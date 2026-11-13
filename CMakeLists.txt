@@ -12,6 +12,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(GNUInstallDirs)
 include(CTest)
+include(ScadaSanitizers)
 include(ScadaTargets)
 include(ScadaDependencies)
 
@@ -26,6 +27,10 @@ install(FILES
   "${SCADA_REPORT_DIR}/licence-report.md"
   "${SCADA_REPORT_DIR}/sbom.cdx.json"
   DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+
+if(BUILD_TESTING)
+  include(ScadaTesting)
+endif()
 
 add_subdirectory(libs)
 add_subdirectory(services)

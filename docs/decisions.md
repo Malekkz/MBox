@@ -101,7 +101,138 @@ Decision: libraries are static, created with `scada_add_library(<name>)` as targ
 Reason: static linking keeps each service one file to install and keeps a combined build possible; the alias gives dependants a stable name.
 Consequences: libraries are not installed. Driver plugins, if the driver interface contract chooses plugins, will need a shared-library helper.
 
-## D-6: Dependency list and its check are plain JSON and CMake
+## D-6: The `check` target is a script around clang-format, clang-tidy and clang-query
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: the coding standard (section 13) names four checks in the `check` target. clang-format and clang-tidy exist; the banned-function check and the `SCADA_RT` check had to be built.
+Options: for the two new checks, a text search; a clang-tidy plugin in C++; clang-query matchers on the syntax tree. For the driver, CMake script or Python.
+Decision: `tools/check/scada_check.py` runs all four checks and fails on any finding. The two new checks are clang-query matchers held in that script, reported as `scada-banned` and `scada-rt`. The target needs Python 3.8 or newer and clang-format, clang-tidy and clang-query 18 or newer; the script refuses older versions.
+Reason: a text search cannot tell a call from a comment, a string or a member of the same name, and cannot see which function a call is in. A plugin must be built against one LLVM version. Matchers need no build and work on the real syntax tree.
+Consequences:
+- The tools are needed only for `check`. A configuration without them warns, and the target fails and names what is missing.
+- A source file that the build does not compile, or that does not compile with Clang, fails the check; it is never skipped.
+- Different clang-format versions can lay out the same code differently. The pipeline (P0-04) must fix one version.
+- LLVM (Apache-2.0 with LLVM exception) and Python (PSF licence) are tools of the build machine and are not linked or shipped. The licence report (P0-07) must list them.
+- Headers are checked through the files that include them. A header that nothing includes is formatted but not analysed.
+
+## D-7: clang-tidy configuration: errors, disabled checks, naming details
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: the coding standard (section 13) enables nine check groups and makes five of them errors, while the same section and issue #3 say that any finding fails the `check` target. `CLAUDE.md` gives the naming rules in one line.
+Options: make all groups errors in `.clang-tidy`; or keep the five there and let the target fail on everything.
+Decision:
+- `.clang-tidy` lists the five error groups as the standard does, so editors show the rest as warnings. The `check` target runs clang-tidy with every finding as an error.
+- Disabled as unworkable: `bugprone-easily-swappable-parameters` (reports every two adjacent parameters of one type, such as two streams; the only fix is a wrapper type per parameter) and `modernize-use-trailing-return-type` (asks for `auto f() -> T` on every function; the project writes the return type first).
+- Naming, where `CLAUDE.md` is not specific: namespaces are `snake_case`. "Constants" are constants at namespace, class or static scope, every `constexpr` variable, enumerators and macros. A `const` local variable or parameter is a variable and is `snake_case`. Private data members end with `_`. Template type parameters are `PascalCase`.
+Reason: one finding list for the gate, without changing what the standard calls an error. The naming details follow the code already merged for #2.
+Consequences: a check disabled later is added to this list in the same pull request.
+
+## D-8: How the banned list is enforced
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: some rows of the banned list (coding standard, section 12) depend on things a tool cannot see: "`strlen` on outside data", "`strtol` without full error checks", "outside reviewed helpers".
+Options: leave those rows to review; or ban the functions everywhere and suppress the reviewed uses.
+Decision: the check reports every use of every function and construct in the list, including `strncpy`, `strlen`, the `atoi` and `strtol` families, `memcpy`, `memmove`, `memset` and `reinterpret_cast`. A reviewed helper suppresses its own line with `// NOLINT(scada-banned): reason` (section 14). A `NOLINT` that does not name the check is not honoured. A cast to `void` to discard a value is not reported as a C-style cast.
+Reason: a rule a tool cannot decide is not a gate. The suppressions make the reviewed uses visible and countable.
+Consequences: the helpers of `libscada-common` and `libscada-tag` will carry the first suppressions, each listed in its pull request. Taking the address of a banned function is reported like a call.
+
+## D-9: `SCADA_RT` and the first real-time check
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: `CLAUDE.md` requires real-time functions to be marked with `SCADA_RT` so that checks can find them. Neither the form of the annotation nor its header was specified.
+Options: a comment marker; a naming convention; an attribute.
+Decision:
+- `SCADA_RT` is defined in `scada/common/realtime.h` of `libscada-common`. Where the compiler has the `clang::annotate` attribute it expands to `[[clang::annotate("scada_rt")]]`, otherwise to nothing. It is written first in the declaration.
+- The check reports, inside a marked function or a lambda in it: `new`, `delete`, the C allocation functions, `std::make_unique`, `std::make_shared`, `std::allocate_shared`, the `printf` family and other C stream output, locking a standard mutex, constructing a standard lock object, and `pthread_mutex_lock`.
+- `libscada-common` is a header-only (interface) target until P0-06 adds its first sources.
+Reason: an attribute is part of the syntax tree, so the check finds the function without guessing, and a declaration in a header marks the definition too. The standard attribute syntax with a vendor namespace is not a language extension; the macro keeps GCC, which warns about unknown attributes, free of it.
+Consequences:
+- Only direct calls are found. A marked function that calls an unmarked function which allocates is not reported; real-time code is still reviewed against section 11.
+- Project code must not use the `annotate` attribute for anything else.
+- Blocking calls, system calls and C++ stream output are not on the first deny-list. They are added as the real-time code appears (phase 1, `libscada-tag`).
+
+## D-10: GoogleTest as the unit test framework
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: the tests need one framework before any real code is written; its licence must be permissive.
+Options: GoogleTest 1.17.0 (BSD-3-Clause); Catch2 3 (BSL-1.0); doctest (MIT); no framework.
+Decision: GoogleTest 1.17.0, without GoogleMock. `cmake/ScadaTesting.cmake` downloads the release archive at configure time, checks its SHA-256 hash and builds it inside the build tree. `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<directory>` builds from an unpacked copy without network access. Its headers are treated as system headers.
+Reason: it is the most widely used C++ framework, so reviewers and tools know it, and it has death tests and per-test timing that the later phases need. It must be built from source in the tree because a sanitizer needs every object in the process instrumented, and a cross build needs it for the target architecture; a copy installed on the machine gives neither.
+Consequences:
+- The first configuration of a build directory needs network access or the override above.
+- GoogleTest is test-only and is not installed or shipped. The licence report (P0-07) must list it: GoogleTest 1.17.0, BSD-3-Clause, test-only.
+- Its macro `GTEST_TEST_`, which `TEST` and `TEST_F` expand to, registers each test with `new`. The banned-function check (D-8) does not report that one expression; a `new` anywhere else in a test file is still reported. Without this, every test would need a suppression.
+- After a fatal assertion such as `ASSERT_TRUE(value.has_value())`, clang-tidy still reports the access to the optional, because it cannot see through the macro. Tests write `if (!value.has_value()) { FAIL() << ...; }` instead, or compare the optional itself.
+
+## D-11: Test kinds, labels and where tests live
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: `CLAUDE.md` names unit, integration and performance tests but not how the build tells them apart.
+Options: one CTest test per test case or per executable; labels or separate build trees per kind.
+Decision:
+- `scada_add_test(<name> KIND unit|integration|perf ...)` creates one GoogleTest executable, registered as one CTest test with the kind as its label and a time limit of 60 s, 300 s or 600 s.
+- Unit tests live in `<component>/tests/`. Integration tests live in `tests/integration/`, performance tests in `tests/perf/`, shared test code in `tests/support/`.
+- `ctest --preset dev` runs unit and integration tests and prints the time per label. `ctest --preset unit` and `ctest --preset integration` run one kind. Performance tests are built everywhere but run only by `ctest --preset perf`.
+- Integration tests start processes with `scada::test::ChildProcess`, which waits in `poll()` for output or exit with a timeout. The command to start is passed in an environment variable so that a cross build can put the emulator in front.
+Reason: one CTest test per executable needs no test discovery at build time, which a cross build without an emulator cannot do. Performance figures from a debug build mean nothing, so no other preset runs them.
+Consequences: CTest reports an executable, not a test case; the case that failed is in the test output, which the presets print on failure. `ChildProcess` uses `pidfd_open`, so the tests need Linux 5.3 or newer.
+
+## D-12: Sanitizer and fuzz builds
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: section 13 of the coding standard requires the sanitizer runs and fuzz targets, but not how they are built.
+Options: sanitizer flags per target or for the whole tree; fuzz targets built only in the fuzz build or in every build.
+Decision:
+- The cache variable `SCADA_SANITIZER` selects `address-undefined`, `thread` or `fuzz`; the presets `asan-ubsan`, `tsan` and `fuzz` set it. The flags apply to the whole build tree, including GoogleTest. Every finding ends the process with a failure (`-fno-sanitize-recover=all`). Configuration stops if the runtime libraries are missing, or if a sanitizer is combined with `SCADA_HARDENING`.
+- `asan-ubsan` and `tsan` are debug builds with the default compiler. `fuzz` uses Clang (`clang++` on `PATH`), because libFuzzer is part of Clang, with `RelWithDebInfo`.
+- `scada_add_fuzz_target(<name> ...)` creates a fuzz target with its seed corpus in `corpus/<name>/` next to it. In the `fuzz` build, the test `<name>` (label `fuzz`) runs it for `SCADA_FUZZ_SECONDS` (default 60 s) with a 10 s limit per input. In every other build the same target is linked with a driver that replays the seed corpus once, as the unit test `<name>-corpus`.
+- A fuzz target lives in `<component>/fuzz/`. Inputs the fuzzer finds and the inputs that made it fail are written to the build tree, never to the source tree.
+- Deliberate bugs that prove the tools work (`tests/sanitizer-fixtures/`, the toy parser in `tests/fuzz-sample/`) are test-only, are not installed, and their tests pass only if the tool reports the bug and the process fails. The fixtures are built only in the sanitizer builds, and the `check` target excludes them, as it excludes its own fixtures; the toy parser is checked, with one suppression on the planted bug.
+- A fuzz target's entry point carries `// NOLINTNEXTLINE(readability-identifier-naming)`, because libFuzzer fixes the name `LLVMFuzzerTestOneInput`.
+- `.clang-format` no longer wraps a comment that starts with `NOLINT`, so that a suppression keeps its check name and reason on one line (coding standard, section 14).
+Reason: a sanitizer misses errors in objects that are not instrumented. Replaying the corpus in every build keeps fuzz targets compiling with GCC and on ARM64, and turns every saved input into a regression test.
+Consequences: the sanitizer and fuzz builds are x86-64 presets, as section 13 requires; there are no ARM64 variants. Fuzzing needs Clang with its runtime libraries installed. A crash found by fuzzing is fixed together with adding the failing input to the seed corpus.
+
+## D-13: The pipeline: GitHub Actions, ARM64 on a native runner
+Date: 2026-11-13
+Phase / issue: 0, #5
+Status: accepted
+
+Context: every pull request must build and pass its tests on x86-64 and ARM64 (reference 18.1), and the issue leaves open how ARM64 is run. D-6 requires the pipeline to fix one clang-format version.
+Options, for ARM64: a GitHub-hosted ARM64 runner (`ubuntu-24.04-arm`), building and testing natively; cross-compiling on x86-64 with the `dev-arm64` presets and running the tests under user-mode emulation; running the whole job in an emulated ARM64 container.
+Decision:
+- `.github/workflows/pipeline.yml` runs on every pull request and every push to `main`, as six jobs that are six separate checks: `build and test (x86-64)`, `build and test (ARM64)`, `check`, `sanitizers (asan-ubsan)`, `sanitizers (tsan)` and `fuzz`. Each job runs the preset commands of `README.md` and fails when a command fails. No step is allowed to fail.
+- ARM64 is built and tested natively on the hosted runner `ubuntu-24.04-arm`, with the same presets (`dev`, `release`) as x86-64. The job first checks that the machine really is `aarch64`.
+- Both `build and test` jobs build `dev` and `release`, run their tests, and keep the staged install tree of `release` as an artifact for 14 days.
+- The sanitizer and fuzz jobs run on x86-64 only (D-12). Fuzz targets run side by side, one per processor, each for `SCADA_FUZZ_SECONDS` (60 s). Inputs that fail are kept as an artifact.
+- Tools: LLVM 18 for clang-format, clang-tidy, clang-query and the fuzzing compiler; GCC 13 and the CMake of the runner image for everything else. Each job prints the versions it used.
+- The runner is set up in one place, `.github/actions/setup-build-machine`, which is the only file that names a package manager. It installs LLVM 18 and puts its tools on `PATH` under their plain names. The build scripts stay free of distribution-specific paths and tools.
+- Performance tests are not run by the pipeline.
+Reason: a native runner executes the tests on real ARM64 processors, so it also covers what emulation does not model faithfully (memory ordering, timing, pointer authentication), and it needs no emulator settings in the build. It is as fast as x86-64, where emulated tests run several times slower. Performance figures from shared runners vary too much between runs to gate on a target; they need a fixed machine.
+Measured (run 2 of pull request #30, 2-processor ARM64 runner, 4-processor x86-64 runners): `build and test (ARM64)` 83 s, `build and test (x86-64)` 85 s, both sanitizer jobs about 60 s each, `check` about 2 min. The whole pipeline took 2 min 48 s from start to last job, with the jobs in parallel.
+Consequences:
+- The cross presets `dev-arm64` and `release-arm64` (D-4) stay for developers; the pipeline does not use them, so nothing checks them automatically.
+- The checks gate a merge only when they are marked as required in the protection rule of `main`, which is a repository setting and not a file. Until then the rule in `CLAUDE.md` ("do not merge a pull request whose checks are failing") is the gate.
+- The fuzz sample stops within 1 s because its planted bug is found at once. With real targets the fuzz job takes 60 s for every group of as many targets as the runner has processors.
+- The hosted runner images change over time. A change of the GCC or CMake version shows in the "Tool versions" step; LLVM stays at 18 until this decision is changed.
+- Where and how the performance tests of section 15 of the reference document run is still open. It must be decided before phase 1 is accepted, because phase 1 has the first real targets.
+- GitHub's actions `actions/checkout` and `actions/upload-artifact` (both MIT) are tools of the pipeline and are not linked or shipped. The licence report (P0-07) must list them. They are referenced by major version, not by commit hash.
+
+## D-14: Dependency list and its check are plain JSON and CMake
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -110,9 +241,9 @@ Context: reference 16.3 requires a build that fails on a dependency whose licenc
 Options: a package manager manifest (vcpkg, Conan); a scanner tool run after the build; a JSON list checked by a CMake module at configure time.
 Decision: `third-party/dependencies.json` is the list and `third-party/licence-allowlist.json` the allow-list. `cmake/ScadaDependencies.cmake` validates both at configure time, then checks every link item of every target of this project: it must be a target of this project, a `link_names` value of a list entry, or a platform library. A directory under `third-party/` must be named after an entry. The two files are configure dependencies, so a build after an edit configures again.
 Reason: it needs no tool beyond CMake, which the build already requires, and no package manager, which the reference forbids relying on.
-Consequences: every dependency must be linked by a name, including header-only ones (an `INTERFACE` target). Not detected: headers used through an include path alone, and what vendored or fetched third-party code links itself; review covers these. Link items written as generator expressions other than plain wrappers are rejected.
+Consequences: build code that fetches a dependency reads its version from the list with `scada_dependency_version`, as `cmake/ScadaTesting.cmake` does for GoogleTest, so the version is written once. Every dependency must be linked by a name, including header-only ones (an `INTERFACE` target). Not detected: headers used through an include path alone, and what vendored or fetched third-party code links itself; review covers these. Link items written as generator expressions other than plain wrappers are rejected.
 
-## D-7: What counts as a dependency, and the first allow-list
+## D-15: What counts as a dependency, and the first allow-list
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -127,7 +258,7 @@ Decision:
 Reason: permissive-only is the one set that every policy option of reference 16.2 accepts, so nothing adopted now can conflict with the later decision. Exact matching of one identifier cannot be bypassed by an expression such as `MIT OR GPL-3.0-only`.
 Consequences: libmodbus (LGPL), open62541 (MPL) and Eclipse Tahu (EPL) cannot be added until the licensing decision extends the allow-list. The bill of materials does not cover the toolchain runtime or the operating system; that is added with packaging in phase 10.
 
-## D-8: Bill of materials format and where the reports go
+## D-16: Bill of materials format and where the reports go
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -136,4 +267,4 @@ Context: reference 13.6 requires a software bill of materials and 16.3 a licence
 Options: CycloneDX JSON; SPDX JSON; a project-specific format.
 Decision: the build writes `build/<preset>/reports/sbom.cdx.json` (CycloneDX 1.5 JSON) and `build/<preset>/reports/licence-report.md`, and installs both to `share/doc/scada/` of the install tree. Dependencies with scope `build` or `test` are in the bill of materials with CycloneDX scope `excluded`. The file has no timestamp and no serial number.
 Reason: CycloneDX needs no generated identifiers or timestamps, so the same input gives the same file, and common scanners read it.
-Consequences: the pipeline (issue P0-04) uploads `build/<preset>/reports/` as an artifact. The generated file is checked by tests for content, not against the CycloneDX schema, because no validator is available offline.
+Consequences: the pipeline uploads `build/release/reports/` of each architecture as the artifact `dependency-reports-<architecture>`. The generated file is checked by tests for content, not against the CycloneDX schema, because no validator is available offline.

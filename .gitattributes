@@ -1,0 +1,2 @@
+# Fuzz corpus files are raw parser input; never convert or diff them as text.
+**/corpus/** binary

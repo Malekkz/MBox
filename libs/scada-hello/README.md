@@ -34,3 +34,5 @@ std::cout << scada::hello::greeting() << '\n';
 ```
 ctest --preset dev -R scada-hello-unit-test
 ```
+
+The unit tests are in `tests/hello_test.cpp` (GoogleTest).
