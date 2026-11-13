@@ -4,7 +4,7 @@ MBox is a SCADA node that runs on one embedded Linux PC per site: it collects
 and logs data, controls field devices, and serves a web HMI and a local CLI.
 
 Status: design baseline frozen (version 1.0). Phase 0 (foundations) is in
-progress; the only code is the build skeleton.
+progress; the only code is the build skeleton and its checks.
 
 ## Where things are
 
@@ -17,6 +17,8 @@ progress; the only code is the build skeleton.
 | `libs/` | Libraries, one directory each (`lib<name>`). All logic lives here. |
 | `services/` | Thin executables, one per service. |
 | `tools/` | Developer and operator tools. |
+| `tools/check/` | The `check` target: formatter, linter, banned-function and `SCADA_RT` checks. |
+| `.clang-format`, `.clang-tidy` | Layout and lint rules. |
 | `tests/` | Tests that span several components. |
 | `cmake/` | Build helpers and toolchain files. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
@@ -44,6 +46,17 @@ put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the
 presets `dev-arm64` or `release-arm64`. Tests of a cross build run if an
 emulator is given at configure time with
 `-DCMAKE_CROSSCOMPILING_EMULATOR="<emulator>;<arguments>"`.
+
+## Checking
+
+```
+cmake --build --preset dev --target check
+```
+
+Runs clang-format, clang-tidy, the banned-function check and the `SCADA_RT`
+check over all C++ sources and fails on any finding. Needs Python 3.8 or newer
+and clang-format, clang-tidy and clang-query 18 or newer. See
+`tools/check/README.md`.
 
 ## Build order
 

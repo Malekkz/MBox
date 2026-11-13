@@ -1,0 +1,23 @@
+# Layout rules for all C++ in this repository. Checked by the `check` target
+# with clang-format 18 or newer (docs/decisions.md, D-6).
+#
+# Start from the Google style and change only what is listed here.
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+ColumnLimit: 80
+IndentWidth: 4
+ContinuationIndentWidth: 4
+# `public:` and `private:` start in the column of `class`.
+AccessModifierOffset: -4
+# Function bodies go on their own lines, except members defined in a class.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+# Fixed, so that existing code does not decide the layout of new code.
+DerivePointerAlignment: false
+PointerAlignment: Left
+# Keep the include blocks as written: own header, then the rest. Regrouping
+# would depend on guessing which header is the "own" one.
+IncludeBlocks: Preserve
+InsertNewlineAtEOF: true
