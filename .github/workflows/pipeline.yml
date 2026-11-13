@@ -1,0 +1,126 @@
+# The pipeline (issue P0-04, docs/decisions.md D-13). Every job runs the same
+# preset commands a developer runs; see README.md, "Pipeline".
+name: pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request replaces the run of the previous push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-test:
+    name: build and test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+
+      # A runner label that resolved to the wrong architecture must not
+      # produce a green ARM64 check.
+      - name: Check the architecture
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
+
+      - name: Build (dev)
+        run: |
+          cmake --preset dev
+          cmake --build --preset dev
+      - name: Test (dev)
+        run: ctest --preset dev
+
+      - name: Build (release)
+        run: |
+          cmake --preset release
+          cmake --build --preset release
+      - name: Test (release)
+        run: ctest --preset release
+
+      - name: Staged install tree
+        run: cmake --install build/release --prefix stage
+      - uses: actions/upload-artifact@v5
+        with:
+          name: stage-${{ matrix.arch }}
+          path: stage/
+          if-no-files-found: error
+          retention-days: 14
+
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Formatter, linter, banned-function and SCADA_RT checks
+        run: |
+          cmake --preset dev
+          cmake --build --preset dev --target check
+
+  sanitizers:
+    name: sanitizers (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan-ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Build
+        run: |
+          cmake --preset fuzz
+          cmake --build --preset fuzz
+      # Each target runs for SCADA_FUZZ_SECONDS (60 s) on one processor, so
+      # targets run side by side, one per processor.
+      - name: Fuzz every target
+        run: ctest --preset fuzz --parallel "$(nproc)"
+      - name: Keep the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fuzz-findings
+          path: build/fuzz/**/*-work/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
