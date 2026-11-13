@@ -2,9 +2,9 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.2 (draft) |
+| Contract version | 0.3 (draft) |
 | Layout version | 1 |
-| Status | Accepted for phase 1 implementation (review P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
+| Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
 | Owners of this contract | `scada-tagd`, `libscada-tag` |
 
@@ -20,24 +20,41 @@ that, any change needs a layout version bump and a migration note.
 - All integers are little-endian. Only 64-bit little-endian targets are
   supported (x86-64, ARM64).
 - Every structure below has a fixed size and alignment, checked with
-  `static_assert` in the library.
-- "Atomic" fields are accessed with `std::atomic` operations and must be
-  lock-free on both targets.
+  `static_assert` in the library. No structure has implicit padding; every gap
+  is a named reserved field, written as zero.
+- Structures hold plain integers only. A field marked `// A` is shared between
+  processes while it changes: the library reads and writes it only through
+  `std::atomic_ref`, which must be lock-free on both targets. No
+  `std::atomic` object is placed in shared memory.
+- A tag value is one `uint64_t` holding a bit pattern: BOOL is 0 or 1, INT64
+  and UINT64 are the integer, FLOAT64 is IEEE 754 binary64, STRING is the slot
+  number. The library converts with `std::bit_cast` and rejects a BOOL that is
+  neither 0 nor 1.
+- Enumerations are `enum class` in the library. They are written here with
+  their underlying type and values.
 - Times are nanoseconds as `int64_t`. `*_time_ns` is `CLOCK_REALTIME` (UTC).
   `*_mono_ns` is `CLOCK_MONOTONIC`. Ages and timeouts always use monotonic time.
 - Names are ASCII, lower case, `[a-z0-9_.-]`, at most 127 bytes for tags and
   31 bytes for owners, processes and queues.
+- Every offset in a region is a multiple of 8 and is validated against the
+  mapped size before use.
+- The minimum kernel is Linux 5.16 (`futex_waitv`, section 8.4).
 
 ## 2. Terms
 
 | Term | Meaning |
 | --- | --- |
-| Owner | The one process allowed to write a given tag |
+| Process | One service, running as its own user, with one `proc` region |
+| Owner | One writing thread of one process. Every tag has exactly one owner. A process has one owner per thread that writes tags (for example one per control task, one per driver channel) |
 | Region | One file in the database directory, mapped into memory |
 | Generation | One complete set of regions built from one configuration |
 | Handle | A 32-bit reference to a tag, valid for one generation |
 | Change ring | Lossy broadcast buffer of tag changes, one per owner |
-| Reliable queue | Lossless single-producer, single-consumer queue |
+| Reliable queue | Lossless queue with one producing thread and one consuming thread |
+
+Owners and queues are declared in the tag-set definition. A process with one
+writing thread has one owner, named like the process. Otherwise owners are
+named `<process>.<writer>`.
 
 ## 3. Directory and files
 
@@ -51,36 +68,91 @@ that, any change needs a layout version bump and a migration note.
     strings.<owner>                    written by the owner (only if it has string tags)
     changes.<owner>                    written by the owner
     events.<producer>                  written by the producer
-    cmd.<driver>.<source>              written by the source (control or cmd)
+    cmd.<driver>.<source>              written by the source
     result.<driver>.<source>           written by the driver
 ```
 
+`<producer>`, `<driver>` and `<source>` are owner names when the process posts
+from more than one thread, so that every queue has exactly one producing
+thread. The full queue name is at most 31 bytes; the tag-set builder rejects a
+longer one.
+
+The base directory and the retain directory (section 12) are the defaults.
+`scada_tag_attach_opts` (section 13) can replace both, so tests can run in
+parallel and without the service users.
+
 ### 3.1 Permissions
 
-- `/dev/shm/scada/` is owned by `scada-tagd:scada`, mode `2750`: only
-  `scada-tagd` can create a generation or switch `current`. If the directory
-  already exists with another owner or mode, `scada-tagd` refuses to start.
+- `/dev/shm/scada/` is created at boot by the platform (the service manager's
+  temporary-files mechanism), not by `scada-tagd`, owned by `scada-tagd:scada`,
+  mode `2750`. Only `scada-tagd` can create a generation or switch `current`.
+- `scada-tagd` refuses to start, and a client refuses to attach
+  (`SCADA_E_PERMISSION`), unless the base directory is a directory owned by
+  the uid of the user `scada-tagd` with exactly that mode. The client looks the
+  uid up by name at attach. With a replaced base directory (tests), the
+  expected uid is given in the options.
 - `gen-<generation>/` is owned by `scada-tagd:scada`, mode `3770` (setgid and
-  sticky): group members can create files, and only a file's owner can remove
-  it.
+  sticky): group members can create files; a file can be removed only by its
+  owner or by `scada-tagd` as owner of the directory.
 - Every region file has mode `0640` and group `scada`. Its owner is the user of
   the process that writes it.
+- Modes are set with an explicit `fchmod` (or `chmod` for directories) after
+  creation, because the creation mode is reduced by the umask.
 - A process maps its own regions read-write and all others read-only.
-- Before trusting a region, a reader must check that the file's owner uid
-  equals the uid recorded for that owner or process in the header, that the
-  file size equals the size the header gives, and that the `RegionHeader`
-  fields (magic, layout version, kind, generation, size, index) match. A
-  mismatch is treated as "region missing" and reported.
-- The `header` file must be owned by the same uid as `/dev/shm/scada/`.
+- Every file is opened relative to the generation directory with `openat` and
+  `O_NOFOLLOW | O_CLOEXEC`, and checked with `fstat` on the descriptor, never
+  by path: it must be a regular file, its owner uid must equal the uid recorded
+  for that owner or process in the header, its size must equal the size the
+  header gives, and the `RegionHeader` fields (magic, layout version, kind,
+  generation, size, index) must match. A mismatch is treated as "region
+  missing" and reported.
+- The `header` file must be owned by the uid of `scada-tagd`.
 - A process resolves `current` once at attach and opens every region relative
   to that directory, so a switch of `current` cannot mix two generations.
+- `scada-tagd` removes, at each liveness check, any entry in the generation
+  directory that the header does not list or whose owner uid is wrong, and
+  reports it.
 
 ### 3.2 Who creates what
 
-`scada-tagd` creates the directory and the `header` region, which contains the
-size of every other region. Each process creates its own regions from those
-sizes when it attaches. This keeps `scada-tagd` unprivileged: it never needs
-to create files on behalf of another user.
+`scada-tagd` creates the generation directory and the `header` region, which
+contains the size of every other region. Each process creates its own regions
+from those sizes when it attaches. This keeps `scada-tagd` unprivileged: it
+never needs to create files on behalf of another user.
+
+A region is created under a temporary name (`.tmp.<name>.<pid>`): create with
+`O_CREAT | O_EXCL`, `fchmod`, `ftruncate`, `posix_fallocate` (so a full
+`/dev/shm` fails here with an error, not later with a signal), initialise, set
+`ready`, then rename into place. A crash therefore never leaves a half-built
+region under its real name. At attach a process removes its own stale
+temporary files.
+
+### 3.3 Accepted risks
+
+These follow from one user per service inside one trusted group, and are
+accepted for layout version 1:
+
+- The owner of a region can shrink its file. Processes that have it mapped are
+  then killed by `SIGBUS` on access. A compromised service can in this way stop
+  another service, which the supervisor restarts. Preventing it would need
+  sealed memory handed out by `scada-tagd`, which contradicts section 17,
+  item 3.
+- A group member can create a file or directory under a name it does not own.
+  The checks above reject it and `scada-tagd` removes it, but the rightful
+  process cannot attach until then. A directory that `scada-tagd` cannot remove
+  stays until reboot; removal of an old generation is best effort.
+
+### 3.4 Deployment requirements
+
+- Service users are system users. The service manager must not remove their
+  shared-memory files at logout (`RemoveIPC` off for them).
+- Units must not use a private IPC namespace, private users or dynamic users.
+  `ProtectSystem=strict` and `PrivateTmp=yes` are compatible.
+- Real-time processes need a locked-memory limit that covers their mappings;
+  `scada-tagd` needs write access to the retain directory.
+- `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
+- A process feeds the service manager's watchdog from the same loop that
+  writes its heartbeat.
 
 ## 4. Region header
 
@@ -95,7 +167,7 @@ struct RegionHeader {            // 64 bytes, alignas(64)
   uint64_t size_bytes;           // total file size
   uint16_t owner_index;          // index into the owner or process table
   uint16_t queue_id;             // for queue regions, else 0xFFFF
-  std::atomic<uint32_t> ready;   // 0 while being initialised, 1 when usable
+  uint32_t ready;                // A; 0 while being initialised, 1 when usable
   uint8_t  reserved[24];
 };
 
@@ -111,18 +183,19 @@ last.
 ## 5. The `header` region
 
 Layout, in order: `RegionHeader`, `GlobalHeader`, owner table, process table,
-queue table, tag directory, name pool. Offsets are from the start of the file.
+queue table, tag directory, slot tables, name pool. Offsets are from the start
+of the file.
 
 ```cpp
 struct GlobalHeader {            // 128 bytes
-  std::atomic<uint32_t> state;   // 1 BUILDING, 2 RUNNING, 3 RETIRING
+  uint32_t state;                // A; 1 BUILDING, 2 RUNNING, 3 RETIRING
   uint32_t tag_count;
   uint16_t owner_count;
   uint16_t process_count;
   uint16_t queue_count;
   uint16_t reserved0;
   uint32_t heartbeat_check_ms;   // how often tagd checks heartbeats
-  uint32_t reserved1;            // explicit padding
+  uint32_t reserved1;
   uint64_t owner_table_offset;
   uint64_t process_table_offset;
   uint64_t queue_table_offset;
@@ -140,9 +213,10 @@ struct OwnerEntry {              // 64 bytes
   uint32_t tag_count;            // slots in tags.<owner>
   uint32_t string_slots;         // slots in strings.<owner>, may be 0
   uint32_t change_ring_capacity; // entries, power of two
-  uint16_t process_index;        // the process that is this owner
+  uint16_t process_index;        // the process this owner is a thread of
   uint16_t reserved0;
-  uint8_t  reserved[12];
+  uint32_t reserved1;
+  uint64_t slot_table_offset;    // uint32_t directory index for each slot
 };
 
 struct ProcessEntry {            // 64 bytes
@@ -150,7 +224,7 @@ struct ProcessEntry {            // 64 bytes
   uint32_t uid;
   uint32_t heartbeat_timeout_ms;
   uint32_t flags;                // bit 0: REALTIME
-  std::atomic<uint32_t> down;    // written by scada-tagd only (section 10.1)
+  uint32_t down;                 // A; written by scada-tagd only (section 10.1)
   uint8_t  reserved[16];
 };
 
@@ -171,24 +245,25 @@ struct DirectoryEntry {          // 24 bytes
   uint32_t name_offset;          // into the name pool
   uint16_t name_len;
   uint8_t  type;                 // TagType
-  uint8_t  flags;                // bit 0 RETAIN, bit 1 WRITABLE_BY_COMMAND
+  uint8_t  flags;                // bit 0 RETAIN, bit 1 WRITABLE_BY_COMMAND,
+                                 // bit 2 RETAIN_NOW (section 12)
   uint8_t  reserved[4];
 };
 ```
 
 - The directory is sorted by `(name_hash, name)`. Lookup is a binary search on
   the hash followed by a name comparison.
-- An owner is always exactly one process. A process that owns no tags (for
-  example `scada-api`) appears only in the process table.
+- The slot table of an owner maps a slot to its directory entry, so a handle
+  from a change entry can be turned back into a name and type.
+- A process that owns no tags (for example `scada-api`) appears only in the
+  process table.
 - Everything in `header` except `GlobalHeader.state` and
   `ProcessEntry.down` is immutable for the life of the generation.
-- No structure has implicit padding; every gap is a named reserved field,
-  written as zero.
 
 ### 5.1 Handles
 
 ```
-handle = (owner_index << 24) | slot        // 8 bits owner, 24 bits slot
+handle = (owner_index << 22) | slot        // 10 bits owner, 22 bits slot
 SCADA_INVALID_HANDLE = 0xFFFFFFFF
 ```
 
@@ -205,16 +280,21 @@ enum Quality : uint8_t { GOOD = 0, UNCERTAIN = 1, BAD = 2 };
 
 enum QualityFlags : uint16_t {
   STALE = 1 << 0, COMM_FAIL = 1 << 1, OUT_OF_RANGE = 1 << 2,
-  SUBSTITUTED = 1 << 3, NOT_INIT = 1 << 4, OWNER_DOWN = 1 << 5,
-  TIME_UNCERTAIN = 1 << 6
+  SUBSTITUTED = 1 << 3,     // value entered by a person in place of the source
+  NOT_INIT = 1 << 4, OWNER_DOWN = 1 << 5, TIME_UNCERTAIN = 1 << 6,
+  BLOCKED = 1 << 7,         // point out of service or blocked for transmission
+  TEST = 1 << 8,            // value produced in test mode
+  OVERFLOW = 1 << 9,        // counter rolled over or value exceeded its format
+  RESTORED = 1 << 10,       // retained value, not yet written by the owner
+  LOCAL_TIME = 1 << 11      // source_time_ns was set by the owner, not a device
 };
 
 struct TagRecord {               // 64 bytes, alignas(64)
-  std::atomic<uint32_t> seq;     // odd while the owner is writing
+  uint32_t seq;                  // A; odd while the owner is writing
   uint8_t  type;
   uint8_t  quality;
   uint16_t quality_flags;
-  union { bool b; int64_t i; uint64_t u; double f; uint64_t str_slot; } value;
+  uint64_t value;                // bit pattern (section 1)
   int64_t  source_time_ns;
   int64_t  update_time_ns;
   int64_t  update_mono_ns;
@@ -227,46 +307,59 @@ Initial state of every record: `seq` 0, `quality` BAD, `quality_flags`
 NOT_INIT, all times 0.
 
 `source_time_ns` is the device timestamp when the protocol has one; otherwise
-the owner sets it equal to `update_time_ns`. STALE is set by the owner (for a
-driver, by the driver framework). `scada-tagd` never writes a tag record; its
-only marking is the `down` flag of section 10.1.
+the owner sets it equal to `update_time_ns` and sets LOCAL_TIME. STALE is set
+by the owner (for a driver, by the driver framework). `scada-tagd` never writes
+a tag record; its only marking is the `down` flag of section 10.1.
 
-### 6.1 Write protocol (owner only)
+### 6.1 Write protocol (owner thread only)
 
 ```
 s = seq.load(relaxed)
-seq.store(s + 1, release)          // now odd
-write type-independent fields and value
+seq.store(s + 1, relaxed)          // now odd
+atomic_thread_fence(release)       // the data stores below must not pass the odd seq
+write the fields other than seq, one 64-bit word at a time, relaxed
 if value or quality or quality_flags changed: change_count += 1
 seq.store(s + 2, release)          // even again
 if changed: append a change entry (section 8)
 ```
 
-The write wakes nobody (section 8.4).
+The fence is required: on ARM64 a release store does not order the stores that
+follow it. The write wakes nobody (section 8.4).
 
-### 6.2 Read protocol (any process)
+### 6.2 Read protocol (any thread of any process)
 
 ```
 repeat up to 64 times:
   s1 = seq.load(acquire)
-  if s1 is odd: spin briefly, continue
-  copy the record
-  s2 = seq.load(acquire)
+  if s1 is odd: pause instruction, continue
+  copy the fields other than seq, one 64-bit word at a time, relaxed
+  atomic_thread_fence(acquire)     // the copies above must complete before s2
+  s2 = seq.load(relaxed)
   if s1 == s2: return the copy
-return BAD | OWNER_DOWN            // writer stalled or died mid-write
+return SCADA_E_BUSY                // the output is left unchanged
 ```
 
-After a successful read the library overlays the owner state: if `down` of
-the owner's process is non-zero, or the owner's region is missing or not ready, the
-returned quality is BAD with OWNER_DOWN set. The stored record is not changed.
+The word-wise relaxed copy is how the library reads memory another process is
+writing without a data race; it compiles to plain moves.
+
+`SCADA_E_BUSY` means the writer was in the middle of a write for the whole
+attempt, for example a non-real-time owner preempted mid-write. It says
+nothing about the value. The caller keeps its previous value for this cycle;
+a dead owner is reported through the overlay below within its heartbeat
+timeout.
+
+After a successful read the library overlays the owner state: if the owner's
+process is down (section 10.1), or the owner's region is missing or not ready,
+the returned quality is BAD with OWNER_DOWN set. The stored record is not
+changed.
 
 ### 6.3 Owner restart
 
 When an owner attaches to a region that already exists for the current
-generation, it must repair it before setting itself running: every record with
-an odd `seq` gets `seq + 1`, quality BAD and flag NOT_INIT. Values of other
-records are kept, so readers see the last value until the owner refreshes it.
-A string slot with an odd `seq` gets `seq + 1` and `len` 0.
+generation, it must repair it before setting itself running. For every record
+with an odd `seq`: write quality BAD and flag NOT_INIT, then store `seq + 1`.
+Values of other records are kept, so readers see the last value until the
+owner refreshes it. A string slot belonging to a repaired record gets `len` 0.
 
 The owner then increments `epoch` in its change ring header (section 8). A
 crash can lose the change entry of the last write, so every consumer must
@@ -274,23 +367,23 @@ resynchronise after an owner restart; the epoch tells it to.
 
 ## 7. String values (`strings.<owner>`)
 
-Layout: `RegionHeader`, then `string_slots` slots. A STRING tag's
-`value.str_slot` is fixed for the generation.
+Layout: `RegionHeader`, then `string_slots` slots. A STRING tag's value is its
+slot number, fixed for the generation.
 
 ```cpp
 struct StringSlot {              // 256 bytes
-  std::atomic<uint32_t> seq;     // same protocol as TagRecord
   uint16_t len;                  // bytes used, at most 250
   uint8_t  data[250];            // UTF-8, not NUL-terminated
+  uint8_t  reserved[4];
 };
 ```
 
-The slot is written inside the tag record's write: the owner makes the tag
-record's `seq` odd, writes the slot under the slot's own `seq`, writes the tag
-record fields, then makes the tag record's `seq` even. A reader reads the tag
-record, then the slot, then checks the tag record's `seq` again and retries if
-it changed. This way a reader never pairs a new string with old quality or
-times.
+The slot has no sequence of its own; the tag record's `seq` protects it. The
+owner makes the tag record's `seq` odd, writes the slot, writes the tag record
+fields, then makes `seq` even. A reader reads `seq`, the tag record and the
+slot, then checks `seq` as in section 6.2. A reader therefore never pairs a
+string with the quality or times of another write. The reader validates `len`
+before using it.
 
 ## 8. Change rings (`changes.<owner>`)
 
@@ -298,41 +391,47 @@ A change ring is a lossy broadcast buffer. Any number of consumers read it,
 each keeping its own cursor in private memory.
 
 ```cpp
-struct ChangeRingHeader {        // 64 bytes, follows RegionHeader
+struct ChangeRingHeader {        // 64 bytes, alignas(64), follows RegionHeader
   uint32_t capacity;             // power of two
-  std::atomic<uint32_t> epoch;   // +1 each time the owner reattaches (section 6.3)
-  std::atomic<uint64_t> write_seq;   // number of entries ever written
+  uint32_t epoch;                // A; +1 each time the owner reattaches (section 6.3)
+  uint64_t write_seq;            // A; number of entries ever written
   uint8_t  reserved[48];
 };
 
 struct ChangeEntry {             // 32 bytes
-  uint64_t seq;                  // equals its position in the stream
+  int64_t  update_mono_ns;       // same instant as in the tag record
   uint32_t handle;
   uint8_t  type;
   uint8_t  quality;
   uint16_t quality_flags;
-  union { bool b; int64_t i; uint64_t u; double f; uint64_t str_slot; } value;
+  uint64_t value;
   int64_t  source_time_ns;
 };
 ```
 
-### 8.1 Write (owner only)
+A consumer takes `capacity` from the header region's owner table, not from
+this header, and checks that the two agree at open.
+
+### 8.1 Write (owner thread only)
 
 ```
 w = write_seq.load(relaxed)
-entries[w & (capacity - 1)] = entry with seq = w
+atomic_thread_fence(release)       // the entry stores must not pass the previous write_seq
+write entries[w & (capacity - 1)], word-wise, relaxed
 write_seq.store(w + 1, release)
 ```
 
-### 8.2 Read (consumer, cursor = next seq wanted)
+### 8.2 Read (consumer, cursor = next position wanted)
 
 ```
 w1 = write_seq.load(acquire)
 if cursor == w1: nothing new
-if w1 - cursor > capacity: GAP
-copy entries[cursor & (capacity - 1)]
-w2 = write_seq.load(acquire)
+if w1 - cursor >= capacity: GAP
+copy entries[cursor & (capacity - 1)], word-wise, relaxed
+atomic_thread_fence(acquire)
+w2 = write_seq.load(relaxed)
 if w2 - cursor >= capacity: GAP        // the slot may have been overwritten
+validate handle, type and quality of the copy
 return the copy; cursor += 1
 ```
 
@@ -340,42 +439,68 @@ return the copy; cursor += 1
 
 A consumer remembers the ring's `epoch`. If it has changed, that is a GAP too.
 
-On GAP the library reports `SCADA_E_GAP` once, sets the cursor to the current
-`write_seq`, and the consumer must resynchronise by reading every tag record
-of that owner it cares about. Consumers must treat a gap as a normal event,
-not an error to crash on.
+On GAP the library reports `SCADA_E_GAP` once, counts it, and sets the cursor
+to the current `write_seq`. The consumer then resynchronises, in this order:
+the cursor is set first, then every tag record of that owner the consumer
+cares about is read. An entry delivered afterwards whose `update_mono_ns` is
+older than the record read for the same tag is discarded by the consumer, so
+an old value never replaces a newer one. Consumers must treat a gap as a
+normal event, not an error to crash on.
+
+A gap loses intermediate transitions for good. To keep it rare, the tag-set
+builder requires `change_ring_capacity` to be at least twice the owner's tag
+count, rounded up to a power of two: one change of quality on every tag of an
+owner (a communication loss, a general interrogation) then fits.
 
 A string tag's change entry carries only the slot number; the consumer reads
 the current string from the slot.
 
-### 8.4 Waiting
+### 8.4 Waiting and waking
 
 Writing never wakes anyone: `scada_tag_write` and `scada_queue_post` make no
-system call. Instead:
+system call. Instead a thread calls `scada_tag_notify()`:
 
-- A process calls `scada_tag_notify()` once at the end of each cycle or scan,
-  outside its real-time section. It wakes the consumers of every ring and
-  queue the process wrote since the previous call. It is not RT-safe.
-- A consumer's wait always has a timeout. The library caps it at 100 ms and
-  checks `write_seq` on waking, so a missed notify delays delivery but cannot
-  lose it.
+- It wakes the consumers of every ring and queue the calling thread wrote
+  since its previous call, increments the process's `cycle_seq` (section 10)
+  and wakes its waiters.
+- It makes one non-blocking system call for each ring or queue written, and
+  one for the cycle. It is bounded but not RT-safe.
+- A real-time task calls it once at the end of each cycle, after its last
+  read, write and post.
+- Non-real-time code calls it after each batch of writes and after each post
+  (a result, an event, a request), so that a slow scan does not delay a
+  command or a result.
 
-Proposed mechanism for the wake: a futex wait on the low 32 bits of
-`write_seq`, which a reader can do on a read-only shared mapping. This must be
-verified on both targets in phase 1. If it does not hold, the fallback is one
-eventfd per ring, passed to consumers by `scada-tagd` over a Unix socket. The
-choice is recorded in the decisions log and then fixed here (section 16).
+A consumer's wait always has a timeout. The library caps it at 100 ms and
+checks `write_seq` on waking, so a missed notify delays delivery but cannot
+lose it.
+
+Mechanism: a futex wait on the low 32 bits of `write_seq` (or on `cycle_seq`),
+which a reader can do on a read-only shared mapping. The wait compares the
+value, so a wake between the check and the wait is not lost.
+
+- A consumer of several rings and queues waits on all of them at once with a
+  wait set (section 13), built on `futex_waitv`.
+- A thread that must also wait on sockets or serial ports asks the wait set
+  for a file descriptor. The library then runs one waiter thread in that
+  process, which turns wake-ups into a process-local eventfd usable with
+  `poll` and `epoll`. Nothing is passed between processes, so this does not
+  depend on `scada-tagd`.
+
+This must be verified on both targets in phase 1 (section 16). The fallback,
+if it does not hold, is one eventfd per ring passed to consumers by
+`scada-tagd` over a Unix socket.
 
 ## 9. Reliable queues (`events.*`, `cmd.*`, `result.*`)
 
-A reliable queue has exactly one producer and one consumer, both fixed in the
-queue table. Nothing is ever overwritten.
+A reliable queue has exactly one producing thread and one consuming thread,
+in the processes fixed in the queue table. Nothing is ever overwritten.
 
 ```cpp
-struct QueueHeader {             // 64 bytes, follows RegionHeader
+struct QueueHeader {             // 64 bytes, alignas(64), follows RegionHeader
   uint32_t capacity;             // power of two
   uint32_t record_size;
-  std::atomic<uint64_t> write_seq;
+  uint64_t write_seq;            // A
   uint8_t  reserved[48];
 };
 ```
@@ -392,33 +517,66 @@ r = consumer.cursors[queue_id].load(acquire)
 w = write_seq.load(relaxed)
 if r > w or w - r > capacity: return SCADA_E_PEER_DOWN   // cursor is not valid
 if w - r == capacity: return SCADA_E_FULL
-records[w & (capacity - 1)] = record, with its id set from w (section 9.3)
+write records[w & (capacity - 1)], with its id set from w (section 9.4)
 write_seq.store(w + 1, release)
 ```
 
-The consumer validates in the same way: a `write_seq` behind its cursor, or
-more than `capacity` ahead, is reported and nothing is consumed.
+"Down" here uses the test of section 10.1, which the producer evaluates itself
+from the consumer's heartbeat; it does not wait for `scada-tagd`.
 
 ### 9.2 Consume
 
 ```
 r = cursors[queue_id].load(relaxed)
-if r == write_seq.load(acquire): nothing new
-process records[r & (capacity - 1)]
-cursors[queue_id].store(r + 1, release)
+w = write_seq.load(acquire)
+if r == w: nothing new
+if r > w or w - r > capacity: report, consume nothing
+copy records[r & (capacity - 1)] and validate it
 ```
 
-Delivery is at least once: if the consumer crashes after processing a record
-but before advancing its cursor, the record is delivered again on restart.
-Consumers must therefore ignore a record id they have already handled.
+When the cursor advances depends on the queue kind:
 
-If the consumer's region is missing or its process is down (`down` in the
-process table, section 10.1), `post` returns `SCADA_E_PEER_DOWN` and nothing
-is queued. This holds for event queues too: while the consumer of an event
-queue is down, an action that needs that event is refused ("no audit, no
-action"). Confirmed in review P1-01.
+| Kind | Cursor advances | Delivery | After a consumer crash |
+| --- | --- | --- | --- |
+| EVENTS, RESULT | After the record is processed (`scada_queue_ack`) | At least once | The unacknowledged record is delivered again; the consumer ignores an id it has already stored |
+| CMD | Before the record is executed | At most once | The record is not delivered again |
 
-### 9.3 Records
+A command is never executed twice and never executed late:
+
+- The driver acknowledges a write request before it acts on it.
+- When a driver attaches, the library drains every request still in its `cmd`
+  queues without executing it and answers each with status ABORTED. Selections
+  do not survive a driver restart.
+- A request whose `expiry_mono_ns` has passed, or whose lifetime
+  (`expiry_mono_ns - posted_mono_ns`) is longer than the limit in section 14,
+  is answered EXPIRED and not executed.
+- If the answer cannot be posted (result queue full or requester down) it is
+  dropped; the requester sees the request expire.
+
+A consumer that creates a new `proc` region inside an existing generation has
+lost its cursors. It sets each cursor to the queue's current `write_seq` and
+reports how many records were skipped.
+
+### 9.3 No audit, no action
+
+If the consumer's region is missing or its process is down, `post` returns
+`SCADA_E_PEER_DOWN` and nothing is queued. This holds for event queues too.
+
+- An action that needs an event record is refused unless the post of that
+  record returned `SCADA_OK`. "Journalled" in this contract means exactly
+  that: accepted into the event queue of a consumer that is not down.
+- This applies to write requests of every source, AUTO included. While the
+  consumer of its event queue is down, `scada-control` cannot post write
+  requests, and outputs follow their configured hold or safe behaviour.
+- The only bypass is emergency direct mode (reference section 11.6).
+- Residual window: a consumer that has just died is seen as down only after
+  its heartbeat timeout. Records accepted in that window are in shared memory
+  and are delivered when the consumer restarts, unless the unit loses power
+  first.
+
+Decided by the product owner in review P1-01 (D-23, D-24).
+
+### 9.4 Records
 
 ```cpp
 struct EventRecord {             // 256 bytes, queues of kind EVENTS
@@ -437,18 +595,19 @@ struct WriteRequest {            // 64 bytes, queues of kind CMD
   uint8_t  source;               // 1 AUTO, 2 OPERATOR, 3 REMOTE
   uint8_t  value_type;           // TagType
   uint8_t  reserved0;
-  union { bool b; int64_t i; uint64_t u; double f; } value;
+  uint64_t value;
   uint32_t user_id;              // 0 for AUTO and REMOTE
   uint32_t reserved1;
   int64_t  expiry_mono_ns;       // the driver must not execute after this
   int64_t  posted_mono_ns;
-  uint8_t  reserved[16];
+  uint64_t select_request_id;    // for OPERATE and CANCEL: the SELECT it belongs to, else 0
+  uint8_t  reserved[8];
 };
 
 struct WriteResult {             // 32 bytes, queues of kind RESULT
   uint64_t request_id;
   uint8_t  status;               // 1 OK, 2 REJECTED, 3 TIMEOUT, 4 DEVICE_ERROR,
-                                 // 5 NOT_AUTHORISED, 6 EXPIRED
+                                 // 5 NOT_AUTHORISED, 6 EXPIRED, 7 ABORTED
   uint8_t  reserved0[3];
   int32_t  protocol_error;       // driver-specific, 0 if none
   int64_t  completed_time_ns;
@@ -459,39 +618,58 @@ struct WriteResult {             // 32 bytes, queues of kind RESULT
 String values cannot be commanded through `WriteRequest` in layout version 1.
 
 Record ids come from the queue's `write_seq`, which lives in the region and
-survives a producer restart. A restarted producer therefore never reuses an
-id within a generation, and a consumer that ignores ids it has already handled
-cannot drop a new command by mistake.
+survives a producer restart, so an id is never reused within a generation. Ids
+start again in a new generation and after a boot; anything stored on disk
+qualifies an id with the time of the record.
 
 ## 10. Process regions (`proc.<process>`)
 
-Every process creates exactly one. It carries the heartbeat and the read
-cursors of every reliable queue the process consumes.
+Every process creates exactly one. It carries the heartbeat, the cycle counter
+and the read cursors of every reliable queue the process consumes.
 
 ```cpp
-struct ProcHeader {              // 64 bytes, follows RegionHeader
-  std::atomic<uint64_t> heartbeat;      // incremented at least once a second
-  std::atomic<int64_t>  heartbeat_mono_ns;
-  uint32_t pid;
-  std::atomic<uint32_t> state;          // 1 STARTING, 2 RUNNING, 3 STOPPING
-  uint8_t  reserved[40];
+struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
+  uint64_t heartbeat;            // A; incremented by scada_tag_heartbeat
+  int64_t  heartbeat_mono_ns;    // A
+  uint32_t pid;                  // for diagnosis only; never used for a decision
+  uint32_t state;                // A; 1 STARTING, 2 RUNNING, 3 STOPPING
+  uint32_t cycle_seq;            // A; incremented by scada_tag_notify
+  uint8_t  reserved[36];
 };
-// followed by: std::atomic<uint64_t> cursors[queue_count];  indexed by queue_id
+// followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
 ```
+
+A process holds an exclusive, non-blocking `flock` on its `proc` region for
+its whole life. A second process with the same name fails to attach with
+`SCADA_E_BUSY`, so two writers can never share a region.
+
+`cycle_seq` lets another process run in step: a control task bound to a
+synchronous scan waits for the I/O process's `cycle_seq` to change, whether or
+not any tag changed in that scan.
 
 ### 10.1 Liveness
 
-- `scada-tagd` checks every `heartbeat_check_ms` (default 250 ms).
-- If a process's `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`
-  (default 3,000 ms), or its region is missing, `scada-tagd` sets `down = 1`
-  in that process's entry in the process table. Every process has the flag,
-  whether or not it owns tags.
-- `down` is cleared when the heartbeat is fresh again and `state` is RUNNING.
+A process is **down** when any of these holds:
+
+- its `proc` region is missing or not ready,
+- its `state` is not RUNNING,
+- its `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`,
+- `scada-tagd` has set `down` in its process table entry.
+
+The library evaluates the first three itself on every use (the read overlay,
+`scada_proc_status`, `post`), so detection does not depend on `scada-tagd`
+being alive and a clean stop is seen at once.
+
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
   library: a hung main loop must stop the heartbeat.
-- Any process can ask whether another is down with `scada_proc_status()`
-  (for example a driver deciding that `scada-control` has stopped).
+- It is called at an interval of at most one third of the process's
+  `heartbeat_timeout_ms` (defaults: 3,000 ms general, 500 ms for real-time
+  processes).
+- `scada-tagd` checks every `heartbeat_check_ms` (default 250 ms), sets `down`
+  when a process is down by the rules above and clears it when the heartbeat
+  is fresh again and `state` is RUNNING. The flag is what `scada-tagd` reports
+  and alarms on.
 - `scada-tagd` has its own `proc.tagd` region. If its heartbeat stops, the
   library reports `SCADA_E_TAGD_DOWN` from `scada_tag_status()`, but existing
   mappings keep working.
@@ -504,33 +682,50 @@ struct ProcHeader {              // 64 bytes, follows RegionHeader
 2. If `current` points to a generation with the same layout version and
    `config_hash`, reuse it: restarting `scada-tagd` does not disturb the data
    plane.
-3. Otherwise create `gen-<n+1>/`, write `header` with state BUILDING, set
-   `ready`, set state RUNNING, then switch the `current` symlink by rename.
+3. Otherwise remove every `gen-*` directory that `current` does not point to
+   and that has no live process (left by a crash while building), create
+   `gen-<n+1>/`, write `header` with state BUILDING, set `ready`, set state
+   RUNNING, then switch `current`: create a symlink under a temporary name and
+   rename it over `current`.
 
 ### 11.2 Attach (`scada_tag_attach`)
 
-1. Open `current/header`. Fail with `SCADA_E_LAYOUT` unless magic and layout
-   version match the library's.
+1. Check the base directory (section 3.1). Open `current/header`. Fail with
+   `SCADA_E_LAYOUT` unless magic and layout version match the library's.
 2. Find the calling process in the process table by name, and check its uid.
-3. Create the process's own regions with `O_CREAT | O_EXCL` at the sizes the
-   header gives. If a region already exists with the right owner, size and
-   generation, reuse and repair it (section 6.3); queue positions and
-   cursors in a reused region are kept. If it exists but does not match,
-   attach fails with `SCADA_E_PERMISSION` and the file is left untouched.
-   Load retained values (section 12) into a newly created `tags` region. Set
-   `ready`.
-4. Set `state` RUNNING and write the first heartbeat. From here the caller
+3. For each of the process's own regions: if it exists with the right owner,
+   size and generation and is `ready`, reuse and repair it (section 6.3);
+   queue positions and cursors in a reused region are kept. If it exists, is
+   owned by the caller's uid, and is unready or has the wrong size, remove it.
+   If it is absent, create it (section 3.2) and load retained values (section
+   12) into a new `tags` region. If it exists with another owner, attach fails
+   with `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
+4. Take the lock on `proc.<process>`. Map and pre-fault the process's own
+   regions. A process with the REALTIME flag is expected to run under
+   `mlockall(MCL_CURRENT | MCL_FUTURE)`.
+5. Drain the process's `cmd` queues (section 9.2).
+6. Set `state` RUNNING and write the first heartbeat. From here the caller
    must call `scada_tag_heartbeat()`.
-5. Map other regions read-only on first use. A region that is missing or not
-   ready is not an error: its tags read as BAD with OWNER_DOWN, and the library
-   retries the mapping in the background.
+7. Read `GlobalHeader.state` again. If it is RETIRING, detach and start again
+   from step 1.
+
+Other processes' regions are mapped read-only and pre-faulted in
+`scada_tag_resolve`, `scada_sub_open`, `scada_queue_open` and
+`scada_proc_resolve`, never inside an RT-safe function. A region that is
+missing or not ready is not an error: its tags read as BAD with OWNER_DOWN.
+The library tries the mapping again inside `scada_tag_notify()`, at most once
+a second for each missing region.
 
 ### 11.3 Generation change
 
 1. `scada-tagd` builds the new generation as in 11.1 and sets the old header's
    state to RETIRING.
-2. Each process sees RETIRING (checked on every heartbeat), finishes its current
-   cycle, detaches, attaches to `current`, and resolves its handles again.
+2. Each process sees RETIRING (checked on every heartbeat). A producer stops
+   writing and posting and calls notify. A consumer first drains its event and
+   result queues until its cursor equals `write_seq`, bounded by 1 second, so
+   that no journal or audit record is dropped. Write requests still queued are
+   answered ABORTED. Then the process detaches, attaches to `current`, and
+   resolves its handles again.
 3. `scada-tagd` removes the old directory when no process region in it has a
    fresh heartbeat, or after a timeout (default 30 s).
 
@@ -544,143 +739,242 @@ by `scada-conf` and the output configuration, not by this contract.
 ## 12. Retained values
 
 - A tag with the RETAIN flag is persisted by `scada-tagd`, which reads it like
-  any other consumer and writes `/var/lib/scada/retain/<owner>.bin` at most
-  every 5 seconds when values changed, and on clean shutdown.
-- The file is written atomically: temporary file, `fsync`, rename. It holds a
-  header (magic, format version, `config_hash`, record count, CRC-32 of the
-  records) and `(tag name, type, value, source_time_ns)` records. Names, not
-  handles, so it survives a generation change; `config_hash` is for diagnosis
-  only and a different hash does not reject the file.
+  any other consumer and writes `/var/lib/scada/retain/<owner>.bin` when
+  values changed, at most once per retain interval (configurable, default
+  5 seconds), and on clean shutdown.
+- A tag that also has RETAIN_NOW (modes, control authority) is written within
+  1 second of its change, so a power loss cannot revert it by more than that.
+- The directory is `scada-tagd:scada`, mode `2750`; files are `0640`. The
+  library checks that a file is a regular file owned by the uid of
+  `scada-tagd` before reading it.
+- The file is written atomically: temporary file, `fsync`, rename, then
+  `fsync` of the directory. Stale temporary files are removed at start. The
+  file holds a header (magic, format version, `config_hash`, record count) and
+  `(tag name, type, value, source_time_ns)` records, followed by a CRC-32 over
+  everything before it. Names, not handles, so it survives a generation
+  change; `config_hash` is for diagnosis only and a different hash does not
+  reject the file.
 - The file is outside input to the library. A file that fails its checks is
   ignored and reported; a record whose name is unknown or whose type differs
   is skipped.
 - When an owner creates a new `tags` region, the library loads the retained
   values for that owner's tags before setting `ready`. A restored value has
-  quality UNCERTAIN and flag SUBSTITUTED until the owner writes it.
+  quality UNCERTAIN and flag RESTORED until the owner writes it.
 
 ## 13. Library interface
 
 The C interface is the stable one; the C++ interface is a thin wrapper.
 
 ```c
+typedef struct {
+  uint8_t  type;                 /* TagType */
+  uint8_t  quality;
+  uint16_t quality_flags;
+  uint32_t change_count;         /* filled by read */
+  uint64_t value;                /* bit pattern, section 1 */
+  int64_t  source_time_ns;       /* on write: 0 means "no device time" */
+  int64_t  update_time_ns;       /* filled by read; ignored by write */
+  int64_t  update_mono_ns;       /* filled by read; ignored by write */
+  int64_t  age_ns;               /* filled by read, from update_mono_ns */
+} scada_value;                   /* 48 bytes */
+
+typedef struct {
+  const char *base_dir;          /* NULL: /dev/shm/scada */
+  const char *retain_dir;        /* NULL: /var/lib/scada/retain */
+  int64_t     tagd_uid;          /* -1: look up the user scada-tagd */
+} scada_attach_opts;
+
 /* Attach and status */
 int  scada_tag_attach(const char *process_name, scada_ctx **out);
+int  scada_tag_attach_opts(const char *process_name, const scada_attach_opts *opts, scada_ctx **out);
 void scada_tag_detach(scada_ctx *ctx);
-int  scada_tag_heartbeat(scada_ctx *ctx);              /* RT-safe; call at least once a second */
-int  scada_tag_notify(scada_ctx *ctx);                 /* wake consumers; once per cycle, not RT-safe */
+int  scada_tag_heartbeat(scada_ctx *ctx);              /* RT-safe */
+int  scada_tag_notify(scada_ctx *ctx);                 /* wake consumers; bounded, not RT-safe */
 int  scada_tag_status(scada_ctx *ctx, scada_status *out);
-int  scada_proc_status(scada_ctx *ctx, const char *process_name, scada_proc_status_t *out);  /* RT-safe after first call */
+int  scada_proc_resolve(scada_ctx *ctx, const char *process_name, uint16_t *index);
+int  scada_proc_status(scada_ctx *ctx, uint16_t index, scada_proc_status_t *out);        /* RT-safe */
 
 /* Tags */
 int  scada_tag_resolve(scada_ctx *ctx, const char *name, uint32_t *handle);
 int  scada_tag_info(scada_ctx *ctx, uint32_t handle, scada_tag_info_t *out);
-int  scada_tag_read(scada_ctx *ctx, uint32_t handle, scada_value *out);          /* RT-safe */
+int  scada_tag_read(scada_ctx *ctx, uint32_t handle, scada_value *out);                  /* RT-safe */
 int  scada_tag_read_many(scada_ctx *ctx, const uint32_t *handles, size_t n,
-                         scada_value *out);                                      /* RT-safe */
-int  scada_tag_write(scada_ctx *ctx, uint32_t handle, const scada_value *v);     /* RT-safe, owner only */
-int  scada_tag_read_string(scada_ctx *ctx, uint32_t handle, char *buf, size_t cap, size_t *len);
+                         scada_value *out, int *status);                                 /* RT-safe */
+int  scada_tag_write(scada_ctx *ctx, uint32_t handle, const scada_value *v);             /* RT-safe, owner thread */
+int  scada_tag_write_many(scada_ctx *ctx, const uint32_t *handles, size_t n,
+                          const scada_value *v);                                         /* RT-safe, owner thread */
+int  scada_tag_read_string(scada_ctx *ctx, uint32_t handle, char *buf, size_t cap,
+                           size_t *len, scada_value *meta);
 int  scada_tag_write_string(scada_ctx *ctx, uint32_t handle, const char *s, size_t len,
                             uint8_t quality, uint16_t flags, int64_t source_time_ns);
 
 /* Change rings */
 int  scada_sub_open(scada_ctx *ctx, const char *owner, scada_sub **out);
 int  scada_sub_next(scada_sub *sub, scada_change *out, int timeout_ms);   /* SCADA_E_GAP on overrun */
+int  scada_sub_stats(scada_sub *sub, scada_sub_stats_t *out);             /* gaps counted */
 void scada_sub_close(scada_sub *sub);
 
 /* Reliable queues */
 int  scada_queue_open(scada_ctx *ctx, const char *queue_name, scada_queue **out);
-int  scada_queue_post(scada_queue *q, const void *record);                /* RT-safe */
-int  scada_queue_next(scada_queue *q, void *record, int timeout_ms);
-int  scada_queue_ack(scada_queue *q);                                     /* advance the cursor */
+int  scada_queue_post(scada_queue *q, const void *record, size_t size);   /* RT-safe */
+int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);
+int  scada_queue_ack(scada_queue *q);                  /* EVENTS and RESULT only */
 void scada_queue_close(scada_queue *q);
+
+/* Waiting on several sources */
+int  scada_waitset_create(scada_ctx *ctx, scada_waitset **out);
+int  scada_waitset_add_sub(scada_waitset *ws, scada_sub *sub);
+int  scada_waitset_add_queue(scada_waitset *ws, scada_queue *q);
+int  scada_waitset_add_cycle(scada_waitset *ws, uint16_t process_index);
+int  scada_waitset_wait(scada_waitset *ws, int timeout_ms);
+int  scada_waitset_fd(scada_waitset *ws, int *fd);     /* for poll and epoll; starts the waiter thread */
+void scada_waitset_destroy(scada_waitset *ws);
 ```
 
-`scada_value` carries type, value, quality, quality flags, the three
-timestamps, and `age_ns` computed from `update_mono_ns` at the time of the
-read.
+- `scada_tag_write` uses `type`, `value`, `quality`, `quality_flags` and
+  `source_time_ns` of its argument; the library sets the update times.
+- `read_many` and `write_many` read the clocks once for the whole call.
+  `read_many` returns a status for each handle.
+- `size` in the queue calls must equal the queue's `record_size`.
+- `scada_sub_open` subscribes to one owner's ring. The per-tag filter of
+  reference section 5.7 is applied by the caller on `scada_change.handle`.
+
+### 13.1 Real-time safety
 
 Functions marked RT-safe must not allocate, block, or enter the kernel. They
-may read `CLOCK_REALTIME` and `CLOCK_MONOTONIC`, which both targets serve from
-the vDSO without a system call; the library checks at attach that this holds.
-Waking consumers is done only by `scada_tag_notify` (section 8.4).
+validate the handle with two comparisons and touch only memory that was mapped
+and pre-faulted earlier.
 
-`scada_sub_open` subscribes to one owner's ring. The per-tag filter of
-reference section 5.7 is applied by the caller on `scada_change.handle`.
+They may read `CLOCK_REALTIME` and `CLOCK_MONOTONIC`, which both targets
+normally serve from the vDSO without a system call. Some clock sources (certain
+ARM timers, a time-stamp counter the kernel has demoted) make the read a real
+system call. The library checks at attach, and again inside
+`scada_tag_notify()` once a minute, by reading the kernel's current clock
+source name and timing a batch of reads. On failure attach still succeeds:
+`scada_tag_status()` reports it, and the process raises a system alarm,
+because the real-time rule no longer holds on that unit.
 
-### 13.1 Return codes
+### 13.2 Threads
 
-| Code | Meaning |
-| --- | --- |
-| `SCADA_OK` (0) | Success |
-| `SCADA_E_LAYOUT` | Layout version or magic mismatch |
-| `SCADA_E_NOT_FOUND` | Unknown tag, owner, process or queue name |
-| `SCADA_E_NOT_OWNER` | Write attempted by a process that does not own the tag |
-| `SCADA_E_TYPE` | Value type does not match the tag type |
-| `SCADA_E_FULL` | Reliable queue is full |
-| `SCADA_E_PEER_DOWN` | The queue's consumer is not attached or is down |
-| `SCADA_E_GAP` | Change ring overrun; resynchronise |
-| `SCADA_E_TIMEOUT` | Nothing arrived within the timeout |
-| `SCADA_E_RETIRING` | The generation is retiring; reattach |
-| `SCADA_E_TAGD_DOWN` | `scada-tagd` heartbeat lost |
-| `SCADA_E_PERMISSION` | Uid mismatch, or a region has the wrong owner |
-| `SCADA_E_IO` | Operating system error; `errno` is preserved |
+- `scada_ctx` may be used from several threads. The read functions,
+  `scada_proc_status` and `scada_tag_heartbeat` are safe from any thread.
+- All writes to the tags of one owner come from one thread. A `scada_sub`, a
+  `scada_queue` and a `scada_waitset` are each used by one thread.
+- `scada_tag_notify` acts for the calling thread: it wakes the consumers of
+  what that thread wrote.
+- The library does not lock to enforce these rules. A debug build checks them
+  and stops the process on a violation.
+
+### 13.3 Return codes
+
+| Code | Value | Meaning |
+| --- | --- | --- |
+| `SCADA_OK` | 0 | Success |
+| `SCADA_E_INVALID` | 1 | Invalid argument or handle |
+| `SCADA_E_LAYOUT` | 2 | Layout version or magic mismatch |
+| `SCADA_E_NOT_FOUND` | 3 | Unknown tag, owner, process or queue name |
+| `SCADA_E_NOT_OWNER` | 4 | Write attempted by a process that does not own the tag |
+| `SCADA_E_TYPE` | 5 | Value type does not match the tag type |
+| `SCADA_E_FULL` | 6 | Reliable queue is full |
+| `SCADA_E_PEER_DOWN` | 7 | The queue's consumer is not attached or is down |
+| `SCADA_E_GAP` | 8 | Change ring overrun or owner restart; resynchronise |
+| `SCADA_E_TIMEOUT` | 9 | Nothing arrived within the timeout |
+| `SCADA_E_RETIRING` | 10 | The generation is retiring; reattach |
+| `SCADA_E_TAGD_DOWN` | 11 | `scada-tagd` heartbeat lost |
+| `SCADA_E_PERMISSION` | 12 | Uid mismatch, or a directory or region has the wrong owner or mode |
+| `SCADA_E_IO` | 13 | Operating system error; `errno` is preserved |
+| `SCADA_E_BUSY` | 14 | The writer was mid-write for the whole read attempt; or the process name is already attached |
 
 ## 14. Limits for layout version 1
 
 | Item | Limit |
 | --- | --- |
 | Tags per generation | 1,000,000 (design target 50,000) |
-| Owners | 255 |
-| Tags per owner | 16,777,215 |
+| Owners | 1,023 |
+| Tags per owner | 4,194,303 |
 | Processes | 1,024 |
 | Reliable queues | 4,096 |
 | Tag name length | 127 bytes |
 | String value length | 250 bytes |
-| Change ring capacity | 1,024 to 16,777,216 entries, default 65,536 |
+| Change ring capacity | 1,024 to 1,048,576 entries (32 MB); default 65,536; at least twice the owner's tag count |
 | Event payload | 232 bytes |
+| Write request lifetime | 60 seconds |
+
+The cursor array of a `proc` region has one entry for every queue of the
+generation, 8 bytes each. Cursors of different queues share cache lines; at
+command and event rates this is harmless.
 
 ## 15. Conformance tests
 
 Phase 1 is accepted only when automated tests show all of these on x86-64 and
 ARM64:
 
-1. Structure sizes, alignments and offsets match this document.
+1. Structure sizes, alignments and offsets match this document, and no
+   structure has padding.
 2. 50,000 tags across 10 owners: 50,000 updates per second sustained for 10
    minutes with no torn reads observed by 4 concurrent readers.
 3. A reader never observes a record with mixed old and new fields (checked
-   with values whose fields are derived from one another).
-4. Killing an owner with `SIGKILL` mid-write: readers return BAD with
-   OWNER_DOWN within the heartbeat timeout plus one check interval, and never
-   hang.
-5. An owner restart repairs its region and readers recover without
-   reattaching.
-6. A non-owner process cannot write: the mapping is read-only and the library
+   with values whose fields are derived from one another). This also runs at
+   the maximum write rate, with writers and readers on separate cores, on the
+   ARM64 runner.
+4. The sequence lock and the change ring are checked with a model checker for
+   the ARM memory model, as written in sections 6 and 8.
+5. Killing an owner with `SIGKILL` mid-write: readers return BAD with
+   OWNER_DOWN within the heartbeat timeout, with `scada-tagd` running and with
+   it stopped, and never hang.
+6. A process that stops cleanly reads as down at once.
+7. An owner restart repairs its region and readers recover without
+   reattaching; every consumer of its ring gets `SCADA_E_GAP` once.
+8. A non-owner process cannot write: the mapping is read-only and the library
    returns `SCADA_E_NOT_OWNER`.
-7. A region file created by the wrong user is rejected.
-8. A library built with a different layout version refuses to attach.
-9. Change ring: a slow consumer gets `SCADA_E_GAP` exactly when overrun and
-   resynchronises correctly; a fast consumer sees every entry in order.
-10. Reliable queue: no loss and no duplication in normal operation; `FULL` when
-    full; redelivery after a consumer crash before `ack`; `PEER_DOWN` when the
-    consumer is absent.
-11. Restarting `scada-tagd` with an unchanged tag set leaves all other
+9. A region file created by the wrong user is rejected and removed by
+   `scada-tagd`; a symlink under a region name is not followed; a base
+   directory with the wrong owner or mode is refused.
+10. A process killed while creating a region attaches again on restart. A
+    second process with the same name is refused.
+11. Regions get the modes of section 3.1 under umask 077. Attach fails with an
+    error, not a signal, when `/dev/shm` is full.
+12. A library built with a different layout version refuses to attach.
+13. Change ring: a slow consumer gets `SCADA_E_GAP` exactly when overrun and
+    resynchronises without an old value replacing a newer one; a fast consumer
+    sees every entry in order.
+14. Avalanche: every tag of an owner changes quality in one cycle; no consumer
+    that is keeping up gets a gap.
+15. A process with several owner threads, each writing its own tags and
+    posting to its own queue, passes tests 2 and 13 under the thread
+    sanitizer.
+16. Reliable queue, EVENTS and RESULT: no loss and no duplication in normal
+    operation; `FULL` when full; redelivery after a consumer crash before
+    `ack`; `PEER_DOWN` when the consumer is absent or stopped.
+17. Reliable queue, CMD: a driver killed after taking a request never sees it
+    again; requests queued while the driver was dead are answered ABORTED and
+    not executed; an expired or over-long request is answered EXPIRED.
+18. After a producer restart, record ids continue without reuse. A queue
+    cursor or `write_seq` outside its valid range is rejected, not followed.
+19. A post to an event queue whose consumer is down returns `PEER_DOWN`.
+20. Restarting `scada-tagd` with an unchanged tag set leaves all other
     processes running without interruption.
-12. A generation change completes with all processes reattached, and retained
-    values are restored.
-13. RT-safe functions make no system calls and no allocations (checked by
-    instrumentation in the test build).
-14. A string tag read never pairs a string with the quality or times of a
+21. A generation change completes within 5 seconds with all processes
+    reattached, retained values restored, no event record lost, and no write
+    request of the old generation executed.
+22. RT-safe functions make no system calls and no allocations, including the
+    first read of a tag after resolve (checked by instrumentation in the test
+    build).
+23. A string tag read never pairs a string with the quality or times of a
     different write.
-15. After a producer restart, record ids continue without reuse; after an
-    owner restart, every consumer of its ring gets `SCADA_E_GAP` once.
-16. A queue cursor or `write_seq` outside its valid range is rejected, not
-    followed.
-17. A process that never calls `scada_tag_notify` still delivers: consumers
-    receive within the wait cap. With notify, they receive within one cycle.
-18. A corrupt or truncated retain file is ignored and reported; attach
-    succeeds.
-19. Read latency and write latency are measured and reported: median and 99.9th
-    percentile for `read`, `read_many` of 500 tags, and `write`.
+24. Waiting: with notify, a consumer receives within one producer cycle; a
+    process that never calls notify still delivers within the 100 ms cap; a
+    wait set over 10 rings wakes for any of them; the file descriptor of a
+    wait set works with `poll`; a waiter on `cycle_seq` wakes on a cycle with
+    no tag change.
+25. A corrupt or truncated retain file is ignored and reported; attach
+    succeeds. A RETAIN_NOW tag is on disk within 1 second.
+26. False trips: the reference load runs for 10 minutes with real-time readers
+    sharing cores with non-real-time owners; no process is reported down and
+    the count of `SCADA_E_BUSY` is reported.
+27. Read latency and write latency are measured and reported: median and 99.9th
+    percentile for `read`, `read_many` of 500 tags, `write`, and `write_many`
+    of 500 tags.
 
 ## 16. Open points to settle in phase 1
 
@@ -690,12 +984,13 @@ the decisions log, and then written into this contract before it becomes 1.0
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
-| Wake mechanism behind `scada_tag_notify` | Futex on a read-only mapping; eventfd as fallback (section 8.4) | P1-07 | A consumer with a read-only mapping is woken on x86-64 and ARM64 |
-| Read retry limit before reporting OWNER_DOWN | 64 attempts | P1-06, confirmed in P1-12 | No false OWNER_DOWN in the 10-minute reference load run, with non-real-time owners |
+| Wake mechanism | Futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
+| Read retry limit before `SCADA_E_BUSY` | 64 attempts | P1-06, confirmed in P1-12 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
 | Default change ring capacity per owner | 65,536 | P1-12 | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
 | Huge pages for the `tags` regions | Not used | P1-12 | Used only if the benchmark shows a lower 99.9th percentile read latency |
-| Heartbeat timeout defaults | 3,000 ms general, 500 ms for real-time processes | P1-04, confirmed in P1-12 | No false `down` under the reference load; conformance test 4 passes |
-| Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 12, with a value changed immediately before the change |
+| Heartbeat timeout defaults | 3,000 ms general, 500 ms for real-time processes | P1-04, confirmed in P1-12 | Conformance tests 5 and 26 |
+| Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 21, with a value changed immediately before the change |
+| Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 
 ## 17. Differences from the reference document
 
@@ -712,20 +1007,37 @@ Confirmed by the product owner in review P1-01:
 2. A reliable queue's read cursor lives in the consumer's `proc` region, for
    the same reason.
 3. Each process creates its own regions; `scada-tagd` creates only the
-   directories and `header`.
+   generation directories and `header`.
+4. An owner is a writing thread, not a process. A process with several
+   writing threads has several owners, rings and queues, so that every ring
+   and queue keeps one lock-free writer.
+5. Command queues deliver at most once and are drained on driver restart
+   (reference 5.3 calls them reliable; reference 14.4 forbids automatic retry
+   of commands).
+6. Write requests of every source, AUTO included, need their event record
+   accepted first (section 9.3).
+7. Writers never wake consumers; `scada_tag_notify` does (section 8.4). This
+   keeps the rule of reference section 5.7 that `write` and `post_request`
+   make no system calls.
 
 Smaller points where this contract adds to or narrows the reference:
 
-4. Quality flag TIME_UNCERTAIN (reference section 14.4 asks for the flag;
-   section 5.2 does not list it).
-5. Write request source REMOTE (reference section 8.1 and 17.4; section 5.3
-   lists only AUTO and OPERATOR).
-6. A change entry carries `source_time_ns` only, not all three timestamps.
-7. Writers never wake consumers; `scada_tag_notify` does, once per cycle
-   (section 8.4). This keeps the rule of reference section 5.7 that `write`
-   and `post_request` make no system calls.
-8. Subscription is per owner; the tag filter is applied by the caller.
-9. `scada-tagd` does not mark tags stale itself; STALE is set by the owner.
+8. Quality flags TIME_UNCERTAIN (reference 14.4), BLOCKED, TEST, OVERFLOW,
+   RESTORED and LOCAL_TIME.
+9. Write request source REMOTE (reference 8.1 and 17.4), result status
+   ABORTED, and `select_request_id`.
+10. A change entry carries `source_time_ns` and `update_mono_ns`, not all
+    three timestamps and no sequence number of its own.
+11. The tag value is a 64-bit pattern, not a union, and shared fields are
+    plain integers accessed atomically, not `std::atomic` members.
+12. A read that cannot complete returns `SCADA_E_BUSY`, not a BAD value.
+13. Liveness is also evaluated by each reader, not only by `scada-tagd`.
+14. Subscription is per owner; the tag filter is applied by the caller.
+15. `scada-tagd` does not mark tags stale itself; STALE is set by the owner.
+16. RETAIN_NOW tags are written within 1 second; the 5-second retain interval
+    is configurable.
+17. The base directory is created by the platform at boot. Minimum kernel
+    Linux 5.16.
 
 ## 18. Change log
 
@@ -733,5 +1045,7 @@ Smaller points where this contract adds to or narrows the reference:
 | --- | --- | --- |
 | 0.1 | 2026-11-13 | First draft |
 | 0.2 | 2026-11-13 | Review P1-01. `down` flag moved from the owner table to the process table. Writers no longer wake consumers; `scada_tag_notify` added. String write nested inside the tag record write. Ring `epoch` added. Record ids taken from the queue `write_seq`. Checks on the base directory, region size and queue cursors. `scada_proc_status` added. Explicit padding in `GlobalHeader`. Retain file check sum. Open points given an owning issue and a pass criterion. |
+| 0.3 | 2026-11-13 | Second review P1-01 (SCADA, C++ and Linux reviewers; D-24). Owners are threads; handle split 10/22 bits. Memory fences added to the sequence lock and ring. Shared fields are plain integers; value is a 64-bit pattern. `SCADA_E_BUSY` in place of a false OWNER_DOWN. Command queues at most once, drained on restart, status ABORTED, lifetime limit, `select_request_id`. AUTO writes need an event record. Liveness evaluated by readers; clean stop is down at once; heartbeat interval tied to the timeout. Wait sets, pollable descriptor, `cycle_seq`. Change entry carries `update_mono_ns`; resynchronisation order; ring capacity tied to tag count. New quality flags. Slot tables. Regions built under a temporary name; own unready files rebuilt; instance lock; `fchmod`, `openat` and `posix_fallocate` rules; base directory created by the platform; accepted risks and deployment requirements. Mapping moved out of RT-safe functions; vDSO check specified. Retain directory ownership, directory `fsync`, CRC over the header, RETAIN_NOW. Generation change drains event queues. Return codes numbered; `scada_value` and attach options defined; batch write. Conformance tests extended from 19 to 27. |
 
-No migration is needed: nothing implements 0.1, and the layout version stays 1.
+No migration is needed: nothing implements 0.1 or 0.2, and the layout version
+stays 1.
