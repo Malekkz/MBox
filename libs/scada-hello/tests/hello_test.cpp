@@ -62,3 +62,11 @@ TEST(Hello, SurplusArgumentIsAUsageError) {
 }
 
 }  // namespace
+
+// TEMPORARY, removed before merge: proves that the pipeline rejects a
+// failing test (issue #5, acceptance).
+namespace {
+TEST(PipelineProof, FailingTest) {
+    EXPECT_EQ(scada::hello::greeting(), "not the greeting");
+}
+}  // namespace
