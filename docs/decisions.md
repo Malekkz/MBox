@@ -49,3 +49,54 @@ clang-tidy; MISRA needs a paid document and commercial checkers.
 Consequences: fuzz targets are written with each parser from phase 2 onward,
 earlier than the phase 10 fuzzing item in the reference document, which
 becomes the long-running fuzzing campaign.
+
+## D-2: CMake 3.21 as the minimum version, presets for every build
+Date: 2026-11-13
+Phase / issue: 0, #2
+Status: accepted
+
+Context: the build needs named configurations (`dev`, `release`, `perf`) that give the same result on every machine and in the pipeline.
+Options: CMake presets (needs CMake 3.21 or newer); wrapper scripts; documented command lines.
+Decision: `CMakePresets.json` version 3, and `cmake_minimum_required(VERSION 3.21)`. Presets name no generator; CMake picks the platform default.
+Reason: presets are part of CMake, so no extra tool or script is needed, and 3.21 is the oldest version that supports the preset features used.
+Consequences: build directories are `build/<preset>`. A machine with an older CMake cannot build the project.
+
+## D-3: How the compiler settings are applied, and the `perf` preset
+Date: 2026-11-13
+Phase / issue: 0, #2
+Status: accepted
+
+Context: section 2 of the coding standard lists the flags, but not how the build applies them, and the issue asks for a `perf` preset without defining it.
+Options: flags set globally or per target; an unsupported flag skipped or fatal; `perf` as the `release` build itself or a separate build.
+Decision:
+- The flags are attached per target by `scada_target_defaults`. The "all builds" list is always on; the option `SCADA_HARDENING` adds the release list.
+- Configuration stops if the compiler rejects a required flag or cannot provide fortify level 3. Nothing is skipped automatically.
+- `release` is `Release` with hardening, with CMake's default `-O3` replaced by the `-O2` of the standard. `perf` is `RelWithDebInfo` (`-O2 -g`) with hardening and runs only tests labelled `perf`.
+- `-fPIE -pie` are produced by CMake's position-independent-code support instead of being written as literal flags.
+- `-U_FORTIFY_SOURCE` precedes `-D_FORTIFY_SOURCE=3`, because some toolchains predefine the macro and the redefinition would be a warning.
+Reason: per-target flags keep our warning policy off third-party code added later. A fatal error is the only way a flag cannot be dropped silently. Performance must be measured with the hardening that ships, and debug information makes a regression diagnosable.
+Consequences: `dev` builds have the warnings and library assertions but not the release flags. Performance figures come from the `perf` preset only. No substitute was needed: GCC 13.3 (x86-64 and ARM64 cross) and Clang 18.1 accept every flag and provide fortify level 3.
+
+Known limit, ARM64: `-mbranch-protection=standard` is applied and our objects carry the BTI and PAC markings, but the linked executable is marked BTI-enabled only if every linked object is, including the toolchain's start files. With the cross toolchain used here they are not, so return-address signing is active and branch-target enforcement is not. This depends on the toolchain that builds the release, which is chosen with the distribution (reference 19.1); it must be checked again then.
+
+## D-4: ARM64 is built by cross-compilation with a GNU toolchain file, or natively
+Date: 2026-11-13
+Phase / issue: 0, #2
+Status: accepted
+
+Context: the same source must build for ARM64 (reference 4.1). How the pipeline runs ARM64 is decided in issue P0-04.
+Options: native build only; a cross toolchain file; a container image per architecture.
+Decision: `cmake/toolchains/aarch64-linux-gnu.cmake` and the presets `dev-arm64` and `release-arm64` cross-compile with the compiler `aarch64-linux-gnu-g++` found on `PATH`; the prefix can be changed with `SCADA_CROSS_PREFIX`. On an ARM64 machine the normal presets build natively.
+Reason: the triplet prefix is the upstream GNU naming, so no distribution path is needed, and both ways of building stay available to P0-04.
+Consequences: tests of a cross build run only when an emulator is given with `CMAKE_CROSSCOMPILING_EMULATOR` at configure time.
+
+## D-5: Libraries are static; target naming
+Date: 2026-11-13
+Phase / issue: 0, #2
+Status: accepted
+
+Context: each service is a library plus a thin executable with the same name (`libscada-hello`, `scada-hello`), and CMake target names must be unique.
+Options: static or shared libraries; target names `lib<name>` or a suffix on the executable.
+Decision: libraries are static, created with `scada_add_library(<name>)` as target `lib<name>` (file `lib<name>.a`) with the alias `scada::<short name>`. Executables are created with `scada_add_executable(<name>)`.
+Reason: static linking keeps each service one file to install and keeps a combined build possible; the alias gives dependants a stable name.
+Consequences: libraries are not installed. Driver plugins, if the driver interface contract chooses plugins, will need a shared-library helper.

@@ -1,0 +1,79 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "dev",
+      "displayName": "Development (native, debug)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (native, optimised, hardened)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O2 -DNDEBUG",
+        "SCADA_HARDENING": "ON"
+      }
+    },
+    {
+      "name": "perf",
+      "displayName": "Performance tests (native, release flags, debug info)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SCADA_HARDENING": "ON"
+      }
+    },
+    {
+      "name": "arm64",
+      "hidden": true,
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake"
+    },
+    {
+      "name": "dev-arm64",
+      "displayName": "Development (cross-compiled for ARM64)",
+      "inherits": ["dev", "arm64"]
+    },
+    {
+      "name": "release-arm64",
+      "displayName": "Release (cross-compiled for ARM64)",
+      "inherits": ["release", "arm64"]
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "perf", "configurePreset": "perf" },
+    { "name": "dev-arm64", "configurePreset": "dev-arm64" },
+    { "name": "release-arm64", "configurePreset": "release-arm64" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    {
+      "name": "perf",
+      "inherits": "base",
+      "configurePreset": "perf",
+      "filter": { "include": { "label": "perf" } }
+    },
+    { "name": "dev-arm64", "inherits": "base", "configurePreset": "dev-arm64" },
+    {
+      "name": "release-arm64",
+      "inherits": "base",
+      "configurePreset": "release-arm64"
+    }
+  ]
+}
