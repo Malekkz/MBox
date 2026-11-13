@@ -232,7 +232,37 @@ Consequences:
 - Where and how the performance tests of section 15 of the reference document run is still open. It must be decided before phase 1 is accepted, because phase 1 has the first real targets.
 - GitHub's actions `actions/checkout` and `actions/upload-artifact` (both MIT) are tools of the pipeline and are not linked or shipped. The licence report (P0-07) must list them. They are referenced by major version, not by commit hash.
 
-## D-14: Dependency list and its check are plain JSON and CMake
+## D-14: `Status` carries a code and a fixed message; `Result<T>` is our own type
+Date: 2026-11-13
+Phase / issue: 0, #7
+Status: accepted
+
+Context: errors are returned as values (`Status`, `Result<T>`), also by the real-time functions of the tag library, which must not allocate. The documents name the two types but not their content.
+Options: a code with an owned `std::string` message; a code with a message that must be a string literal; a code only. For `Result<T>`: `std::expected` (C++23, not available in C++20); a third-party type; our own.
+Decision:
+- `Status` is a `StatusCode` (14 values, `status.h`) plus a `StaticString`, a view that can only be built from a string literal at compile time. It owns nothing and is trivially copyable. Details that vary at run time go into the log record written where the error is handled.
+- `Result<T>` is our own class holding a value or an error `Status`. Calling `value()` on an error, or building a `Result` from an OK status, ends the process through `panic()`; the check stays on in release builds (coding standard, section 7).
+- The common library uses the namespace `scada`, not `scada::common`, because these names appear in every interface.
+Reason: a literal message makes `Status` usable in real-time code and removes any dangling-view risk, at no cost to callers that only branch on the code. Our own `Result<T>` needs no dependency and no language level beyond C++20.
+Consequences: a `Status` cannot carry a file name or a number; callers log them. `Result<T>` can be replaced by `std::expected` if the language level is raised.
+
+## D-15: Logging through a bounded queue, to the journal's native socket
+Date: 2026-11-13
+Phase / issue: 0, #7
+Status: accepted
+
+Context: services log to the systemd journal in a structured format with bounded size (reference 14.6), with a stderr fallback, and logging must not block the caller for more than a bounded time (issue #7). How records reach the journal, and what happens when it stalls, was open.
+Options: link `libsystemd` and call `sd_journal_send`; write the journal's native datagram protocol ourselves; print to stderr with a priority prefix only. For a stalled sink: block the caller; drop the oldest queued record; drop the new record.
+Decision:
+- `Logger::log` copies the record into a pre-allocated queue (default 256 records) under a mutex that is never held during sink I/O, and a worker thread per `Logger` delivers it. When the queue is full the new record is dropped and counted, and one `WARNING` record with the field `DROPPED` reports the loss once the sink recovers.
+- A record is limited to a 384-byte message and 8 fields with 32-byte keys and 96-byte values; longer text is cut. Field keys follow the journal's key rule.
+- The journal sink speaks the native protocol on `/run/systemd/journal/socket` with a non-blocking datagram socket. No library is linked.
+- The journal is used only when `JOURNAL_STREAM` shows that the service manager connected stderr to it; otherwise, and whenever a journal send fails, the record is written to stderr as one escaped text line.
+- The record's creation time is sent as the field `SCADA_TIME_NS`, because the journal stamps the later delivery time.
+Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
+Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
+
+## D-16: Dependency list and its check are plain JSON and CMake
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -243,7 +273,7 @@ Decision: `third-party/dependencies.json` is the list and `third-party/licence-a
 Reason: it needs no tool beyond CMake, which the build already requires, and no package manager, which the reference forbids relying on.
 Consequences: build code that fetches a dependency reads its version from the list with `scada_dependency_version`, as `cmake/ScadaTesting.cmake` does for GoogleTest, so the version is written once. Every dependency must be linked by a name, including header-only ones (an `INTERFACE` target). Not detected: headers used through an include path alone, and what vendored or fetched third-party code links itself; review covers these. Link items written as generator expressions other than plain wrappers are rejected.
 
-## D-15: What counts as a dependency, and the first allow-list
+## D-17: What counts as a dependency, and the first allow-list
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -258,7 +288,7 @@ Decision:
 Reason: permissive-only is the one set that every policy option of reference 16.2 accepts, so nothing adopted now can conflict with the later decision. Exact matching of one identifier cannot be bypassed by an expression such as `MIT OR GPL-3.0-only`.
 Consequences: libmodbus (LGPL), open62541 (MPL) and Eclipse Tahu (EPL) cannot be added until the licensing decision extends the allow-list. The bill of materials does not cover the toolchain runtime or the operating system; that is added with packaging in phase 10.
 
-## D-16: Bill of materials format and where the reports go
+## D-18: Bill of materials format and where the reports go
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted

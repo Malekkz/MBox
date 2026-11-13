@@ -8,7 +8,7 @@
 include_guard(GLOBAL)
 
 # Link names that belong to the C library of the platform, not to a third
-# party. They need no entry in the dependency list (decision D-15).
+# party. They need no entry in the dependency list (decision D-17).
 set(SCADA_PLATFORM_LINK_NAMES Threads::Threads pthread m dl rt atomic)
 
 set(_SCADA_DEPENDENCY_KEYS

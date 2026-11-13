@@ -1,7 +1,7 @@
 # third-party
 
 The list of third-party dependencies, the licence allow-list, and any vendored
-third-party code (reference 13.6, 16.3; decisions D-14 to D-16).
+third-party code (reference 13.6, 16.3; decisions D-16 to D-18).
 
 | File | Content |
 | --- | --- |
@@ -67,7 +67,7 @@ Reviewers must check these.
 | `link_names` | no | Names as written in `target_link_libraries`: CMake targets or library names. |
 
 Unknown keys are errors. The compiler, its runtime libraries and the C library
-are part of the toolchain and are not listed (D-15).
+are part of the toolchain and are not listed (D-17).
 
 ## Changing the allow-list
 
