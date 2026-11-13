@@ -7,13 +7,15 @@ product.
 ## What it does
 
 - Returns a fixed greeting line.
-- Implements the whole `scada-hello` command, including argument handling, so
-  that the executable contains no logic.
+- Implements the whole `scada-hello` command, including argument handling and
+  the service loop (readiness, watchdog, stop), so that the executable
+  contains no logic.
 
 ## Interfaces
 
 - Public header: `include/scada/hello/hello.h`, namespace `scada::hello`.
-- No contract; nothing crosses a process boundary.
+- Uses `libscada-service` to talk to the service manager.
+- No contract of this project.
 
 ## How to use it
 
@@ -34,3 +36,6 @@ std::cout << scada::hello::greeting() << '\n';
 ```
 ctest --preset dev -R scada-hello-unit-test
 ```
+
+The service loop needs a real process and is tested in
+`services/scada-hello/tests`.

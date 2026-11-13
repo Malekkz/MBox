@@ -55,13 +55,8 @@ int main() {
     expect(scada::hello::greeting() == "Hello from libscada-hello",
            "greeting text");
 
-    {
-        const RunResult result = run_with({});
-        expect(result.exit_code == EXIT_OK, "no arguments: exit code");
-        expect(result.out == "Hello from libscada-hello\n",
-               "no arguments: prints the greeting");
-        expect(result.err.empty(), "no arguments: nothing on the error stream");
-    }
+    // Running with no arguments starts the service loop, which needs a real
+    // process and signals; services/scada-hello/tests covers it.
     {
         const std::array<std::string_view, 1> args{"--help"};
         const RunResult result = run_with(args);

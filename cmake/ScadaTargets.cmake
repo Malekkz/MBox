@@ -2,6 +2,7 @@
 # pattern (CLAUDE.md, How work is organised).
 
 include(ScadaCompileOptions)
+include(ScadaInstall)
 
 # scada_add_library(<name> SOURCES <files...> [DEPENDS <targets...>])
 #
@@ -31,8 +32,8 @@ endfunction()
 
 # scada_add_executable(<name> SOURCES <files...> [DEPENDS <targets...>])
 #
-# Creates an executable and installs it to the binary directory of the install
-# tree.
+# Creates an executable and installs it to the binary directory of the staged
+# tree (ScadaInstall.cmake).
 function(scada_add_executable name)
   cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;DEPENDS")
   if(arg_UNPARSED_ARGUMENTS OR NOT arg_SOURCES)
@@ -42,14 +43,16 @@ function(scada_add_executable name)
   add_executable(${name} ${arg_SOURCES})
   target_link_libraries(${name} PRIVATE ${arg_DEPENDS})
   scada_target_defaults(${name})
-  install(TARGETS ${name} RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(TARGETS ${name} RUNTIME DESTINATION "${SCADA_INSTALL_BINDIR}")
 endfunction()
 
-# scada_add_test(<name> SOURCES <files...> [DEPENDS <targets...>])
+# scada_add_test(<name> SOURCES <files...> [DEPENDS <targets...>]
+#                [ARGS <arguments...>])
 #
-# Creates a test executable and registers it with CTest. It is not installed.
+# Creates a test executable and registers it with CTest, run with ARGS. It is
+# not installed.
 function(scada_add_test name)
-  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;DEPENDS")
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;DEPENDS;ARGS")
   if(arg_UNPARSED_ARGUMENTS OR NOT arg_SOURCES)
     message(FATAL_ERROR "scada_add_test(${name}): bad arguments")
   endif()
@@ -57,5 +60,5 @@ function(scada_add_test name)
   add_executable(${name} ${arg_SOURCES})
   target_link_libraries(${name} PRIVATE ${arg_DEPENDS})
   scada_target_defaults(${name})
-  add_test(NAME ${name} COMMAND ${name})
+  add_test(NAME ${name} COMMAND ${name} ${arg_ARGS})
 endfunction()

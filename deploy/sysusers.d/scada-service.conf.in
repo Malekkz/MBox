@@ -1,0 +1,4 @@
+# Generated from deploy/sysusers.d/scada-service.conf.in.
+# The system user of the service @SCADA_SERVICE_NAME@ (reference 4.2).
+u @SCADA_SERVICE_NAME@ - "@SCADA_SERVICE_DESCRIPTION@"
+m @SCADA_SERVICE_NAME@ @SCADA_GROUP@

@@ -1,0 +1,34 @@
+# Generated from deploy/systemd/scada-service.service.in. Do not edit the
+# installed file; local changes belong in a drop-in under
+# /etc/systemd/system/@SCADA_SERVICE_NAME@.service.d/.
+
+[Unit]
+Description=@SCADA_SERVICE_DESCRIPTION@
+
+[Service]
+# The service reports readiness itself and must feed the watchdog, so systemd
+# restarts a hung process as well as a crashed one (reference 4.2).
+Type=notify
+NotifyAccess=main
+ExecStart=@SCADA_SERVICE_EXECUTABLE@
+WatchdogSec=@SCADA_SERVICE_WATCHDOG_SEC@
+Restart=on-failure
+RestartSec=1
+
+# Own unprivileged user; the shared group grants access to the tag database.
+User=@SCADA_SERVICE_NAME@
+Group=@SCADA_SERVICE_NAME@
+SupplementaryGroups=@SCADA_GROUP@
+
+# Sandboxing (reference 4.2). The whole filesystem is read-only for the
+# service; a service that keeps state names its directories with
+# StateDirectory= or ReadWritePaths= in a drop-in. No capabilities: a service
+# that needs one adds it the same way.
+ProtectSystem=strict
+NoNewPrivileges=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
