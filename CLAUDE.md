@@ -23,7 +23,10 @@ If these three disagree, stop and ask (see "When to stop and ask").
   create. The repository has no enforced branch protection, so these rules are
   the protection.
 - Do not merge a pull request whose checks are failing or still running.
-- Branch names: `phase<N>/<issue-number>-<short-name>`.
+- Branch names: use the branch the session assigns. If you choose the name
+  yourself, use `phase<N>/<issue-number>-<short-name>`. Either way, the pull
+  request title starts with the issue ID (for example `P0-01`) and the
+  description closes the issue (`Closes #2`).
 - Work on the issue you were given. Do not start later phases, and do not add
   features the issue does not ask for.
 - Each service is a library plus a thin executable: all logic lives in the
