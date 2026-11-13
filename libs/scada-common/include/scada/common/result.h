@@ -2,6 +2,7 @@
 #define SCADA_COMMON_RESULT_H
 
 #include "scada/common/panic.h"
+#include "scada/common/static_string.h"
 #include "scada/common/status.h"
 
 #include <optional>
@@ -26,14 +27,12 @@ class [[nodiscard]] Result {
 public:
     // Success, holding `value`. Implicit, so that a function can
     // `return value;`.
-    // NOLINTNEXTLINE(google-explicit-constructor): see above
     Result(T value) noexcept(std::is_nothrow_move_constructible_v<T>)
         : value_(std::move(value)) {}
 
     // Failure. `error` must not be OK; passing an OK status is a programmer
     // error and ends the process. Implicit, so that a function can
     // `return Status(...);`.
-    // NOLINTNEXTLINE(google-explicit-constructor): see above
     Result(Status error) noexcept : status_(error) {
         if (status_.ok()) {
             panic("Result constructed from an OK status");
@@ -50,24 +49,27 @@ public:
     // until the Result is destroyed, assigned to or moved from. The rvalue
     // overload lets `std::move(result).value()` move the value out.
     [[nodiscard]] T& value() & noexcept {
-        require_value();
+        if (!value_.has_value()) {
+            panic(VALUE_ON_ERROR);
+        }
         return *value_;
     }
     [[nodiscard]] const T& value() const& noexcept {
-        require_value();
+        if (!value_.has_value()) {
+            panic(VALUE_ON_ERROR);
+        }
         return *value_;
     }
     [[nodiscard]] T&& value() && noexcept {
-        require_value();
+        if (!value_.has_value()) {
+            panic(VALUE_ON_ERROR);
+        }
         return std::move(*value_);
     }
 
 private:
-    void require_value() const noexcept {
-        if (!value_.has_value()) {
-            panic("Result::value() called on an error");
-        }
-    }
+    static constexpr StaticString VALUE_ON_ERROR =
+        "Result::value() called on an error";
 
     std::optional<T> value_;
     Status status_;

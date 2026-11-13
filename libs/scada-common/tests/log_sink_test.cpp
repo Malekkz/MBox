@@ -6,19 +6,26 @@
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/log.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
-#include <fcntl.h>
-#include <poll.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -53,18 +60,19 @@ Pipe make_pipe() {
     return {Fd(ends[0]), Fd(ends[1])};
 }
 
-// Reads what is available on `fd`, waiting until something is. Returns an
-// empty string if nothing arrives in time.
-std::string read_available(int fd) {
-    pollfd waiting{fd, POLLIN, 0};
+// Reads what is available on `descriptor`, waiting until something is. Returns
+// an empty string if nothing arrives in time.
+std::string read_available(int descriptor) {
+    constexpr std::size_t BUFFER_BYTES = 8192;
+    pollfd waiting{descriptor, POLLIN, 0};
     if (::poll(&waiting, 1, WAIT_MS) <= 0) {
         return {};
     }
-    std::array<char, 8192> buffer{};
-    const ssize_t count = ::read(fd, buffer.data(), buffer.size());
-    return count > 0 ? std::string(buffer.data(),
-                                   static_cast<std::size_t>(count))
-                     : std::string();
+    std::array<char, BUFFER_BYTES> buffer{};
+    const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+    return count > 0
+               ? std::string(buffer.data(), static_cast<std::size_t>(count))
+               : std::string();
 }
 
 // A datagram socket bound in a private temporary directory, playing the
@@ -72,13 +80,21 @@ std::string read_available(int fd) {
 class FakeJournal {
 public:
     FakeJournal() {
-        std::string pattern =
-            (std::filesystem::temp_directory_path() / "scada-log-XXXXXX")
-                .string();
-        if (::mkdtemp(pattern.data()) == nullptr) {
+        // A name no other process or earlier journal of this test uses.
+        // create_directory fails if the directory exists, so a name that
+        // was taken after all leaves the journal not ready.
+        static int instances = 0;
+        ++instances;
+        std::string name = "scada-log-";
+        name.append(std::to_string(::getpid()));
+        name.append("-").append(std::to_string(instances));
+        const std::filesystem::path directory =
+            std::filesystem::temp_directory_path() / name;
+        std::error_code failed;
+        if (!std::filesystem::create_directory(directory, failed)) {
             return;
         }
-        directory_ = pattern;
+        directory_ = directory.string();
         path_ = directory_ + "/socket";
 
         sockaddr_un address{};
@@ -88,7 +104,7 @@ public:
         }
         std::copy(path_.begin(), path_.end(), std::begin(address.sun_path));
         Fd socket(::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0));
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the socket interface takes every address type through a sockaddr pointer
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
         const auto* generic = reinterpret_cast<const sockaddr*>(&address);
         if (socket.valid() &&
             ::bind(socket.get(), generic, sizeof(address)) == 0) {
@@ -125,7 +141,7 @@ class CountingSink final : public LogSink {
 public:
     CountingSink(int& calls, bool fails) : calls_(calls), fails_(fails) {}
 
-    [[nodiscard]] Status write(const LogRecord&) noexcept override {
+    [[nodiscard]] Status write(const LogRecord& /*record*/) noexcept override {
         ++calls_;
         return fails_ ? Status(StatusCode::IO_ERROR, "sink failed") : Status();
     }
@@ -199,12 +215,14 @@ void test_stream_line_limit(Checker& checker) {
         return;
     }
     // Larger than the Logger would ever pass; the sink must still bound it.
-    const std::string huge(20'000, '\n');
+    constexpr std::size_t HUGE_BYTES = 20'000;
+    constexpr std::size_t LINE_LIMIT = 4096;
+    const std::string huge(HUGE_BYTES, '\n');
     checker.expect(
         sink.value()->write({LogLevel::INFO, 0, "scada-test", huge, {}}).ok(),
         "line limit: write succeeds");
     const std::string line = read_available(pipe.reader.get());
-    checker.expect(line.size() == 4096, "line limit: line is 4096 bytes");
+    checker.expect(line.size() == LINE_LIMIT, "line limit: line is 4096 bytes");
     checker.expect(!line.empty() && line.back() == '\n' &&
                        line.find('\n') == line.size() - 1,
                    "line limit: the cut line still ends with one line break");
@@ -218,17 +236,21 @@ void test_stream_stalled(Checker& checker) {
         checker.expect(false, "stream stalled: sink created");
         return;
     }
-    // Fill the pipe; nobody reads it. The fill uses non-blocking mode, the
-    // sink then sees an ordinary blocking descriptor.
-    const int flags = ::fcntl(pipe.writer.get(), F_GETFL);
-    checker.expect(::fcntl(pipe.writer.get(), F_SETFL, flags | O_NONBLOCK) == 0,
-                   "stream stalled: non-blocking set");
-    const std::array<char, 4096> block{};
-    while (::write(pipe.writer.get(), block.data(), block.size()) > 0) {
+    // Fill the pipe; nobody reads it. A pipe reports itself writable while
+    // one page is free, so a write of one page after that never blocks.
+    constexpr std::size_t PAGE_BYTES = 4096;
+    constexpr int MAX_PAGES = 100'000;
+    const std::array<char, PAGE_BYTES> page{};
+    pollfd writable{pipe.writer.get(), POLLOUT, 0};
+    int pages = 0;
+    while (pages < MAX_PAGES && ::poll(&writable, 1, 0) == 1 &&
+           ::write(pipe.writer.get(), page.data(), page.size()) > 0) {
+        ++pages;
     }
-    checker.expect(::fcntl(pipe.writer.get(), F_SETFL, flags) == 0,
-                   "stream stalled: blocking restored");
+    checker.expect(pages > 0 && pages < MAX_PAGES,
+                   "stream stalled: pipe filled");
 
+    constexpr std::int64_t BOUND_SECONDS = 10;
     const std::int64_t start = scada::monotonic_ns();
     const Status status =
         sink.value()->write({LogLevel::INFO, 0, "scada-test", "stuck", {}});
@@ -236,7 +258,7 @@ void test_stream_stalled(Checker& checker) {
     checker.expect(status.code() == StatusCode::TIMEOUT,
                    "stream stalled: write gives up with TIMEOUT");
     // The sink waits 100 ms; the margin covers a slow or emulated machine.
-    checker.expect(elapsed < 10 * scada::NANOSECONDS_PER_SECOND,
+    checker.expect(elapsed < BOUND_SECONDS * scada::NANOSECONDS_PER_SECOND,
                    "stream stalled: write returned within the bound");
 }
 
@@ -274,7 +296,6 @@ void test_journal_datagram(Checker& checker) {
 
     // A value with a line break uses the length-prefixed form, so it cannot
     // inject a field of its own.
-    using namespace std::string_literals;
     const std::array<LogField, 1> multiline{
         LogField{"DETAIL", "a\nPRIORITY=0"}};
     checker.expect(sink.value()
@@ -282,12 +303,19 @@ void test_journal_datagram(Checker& checker) {
                                 "two\nlines", multiline})
                        .ok(),
                    "journal: multi-line write succeeds");
-    checker.expect(journal.receive() ==
-                       "MESSAGE\n\x09\0\0\0\0\0\0\0two\nlines\n"s +
-                           "PRIORITY=3\n"
-                           "SYSLOG_IDENTIFIER=scada-test\n"
-                           "SCADA_TIME_NS=1700000000123456789\n" +
-                           "DETAIL\n\x0c\0\0\0\0\0\0\0a\nPRIORITY=0\n"s,
+    // The length is 8 bytes, least significant first: 9 and 12 here.
+    constexpr std::size_t LENGTH_PADDING = 7;
+    std::string expected = "MESSAGE\n\x09";
+    expected.append(LENGTH_PADDING, '\0');
+    expected.append(
+        "two\nlines\n"
+        "PRIORITY=3\n"
+        "SYSLOG_IDENTIFIER=scada-test\n"
+        "SCADA_TIME_NS=1700000000123456789\n"
+        "DETAIL\n\x0c");
+    expected.append(LENGTH_PADDING, '\0');
+    expected.append("a\nPRIORITY=0\n");
+    checker.expect(journal.receive() == expected,
                    "journal: values with line breaks are length-prefixed");
 }
 
@@ -318,6 +346,7 @@ void test_journal_stalled(Checker& checker) {
     // The fake journal never reads. Its receive queue fills, and from then
     // on the sink must refuse instead of waiting.
     constexpr int ATTEMPTS = 100'000;
+    constexpr std::int64_t BOUND_SECONDS = 30;
     Status status;
     int accepted = 0;
     const std::int64_t start = scada::monotonic_ns();
@@ -329,26 +358,27 @@ void test_journal_stalled(Checker& checker) {
     const std::int64_t elapsed = scada::monotonic_ns() - start;
     checker.expect(status.code() == StatusCode::UNAVAILABLE,
                    "journal stalled: write is refused with UNAVAILABLE");
-    checker.expect(elapsed < 30 * scada::NANOSECONDS_PER_SECOND,
+    checker.expect(elapsed < BOUND_SECONDS * scada::NANOSECONDS_PER_SECOND,
                    "journal stalled: no write waited for the journal");
 }
 
 void test_journal_unreachable(Checker& checker) {
     const FakeJournal journal;
-    checker.expect(
-        scada::make_journal_sink(journal.directory() + "/missing")
-                .status()
-                .code() == StatusCode::UNAVAILABLE,
-        "journal: no socket at the path gives UNAVAILABLE");
+    checker.expect(scada::make_journal_sink(journal.directory() + "/missing")
+                           .status()
+                           .code() == StatusCode::UNAVAILABLE,
+                   "journal: no socket at the path gives UNAVAILABLE");
     checker.expect(scada::make_journal_sink("").status().code() ==
                        StatusCode::INVALID_ARGUMENT,
                    "journal: empty path rejected");
     checker.expect(
-        scada::make_journal_sink(std::string(200, 'a')).status().code() ==
-            StatusCode::INVALID_ARGUMENT,
+        scada::make_journal_sink(std::string(sizeof(sockaddr_un), 'a'))
+                .status()
+                .code() == StatusCode::INVALID_ARGUMENT,
         "journal: path longer than a socket address rejected");
-    using namespace std::string_literals;
-    checker.expect(scada::make_journal_sink("\0abstract"s).status().code() ==
+    std::string abstract(1, '\0');
+    abstract.append("abstract");
+    checker.expect(scada::make_journal_sink(abstract).status().code() ==
                        StatusCode::INVALID_ARGUMENT,
                    "journal: path with a NUL rejected");
 }
@@ -390,11 +420,11 @@ void test_fallback(Checker& checker) {
         int calls = 0;
         checker.expect(
             scada::make_fallback_sink(
-                    nullptr, std::make_unique<CountingSink>(calls, false))
-                    .status()
-                    .code() == StatusCode::INVALID_ARGUMENT &&
+                nullptr, std::make_unique<CountingSink>(calls, false))
+                        .status()
+                        .code() == StatusCode::INVALID_ARGUMENT &&
                 scada::make_fallback_sink(
-                        std::make_unique<CountingSink>(calls, false), nullptr)
+                    std::make_unique<CountingSink>(calls, false), nullptr)
                         .status()
                         .code() == StatusCode::INVALID_ARGUMENT,
             "fallback: null sinks rejected");
@@ -450,36 +480,45 @@ void test_journal_stream_detection(Checker& checker) {
                    "journal stream: fstat");
     const std::string device = std::to_string(info.st_dev);
     const std::string inode = std::to_string(info.st_ino);
-    const int fd = pipe.writer.get();
+    const std::string other_device = std::to_string(info.st_dev + 1);
+    const std::string other_inode = std::to_string(info.st_ino + 1);
+    const int descriptor = pipe.writer.get();
+    // Joins two parts with a separator between them.
+    const auto join = [](std::string_view left, std::string_view separator,
+                         std::string_view right) {
+        std::string text(left);
+        text.append(separator).append(right);
+        return text;
+    };
 
-    checker.expect(is_journal_stream(device + ":" + inode, fd),
+    checker.expect(is_journal_stream(join(device, ":", inode), descriptor),
                    "journal stream: matching device and inode");
     checker.expect(
-        !is_journal_stream(device + ":" + std::to_string(info.st_ino + 1), fd),
+        !is_journal_stream(join(device, ":", other_inode), descriptor),
         "journal stream: other inode");
     checker.expect(
-        !is_journal_stream(std::to_string(info.st_dev + 1) + ":" + inode, fd),
+        !is_journal_stream(join(other_device, ":", inode), descriptor),
         "journal stream: other device");
-    checker.expect(!is_journal_stream(device + ":" + inode, -1),
+    checker.expect(!is_journal_stream(join(device, ":", inode), -1),
                    "journal stream: invalid descriptor");
-    for (const std::string& malformed :
-         std::vector<std::string>{"", ":", device, device + ":",
-                                  ":" + inode, device + ":" + inode + ":",
-                                  device + ":" + inode + " ",
-                                  " " + device + ":" + inode,
-                                  device + ";" + inode,
-                                  "-" + device + ":" + inode,
-                                  device + ":0x" + inode,
-                                  "99999999999999999999999:" + inode}) {
-        checker.expect(!is_journal_stream(malformed, fd),
+    const std::string valid = join(device, ":", inode);
+    for (const std::string& malformed : std::vector<std::string>{
+             "", ":", device, join(device, ":", ""), join("", ":", inode),
+             join(valid, ":", ""), join(valid, " ", ""), join(" ", "", valid),
+             join(device, ";", inode), join("-", "", valid),
+             join(device, ":0x", inode),
+             join("99999999999999999999999", ":", inode)}) {
+        checker.expect(!is_journal_stream(malformed, descriptor),
                        "journal stream: malformed value rejected");
     }
 }
 
 void test_parse_decimal(Checker& checker) {
     using scada::log_internal::parse_decimal;
+    constexpr std::uint64_t FORTY_TWO = 42;
     checker.expect(parse_decimal("0") == 0U, "decimal: zero");
-    checker.expect(parse_decimal("0042") == 42U, "decimal: leading zeros");
+    checker.expect(parse_decimal("0042") == FORTY_TWO,
+                   "decimal: leading zeros");
     checker.expect(parse_decimal("18446744073709551615") == UINT64_MAX,
                    "decimal: largest 64-bit value");
     checker.expect(!parse_decimal("18446744073709551616"),
@@ -495,6 +534,7 @@ void test_parse_decimal(Checker& checker) {
 
 void test_truncate_utf8(Checker& checker) {
     using scada::log_internal::truncate_utf8;
+    constexpr std::size_t LIMIT = 5;
     checker.expect(truncate_utf8("abc", 3) == "abc", "truncate: fits");
     checker.expect(truncate_utf8("abcd", 3) == "abc", "truncate: plain cut");
     checker.expect(truncate_utf8("abc", 0).empty(), "truncate: to nothing");
@@ -509,8 +549,9 @@ void test_truncate_utf8(Checker& checker) {
                    "truncate: after a whole character");
     // Not UTF-8: only continuation bytes. The cut moves back 3 bytes at
     // most and never below zero.
-    checker.expect(truncate_utf8("\x80\x80\x80\x80\x80\x80", 5).size() == 2,
-                   "truncate: invalid text is cut within 3 bytes");
+    checker.expect(
+        truncate_utf8("\x80\x80\x80\x80\x80\x80", LIMIT).size() == LIMIT - 3,
+        "truncate: invalid text is cut within 3 bytes");
     checker.expect(truncate_utf8("\x80\x80\x80", 1).empty(),
                    "truncate: invalid text, cut reaches the start");
 }
@@ -520,8 +561,11 @@ void test_key_validation(Checker& checker) {
     checker.expect(is_valid_log_key("A"), "key: one letter");
     checker.expect(is_valid_log_key("TAG_NAME_2"),
                    "key: letters, digit, underscore");
-    checker.expect(is_valid_log_key(std::string(32, 'K')), "key: 32 bytes");
-    checker.expect(!is_valid_log_key(std::string(33, 'K')), "key: 33 bytes");
+    checker.expect(is_valid_log_key(std::string(scada::LOG_MAX_KEY_BYTES, 'K')),
+                   "key: longest allowed");
+    checker.expect(
+        !is_valid_log_key(std::string(scada::LOG_MAX_KEY_BYTES + 1, 'K')),
+        "key: one byte too long");
     checker.expect(!is_valid_log_key(""), "key: empty");
     checker.expect(!is_valid_log_key("_PID"), "key: leading underscore");
     checker.expect(!is_valid_log_key("2ND"), "key: leading digit");
@@ -538,7 +582,14 @@ void test_key_validation(Checker& checker) {
 
 void test_bounded_text(Checker& checker) {
     using scada::log_internal::BoundedText;
-    std::array<char, 8> storage{};
+    constexpr std::size_t SMALL = 8;
+    constexpr std::size_t WIDE = 32;
+    constexpr std::uint64_t SEVEN = 7;
+    constexpr std::uint64_t LONGER = 12345;
+    constexpr std::size_t TOO_WIDE = 99;
+    constexpr std::uint64_t PATTERN = 0x0102030405060708U;
+
+    std::array<char, SMALL> storage{};
     BoundedText text(storage);
     text.append("abc");
     text.append('d');
@@ -548,28 +599,29 @@ void test_bounded_text(Checker& checker) {
     checker.expect(text.view() == "abcdefgh" && text.truncated(),
                    "bounded: cut at the end of the storage");
     text.append('k');
-    text.append_number(5);
+    text.append_number(SEVEN);
     checker.expect(text.view() == "abcdefgh", "bounded: full stays unchanged");
 
-    std::array<char, 32> wide{};
+    std::array<char, WIDE> wide{};
     BoundedText numbers(wide);
     numbers.append_number(0);
     numbers.append(' ');
-    numbers.append_number(7, 3);
+    numbers.append_number(SEVEN, 3);
     numbers.append(' ');
-    numbers.append_number(12345, 2);
+    numbers.append_number(LONGER, 2);
     checker.expect(numbers.view() == "0 007 12345", "bounded: numbers");
 
     BoundedText largest(wide);
-    largest.append_number(UINT64_MAX, 99);
+    largest.append_number(UINT64_MAX, TOO_WIDE);
     checker.expect(largest.view() == "18446744073709551615",
                    "bounded: largest number, width capped at 20");
 
     BoundedText bytes(wide);
-    bytes.append_le64(0x0102030405060708U);
-    checker.expect(bytes.view() ==
-                       std::string_view("\x08\x07\x06\x05\x04\x03\x02\x01", 8),
-                   "bounded: 64-bit value, least significant byte first");
+    bytes.append_le64(PATTERN);
+    checker.expect(
+        bytes.view() == std::string_view("\x08\x07\x06\x05\x04\x03\x02\x01",
+                                         sizeof(PATTERN)),
+        "bounded: 64-bit value, least significant byte first");
 }
 
 }  // namespace

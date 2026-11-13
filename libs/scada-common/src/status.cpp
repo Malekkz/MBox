@@ -1,5 +1,7 @@
 #include "scada/common/status.h"
 
+#include <string_view>
+
 namespace scada {
 
 std::string_view to_string(StatusCode code) noexcept {

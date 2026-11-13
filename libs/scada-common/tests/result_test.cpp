@@ -1,5 +1,6 @@
-#include "check.h"
 #include "scada/common/result.h"
+#include "check.h"
+#include "scada/common/status.h"
 
 #include <memory>
 #include <string>
@@ -10,6 +11,9 @@ namespace {
 using scada::Result;
 using scada::Status;
 using scada::StatusCode;
+
+constexpr int SEVEN = 7;
+constexpr int ANSWER = 42;
 
 Result<int> parse_positive(int value) {
     if (value <= 0) {
@@ -24,9 +28,9 @@ int main() {
     scada::test::Checker checker;
 
     {
-        const Result<int> result = parse_positive(7);
+        const Result<int> result = parse_positive(SEVEN);
         checker.expect(result.ok(), "value: ok");
-        checker.expect(result.value() == 7, "value: content");
+        checker.expect(result.value() == SEVEN, "value: content");
         checker.expect(result.status().ok(), "value: status is OK");
     }
     {
@@ -44,10 +48,10 @@ int main() {
     }
     {
         // A move-only value goes in and comes out without a copy.
-        Result<std::unique_ptr<int>> result = std::make_unique<int>(42);
+        Result<std::unique_ptr<int>> result = std::make_unique<int>(ANSWER);
         checker.expect(result.ok(), "move-only: ok");
         const std::unique_ptr<int> taken = std::move(result).value();
-        checker.expect(taken != nullptr && *taken == 42,
+        checker.expect(taken != nullptr && *taken == ANSWER,
                        "move-only: moved out");
     }
     {
@@ -69,9 +73,9 @@ int main() {
                    }),
                    "construction from an OK status aborts");
     checker.expect(!scada::test::aborts([] {
-                       const Result<int> result = parse_positive(1);
-                       static_cast<void>(result.value());
-                   }),
+        const Result<int> result = parse_positive(1);
+        static_cast<void>(result.value());
+    }),
                    "correct use does not abort");
 
     return checker.exit_code();

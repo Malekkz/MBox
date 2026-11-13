@@ -1,5 +1,5 @@
-#include "check.h"
 #include "scada/common/clock.h"
+#include "check.h"
 
 #include <chrono>
 #include <cstdint>
@@ -43,7 +43,8 @@ int main() {
     {
         bool ordered = true;
         std::int64_t previous = scada::monotonic_ns();
-        for (int i = 0; i < 100'000; ++i) {
+        constexpr int READINGS = 100'000;
+        for (int i = 0; i < READINGS; ++i) {
             const std::int64_t now = scada::monotonic_ns();
             ordered = ordered && now >= previous;
             previous = now;

@@ -4,6 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string_view>
 
 #include <sys/stat.h>
 
@@ -14,13 +18,22 @@ namespace {
 constexpr std::array<std::string_view, 4> RESERVED_KEYS{
     "MESSAGE", "PRIORITY", "SYSLOG_IDENTIFIER", LOG_TIME_FIELD};
 
-constexpr bool is_upper(char c) noexcept {
-    return c >= 'A' && c <= 'Z';
+constexpr bool is_upper(char character) noexcept {
+    return character >= 'A' && character <= 'Z';
 }
 
-constexpr bool is_digit(char c) noexcept {
-    return c >= '0' && c <= '9';
+constexpr bool is_digit(char character) noexcept {
+    return character >= '0' && character <= '9';
 }
+
+constexpr std::uint64_t DECIMAL_BASE = 10;
+constexpr unsigned BITS_PER_BYTE = 8;
+constexpr std::uint64_t BYTE_MASK = 0xFF;
+
+// A UTF-8 continuation byte has the form 10xxxxxx.
+constexpr unsigned UTF8_CONTINUATION_MASK = 0xC0;
+constexpr unsigned UTF8_CONTINUATION_BITS = 0x80;
+constexpr int UTF8_MAX_CONTINUATION_BYTES = 3;
 
 }  // namespace
 
@@ -30,12 +43,13 @@ bool is_valid_log_key(std::string_view key) noexcept {
         return false;
     }
     const bool characters_ok =
-        std::all_of(key.begin(), key.end(), [](char c) {
-            return is_upper(c) || is_digit(c) || c == '_';
+        std::all_of(key.begin(), key.end(), [](char character) {
+            return is_upper(character) || is_digit(character) ||
+                   character == '_';
         });
-    return characters_ok && std::find(RESERVED_KEYS.begin(),
-                                      RESERVED_KEYS.end(),
-                                      key) == RESERVED_KEYS.end();
+    return characters_ok &&
+           std::find(RESERVED_KEYS.begin(), RESERVED_KEYS.end(), key) ==
+               RESERVED_KEYS.end();
 }
 
 namespace log_internal {
@@ -49,9 +63,9 @@ std::string_view truncate_utf8(std::string_view text,
     // first byte that would be cut off is one of them, the cut is inside a
     // character: move it back to the start of that character.
     std::size_t cut = max_bytes;
-    for (int step = 0; step < 3 && cut > 0; ++step) {
+    for (int step = 0; step < UTF8_MAX_CONTINUATION_BYTES && cut > 0; ++step) {
         const auto next = static_cast<unsigned char>(text[cut]);
-        if ((next & 0xC0U) != 0x80U) {
+        if ((next & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION_BITS) {
             break;
         }
         --cut;
@@ -65,20 +79,21 @@ std::optional<std::uint64_t> parse_decimal(std::string_view text) noexcept {
     }
     constexpr std::uint64_t MAX = UINT64_MAX;
     std::uint64_t value = 0;
-    for (const char c : text) {
-        if (!is_digit(c)) {
+    for (const char character : text) {
+        if (!is_digit(character)) {
             return std::nullopt;
         }
-        const auto digit = static_cast<std::uint64_t>(c - '0');
-        if (value > (MAX - digit) / 10) {
+        const auto digit = static_cast<std::uint64_t>(character - '0');
+        if (value > (MAX - digit) / DECIMAL_BASE) {
             return std::nullopt;
         }
-        value = value * 10 + digit;
+        value = value * DECIMAL_BASE + digit;
     }
     return value;
 }
 
-bool is_journal_stream(std::string_view journal_stream, int fd) noexcept {
+bool is_journal_stream(std::string_view journal_stream,
+                       int descriptor) noexcept {
     const std::size_t colon = journal_stream.find(':');
     if (colon == std::string_view::npos) {
         return false;
@@ -89,7 +104,7 @@ bool is_journal_stream(std::string_view journal_stream, int fd) noexcept {
         return false;
     }
     struct stat info {};
-    if (::fstat(fd, &info) != 0) {
+    if (::fstat(descriptor, &info) != 0) {
         return false;
     }
     return static_cast<std::uint64_t>(info.st_dev) == *device &&
@@ -113,21 +128,22 @@ void BoundedText::append(char character) noexcept {
 void BoundedText::append_number(std::uint64_t value,
                                 std::size_t min_width) noexcept {
     // 20 digits hold any 64-bit value. Filled from the last digit backwards.
-    std::array<char, 20> digits{};
+    std::array<char, UINT64_DIGITS> digits{};
     std::size_t first = digits.size();
-    const std::size_t width = std::clamp<std::size_t>(min_width, 1, 20);
+    const std::size_t width =
+        std::clamp<std::size_t>(min_width, 1, UINT64_DIGITS);
     while (value != 0 || digits.size() - first < width) {
         --first;
-        digits.at(first) = static_cast<char>('0' + value % 10);
-        value /= 10;
+        digits.at(first) = static_cast<char>('0' + value % DECIMAL_BASE);
+        value /= DECIMAL_BASE;
     }
     append(std::string_view(digits.data(), digits.size()).substr(first));
 }
 
 void BoundedText::append_le64(std::uint64_t value) noexcept {
-    for (int byte = 0; byte < 8; ++byte) {
-        append(static_cast<char>(value & 0xFFU));
-        value >>= 8U;
+    for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
+        append(static_cast<char>(value & BYTE_MASK));
+        value >>= BITS_PER_BYTE;
     }
 }
 

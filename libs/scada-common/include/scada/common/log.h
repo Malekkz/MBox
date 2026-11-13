@@ -109,7 +109,7 @@ protected:
 [[nodiscard]] Result<std::unique_ptr<LogSink>> make_journal_sink(
     std::string_view socket_path = "/run/systemd/journal/socket") noexcept;
 
-// Returns a sink that writes each record as one text line to `fd`:
+// Returns a sink that writes each record as one text line to `descriptor`:
 //   <UTC time> <LEVEL> <component>: <message> KEY="value" ...
 // Control characters, and quotes inside values, are escaped, so a record
 // cannot forge a second line. A line is at most 4096 bytes. `write` waits at
@@ -117,9 +117,9 @@ protected:
 // TIMEOUT.
 //
 // The descriptor is borrowed: the caller keeps it open for the life of the
-// sink. Fails with INVALID_ARGUMENT if `fd` is negative.
+// sink. Fails with INVALID_ARGUMENT if `descriptor` is negative.
 [[nodiscard]] Result<std::unique_ptr<LogSink>> make_stream_sink(
-    int fd) noexcept;
+    int descriptor) noexcept;
 
 // Returns a sink that writes to `primary` and, whenever that fails, writes
 // the same record to `secondary` and returns its result. Fails with
@@ -195,7 +195,7 @@ public:
     [[nodiscard]] std::uint64_t sink_failures() const noexcept;
 
 private:
-    struct Impl;
+    class Impl;
     explicit Logger(std::unique_ptr<Impl> impl) noexcept;
 
     std::unique_ptr<Impl> impl_;

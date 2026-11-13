@@ -273,6 +273,8 @@ at that one function, and the suppression file contains nothing else.
 - A single finding may be suppressed only on the line it occurs, naming the
   check and giving a reason: `// NOLINT(check-name): reason`.
 - A suppression without a named check and a reason fails review.
+- The banned-function and `SCADA_RT` checks are named `scada-banned` and
+  `scada-rt`. They ignore a `NOLINT` that does not name them.
 - Every suppression added by a pull request is listed in its description.
 - Suppressions in code covered by "Safety and security rules" in `CLAUDE.md`
   need review by a person.

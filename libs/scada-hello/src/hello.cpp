@@ -1,6 +1,8 @@
 #include "scada/hello/hello.h"
 
 #include <ostream>
+#include <span>
+#include <string_view>
 
 namespace scada::hello {
 

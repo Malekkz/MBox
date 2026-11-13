@@ -3,17 +3,25 @@
 #include "log_internal.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <memory>
 #include <new>
+#include <span>
+#include <string_view>
 #include <utility>
 
-#include <poll.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -22,6 +30,7 @@ namespace scada {
 namespace {
 
 using log_internal::BoundedText;
+using log_internal::UINT64_DIGITS;
 
 // How often an interrupted system call is repeated before giving up, so that
 // a storm of signals cannot hold the worker in a loop.
@@ -40,27 +49,28 @@ constexpr std::size_t JOURNAL_DATAGRAM_BYTES = 2048;
 constexpr std::string_view MESSAGE_KEY = "MESSAGE";
 constexpr std::string_view PRIORITY_KEY = "PRIORITY";
 constexpr std::string_view IDENTIFIER_KEY = "SYSLOG_IDENTIFIER";
-constexpr std::size_t UINT64_DIGITS = 20;
 
 constexpr std::size_t journal_field_bytes(std::size_t key,
                                           std::size_t value) noexcept {
     return key + JOURNAL_FIELD_OVERHEAD + value;
 }
-static_assert(
-    journal_field_bytes(MESSAGE_KEY.size(), LOG_MAX_MESSAGE_BYTES) +
-            journal_field_bytes(PRIORITY_KEY.size(), 1) +
-            journal_field_bytes(IDENTIFIER_KEY.size(),
-                                LOG_MAX_COMPONENT_BYTES) +
-            journal_field_bytes(LOG_TIME_FIELD.size(), UINT64_DIGITS) +
-            LOG_MAX_FIELDS *
-                journal_field_bytes(LOG_MAX_KEY_BYTES, LOG_MAX_VALUE_BYTES) <=
-        JOURNAL_DATAGRAM_BYTES,
-    "a record at the size limits must fit one journal datagram");
+static_assert(journal_field_bytes(MESSAGE_KEY.size(), LOG_MAX_MESSAGE_BYTES) +
+                      journal_field_bytes(PRIORITY_KEY.size(), 1) +
+                      journal_field_bytes(IDENTIFIER_KEY.size(),
+                                          LOG_MAX_COMPONENT_BYTES) +
+                      journal_field_bytes(LOG_TIME_FIELD.size(),
+                                          UINT64_DIGITS) +
+                      LOG_MAX_FIELDS *
+                          journal_field_bytes(LOG_MAX_KEY_BYTES,
+                                              LOG_MAX_VALUE_BYTES) <=
+                  JOURNAL_DATAGRAM_BYTES,
+              "a record at the size limits must fit one journal datagram");
 
 constexpr std::uint8_t priority_of(LogLevel level) noexcept {
     // The journal accepts 0 to 7; a value that is not an enumerator is
     // reported as the least severe instead of being trusted.
-    return std::min<std::uint8_t>(static_cast<std::uint8_t>(level), 7);
+    constexpr std::uint8_t LEAST_SEVERE = 7;
+    return std::min(static_cast<std::uint8_t>(level), LEAST_SEVERE);
 }
 
 constexpr std::string_view name_of(LogLevel level) noexcept {
@@ -177,17 +187,20 @@ private:
 void append_escaped(BoundedText& out, std::string_view text,
                     bool quoted) noexcept {
     constexpr std::string_view HEX = "0123456789abcdef";
-    for (const char c : text) {
-        const auto byte = static_cast<unsigned char>(c);
-        if (byte < 0x20U || byte == 0x7FU) {
+    constexpr unsigned FIRST_PRINTABLE = 0x20;
+    constexpr unsigned DELETE = 0x7F;
+    constexpr unsigned LOW_NIBBLE = 0x0F;
+    for (const char character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte < FIRST_PRINTABLE || byte == DELETE) {
             out.append("\\x");
             out.append(HEX.at(byte >> 4U));
-            out.append(HEX.at(byte & 0x0FU));
-        } else if (c == '\\' || (quoted && c == '"')) {
+            out.append(HEX.at(byte & LOW_NIBBLE));
+        } else if (character == '\\' || (quoted && character == '"')) {
             out.append('\\');
-            out.append(c);
+            out.append(character);
         } else {
-            out.append(c);
+            out.append(character);
         }
     }
 }
@@ -200,13 +213,14 @@ void append_utc_time(BoundedText& out, std::int64_t time_ns) noexcept {
     const std::uint64_t millis =
         total_ns % static_cast<std::uint64_t>(NANOSECONDS_PER_SECOND) /
         1'000'000U;
+    constexpr std::uint64_t TM_YEAR_BASE = 1900;  // tm_year counts from 1900
     std::tm parts{};
     // On failure `parts` stays zero and a recognisably wrong date is printed.
     static_cast<void>(::gmtime_r(&seconds, &parts));
     const auto field = [](int value) {
         return static_cast<std::uint64_t>(std::max(value, 0));
     };
-    out.append_number(field(parts.tm_year) + 1900, 4);
+    out.append_number(field(parts.tm_year) + TM_YEAR_BASE, 4);
     out.append('-');
     out.append_number(field(parts.tm_mon) + 1, 2);
     out.append('-');
@@ -224,7 +238,7 @@ void append_utc_time(BoundedText& out, std::int64_t time_ns) noexcept {
 
 class StreamSink final : public LogSink {
 public:
-    explicit StreamSink(int fd) noexcept : fd_(fd) {}
+    explicit StreamSink(int descriptor) noexcept : fd_(descriptor) {}
 
     [[nodiscard]] Status write(const LogRecord& record) noexcept override {
         std::array<char, STREAM_LINE_BYTES> storage{};
@@ -328,7 +342,7 @@ Result<std::unique_ptr<LogSink>> make_journal_sink(
         return Status(StatusCode::RESOURCE_EXHAUSTED,
                       "cannot create the journal socket");
     }
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the socket interface takes every address type through a sockaddr pointer
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
     const auto* generic = reinterpret_cast<const sockaddr*>(&address);
     if (::connect(socket.get(), generic, sizeof(address)) != 0) {
         return Status(StatusCode::UNAVAILABLE,
@@ -337,12 +351,12 @@ Result<std::unique_ptr<LogSink>> make_journal_sink(
     return make_sink<JournalSink>(std::move(socket));
 }
 
-Result<std::unique_ptr<LogSink>> make_stream_sink(int fd) noexcept {
-    if (fd < 0) {
+Result<std::unique_ptr<LogSink>> make_stream_sink(int descriptor) noexcept {
+    if (descriptor < 0) {
         return Status(StatusCode::INVALID_ARGUMENT,
                       "log stream descriptor is negative");
     }
-    return make_sink<StreamSink>(fd);
+    return make_sink<StreamSink>(descriptor);
 }
 
 Result<std::unique_ptr<LogSink>> make_fallback_sink(
@@ -360,7 +374,7 @@ Result<std::unique_ptr<LogSink>> make_default_sink() noexcept {
     // because a child process inherits the variable even after redirecting
     // the stream elsewhere. Read once at start-up, before threads change the
     // environment.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): see above
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once at start-up, see above
     const char* const journal_stream = std::getenv("JOURNAL_STREAM");
     if (journal_stream != nullptr &&
         log_internal::is_journal_stream(journal_stream, STDERR_FILENO)) {

@@ -11,9 +11,9 @@ public:
     // Holds no descriptor.
     Fd() noexcept = default;
 
-    // Takes ownership of `fd`. A negative value gives an invalid Fd, so the
-    // return value of `open` or `socket` can be passed directly.
-    explicit Fd(int fd) noexcept;
+    // Takes ownership of `descriptor`. A negative value gives an invalid Fd, so
+    // the return value of `open` or `socket` can be passed directly.
+    explicit Fd(int descriptor) noexcept;
 
     ~Fd();
 

@@ -1,6 +1,6 @@
 # These tests use no test framework: the framework is chosen in issue P0-03,
 # and they move to it then (as libscada-hello's test does).
-foreach(name IN ITEMS status result clock fd log log_sink)
+foreach(name IN ITEMS status result clock fd log log_sink realtime)
   string(REPLACE "_" "-" dashed "${name}")
   set(test "scada-common-${dashed}-unit-test")
   scada_add_test(${test} SOURCES ${name}_test.cpp DEPENDS scada::common)

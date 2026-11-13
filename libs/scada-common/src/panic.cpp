@@ -1,11 +1,14 @@
 #include "scada/common/panic.h"
 
+#include "scada/common/static_string.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <string_view>
 
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace scada {

@@ -22,9 +22,10 @@ public:
     // passed wherever a StaticString is expected. Evaluated at compile time
     // only; passing anything but a constant character array does not compile.
     template <std::size_t N>
-    // NOLINTNEXTLINE(google-explicit-constructor,cppcoreguidelines-avoid-c-arrays): a string literal is a C array, and the conversion must be implicit to be usable
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a string literal is a C array
     consteval StaticString(const char (&literal)[N]) noexcept
-        : view_(literal, literal[N - 1] == '\0' ? N - 1 : N) {}
+        : view_(static_cast<const char*>(literal),
+                literal[N - 1] == '\0' ? N - 1 : N) {}
 
     // Returns the text. The view is valid for the life of the process.
     [[nodiscard]] constexpr std::string_view view() const noexcept {

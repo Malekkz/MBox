@@ -101,7 +101,65 @@ Decision: libraries are static, created with `scada_add_library(<name>)` as targ
 Reason: static linking keeps each service one file to install and keeps a combined build possible; the alias gives dependants a stable name.
 Consequences: libraries are not installed. Driver plugins, if the driver interface contract chooses plugins, will need a shared-library helper.
 
-## D-6: `Status` carries a code and a fixed message; `Result<T>` is our own type
+## D-6: The `check` target is a script around clang-format, clang-tidy and clang-query
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: the coding standard (section 13) names four checks in the `check` target. clang-format and clang-tidy exist; the banned-function check and the `SCADA_RT` check had to be built.
+Options: for the two new checks, a text search; a clang-tidy plugin in C++; clang-query matchers on the syntax tree. For the driver, CMake script or Python.
+Decision: `tools/check/scada_check.py` runs all four checks and fails on any finding. The two new checks are clang-query matchers held in that script, reported as `scada-banned` and `scada-rt`. The target needs Python 3.8 or newer and clang-format, clang-tidy and clang-query 18 or newer; the script refuses older versions.
+Reason: a text search cannot tell a call from a comment, a string or a member of the same name, and cannot see which function a call is in. A plugin must be built against one LLVM version. Matchers need no build and work on the real syntax tree.
+Consequences:
+- The tools are needed only for `check`. A configuration without them warns, and the target fails and names what is missing.
+- A source file that the build does not compile, or that does not compile with Clang, fails the check; it is never skipped.
+- Different clang-format versions can lay out the same code differently. The pipeline (P0-04) must fix one version.
+- LLVM (Apache-2.0 with LLVM exception) and Python (PSF licence) are tools of the build machine and are not linked or shipped. The licence report (P0-07) must list them.
+- Headers are checked through the files that include them. A header that nothing includes is formatted but not analysed.
+
+## D-7: clang-tidy configuration: errors, disabled checks, naming details
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: the coding standard (section 13) enables nine check groups and makes five of them errors, while the same section and issue #3 say that any finding fails the `check` target. `CLAUDE.md` gives the naming rules in one line.
+Options: make all groups errors in `.clang-tidy`; or keep the five there and let the target fail on everything.
+Decision:
+- `.clang-tidy` lists the five error groups as the standard does, so editors show the rest as warnings. The `check` target runs clang-tidy with every finding as an error.
+- Disabled as unworkable: `bugprone-easily-swappable-parameters` (reports every two adjacent parameters of one type, such as two streams; the only fix is a wrapper type per parameter) and `modernize-use-trailing-return-type` (asks for `auto f() -> T` on every function; the project writes the return type first).
+- Naming, where `CLAUDE.md` is not specific: namespaces are `snake_case`. "Constants" are constants at namespace, class or static scope, every `constexpr` variable, enumerators and macros. A `const` local variable or parameter is a variable and is `snake_case`. Private data members end with `_`. Template type parameters are `PascalCase`.
+Reason: one finding list for the gate, without changing what the standard calls an error. The naming details follow the code already merged for #2.
+Consequences: a check disabled later is added to this list in the same pull request.
+
+## D-8: How the banned list is enforced
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: some rows of the banned list (coding standard, section 12) depend on things a tool cannot see: "`strlen` on outside data", "`strtol` without full error checks", "outside reviewed helpers".
+Options: leave those rows to review; or ban the functions everywhere and suppress the reviewed uses.
+Decision: the check reports every use of every function and construct in the list, including `strncpy`, `strlen`, the `atoi` and `strtol` families, `memcpy`, `memmove`, `memset` and `reinterpret_cast`. A reviewed helper suppresses its own line with `// NOLINT(scada-banned): reason` (section 14). A `NOLINT` that does not name the check is not honoured. A cast to `void` to discard a value is not reported as a C-style cast.
+Reason: a rule a tool cannot decide is not a gate. The suppressions make the reviewed uses visible and countable.
+Consequences: the helpers of `libscada-common` and `libscada-tag` will carry the first suppressions, each listed in its pull request. Taking the address of a banned function is reported like a call.
+
+## D-9: `SCADA_RT` and the first real-time check
+Date: 2026-11-13
+Phase / issue: 0, #3
+Status: accepted
+
+Context: `CLAUDE.md` requires real-time functions to be marked with `SCADA_RT` so that checks can find them. Neither the form of the annotation nor its header was specified.
+Options: a comment marker; a naming convention; an attribute.
+Decision:
+- `SCADA_RT` is defined in `scada/common/realtime.h` of `libscada-common`. Where the compiler has the `clang::annotate` attribute it expands to `[[clang::annotate("scada_rt")]]`, otherwise to nothing. It is written first in the declaration.
+- The check reports, inside a marked function or a lambda in it: `new`, `delete`, the C allocation functions, `std::make_unique`, `std::make_shared`, `std::allocate_shared`, the `printf` family and other C stream output, locking a standard mutex, constructing a standard lock object, and `pthread_mutex_lock`.
+- `libscada-common` is a header-only (interface) target until P0-06 adds its first sources.
+Reason: an attribute is part of the syntax tree, so the check finds the function without guessing, and a declaration in a header marks the definition too. The standard attribute syntax with a vendor namespace is not a language extension; the macro keeps GCC, which warns about unknown attributes, free of it.
+Consequences:
+- Only direct calls are found. A marked function that calls an unmarked function which allocates is not reported; real-time code is still reviewed against section 11.
+- Project code must not use the `annotate` attribute for anything else.
+- Blocking calls, system calls and C++ stream output are not on the first deny-list. They are added as the real-time code appears (phase 1, `libscada-tag`).
+
+## D-10: `Status` carries a code and a fixed message; `Result<T>` is our own type
 Date: 2026-11-13
 Phase / issue: 0, #7
 Status: accepted
@@ -115,7 +173,7 @@ Decision:
 Reason: a literal message makes `Status` usable in real-time code and removes any dangling-view risk, at no cost to callers that only branch on the code. Our own `Result<T>` needs no dependency and no language level beyond C++20.
 Consequences: a `Status` cannot carry a file name or a number; callers log them. `Result<T>` can be replaced by `std::expected` if the language level is raised.
 
-## D-7: Logging through a bounded queue, to the journal's native socket
+## D-11: Logging through a bounded queue, to the journal's native socket
 Date: 2026-11-13
 Phase / issue: 0, #7
 Status: accepted
@@ -130,3 +188,14 @@ Decision:
 - The record's creation time is sent as the field `SCADA_TIME_NS`, because the journal stamps the later delivery time.
 Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
 Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
+
+## D-12: Suppression comments are not wrapped by the formatter
+Date: 2026-11-13
+Phase / issue: 0, #7
+Status: accepted
+
+Context: a suppression is valid only on one line, with the check name and the reason (coding standard, section 14). With an 80-column limit clang-format wraps such a comment, and the wrapped `NOLINTNEXTLINE` then applies to its own second line instead of the code.
+Options: keep every suppression under 80 columns; move the reason to a separate comment; tell clang-format not to wrap these comments.
+Decision: `.clang-format` sets `CommentPragmas` so that comments starting with `NOLINT` are left as written. Such a line may exceed 80 columns.
+Reason: several check names alone leave no room for a reason within 80 columns, and section 14 wants the reason on the same line.
+Consequences: suppression lines are the only lines allowed to be longer than the column limit.

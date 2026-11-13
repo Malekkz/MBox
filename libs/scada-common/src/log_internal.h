@@ -12,6 +12,9 @@
 
 namespace scada::log_internal {
 
+// Decimal digits of the largest 64-bit unsigned value.
+inline constexpr std::size_t UINT64_DIGITS = 20;
+
 // Returns the longest prefix of `text` that is at most `max_bytes` long and
 // does not end inside a UTF-8 character. Text that is not valid UTF-8 is cut
 // within 3 bytes of the limit.
@@ -25,9 +28,9 @@ namespace scada::log_internal {
 
 // Returns true if `journal_stream` (the value of the JOURNAL_STREAM
 // environment variable, "<device>:<inode>" in decimal) names the file that
-// `fd` refers to. Malformed text gives false.
+// `descriptor` refers to. Malformed text gives false.
 [[nodiscard]] bool is_journal_stream(std::string_view journal_stream,
-                                     int fd) noexcept;
+                                     int descriptor) noexcept;
 
 // Appends text to caller-provided storage and never writes beyond it; what
 // does not fit is discarded and remembered as truncation. The storage must

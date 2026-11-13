@@ -6,7 +6,7 @@
 
 namespace scada {
 
-Fd::Fd(int fd) noexcept : fd_(fd >= 0 ? fd : -1) {}
+Fd::Fd(int descriptor) noexcept : fd_(descriptor >= 0 ? descriptor : -1) {}
 
 Fd::~Fd() {
     reset();

@@ -1,12 +1,12 @@
-#include "check.h"
 #include "scada/common/fd.h"
+#include "check.h"
 
 #include <array>
 #include <cerrno>
 #include <type_traits>
 #include <utility>
 
-#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -18,8 +18,9 @@ static_assert(!std::is_copy_assignable_v<Fd>);
 static_assert(std::is_nothrow_move_constructible_v<Fd>);
 static_assert(std::is_nothrow_move_assignable_v<Fd>);
 
-bool is_open(int fd) {
-    return ::fcntl(fd, F_GETFD) != -1 || errno != EBADF;
+bool is_open(int descriptor) {
+    struct stat info {};
+    return ::fstat(descriptor, &info) == 0 || errno != EBADF;
 }
 
 // Returns both ends of a new pipe.
@@ -63,7 +64,7 @@ int main() {
 
         Fd moved(std::move(first));
         checker.expect(moved.get() == ends[0], "move construction transfers");
-        // NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what is tested
+        // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move): the moved-from state is what is tested
         checker.expect(!first.valid(), "move construction empties the source");
 
         moved = std::move(second);

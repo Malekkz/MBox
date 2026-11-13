@@ -1,7 +1,9 @@
-#include "check.h"
 #include "scada/common/status.h"
+#include "check.h"
 
 #include <array>
+#include <cstdint>
+#include <string_view>
 #include <type_traits>
 
 namespace {
@@ -68,9 +70,11 @@ int main() {
         }
         // A value that is not an enumerator, as an unvalidated read from
         // outside would give.
-        checker.expect(
-            scada::to_string(static_cast<StatusCode>(200)) == "UNKNOWN",
-            "to_string: value outside the enumeration");
+        constexpr std::uint8_t NOT_AN_ENUMERATOR = 200;
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange): the out-of-range value is what is tested; the fixed underlying type makes the cast defined
+        const auto unknown = static_cast<StatusCode>(NOT_AN_ENUMERATOR);
+        checker.expect(scada::to_string(unknown) == "UNKNOWN",
+                       "to_string: value outside the enumeration");
     }
 
     return checker.exit_code();

@@ -6,6 +6,9 @@
 #include <iostream>
 #include <string_view>
 
+#include <csignal>
+
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -40,11 +43,14 @@ template <typename Action>
         action();
         ::_exit(0);
     }
-    int state = 0;
-    if (::waitpid(child, &state, 0) != child) {
+    // waitid reports the cause in fields, where waitpid needs macros that
+    // contain C-style casts.
+    siginfo_t info{};
+    if (::waitid(P_PID, static_cast<id_t>(child), &info, WEXITED) != 0) {
         return false;
     }
-    return WIFSIGNALED(state) && WTERMSIG(state) == SIGABRT;
+    return (info.si_code == CLD_KILLED || info.si_code == CLD_DUMPED) &&
+           info.si_status == SIGABRT;
 }
 
 }  // namespace scada::test

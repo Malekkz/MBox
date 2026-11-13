@@ -150,6 +150,7 @@ These are created in phase 0; keep this list current.
 ```
 cmake --preset dev          # configure
 cmake --build --preset dev  # build
+cmake --build --preset dev --target check   # formatter, linter, banned-function and SCADA_RT checks
 ctest --preset dev          # unit and integration tests
 ctest --preset perf         # performance tests
 cmake --install build/dev --prefix stage   # staged install tree
