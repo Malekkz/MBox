@@ -14,6 +14,7 @@
 #include <vector>
 
 // Defined by the fuzz target this file is linked with.
+// NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size);
 

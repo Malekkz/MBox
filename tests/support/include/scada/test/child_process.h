@@ -19,7 +19,7 @@ namespace scada::test {
 class UniqueFd {
 public:
     UniqueFd() = default;
-    explicit UniqueFd(int fd) noexcept : fd_(fd) {}
+    explicit UniqueFd(int descriptor) noexcept : fd_(descriptor) {}
     ~UniqueFd() { reset(); }
 
     UniqueFd(UniqueFd&& other) noexcept;

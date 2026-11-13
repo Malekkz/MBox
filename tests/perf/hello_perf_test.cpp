@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -35,7 +36,8 @@ TEST(HelloPerf, RunStaysWithinItsMedianBudget) {
     }
 
     // The median, not the mean: one preempted call must not fail the test.
-    const auto middle = samples.begin() + static_cast<std::ptrdiff_t>(CALLS / 2);
+    const auto middle =
+        samples.begin() + static_cast<std::ptrdiff_t>(CALLS / 2);
     std::nth_element(samples.begin(), middle, samples.end());
     const auto median =
         std::chrono::duration_cast<std::chrono::nanoseconds>(*middle);

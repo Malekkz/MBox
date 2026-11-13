@@ -1,4 +1,4 @@
-# The unit test framework: GoogleTest (docs/decisions.md, D-6).
+# The unit test framework: GoogleTest (docs/decisions.md, D-10).
 #
 # It is built from source inside this build tree, never taken from the
 # machine, so that it is compiled with the same sanitizer and architecture as

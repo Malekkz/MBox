@@ -7,7 +7,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +29,7 @@ constexpr std::chrono::seconds WAIT_LIMIT{30};
 std::vector<std::string> hello_command(
     std::initializer_list<std::string_view> extra = {}) {
     std::vector<std::string> command;
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
     const char* const value = std::getenv("SCADA_HELLO_COMMAND");
     if (value == nullptr) {
         return command;
@@ -42,37 +45,35 @@ std::vector<std::string> hello_command(
     return command;
 }
 
+bool contains_greeting(std::string_view out) {
+    return out.find("Hello from libscada-hello\n") != std::string_view::npos;
+}
+
 TEST(HelloProcess, PrintsTheGreetingAndExitsWithSuccess) {
     const std::vector<std::string> command = hello_command();
     ASSERT_FALSE(command.empty()) << "SCADA_HELLO_COMMAND is not set";
     std::optional<ChildProcess> child = ChildProcess::start(command);
-    ASSERT_TRUE(child.has_value()) << "could not start " << command.back();
+    if (!child.has_value()) {
+        FAIL() << "could not start " << command.back();
+    }
 
-    const bool greeted = child->wait_for_output(
-        [](std::string_view out) {
-            return out.find("Hello from libscada-hello\n") !=
-                   std::string_view::npos;
-        },
-        WAIT_LIMIT);
-    EXPECT_TRUE(greeted) << "output so far: " << child->out();
-
-    const std::optional<int> exit_code = child->wait_for_exit(WAIT_LIMIT);
-    ASSERT_TRUE(exit_code.has_value()) << "did not exit normally in time";
-    EXPECT_EQ(*exit_code, scada::hello::EXIT_OK);
+    EXPECT_TRUE(child->wait_for_output(contains_greeting, WAIT_LIMIT));
+    // An exit code that is missing means: not exited in time, or killed.
+    EXPECT_EQ(child->wait_for_exit(WAIT_LIMIT), scada::hello::EXIT_OK);
     EXPECT_EQ(child->out(), "Hello from libscada-hello\n");
-    EXPECT_TRUE(child->err().empty()) << child->err();
+    EXPECT_EQ(child->err(), "");
 }
 
 TEST(HelloProcess, RejectsAnUnknownOption) {
     const std::vector<std::string> command = hello_command({"--bogus"});
     ASSERT_GT(command.size(), 1U) << "SCADA_HELLO_COMMAND is not set";
     std::optional<ChildProcess> child = ChildProcess::start(command);
-    ASSERT_TRUE(child.has_value());
+    if (!child.has_value()) {
+        FAIL() << "could not start " << command.front();
+    }
 
-    const std::optional<int> exit_code = child->wait_for_exit(WAIT_LIMIT);
-    ASSERT_TRUE(exit_code.has_value()) << "did not exit normally in time";
-    EXPECT_EQ(*exit_code, scada::hello::EXIT_USAGE);
-    EXPECT_TRUE(child->out().empty()) << child->out();
+    EXPECT_EQ(child->wait_for_exit(WAIT_LIMIT), scada::hello::EXIT_USAGE);
+    EXPECT_EQ(child->out(), "");
     EXPECT_TRUE(child->err().starts_with("scada-hello: unexpected arguments"))
         << child->err();
 }
@@ -80,7 +81,8 @@ TEST(HelloProcess, RejectsAnUnknownOption) {
 TEST(ChildProcess, ReportsAProgramThatCannotBeStarted) {
     EXPECT_FALSE(ChildProcess::start({}).has_value());
 
-    const std::vector<std::string> command{"/nonexistent/scada-no-such-program"};
+    const std::vector<std::string> command{
+        "/nonexistent/scada-no-such-program"};
     std::optional<ChildProcess> child = ChildProcess::start(command);
     if (child.has_value()) {
         // Under a user-mode emulator the failure is only visible as the exit

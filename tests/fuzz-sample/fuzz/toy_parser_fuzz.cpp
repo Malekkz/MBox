@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <span>
 
+// NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) {
     const std::span<const std::uint8_t> input(data, size);

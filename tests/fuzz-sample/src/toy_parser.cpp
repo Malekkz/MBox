@@ -1,7 +1,13 @@
 #include "scada/toy/toy_parser.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
 
 namespace scada::toy {
 
@@ -12,6 +18,7 @@ constexpr std::byte VERSION{0x01};
 constexpr std::uint8_t RECORD_VALUE = 1;
 constexpr std::uint8_t RECORD_NAME = 2;
 constexpr std::uint8_t RECORD_LABEL = 3;
+constexpr unsigned BITS_PER_BYTE = 8;
 
 // Reads through the input and checks every read against what is left.
 class Cursor {
@@ -45,8 +52,9 @@ private:
 
 std::string to_text(std::span<const std::byte> bytes) {
     std::string text(bytes.size(), '\0');
-    std::transform(bytes.begin(), bytes.end(), text.begin(),
-                   [](std::byte b) { return std::to_integer<char>(b); });
+    std::transform(
+        bytes.begin(), bytes.end(), text.begin(),
+        [](std::byte value) { return std::to_integer<char>(value); });
     return text;
 }
 
@@ -58,6 +66,7 @@ std::optional<std::string> copy_label(std::span<const std::byte> payload) {
     if (payload.size() > MAX_NAME_SIZE) {
         return std::nullopt;
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the planted bug needs a raw heap buffer
     const auto buffer = std::make_unique<std::byte[]>(LABEL_CAPACITY);
     std::copy(payload.begin(), payload.end(), buffer.get());
     return to_text(std::span<const std::byte>(buffer.get(), payload.size()));
@@ -88,32 +97,33 @@ std::optional<Message> parse(std::span<const std::byte> input) {
         }
 
         switch (*type) {
-        case RECORD_VALUE: {
-            if (payload->size() != 2 || message.values.size() >= MAX_VALUES) {
-                return std::nullopt;
+            case RECORD_VALUE: {
+                if (payload->size() != 2 ||
+                    message.values.size() >= MAX_VALUES) {
+                    return std::nullopt;
+                }
+                const auto high = std::to_integer<std::uint16_t>((*payload)[0]);
+                const auto low = std::to_integer<std::uint16_t>((*payload)[1]);
+                message.values.push_back(
+                    static_cast<std::uint16_t>((high << BITS_PER_BYTE) | low));
+                break;
             }
-            const auto high = std::to_integer<std::uint16_t>((*payload)[0]);
-            const auto low = std::to_integer<std::uint16_t>((*payload)[1]);
-            message.values.push_back(
-                static_cast<std::uint16_t>((high << 8U) | low));
-            break;
-        }
-        case RECORD_NAME:
-            if (payload->size() > MAX_NAME_SIZE) {
-                return std::nullopt;
+            case RECORD_NAME:
+                if (payload->size() > MAX_NAME_SIZE) {
+                    return std::nullopt;
+                }
+                message.name = to_text(*payload);
+                break;
+            case RECORD_LABEL: {
+                std::optional<std::string> label = copy_label(*payload);
+                if (!label) {
+                    return std::nullopt;
+                }
+                message.label = std::move(*label);
+                break;
             }
-            message.name = to_text(*payload);
-            break;
-        case RECORD_LABEL: {
-            std::optional<std::string> label = copy_label(*payload);
-            if (!label) {
+            default:
                 return std::nullopt;
-            }
-            message.label = std::move(*label);
-            break;
-        }
-        default:
-            return std::nullopt;
         }
     }
     return message;

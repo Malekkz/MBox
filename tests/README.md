@@ -1,7 +1,7 @@
 # tests
 
 Tests that span several components, the code tests share, and the samples
-that prove the test tooling works. Decisions: `docs/decisions.md`, D-6 to D-8.
+that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 
 ## Layout
 
@@ -35,7 +35,9 @@ the command to start through `ENVIRONMENT`, as `integration/CMakeLists.txt`
 does, so that a cross build can run it through the emulator.
 
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
-least one seed input in `corpus/<name>/` next to it:
+least one seed input in `corpus/<name>/` next to it. Copy the entry point
+from `fuzz-sample/fuzz/toy_parser_fuzz.cpp`; the suppression on it is needed
+because libFuzzer fixes that name:
 
 ```cmake
 scada_add_fuzz_target(foo_frame_fuzz
@@ -55,4 +57,12 @@ seed corpus.
 data race) and the toy parser in `fuzz-sample/` are wrong on purpose. Their
 tests pass only when the tool reports the bug and the process fails. Do not
 fix them, do not copy from them, and never link them into product code. The
-fixtures are built only in the `asan-ubsan` and `tsan` builds.
+fixtures are built only in the `asan-ubsan` and `tsan` builds and are not
+covered by the `check` target.
+
+## Passing the `check` target in a test
+
+- After `ASSERT_TRUE(value.has_value())` the linter still reports the access
+  to the optional. Write `if (!value.has_value()) { FAIL() << "why"; }`, or
+  compare the optional itself: `EXPECT_EQ(child->wait_for_exit(limit), 0)`.
+- `TEST` and `TEST_F` need no suppression for the `new` inside the macro.
