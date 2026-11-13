@@ -67,6 +67,12 @@ jobs:
 
       # The licence report and the bill of materials of the release build
       # (issue P0-07). They are also inside the staged install tree.
+      # Printed so that a reviewer can read them in the job log without
+      # downloading the artifact.
+      - name: Licence report and bill of materials
+        run: |
+          cat build/release/reports/licence-report.md
+          cat build/release/reports/sbom.cdx.json
       - uses: actions/upload-artifact@v6
         with:
           name: dependency-reports-${{ matrix.arch }}
