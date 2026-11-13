@@ -17,6 +17,12 @@ If these three disagree, stop and ask (see "When to stop and ask").
 
 - One issue, one branch, one pull request. Keep pull requests small enough to
   review in one sitting.
+- Never commit or push to `main` directly. Every change reaches `main` through
+  a pull request, and a person merges it. Do not merge your own pull request.
+- Never force-push to `main`, and never delete or rewrite a branch you did not
+  create. The repository has no enforced branch protection, so these rules are
+  the protection.
+- Do not merge a pull request whose checks are failing or still running.
 - Branch names: `phase<N>/<issue-number>-<short-name>`.
 - Work on the issue you were given. Do not start later phases, and do not add
   features the issue does not ask for.
