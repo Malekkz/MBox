@@ -67,11 +67,17 @@ void expect_layout(std::span<const Field> fields,
     EXPECT_EQ(expected_offset, documented_size) << "padding or a missing field";
 }
 
-// True if `value` is lock-free when shared through std::atomic_ref, as asked
-// of the machine the test runs on.
+// True if `value` is lock-free when shared through std::atomic_ref: its type
+// is always lock-free on this target, and the object sits at an address with
+// the alignment the atomic access needs. The run-time query
+// `is_lock_free()` is not used: with some compilers it is a call into the
+// separate atomic support library, which a lock-free target must not need.
 template <typename T>
-bool lock_free(T& value) {
-    return std::atomic_ref<T>(value).is_lock_free();
+bool lock_free(const T& value) {
+    return std::atomic_ref<T>::is_always_lock_free &&
+           std::bit_cast<std::uintptr_t>(&value) %
+                   std::atomic_ref<T>::required_alignment ==
+               0;
 }
 
 TEST(Conformance01Layout, RegionHeader) {
@@ -349,9 +355,8 @@ TEST(Conformance01Layout, DefaultValueIsAllZero) {
               (std::array<std::uint8_t, sizeof(StringSlot)>{}));
 }
 
-// Every field the contract marks `A`, on the machine the test runs on. The
-// compile-time check in layout.h covers the types; this covers the fields at
-// their real offsets.
+// Every field the contract marks `A`. The compile-time check in layout.h
+// covers the types; this covers the fields at their real offsets.
 TEST(SharedAtomics, EveryAtomicFieldIsLockFree) {
     RegionHeader region_header;
     EXPECT_TRUE(lock_free(region_header.ready));

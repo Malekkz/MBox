@@ -55,8 +55,9 @@ ctest --preset dev -R scada-tag-unit-test
 - `Conformance01Layout.*` is conformance test 1 of the contract: for each
   structure, the fields in the order and with the sizes of the contract must
   follow one another without a gap and fill the structure.
-- `SharedAtomics.*` checks on the machine it runs on that every field marked
-  `A` in the contract is lock-free.
+- `SharedAtomics.*` checks that every field marked `A` in the contract has a
+  type that is always lock-free on the target and sits at an address aligned
+  for atomic access.
 - `Handle.*`, `NameHash.*` and `Types.*` cover handles, the name hash and the
   enumerations, including values that must be rejected.
 
