@@ -4,7 +4,8 @@ MBox is a SCADA node that runs on one embedded Linux PC per site: it collects
 and logs data, controls field devices, and serves a web HMI and a local CLI.
 
 Status: design baseline frozen (version 1.0). Phase 0 (foundations) is in
-progress; the only code is the build skeleton.
+progress; the code so far is the build skeleton and the common library
+(`libs/scada-common`: status and result types, logging, clocks).
 
 ## Where things are
 
