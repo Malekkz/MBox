@@ -206,3 +206,28 @@ Decision:
 - `.clang-format` no longer wraps a comment that starts with `NOLINT`, so that a suppression keeps its check name and reason on one line (coding standard, section 14).
 Reason: a sanitizer misses errors in objects that are not instrumented. Replaying the corpus in every build keeps fuzz targets compiling with GCC and on ARM64, and turns every saved input into a regression test.
 Consequences: the sanitizer and fuzz builds are x86-64 presets, as section 13 requires; there are no ARM64 variants. Fuzzing needs Clang with its runtime libraries installed. A crash found by fuzzing is fixed together with adding the failing input to the seed corpus.
+
+## D-13: The pipeline: GitHub Actions, ARM64 on a native runner
+Date: 2026-11-13
+Phase / issue: 0, #5
+Status: accepted
+
+Context: every pull request must build and pass its tests on x86-64 and ARM64 (reference 18.1), and the issue leaves open how ARM64 is run. D-6 requires the pipeline to fix one clang-format version.
+Options, for ARM64: a GitHub-hosted ARM64 runner (`ubuntu-24.04-arm`), building and testing natively; cross-compiling on x86-64 with the `dev-arm64` presets and running the tests under user-mode emulation; running the whole job in an emulated ARM64 container.
+Decision:
+- `.github/workflows/pipeline.yml` runs on every pull request and every push to `main`, as six jobs that are six separate checks: `build and test (x86-64)`, `build and test (ARM64)`, `check`, `sanitizers (asan-ubsan)`, `sanitizers (tsan)` and `fuzz`. Each job runs the preset commands of `README.md` and fails when a command fails. No step is allowed to fail.
+- ARM64 is built and tested natively on the hosted runner `ubuntu-24.04-arm`, with the same presets (`dev`, `release`) as x86-64. The job first checks that the machine really is `aarch64`.
+- Both `build and test` jobs build `dev` and `release`, run their tests, and keep the staged install tree of `release` as an artifact for 14 days.
+- The sanitizer and fuzz jobs run on x86-64 only (D-12). Fuzz targets run side by side, one per processor, each for `SCADA_FUZZ_SECONDS` (60 s). Inputs that fail are kept as an artifact.
+- Tools: LLVM 18 for clang-format, clang-tidy, clang-query and the fuzzing compiler; GCC 13 and the CMake of the runner image for everything else. Each job prints the versions it used.
+- The runner is set up in one place, `.github/actions/setup-build-machine`, which is the only file that names a package manager. It installs LLVM 18 and puts its tools on `PATH` under their plain names. The build scripts stay free of distribution-specific paths and tools.
+- Performance tests are not run by the pipeline.
+Reason: a native runner executes the tests on real ARM64 processors, so it also covers what emulation does not model faithfully (memory ordering, timing, pointer authentication), and it needs no emulator settings in the build. It is as fast as x86-64, where emulated tests run several times slower. Performance figures from shared runners vary too much between runs to gate on a target; they need a fixed machine.
+Measured (run 2 of pull request #30, 2-processor ARM64 runner, 4-processor x86-64 runners): `build and test (ARM64)` 83 s, `build and test (x86-64)` 85 s, both sanitizer jobs about 60 s each, `check` about 2 min. The whole pipeline took 2 min 48 s from start to last job, with the jobs in parallel.
+Consequences:
+- The cross presets `dev-arm64` and `release-arm64` (D-4) stay for developers; the pipeline does not use them, so nothing checks them automatically.
+- The checks gate a merge only when they are marked as required in the protection rule of `main`, which is a repository setting and not a file. Until then the rule in `CLAUDE.md` ("do not merge a pull request whose checks are failing") is the gate.
+- The fuzz sample stops within 1 s because its planted bug is found at once. With real targets the fuzz job takes 60 s for every group of as many targets as the runner has processors.
+- The hosted runner images change over time. A change of the GCC or CMake version shows in the "Tool versions" step; LLVM stays at 18 until this decision is changed.
+- Where and how the performance tests of section 15 of the reference document run is still open. It must be decided before phase 1 is accepted, because phase 1 has the first real targets.
+- GitHub's actions `actions/checkout` and `actions/upload-artifact` (both MIT) are tools of the pipeline and are not linked or shipped. The licence report (P0-07) must list them. They are referenced by major version, not by commit hash.
