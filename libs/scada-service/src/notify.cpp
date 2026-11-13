@@ -3,18 +3,24 @@
 #include "unix_address.h"
 
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace scada::service {
 
 namespace {
 
 std::optional<std::string> environment_value(const char* name) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): start-up only, see the header
     const char* const value = std::getenv(name);
     if (value == nullptr) {
         return std::nullopt;
@@ -28,17 +34,18 @@ std::optional<std::int64_t> parse_positive(std::string_view text,
     if (text.empty()) {
         return std::nullopt;
     }
+    constexpr std::int64_t BASE = 10;
     std::int64_t value = 0;
-    for (const char c : text) {
-        if (c < '0' || c > '9') {
+    for (const char character : text) {
+        if (character < '0' || character > '9') {
             return std::nullopt;
         }
-        const std::int64_t digit = c - '0';
+        const std::int64_t digit = character - '0';
         // Checked before the multiplication, so it cannot overflow.
-        if (value > (max - digit) / 10) {
+        if (value > (max - digit) / BASE) {
             return std::nullopt;
         }
-        value = value * 10 + digit;
+        value = value * BASE + digit;
     }
     if (value < 1) {
         return std::nullopt;

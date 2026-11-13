@@ -13,8 +13,8 @@ public:
     // An empty owner; valid() is false.
     Fd() noexcept = default;
 
-    // Takes ownership of `fd`. A negative value gives an empty owner.
-    explicit Fd(int fd) noexcept : fd_(fd) {}
+    // Takes ownership of `descriptor`. A negative value gives an empty owner.
+    explicit Fd(int descriptor) noexcept : fd_(descriptor) {}
 
     Fd(const Fd&) = delete;
     Fd& operator=(const Fd&) = delete;

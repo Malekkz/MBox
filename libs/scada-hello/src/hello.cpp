@@ -2,14 +2,17 @@
 
 #include "scada/service/notify.h"
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
-#include <csignal>
+#include <cstdint>
 #include <ctime>
 #include <optional>
 #include <ostream>
+#include <span>
+#include <string_view>
 
 namespace scada::hello {
 
@@ -41,12 +44,13 @@ constexpr std::string_view USAGE =
     "  WATCHDOG_PID     Process the watchdog applies to.\n";
 
 // What ended one wait of the main loop.
-enum class Wake { FEED_DUE, STOP, HANG, ERROR };
+enum class Wake : std::uint8_t { FEED_DUE, STOP, HANG, ERROR };
 
 // Waits for one of the signals in `signals`, which must be blocked, for at
 // most `timeout`, or without limit if `timeout` is nullopt.
-Wake wait_for_signal(const sigset_t& signals,
-                     std::optional<std::chrono::microseconds> timeout) noexcept {
+Wake wait_for_signal(
+    const sigset_t& signals,
+    std::optional<std::chrono::microseconds> timeout) noexcept {
     int signal_number = 0;
     if (timeout) {
         const auto seconds =

@@ -1,13 +1,20 @@
 #include "scada/service/notify_listener.h"
 
+#include "scada/service/fd.h"
 #include "unix_address.h"
 
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
 #include <limits>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace scada::service {
@@ -37,13 +44,10 @@ std::optional<std::string> NotifyListener::receive(
     waiting.fd = socket_.get();
     waiting.events = POLLIN;
 
-    const auto max_timeout = std::numeric_limits<int>::max();
-    const int timeout_ms =
-        timeout.count() < 0
-            ? 0
-            : timeout.count() > max_timeout
-                  ? max_timeout
-                  : static_cast<int>(timeout.count());
+    // poll() takes the timeout as an int; the clamp makes the cast safe.
+    using Count = std::chrono::milliseconds::rep;
+    const auto timeout_ms = static_cast<int>(
+        std::clamp<Count>(timeout.count(), 0, std::numeric_limits<int>::max()));
     if (::poll(&waiting, 1, timeout_ms) != 1) {
         return std::nullopt;
     }

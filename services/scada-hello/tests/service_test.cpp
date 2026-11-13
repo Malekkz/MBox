@@ -11,12 +11,13 @@
 #include "scada/hello/hello.h"
 #include "scada/service/notify_listener.h"
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
 #include <sys/resource.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <chrono>
-#include <csignal>
 #include <cstddef>
 #include <cstdlib>
 #include <ctime>
@@ -25,6 +26,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -37,6 +39,8 @@ constexpr std::chrono::milliseconds TIMEOUT{10000};
 // How long the watchdog must stay silent to count as not fed: ten feed
 // periods.
 constexpr std::chrono::milliseconds SILENCE{1000};
+// Exit code of a child that could not start the command, as a shell uses it.
+constexpr int EXIT_NOT_STARTED = 127;
 
 // Counts failed expectations and reports each one.
 class Checker {
@@ -64,30 +68,11 @@ struct Exit {
 // runs, so a failed test leaves nothing behind.
 class Child {
 public:
-    // Starts `command` with NOTIFY_SOCKET set to `notify_socket` (unset if
-    // empty) and the test's watchdog interval. `command` is argv of this
-    // test from its second element on, so it ends with a null pointer.
+    // Starts `command` with NOTIFY_SOCKET set to `notify_socket`, the test's
+    // watchdog interval, and no WATCHDOG_PID. The `env` utility sets the
+    // variables, so this process's own environment is not changed.
     Child(std::span<char*> command, const std::string& notify_socket)
-        : pid_(::fork()) {
-        if (pid_ != 0) {
-            return;
-        }
-        // In the child. A watchdog abort must not write a core file.
-        const rlimit no_core{0, 0};
-        const std::string usec = std::to_string(
-            std::chrono::microseconds(WATCHDOG_INTERVAL).count());
-        const bool prepared =
-            ::setrlimit(RLIMIT_CORE, &no_core) == 0 &&
-            (notify_socket.empty()
-                 ? ::unsetenv("NOTIFY_SOCKET")
-                 : ::setenv("NOTIFY_SOCKET", notify_socket.c_str(), 1)) == 0 &&
-            ::setenv("WATCHDOG_USEC", usec.c_str(), 1) == 0 &&
-            ::unsetenv("WATCHDOG_PID") == 0;
-        if (prepared) {
-            ::execvp(command.front(), command.data());
-        }
-        std::_Exit(127);
-    }
+        : pid_(start(command, notify_socket)) {}
 
     Child(const Child&) = delete;
     Child& operator=(const Child&) = delete;
@@ -97,7 +82,8 @@ public:
     ~Child() {
         if (started() && !reaped_) {
             static_cast<void>(::kill(pid_, SIGKILL));
-            static_cast<void>(::waitpid(pid_, nullptr, 0));
+            siginfo_t info{};
+            static_cast<void>(::waitid(P_PID, child_id(), &info, WEXITED));
         }
     }
 
@@ -120,23 +106,22 @@ public:
         }
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         for (;;) {
-            int status = 0;
-            const pid_t result = ::waitpid(pid_, &status, WNOHANG);
-            if (result == pid_) {
+            // si_pid stays zero if the child has not ended yet.
+            siginfo_t info{};
+            const int result =
+                ::waitid(P_PID, child_id(), &info, WEXITED | WNOHANG);
+            if (result == 0 && info.si_pid == pid_) {
                 reaped_ = true;
-                if (WIFSIGNALED(status)) {
-                    return Exit{true, WTERMSIG(status)};
-                }
-                return Exit{false, WEXITSTATUS(status)};
+                return Exit{info.si_code != CLD_EXITED, info.si_status};
             }
             const auto left = deadline - std::chrono::steady_clock::now();
-            if (result < 0 || left <= std::chrono::nanoseconds::zero()) {
+            if (result != 0 || left <= std::chrono::nanoseconds::zero()) {
                 return std::nullopt;
             }
             const auto seconds =
                 std::chrono::duration_cast<std::chrono::seconds>(left);
             const std::chrono::nanoseconds rest = left - seconds;
-            timespec limit{};
+            std::timespec limit{};
             limit.tv_sec = static_cast<std::time_t>(seconds.count());
             limit.tv_nsec = static_cast<long>(rest.count());
             static_cast<void>(::sigtimedwait(&child_signal, nullptr, &limit));
@@ -148,6 +133,39 @@ public:
     }
 
 private:
+    // Forks and runs the command in the child. Returns the child's process
+    // id, or -1 if the fork failed.
+    [[nodiscard]] static pid_t start(std::span<char*> command,
+                                     const std::string& notify_socket) {
+        const std::string usec = std::to_string(
+            std::chrono::microseconds(WATCHDOG_INTERVAL).count());
+        std::vector<std::string> words{"env", "-u", "WATCHDOG_PID",
+                                       "NOTIFY_SOCKET=" + notify_socket,
+                                       "WATCHDOG_USEC=" + usec};
+        words.insert(words.end(), command.begin(), command.end());
+        // execvp() wants writable strings and a null pointer at the end.
+        std::vector<char*> arguments;
+        arguments.reserve(words.size() + 1);
+        for (std::string& word : words) {
+            arguments.push_back(word.data());
+        }
+        arguments.push_back(nullptr);
+
+        const pid_t pid = ::fork();
+        if (pid != 0) {
+            return pid;
+        }
+        // In the child. A watchdog abort must not write a core file.
+        const rlimit no_core{0, 0};
+        if (::setrlimit(RLIMIT_CORE, &no_core) == 0) {
+            ::execvp(arguments.front(), arguments.data());
+        }
+        std::_Exit(EXIT_NOT_STARTED);
+    }
+
+    // The process id in the type waitid() takes; pid_ is positive here.
+    [[nodiscard]] id_t child_id() const { return static_cast<id_t>(pid_); }
+
     pid_t pid_ = -1;
     bool reaped_ = false;
 };
@@ -196,9 +214,9 @@ void test_ready_feed_stop(Checker& checker, std::span<char*> command) {
     checker.expect(expect_message(*listener, "STOPPING=1"),
                    "stop: reports that it is stopping");
     const std::optional<Exit> exit = child.wait(TIMEOUT);
-    checker.expect(exit && !exit->signalled &&
-                       exit->code == scada::hello::EXIT_OK,
-                   "stop: exits with code 0");
+    checker.expect(
+        exit && !exit->signalled && exit->code == scada::hello::EXIT_OK,
+        "stop: exits with code 0");
 }
 
 void test_hang(Checker& checker, std::span<char*> command) {
@@ -240,9 +258,9 @@ void test_invalid_environment(Checker& checker, std::span<char*> command) {
     Child child(command, "not-a-socket-name");
     checker.expect(child.started(), "invalid: service started");
     const std::optional<Exit> exit = child.wait(TIMEOUT);
-    checker.expect(exit && !exit->signalled &&
-                       exit->code == scada::hello::EXIT_ERROR,
-                   "invalid: exits with code 1");
+    checker.expect(
+        exit && !exit->signalled && exit->code == scada::hello::EXIT_ERROR,
+        "invalid: exits with code 1");
 }
 
 }  // namespace
@@ -251,7 +269,8 @@ int main(int argc, char* argv[]) {
     const std::span<char*> raw_args(
         argv, argc > 0 ? static_cast<std::size_t>(argc) : 0);
     if (raw_args.size() < 2) {
-        std::cerr << "Usage: scada-hello-service-test <command> [<argument>...]\n";
+        std::cerr
+            << "Usage: scada-hello-service-test <command> [<argument>...]\n";
         return 2;
     }
     const std::span<char*> command = raw_args.subspan(1);

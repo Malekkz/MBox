@@ -10,7 +10,7 @@ What a process needs to run as a systemd service of type `notify`
   service manager. Sending never blocks.
 - Provides `NotifyListener`, the service manager's side of the protocol, so
   tests can start a service and observe it without systemd.
-- It does not link `libsystemd` (`docs/decisions.md`, D-7), and it does not
+- It does not link `libsystemd` (`docs/decisions.md`, D-11), and it does not
   decide when to feed the watchdog; the service's main loop does.
 
 ## Interfaces

@@ -1,8 +1,13 @@
 #include "unix_address.h"
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include <algorithm>
 #include <cstddef>
+#include <optional>
 #include <span>
+#include <string_view>
 
 namespace scada::service {
 
@@ -37,13 +42,13 @@ std::optional<UnixAddress> make_unix_address(std::string_view name) noexcept {
     return result;
 }
 
-bool bind_unix(int fd, const UnixAddress& address) noexcept {
+bool bind_unix(int descriptor, const UnixAddress& address) noexcept {
     // bind() takes the generic `sockaddr*`, which the sockets API defines as
     // the way to pass any address type. The conversion goes through `void*`
-    // and happens only here (docs/decisions.md, D-7).
+    // and happens only here (docs/decisions.md, D-11).
     const void* const generic = &address.address;
-    return ::bind(fd, static_cast<const sockaddr*>(generic), address.length) ==
-           0;
+    return ::bind(descriptor, static_cast<const sockaddr*>(generic),
+                  address.length) == 0;
 }
 
 }  // namespace scada::service

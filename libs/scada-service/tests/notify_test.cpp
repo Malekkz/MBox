@@ -5,16 +5,18 @@
 #include "scada/service/notify_listener.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
-using scada::service::NotifyEnvironment;
 using scada::service::Notifier;
+using scada::service::NotifyEnvironment;
 using scada::service::NotifyListener;
 using scada::service::NotifySettings;
 using scada::service::NotifyStatus;
@@ -22,6 +24,10 @@ using scada::service::parse_notify_environment;
 
 constexpr std::int64_t OWN_PID = 4242;
 constexpr std::chrono::milliseconds RECEIVE_TIMEOUT{5000};
+constexpr std::chrono::seconds THIRTY_SECONDS{30};
+// A socket address holds a name of at most 107 bytes.
+constexpr std::size_t LONGEST_NAME = 107;
+constexpr std::size_t VERY_LONG_NAME = 100000;
 
 // Counts failed expectations and reports each one.
 class Checker {
@@ -61,15 +67,16 @@ void test_parse_valid(Checker& checker) {
     {
         const auto settings = parse_notify_environment(
             environment("/run/systemd/notify", "30000000", "4242"), OWN_PID);
-        checker.expect(settings && settings->socket_name == "/run/systemd/notify",
-                       "path socket: accepted");
-        checker.expect(settings && settings->watchdog_interval ==
-                                       std::chrono::seconds(30),
-                       "watchdog for this process: interval set");
+        checker.expect(
+            settings && settings->socket_name == "/run/systemd/notify",
+            "path socket: accepted");
+        checker.expect(
+            settings && settings->watchdog_interval == THIRTY_SECONDS,
+            "watchdog for this process: interval set");
     }
     {
-        const auto settings = parse_notify_environment(
-            environment("@abstract", "1"), OWN_PID);
+        const auto settings =
+            parse_notify_environment(environment("@abstract", "1"), OWN_PID);
         checker.expect(settings && settings->socket_name == "@abstract",
                        "abstract socket: accepted");
         checker.expect(settings && settings->watchdog_interval ==
@@ -90,9 +97,8 @@ void test_parse_valid(Checker& checker) {
                        "largest interval: accepted");
     }
     {
-        // 107 bytes is the longest name a socket address holds.
         const auto settings = parse_notify_environment(
-            environment("/" + std::string(106, 'a')), OWN_PID);
+            environment("/" + std::string(LONGEST_NAME - 1, 'a')), OWN_PID);
         checker.expect(settings.has_value(), "longest socket name: accepted");
     }
 }
@@ -105,10 +111,12 @@ void test_parse_invalid(Checker& checker) {
     rejected(environment("relative/path"), "relative socket path");
     rejected(environment("/"), "socket name of one character");
     rejected(environment("@"), "abstract socket without a name");
-    rejected(environment("/" + std::string(107, 'a')), "oversized socket name");
-    rejected(environment("/" + std::string(100000, 'a')),
+    rejected(environment("/" + std::string(LONGEST_NAME, 'a')),
+             "oversized socket name");
+    rejected(environment("/" + std::string(VERY_LONG_NAME, 'a')),
              "very long socket name");
-    rejected(environment(std::string("/a\0b", 4)), "socket name with NUL");
+    rejected(environment("/a" + std::string(1, '\0') + "b"),
+             "socket name with NUL");
     rejected(environment("@s", ""), "empty interval");
     rejected(environment("@s", "0"), "zero interval");
     rejected(environment("@s", "-5"), "negative interval");
@@ -141,8 +149,8 @@ void test_send(Checker& checker) {
     if (!listener) {
         return;
     }
-    const auto settings = parse_notify_environment(
-        environment(listener->socket_name()), OWN_PID);
+    const auto settings =
+        parse_notify_environment(environment(listener->socket_name()), OWN_PID);
     checker.expect(settings.has_value(), "listener name: valid");
     if (!settings) {
         return;
@@ -172,15 +180,15 @@ void test_send(Checker& checker) {
 
     checker.expect(notifier.send("") == NotifyStatus::INVALID_MESSAGE,
                    "empty message: rejected");
-    checker.expect(notifier.send(longest + "x") ==
-                       NotifyStatus::INVALID_MESSAGE,
-                   "oversized message: rejected");
-    checker.expect(notifier.send(std::string_view("A=1\0B", 5)) ==
+    checker.expect(
+        notifier.send(longest + "x") == NotifyStatus::INVALID_MESSAGE,
+        "oversized message: rejected");
+    checker.expect(notifier.send("A=1" + std::string(1, '\0') + "B") ==
                        NotifyStatus::INVALID_MESSAGE,
                    "message with NUL: rejected");
-    checker.expect(notifier.status("two\nlines") ==
-                       NotifyStatus::INVALID_MESSAGE,
-                   "status with a line break: rejected");
+    checker.expect(
+        notifier.status("two\nlines") == NotifyStatus::INVALID_MESSAGE,
+        "status with a line break: rejected");
     checker.expect(!listener->receive(std::chrono::milliseconds(0)),
                    "rejected messages: nothing was sent");
 }

@@ -37,4 +37,5 @@ ctest --preset dev -R '^scada-hello-'
 (`libscada-service`) in place of systemd. It checks readiness, watchdog
 feeding, the stop on `SIGTERM`, and that a hung process stops feeding and is
 ended by the watchdog's `SIGABRT`. The restart itself is done by systemd and
-is checked on a test machine (`docs/install.md`, step 5).
+is checked on a test machine (`docs/install.md`, step 5). The test starts the
+service through the `env` utility, which must be on `PATH`.

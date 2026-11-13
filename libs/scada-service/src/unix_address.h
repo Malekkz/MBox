@@ -21,8 +21,9 @@ struct UnixAddress {
 [[nodiscard]] std::optional<UnixAddress> make_unix_address(
     std::string_view name) noexcept;
 
-// Binds `fd` to `address`. Returns true on success.
-[[nodiscard]] bool bind_unix(int fd, const UnixAddress& address) noexcept;
+// Binds the socket `descriptor` to `address`. Returns true on success.
+[[nodiscard]] bool bind_unix(int descriptor,
+                             const UnixAddress& address) noexcept;
 
 }  // namespace scada::service
 

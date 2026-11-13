@@ -1,0 +1,68 @@
+# Lint rules for all C++ in this repository. Checked by the `check` target
+# with clang-tidy 18 or newer.
+#
+# The check groups and the error list are those of docs/coding-standard.md,
+# section 13. The `check` target fails on every finding, also on those that
+# are only warnings here (docs/decisions.md, D-7).
+#
+# A check is disabled only if it proves unworkable. Each disabled check has a
+# one-line reason here and is listed in docs/decisions.md, D-7.
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -modernize-use-trailing-return-type
+
+# Disabled checks:
+#
+# bugprone-easily-swappable-parameters: reports every two adjacent parameters of one type, such as (out, err); the only fix is a wrapper type per parameter.
+# modernize-use-trailing-return-type: asks for `auto f() -> T` on every function; the project writes the return type first.
+
+WarningsAsErrors: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*
+
+# Headers of this repository are checked together with the files that include
+# them.
+HeaderFilterRegex: '.*/(libs|services|tools|tests)/.*'
+
+# Names (CLAUDE.md, Code): snake_case for functions and variables, PascalCase
+# for types, UPPER_CASE for constants and enumerators. D-7 in
+# docs/decisions.md says which variables count as constants.
+CheckOptions:
+  # The C library declares some POSIX names in internal headers (`bits/...`,
+  # `sys/poll.h`). Project code includes the header POSIX names for them, so
+  # the include check must not ask for the internal one, nor call the POSIX
+  # one unused (docs/decisions.md, D-13).
+  misc-include-cleaner.IgnoreHeaders: 'bits/.*;poll\.h;sys/poll\.h;sys/uio\.h;stdlib\.h;time\.h'
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.UnionCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.TypeAliasCase: CamelCase
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.TypeTemplateParameterCase: CamelCase
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: _
+  readability-identifier-naming.LocalConstantCase: lower_case
+  readability-identifier-naming.GlobalConstantCase: UPPER_CASE
+  readability-identifier-naming.StaticConstantCase: UPPER_CASE
+  readability-identifier-naming.ClassConstantCase: UPPER_CASE
+  readability-identifier-naming.ConstexprVariableCase: UPPER_CASE
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.ScopedEnumConstantCase: UPPER_CASE
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

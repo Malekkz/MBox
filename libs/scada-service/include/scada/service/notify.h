@@ -4,7 +4,7 @@
 // Client side of the systemd service notification protocol (sd_notify(3)):
 // readiness, watchdog and stop messages sent as datagrams to the socket named
 // by NOTIFY_SOCKET. Implemented directly on the documented protocol, so no
-// systemd library is linked (docs/decisions.md, D-7).
+// systemd library is linked (docs/decisions.md, D-11).
 
 #include "scada/service/fd.h"
 
@@ -46,7 +46,7 @@ struct NotifySettings {
 };
 
 // Outcome of sending one message.
-enum class NotifyStatus {
+enum class NotifyStatus : std::uint8_t {
     SENT,             // The service manager's socket accepted the message.
     DISABLED,         // No service manager; nothing was sent.
     INVALID_MESSAGE,  // Empty, too long, or contains a NUL byte; not sent.
@@ -77,7 +77,9 @@ public:
     explicit Notifier(const NotifySettings& settings);
 
     // True if a service manager is to be notified.
-    [[nodiscard]] bool enabled() const noexcept { return !socket_name_.empty(); }
+    [[nodiscard]] bool enabled() const noexcept {
+        return !socket_name_.empty();
+    }
 
     // Reports that start-up is complete ("READY=1").
     [[nodiscard]] NotifyStatus ready() noexcept;
