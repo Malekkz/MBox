@@ -21,3 +21,6 @@ PointerAlignment: Left
 # would depend on guessing which header is the "own" one.
 IncludeBlocks: Preserve
 InsertNewlineAtEOF: true
+# A suppression carries its check name and its reason on one line (coding
+# standard, section 14); wrapping it would separate them and stop it working.
+CommentPragmas: '^ (IWYU pragma:|NOLINT)'

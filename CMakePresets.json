@@ -1,6 +1,10 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -11,7 +15,9 @@
       "name": "dev",
       "displayName": "Development (native, debug)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "release",
@@ -33,6 +39,34 @@
       }
     },
     {
+      "name": "asan-ubsan",
+      "displayName": "AddressSanitizer with leak detection + UndefinedBehaviorSanitizer (native, debug)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SCADA_SANITIZER": "address-undefined"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer (native, debug)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SCADA_SANITIZER": "thread"
+      }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "Fuzzing: libFuzzer + AddressSanitizer + UndefinedBehaviorSanitizer (native, Clang)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "SCADA_SANITIZER": "fuzz"
+      }
+    },
+    {
       "name": "arm64",
       "hidden": true,
       "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake"
@@ -40,39 +74,140 @@
     {
       "name": "dev-arm64",
       "displayName": "Development (cross-compiled for ARM64)",
-      "inherits": ["dev", "arm64"]
+      "inherits": [
+        "dev",
+        "arm64"
+      ]
     },
     {
       "name": "release-arm64",
       "displayName": "Release (cross-compiled for ARM64)",
-      "inherits": ["release", "arm64"]
+      "inherits": [
+        "release",
+        "arm64"
+      ]
     }
   ],
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "perf", "configurePreset": "perf" },
-    { "name": "dev-arm64", "configurePreset": "dev-arm64" },
-    { "name": "release-arm64", "configurePreset": "release-arm64" }
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf"
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    },
+    {
+      "name": "dev-arm64",
+      "configurePreset": "dev-arm64"
+    },
+    {
+      "name": "release-arm64",
+      "configurePreset": "release-arm64"
+    }
   ],
   "testPresets": [
     {
       "name": "base",
       "hidden": true,
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
-    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
-    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    {
+      "name": "functional",
+      "hidden": true,
+      "inherits": "base",
+      "filter": {
+        "exclude": {
+          "label": "perf"
+        }
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "functional",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "unit",
+      "inherits": "base",
+      "configurePreset": "dev",
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      }
+    },
+    {
+      "name": "integration",
+      "inherits": "base",
+      "configurePreset": "dev",
+      "filter": {
+        "include": {
+          "label": "integration"
+        }
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "functional",
+      "configurePreset": "release"
+    },
     {
       "name": "perf",
       "inherits": "base",
       "configurePreset": "perf",
-      "filter": { "include": { "label": "perf" } }
+      "filter": {
+        "include": {
+          "label": "perf"
+        }
+      }
     },
-    { "name": "dev-arm64", "inherits": "base", "configurePreset": "dev-arm64" },
+    {
+      "name": "asan-ubsan",
+      "inherits": "functional",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "inherits": "functional",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "fuzz",
+      "inherits": "base",
+      "configurePreset": "fuzz",
+      "filter": {
+        "include": {
+          "label": "fuzz"
+        }
+      }
+    },
+    {
+      "name": "dev-arm64",
+      "inherits": "functional",
+      "configurePreset": "dev-arm64"
+    },
     {
       "name": "release-arm64",
-      "inherits": "base",
+      "inherits": "functional",
       "configurePreset": "release-arm64"
     }
   ]

@@ -19,7 +19,9 @@ build/dev/services/scada-hello/scada-hello [--help]
 ## How to test it
 
 ```
-ctest --preset dev -R '^scada-hello-(runs|rejects)'
+ctest --preset dev -R scada-hello-integration-test
 ```
 
-These tests start the real executable and check its output and exit code.
+The integration test (`tests/integration/hello_integration_test.cpp`) starts
+the real executable and checks its output and exit code. It needs no
+simulator.

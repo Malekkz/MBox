@@ -1,10 +1,10 @@
-// Unit test for libscada-hello. It uses no test framework: the framework is
-// chosen in issue P0-03, and this file moves to it then.
+// Unit tests for libscada-hello.
 
 #include "scada/hello/hello.h"
 
+#include <gtest/gtest.h>
+
 #include <array>
-#include <iostream>
 #include <span>
 #include <sstream>
 #include <string>
@@ -12,21 +12,8 @@
 
 namespace {
 
-// Counts failed expectations and reports each one.
-class Checker {
-public:
-    void expect(bool condition, std::string_view what) {
-        if (!condition) {
-            std::cerr << "FAILED: " << what << '\n';
-            ++failures_;
-        }
-    }
-
-    [[nodiscard]] bool passed() const { return failures_ == 0; }
-
-private:
-    int failures_ = 0;
-};
+using scada::hello::EXIT_OK;
+using scada::hello::EXIT_USAGE;
 
 struct RunResult {
     int exit_code = 0;
@@ -41,48 +28,37 @@ RunResult run_with(std::span<const std::string_view> args) {
     return {exit_code, out.str(), err.str()};
 }
 
-}  // namespace
-
-int main() {
-    using scada::hello::EXIT_OK;
-    using scada::hello::EXIT_USAGE;
-
-    Checker checker;
-    const auto expect = [&checker](bool condition, std::string_view what) {
-        checker.expect(condition, what);
-    };
-
-    expect(scada::hello::greeting() == "Hello from libscada-hello",
-           "greeting text");
-
-    {
-        const RunResult result = run_with({});
-        expect(result.exit_code == EXIT_OK, "no arguments: exit code");
-        expect(result.out == "Hello from libscada-hello\n",
-               "no arguments: prints the greeting");
-        expect(result.err.empty(), "no arguments: nothing on the error stream");
-    }
-    {
-        const std::array<std::string_view, 1> args{"--help"};
-        const RunResult result = run_with(args);
-        expect(result.exit_code == EXIT_OK, "--help: exit code");
-        expect(result.out.starts_with("Usage: scada-hello"),
-               "--help: prints usage");
-        expect(result.err.empty(), "--help: nothing on the error stream");
-    }
-    {
-        const std::array<std::string_view, 1> args{"--bogus"};
-        const RunResult result = run_with(args);
-        expect(result.exit_code == EXIT_USAGE, "unknown option: exit code");
-        expect(result.out.empty(), "unknown option: nothing on the output");
-        expect(result.err.starts_with("scada-hello: unexpected arguments"),
-               "unknown option: diagnostic");
-    }
-    {
-        const std::array<std::string_view, 2> args{"--help", "extra"};
-        const RunResult result = run_with(args);
-        expect(result.exit_code == EXIT_USAGE, "surplus argument: exit code");
-    }
-
-    return checker.passed() ? 0 : 1;
+TEST(Hello, GreetingText) {
+    EXPECT_EQ(scada::hello::greeting(), "Hello from libscada-hello");
 }
+
+TEST(Hello, NoArgumentsPrintsTheGreeting) {
+    const RunResult result = run_with({});
+    EXPECT_EQ(result.exit_code, EXIT_OK);
+    EXPECT_EQ(result.out, "Hello from libscada-hello\n");
+    EXPECT_TRUE(result.err.empty());
+}
+
+TEST(Hello, HelpPrintsUsage) {
+    const std::array<std::string_view, 1> args{"--help"};
+    const RunResult result = run_with(args);
+    EXPECT_EQ(result.exit_code, EXIT_OK);
+    EXPECT_TRUE(result.out.starts_with("Usage: scada-hello"));
+    EXPECT_TRUE(result.err.empty());
+}
+
+TEST(Hello, UnknownOptionIsAUsageError) {
+    const std::array<std::string_view, 1> args{"--bogus"};
+    const RunResult result = run_with(args);
+    EXPECT_EQ(result.exit_code, EXIT_USAGE);
+    EXPECT_TRUE(result.out.empty());
+    EXPECT_TRUE(result.err.starts_with("scada-hello: unexpected arguments"));
+}
+
+TEST(Hello, SurplusArgumentIsAUsageError) {
+    const std::array<std::string_view, 2> args{"--help", "extra"};
+    const RunResult result = run_with(args);
+    EXPECT_EQ(result.exit_code, EXIT_USAGE);
+}
+
+}  // namespace

@@ -148,6 +148,9 @@ class BannedCheck(unittest.TestCase):
     def test_owning_raw_pointer_is_rejected(self):
         self.assert_reports_marked_lines("owning_raw_pointer.cpp")
 
+    def test_only_the_new_of_the_test_framework_macro_is_allowed(self):
+        self.assert_reports_marked_lines("banned_test_macro.cpp")
+
     def test_every_entry_of_the_banned_list_is_rejected(self):
         self.assert_reports_marked_lines("banned_all.cpp")
 
