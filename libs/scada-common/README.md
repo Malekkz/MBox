@@ -53,7 +53,7 @@ No exception leaves the library. Functions that can fail return `Status` or
   `result.h`, `log.h`, `clock.h`, `fd.h`, `panic.h`, `static_string.h`,
   `realtime.h`.
 - Uses the journal socket `/run/systemd/journal/socket`.
-- No contract; decisions D-9, D-13 and D-14 in `docs/decisions.md`.
+- No contract; decisions D-9, D-14 and D-15 in `docs/decisions.md`.
 
 ## How to use it
 

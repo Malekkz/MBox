@@ -20,6 +20,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `tools/` | Developer and operator tools. |
 | `tools/check/` | The `check` target: formatter, linter, banned-function and `SCADA_RT` checks. |
 | `.clang-format`, `.clang-tidy` | Layout and lint rules. |
+| `.github/workflows/pipeline.yml` | The pipeline that gates every pull request. |
 | `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
@@ -82,6 +83,35 @@ Runs clang-format, clang-tidy, the banned-function check and the `SCADA_RT`
 check over all C++ sources and fails on any finding. Needs Python 3.8 or newer
 and clang-format, clang-tidy and clang-query 18 or newer. See
 `tools/check/README.md`.
+
+## Pipeline
+
+`.github/workflows/pipeline.yml` runs on every pull request and on every push
+to `main`. Each job is one check on the pull request, and each runs the
+commands above and nothing else:
+
+| Check | Runs | Machine |
+| --- | --- | --- |
+| `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree | x86-64 |
+| `build and test (ARM64)` | The same, built and run natively | ARM64 |
+| `check` | The `check` target | x86-64 |
+| `sanitizers (asan-ubsan)` | Build and tests of the `asan-ubsan` preset | x86-64 |
+| `sanitizers (tsan)` | Build and tests of the `tsan` preset | x86-64 |
+| `fuzz` | Every fuzz target for 60 s | x86-64 |
+
+A failing command fails its check: a compiler warning, a failing test, a
+finding of the `check` target, a sanitizer report or a fuzzing crash. Nothing
+is skipped or allowed to fail. Performance tests are not part of the pipeline
+(`docs/decisions.md`, D-13).
+
+- The staged install tree of the `release` build is kept for 14 days as the
+  artifacts `stage-x86-64` and `stage-ARM64` of the run.
+- When fuzzing fails, the failing inputs are kept as the artifact
+  `fuzz-findings`.
+- The tools are LLVM 18 and the GCC and CMake of the runner image; each job
+  prints their versions in its step "Tool versions".
+- All six checks must be marked as required in the protection rule of `main`.
+  GitHub cannot read this from the repository; it is a repository setting.
 
 ## Build order
 
