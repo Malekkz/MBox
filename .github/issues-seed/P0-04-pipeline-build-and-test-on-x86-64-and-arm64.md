@@ -14,8 +14,10 @@ labels: phase-0
 
 - [ ] A pull request with a failing test, a warning, or a formatting error cannot pass.
 - [ ] Both architectures appear as separate required checks.
+- [ ] A pull request with any sanitizer finding cannot pass.
+- [ ] Every fuzz target runs for a short fixed time (default 60 seconds each) on every pull request.
 - [ ] Total pipeline time is reported in the pull request that adds it.
 
 ## References
 
-reference 18.1; CLAUDE.md (Definition of done)
+reference 18.1; CLAUDE.md (Definition of done); docs/coding-standard.md section 13
