@@ -53,7 +53,7 @@ No exception leaves the library. Functions that can fail return `Status` or
   `result.h`, `log.h`, `clock.h`, `fd.h`, `panic.h`, `static_string.h`,
   `realtime.h`.
 - Uses the journal socket `/run/systemd/journal/socket`.
-- No contract; decisions D-9, D-10 and D-11 in `docs/decisions.md`.
+- No contract; decisions D-9, D-13 and D-14 in `docs/decisions.md`.
 
 ## How to use it
 
@@ -80,8 +80,12 @@ logger.value().log(scada::LogLevel::WARNING, "device not answering",
 ## How to test it
 
 ```
-ctest --preset dev -R scada-common
+ctest --preset dev -R 'scada-common|journal_stream'
 ```
 
-The tests need no fixture. The sink tests create a pipe and a datagram socket
-in a temporary directory in place of the journal.
+- `scada-common-unit-test`: the unit tests. They need no fixture; the sink
+  tests create a pipe and a datagram socket in a temporary directory in place
+  of the journal.
+- `journal_stream_fuzz`: fuzz target for the parser of `JOURNAL_STREAM`, in
+  `fuzz/`. `ctest --preset fuzz` fuzzes it for 60 s; every other build replays
+  its seed corpus as `journal_stream_fuzz-corpus`.

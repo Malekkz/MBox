@@ -12,7 +12,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(GNUInstallDirs)
 include(CTest)
+include(ScadaSanitizers)
 include(ScadaTargets)
+if(BUILD_TESTING)
+  include(ScadaTesting)
+endif()
 
 add_subdirectory(libs)
 add_subdirectory(services)

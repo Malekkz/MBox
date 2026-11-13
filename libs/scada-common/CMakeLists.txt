@@ -13,4 +13,5 @@ scada_add_library(scada-common
 
 if(BUILD_TESTING)
   add_subdirectory(tests)
+  add_subdirectory(fuzz)
 endif()

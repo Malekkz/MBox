@@ -14,7 +14,8 @@ sources and fails on any finding.
 | `rt` | clang-query | Deny-list for `SCADA_RT` functions | `scada-rt` |
 
 - It checks every `.h`, `.hpp`, `.cpp`, `.cc` and `.cxx` file under `libs/`,
-  `services/`, `tools/` and `tests/`, except the fixtures of its own tests.
+  `services/`, `tools/` and `tests/`, except the fixtures of its own tests
+  and the deliberate bugs in `tests/sanitizer-fixtures/`.
 - `tidy`, `banned` and `rt` use the compile commands of the build directory.
   A source file that is not part of the build, or does not compile with
   Clang, fails the check. Headers are checked through the files that include
@@ -41,6 +42,10 @@ std::memcpy(target.data(), source.data(), size);  // NOLINT(scada-banned): revie
 
 `// NOLINTNEXTLINE(scada-banned): reason` on the line before also works.
 `banned` and `rt` ignore a `NOLINT` that does not name them.
+
+One expression is exempt without a suppression: the `new` inside
+GoogleTest's macro `GTEST_TEST_`, which `TEST` and `TEST_F` expand to in
+every test file. A `new` in a test body is still reported.
 
 ## How to run it
 

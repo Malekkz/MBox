@@ -159,7 +159,55 @@ Consequences:
 - Project code must not use the `annotate` attribute for anything else.
 - Blocking calls, system calls and C++ stream output are not on the first deny-list. They are added as the real-time code appears (phase 1, `libscada-tag`).
 
-## D-10: `Status` carries a code and a fixed message; `Result<T>` is our own type
+## D-10: GoogleTest as the unit test framework
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: the tests need one framework before any real code is written; its licence must be permissive.
+Options: GoogleTest 1.17.0 (BSD-3-Clause); Catch2 3 (BSL-1.0); doctest (MIT); no framework.
+Decision: GoogleTest 1.17.0, without GoogleMock. `cmake/ScadaTesting.cmake` downloads the release archive at configure time, checks its SHA-256 hash and builds it inside the build tree. `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<directory>` builds from an unpacked copy without network access. Its headers are treated as system headers.
+Reason: it is the most widely used C++ framework, so reviewers and tools know it, and it has death tests and per-test timing that the later phases need. It must be built from source in the tree because a sanitizer needs every object in the process instrumented, and a cross build needs it for the target architecture; a copy installed on the machine gives neither.
+Consequences:
+- The first configuration of a build directory needs network access or the override above.
+- GoogleTest is test-only and is not installed or shipped. The licence report (P0-07) must list it: GoogleTest 1.17.0, BSD-3-Clause, test-only.
+- Its macro `GTEST_TEST_`, which `TEST` and `TEST_F` expand to, registers each test with `new`. The banned-function check (D-8) does not report that one expression; a `new` anywhere else in a test file is still reported. Without this, every test would need a suppression.
+- After a fatal assertion such as `ASSERT_TRUE(value.has_value())`, clang-tidy still reports the access to the optional, because it cannot see through the macro. Tests write `if (!value.has_value()) { FAIL() << ...; }` instead, or compare the optional itself.
+
+## D-11: Test kinds, labels and where tests live
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: `CLAUDE.md` names unit, integration and performance tests but not how the build tells them apart.
+Options: one CTest test per test case or per executable; labels or separate build trees per kind.
+Decision:
+- `scada_add_test(<name> KIND unit|integration|perf ...)` creates one GoogleTest executable, registered as one CTest test with the kind as its label and a time limit of 60 s, 300 s or 600 s.
+- Unit tests live in `<component>/tests/`. Integration tests live in `tests/integration/`, performance tests in `tests/perf/`, shared test code in `tests/support/`.
+- `ctest --preset dev` runs unit and integration tests and prints the time per label. `ctest --preset unit` and `ctest --preset integration` run one kind. Performance tests are built everywhere but run only by `ctest --preset perf`.
+- Integration tests start processes with `scada::test::ChildProcess`, which waits in `poll()` for output or exit with a timeout. The command to start is passed in an environment variable so that a cross build can put the emulator in front.
+Reason: one CTest test per executable needs no test discovery at build time, which a cross build without an emulator cannot do. Performance figures from a debug build mean nothing, so no other preset runs them.
+Consequences: CTest reports an executable, not a test case; the case that failed is in the test output, which the presets print on failure. `ChildProcess` uses `pidfd_open`, so the tests need Linux 5.3 or newer.
+
+## D-12: Sanitizer and fuzz builds
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: section 13 of the coding standard requires the sanitizer runs and fuzz targets, but not how they are built.
+Options: sanitizer flags per target or for the whole tree; fuzz targets built only in the fuzz build or in every build.
+Decision:
+- The cache variable `SCADA_SANITIZER` selects `address-undefined`, `thread` or `fuzz`; the presets `asan-ubsan`, `tsan` and `fuzz` set it. The flags apply to the whole build tree, including GoogleTest. Every finding ends the process with a failure (`-fno-sanitize-recover=all`). Configuration stops if the runtime libraries are missing, or if a sanitizer is combined with `SCADA_HARDENING`.
+- `asan-ubsan` and `tsan` are debug builds with the default compiler. `fuzz` uses Clang (`clang++` on `PATH`), because libFuzzer is part of Clang, with `RelWithDebInfo`.
+- `scada_add_fuzz_target(<name> ...)` creates a fuzz target with its seed corpus in `corpus/<name>/` next to it. In the `fuzz` build, the test `<name>` (label `fuzz`) runs it for `SCADA_FUZZ_SECONDS` (default 60 s) with a 10 s limit per input. In every other build the same target is linked with a driver that replays the seed corpus once, as the unit test `<name>-corpus`.
+- A fuzz target lives in `<component>/fuzz/`. Inputs the fuzzer finds and the inputs that made it fail are written to the build tree, never to the source tree.
+- Deliberate bugs that prove the tools work (`tests/sanitizer-fixtures/`, the toy parser in `tests/fuzz-sample/`) are test-only, are not installed, and their tests pass only if the tool reports the bug and the process fails. The fixtures are built only in the sanitizer builds, and the `check` target excludes them, as it excludes its own fixtures; the toy parser is checked, with one suppression on the planted bug.
+- A fuzz target's entry point carries `// NOLINTNEXTLINE(readability-identifier-naming)`, because libFuzzer fixes the name `LLVMFuzzerTestOneInput`.
+- `.clang-format` no longer wraps a comment that starts with `NOLINT`, so that a suppression keeps its check name and reason on one line (coding standard, section 14).
+Reason: a sanitizer misses errors in objects that are not instrumented. Replaying the corpus in every build keeps fuzz targets compiling with GCC and on ARM64, and turns every saved input into a regression test.
+Consequences: the sanitizer and fuzz builds are x86-64 presets, as section 13 requires; there are no ARM64 variants. Fuzzing needs Clang with its runtime libraries installed. A crash found by fuzzing is fixed together with adding the failing input to the seed corpus.
+
+## D-13: `Status` carries a code and a fixed message; `Result<T>` is our own type
 Date: 2026-11-13
 Phase / issue: 0, #7
 Status: accepted
@@ -173,7 +221,7 @@ Decision:
 Reason: a literal message makes `Status` usable in real-time code and removes any dangling-view risk, at no cost to callers that only branch on the code. Our own `Result<T>` needs no dependency and no language level beyond C++20.
 Consequences: a `Status` cannot carry a file name or a number; callers log them. `Result<T>` can be replaced by `std::expected` if the language level is raised.
 
-## D-11: Logging through a bounded queue, to the journal's native socket
+## D-14: Logging through a bounded queue, to the journal's native socket
 Date: 2026-11-13
 Phase / issue: 0, #7
 Status: accepted
@@ -188,14 +236,3 @@ Decision:
 - The record's creation time is sent as the field `SCADA_TIME_NS`, because the journal stamps the later delivery time.
 Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
 Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
-
-## D-12: Suppression comments are not wrapped by the formatter
-Date: 2026-11-13
-Phase / issue: 0, #7
-Status: accepted
-
-Context: a suppression is valid only on one line, with the check name and the reason (coding standard, section 14). With an 80-column limit clang-format wraps such a comment, and the wrapped `NOLINTNEXTLINE` then applies to its own second line instead of the code.
-Options: keep every suppression under 80 columns; move the reason to a separate comment; tell clang-format not to wrap these comments.
-Decision: `.clang-format` sets `CommentPragmas` so that comments starting with `NOLINT` are left as written. Such a line may exceed 80 columns.
-Reason: several check names alone leave no room for a reason within 80 columns, and section 14 wants the reason on the same line.
-Consequences: suppression lines are the only lines allowed to be longer than the column limit.

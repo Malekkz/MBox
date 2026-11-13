@@ -20,7 +20,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `tools/` | Developer and operator tools. |
 | `tools/check/` | The `check` target: formatter, linter, banned-function and `SCADA_RT` checks. |
 | `.clang-format`, `.clang-tidy` | Layout and lint rules. |
-| `tests/` | Tests that span several components. |
+| `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
@@ -29,12 +29,15 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 
 ## Building
 
-Needs CMake 3.21 or newer and GCC or Clang with C++20 support.
+Needs CMake 3.21 or newer and GCC or Clang with C++20 support. The first
+configuration of a build directory downloads GoogleTest 1.17.0 (checked
+against a fixed hash); to build without network access, pass
+`-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<unpacked release>`.
 
 ```
 cmake --preset dev          # configure
 cmake --build --preset dev  # build
-ctest --preset dev          # test
+ctest --preset dev          # unit and integration tests
 ```
 
 Other presets: `release` (optimised, with the release flags of the coding
@@ -47,6 +50,27 @@ put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the
 presets `dev-arm64` or `release-arm64`. Tests of a cross build run if an
 emulator is given at configure time with
 `-DCMAKE_CROSSCOMPILING_EMULATOR="<emulator>;<arguments>"`.
+
+## Testing
+
+Every test has one label: `unit`, `integration`, `perf`, `sanitizer` or
+`fuzz`. `ctest` prints the time per label at the end of a run.
+
+| Command | Runs |
+| --- | --- |
+| `ctest --preset dev` | Unit and integration tests |
+| `ctest --preset unit` | Unit tests only (uses the `dev` build) |
+| `ctest --preset integration` | Integration tests only (uses the `dev` build) |
+| `ctest --preset perf` | Performance tests, in the `perf` build |
+| `ctest --preset asan-ubsan` | Unit and integration tests under AddressSanitizer with leak detection and UndefinedBehaviorSanitizer |
+| `ctest --preset tsan` | Unit and integration tests under ThreadSanitizer |
+| `ctest --preset fuzz` | Every fuzz target for 60 s each; needs Clang |
+
+Each preset has its own build directory, so configure and build it first, for
+example `cmake --preset tsan && cmake --build --preset tsan`. The sanitizer
+presets also run tests that prove each sanitizer catches a deliberate bug.
+Change the fuzzing time with `-DSCADA_FUZZ_SECONDS=<seconds>` at configure
+time. Where tests live and how to add one is in `tests/README.md`.
 
 ## Checking
 

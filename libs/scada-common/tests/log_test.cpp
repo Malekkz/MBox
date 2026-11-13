@@ -1,10 +1,11 @@
 // Tests of the Logger: queueing, limits, and behaviour with a stalled sink.
 
 #include "scada/common/log.h"
-#include "check.h"
 #include "scada/common/clock.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
+
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -112,44 +114,44 @@ Result<Logger> make_logger(Capture& capture, std::size_t capacity = CAPACITY,
                           {"unit-test", min_level, capacity});
 }
 
-void test_create_validates(scada::test::Checker& checker) {
-    constexpr std::size_t SMALL = 8;
+// Returns the outcome of creating a logger with the given options.
+StatusCode create_code(std::string_view component, std::size_t capacity) {
     Capture capture;
-    const auto code_for = [&capture](std::string_view component,
-                                     std::size_t capacity) {
-        return Logger::create(std::make_unique<CaptureSink>(capture),
-                              {component, LogLevel::INFO, capacity})
-            .status()
-            .code();
-    };
-    checker.expect(Logger::create(nullptr, {"unit-test"}).status().code() ==
-                       StatusCode::INVALID_ARGUMENT,
-                   "create: null sink rejected");
-    checker.expect(code_for("", SMALL) == StatusCode::INVALID_ARGUMENT,
-                   "create: empty component rejected");
-    checker.expect(code_for("bad name", SMALL) == StatusCode::INVALID_ARGUMENT,
-                   "create: component with a space rejected");
-    checker.expect(
-        code_for("line\nbreak", SMALL) == StatusCode::INVALID_ARGUMENT,
-        "create: component with a line break rejected");
-    checker.expect(
-        code_for(std::string(scada::LOG_MAX_COMPONENT_BYTES + 1, 'a'), SMALL) ==
-            StatusCode::INVALID_ARGUMENT,
-        "create: component one byte too long rejected");
-    checker.expect(code_for(std::string(scada::LOG_MAX_COMPONENT_BYTES, 'a'),
-                            SMALL) == StatusCode::OK,
-                   "create: component of the maximum length accepted");
-    checker.expect(code_for("unit-test", 0) == StatusCode::OUT_OF_RANGE,
-                   "create: capacity 0 rejected");
-    checker.expect(code_for("unit-test", scada::LOG_MAX_QUEUE_CAPACITY + 1) ==
-                       StatusCode::OUT_OF_RANGE,
-                   "create: capacity above the maximum rejected");
+    return Logger::create(std::make_unique<CaptureSink>(capture),
+                          {component, LogLevel::INFO, capacity})
+        .status()
+        .code();
 }
 
-void test_delivers_in_order(scada::test::Checker& checker) {
+TEST(Logger, CreateRejectsANullSink) {
+    EXPECT_EQ(Logger::create(nullptr, {"unit-test"}).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(Logger, CreateChecksTheComponentName) {
+    const std::string longest(scada::LOG_MAX_COMPONENT_BYTES, 'a');
+    EXPECT_EQ(create_code("", CAPACITY), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(create_code("bad name", CAPACITY), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(create_code("line\nbreak", CAPACITY),
+              StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(create_code(longest + "a", CAPACITY),
+              StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(create_code(longest, CAPACITY), StatusCode::OK);
+}
+
+TEST(Logger, CreateChecksTheQueueCapacity) {
+    EXPECT_EQ(create_code("unit-test", 0), StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(create_code("unit-test", scada::LOG_MAX_QUEUE_CAPACITY + 1),
+              StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(create_code("unit-test", 1), StatusCode::OK);
+    EXPECT_EQ(create_code("unit-test", scada::LOG_MAX_QUEUE_CAPACITY),
+              StatusCode::OK);
+}
+
+TEST(Logger, DeliversInOrder) {
     Capture capture;
     Result<Logger> logger = make_logger(capture);
-    checker.expect(logger.ok(), "deliver: logger created");
+    EXPECT_TRUE(logger.ok()) << "deliver: logger created";
     if (!logger.ok()) {
         return;
     }
@@ -159,25 +161,24 @@ void test_delivers_in_order(scada::test::Checker& checker) {
     const std::array<LogField, 1> fields{LogField{"CODE", "17"}};
     logger.value().log(LogLevel::ERROR, "write failed", fields);
 
-    checker.expect(logger.value().flush(WAIT).ok(), "deliver: flush succeeds");
+    EXPECT_TRUE(logger.value().flush(WAIT).ok()) << "deliver: flush succeeds";
     const std::vector<std::string> expected{
         "6|unit-test|started",
         "4|unit-test|link down|PEER=ps2|ATTEMPT=3",
         "3|unit-test|write failed|CODE=17",
     };
-    checker.expect(capture.snapshot() == expected,
-                   "deliver: records arrive complete and in order");
-    checker.expect(
-        logger.value().dropped() == 0 && logger.value().sink_failures() == 0,
-        "deliver: nothing dropped or refused");
+    EXPECT_TRUE(capture.snapshot() == expected)
+        << "deliver: records arrive complete and in order";
+    EXPECT_TRUE(logger.value().dropped() == 0 &&
+                logger.value().sink_failures() == 0)
+        << "deliver: nothing dropped or refused";
 }
 
-void test_level_filter(scada::test::Checker& checker) {
+TEST(Logger, LevelFilter) {
     Capture capture;
     Result<Logger> logger = make_logger(capture, CAPACITY, LogLevel::WARNING);
     if (!logger.ok()) {
-        checker.expect(false, "filter: logger created");
-        return;
+        FAIL() << "filter: logger created";
     }
     logger.value().log(LogLevel::DEBUG, "debug");
     logger.value().log(LogLevel::INFO, "info");
@@ -185,198 +186,220 @@ void test_level_filter(scada::test::Checker& checker) {
     logger.value().log(LogLevel::WARNING, "warning");
     logger.value().log(LogLevel::ERROR, "error");
     logger.value().log(LogLevel::CRITICAL, "critical");
-    checker.expect(logger.value().flush(WAIT).ok(), "filter: flush succeeds");
+    EXPECT_TRUE(logger.value().flush(WAIT).ok()) << "filter: flush succeeds";
     const std::vector<std::string> expected{
         "4|unit-test|warning", "3|unit-test|error", "2|unit-test|critical"};
-    checker.expect(capture.snapshot() == expected,
-                   "filter: only records at or above min_level pass");
+    EXPECT_TRUE(capture.snapshot() == expected)
+        << "filter: only records at or above min_level pass";
 }
 
-void test_limits(scada::test::Checker& checker) {
+// Logs one record through a new logger and returns what the sink received
+// for it, without the "<priority>|<component>|" prefix. Returns "<failed>" if
+// the record did not arrive alone.
+std::string deliver_one(std::string_view message,
+                        std::span<const LogField> fields) {
+    const std::string_view prefix = "6|unit-test|";
     Capture capture;
     Result<Logger> logger = make_logger(capture);
     if (!logger.ok()) {
-        checker.expect(false, "limits: logger created");
-        return;
+        return "<failed>";
     }
-    // 1: message one byte too long is cut to the limit.
-    logger.value().log(LogLevel::INFO,
-                       std::string(scada::LOG_MAX_MESSAGE_BYTES + 1, 'm'));
-    // 2: a two-byte character straddling the limit is removed whole.
-    logger.value().log(
-        LogLevel::INFO,
-        std::string(scada::LOG_MAX_MESSAGE_BYTES - 1, 'm') + "\xC3\xA9");
-    // 3: value too long; invalid and reserved keys omitted.
-    logger.value().log(
-        LogLevel::INFO, "fields",
-        {{"GOOD", std::string(scada::LOG_MAX_VALUE_BYTES + 1, 'v')},
-         {"lower", "x"},
-         {"", "x"},
-         {"MESSAGE", "forged"},
-         {"PRIORITY", "0"},
-         {"WITH SPACE", "x"},
-         {"LINE\nBREAK", "x"},
-         {"ALSO_GOOD_2", "y"}});
-    // 4: more fields than the limit.
-    std::vector<LogField> many(scada::LOG_MAX_FIELDS + 3, LogField{"K", "v"});
-    logger.value().log(LogLevel::INFO, "many", many);
-    // 5: everything at its maximum still fits the queue slot.
-    const std::string long_key(scada::LOG_MAX_KEY_BYTES, 'K');
-    const std::string long_value(scada::LOG_MAX_VALUE_BYTES, 'v');
-    std::vector<LogField> full(scada::LOG_MAX_FIELDS,
-                               LogField{long_key, long_value});
-    logger.value().log(LogLevel::INFO,
-                       std::string(scada::LOG_MAX_MESSAGE_BYTES, 'm'), full);
-
-    checker.expect(logger.value().flush(WAIT).ok(), "limits: flush succeeds");
+    logger.value().log(LogLevel::INFO, message, fields);
+    if (!logger.value().flush(WAIT).ok()) {
+        return "<failed>";
+    }
     const std::vector<std::string> records = capture.snapshot();
-    constexpr std::size_t LOGGED = 5;
-    checker.expect(records.size() == LOGGED, "limits: every record arrived");
-    if (records.size() != LOGGED) {
-        return;
+    if (records.size() != 1 || !records.front().starts_with(prefix)) {
+        return "<failed>";
     }
-    const std::string prefix = "6|unit-test|";
-    checker.expect(
-        records[0] == prefix + std::string(scada::LOG_MAX_MESSAGE_BYTES, 'm'),
-        "limits: long message cut to the limit");
-    checker.expect(
-        records[1] ==
-            prefix + std::string(scada::LOG_MAX_MESSAGE_BYTES - 1, 'm'),
-        "limits: message cut at a character boundary");
-    checker.expect(
-        records[2] == prefix + "fields|GOOD=" +
-                          std::string(scada::LOG_MAX_VALUE_BYTES, 'v') +
-                          "|ALSO_GOOD_2=y",
-        "limits: long value cut, invalid and reserved keys omitted");
-    checker.expect(static_cast<std::size_t>(
-                       std::count(records[3].begin(), records[3].end(), '=')) ==
-                       scada::LOG_MAX_FIELDS,
-                   "limits: fields beyond the maximum omitted");
-    std::string full_text =
-        prefix + std::string(scada::LOG_MAX_MESSAGE_BYTES, 'm');
+    return records.front().substr(prefix.size());
+}
+
+TEST(Logger, LongMessageIsCutToTheLimit) {
+    const std::string limit(scada::LOG_MAX_MESSAGE_BYTES, 'm');
+    EXPECT_EQ(deliver_one(limit + "m", {}), limit);
+}
+
+TEST(Logger, MessageIsCutAtACharacterBoundary) {
+    // A two-byte character straddling the limit is removed whole.
+    const std::string before(scada::LOG_MAX_MESSAGE_BYTES - 1, 'm');
+    EXPECT_EQ(deliver_one(before + "\xC3\xA9", {}), before);
+}
+
+TEST(Logger, LongValueIsCutAndBadKeysAreOmitted) {
+    const std::string limit(scada::LOG_MAX_VALUE_BYTES, 'v');
+    const std::string too_long = limit + "v";
+    const std::vector<LogField> fields{
+        {"GOOD", too_long},    {"lower", "x"},      {"", "x"},
+        {"MESSAGE", "forged"}, {"PRIORITY", "0"},   {"WITH SPACE", "x"},
+        {"LINE\nBREAK", "x"},  {"ALSO_GOOD_2", "y"}};
+    EXPECT_EQ(deliver_one("fields", fields),
+              "fields|GOOD=" + limit + "|ALSO_GOOD_2=y");
+}
+
+TEST(Logger, FieldsBeyondTheMaximumAreOmitted) {
+    const std::vector<LogField> many(scada::LOG_MAX_FIELDS + 3,
+                                     LogField{"K", "v"});
+    const std::string record = deliver_one("many", many);
+    EXPECT_EQ(
+        static_cast<std::size_t>(std::count(record.begin(), record.end(), '=')),
+        scada::LOG_MAX_FIELDS);
+}
+
+TEST(Logger, RecordAtEveryMaximumIsDeliveredIntact) {
+    const std::string message(scada::LOG_MAX_MESSAGE_BYTES, 'm');
+    const std::string key(scada::LOG_MAX_KEY_BYTES, 'K');
+    const std::string value(scada::LOG_MAX_VALUE_BYTES, 'v');
+    const std::vector<LogField> full(scada::LOG_MAX_FIELDS,
+                                     LogField{key, value});
+    std::string expected = message;
     for (std::size_t i = 0; i < scada::LOG_MAX_FIELDS; ++i) {
-        full_text.append("|").append(long_key).append("=").append(long_value);
+        expected.append("|").append(key).append("=").append(value);
     }
-    checker.expect(records[4] == full_text,
-                   "limits: a record at every maximum is delivered intact");
+    EXPECT_EQ(deliver_one(message, full), expected);
+}
+
+// Logs `count` numbered records and returns the longest time one call took,
+// in nanoseconds.
+std::int64_t longest_log_call_ns(Logger& logger, std::size_t count) {
+    std::int64_t longest_ns = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::int64_t start = scada::monotonic_ns();
+        logger.log(LogLevel::INFO, "queued", {{"N", std::to_string(i)}});
+        longest_ns = std::max(longest_ns, scada::monotonic_ns() - start);
+    }
+    return longest_ns;
+}
+
+// The stalled-sink scenario: the sink blocks, more records are logged than
+// the queue holds, then the sink recovers.
+constexpr std::size_t STALL_QUEUE_SIZE = 8;
+constexpr std::size_t STALL_EXTRA = 5;
+
+struct StallOutcome {
+    bool sink_stalled = false;         // the worker blocked inside the sink
+    std::int64_t longest_call_ns = 0;  // slowest log call during the stall
+    std::uint64_t dropped = 0;
+    std::size_t delivered_during_stall = 0;
+    StatusCode flush_during_stall = StatusCode::OK;
+    StatusCode flush_after_recovery = StatusCode::INTERNAL;
+    std::vector<std::string> records;  // everything the sink received
+};
+
+StallOutcome run_stalled_sink_scenario() {
+    constexpr std::chrono::milliseconds SHORT_WAIT{20};
+    StallOutcome outcome;
+    Capture capture;
+    capture.set_stalled(true);
+    Result<Logger> logger = make_logger(capture, STALL_QUEUE_SIZE);
+    if (!logger.ok()) {
+        return outcome;
+    }
+    // The worker takes the first record and blocks inside the sink; from
+    // then on the queue is empty and nothing is delivered.
+    logger.value().log(LogLevel::INFO, "first");
+    outcome.sink_stalled = capture.wait_for_entered(1);
+
+    outcome.longest_call_ns =
+        longest_log_call_ns(logger.value(), STALL_QUEUE_SIZE + STALL_EXTRA);
+    outcome.dropped = logger.value().dropped();
+    outcome.delivered_during_stall = capture.snapshot().size();
+    outcome.flush_during_stall = logger.value().flush(SHORT_WAIT).code();
+
+    capture.set_stalled(false);
+    outcome.flush_after_recovery = logger.value().flush(WAIT).code();
+    outcome.records = capture.snapshot();
+    return outcome;
 }
 
 // Acceptance criterion of issue P0-06: logging never blocks the caller for
 // more than a bounded time, shown with a stalled sink.
-void test_stalled_sink(scada::test::Checker& checker) {
-    constexpr std::size_t QUEUE_SIZE = 8;
-    constexpr std::size_t EXTRA = 5;
+TEST(Logger, StalledSinkNeverBlocksTheCaller) {
     // Far above what a call needs, far below "blocked": the sink stays
     // stalled for the whole measurement, so a call that waited for it would
-    // never return at all.
+    // never return at all, and the scenario would not finish.
     constexpr std::int64_t BOUND_NS = scada::NANOSECONDS_PER_SECOND;
-    constexpr std::chrono::milliseconds SHORT_WAIT{20};
-
-    Capture capture;
-    capture.set_stalled(true);
-    Result<Logger> logger = make_logger(capture, QUEUE_SIZE);
-    if (!logger.ok()) {
-        checker.expect(false, "stalled: logger created");
-        return;
-    }
-
-    // The worker takes the first record and blocks inside the sink; from
-    // then on the queue is empty and nothing is delivered.
-    logger.value().log(LogLevel::INFO, "first");
-    checker.expect(capture.wait_for_entered(1), "stalled: sink is stalled");
-
-    std::int64_t longest_ns = 0;
-    for (std::size_t i = 0; i < QUEUE_SIZE + EXTRA; ++i) {
-        const std::int64_t start = scada::monotonic_ns();
-        logger.value().log(LogLevel::INFO, "queued",
-                           {{"N", std::to_string(i)}});
-        longest_ns = std::max(longest_ns, scada::monotonic_ns() - start);
-    }
-    // Reaching this line at all shows that no call waited for the sink.
-    checker.expect(longest_ns < BOUND_NS,
-                   "stalled: every log call returned within the bound");
-    checker.expect(logger.value().dropped() == EXTRA,
-                   "stalled: exactly the records beyond the capacity dropped");
-    checker.expect(capture.snapshot().empty(),
-                   "stalled: nothing delivered while the sink is stalled");
-    checker.expect(
-        logger.value().flush(SHORT_WAIT).code() == StatusCode::TIMEOUT,
-        "stalled: flush reports a timeout instead of waiting");
-
-    capture.set_stalled(false);
-    checker.expect(logger.value().flush(WAIT).ok(),
-                   "stalled: queue delivered after the sink recovers");
-    std::vector<std::string> expected{"6|unit-test|first"};
-    for (std::size_t i = 0; i < QUEUE_SIZE; ++i) {
-        expected.push_back("6|unit-test|queued|N=" + std::to_string(i));
-    }
-    expected.emplace_back(
-        "4|unit-test|log records dropped: the queue was full|DROPPED=" +
-        std::to_string(EXTRA));
-    checker.expect(capture.snapshot() == expected,
-                   "stalled: oldest records kept, then the loss is reported");
+    const StallOutcome outcome = run_stalled_sink_scenario();
+    ASSERT_TRUE(outcome.sink_stalled);
+    EXPECT_LT(outcome.longest_call_ns, BOUND_NS);
+    // Exactly the records beyond the capacity are dropped.
+    EXPECT_EQ(outcome.dropped, STALL_EXTRA);
+    EXPECT_EQ(outcome.delivered_during_stall, 0U);
+    // flush reports a timeout instead of waiting for the sink.
+    EXPECT_EQ(outcome.flush_during_stall, StatusCode::TIMEOUT);
 }
 
-void test_destructor_delivers(scada::test::Checker& checker) {
+TEST(Logger, StalledSinkGetsTheQueueAndTheLossReportAfterRecovery) {
+    const StallOutcome outcome = run_stalled_sink_scenario();
+    ASSERT_TRUE(outcome.sink_stalled);
+    EXPECT_EQ(outcome.flush_after_recovery, StatusCode::OK);
+    // The oldest records are kept, then the loss is reported.
+    std::vector<std::string> expected{"6|unit-test|first"};
+    for (std::size_t i = 0; i < STALL_QUEUE_SIZE; ++i) {
+        expected.push_back("6|unit-test|queued|N=" + std::to_string(i));
+    }
+    expected.push_back(
+        "4|unit-test|log records dropped: the queue was full|DROPPED=" +
+        std::to_string(STALL_EXTRA));
+    EXPECT_EQ(outcome.records, expected);
+}
+
+TEST(Logger, DestructorDelivers) {
     constexpr std::size_t PENDING = 20;
     Capture capture;
     {
         Result<Logger> logger = make_logger(capture);
         if (!logger.ok()) {
-            checker.expect(false, "destructor: logger created");
-            return;
+            FAIL() << "destructor: logger created";
         }
         for (std::size_t i = 0; i < PENDING; ++i) {
             logger.value().log(LogLevel::INFO, "pending");
         }
     }
-    checker.expect(capture.snapshot().size() == PENDING,
-                   "destructor: queued records are delivered first");
+    EXPECT_TRUE(capture.snapshot().size() == PENDING)
+        << "destructor: queued records are delivered first";
 }
 
-void test_sink_failure_counted(scada::test::Checker& checker) {
+TEST(Logger, SinkFailureCounted) {
     Capture capture;
     capture.set_failing(true);
     Result<Logger> logger = make_logger(capture);
     if (!logger.ok()) {
-        checker.expect(false, "failure: logger created");
-        return;
+        FAIL() << "failure: logger created";
     }
     logger.value().log(LogLevel::INFO, "one");
     logger.value().log(LogLevel::INFO, "two");
-    checker.expect(logger.value().flush(WAIT).ok(), "failure: flush succeeds");
-    checker.expect(logger.value().sink_failures() == 2,
-                   "failure: refused records are counted");
+    EXPECT_TRUE(logger.value().flush(WAIT).ok()) << "failure: flush succeeds";
+    EXPECT_TRUE(logger.value().sink_failures() == 2)
+        << "failure: refused records are counted";
 }
 
-void test_moved_from(scada::test::Checker& checker) {
+TEST(Logger, MovedFrom) {
     Capture capture;
     Result<Logger> source = make_logger(capture);
     if (!source.ok()) {
-        checker.expect(false, "move: logger created");
-        return;
+        FAIL() << "move: logger created";
     }
     Logger target = std::move(source).value();
     // NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what is tested
     source.value().log(LogLevel::INFO, "discarded");
-    checker.expect(
-        source.value().flush(WAIT).ok() && source.value().dropped() == 0,
-        "move: a moved-from logger is inert");
+    EXPECT_TRUE(source.value().flush(WAIT).ok() &&
+                source.value().dropped() == 0)
+        << "move: a moved-from logger is inert";
     target.log(LogLevel::INFO, "kept");
-    checker.expect(target.flush(WAIT).ok(), "move: flush succeeds");
-    checker.expect(
-        capture.snapshot() == std::vector<std::string>{"6|unit-test|kept"},
-        "move: the target logs, the source discards");
+    EXPECT_TRUE(target.flush(WAIT).ok()) << "move: flush succeeds";
+    EXPECT_TRUE(capture.snapshot() ==
+                std::vector<std::string>{"6|unit-test|kept"})
+        << "move: the target logs, the source discards";
 }
 
-void test_concurrent_callers(scada::test::Checker& checker) {
+TEST(Logger, ConcurrentCallers) {
     constexpr std::size_t THREADS = 4;
     constexpr std::size_t PER_THREAD = 200;
     Capture capture;
     Result<Logger> logger = make_logger(capture, THREADS * PER_THREAD);
     if (!logger.ok()) {
-        checker.expect(false, "concurrent: logger created");
-        return;
+        FAIL() << "concurrent: logger created";
     }
     {
         Logger& shared = logger.value();
@@ -394,12 +417,12 @@ void test_concurrent_callers(scada::test::Checker& checker) {
             });
         }
     }
-    checker.expect(logger.value().flush(WAIT).ok(),
-                   "concurrent: flush succeeds");
+    EXPECT_TRUE(logger.value().flush(WAIT).ok())
+        << "concurrent: flush succeeds";
     const std::vector<std::string> records = capture.snapshot();
-    checker.expect(
-        records.size() == THREADS * PER_THREAD && logger.value().dropped() == 0,
-        "concurrent: every record delivered");
+    EXPECT_TRUE(records.size() == THREADS * PER_THREAD &&
+                logger.value().dropped() == 0)
+        << "concurrent: every record delivered";
     // Per thread, records keep the order in which they were logged.
     bool ordered = true;
     for (std::size_t thread = 0; thread < THREADS; ++thread) {
@@ -414,21 +437,7 @@ void test_concurrent_callers(scada::test::Checker& checker) {
         }
         ordered = ordered && next == PER_THREAD;
     }
-    checker.expect(ordered, "concurrent: per-thread order is kept");
+    EXPECT_TRUE(ordered) << "concurrent: per-thread order is kept";
 }
 
 }  // namespace
-
-int main() {
-    scada::test::Checker checker;
-    test_create_validates(checker);
-    test_delivers_in_order(checker);
-    test_level_filter(checker);
-    test_limits(checker);
-    test_stalled_sink(checker);
-    test_destructor_delivers(checker);
-    test_sink_failure_counted(checker);
-    test_moved_from(checker);
-    test_concurrent_callers(checker);
-    return checker.exit_code();
-}
