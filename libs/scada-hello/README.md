@@ -8,8 +8,8 @@ product.
 
 - Returns a fixed greeting line.
 - Implements the whole `scada-hello` command, including argument handling and
-  the service loop (readiness, watchdog, stop), so that the executable
-  contains no logic.
+  the service loop of `--service` (readiness, watchdog, stop), so that the
+  executable contains no logic.
 
 ## Interfaces
 
@@ -37,5 +37,5 @@ std::cout << scada::hello::greeting() << '\n';
 ctest --preset dev -R scada-hello-unit-test
 ```
 
-The service loop needs a real process and is tested in
-`services/scada-hello/tests`.
+The unit tests are in `tests/hello_test.cpp` (GoogleTest). The service loop
+needs a real process and is tested in `tests/integration`.

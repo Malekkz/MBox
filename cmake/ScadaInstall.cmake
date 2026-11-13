@@ -32,14 +32,16 @@ set(SCADA_SERVICE_UNIT_TEMPLATE
 set(SCADA_SERVICE_SYSUSERS_TEMPLATE
   "${CMAKE_CURRENT_LIST_DIR}/../deploy/sysusers.d/scada-service.conf.in")
 
-# scada_install_service(<name> DESCRIPTION <text> WATCHDOG_SEC <seconds>)
+# scada_install_service(<name> DESCRIPTION <text> WATCHDOG_SEC <seconds>
+#                       [ARGUMENTS <arguments...>])
 #
 # Generates and installs what systemd needs to run the executable <name> as a
 # service (reference 4.2): the unit <name>.service from the common template,
 # and the definition of the system user <name>, member of the `scada` group.
-# The service must report readiness and feed the watchdog (libscada-service).
+# The unit starts the executable with ARGUMENTS. The service must report
+# readiness and feed the watchdog (libscada-service).
 function(scada_install_service name)
-  cmake_parse_arguments(PARSE_ARGV 1 arg "" "DESCRIPTION;WATCHDOG_SEC" "")
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "DESCRIPTION;WATCHDOG_SEC" "ARGUMENTS")
   if(arg_UNPARSED_ARGUMENTS OR NOT arg_DESCRIPTION
      OR NOT arg_WATCHDOG_SEC MATCHES "^[1-9][0-9]*$")
     message(FATAL_ERROR "scada_install_service(${name}): bad arguments")
@@ -51,7 +53,17 @@ function(scada_install_service name)
   set(SCADA_SERVICE_NAME "${name}")
   set(SCADA_SERVICE_DESCRIPTION "${arg_DESCRIPTION}")
   set(SCADA_SERVICE_WATCHDOG_SEC "${arg_WATCHDOG_SEC}")
-  set(SCADA_SERVICE_EXECUTABLE "/${SCADA_INSTALL_BINDIR}/${name}")
+  # The command line of the unit: words separated by spaces. An argument that
+  # systemd would split or expand is refused instead of quoted.
+  set(command "/${SCADA_INSTALL_BINDIR}/${name}")
+  foreach(argument IN LISTS arg_ARGUMENTS)
+    if(NOT argument MATCHES "^[A-Za-z0-9_=./:-]+$")
+      message(FATAL_ERROR
+        "scada_install_service(${name}): unsupported argument '${argument}'")
+    endif()
+    string(APPEND command " ${argument}")
+  endforeach()
+  set(SCADA_SERVICE_COMMAND "${command}")
 
   set(unit "${CMAKE_CURRENT_BINARY_DIR}/${name}.service")
   configure_file("${SCADA_SERVICE_UNIT_TEMPLATE}" "${unit}" @ONLY)

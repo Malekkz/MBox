@@ -159,7 +159,55 @@ Consequences:
 - Project code must not use the `annotate` attribute for anything else.
 - Blocking calls, system calls and C++ stream output are not on the first deny-list. They are added as the real-time code appears (phase 1, `libscada-tag`).
 
-## D-10: The staged tree is an image of the root filesystem
+## D-10: GoogleTest as the unit test framework
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: the tests need one framework before any real code is written; its licence must be permissive.
+Options: GoogleTest 1.17.0 (BSD-3-Clause); Catch2 3 (BSL-1.0); doctest (MIT); no framework.
+Decision: GoogleTest 1.17.0, without GoogleMock. `cmake/ScadaTesting.cmake` downloads the release archive at configure time, checks its SHA-256 hash and builds it inside the build tree. `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<directory>` builds from an unpacked copy without network access. Its headers are treated as system headers.
+Reason: it is the most widely used C++ framework, so reviewers and tools know it, and it has death tests and per-test timing that the later phases need. It must be built from source in the tree because a sanitizer needs every object in the process instrumented, and a cross build needs it for the target architecture; a copy installed on the machine gives neither.
+Consequences:
+- The first configuration of a build directory needs network access or the override above.
+- GoogleTest is test-only and is not installed or shipped. The licence report (P0-07) must list it: GoogleTest 1.17.0, BSD-3-Clause, test-only.
+- Its macro `GTEST_TEST_`, which `TEST` and `TEST_F` expand to, registers each test with `new`. The banned-function check (D-8) does not report that one expression; a `new` anywhere else in a test file is still reported. Without this, every test would need a suppression.
+- After a fatal assertion such as `ASSERT_TRUE(value.has_value())`, clang-tidy still reports the access to the optional, because it cannot see through the macro. Tests write `if (!value.has_value()) { FAIL() << ...; }` instead, or compare the optional itself.
+
+## D-11: Test kinds, labels and where tests live
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: `CLAUDE.md` names unit, integration and performance tests but not how the build tells them apart.
+Options: one CTest test per test case or per executable; labels or separate build trees per kind.
+Decision:
+- `scada_add_test(<name> KIND unit|integration|perf ...)` creates one GoogleTest executable, registered as one CTest test with the kind as its label and a time limit of 60 s, 300 s or 600 s.
+- Unit tests live in `<component>/tests/`. Integration tests live in `tests/integration/`, performance tests in `tests/perf/`, shared test code in `tests/support/`.
+- `ctest --preset dev` runs unit and integration tests and prints the time per label. `ctest --preset unit` and `ctest --preset integration` run one kind. Performance tests are built everywhere but run only by `ctest --preset perf`.
+- Integration tests start processes with `scada::test::ChildProcess`, which waits in `poll()` for output or exit with a timeout. The command to start is passed in an environment variable so that a cross build can put the emulator in front.
+Reason: one CTest test per executable needs no test discovery at build time, which a cross build without an emulator cannot do. Performance figures from a debug build mean nothing, so no other preset runs them.
+Consequences: CTest reports an executable, not a test case; the case that failed is in the test output, which the presets print on failure. `ChildProcess` uses `pidfd_open`, so the tests need Linux 5.3 or newer.
+
+## D-12: Sanitizer and fuzz builds
+Date: 2026-11-13
+Phase / issue: 0, #4
+Status: accepted
+
+Context: section 13 of the coding standard requires the sanitizer runs and fuzz targets, but not how they are built.
+Options: sanitizer flags per target or for the whole tree; fuzz targets built only in the fuzz build or in every build.
+Decision:
+- The cache variable `SCADA_SANITIZER` selects `address-undefined`, `thread` or `fuzz`; the presets `asan-ubsan`, `tsan` and `fuzz` set it. The flags apply to the whole build tree, including GoogleTest. Every finding ends the process with a failure (`-fno-sanitize-recover=all`). Configuration stops if the runtime libraries are missing, or if a sanitizer is combined with `SCADA_HARDENING`.
+- `asan-ubsan` and `tsan` are debug builds with the default compiler. `fuzz` uses Clang (`clang++` on `PATH`), because libFuzzer is part of Clang, with `RelWithDebInfo`.
+- `scada_add_fuzz_target(<name> ...)` creates a fuzz target with its seed corpus in `corpus/<name>/` next to it. In the `fuzz` build, the test `<name>` (label `fuzz`) runs it for `SCADA_FUZZ_SECONDS` (default 60 s) with a 10 s limit per input. In every other build the same target is linked with a driver that replays the seed corpus once, as the unit test `<name>-corpus`.
+- A fuzz target lives in `<component>/fuzz/`. Inputs the fuzzer finds and the inputs that made it fail are written to the build tree, never to the source tree.
+- Deliberate bugs that prove the tools work (`tests/sanitizer-fixtures/`, the toy parser in `tests/fuzz-sample/`) are test-only, are not installed, and their tests pass only if the tool reports the bug and the process fails. The fixtures are built only in the sanitizer builds, and the `check` target excludes them, as it excludes its own fixtures; the toy parser is checked, with one suppression on the planted bug.
+- A fuzz target's entry point carries `// NOLINTNEXTLINE(readability-identifier-naming)`, because libFuzzer fixes the name `LLVMFuzzerTestOneInput`.
+- `.clang-format` no longer wraps a comment that starts with `NOLINT`, so that a suppression keeps its check name and reason on one line (coding standard, section 14).
+Reason: a sanitizer misses errors in objects that are not instrumented. Replaying the corpus in every build keeps fuzz targets compiling with GCC and on ARM64, and turns every saved input into a regression test.
+Consequences: the sanitizer and fuzz builds are x86-64 presets, as section 13 requires; there are no ARM64 variants. Fuzzing needs Clang with its runtime libraries installed. A crash found by fuzzing is fixed together with adding the failing input to the seed corpus.
+
+## D-13: The staged tree is an image of the root filesystem
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
@@ -174,7 +222,7 @@ Decision:
 Reason: one command with one prefix gives the whole layout, and the tree can be copied to `/` or wrapped by any package format. `sysusers.d` is part of systemd, which the design already requires, so no distribution's user tool is needed.
 Consequences: the build cannot be installed to a prefix such as `/usr/local`. A distribution that builds systemd with other directories sets the two cache variables. Ownership and modes of the data directories, and the permissions of `/dev/shm/scada`, are still to be set, by the service issues and the tag database contract.
 
-## D-11: The systemd notification protocol is implemented in `libscada-service`
+## D-14: The systemd notification protocol is implemented in `libscada-service`
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
@@ -184,13 +232,13 @@ Options: link `libsystemd` (`sd_notify`); implement the documented datagram prot
 Decision:
 - A new library, `libscada-service`, implements the client side of the protocol with plain sockets. It also holds `NotifyListener`, the service manager's side, which tests use in place of systemd.
 - Values of `NOTIFY_SOCKET`, `WATCHDOG_USEC` and `WATCHDOG_PID` are validated as untrusted input. A service refuses to start on an invalid value instead of running without notification.
-- Until P0-06: the library carries its own `Fd` owner type, and returns `NotifyStatus` and `std::optional` instead of `Status` and `Result<T>`. P0-06 moves `Fd` to `libscada-common` and converts the return types.
+- Until P0-06: the library carries its own `Fd` owner type (the test support library has a second one, `UniqueFd`), and returns `NotifyStatus` and `std::optional` instead of `Status` and `Result<T>`. P0-06 moves `Fd` to `libscada-common` and converts the return types.
 - `bind()` needs a `sockaddr*` for a `sockaddr_un`. The conversion goes through `void*` in one function, `bind_unix`, used only by `NotifyListener`. Sending uses `sendmsg()`, which takes the address as `void*` and needs no conversion.
-- The environment parser has unit tests for invalid, oversized and overflowing values but no fuzz target, because the fuzzing set-up is part of issue P0-03. The fuzz target is added there.
+- The environment parser has unit tests for invalid, oversized and overflowing values and the fuzz target `notify_environment_fuzz`.
 Reason: the protocol is a few lines, is documented as stable by systemd, and avoids a dependency before the licence report exists. A wrapper would report readiness for a service that is not ready.
 Consequences: only the messages the services need are supported (`READY`, `WATCHDOG`, `STOPPING`, `STATUS`); file descriptor passing and `sd_notify` over other socket types are not.
 
-## D-12: Service unit template and the watchdog test hook
+## D-15: Service unit template and the watchdog test hook
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
@@ -198,15 +246,16 @@ Status: accepted
 Context: reference 4.2 fixes `Type=notify`, `WatchdogSec`, one user per service and three sandboxing options. It leaves the watchdog interval, the restart policy and the way to hang a service deliberately open.
 Options, restart policy: `Restart=on-failure` with systemd's default rate limit; full backoff and restart limit of reference 14.4 now. Options, hang: a signal; a command-line option; a debug build only.
 Decision:
-- All units are generated from `deploy/systemd/scada-service.service.in` by `scada_install_service(<name> DESCRIPTION <text> WATCHDOG_SEC <seconds>)`. The watchdog interval is set per service; `scada-hello` uses 10 s. Services feed the watchdog at half the interval.
+- All units are generated from `deploy/systemd/scada-service.service.in` by `scada_install_service(<name> DESCRIPTION <text> WATCHDOG_SEC <seconds> [ARGUMENTS <arguments...>])`. The watchdog interval is set per service; `scada-hello` uses 10 s. Services feed the watchdog at half the interval.
 - The template sets `Restart=on-failure`, `RestartSec=1`, and leaves systemd's default rate limit (5 starts in 10 s) in place. Backoff, the restart limit and the system alarm of reference 14.4 are set when supervision is built.
 - The template sets `ProtectSystem=strict`, `NoNewPrivileges=yes`, `PrivateTmp=yes` and empty `CapabilityBoundingSet=` and `AmbientCapabilities=`. A service that needs a writable directory or a capability adds it to its own unit when it is built. `NotifyAccess=main` accepts notifications from the main process only.
-- `scada-hello` hangs its main loop on `SIGUSR1`. Only `scada-hello` has this hook; it is not part of the template or of `libscada-service`.
+- `scada-hello` runs as a service only with `--service`; without arguments it still prints the greeting and exits, which the unit, integration and performance tests of issue #4 rely on. As a service it hangs its main loop on `SIGUSR1`. Only `scada-hello` has this hook; it is not part of the template or of `libscada-service`.
+- The shared test class `scada::test::ChildProcess` gains `send_signal` and `wait_for_signal_exit`, which the service tests need.
 - The test `install-units-verify` runs `systemd-analyze verify --root=<staged tree> --recursive-errors=no`, which needs systemd 250 or newer on the build machine. The test fails if `systemd-analyze` is missing.
 Reason: the template holds what every service shares; values that depend on the service stay with the service. A signal needs no change to the unit to trigger a hang on a test machine.
 Consequences: every service unit starts from the strictest sandbox and widens it explicitly. Product services get no hang hook (reference 13.6: no debug interfaces in release builds).
 
-## D-13: Include check and POSIX headers
+## D-16: Include check and POSIX headers
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted

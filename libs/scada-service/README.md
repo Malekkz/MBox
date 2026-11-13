@@ -10,7 +10,7 @@ What a process needs to run as a systemd service of type `notify`
   service manager. Sending never blocks.
 - Provides `NotifyListener`, the service manager's side of the protocol, so
   tests can start a service and observe it without systemd.
-- It does not link `libsystemd` (`docs/decisions.md`, D-11), and it does not
+- It does not link `libsystemd` (`docs/decisions.md`, D-14), and it does not
   decide when to feed the watchdog; the service's main loop does.
 
 ## Interfaces
@@ -44,8 +44,10 @@ service's `CMakeLists.txt` (`cmake/ScadaInstall.cmake`).
 ## How to test it
 
 ```
-ctest --preset dev -R scada-service-unit-test
+ctest --preset dev -R 'scada-service-unit-test|notify_environment_fuzz'
 ```
 
-The test uses `NotifyListener` on an abstract-namespace socket; it needs no
-systemd and creates no files.
+The unit test uses `NotifyListener` on an abstract-namespace socket; it needs
+no systemd and creates no files. `fuzz/notify_environment_fuzz.cpp` is the
+fuzz target of the environment parser; its seed corpus is replayed as a unit
+test, and it is fuzzed in the `fuzz` build.

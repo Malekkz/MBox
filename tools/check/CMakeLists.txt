@@ -50,12 +50,15 @@ set(scada_check_tools
   --clang-tidy "${SCADA_CLANG_TIDY}"
   --clang-query "${SCADA_CLANG_QUERY}")
 
-# The fixtures break the rules on purpose; the tests below cover them.
+# The fixtures break the rules on purpose; the tests below cover them. The
+# sanitizer fixtures are deliberate bugs too, and exist only in the sanitizer
+# builds (tests/sanitizer-fixtures/CMakeLists.txt).
 add_custom_target(check
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scada_check.py"
     --source-dir "${PROJECT_SOURCE_DIR}"
     --build-dir "${PROJECT_BINARY_DIR}"
     --exclude tools/check/tests/fixtures
+    --exclude tests/sanitizer-fixtures
     ${scada_check_tools}
   COMMENT "Checking format, lint, banned functions and SCADA_RT"
   USES_TERMINAL
@@ -68,4 +71,6 @@ if(BUILD_TESTING)
   add_test(NAME scada-check-test
     COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test.py" ${scada_check_tools})
+  # About 15 s, most of it in clang-tidy; longer on a loaded machine.
+  set_tests_properties(scada-check-test PROPERTIES LABELS unit TIMEOUT 300)
 endif()

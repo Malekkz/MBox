@@ -24,9 +24,10 @@ inline constexpr std::string_view HANG_STATUS = "Main loop hung on request";
 // without the program name and are treated as untrusted. Normal output goes to
 // `out`, diagnostics to `err`. Returns the process exit code.
 //
-// With `--help` it prints the usage text and returns EXIT_OK. With unknown or
-// surplus arguments it returns EXIT_USAGE. With no arguments it runs as a
-// service and blocks until it is told to stop:
+// With no arguments it prints the greeting and returns EXIT_OK. With `--help`
+// it prints the usage text and returns EXIT_OK. With unknown or surplus
+// arguments it returns EXIT_USAGE. With `--service` it runs as a service and
+// blocks until it is told to stop:
 // - it prints the greeting, reports readiness to the service manager named in
 //   the environment (NOTIFY_SOCKET), and feeds the watchdog at half the
 //   interval in WATCHDOG_USEC;
@@ -37,8 +38,9 @@ inline constexpr std::string_view HANG_STATUS = "Main loop hung on request";
 //   cannot be reported.
 // Without a service manager it runs the same way and sends nothing.
 //
-// It blocks SIGTERM, SIGINT and SIGUSR1 for the calling thread and leaves
-// them blocked. Call it from the main thread before starting any other.
+// As a service it blocks SIGTERM, SIGINT and SIGUSR1 for the calling thread
+// and leaves them blocked. Call it from the main thread before starting any
+// other.
 [[nodiscard]] int run(std::span<const std::string_view> args, std::ostream& out,
                       std::ostream& err);
 

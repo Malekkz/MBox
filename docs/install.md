@@ -70,8 +70,8 @@ systemctl start scada-hello.service
 systemctl status scada-hello.service
 ```
 
-`systemctl start` returns only after the service has reported readiness,
-because the unit is of type `notify`. The status shows `active (running)` and
+The unit runs `scada-hello --service`. `systemctl start` returns only after
+the service has reported readiness, because the unit is of type `notify`. The status shows `active (running)` and
 the user `scada-hello`. `journalctl -u scada-hello.service` shows the line
 `Hello from libscada-hello`.
 

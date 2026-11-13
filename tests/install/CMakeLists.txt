@@ -30,3 +30,9 @@ add_test(NAME install-units-verify
     -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_units.cmake")
 set_tests_properties(install-units-verify PROPERTIES
   FIXTURES_REQUIRED staged-tree)
+
+set_tests_properties(install-stage install-layout install-units-verify
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    ENVIRONMENT "${SCADA_TEST_ENVIRONMENT}")

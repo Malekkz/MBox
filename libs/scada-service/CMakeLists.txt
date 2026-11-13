@@ -3,4 +3,5 @@ scada_add_library(scada-service
 
 if(BUILD_TESTING)
   add_subdirectory(tests)
+  add_subdirectory(fuzz)
 endif()

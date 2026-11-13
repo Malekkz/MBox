@@ -23,21 +23,21 @@ using scada::service::NotifySettings;
 using scada::service::NotifyStatus;
 
 constexpr std::string_view USAGE =
-    "Usage: scada-hello [--help]\n"
+    "Usage: scada-hello [--help | --service]\n"
     "\n"
-    "Runs as a systemd notify service: prints a greeting, reports readiness,\n"
-    "and feeds the watchdog until it is stopped. Proves the build, the\n"
-    "library-plus-thin-executable pattern and the service skeleton; it has no\n"
-    "other function.\n"
+    "Prints a greeting. Proves the build, the library-plus-thin-executable\n"
+    "pattern and the service skeleton; it has no other function.\n"
     "\n"
     "Options:\n"
-    "  --help  Show this text and exit.\n"
+    "  --help     Show this text and exit.\n"
+    "  --service  Run as a systemd notify service: print the greeting, report\n"
+    "             readiness, and feed the watchdog until stopped.\n"
     "\n"
-    "Signals:\n"
+    "Signals (with --service):\n"
     "  SIGTERM, SIGINT  Stop and exit with code 0.\n"
     "  SIGUSR1          Hang the main loop on purpose, to test the watchdog.\n"
     "\n"
-    "Environment (set by systemd):\n"
+    "Environment (with --service, set by systemd):\n"
     "  NOTIFY_SOCKET    Socket for readiness and watchdog messages.\n"
     "  WATCHDOG_USEC    Watchdog interval in microseconds; the service feeds\n"
     "                   the watchdog at half this interval.\n"
@@ -155,6 +155,10 @@ std::string_view greeting() noexcept {
 int run(std::span<const std::string_view> args, std::ostream& out,
         std::ostream& err) {
     if (args.empty()) {
+        out << greeting() << '\n';
+        return EXIT_OK;
+    }
+    if (args.size() == 1 && args.front() == "--service") {
         return serve(out, err);
     }
     if (args.size() == 1 && args.front() == "--help") {

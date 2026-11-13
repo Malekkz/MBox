@@ -10,7 +10,7 @@ Description=@SCADA_SERVICE_DESCRIPTION@
 # restarts a hung process as well as a crashed one (reference 4.2).
 Type=notify
 NotifyAccess=main
-ExecStart=@SCADA_SERVICE_EXECUTABLE@
+ExecStart=@SCADA_SERVICE_COMMAND@
 WatchdogSec=@SCADA_SERVICE_WATCHDOG_SEC@
 Restart=on-failure
 RestartSec=1

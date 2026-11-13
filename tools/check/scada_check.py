@@ -81,10 +81,16 @@ _RT = _ANY + ', hasAncestor(functionDecl(hasAttr("attr::Annotate")))'
 
 _ALLOCATION = ("malloc", "calloc", "realloc", "free", "aligned_alloc")
 
+# GoogleTest registers each test with a `new` written in the body of this
+# macro, which TEST and TEST_F expand to. The expression is the framework's
+# code, not ours, but it is expanded in our files, so _ANY does not cover it.
+# A `new` in an argument of the macro, or in the test body, is still reported.
+_FRAMEWORK_NEW = 'unless(isExpandedFromMacro("GTEST_TEST_"))'
+
 # Coding standard, section 12. One rule per table row where possible; the
 # message names the replacement the table gives.
 BANNED_RULES = [
-    Rule("scada-banned", f"cxxNewExpr({_ANY})",
+    Rule("scada-banned", f"cxxNewExpr({_ANY}, {_FRAMEWORK_NEW})",
          "'new' is banned; use a value, std::make_unique or a container"),
     Rule("scada-banned", f"cxxDeleteExpr({_ANY})",
          "'delete' is banned; the owner's destructor releases the resource"),
