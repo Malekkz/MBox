@@ -26,7 +26,7 @@ scada_dependencies(
 install(FILES
   "${SCADA_REPORT_DIR}/licence-report.md"
   "${SCADA_REPORT_DIR}/sbom.cdx.json"
-  DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+  DESTINATION "${SCADA_INSTALL_DOCDIR}")
 
 if(BUILD_TESTING)
   include(ScadaTesting)
@@ -35,6 +35,7 @@ endif()
 add_subdirectory(libs)
 add_subdirectory(services)
 add_subdirectory(tools)
+add_subdirectory(deploy)
 add_subdirectory(tests)
 if(BUILD_TESTING)
   add_subdirectory(cmake/tests)

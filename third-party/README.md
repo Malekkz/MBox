@@ -1,7 +1,7 @@
 # third-party
 
 The list of third-party dependencies, the licence allow-list, and any vendored
-third-party code (reference 13.6, 16.3; decisions D-16 to D-18).
+third-party code (reference 13.6, 16.3; decisions D-20 to D-22).
 
 | File | Content |
 | --- | --- |
@@ -21,7 +21,7 @@ of the two files changes. It stops the build when:
   (`Threads::Threads`, `pthread`, `m`, `dl`, `rt`, `atomic`).
 
 On success it writes two files to `build/<preset>/reports/`, and
-`cmake --install` copies them to `share/doc/scada/`:
+`cmake --install` copies them to `usr/share/doc/scada/` of the staged tree:
 
 | File | Content |
 | --- | --- |
@@ -67,7 +67,7 @@ Reviewers must check these.
 | `link_names` | no | Names as written in `target_link_libraries`: CMake targets or library names. |
 
 Unknown keys are errors. The compiler, its runtime libraries and the C library
-are part of the toolchain and are not listed (D-17).
+are part of the toolchain and are not listed (D-21).
 
 ## Changing the allow-list
 

@@ -2,6 +2,7 @@
 # pattern (CLAUDE.md, How work is organised).
 
 include(ScadaCompileOptions)
+include(ScadaInstall)
 
 # scada_add_library(<name> SOURCES <files...> [DEPENDS <targets...>])
 #
@@ -31,8 +32,8 @@ endfunction()
 
 # scada_add_executable(<name> SOURCES <files...> [DEPENDS <targets...>])
 #
-# Creates an executable and installs it to the binary directory of the install
-# tree.
+# Creates an executable and installs it to the binary directory of the staged
+# tree (ScadaInstall.cmake).
 function(scada_add_executable name)
   cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;DEPENDS")
   if(arg_UNPARSED_ARGUMENTS OR NOT arg_SOURCES)
@@ -42,7 +43,7 @@ function(scada_add_executable name)
   add_executable(${name} ${arg_SOURCES})
   target_link_libraries(${name} PRIVATE ${arg_DEPENDS})
   scada_target_defaults(${name})
-  install(TARGETS ${name} RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(TARGETS ${name} RUNTIME DESTINATION "${SCADA_INSTALL_BINDIR}")
 endfunction()
 
 # scada_add_test(<name> KIND <unit|integration|perf> SOURCES <files...>

@@ -262,7 +262,68 @@ Decision:
 Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
 Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
 
-## D-16: Dependency list and its check are plain JSON and CMake
+## D-16: The staged tree is an image of the root filesystem
+Date: 2026-11-13
+Phase / issue: 0, #6
+Status: accepted
+
+Context: reference 4.4 fixes absolute paths in `/usr`, `/etc` and `/var`, and `cmake --install build/<preset> --prefix stage` must produce them "under a prefix". A CMake prefix of `/usr` cannot hold `/etc` and `/var`.
+Options: the install prefix is the staging root, with destinations `usr/bin`, `etc/scada` and so on; the prefix is `/usr` and staging uses `DESTDIR`; GNU install directory variables.
+Decision:
+- The install prefix is the staging root. `cmake/ScadaInstall.cmake` holds the destinations, relative to the root. Paths used at runtime, such as `ExecStart=` in a unit, are these destinations with a leading `/` and do not depend on the prefix.
+- systemd units go to `usr/lib/systemd/system` and user definitions to `usr/lib/sysusers.d`, which are systemd's own default locations. Both are cache variables (`SCADA_INSTALL_SYSTEMD_UNITDIR`, `SCADA_INSTALL_SYSUSERSDIR`).
+- The directories `etc/scada`, `usr/lib/scada`, `usr/share/scada/web` and the four under `var/lib/scada` are installed empty and owned by root. Each is handed to its service's user by the issue that adds that service. `/run/scada` and `/dev/shm/scada` are not in the tree, because they are on memory-backed filesystems; the owning services create them at runtime.
+- Service users are declared with `sysusers.d` files, one per service plus one for the `scada` group.
+Reason: one command with one prefix gives the whole layout, and the tree can be copied to `/` or wrapped by any package format. `sysusers.d` is part of systemd, which the design already requires, so no distribution's user tool is needed.
+Consequences: the build cannot be installed to a prefix such as `/usr/local`. A distribution that builds systemd with other directories sets the two cache variables. Ownership and modes of the data directories, and the permissions of `/dev/shm/scada`, are still to be set, by the service issues and the tag database contract.
+
+## D-17: The systemd notification protocol is implemented in `libscada-service`
+Date: 2026-11-13
+Phase / issue: 0, #6
+Status: accepted
+
+Context: a `Type=notify` service must send `READY=1` and `WATCHDOG=1` to the socket in `NOTIFY_SOCKET`. No dependency list or licence report exists yet (issue P0-07).
+Options: link `libsystemd` (`sd_notify`); implement the documented datagram protocol; start services through a wrapper that notifies for them.
+Decision:
+- A new library, `libscada-service`, implements the client side of the protocol with plain sockets. It also holds `NotifyListener`, the service manager's side, which tests use in place of systemd.
+- Values of `NOTIFY_SOCKET`, `WATCHDOG_USEC` and `WATCHDOG_PID` are validated as untrusted input. A service refuses to start on an invalid value instead of running without notification.
+- The library uses `Fd`, `Status` and `Result<T>` of `libscada-common`. A send returns OK when there is no service manager, because nothing had to be done; `Notifier::enabled()` tells the two cases apart.
+- `bind()` needs a `sockaddr*` for a `sockaddr_un`. The conversion goes through `void*` in one function, `bind_unix`, used only by `NotifyListener`. Sending uses `sendmsg()`, which takes the address as `void*` and needs no conversion.
+- The environment parser has unit tests for invalid, oversized and overflowing values and the fuzz target `notify_environment_fuzz`.
+Reason: the protocol is a few lines, is documented as stable by systemd, and avoids a dependency before the licence report exists. A wrapper would report readiness for a service that is not ready.
+Consequences: only the messages the services need are supported (`READY`, `WATCHDOG`, `STOPPING`, `STATUS`); file descriptor passing and `sd_notify` over other socket types are not.
+
+## D-18: Service unit template and the watchdog test hook
+Date: 2026-11-13
+Phase / issue: 0, #6
+Status: accepted
+
+Context: reference 4.2 fixes `Type=notify`, `WatchdogSec`, one user per service and three sandboxing options. It leaves the watchdog interval, the restart policy and the way to hang a service deliberately open.
+Options, restart policy: `Restart=on-failure` with systemd's default rate limit; full backoff and restart limit of reference 14.4 now. Options, hang: a signal; a command-line option; a debug build only.
+Decision:
+- All units are generated from `deploy/systemd/scada-service.service.in` by `scada_install_service(<name> DESCRIPTION <text> WATCHDOG_SEC <seconds> [ARGUMENTS <arguments...>])`. The watchdog interval is set per service; `scada-hello` uses 10 s. Services feed the watchdog at half the interval.
+- The template sets `Restart=on-failure`, `RestartSec=1`, and leaves systemd's default rate limit (5 starts in 10 s) in place. Backoff, the restart limit and the system alarm of reference 14.4 are set when supervision is built.
+- The template sets `ProtectSystem=strict`, `NoNewPrivileges=yes`, `PrivateTmp=yes` and empty `CapabilityBoundingSet=` and `AmbientCapabilities=`. A service that needs a writable directory or a capability adds it to its own unit when it is built. `NotifyAccess=main` accepts notifications from the main process only.
+- `scada-hello` runs as a service only with `--service`; without arguments it still prints the greeting and exits, which the unit, integration and performance tests of issue #4 rely on. As a service it hangs its main loop on `SIGUSR1`. Only `scada-hello` has this hook; it is not part of the template or of `libscada-service`.
+- The shared test class `scada::test::ChildProcess` gains `send_signal` and `wait_for_signal_exit`, which the service tests need.
+- The test `install-units-verify` runs `systemd-analyze verify --root=<staged tree> --recursive-errors=no`, which needs systemd 250 or newer on the build machine. The test fails if `systemd-analyze` is missing.
+Reason: the template holds what every service shares; values that depend on the service stay with the service. A signal needs no change to the unit to trigger a hang on a test machine.
+Consequences: every service unit starts from the strictest sandbox and widens it explicitly. Product services get no hang hook (reference 13.6: no debug interfaces in release builds).
+
+## D-19: Include check and POSIX headers
+Date: 2026-11-13
+Phase / issue: 0, #6
+Status: accepted
+
+Context: the first code that uses POSIX interfaces (`libscada-service`) failed `misc-include-cleaner`. The check attributes a name to the header that declares it in this C library, which is often an internal one: `bits/types/sigset_t.h` for `sigset_t`, `sys/poll.h` for `poll`, `stdlib.h` for `WNOHANG`. It then reports the header POSIX names for it (`<poll.h>`, `<sys/uio.h>`) as unused. Separately, `modernize-deprecated-headers` asks for `<csignal>` in place of `<signal.h>`, but `<csignal>` is not required to declare the POSIX signal functions.
+Options: disable `misc-include-cleaner`; include the internal headers; tell the check which headers to leave alone.
+Decision:
+- `.clang-tidy` sets `misc-include-cleaner.IgnoreHeaders` to `bits/.*`, `poll.h`, `sys/poll.h`, `sys/uio.h`, `stdlib.h` and `time.h`. The check neither asks for these nor reports them unused. Project code includes the header that POSIX names for an interface.
+- A file that needs POSIX signal functions includes `<signal.h>` with `// NOLINT(modernize-deprecated-headers)` and the reason on that line.
+Reason: internal headers differ between C libraries, so including them would tie the code to one (reference 4.1). The check stays on for every other header, including all C++ and project headers.
+Consequences: an unused `<poll.h>`, `<sys/uio.h>`, `<stdlib.h>` or `<time.h>` is not reported. The list grows only when a new POSIX header shows the same problem, in the pull request that meets it.
+
+## D-20: Dependency list and its check are plain JSON and CMake
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -273,7 +334,7 @@ Decision: `third-party/dependencies.json` is the list and `third-party/licence-a
 Reason: it needs no tool beyond CMake, which the build already requires, and no package manager, which the reference forbids relying on.
 Consequences: build code that fetches a dependency reads its version from the list with `scada_dependency_version`, as `cmake/ScadaTesting.cmake` does for GoogleTest, so the version is written once. Every dependency must be linked by a name, including header-only ones (an `INTERFACE` target). Not detected: headers used through an include path alone, and what vendored or fetched third-party code links itself; review covers these. Link items written as generator expressions other than plain wrappers are rejected.
 
-## D-17: What counts as a dependency, and the first allow-list
+## D-21: What counts as a dependency, and the first allow-list
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
@@ -288,13 +349,13 @@ Decision:
 Reason: permissive-only is the one set that every policy option of reference 16.2 accepts, so nothing adopted now can conflict with the later decision. Exact matching of one identifier cannot be bypassed by an expression such as `MIT OR GPL-3.0-only`.
 Consequences: libmodbus (LGPL), open62541 (MPL) and Eclipse Tahu (EPL) cannot be added until the licensing decision extends the allow-list. The bill of materials does not cover the toolchain runtime or the operating system; that is added with packaging in phase 10.
 
-## D-18: Bill of materials format and where the reports go
+## D-22: Bill of materials format and where the reports go
 Date: 2026-11-13
 Phase / issue: 0, #8
 Status: accepted
 
 Context: reference 13.6 requires a software bill of materials and 16.3 a licence report, without naming formats or locations.
 Options: CycloneDX JSON; SPDX JSON; a project-specific format.
-Decision: the build writes `build/<preset>/reports/sbom.cdx.json` (CycloneDX 1.5 JSON) and `build/<preset>/reports/licence-report.md`, and installs both to `share/doc/scada/` of the install tree. Dependencies with scope `build` or `test` are in the bill of materials with CycloneDX scope `excluded`. The file has no timestamp and no serial number.
+Decision: the build writes `build/<preset>/reports/sbom.cdx.json` (CycloneDX 1.5 JSON) and `build/<preset>/reports/licence-report.md`, and installs both to `usr/share/doc/scada/` of the staged tree (D-16), the usual place for documents that belong to a product, which reference 4.4 does not list. Dependencies with scope `build` or `test` are in the bill of materials with CycloneDX scope `excluded`. The file has no timestamp and no serial number.
 Reason: CycloneDX needs no generated identifiers or timestamps, so the same input gives the same file, and common scanners read it.
 Consequences: the pipeline uploads `build/release/reports/` of each architecture as the artifact `dependency-reports-<architecture>`. The generated file is checked by tests for content, not against the CycloneDX schema, because no validator is available offline.

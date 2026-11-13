@@ -71,6 +71,16 @@ public:
     [[nodiscard]] std::optional<int> wait_for_exit(
         std::chrono::milliseconds timeout);
 
+    // Blocks until the process has been ended by a signal and all its output
+    // is captured. Returns that signal's number, or nothing if `timeout`
+    // passes first or the process exited by itself.
+    [[nodiscard]] std::optional<int> wait_for_signal_exit(
+        std::chrono::milliseconds timeout);
+
+    // Sends the signal `signal_number` to the process. Returns false if the
+    // process has already been reaped or the signal could not be sent.
+    [[nodiscard]] bool send_signal(int signal_number) noexcept;
+
     // Everything captured so far.
     [[nodiscard]] const std::string& out() const noexcept { return out_; }
     [[nodiscard]] const std::string& err() const noexcept { return err_; }
@@ -83,6 +93,9 @@ private:
     bool wait_until(const std::function<bool()>& done,
                     std::chrono::milliseconds timeout);
     void check_exit() noexcept;
+    // Waits for the end of the process and of its output. Returns the raw
+    // wait status, or nothing on timeout.
+    std::optional<int> wait_for_end(std::chrono::milliseconds timeout);
 
     int pid_ = -1;
     // Becomes readable when the process exits, which lets poll() wait for
