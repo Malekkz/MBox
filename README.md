@@ -25,7 +25,10 @@ parallel.
 
 ## First steps
 
-1. Create the GitHub repository and push this tree.
+1. Review and merge the pull request that adds this starting set.
 2. Protect the `main` branch: require passing checks and one review.
-3. Run `scripts/create-issues.sh` to create the phase 0 and 1 issues.
-4. Start with issue P0-01.
+3. Start with issue #2 (P0-01).
+
+The phase 0 and 1 issues (#2 to #21) already exist on GitHub. Do not run
+`scripts/create-issues.sh` on this repository again, or they will be
+duplicated; the script is kept for creating later phases' issues the same way.
