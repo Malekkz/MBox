@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    {
+      "name": "alpha",
+      "version": "1.4.0",
+      "licence": "MIT",
+      "scope": "product",
+      "purpose": "Says \"hello\" \\ a|b",
+      "url": "https://example.invalid/alpha",
+      "purl": "pkg:generic/alpha@1.4.0",
+      "link_names": ["external::alpha", "alpha-raw"]
+    },
+    {
+      "name": "checker",
+      "version": "2.0",
+      "licence": "BSD-3-Clause",
+      "scope": "test",
+      "purpose": "Test framework",
+      "url": "https://example.invalid/checker"
+    }
+  ]
+}

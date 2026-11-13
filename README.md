@@ -19,6 +19,7 @@ progress; the only code is the build skeleton.
 | `tools/` | Developer and operator tools. |
 | `tests/` | Tests that span several components. |
 | `cmake/` | Build helpers and toolchain files. |
+| `third-party/` | Dependency list, licence allow-list, vendored code. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
@@ -38,6 +39,12 @@ Other presets: `release` (optimised, with the release flags of the coding
 standard, section 2) and `perf` (the same flags with debug information, runs
 performance tests only). Configuration stops if the compiler does not support
 a required flag.
+
+Every build checks the third-party dependencies against
+`third-party/dependencies.json` and the licence allow-list, and stops if one
+is unlisted or its licence is not allowed. It writes the licence report and
+the software bill of materials to `build/<preset>/reports/`. To add a
+dependency, see `third-party/README.md`.
 
 ARM64: on an ARM64 machine the same presets build natively. To cross-compile,
 put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the

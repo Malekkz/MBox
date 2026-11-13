@@ -100,3 +100,40 @@ Options: static or shared libraries; target names `lib<name>` or a suffix on the
 Decision: libraries are static, created with `scada_add_library(<name>)` as target `lib<name>` (file `lib<name>.a`) with the alias `scada::<short name>`. Executables are created with `scada_add_executable(<name>)`.
 Reason: static linking keeps each service one file to install and keeps a combined build possible; the alias gives dependants a stable name.
 Consequences: libraries are not installed. Driver plugins, if the driver interface contract chooses plugins, will need a shared-library helper.
+
+## D-6: Dependency list and its check are plain JSON and CMake
+Date: 2026-11-13
+Phase / issue: 0, #8
+Status: accepted
+
+Context: reference 16.3 requires a build that fails on a dependency whose licence is not approved, and issue #8 requires it to fail on an unlisted dependency. Neither says where the list lives or how a dependency is detected.
+Options: a package manager manifest (vcpkg, Conan); a scanner tool run after the build; a JSON list checked by a CMake module at configure time.
+Decision: `third-party/dependencies.json` is the list and `third-party/licence-allowlist.json` the allow-list. `cmake/ScadaDependencies.cmake` validates both at configure time, then checks every link item of every target of this project: it must be a target of this project, a `link_names` value of a list entry, or a platform library. A directory under `third-party/` must be named after an entry. The two files are configure dependencies, so a build after an edit configures again.
+Reason: it needs no tool beyond CMake, which the build already requires, and no package manager, which the reference forbids relying on.
+Consequences: every dependency must be linked by a name, including header-only ones (an `INTERFACE` target). Not detected: headers used through an include path alone, and what vendored or fetched third-party code links itself; review covers these. Link items written as generator expressions other than plain wrappers are rejected.
+
+## D-7: What counts as a dependency, and the first allow-list
+Date: 2026-11-13
+Phase / issue: 0, #8
+Status: accepted
+
+Context: the licensing policy is open until phase 9 (reference 16), but the allow-list must exist now.
+Options: allow-list of permissive licences only; also weak-copyleft licences (LGPL, MPL, EPL); licence expressions or one identifier per entry.
+Decision:
+- The allow-list holds Apache-2.0, BSD-2-Clause, BSD-3-Clause, BSL-1.0, CC0-1.0, ISC, MIT, Zlib and blessing (the SQLite dedication). No GPL, LGPL, MPL or EPL.
+- `licence` is one SPDX identifier, compared exactly. A dependency offered under several licences is listed with the one it is used under.
+- The compiler, its runtime libraries and the C library (including `pthread`, `m`, `dl`, `rt`, `atomic`) belong to the toolchain, are chosen with the distribution (reference 19.1) and are not listed.
+- A change to the allow-list needs review by a person and a decision entry.
+Reason: permissive-only is the one set that every policy option of reference 16.2 accepts, so nothing adopted now can conflict with the later decision. Exact matching of one identifier cannot be bypassed by an expression such as `MIT OR GPL-3.0-only`.
+Consequences: libmodbus (LGPL), open62541 (MPL) and Eclipse Tahu (EPL) cannot be added until the licensing decision extends the allow-list. The bill of materials does not cover the toolchain runtime or the operating system; that is added with packaging in phase 10.
+
+## D-8: Bill of materials format and where the reports go
+Date: 2026-11-13
+Phase / issue: 0, #8
+Status: accepted
+
+Context: reference 13.6 requires a software bill of materials and 16.3 a licence report, without naming formats or locations.
+Options: CycloneDX JSON; SPDX JSON; a project-specific format.
+Decision: the build writes `build/<preset>/reports/sbom.cdx.json` (CycloneDX 1.5 JSON) and `build/<preset>/reports/licence-report.md`, and installs both to `share/doc/scada/` of the install tree. Dependencies with scope `build` or `test` are in the bill of materials with CycloneDX scope `excluded`. The file has no timestamp and no serial number.
+Reason: CycloneDX needs no generated identifiers or timestamps, so the same input gives the same file, and common scanners read it.
+Consequences: the pipeline (issue P0-04) uploads `build/<preset>/reports/` as an artifact. The generated file is checked by tests for content, not against the CycloneDX schema, because no validator is available offline.
