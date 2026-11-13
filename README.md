@@ -15,6 +15,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `docs/contracts/` | Interface contracts between the parts. |
 | `docs/decisions.md` | Log of decisions taken during the build. |
 | `docs/coding-standard.md` | C++ coding standard, focused on memory safety. |
+| `docs/install.md` | Installing the staged tree on a test machine by hand. |
 | `libs/` | Libraries, one directory each (`lib<name>`). All logic lives here. |
 | `services/` | Thin executables, one per service. |
 | `tools/` | Developer and operator tools. |
@@ -23,6 +24,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `.github/workflows/pipeline.yml` | The pipeline that gates every pull request. |
 | `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
+| `deploy/` | Templates for systemd units and service users, and the parts of the install tree that belong to no component. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
@@ -45,6 +47,13 @@ Other presets: `release` (optimised, with the release flags of the coding
 standard, section 2) and `perf` (the same flags with debug information, runs
 performance tests only). Configuration stops if the compiler does not support
 a required flag.
+
+The tests need `systemd-analyze` from systemd 250 or newer, to check the
+generated service units.
+
+Staged install tree: `cmake --install build/dev --prefix stage` writes an
+image of the paths the software owns on the target (`usr/bin`, `etc/scada`,
+`var/lib/scada` and so on) under `stage/`. See `docs/install.md`.
 
 ARM64: on an ARM64 machine the same presets build natively. To cross-compile,
 put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the

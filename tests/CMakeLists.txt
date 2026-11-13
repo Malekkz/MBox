@@ -6,6 +6,7 @@ endif()
 
 add_subdirectory(support)
 add_subdirectory(integration)
+add_subdirectory(install)
 add_subdirectory(perf)
 add_subdirectory(fuzz-sample)
 add_subdirectory(sanitizer-fixtures)

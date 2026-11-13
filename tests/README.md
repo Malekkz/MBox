@@ -10,6 +10,7 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `<component>/tests/` | Unit tests of one library; run in seconds | `unit` |
 | `<component>/fuzz/` | Fuzz targets of one library, seed corpus in `corpus/<target>/` | `fuzz`, `unit` |
 | `tests/integration/` | Tests that start real processes | `integration` |
+| `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
 | `tests/perf/` | Performance tests against stated budgets | `perf` |
 | `tests/support/` | `scada::test-support` (start a process, wait on a condition) and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
@@ -66,3 +67,19 @@ covered by the `check` target.
   to the optional. Write `if (!value.has_value()) { FAIL() << "why"; }`, or
   compare the optional itself: `EXPECT_EQ(child->wait_for_exit(limit), 0)`.
 - `TEST` and `TEST_F` need no suppression for the `new` inside the macro.
+
+## The install tests
+
+`install/` holds three tests of the staged install tree (`docs/install.md`),
+written as CMake scripts because they run tools, not C++:
+
+- `install-stage` installs the build into `build/<preset>/tests/install/stage`.
+- `install-layout` checks that tree against the directory layout of
+  reference 4.4.
+- `install-units-verify` runs `systemd-analyze verify` on every service unit
+  in it. It needs `systemd-analyze` from systemd 250 or newer and fails
+  without it.
+
+```
+ctest --preset dev -R '^install-'
+```
