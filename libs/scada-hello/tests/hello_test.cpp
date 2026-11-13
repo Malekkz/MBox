@@ -62,3 +62,11 @@ TEST(Hello, SurplusArgumentIsAUsageError) {
 }
 
 }  // namespace
+
+// TEMPORARY, removed before merge: proves that the pipeline rejects a
+// compiler warning (issue #5, acceptance).
+namespace {
+TEST(PipelineProof, Warning) {
+    int unused = 0;
+}
+}  // namespace
