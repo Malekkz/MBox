@@ -34,9 +34,10 @@ cmake --build --preset dev  # build
 ctest --preset dev          # test
 ```
 
-Other presets: `release` (optimised, with the hardening flags of reference
-13.6) and `perf` (release flags with debug information, runs performance tests
-only).
+Other presets: `release` (optimised, with the release flags of the coding
+standard, section 2) and `perf` (the same flags with debug information, runs
+performance tests only). Configuration stops if the compiler does not support
+a required flag.
 
 ARM64: on an ARM64 machine the same presets build natively. To cross-compile,
 put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the

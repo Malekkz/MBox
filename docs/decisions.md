@@ -61,16 +61,23 @@ Decision: `CMakePresets.json` version 3, and `cmake_minimum_required(VERSION 3.2
 Reason: presets are part of CMake, so no extra tool or script is needed, and 3.21 is the oldest version that supports the preset features used.
 Consequences: build directories are `build/<preset>`. A machine with an older CMake cannot build the project.
 
-## D-3: Hardening flags and the `perf` preset
+## D-3: How the compiler settings are applied, and the `perf` preset
 Date: 2026-11-13
 Phase / issue: 0, #2
 Status: accepted
 
-Context: reference 13.6 names four hardening measures but not the flags, and the issue asks for a `perf` preset without defining it.
-Options: for fortified sources, level 2 or level 3; for `perf`, the `release` build itself or a separate build.
-Decision: the option `SCADA_HARDENING` adds `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`, position-independent executables and `-Wl,-z,relro -Wl,-z,now`. `release` is `Release` with hardening. `perf` is `RelWithDebInfo` with hardening and runs only tests labelled `perf`.
-Reason: level 2 is supported by every GCC and Clang version able to build C++20, level 3 is not. Performance must be measured with the hardening that ships, and debug information makes a regression diagnosable.
-Consequences: `dev` builds are not hardened. Performance figures come from the `perf` preset only. Raising the fortify level later is a one-line change that needs a performance run.
+Context: section 2 of the coding standard lists the flags, but not how the build applies them, and the issue asks for a `perf` preset without defining it.
+Options: flags set globally or per target; an unsupported flag skipped or fatal; `perf` as the `release` build itself or a separate build.
+Decision:
+- The flags are attached per target by `scada_target_defaults`. The "all builds" list is always on; the option `SCADA_HARDENING` adds the release list.
+- Configuration stops if the compiler rejects a required flag or cannot provide fortify level 3. Nothing is skipped automatically.
+- `release` is `Release` with hardening, with CMake's default `-O3` replaced by the `-O2` of the standard. `perf` is `RelWithDebInfo` (`-O2 -g`) with hardening and runs only tests labelled `perf`.
+- `-fPIE -pie` are produced by CMake's position-independent-code support instead of being written as literal flags.
+- `-U_FORTIFY_SOURCE` precedes `-D_FORTIFY_SOURCE=3`, because some toolchains predefine the macro and the redefinition would be a warning.
+Reason: per-target flags keep our warning policy off third-party code added later. A fatal error is the only way a flag cannot be dropped silently. Performance must be measured with the hardening that ships, and debug information makes a regression diagnosable.
+Consequences: `dev` builds have the warnings and library assertions but not the release flags. Performance figures come from the `perf` preset only. No substitute was needed: GCC 13.3 (x86-64 and ARM64 cross) and Clang 18.1 accept every flag and provide fortify level 3.
+
+Known limit, ARM64: `-mbranch-protection=standard` is applied and our objects carry the BTI and PAC markings, but the linked executable is marked BTI-enabled only if every linked object is, including the toolchain's start files. With the cross toolchain used here they are not, so return-address signing is active and branch-target enforcement is not. This depends on the toolchain that builds the release, which is chosen with the distribution (reference 19.1); it must be checked again then.
 
 ## D-4: ARM64 is built by cross-compilation with a GNU toolchain file, or natively
 Date: 2026-11-13

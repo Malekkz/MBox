@@ -12,17 +12,24 @@
 
 namespace {
 
-int failures = 0;
-
-void expect(bool condition, std::string_view what) {
-    if (!condition) {
-        std::cerr << "FAILED: " << what << '\n';
-        ++failures;
+// Counts failed expectations and reports each one.
+class Checker {
+public:
+    void expect(bool condition, std::string_view what) {
+        if (!condition) {
+            std::cerr << "FAILED: " << what << '\n';
+            ++failures_;
+        }
     }
-}
+
+    [[nodiscard]] bool passed() const { return failures_ == 0; }
+
+private:
+    int failures_ = 0;
+};
 
 struct RunResult {
-    int exit_code;
+    int exit_code = 0;
     std::string out;
     std::string err;
 };
@@ -39,6 +46,11 @@ RunResult run_with(std::span<const std::string_view> args) {
 int main() {
     using scada::hello::EXIT_OK;
     using scada::hello::EXIT_USAGE;
+
+    Checker checker;
+    const auto expect = [&checker](bool condition, std::string_view what) {
+        checker.expect(condition, what);
+    };
 
     expect(scada::hello::greeting() == "Hello from libscada-hello",
            "greeting text");
@@ -72,5 +84,5 @@ int main() {
         expect(result.exit_code == EXIT_USAGE, "surplus argument: exit code");
     }
 
-    return failures == 0 ? 0 : 1;
+    return checker.passed() ? 0 : 1;
 }
