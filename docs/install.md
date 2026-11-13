@@ -29,6 +29,7 @@ For ARM64 use the preset `release-arm64` and `build/release-arm64`.
 | `usr/bin/` | Service executables |
 | `usr/lib/scada/` | Driver plugins (empty for now) |
 | `usr/share/scada/web/` | Web app static files (empty for now) |
+| `usr/share/doc/scada/` | Licence report and software bill of materials |
 | `usr/lib/systemd/system/` | One systemd unit per service |
 | `usr/lib/sysusers.d/` | The `scada` group and one system user per service |
 | `etc/scada/` | Active configuration (empty for now) |

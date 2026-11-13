@@ -14,6 +14,20 @@ include(GNUInstallDirs)
 include(CTest)
 include(ScadaSanitizers)
 include(ScadaTargets)
+include(ScadaDependencies)
+
+# Third-party dependency list, licence check, licence report and bill of
+# materials (reference 13.6, 16.3). Must precede the first target.
+set(SCADA_REPORT_DIR "${CMAKE_BINARY_DIR}/reports")
+scada_dependencies(
+  LIST "${CMAKE_CURRENT_SOURCE_DIR}/third-party/dependencies.json"
+  ALLOWLIST "${CMAKE_CURRENT_SOURCE_DIR}/third-party/licence-allowlist.json"
+  OUTPUT_DIR "${SCADA_REPORT_DIR}")
+install(FILES
+  "${SCADA_REPORT_DIR}/licence-report.md"
+  "${SCADA_REPORT_DIR}/sbom.cdx.json"
+  DESTINATION "${SCADA_INSTALL_DOCDIR}")
+
 if(BUILD_TESTING)
   include(ScadaTesting)
 endif()
@@ -23,3 +37,6 @@ add_subdirectory(services)
 add_subdirectory(tools)
 add_subdirectory(deploy)
 add_subdirectory(tests)
+if(BUILD_TESTING)
+  add_subdirectory(cmake/tests)
+endif()

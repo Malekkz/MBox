@@ -24,6 +24,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `.github/workflows/pipeline.yml` | The pipeline that gates every pull request. |
 | `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
+| `third-party/` | Dependency list, licence allow-list, vendored code. |
 | `deploy/` | Templates for systemd units and service users, and the parts of the install tree that belong to no component. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
@@ -47,6 +48,13 @@ Other presets: `release` (optimised, with the release flags of the coding
 standard, section 2) and `perf` (the same flags with debug information, runs
 performance tests only). Configuration stops if the compiler does not support
 a required flag.
+
+Every build checks the third-party dependencies against
+`third-party/dependencies.json` and the licence allow-list, and stops if one
+is unlisted or its licence is not allowed. It writes the licence report and
+the software bill of materials to `build/<preset>/reports/`, and the staged
+install tree carries both in `usr/share/doc/scada/`. To add a
+dependency, see `third-party/README.md`.
 
 The tests need `systemd-analyze` from systemd 250 or newer, to check the
 generated service units.
@@ -115,6 +123,10 @@ is skipped or allowed to fail. Performance tests are not part of the pipeline
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.
+- The licence report and the software bill of materials of the `release`
+  build are kept for 14 days as the artifacts `dependency-reports-x86-64` and
+  `dependency-reports-ARM64`. Both files are also printed in the job log, in
+  the step "Licence report and bill of materials".
 - When fuzzing fails, the failing inputs are kept as the artifact
   `fuzz-findings`.
 - The tools are LLVM 18 and the GCC and CMake of the runner image; each job

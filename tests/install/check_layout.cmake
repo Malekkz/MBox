@@ -26,6 +26,10 @@ expect_directory("usr/lib/scada")
 expect_directory("usr/bin")
 expect_directory("usr/share/scada/web")
 
+# Licence report and bill of materials (reference 13.6, 16.3).
+expect_file("usr/share/doc/scada/licence-report.md")
+expect_file("usr/share/doc/scada/sbom.cdx.json")
+
 expect_file("${SYSUSERSDIR}/scada.conf")
 if(NOT UNITS)
   message(SEND_ERROR "no service units are installed")

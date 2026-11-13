@@ -15,7 +15,9 @@ if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
 
-set(SCADA_GOOGLETEST_VERSION 1.17.0)
+# The version comes from the dependency list, so that the licence report and
+# the bill of materials cannot name another one. The hash below belongs to it.
+scada_dependency_version(SCADA_GOOGLETEST_VERSION googletest)
 
 FetchContent_Declare(googletest
   URL "https://github.com/google/googletest/releases/download/v${SCADA_GOOGLETEST_VERSION}/googletest-${SCADA_GOOGLETEST_VERSION}.tar.gz"

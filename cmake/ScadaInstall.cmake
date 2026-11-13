@@ -12,6 +12,8 @@
 set(SCADA_INSTALL_BINDIR "usr/bin")
 set(SCADA_INSTALL_LIBEXECDIR "usr/lib/scada")
 set(SCADA_INSTALL_WEBDIR "usr/share/scada/web")
+# Licence report and bill of materials (decision D-22).
+set(SCADA_INSTALL_DOCDIR "usr/share/doc/scada")
 set(SCADA_INSTALL_CONFDIR "etc/scada")
 set(SCADA_INSTALL_STATEDIR "var/lib/scada")
 set(SCADA_INSTALL_STATE_SUBDIRS config-history hist journal retain)
