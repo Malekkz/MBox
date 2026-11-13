@@ -67,17 +67,19 @@ void expect_layout(std::span<const Field> fields,
     EXPECT_EQ(expected_offset, documented_size) << "padding or a missing field";
 }
 
-// True if `value` is lock-free when shared through std::atomic_ref: its type
-// is always lock-free on this target, and the object sits at an address with
-// the alignment the atomic access needs. The run-time query
-// `is_lock_free()` is not used: with some compilers it is a call into the
-// separate atomic support library, which a lock-free target must not need.
-template <typename T>
-bool lock_free(const T& value) {
-    return std::atomic_ref<T>::is_always_lock_free &&
-           std::bit_cast<std::uintptr_t>(&value) %
-                   std::atomic_ref<T>::required_alignment ==
-               0;
+// True if the member `member` of `object` is lock-free when shared through
+// std::atomic_ref: its type is always lock-free on this target, and the
+// field sits where the atomic access needs it, at a multiple of the required
+// alignment inside a structure that is aligned at least as much. The
+// run-time query `is_lock_free()` is not used: with some compilers it is a
+// call into the separate atomic support library, which a lock-free target
+// must not need.
+template <typename Struct, typename Member>
+bool lock_free(const Struct& object, Member Struct::*member) {
+    const std::size_t alignment = std::atomic_ref<Member>::required_alignment;
+    return std::atomic_ref<Member>::is_always_lock_free &&
+           alignof(Struct) % alignment == 0 &&
+           field(object, member, "", 0).offset % alignment == 0;
 }
 
 TEST(Conformance01Layout, RegionHeader) {
@@ -358,26 +360,27 @@ TEST(Conformance01Layout, DefaultValueIsAllZero) {
 // Every field the contract marks `A`. The compile-time check in layout.h
 // covers the types; this covers the fields at their real offsets.
 TEST(SharedAtomics, EveryAtomicFieldIsLockFree) {
-    RegionHeader region_header;
-    EXPECT_TRUE(lock_free(region_header.ready));
-    GlobalHeader global_header;
-    EXPECT_TRUE(lock_free(global_header.state));
-    ProcessEntry process_entry;
-    EXPECT_TRUE(lock_free(process_entry.down));
-    TagRecord tag_record;
-    EXPECT_TRUE(lock_free(tag_record.seq));
-    ChangeRingHeader change_ring_header;
-    EXPECT_TRUE(lock_free(change_ring_header.epoch));
-    EXPECT_TRUE(lock_free(change_ring_header.write_seq));
-    QueueHeader queue_header;
-    EXPECT_TRUE(lock_free(queue_header.write_seq));
-    ProcHeader proc_header;
-    EXPECT_TRUE(lock_free(proc_header.heartbeat));
-    EXPECT_TRUE(lock_free(proc_header.heartbeat_mono_ns));
-    EXPECT_TRUE(lock_free(proc_header.state));
-    EXPECT_TRUE(lock_free(proc_header.cycle_seq));
-    std::uint64_t cursor = 0;
-    EXPECT_TRUE(lock_free(cursor));
+    const RegionHeader region_header;
+    EXPECT_TRUE(lock_free(region_header, &RegionHeader::ready));
+    const GlobalHeader global_header;
+    EXPECT_TRUE(lock_free(global_header, &GlobalHeader::state));
+    const ProcessEntry process_entry;
+    EXPECT_TRUE(lock_free(process_entry, &ProcessEntry::down));
+    const TagRecord tag_record;
+    EXPECT_TRUE(lock_free(tag_record, &TagRecord::seq));
+    const ChangeRingHeader change_ring_header;
+    EXPECT_TRUE(lock_free(change_ring_header, &ChangeRingHeader::epoch));
+    EXPECT_TRUE(lock_free(change_ring_header, &ChangeRingHeader::write_seq));
+    const QueueHeader queue_header;
+    EXPECT_TRUE(lock_free(queue_header, &QueueHeader::write_seq));
+    const ProcHeader proc_header;
+    EXPECT_TRUE(lock_free(proc_header, &ProcHeader::heartbeat));
+    EXPECT_TRUE(lock_free(proc_header, &ProcHeader::heartbeat_mono_ns));
+    EXPECT_TRUE(lock_free(proc_header, &ProcHeader::state));
+    EXPECT_TRUE(lock_free(proc_header, &ProcHeader::cycle_seq));
+    // The cursors after ProcHeader are bare 64-bit integers at multiples of
+    // 8 (CursorArrayFollowsProcHeader).
+    EXPECT_TRUE(IS_SHARED_ATOMIC<std::uint64_t>);
 }
 
 }  // namespace
