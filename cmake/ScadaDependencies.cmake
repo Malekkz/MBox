@@ -8,7 +8,7 @@
 include_guard(GLOBAL)
 
 # Link names that belong to the C library of the platform, not to a third
-# party. They need no entry in the dependency list (decision D-7).
+# party. They need no entry in the dependency list (decision D-15).
 set(SCADA_PLATFORM_LINK_NAMES Threads::Threads pthread m dl rt atomic)
 
 set(_SCADA_DEPENDENCY_KEYS
@@ -19,6 +19,11 @@ set(_SCADA_DEPENDENCY_SCOPES product build test)
 # Stops the configuration with every problem found, one per indented line.
 # Indented lines are not re-wrapped by CMake, so they stay searchable.
 function(_scada_dependency_fail list_file)
+  # A failed check must not leave output behind that looks valid.
+  get_property(output_files GLOBAL PROPERTY SCADA_DEPENDENCY_OUTPUT_FILES)
+  if(output_files)
+    file(REMOVE ${output_files})
+  endif()
   list(JOIN ARGN "\n  " problems)
   message(FATAL_ERROR
     "Dependency check failed:\n\n  ${problems}\n\n"
@@ -202,6 +207,8 @@ function(scada_dependencies)
           "${where}: licence '${field_licence}' is not on the allow-list")
       endif()
       list(APPEND names "${field_name}")
+      set_property(GLOBAL PROPERTY
+        "SCADA_DEPENDENCY_VERSION_${field_name}" "${field_version}")
       list(APPEND all_link_names ${field_link_names})
 
       # Bill of materials component. Only `product` dependencies ship.
@@ -382,8 +389,21 @@ function(_scada_check_linked_dependencies)
   endforeach()
 
   if(problems)
-    get_property(output_files GLOBAL PROPERTY SCADA_DEPENDENCY_OUTPUT_FILES)
-    file(REMOVE ${output_files})
     _scada_dependency_fail("${list_file}" ${problems})
   endif()
+endfunction()
+
+# scada_dependency_version(<out> <name>)
+#
+# Sets `out` to the version of the listed dependency `name`, so that the code
+# that fetches a dependency takes its version from the list instead of
+# repeating it. Stops the configuration if `name` is not listed.
+function(scada_dependency_version out name)
+  get_property(version GLOBAL PROPERTY "SCADA_DEPENDENCY_VERSION_${name}")
+  if(NOT version)
+    get_property(list_file GLOBAL PROPERTY SCADA_DEPENDENCY_LIST_FILE)
+    _scada_dependency_fail("${list_file}"
+      "dependency '${name}' is used by the build but is not in the dependency list")
+  endif()
+  set(${out} "${version}" PARENT_SCOPE)
 endfunction()

@@ -65,6 +65,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The licence report and the bill of materials of the release build
+      # (issue P0-07). They are also inside the staged install tree.
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dependency-reports-${{ matrix.arch }}
+          path: build/release/reports/
+          if-no-files-found: error
+          retention-days: 14
+
   check:
     name: check
     runs-on: ubuntu-24.04

@@ -1,7 +1,7 @@
 # third-party
 
 The list of third-party dependencies, the licence allow-list, and any vendored
-third-party code (reference 13.6, 16.3; decisions D-6 to D-8).
+third-party code (reference 13.6, 16.3; decisions D-14 to D-16).
 
 | File | Content |
 | --- | --- |
@@ -38,6 +38,9 @@ Reviewers must check these.
 2. Add an entry to `dependencies.json` in the same pull request as the code
    that uses it.
 3. Link it by one of the names in `link_names`.
+4. If the build fetches it, take the version from the list with
+   `scada_dependency_version(<variable> <name>)`, as `cmake/ScadaTesting.cmake`
+   does, so that the version is written once.
 
 ```json
 {
@@ -64,7 +67,7 @@ Reviewers must check these.
 | `link_names` | no | Names as written in `target_link_libraries`: CMake targets or library names. |
 
 Unknown keys are errors. The compiler, its runtime libraries and the C library
-are part of the toolchain and are not listed (D-7).
+are part of the toolchain and are not listed (D-15).
 
 ## Changing the allow-list
 

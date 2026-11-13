@@ -112,6 +112,9 @@ is skipped or allowed to fail. Performance tests are not part of the pipeline
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.
+- The licence report and the software bill of materials of the `release`
+  build are kept for 14 days as the artifacts `dependency-reports-x86-64` and
+  `dependency-reports-ARM64`.
 - When fuzzing fails, the failing inputs are kept as the artifact
   `fuzz-findings`.
 - The tools are LLVM 18 and the GCC and CMake of the runner image; each job

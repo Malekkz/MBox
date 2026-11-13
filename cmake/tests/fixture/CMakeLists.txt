@@ -1,5 +1,6 @@
 # A project with no compiled code, used to test ScadaDependencies.cmake.
-# FIXTURE_LINKS is what the project's own target links.
+# FIXTURE_LINKS is what the project's own target links, and
+# FIXTURE_USES_VERSION_OF a dependency whose listed version the build reads.
 cmake_minimum_required(VERSION 3.21)
 project(fixture VERSION 1.2.3 LANGUAGES NONE)
 
@@ -9,6 +10,14 @@ scada_dependencies(
   LIST "${FIXTURE_LIST}"
   ALLOWLIST "${FIXTURE_ALLOWLIST}"
   OUTPUT_DIR "${CMAKE_BINARY_DIR}/reports")
+
+# Stands for build code that fetches a dependency at the listed version.
+if(FIXTURE_USES_VERSION_OF)
+  scada_dependency_version(fetched_version "${FIXTURE_USES_VERSION_OF}")
+  if(NOT fetched_version STREQUAL "1.4.0")
+    message(FATAL_ERROR "Got version '${fetched_version}', expected 1.4.0")
+  endif()
+endif()
 
 # Stand-ins for packages found on the system.
 add_library(external::alpha INTERFACE IMPORTED)

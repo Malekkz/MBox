@@ -1,4 +1,15 @@
 {
   "schema_version": 1,
-  "dependencies": []
+  "dependencies": [
+    {
+      "name": "googletest",
+      "version": "1.17.0",
+      "licence": "BSD-3-Clause",
+      "scope": "test",
+      "purpose": "Unit test framework (GoogleTest, without GoogleMock)",
+      "url": "https://github.com/google/googletest",
+      "purl": "pkg:github/google/googletest@v1.17.0",
+      "link_names": ["GTest::gtest", "GTest::gtest_main"]
+    }
+  ]
 }

@@ -8,13 +8,14 @@ set(scada_real_allowlist
   "${PROJECT_SOURCE_DIR}/third-party/licence-allowlist.json")
 
 # scada_add_dependency_case(<name> LIST <case> [LINKS <names...>]
-#   [EXPECT_ERROR <regex>] [CHECK_SCRIPT <file>])
+#   [USES_VERSION_OF <dependency>] [EXPECT_ERROR <regex>]
+#   [CHECK_SCRIPT <file>])
 #
 # In LINKS, write a generator expression as "@<...>": add_test would evaluate
 # "$<...>" itself. run_case.cmake turns it back.
 function(scada_add_dependency_case name)
   cmake_parse_arguments(PARSE_ARGV 1 arg ""
-    "LIST;EXPECT_ERROR;CHECK_SCRIPT" "LINKS")
+    "LIST;EXPECT_ERROR;CHECK_SCRIPT;USES_VERSION_OF" "LINKS")
   list(JOIN arg_LINKS "|" links)
   set(arguments
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixture"
@@ -23,7 +24,8 @@ function(scada_add_dependency_case name)
     "-DMODULE_DIR=${PROJECT_SOURCE_DIR}/cmake"
     "-DLIST=${CMAKE_CURRENT_SOURCE_DIR}/cases/${arg_LIST}/dependencies.json"
     "-DALLOWLIST=${scada_real_allowlist}"
-    "-DLINKS=${links}")
+    "-DLINKS=${links}"
+    "-DUSES_VERSION_OF=${arg_USES_VERSION_OF}")
   if(DEFINED arg_EXPECT_ERROR)
     list(APPEND arguments "-DEXPECT_ERROR=${arg_EXPECT_ERROR}")
   endif()
@@ -34,6 +36,8 @@ function(scada_add_dependency_case name)
   add_test(NAME dependency-check-${name}
     COMMAND "${CMAKE_COMMAND}" ${arguments}
       -P "${CMAKE_CURRENT_SOURCE_DIR}/run_case.cmake")
+  set_tests_properties(dependency-check-${name} PROPERTIES
+    LABELS unit TIMEOUT 60)
 endfunction()
 
 # Accepted.
@@ -73,6 +77,13 @@ scada_add_dependency_case(licence-expression LIST licence-expression
 add_test(NAME dependency-check-allowlist-has-no-gpl
   COMMAND "${CMAKE_COMMAND}" "-DALLOWLIST=${scada_real_allowlist}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/check_allowlist.cmake")
+set_tests_properties(dependency-check-allowlist-has-no-gpl PROPERTIES
+  LABELS unit TIMEOUT 60)
+
+scada_add_dependency_case(fetched-but-unlisted LIST empty
+  USES_VERSION_OF alpha
+  EXPECT_ERROR "dependency 'alpha' is used by the build but is not in the dependency list")
+scada_add_dependency_case(fetched-and-listed LIST listed USES_VERSION_OF alpha)
 
 # Rejected: the list is malformed.
 scada_add_dependency_case(missing-version LIST missing-version

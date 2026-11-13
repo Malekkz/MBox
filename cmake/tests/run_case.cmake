@@ -1,7 +1,8 @@
 # Configures the fixture project for one case and checks the outcome.
 #
 #   cmake -DSOURCE_DIR=... -DBINARY_DIR=... -DGENERATOR=... -DMODULE_DIR=...
-#         -DLIST=... -DALLOWLIST=... [-DLINKS=a|b] [-DEXPECT_ERROR=<regex>]
+#         -DLIST=... -DALLOWLIST=... [-DLINKS=a|b] [-DUSES_VERSION_OF=<name>]
+#         [-DEXPECT_ERROR=<regex>]
 #         [-DCHECK_SCRIPT=<file>] -P run_case.cmake
 #
 # With EXPECT_ERROR the configuration must fail with matching output.
@@ -21,6 +22,7 @@ execute_process(
     "-DFIXTURE_LIST=${LIST}"
     "-DFIXTURE_ALLOWLIST=${ALLOWLIST}"
     "-DFIXTURE_LINKS=${links}"
+    "-DFIXTURE_USES_VERSION_OF=${USES_VERSION_OF}"
   RESULT_VARIABLE result
   OUTPUT_VARIABLE output
   ERROR_VARIABLE output)
