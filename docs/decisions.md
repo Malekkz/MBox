@@ -261,3 +261,18 @@ Decision:
 - The record's creation time is sent as the field `SCADA_TIME_NS`, because the journal stamps the later delivery time.
 Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
 Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
+
+## D-16: Tag database contract review: wake-up by `scada_tag_notify`, and the other review outcomes
+Date: 2026-11-13
+Phase / issue: 1, #9
+Status: accepted
+
+Context: the tag database contract draft 0.1 was reviewed against reference section 5 before phase 1 code starts. The draft had tag writes and queue posts wake waiting consumers, which needs a system call; reference 5.7 and `CLAUDE.md` forbid system calls in `write` and `post_request`. The draft also listed three refinements of the reference and five open points without saying where each is settled.
+Options: for the wake-up: allow one non-blocking wake call inside `write` and `post`; never wake and let consumers poll on a short timer; wake once per cycle through a separate call. For a post to an event queue whose consumer is down: reject at once; accept until the queue is full. For the open points: fix the proposed values now; one separate experiment issue; assign each to the phase 1 issue that builds the part.
+Decision (by the product owner):
+- Writers never wake consumers. A process calls `scada_tag_notify()` once per cycle or scan, outside its real-time section, and every consumer wait has a timeout capped at 100 ms.
+- The three refinements of contract section 17 are confirmed. The `down` flag is in the process table, as in the reference, so that processes without tags have one too.
+- A post to an event queue whose consumer is down is rejected at once with `SCADA_E_PEER_DOWN`.
+- Each open point is settled in a named phase 1 issue against a pass criterion (contract section 16).
+Reason: the real-time rule stays without an exception, and a consumer sees a change at most one cycle late. Rejecting at once is the strict reading of "no audit, no action": no command is accepted while its audit record could exist only in memory.
+Consequences: a process that forgets `scada_tag_notify` still delivers, up to 100 ms late. While `scada-audit` or a journal consumer restarts, commands are refused. The review also changed the string write order, record ids, the ring `epoch` and several checks; the contract's change log (section 18) lists them. The contract is version 0.2, layout version 1.
