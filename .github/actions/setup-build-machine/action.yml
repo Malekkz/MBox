@@ -1,0 +1,52 @@
+# The only place that names a package manager (docs/decisions.md, D-13).
+# Everything after this step uses the presets, as on a developer machine.
+name: Set up the build machine
+description: >
+  Installs LLVM at the one version the pipeline uses, puts its tools on PATH
+  under their plain names, and prints the versions of every build tool.
+
+inputs:
+  llvm-version:
+    description: LLVM major version for clang-format, clang-tidy, clang-query and Clang.
+    default: "18"
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM ${{ inputs.llvm-version }}
+      shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm-version }}
+      run: |
+        sudo apt-get update --quiet
+        sudo apt-get install --yes --quiet --no-install-recommends \
+          "clang-${LLVM_VERSION}" "clang-format-${LLVM_VERSION}" \
+          "clang-tidy-${LLVM_VERSION}" "clang-tools-${LLVM_VERSION}" \
+          "libclang-rt-${LLVM_VERSION}-dev" "llvm-${LLVM_VERSION}"
+
+    # The build looks for `clang++`, `clang-tidy` and so on. The runner image
+    # carries several LLVM versions, so the plain names are pointed at the
+    # chosen one instead of at whatever the image prefers this month.
+    - name: Put the LLVM tools on PATH
+      shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm-version }}
+      run: |
+        bin="${RUNNER_TEMP}/llvm-bin"
+        mkdir -p "${bin}"
+        for tool in clang clang++ clang-format clang-tidy clang-query llvm-symbolizer; do
+          ln -sf "$(command -v "${tool}-${LLVM_VERSION}")" "${bin}/${tool}"
+        done
+        echo "${bin}" >> "${GITHUB_PATH}"
+        echo "CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)" >> "${GITHUB_ENV}"
+
+    - name: Tool versions
+      shell: bash
+      run: |
+        echo "machine: $(uname -m), $(nproc) processors"
+        cmake --version | head -n 1
+        c++ --version | head -n 1
+        clang++ --version | head -n 1
+        clang-format --version
+        clang-tidy --version | grep -i version
+        python3 --version

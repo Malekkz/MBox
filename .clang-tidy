@@ -43,7 +43,7 @@ CheckOptions:
   # The C library declares some POSIX names in internal headers (`bits/...`,
   # `sys/poll.h`). Project code includes the header POSIX names for them, so
   # the include check must not ask for the internal one, nor call the POSIX
-  # one unused (docs/decisions.md, D-16).
+  # one unused (docs/decisions.md, D-17).
   misc-include-cleaner.IgnoreHeaders: 'bits/.*;poll\.h;sys/poll\.h;sys/uio\.h;stdlib\.h;time\.h'
   readability-identifier-naming.NamespaceCase: lower_case
   readability-identifier-naming.ClassCase: CamelCase

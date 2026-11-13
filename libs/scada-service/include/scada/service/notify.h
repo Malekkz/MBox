@@ -4,7 +4,7 @@
 // Client side of the systemd service notification protocol (sd_notify(3)):
 // readiness, watchdog and stop messages sent as datagrams to the socket named
 // by NOTIFY_SOCKET. Implemented directly on the documented protocol, so no
-// systemd library is linked (docs/decisions.md, D-14).
+// systemd library is linked (docs/decisions.md, D-15).
 
 #include "scada/service/fd.h"
 

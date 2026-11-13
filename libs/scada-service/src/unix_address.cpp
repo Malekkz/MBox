@@ -45,7 +45,7 @@ std::optional<UnixAddress> make_unix_address(std::string_view name) noexcept {
 bool bind_unix(int descriptor, const UnixAddress& address) noexcept {
     // bind() takes the generic `sockaddr*`, which the sockets API defines as
     // the way to pass any address type. The conversion goes through `void*`
-    // and happens only here (docs/decisions.md, D-14).
+    // and happens only here (docs/decisions.md, D-15).
     const void* const generic = &address.address;
     return ::bind(descriptor, static_cast<const sockaddr*>(generic),
                   address.length) == 0;
