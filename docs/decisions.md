@@ -359,3 +359,41 @@ Options: CycloneDX JSON; SPDX JSON; a project-specific format.
 Decision: the build writes `build/<preset>/reports/sbom.cdx.json` (CycloneDX 1.5 JSON) and `build/<preset>/reports/licence-report.md`, and installs both to `usr/share/doc/scada/` of the staged tree (D-16), the usual place for documents that belong to a product, which reference 4.4 does not list. Dependencies with scope `build` or `test` are in the bill of materials with CycloneDX scope `excluded`. The file has no timestamp and no serial number.
 Reason: CycloneDX needs no generated identifiers or timestamps, so the same input gives the same file, and common scanners read it.
 Consequences: the pipeline uploads `build/release/reports/` of each architecture as the artifact `dependency-reports-<architecture>`. The generated file is checked by tests for content, not against the CycloneDX schema, because no validator is available offline.
+
+## D-23: Tag database contract review: wake-up by `scada_tag_notify`, and the other review outcomes
+Date: 2026-11-13
+Phase / issue: 1, #9
+Status: accepted
+
+Context: the tag database contract draft 0.1 was reviewed against reference section 5 before phase 1 code starts. The draft had tag writes and queue posts wake waiting consumers, which needs a system call; reference 5.7 and `CLAUDE.md` forbid system calls in `write` and `post_request`. The draft also listed three refinements of the reference and five open points without saying where each is settled.
+Options: for the wake-up: allow one non-blocking wake call inside `write` and `post`; never wake and let consumers poll on a short timer; wake once per cycle through a separate call. For a post to an event queue whose consumer is down: reject at once; accept until the queue is full. For the open points: fix the proposed values now; one separate experiment issue; assign each to the phase 1 issue that builds the part.
+Decision (by the product owner):
+- Writers never wake consumers. A process calls `scada_tag_notify()` once per cycle or scan, outside its real-time section, and every consumer wait has a timeout capped at 100 ms.
+- The three refinements of contract section 17 are confirmed. The `down` flag is in the process table, as in the reference, so that processes without tags have one too.
+- A post to an event queue whose consumer is down is rejected at once with `SCADA_E_PEER_DOWN`.
+- Each open point is settled in a named phase 1 issue against a pass criterion (contract section 16).
+Reason: the real-time rule stays without an exception, and a consumer sees a change at most one cycle late. Rejecting at once is the strict reading of "no audit, no action": no command is accepted while its audit record could exist only in memory.
+Consequences: a process that forgets `scada_tag_notify` still delivers, up to 100 ms late. While `scada-audit` or a journal consumer restarts, commands are refused. The review also changed the string write order, record ids, the ring `epoch` and several checks; the contract's change log (section 18) lists them. The contract is version 0.2, layout version 1.
+
+## D-24: Tag database contract, second review: owners are threads, commands at most once, and the other outcomes
+Date: 2026-11-13
+Phase / issue: 1, #9
+Status: accepted
+
+Context: draft 0.2 of the tag database contract was reviewed independently from three sides (SCADA practice, C++ and lock-free correctness, Linux). All three found it fit for phase 1 only after changes. Six points needed a decision; the rest were corrections.
+Options:
+- Several writing threads in one process (control tasks, driver channels) against single-writer rings and queues: one ring and queue set per writing thread; all publication through one thread; a multi-producer design.
+- Command queue delivery: at least once with duplicate suppression in the driver; at most once.
+- Automatic control writes and "no audit, no action": exempt source AUTO; require the record for every source; leave it to phase 5.
+- An owner shrinking its region file kills mapped readers: accept; hand out sealed memory from `scada-tagd`.
+- Wake-up: futex with `futex_waitv` and an in-process bridge to a file descriptor; eventfd passed by `scada-tagd`.
+- Scope: everything in the pull request of #9; blockers only.
+Decision (by the product owner):
+- An owner is a writing thread. A process has one owner, ring and queue set per writing thread. The handle is 10 bits owner, 22 bits slot.
+- Command queues deliver at most once: the driver acknowledges before executing, and on attach drains pending requests with status `ABORTED`. A request lives at most 60 seconds.
+- Write requests of every source, AUTO included, need their event record accepted first. While the consumer of that event queue is down, `scada-control` cannot post write requests and outputs follow their configured hold or safe behaviour.
+- The truncation risk is accepted for layout version 1 and written into the contract.
+- Futex is the primary wake mechanism, with wait sets on `futex_waitv` and an in-process eventfd bridge for threads that wait on sockets. Minimum kernel Linux 5.16.
+- All review findings are fixed in the pull request of #9 (contract 0.3; its section 18 lists them).
+Reason: one writer per ring keeps every path lock-free and the real-time rule intact. A command that may run twice or late is worse than one that is reported as aborted (reference 14.4). Every change to the plant leaves a record, whatever its origin (reference 3.3).
+Consequences: the tag-set definition must name the writing threads. A restart of the journal or audit consumer stops automatic control until it is back; the event volume of automatic writes has to be sized when the journal is designed (phases 5 and 7). A driver restart aborts commands in flight, and the operator repeats them. The base directory must be created by the platform at boot, which phase 0 packaging (#6) has to provide. Corrections that needed no decision, among them the memory fences for ARM64 and `SCADA_E_BUSY` in place of a false `OWNER_DOWN`, are listed in the contract's change log.
