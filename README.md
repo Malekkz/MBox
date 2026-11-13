@@ -13,6 +13,7 @@ progress; the only code is the build skeleton.
 | `docs/reference-architecture.md` | The design baseline. Start here. |
 | `docs/contracts/` | Interface contracts between the parts. |
 | `docs/decisions.md` | Log of decisions taken during the build. |
+| `docs/coding-standard.md` | C++ coding standard, focused on memory safety. |
 | `libs/` | Libraries, one directory each (`lib<name>`). All logic lives here. |
 | `services/` | Thin executables, one per service. |
 | `tools/` | Developer and operator tools. |

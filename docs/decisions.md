@@ -32,7 +32,25 @@ Consequences: what this fixes or rules out later.
 
 ## Decisions
 
-## D-1: CMake 3.21 as the minimum version, presets for every build
+## D-1: C++ coding standard and memory-safety gates
+Date: 2026-11-13
+Phase / issue: phase 0, before issue #3
+Status: accepted
+
+Context: the rules in `CLAUDE.md` named no baseline and covered memory safety
+only briefly, while phase 0 was about to fix compiler flags and linter checks.
+Options: C++ Core Guidelines; MISRA C++:2023; a project-only rule list.
+Decision: `docs/coding-standard.md`, based on the C++ Core Guidelines with
+stricter project rules for ownership, bounds, integers, shared memory and
+parsing. Sanitizer runs gate every pull request, and every parser ships with a
+fuzz target.
+Reason: the Core Guidelines are free to use and are checked directly by
+clang-tidy; MISRA needs a paid document and commercial checkers.
+Consequences: fuzz targets are written with each parser from phase 2 onward,
+earlier than the phase 10 fuzzing item in the reference document, which
+becomes the long-running fuzzing campaign.
+
+## D-2: CMake 3.21 as the minimum version, presets for every build
 Date: 2026-11-13
 Phase / issue: 0, #2
 Status: accepted
@@ -43,7 +61,7 @@ Decision: `CMakePresets.json` version 3, and `cmake_minimum_required(VERSION 3.2
 Reason: presets are part of CMake, so no extra tool or script is needed, and 3.21 is the oldest version that supports the preset features used.
 Consequences: build directories are `build/<preset>`. A machine with an older CMake cannot build the project.
 
-## D-2: Hardening flags and the `perf` preset
+## D-3: Hardening flags and the `perf` preset
 Date: 2026-11-13
 Phase / issue: 0, #2
 Status: accepted
@@ -54,7 +72,7 @@ Decision: the option `SCADA_HARDENING` adds `-fstack-protector-strong`, `-D_FORT
 Reason: level 2 is supported by every GCC and Clang version able to build C++20, level 3 is not. Performance must be measured with the hardening that ships, and debug information makes a regression diagnosable.
 Consequences: `dev` builds are not hardened. Performance figures come from the `perf` preset only. Raising the fortify level later is a one-line change that needs a performance run.
 
-## D-3: ARM64 is built by cross-compilation with a GNU toolchain file, or natively
+## D-4: ARM64 is built by cross-compilation with a GNU toolchain file, or natively
 Date: 2026-11-13
 Phase / issue: 0, #2
 Status: accepted
@@ -65,7 +83,7 @@ Decision: `cmake/toolchains/aarch64-linux-gnu.cmake` and the presets `dev-arm64`
 Reason: the triplet prefix is the upstream GNU naming, so no distribution path is needed, and both ways of building stay available to P0-04.
 Consequences: tests of a cross build run only when an emulator is given with `CMAKE_CROSSCOMPILING_EMULATOR` at configure time.
 
-## D-4: Libraries are static; target naming
+## D-5: Libraries are static; target naming
 Date: 2026-11-13
 Phase / issue: 0, #2
 Status: accepted
