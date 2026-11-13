@@ -1,7 +1,7 @@
 # MBox
 
-MBox is a SCADA node: a SCADA system that runs on one embedded Linux PC per site: it collects and
-logs data, controls field devices, and serves a web HMI and a local CLI.
+MBox is a SCADA node that runs on one embedded Linux PC per site: it collects
+and logs data, controls field devices, and serves a web HMI and a local CLI.
 
 Status: design baseline frozen (version 1.0). No code yet. Phase 0 is next.
 
