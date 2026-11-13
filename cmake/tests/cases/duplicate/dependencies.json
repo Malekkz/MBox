@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    { "name": "alpha", "version": "1.4.0", "scope": "product", "purpose": "x", "url": "https://example.invalid/alpha", "licence": "MIT" },
+    { "name": "alpha", "version": "1.4.0", "scope": "product", "purpose": "x", "url": "https://example.invalid/alpha", "licence": "MIT" }
+  ]
+}

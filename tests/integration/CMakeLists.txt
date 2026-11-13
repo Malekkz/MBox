@@ -7,5 +7,5 @@ list(JOIN hello_command "|" hello_command)
 
 scada_add_test(scada-hello-integration-test KIND integration
   SOURCES hello_integration_test.cpp
-  DEPENDS scada::hello scada::test-support
+  DEPENDS scada::hello scada::service scada::test-support
   ENVIRONMENT "SCADA_HELLO_COMMAND=${hello_command}")

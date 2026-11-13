@@ -15,6 +15,7 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `docs/contracts/` | Interface contracts between the parts. |
 | `docs/decisions.md` | Log of decisions taken during the build. |
 | `docs/coding-standard.md` | C++ coding standard, focused on memory safety. |
+| `docs/install.md` | Installing the staged tree on a test machine by hand. |
 | `libs/` | Libraries, one directory each (`lib<name>`). All logic lives here. |
 | `services/` | Thin executables, one per service. |
 | `tools/` | Developer and operator tools. |
@@ -23,6 +24,8 @@ library (`libs/scada-common`: status and result types, logging, clocks).
 | `.github/workflows/pipeline.yml` | The pipeline that gates every pull request. |
 | `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
+| `third-party/` | Dependency list, licence allow-list, vendored code. |
+| `deploy/` | Templates for systemd units and service users, and the parts of the install tree that belong to no component. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
@@ -45,6 +48,20 @@ Other presets: `release` (optimised, with the release flags of the coding
 standard, section 2) and `perf` (the same flags with debug information, runs
 performance tests only). Configuration stops if the compiler does not support
 a required flag.
+
+Every build checks the third-party dependencies against
+`third-party/dependencies.json` and the licence allow-list, and stops if one
+is unlisted or its licence is not allowed. It writes the licence report and
+the software bill of materials to `build/<preset>/reports/`, and the staged
+install tree carries both in `usr/share/doc/scada/`. To add a
+dependency, see `third-party/README.md`.
+
+The tests need `systemd-analyze` from systemd 250 or newer, to check the
+generated service units.
+
+Staged install tree: `cmake --install build/dev --prefix stage` writes an
+image of the paths the software owns on the target (`usr/bin`, `etc/scada`,
+`var/lib/scada` and so on) under `stage/`. See `docs/install.md`.
 
 ARM64: on an ARM64 machine the same presets build natively. To cross-compile,
 put a GNU cross toolchain (`aarch64-linux-gnu-g++`) on `PATH` and use the
@@ -106,6 +123,10 @@ is skipped or allowed to fail. Performance tests are not part of the pipeline
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.
+- The licence report and the software bill of materials of the `release`
+  build are kept for 14 days as the artifacts `dependency-reports-x86-64` and
+  `dependency-reports-ARM64`. Both files are also printed in the job log, in
+  the step "Licence report and bill of materials".
 - When fuzzing fails, the failing inputs are kept as the artifact
   `fuzz-findings`.
 - The tools are LLVM 18 and the GCC and CMake of the runner image; each job

@@ -257,21 +257,54 @@ bool ChildProcess::wait_for_output(
     return wait_until([&] { return condition(out_); }, timeout);
 }
 
-std::optional<int> ChildProcess::wait_for_exit(
+std::optional<int> ChildProcess::wait_for_end(
     std::chrono::milliseconds timeout) {
-    const bool exited = wait_until(
+    const bool ended = wait_until(
         [this] { return wait_status_ && !out_fd_.valid() && !err_fd_.valid(); },
         timeout);
-    if (!exited || !wait_status_.has_value()) {
+    if (!ended) {
         return std::nullopt;
     }
-    const int status = *wait_status_;
+    return wait_status_;
+}
+
+std::optional<int> ChildProcess::wait_for_exit(
+    std::chrono::milliseconds timeout) {
+    const std::optional<int> ended = wait_for_end(timeout);
+    if (!ended.has_value()) {
+        return std::nullopt;
+    }
+    const int status = *ended;
     // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
     if (!WIFEXITED(status)) {
         return std::nullopt;
     }
     // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
     return WEXITSTATUS(status);
+}
+
+std::optional<int> ChildProcess::wait_for_signal_exit(
+    std::chrono::milliseconds timeout) {
+    const std::optional<int> ended = wait_for_end(timeout);
+    if (!ended.has_value()) {
+        return std::nullopt;
+    }
+    const int status = *ended;
+    // The process is never traced or stopped here, so a status that is not
+    // a normal exit is the end by a signal.
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    if (WIFEXITED(status)) {
+        return std::nullopt;
+    }
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    return WTERMSIG(status);
+}
+
+bool ChildProcess::send_signal(int signal_number) noexcept {
+    check_exit();
+    // Not after the process is reaped: its id may belong to another by then.
+    // NOLINTNEXTLINE(misc-include-cleaner): from <csignal>, which the check does not map
+    return pid_ > 0 && !wait_status_ && ::kill(pid_, signal_number) == 0;
 }
 
 }  // namespace scada::test
