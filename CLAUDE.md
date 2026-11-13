@@ -10,8 +10,10 @@ change, whoever or whatever makes it.
 2. `docs/contracts/` holds the interface contracts. A contract decides how two
    parts talk to each other. Code must match the contract, never the reverse.
 3. `docs/decisions.md` records every choice the reference document left open.
+4. `docs/coding-standard.md` is the C++ coding standard. Read it before
+   writing or reviewing C++.
 
-If these three disagree, stop and ask (see "When to stop and ask").
+If these disagree, stop and ask (see "When to stop and ask").
 
 ## How work is organised
 
@@ -39,7 +41,7 @@ A pull request is ready only when all of these hold:
 
 - [ ] It builds with no warnings on x86-64 and ARM64.
 - [ ] All tests pass on both, including the ones added for this change.
-- [ ] Formatter and linter are clean.
+- [ ] Formatter, linter and sanitizer runs are clean.
 - [ ] New behaviour has unit tests; anything that crosses a process boundary
       has an integration test.
 - [ ] Interface or behaviour changes are reflected in the documentation in the
@@ -53,10 +55,14 @@ yet, say so in the pull request and leave the issue open.
 
 ## Code
 
+This section is the short version. The full rules, including ownership,
+bounds, integer, concurrency and shared-memory rules, are in
+`docs/coding-standard.md`, and they are binding.
+
 - C++20, built with CMake. No compiler extensions, no architecture-specific
   code outside the I/O HAL.
-- Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`). Release builds use
-  the hardening flags listed in section 13.6 of the reference document.
+- Warnings are errors. The warning, hardening and library-assertion flags are
+  listed in section 2 of the coding standard.
 - No distribution-specific paths, tools or package managers anywhere in code or
   build scripts. Install through the CMake install tree only.
 - Errors are returned as values (`Status`, `Result<T>`). No exceptions across
@@ -93,6 +99,8 @@ Mark such functions with the `SCADA_RT` annotation so the checks can find them.
 - Tests must be deterministic. No sleeps to "wait for things"; wait on a
   condition with a timeout.
 - A bug fix comes with a test that fails without the fix.
+- Every pull request passes the address, undefined-behaviour and thread
+  sanitizer runs. Every parser of outside input ships with a fuzz target.
 
 ## Safety and security rules
 

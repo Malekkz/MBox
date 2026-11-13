@@ -12,6 +12,7 @@ Status: design baseline frozen (version 1.0). No code yet. Phase 0 is next.
 | `docs/reference-architecture.md` | The design baseline. Start here. |
 | `docs/contracts/` | Interface contracts between the parts. |
 | `docs/decisions.md` | Log of decisions taken during the build. |
+| `docs/coding-standard.md` | C++ coding standard, focused on memory safety. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
 | `scripts/create-issues.sh` | Creates those issues on GitHub. |
