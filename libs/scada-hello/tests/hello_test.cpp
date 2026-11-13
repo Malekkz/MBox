@@ -62,3 +62,13 @@ TEST(Hello, SurplusArgumentIsAUsageError) {
 }
 
 }  // namespace
+
+// TEMPORARY, removed before merge: proves that the pipeline rejects a
+// formatting error and a sanitizer finding (issue #5, acceptance).
+#include <cstdlib>
+namespace {
+TEST(PipelineProof,   LeakAndBadLayout) {
+        void* leaked = std::malloc(16);
+    EXPECT_NE(leaked, nullptr);
+}
+}  // namespace
