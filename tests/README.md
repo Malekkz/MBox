@@ -1,7 +1,58 @@
 # tests
 
-Tests that span several components: integration tests that start real
-processes against simulated devices, and performance tests. Unit tests do not
-live here; they live in the `tests/` directory of their component.
+Tests that span several components, the code tests share, and the samples
+that prove the test tooling works. Decisions: `docs/decisions.md`, D-6 to D-8.
 
-Empty until the test framework and layout are set up (issue P0-03).
+## Layout
+
+| Path | Content | Label |
+| --- | --- | --- |
+| `<component>/tests/` | Unit tests of one library; run in seconds | `unit` |
+| `<component>/fuzz/` | Fuzz targets of one library, seed corpus in `corpus/<target>/` | `fuzz`, `unit` |
+| `tests/integration/` | Tests that start real processes | `integration` |
+| `tests/perf/` | Performance tests against stated budgets | `perf` |
+| `tests/support/` | `scada::test-support` (start a process, wait on a condition) and the corpus replay driver | |
+| `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
+| `tests/fuzz-sample/` | Toy parser with a planted bug, and its fuzz target | `fuzz`, `unit` |
+
+The commands for each kind are in the top-level `README.md`, "Testing".
+
+## Adding a test
+
+Unit, integration or performance test, written with GoogleTest; `main()` comes
+from the framework:
+
+```cmake
+scada_add_test(scada-foo-unit-test KIND unit
+  SOURCES foo_test.cpp
+  DEPENDS scada::foo)
+```
+
+An integration test starts its processes with `scada::test::ChildProcess`
+(`support/include/scada/test/child_process.h`) and waits with
+`wait_for_output` or `wait_for_exit`, both with a timeout. Do not sleep. Pass
+the command to start through `ENVIRONMENT`, as `integration/CMakeLists.txt`
+does, so that a cross build can run it through the emulator.
+
+Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
+least one seed input in `corpus/<name>/` next to it:
+
+```cmake
+scada_add_fuzz_target(foo_frame_fuzz
+  SOURCES foo_frame_fuzz.cpp
+  DEPENDS scada::foo)
+```
+
+In the `fuzz` build this is fuzzed for 60 s as test `foo_frame_fuzz`. In every
+other build the seed corpus is replayed once as unit test
+`foo_frame_fuzz-corpus`. When fuzzing finds a failing input, it is written to
+`build/fuzz/.../<name>-work/artifacts/`; fix the bug and add that file to the
+seed corpus.
+
+## The samples that contain bugs
+
+`sanitizer-fixtures/` (heap overflow, use after free, leak, signed overflow,
+data race) and the toy parser in `fuzz-sample/` are wrong on purpose. Their
+tests pass only when the tool reports the bug and the process fails. Do not
+fix them, do not copy from them, and never link them into product code. The
+fixtures are built only in the `asan-ubsan` and `tsan` builds.

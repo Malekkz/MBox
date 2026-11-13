@@ -151,9 +151,15 @@ These are created in phase 0; keep this list current.
 cmake --preset dev          # configure
 cmake --build --preset dev  # build
 ctest --preset dev          # unit and integration tests
+ctest --preset unit         # unit tests only (dev build)
+ctest --preset integration  # integration tests only (dev build)
 ctest --preset perf         # performance tests
 cmake --install build/dev --prefix stage   # staged install tree
 ```
 
 Replace `dev` with `release` for the build with the release flags, or with `dev-arm64` or
 `release-arm64` to cross-compile for ARM64 (see `README.md`, "Building").
+
+Replace `dev` with `asan-ubsan`, `tsan` or `fuzz` for the sanitizer and fuzz
+builds (see `README.md`, "Testing"). `perf`, `asan-ubsan`, `tsan` and `fuzz`
+each need their own configure and build step first.
