@@ -1,6 +1,8 @@
 // Unit tests for libscada-service.
 
 #include "scada/service/notify.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/service/notify_listener.h"
 
 #include <gtest/gtest.h>
@@ -14,11 +16,12 @@
 
 namespace {
 
+using scada::Result;
+using scada::StatusCode;
 using scada::service::Notifier;
 using scada::service::NotifyEnvironment;
 using scada::service::NotifyListener;
 using scada::service::NotifySettings;
-using scada::service::NotifyStatus;
 using scada::service::parse_notify_environment;
 
 constexpr std::int64_t OWN_PID = 4242;
@@ -41,63 +44,63 @@ NotifyEnvironment environment(
 
 // True if the environment is accepted.
 bool accepted(const NotifyEnvironment& env) {
-    return parse_notify_environment(env, OWN_PID).has_value();
+    return parse_notify_environment(env, OWN_PID).ok();
 }
 
 TEST(NotifyEnvironmentParsing, NothingSetMeansNoServiceManager) {
     const auto settings = parse_notify_environment({}, OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "an empty environment was rejected";
     }
-    EXPECT_TRUE(settings->socket_name.empty());
-    EXPECT_EQ(settings->watchdog_interval, std::nullopt);
+    EXPECT_TRUE(settings.value().socket_name.empty());
+    EXPECT_EQ(settings.value().watchdog_interval, std::nullopt);
 }
 
 TEST(NotifyEnvironmentParsing, EmptySocketNameMeansNoServiceManager) {
     const auto settings = parse_notify_environment(environment(""), OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "an empty socket name was rejected";
     }
-    EXPECT_TRUE(settings->socket_name.empty());
+    EXPECT_TRUE(settings.value().socket_name.empty());
 }
 
 TEST(NotifyEnvironmentParsing, AcceptsAPathAndAWatchdogForThisProcess) {
     const auto settings = parse_notify_environment(
         environment("/run/systemd/notify", "30000000", "4242"), OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "a valid environment was rejected";
     }
-    EXPECT_EQ(settings->socket_name, "/run/systemd/notify");
-    EXPECT_EQ(settings->watchdog_interval, THIRTY_SECONDS);
+    EXPECT_EQ(settings.value().socket_name, "/run/systemd/notify");
+    EXPECT_EQ(settings.value().watchdog_interval, THIRTY_SECONDS);
 }
 
 TEST(NotifyEnvironmentParsing, AcceptsAnAbstractNameWithoutWatchdogPid) {
     const auto settings =
         parse_notify_environment(environment("@abstract", "1"), OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "a valid environment was rejected";
     }
-    EXPECT_EQ(settings->socket_name, "@abstract");
-    EXPECT_EQ(settings->watchdog_interval, std::chrono::microseconds(1));
+    EXPECT_EQ(settings.value().socket_name, "@abstract");
+    EXPECT_EQ(settings.value().watchdog_interval, std::chrono::microseconds(1));
 }
 
 TEST(NotifyEnvironmentParsing, IgnoresAWatchdogForAnotherProcess) {
     const auto settings = parse_notify_environment(
         environment("@abstract", "30000000", "1"), OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "a valid environment was rejected";
     }
-    EXPECT_EQ(settings->watchdog_interval, std::nullopt);
+    EXPECT_EQ(settings.value().watchdog_interval, std::nullopt);
 }
 
 TEST(NotifyEnvironmentParsing, AcceptsTheLimits) {
     const auto settings = parse_notify_environment(
         environment("/" + std::string(LONGEST_NAME - 1, 'a'), "86400000000"),
         OWN_PID);
-    if (!settings.has_value()) {
+    if (!settings.ok()) {
         FAIL() << "the longest name or the longest interval was rejected";
     }
-    EXPECT_EQ(settings->watchdog_interval,
+    EXPECT_EQ(settings.value().watchdog_interval,
               scada::service::MAX_WATCHDOG_INTERVAL);
 }
 
@@ -133,80 +136,85 @@ TEST(NotifyEnvironmentParsing, RejectsInvalidProcessIds) {
 TEST(Notifier, SendsNothingWithoutAServiceManager) {
     Notifier notifier(NotifySettings{});
     EXPECT_FALSE(notifier.enabled());
-    EXPECT_EQ(notifier.ready(), NotifyStatus::DISABLED);
-    EXPECT_EQ(notifier.watchdog(), NotifyStatus::DISABLED);
+    EXPECT_TRUE(notifier.ready().ok());
+    EXPECT_TRUE(notifier.watchdog().ok());
 }
 
 TEST(Notifier, SendsEachStateToTheListener) {
-    std::optional<NotifyListener> listener = NotifyListener::create();
-    if (!listener.has_value()) {
+    Result<NotifyListener> listener = NotifyListener::create();
+    if (!listener.ok()) {
         FAIL() << "could not create a listener";
     }
-    Notifier notifier(NotifySettings{listener->socket_name(), std::nullopt});
+    Notifier notifier(
+        NotifySettings{listener.value().socket_name(), std::nullopt});
 
-    EXPECT_EQ(notifier.ready(), NotifyStatus::SENT);
-    EXPECT_EQ(listener->receive(RECEIVE_TIMEOUT), "READY=1");
-    EXPECT_EQ(notifier.watchdog(), NotifyStatus::SENT);
-    EXPECT_EQ(listener->receive(RECEIVE_TIMEOUT), "WATCHDOG=1");
-    EXPECT_EQ(notifier.stopping(), NotifyStatus::SENT);
-    EXPECT_EQ(listener->receive(RECEIVE_TIMEOUT), "STOPPING=1");
+    EXPECT_TRUE(notifier.ready().ok());
+    EXPECT_EQ(listener.value().receive(RECEIVE_TIMEOUT), "READY=1");
+    EXPECT_TRUE(notifier.watchdog().ok());
+    EXPECT_EQ(listener.value().receive(RECEIVE_TIMEOUT), "WATCHDOG=1");
+    EXPECT_TRUE(notifier.stopping().ok());
+    EXPECT_EQ(listener.value().receive(RECEIVE_TIMEOUT), "STOPPING=1");
 }
 
 TEST(Notifier, SendsAStatusLineAndTheLongestMessage) {
-    std::optional<NotifyListener> listener = NotifyListener::create();
-    if (!listener.has_value()) {
+    Result<NotifyListener> listener = NotifyListener::create();
+    if (!listener.ok()) {
         FAIL() << "could not create a listener";
     }
-    Notifier notifier(NotifySettings{listener->socket_name(), std::nullopt});
+    Notifier notifier(
+        NotifySettings{listener.value().socket_name(), std::nullopt});
 
-    EXPECT_EQ(notifier.status("all well"), NotifyStatus::SENT);
-    EXPECT_EQ(listener->receive(RECEIVE_TIMEOUT), "STATUS=all well");
+    EXPECT_TRUE(notifier.set_status_text("all well").ok());
+    EXPECT_EQ(listener.value().receive(RECEIVE_TIMEOUT), "STATUS=all well");
 
     const std::string longest(scada::service::MAX_NOTIFY_MESSAGE_SIZE, 'x');
-    EXPECT_EQ(notifier.send(longest), NotifyStatus::SENT);
-    EXPECT_EQ(listener->receive(RECEIVE_TIMEOUT), longest);
+    EXPECT_TRUE(notifier.send(longest).ok());
+    EXPECT_EQ(listener.value().receive(RECEIVE_TIMEOUT), longest);
 }
 
 TEST(Notifier, AcceptsTheSocketNameOfAListener) {
-    std::optional<NotifyListener> listener = NotifyListener::create();
-    if (!listener.has_value()) {
+    Result<NotifyListener> listener = NotifyListener::create();
+    if (!listener.ok()) {
         FAIL() << "could not create a listener";
     }
-    EXPECT_TRUE(accepted(environment(listener->socket_name())));
+    EXPECT_TRUE(accepted(environment(listener.value().socket_name())));
     const Notifier notifier(
-        NotifySettings{listener->socket_name(), std::nullopt});
+        NotifySettings{listener.value().socket_name(), std::nullopt});
     EXPECT_TRUE(notifier.enabled());
 }
 
 TEST(Notifier, RejectsInvalidMessagesWithoutSending) {
-    std::optional<NotifyListener> listener = NotifyListener::create();
-    if (!listener.has_value()) {
+    Result<NotifyListener> listener = NotifyListener::create();
+    if (!listener.ok()) {
         FAIL() << "could not create a listener";
     }
-    Notifier notifier(NotifySettings{listener->socket_name(), std::nullopt});
+    Notifier notifier(
+        NotifySettings{listener.value().socket_name(), std::nullopt});
 
     const std::string too_long(scada::service::MAX_NOTIFY_MESSAGE_SIZE + 1,
                                'x');
-    EXPECT_EQ(notifier.send(""), NotifyStatus::INVALID_MESSAGE);
-    EXPECT_EQ(notifier.send(too_long), NotifyStatus::INVALID_MESSAGE);
-    EXPECT_EQ(notifier.send("A=1" + std::string(1, '\0') + "B"),
-              NotifyStatus::INVALID_MESSAGE);
-    EXPECT_EQ(notifier.status("two\nlines"), NotifyStatus::INVALID_MESSAGE);
-    EXPECT_EQ(listener->receive(std::chrono::milliseconds(0)), std::nullopt);
+    EXPECT_EQ(notifier.send("").code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(notifier.send(too_long).code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(notifier.send("A=1" + std::string(1, '\0') + "B").code(),
+              StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(notifier.set_status_text("two\nlines").code(),
+              StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(listener.value().receive(std::chrono::milliseconds(0)),
+              std::nullopt);
 }
 
 TEST(Notifier, FailsWhenNothingListens) {
     std::string name;
     {
-        std::optional<NotifyListener> listener = NotifyListener::create();
-        if (!listener.has_value()) {
+        Result<NotifyListener> listener = NotifyListener::create();
+        if (!listener.ok()) {
             FAIL() << "could not create a listener";
         }
-        name = listener->socket_name();
+        name = listener.value().socket_name();
     }
     // The listener is gone, so nothing is bound to the name any more.
     Notifier notifier(NotifySettings{name, std::nullopt});
-    EXPECT_EQ(notifier.ready(), NotifyStatus::FAILED);
+    EXPECT_EQ(notifier.ready().code(), StatusCode::IO_ERROR);
 }
 
 }  // namespace

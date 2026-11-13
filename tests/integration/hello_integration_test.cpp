@@ -1,6 +1,7 @@
 // Integration tests for scada-hello: they start the real executable, so they
 // also cover linking, start-up and the exit code seen by the caller.
 
+#include "scada/common/result.h"
 #include "scada/hello/hello.h"
 #include "scada/service/notify_listener.h"
 #include "scada/test/child_process.h"
@@ -110,12 +111,12 @@ struct RunningService {
 // Starts scada-hello as a service. Returns nothing if the listener or the
 // process could not be started, or SCADA_HELLO_COMMAND is not set.
 std::optional<RunningService> start_service() {
-    std::optional<NotifyListener> listener = NotifyListener::create();
-    if (!listener.has_value()) {
+    scada::Result<NotifyListener> listener = NotifyListener::create();
+    if (!listener.ok()) {
         return std::nullopt;
     }
     const std::vector<std::string> command =
-        service_command(listener->socket_name());
+        service_command(listener.value().socket_name());
     if (command.empty()) {
         return std::nullopt;
     }
@@ -123,7 +124,7 @@ std::optional<RunningService> start_service() {
     if (!child.has_value()) {
         return std::nullopt;
     }
-    return RunningService{std::move(*listener), std::move(*child)};
+    return RunningService{std::move(listener).value(), std::move(*child)};
 }
 
 // Hangs the main loop of `service` and waits until it has reported the hang,
@@ -246,7 +247,9 @@ TEST_F(HelloService, RefusesToStartOnAnInvalidNotifySocket) {
     }
     EXPECT_EQ(child->wait_for_exit(WAIT_LIMIT), scada::hello::EXIT_ERROR);
     EXPECT_EQ(child->out(), "");
-    EXPECT_TRUE(child->err().starts_with("scada-hello: invalid"))
+    EXPECT_EQ(child->err(),
+              "scada-hello: invalid environment: NOTIFY_SOCKET is not a valid "
+              "socket name\n")
         << child->err();
 }
 

@@ -5,7 +5,8 @@
 // stands in for systemd so that a service can be started and observed without
 // one. Not used by any service.
 
-#include "scada/service/fd.h"
+#include "scada/common/fd.h"
+#include "scada/common/result.h"
 
 #include <chrono>
 #include <cstddef>
@@ -21,8 +22,8 @@ inline constexpr std::size_t MAX_RECEIVED_NOTIFY_SIZE = 4096;
 class NotifyListener {
 public:
     // Binds a datagram socket to a unique abstract-namespace name, so nothing
-    // is created in the filesystem. Returns nullopt if that fails.
-    [[nodiscard]] static std::optional<NotifyListener> create();
+    // is created in the filesystem. Returns IO_ERROR if that fails.
+    [[nodiscard]] static Result<NotifyListener> create();
 
     // The value to pass to the service as NOTIFY_SOCKET.
     [[nodiscard]] const std::string& socket_name() const noexcept {

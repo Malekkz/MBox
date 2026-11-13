@@ -1,5 +1,8 @@
 #include "scada/service/notify.h"
 
+#include "scada/common/fd.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "unix_address.h"
 
 #include <sys/socket.h>
@@ -8,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -61,14 +66,15 @@ NotifyEnvironment read_notify_environment() {
             environment_value("WATCHDOG_PID")};
 }
 
-std::optional<NotifySettings> parse_notify_environment(
+Result<NotifySettings> parse_notify_environment(
     const NotifyEnvironment& environment, std::int64_t own_pid) {
     NotifySettings settings;
 
     // An empty NOTIFY_SOCKET means the same as an unset one.
     if (environment.notify_socket && !environment.notify_socket->empty()) {
         if (!make_unix_address(*environment.notify_socket)) {
-            return std::nullopt;
+            return Status(StatusCode::INVALID_ARGUMENT,
+                          "NOTIFY_SOCKET is not a valid socket name");
         }
         settings.socket_name = *environment.notify_socket;
     }
@@ -79,7 +85,8 @@ std::optional<NotifySettings> parse_notify_environment(
             parse_positive(*environment.watchdog_pid,
                            std::numeric_limits<std::int64_t>::max());
         if (!pid) {
-            return std::nullopt;
+            return Status(StatusCode::INVALID_ARGUMENT,
+                          "WATCHDOG_PID is not a process id");
         }
         watchdog_is_for_us = *pid == own_pid;
     }
@@ -87,7 +94,8 @@ std::optional<NotifySettings> parse_notify_environment(
         const auto usec = parse_positive(*environment.watchdog_usec,
                                          MAX_WATCHDOG_INTERVAL.count());
         if (!usec) {
-            return std::nullopt;
+            return Status(StatusCode::INVALID_ARGUMENT,
+                          "WATCHDOG_USEC is not a valid interval");
         }
         if (watchdog_is_for_us) {
             settings.watchdog_interval = std::chrono::microseconds(*usec);
@@ -103,38 +111,39 @@ Notifier::Notifier(const NotifySettings& settings)
     }
 }
 
-NotifyStatus Notifier::ready() noexcept {
+Status Notifier::ready() noexcept {
     return send("READY=1");
 }
 
-NotifyStatus Notifier::watchdog() noexcept {
+Status Notifier::watchdog() noexcept {
     return send("WATCHDOG=1");
 }
 
-NotifyStatus Notifier::stopping() noexcept {
+Status Notifier::stopping() noexcept {
     return send("STOPPING=1");
 }
 
-NotifyStatus Notifier::status(std::string_view text) {
+Status Notifier::set_status_text(std::string_view text) {
     if (text.find('\n') != std::string_view::npos) {
-        return NotifyStatus::INVALID_MESSAGE;
+        return {StatusCode::INVALID_ARGUMENT, "status text has a line break"};
     }
     std::string message = "STATUS=";
     message += text;
     return send(message);
 }
 
-NotifyStatus Notifier::send(std::string_view message) noexcept {
+Status Notifier::send(std::string_view message) noexcept {
     if (!enabled()) {
-        return NotifyStatus::DISABLED;
+        return {};
     }
     if (message.empty() || message.size() > MAX_NOTIFY_MESSAGE_SIZE ||
         message.find('\0') != std::string_view::npos) {
-        return NotifyStatus::INVALID_MESSAGE;
+        return {StatusCode::INVALID_ARGUMENT,
+                "notification message is empty, too long or contains NUL"};
     }
     std::optional<UnixAddress> address = make_unix_address(socket_name_);
     if (!socket_.valid() || !address) {
-        return NotifyStatus::FAILED;
+        return {StatusCode::IO_ERROR, "notification socket is not open"};
     }
 
     // sendmsg() takes a writable buffer, so the message is copied; the size
@@ -156,9 +165,9 @@ NotifyStatus Notifier::send(std::string_view message) noexcept {
     const ssize_t sent =
         ::sendmsg(socket_.get(), &header, MSG_DONTWAIT | MSG_NOSIGNAL);
     if (sent < 0 || static_cast<std::size_t>(sent) != message.size()) {
-        return NotifyStatus::FAILED;
+        return {StatusCode::IO_ERROR, "sending to the service manager failed"};
     }
-    return NotifyStatus::SENT;
+    return {};
 }
 
 }  // namespace scada::service

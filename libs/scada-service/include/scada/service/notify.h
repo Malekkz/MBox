@@ -4,9 +4,11 @@
 // Client side of the systemd service notification protocol (sd_notify(3)):
 // readiness, watchdog and stop messages sent as datagrams to the socket named
 // by NOTIFY_SOCKET. Implemented directly on the documented protocol, so no
-// systemd library is linked (docs/decisions.md, D-15).
+// systemd library is linked (docs/decisions.md, D-17).
 
-#include "scada/service/fd.h"
+#include "scada/common/fd.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 
 #include <chrono>
 #include <cstddef>
@@ -45,35 +47,33 @@ struct NotifySettings {
     std::optional<std::chrono::microseconds> watchdog_interval;
 };
 
-// Outcome of sending one message.
-enum class NotifyStatus : std::uint8_t {
-    SENT,             // The service manager's socket accepted the message.
-    DISABLED,         // No service manager; nothing was sent.
-    INVALID_MESSAGE,  // Empty, too long, or contains a NUL byte; not sent.
-    FAILED,           // The socket could not be opened or the send failed.
-};
-
 // Reads the three variables from the process environment. Not thread-safe
 // against concurrent changes of the environment; call it at start-up.
 [[nodiscard]] NotifyEnvironment read_notify_environment();
 
-// Validates `environment` for the process with id `own_pid`. Returns nullopt
-// if any variable that is set has an invalid value: a socket name that is not
-// an absolute path or '@name', is too long for a socket address or contains a
-// NUL byte; an interval or process id that is not a positive decimal number;
-// an interval above MAX_WATCHDOG_INTERVAL. A watchdog addressed to another
-// process (WATCHDOG_PID differs from `own_pid`) is valid and gives no
-// watchdog interval.
-[[nodiscard]] std::optional<NotifySettings> parse_notify_environment(
+// Validates `environment` for the process with id `own_pid`. Returns
+// INVALID_ARGUMENT if any variable that is set has an invalid value: a socket
+// name that is not an absolute path or '@name', is too long for a socket
+// address or contains a NUL byte; an interval or process id that is not a
+// positive decimal number; an interval above MAX_WATCHDOG_INTERVAL. The
+// message names the variable. A watchdog addressed to another process
+// (WATCHDOG_PID differs from `own_pid`) is valid and gives no watchdog
+// interval.
+[[nodiscard]] Result<NotifySettings> parse_notify_environment(
     const NotifyEnvironment& environment, std::int64_t own_pid);
 
 // Sends state messages to the service manager.
+//
+// Every send returns OK if the message was handed to the service manager's
+// socket, and also if there is no service manager, in which case nothing is
+// sent; enabled() tells the two apart. It returns INVALID_ARGUMENT for a
+// message that is empty, too long or contains a NUL byte, and IO_ERROR if the
+// socket could not be opened or the send failed.
 class Notifier {
 public:
     // Opens the socket for `settings.socket_name`. With an empty name the
-    // notifier is disabled and every send returns DISABLED. If the socket
-    // cannot be opened, every send returns FAILED. `settings` must come from
-    // parse_notify_environment().
+    // notifier is disabled. If the socket cannot be opened, every send returns
+    // IO_ERROR. `settings` must come from parse_notify_environment().
     explicit Notifier(const NotifySettings& settings);
 
     // True if a service manager is to be notified.
@@ -82,21 +82,22 @@ public:
     }
 
     // Reports that start-up is complete ("READY=1").
-    [[nodiscard]] NotifyStatus ready() noexcept;
+    Status ready() noexcept;
 
     // Feeds the watchdog ("WATCHDOG=1").
-    [[nodiscard]] NotifyStatus watchdog() noexcept;
+    Status watchdog() noexcept;
 
     // Reports that the service is shutting down ("STOPPING=1").
-    [[nodiscard]] NotifyStatus stopping() noexcept;
+    Status stopping() noexcept;
 
     // Sets the free-text status line shown by the service manager
-    // ("STATUS=<text>"). `text` must be a single line.
-    [[nodiscard]] NotifyStatus status(std::string_view text);
+    // ("STATUS=<text>"). `text` must be a single line; a line break gives
+    // INVALID_ARGUMENT.
+    Status set_status_text(std::string_view text);
 
     // Sends one raw message, for example "READY=1". Does not block: if the
-    // service manager's queue is full the result is FAILED.
-    [[nodiscard]] NotifyStatus send(std::string_view message) noexcept;
+    // service manager's queue is full the result is IO_ERROR.
+    Status send(std::string_view message) noexcept;
 
 private:
     std::string socket_name_;

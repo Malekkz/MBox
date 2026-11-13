@@ -1,5 +1,6 @@
 #include "scada/hello/hello.h"
 
+#include "scada/common/result.h"
 #include "scada/service/notify.h"
 
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
@@ -20,7 +21,6 @@ namespace {
 
 using scada::service::Notifier;
 using scada::service::NotifySettings;
-using scada::service::NotifyStatus;
 
 constexpr std::string_view USAGE =
     "Usage: scada-hello [--help | --service]\n"
@@ -88,14 +88,15 @@ Wake wait_for_signal(
 }
 
 int serve(std::ostream& out, std::ostream& err) {
-    const std::optional<NotifySettings> settings =
+    const Result<NotifySettings> parsed =
         scada::service::parse_notify_environment(
             scada::service::read_notify_environment(), ::getpid());
-    if (!settings) {
-        err << "scada-hello: invalid NOTIFY_SOCKET, WATCHDOG_USEC or "
-               "WATCHDOG_PID\n";
+    if (!parsed.ok()) {
+        err << "scada-hello: invalid environment: " << parsed.status().message()
+            << '\n';
         return EXIT_ERROR;
     }
+    const NotifySettings& settings = parsed.value();
 
     // The signals are blocked and then collected synchronously, so no signal
     // handler and no global flag is needed.
@@ -108,22 +109,22 @@ int serve(std::ostream& out, std::ostream& err) {
         return EXIT_ERROR;
     }
 
-    Notifier notifier(*settings);
+    Notifier notifier(settings);
     out << greeting() << '\n' << std::flush;
-    if (notifier.ready() == NotifyStatus::FAILED) {
+    if (!notifier.ready().ok()) {
         err << "scada-hello: cannot report readiness to the service manager\n";
         return EXIT_ERROR;
     }
 
     std::optional<std::chrono::microseconds> feed_period;
-    if (settings->watchdog_interval) {
-        feed_period = *settings->watchdog_interval / 2;
+    if (settings.watchdog_interval) {
+        feed_period = *settings.watchdog_interval / 2;
     }
 
     for (;;) {
         switch (wait_for_signal(signals, feed_period)) {
             case Wake::FEED_DUE:
-                if (notifier.watchdog() == NotifyStatus::FAILED) {
+                if (!notifier.watchdog().ok()) {
                     // Keep running: if feeding stays broken the service
                     // manager restarts the service, which is its job.
                     err << "scada-hello: cannot feed the watchdog\n"
@@ -137,7 +138,7 @@ int serve(std::ostream& out, std::ostream& err) {
                 return EXIT_OK;
             case Wake::HANG:
                 // Best effort: the status line only helps the person testing.
-                static_cast<void>(notifier.status(HANG_STATUS));
+                static_cast<void>(notifier.set_status_text(HANG_STATUS));
                 hang();
             case Wake::ERROR:
                 err << "scada-hello: waiting for signals failed\n";

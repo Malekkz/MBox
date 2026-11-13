@@ -1,6 +1,8 @@
 #include "scada/service/notify_listener.h"
 
-#include "scada/service/fd.h"
+#include "scada/common/fd.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "unix_address.h"
 
 #include <poll.h>
@@ -22,10 +24,10 @@ namespace scada::service {
 NotifyListener::NotifyListener(std::string socket_name, Fd socket) noexcept
     : socket_name_(std::move(socket_name)), socket_(std::move(socket)) {}
 
-std::optional<NotifyListener> NotifyListener::create() {
+Result<NotifyListener> NotifyListener::create() {
     Fd socket(::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0));
     if (!socket.valid()) {
-        return std::nullopt;
+        return Status(StatusCode::IO_ERROR, "cannot create a socket");
     }
     // Unique among live listeners: the process id separates processes, the
     // descriptor number separates listeners within one.
@@ -33,7 +35,7 @@ std::optional<NotifyListener> NotifyListener::create() {
                        std::to_string(socket.get());
     const std::optional<UnixAddress> address = make_unix_address(name);
     if (!address || !bind_unix(socket.get(), *address)) {
-        return std::nullopt;
+        return Status(StatusCode::IO_ERROR, "cannot bind the listener socket");
     }
     return NotifyListener(std::move(name), std::move(socket));
 }

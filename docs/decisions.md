@@ -232,7 +232,37 @@ Consequences:
 - Where and how the performance tests of section 15 of the reference document run is still open. It must be decided before phase 1 is accepted, because phase 1 has the first real targets.
 - GitHub's actions `actions/checkout` and `actions/upload-artifact` (both MIT) are tools of the pipeline and are not linked or shipped. The licence report (P0-07) must list them. They are referenced by major version, not by commit hash.
 
-## D-14: The staged tree is an image of the root filesystem
+## D-14: `Status` carries a code and a fixed message; `Result<T>` is our own type
+Date: 2026-11-13
+Phase / issue: 0, #7
+Status: accepted
+
+Context: errors are returned as values (`Status`, `Result<T>`), also by the real-time functions of the tag library, which must not allocate. The documents name the two types but not their content.
+Options: a code with an owned `std::string` message; a code with a message that must be a string literal; a code only. For `Result<T>`: `std::expected` (C++23, not available in C++20); a third-party type; our own.
+Decision:
+- `Status` is a `StatusCode` (14 values, `status.h`) plus a `StaticString`, a view that can only be built from a string literal at compile time. It owns nothing and is trivially copyable. Details that vary at run time go into the log record written where the error is handled.
+- `Result<T>` is our own class holding a value or an error `Status`. Calling `value()` on an error, or building a `Result` from an OK status, ends the process through `panic()`; the check stays on in release builds (coding standard, section 7).
+- The common library uses the namespace `scada`, not `scada::common`, because these names appear in every interface.
+Reason: a literal message makes `Status` usable in real-time code and removes any dangling-view risk, at no cost to callers that only branch on the code. Our own `Result<T>` needs no dependency and no language level beyond C++20.
+Consequences: a `Status` cannot carry a file name or a number; callers log them. `Result<T>` can be replaced by `std::expected` if the language level is raised.
+
+## D-15: Logging through a bounded queue, to the journal's native socket
+Date: 2026-11-13
+Phase / issue: 0, #7
+Status: accepted
+
+Context: services log to the systemd journal in a structured format with bounded size (reference 14.6), with a stderr fallback, and logging must not block the caller for more than a bounded time (issue #7). How records reach the journal, and what happens when it stalls, was open.
+Options: link `libsystemd` and call `sd_journal_send`; write the journal's native datagram protocol ourselves; print to stderr with a priority prefix only. For a stalled sink: block the caller; drop the oldest queued record; drop the new record.
+Decision:
+- `Logger::log` copies the record into a pre-allocated queue (default 256 records) under a mutex that is never held during sink I/O, and a worker thread per `Logger` delivers it. When the queue is full the new record is dropped and counted, and one `WARNING` record with the field `DROPPED` reports the loss once the sink recovers.
+- A record is limited to a 384-byte message and 8 fields with 32-byte keys and 96-byte values; longer text is cut. Field keys follow the journal's key rule.
+- The journal sink speaks the native protocol on `/run/systemd/journal/socket` with a non-blocking datagram socket. No library is linked.
+- The journal is used only when `JOURNAL_STREAM` shows that the service manager connected stderr to it; otherwise, and whenever a journal send fails, the record is written to stderr as one escaped text line.
+- The record's creation time is sent as the field `SCADA_TIME_NS`, because the journal stamps the later delivery time.
+Reason: the native protocol is documented as stable by systemd and needs about 50 lines, while `libsystemd` would be a new dependency to record and cross-compile. Dropping the new record keeps the records that led up to a stall, which are the ones needed to diagnose it, and needs no reordering.
+Consequences: records can be lost under overload, and the loss is visible in the log. The size limits keep every record inside one datagram, so the protocol's file-descriptor passing for large messages is not needed. The socket path is fixed by systemd, not by a distribution. The stderr sink bounds its wait with `poll` (100 ms) before a blocking write; another writer that fills the same pipe in between can still delay the worker thread, never a caller. Real-time code must not log (CLAUDE.md); it passes data to a non-real-time thread instead.
+
+## D-16: The staged tree is an image of the root filesystem
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
@@ -247,23 +277,23 @@ Decision:
 Reason: one command with one prefix gives the whole layout, and the tree can be copied to `/` or wrapped by any package format. `sysusers.d` is part of systemd, which the design already requires, so no distribution's user tool is needed.
 Consequences: the build cannot be installed to a prefix such as `/usr/local`. A distribution that builds systemd with other directories sets the two cache variables. Ownership and modes of the data directories, and the permissions of `/dev/shm/scada`, are still to be set, by the service issues and the tag database contract.
 
-## D-15: The systemd notification protocol is implemented in `libscada-service`
+## D-17: The systemd notification protocol is implemented in `libscada-service`
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
 
-Context: a `Type=notify` service must send `READY=1` and `WATCHDOG=1` to the socket in `NOTIFY_SOCKET`. No dependency list or licence report exists yet (issue P0-07), and `libscada-common` does not exist yet (issue P0-06).
+Context: a `Type=notify` service must send `READY=1` and `WATCHDOG=1` to the socket in `NOTIFY_SOCKET`. No dependency list or licence report exists yet (issue P0-07).
 Options: link `libsystemd` (`sd_notify`); implement the documented datagram protocol; start services through a wrapper that notifies for them.
 Decision:
 - A new library, `libscada-service`, implements the client side of the protocol with plain sockets. It also holds `NotifyListener`, the service manager's side, which tests use in place of systemd.
 - Values of `NOTIFY_SOCKET`, `WATCHDOG_USEC` and `WATCHDOG_PID` are validated as untrusted input. A service refuses to start on an invalid value instead of running without notification.
-- Until P0-06: the library carries its own `Fd` owner type (the test support library has a second one, `UniqueFd`), and returns `NotifyStatus` and `std::optional` instead of `Status` and `Result<T>`. P0-06 moves `Fd` to `libscada-common` and converts the return types.
+- The library uses `Fd`, `Status` and `Result<T>` of `libscada-common`. A send returns OK when there is no service manager, because nothing had to be done; `Notifier::enabled()` tells the two cases apart.
 - `bind()` needs a `sockaddr*` for a `sockaddr_un`. The conversion goes through `void*` in one function, `bind_unix`, used only by `NotifyListener`. Sending uses `sendmsg()`, which takes the address as `void*` and needs no conversion.
 - The environment parser has unit tests for invalid, oversized and overflowing values and the fuzz target `notify_environment_fuzz`.
 Reason: the protocol is a few lines, is documented as stable by systemd, and avoids a dependency before the licence report exists. A wrapper would report readiness for a service that is not ready.
 Consequences: only the messages the services need are supported (`READY`, `WATCHDOG`, `STOPPING`, `STATUS`); file descriptor passing and `sd_notify` over other socket types are not.
 
-## D-16: Service unit template and the watchdog test hook
+## D-18: Service unit template and the watchdog test hook
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted
@@ -280,7 +310,7 @@ Decision:
 Reason: the template holds what every service shares; values that depend on the service stay with the service. A signal needs no change to the unit to trigger a hang on a test machine.
 Consequences: every service unit starts from the strictest sandbox and widens it explicitly. Product services get no hang hook (reference 13.6: no debug interfaces in release builds).
 
-## D-17: Include check and POSIX headers
+## D-19: Include check and POSIX headers
 Date: 2026-11-13
 Phase / issue: 0, #6
 Status: accepted

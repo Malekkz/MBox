@@ -10,13 +10,14 @@ What a process needs to run as a systemd service of type `notify`
   service manager. Sending never blocks.
 - Provides `NotifyListener`, the service manager's side of the protocol, so
   tests can start a service and observe it without systemd.
-- It does not link `libsystemd` (`docs/decisions.md`, D-15), and it does not
+- It does not link `libsystemd` (`docs/decisions.md`, D-17), and it does not
   decide when to feed the watchdog; the service's main loop does.
 
 ## Interfaces
 
 - Public headers in `include/scada/service/`, namespace `scada::service`:
-  `notify.h`, `notify_listener.h`, `fd.h`.
+  `notify.h`, `notify_listener.h`.
+- Uses `Fd`, `Status` and `Result<T>` of `libscada-common`.
 - The systemd notification protocol, as described in `sd_notify(3)`.
 - No contract of this project.
 
@@ -29,13 +30,13 @@ Link the CMake target `scada::service`:
 
 const auto settings = scada::service::parse_notify_environment(
     scada::service::read_notify_environment(), ::getpid());
-if (!settings) { /* invalid environment: refuse to start */ }
+if (!settings.ok()) { /* invalid environment: refuse to start */ }
 
-scada::service::Notifier notifier(*settings);
+scada::service::Notifier notifier(settings.value());
 // ... start up ...
-if (notifier.ready() == scada::service::NotifyStatus::FAILED) { /* exit */ }
-// In the main loop, at half of settings->watchdog_interval:
-if (notifier.watchdog() == scada::service::NotifyStatus::FAILED) { /* log */ }
+if (!notifier.ready().ok()) { /* exit */ }
+// In the main loop, at half of settings.value().watchdog_interval:
+if (!notifier.watchdog().ok()) { /* log */ }
 ```
 
 Install the unit and the service user with `scada_install_service` in the
