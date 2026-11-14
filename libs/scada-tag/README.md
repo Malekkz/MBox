@@ -378,7 +378,7 @@ rate of `SCADA_E_BUSY` was measured on x86-64 only (decision D-30).
 
 ## Change rings and waking
 
-Contract section 8; decision D-31.
+Contract section 8; decision D-32.
 
 A write that changes value, quality or quality flags (for a STRING tag:
 its text) appends one change entry to the ring of its owner, after the
@@ -407,14 +407,14 @@ and repeats the clock check, as `scada_tag_status` does.
 A consumer waits on the futex word of a ring through its read-only
 mapping; a wake through the owner's read-write mapping reaches it, because
 the kernel keys a shared futex by file and offset (the experiment of issue
-P1-07, decision D-31). Every wait looks at the ring again at least every
+P1-07, decision D-32). Every wait looks at the ring again at least every
 100 ms, so a process that never calls `scada_tag_notify` still delivers
 within 100 ms.
 
 `scada_sub_next` returns `SCADA_E_GAP` once for each of these: the
 subscription fell `capacity` entries behind (contract 8.2), the owner
 attached again (the epoch changed), the ring appeared, disappeared or was
-replaced, or the owner's process went down or came back (decision D-32). The subscription then continues at the end of the ring; the
+replaced, or the owner's process went down or came back (decision D-33). The subscription then continues at the end of the ring; the
 consumer reads the tags it cares about and drops any later change older
 than what it read. A change entry is input: one that is not a valid change
 of a tag of the owner gives `SCADA_E_LAYOUT` and is skipped.

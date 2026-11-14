@@ -7,7 +7,7 @@
 //
 // With SCADA_PERF_REPORT_ONLY=1 in the environment it only prints the
 // figures: the pipeline runs it so on shared runners, whose timing is not
-// fit to gate on (decisions D-13, D-31).
+// fit to gate on (decisions D-13, D-32).
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"

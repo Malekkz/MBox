@@ -2,7 +2,7 @@
 #define SCADA_TAG_FUTEX_H
 
 // Waiting and waking on 32-bit words of shared memory
-// (docs/contracts/tag-database.md, section 8.4; decision D-31). The words
+// (docs/contracts/tag-database.md, section 8.4; decision D-32). The words
 // lie in mappings of region files that other processes map too, so the
 // futexes are shared, not private: the kernel identifies them by file and
 // offset, which makes a wait on a read-only mapping meet a wake on another

@@ -2,7 +2,7 @@
 // and for the wake mechanism under it (section 8.4): a futex wait on a
 // read-only shared mapping that a wake through a writable mapping of the
 // same file ends. That is the experiment of issue P1-07; the result is in
-// docs/decisions.md, D-31.
+// docs/decisions.md, D-32.
 
 #include "change_ring.h"
 #include "futex.h"

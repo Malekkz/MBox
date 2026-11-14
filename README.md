@@ -126,7 +126,7 @@ is skipped or allowed to fail. Performance tests are not part of the pipeline
 (`docs/decisions.md`, D-13), with one exception: both `build and test` jobs
 run `scada-tag-wake-perf-test` on the `release` build and print the wake-up
 latency of a change ring consumer, without gating on it, because the ARM64
-runner is the only ARM64 machine of the project (D-31).
+runner is the only ARM64 machine of the project (D-32).
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.

@@ -551,7 +551,7 @@ value, so a wake between the check and the wait is not lost.
   `poll` and `epoll`. Nothing is passed between processes, so this does not
   depend on `scada-tagd`.
 
-Verified on x86-64 and ARM64 in phase 1 (P1-07, D-31). The fallback that
+Verified on x86-64 and ARM64 in phase 1 (P1-07, D-32). The fallback that
 was kept in reserve, one eventfd per ring passed to consumers by
 `scada-tagd` over a Unix socket, is not needed.
 
@@ -1088,7 +1088,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
-| Wake mechanism | Settled in P1-07 (D-31): futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
+| Wake mechanism | Settled in P1-07 (D-32): futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
 | Read retry limit before `SCADA_E_BUSY` | 64 attempts | P1-06, confirmed in P1-12 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
 | Default change ring capacity per owner | 65,536 | P1-12 | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
 | Huge pages for the `tags` regions | Not used | P1-12 | Used only if the benchmark shows a lower 99.9th percentile read latency |
@@ -1155,7 +1155,7 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
 
-| 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-31). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-32); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
+| 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 
 Migration, 0.4 to 0.5: none for data. The layout version stays 1 and no
 structure in shared memory changed. `scada_change` and `scada_sub_stats_t`

@@ -1,7 +1,7 @@
 // Integration tests for the change rings with real processes (contract,
 // sections 8 and 15): a writer process notifies, and this process consumes
 // its rings through read-only mappings and is woken across the process
-// boundary by a futex on those mappings (decision D-31). Conformance tests
+// boundary by a futex on those mappings (decision D-32). Conformance tests
 // 7 (the ring), 13 and 24.
 //
 // Every wait is on a condition with a limit.
