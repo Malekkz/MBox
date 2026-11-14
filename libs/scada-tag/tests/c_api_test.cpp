@@ -14,10 +14,14 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -26,6 +30,9 @@ using scada::tag::GenerationState;
 using scada::tag::testing::PROCESS_IO;
 
 constexpr std::uint32_t OTHER_LAYOUT_VERSION = 2;
+// The bit patterns of two FLOAT64 values, 42.5 and -7.25.
+constexpr std::uint64_t LEVEL_BITS = 0x4045'4000'0000'0000U;
+constexpr std::uint64_t OTHER_LEVEL_BITS = 0xC01D'0000'0000'0000U;
 // A value beyond every uid.
 constexpr std::int64_t NO_UID = 0x1'0000'0000;
 
@@ -89,7 +96,7 @@ TEST_F(CApi, AttachHeartbeatStatusDetach) {
     EXPECT_EQ(status.regions_created, 5U);
     EXPECT_EQ(status.regions_reused, 0U);
     EXPECT_EQ(status.records_repaired, 0U);
-    EXPECT_EQ(status.reserved0, 0);
+    EXPECT_LE(status.clock_syscall, 1);
     EXPECT_EQ(status.reserved1, 0U);
 
     static_cast<void>(host().check(scada::monotonic_ns()));
@@ -235,6 +242,146 @@ TEST_F(CApi, TagdDownIsReportedAndTheContextKeepsWorking) {
     EXPECT_EQ(status.tagd_down, 1);
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RUNNING);
     EXPECT_EQ(scada_tag_heartbeat(feeder.get()), SCADA_OK);
+}
+
+TEST_F(CApi, TheTagStructuresHaveTheirDocumentedSizes) {
+    EXPECT_EQ(sizeof(scada_value), 48U);
+    EXPECT_EQ(sizeof(scada_tag_info_t), 168U);
+    EXPECT_EQ(SCADA_INVALID_HANDLE, 0xFFFF'FFFFU);
+    EXPECT_EQ(SCADA_E_NOT_OWNER, 4);
+    EXPECT_EQ(SCADA_E_TYPE, 5);
+    EXPECT_EQ(SCADA_FLAG_OWNER_DOWN, 1 << 5);
+    EXPECT_EQ(SCADA_FLAG_LOCAL_TIME, 1 << 11);
+}
+
+TEST_F(CApi, ATagIsResolvedWrittenAndReadThroughTheCInterface) {
+    start_host();
+    Context feeder;
+    Context web;
+    ASSERT_EQ(attach("io", feeder), SCADA_OK);
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+
+    std::uint32_t own = 0;
+    std::uint32_t level = 0;
+    ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.level", &own), SCADA_OK);
+    ASSERT_EQ(scada_tag_resolve(web.get(), "plant.level", &level), SCADA_OK);
+    EXPECT_EQ(own, level);
+
+    scada_tag_info_t info{};
+    ASSERT_EQ(scada_tag_info(web.get(), level, &info), SCADA_OK);
+    EXPECT_EQ(std::string_view(std::data(info.name)), "plant.level");
+    EXPECT_EQ(info.type, SCADA_TYPE_FLOAT64);
+
+    scada_value written{};
+    written.type = SCADA_TYPE_FLOAT64;
+    written.quality = SCADA_QUALITY_GOOD;
+    written.value = LEVEL_BITS;
+    ASSERT_EQ(scada_tag_write(feeder.get(), own, &written), SCADA_OK);
+    EXPECT_EQ(scada_tag_write(web.get(), level, &written), SCADA_E_NOT_OWNER);
+
+    scada_value value{};
+    ASSERT_EQ(scada_tag_read(web.get(), level, &value), SCADA_OK);
+    EXPECT_EQ(value.value, LEVEL_BITS);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_GOOD);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_LOCAL_TIME);
+
+    written.value = OTHER_LEVEL_BITS;
+    ASSERT_EQ(scada_tag_write_many(feeder.get(), &own, 1, &written), SCADA_OK);
+    int status = -1;
+    ASSERT_EQ(scada_tag_read_many(web.get(), &level, 1, &value, &status),
+              SCADA_OK);
+    EXPECT_EQ(status, SCADA_OK);
+    EXPECT_EQ(value.value, OTHER_LEVEL_BITS);
+    ASSERT_EQ(scada_tag_read_many(web.get(), &level, 1, &value, nullptr),
+              SCADA_OK);
+
+    std::uint32_t note = 0;
+    ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.note", &note), SCADA_OK);
+    const std::string_view text = "valve 3 open";
+    ASSERT_EQ(scada_tag_write_string(feeder.get(), note, text.data(),
+                                     text.size(), SCADA_QUALITY_GOOD, 0, 0),
+              SCADA_OK);
+    ASSERT_EQ(scada_tag_resolve(web.get(), "plant.note", &note), SCADA_OK);
+    std::array<char, SCADA_STRING_MAX> buffer{};
+    std::size_t length = 0;
+    scada_value meta{};
+    ASSERT_EQ(scada_tag_read_string(web.get(), note, buffer.data(),
+                                    buffer.size(), &length, &meta),
+              SCADA_OK);
+    EXPECT_EQ(std::string_view(buffer.data(), length), text);
+    EXPECT_EQ(meta.type, SCADA_TYPE_STRING);
+    // An empty text needs no pointer.
+    EXPECT_EQ(scada_tag_write_string(feeder.get(), note, nullptr, 0,
+                                     SCADA_QUALITY_GOOD, 0, 0),
+              SCADA_OK);
+
+    // The owner detaches: its tags read as down at once.
+    feeder.detach();
+    ASSERT_EQ(scada_tag_read(web.get(), level, &value), SCADA_OK);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
+}
+
+TEST_F(CApi, NullArgumentsOfTheTagFunctionsAreInvalid) {
+    start_host();
+    Context feeder;
+    ASSERT_EQ(attach("io", feeder), SCADA_OK);
+    scada_ctx* const ctx = feeder.get();
+    std::uint32_t handle = 0;
+    ASSERT_EQ(scada_tag_resolve(ctx, "plant.level", &handle), SCADA_OK);
+    scada_value value{};
+    value.type = SCADA_TYPE_FLOAT64;
+    scada_tag_info_t info{};
+    std::array<char, SCADA_STRING_MAX> buffer{};
+    std::size_t length = 0;
+
+    std::uint32_t none = 0;
+    EXPECT_EQ(scada_tag_resolve(nullptr, "plant.level", &none),
+              SCADA_E_INVALID);
+    EXPECT_EQ(none, SCADA_INVALID_HANDLE);
+    EXPECT_EQ(scada_tag_resolve(ctx, nullptr, &none), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_resolve(ctx, "plant.level", nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_resolve(ctx, "plant.none", &none), SCADA_E_NOT_FOUND);
+    EXPECT_EQ(none, SCADA_INVALID_HANDLE);
+
+    EXPECT_EQ(scada_tag_info(nullptr, handle, &info), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_info(ctx, handle, nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read(nullptr, handle, &value), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read(ctx, handle, nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write(nullptr, handle, &value), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write(ctx, handle, nullptr), SCADA_E_INVALID);
+
+    EXPECT_EQ(scada_tag_read_many(nullptr, &handle, 1, &value, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read_many(ctx, nullptr, 1, &value, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read_many(ctx, &handle, 1, nullptr, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read_many(ctx, nullptr, 0, nullptr, nullptr), SCADA_OK);
+    EXPECT_EQ(scada_tag_write_many(nullptr, &handle, 1, &value),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_many(ctx, nullptr, 1, &value), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_many(ctx, &handle, 1, nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_many(ctx, nullptr, 0, nullptr), SCADA_OK);
+
+    std::uint32_t note = 0;
+    ASSERT_EQ(scada_tag_resolve(ctx, "plant.note", &note), SCADA_OK);
+    EXPECT_EQ(scada_tag_read_string(nullptr, note, buffer.data(), buffer.size(),
+                                    &length, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read_string(ctx, note, nullptr, buffer.size(), &length,
+                                    nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_read_string(ctx, note, buffer.data(), buffer.size(),
+                                    nullptr, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_string(nullptr, note, "x", 1, 0, 0, 0),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_string(ctx, note, nullptr, 1, 0, 0, 0),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_write_string(ctx, note, buffer.data(),
+                                     SCADA_STRING_MAX + 1, 0, 0, 0),
+              SCADA_E_INVALID);
 }
 
 }  // namespace

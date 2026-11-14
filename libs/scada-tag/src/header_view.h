@@ -69,6 +69,8 @@ struct HeaderContents {
     std::uint32_t heartbeat_check_ms = 0;
     ConfigHash config_hash{};
     std::size_t directory_offset = 0;  // `tag_count` entries fit there
+    std::size_t name_pool_offset = 0;  // `name_pool_size` bytes fit there
+    std::size_t name_pool_size = 0;
     std::vector<ProcessInfo> processes;
     std::vector<OwnerInfo> owners;
     std::vector<QueueInfo> queues;
@@ -105,6 +107,41 @@ struct HeaderContents {
                                                std::size_t owner_index,
                                                std::uint32_t slot) noexcept;
 
+// One entry of the tag directory, validated.
+struct TagEntry {
+    std::uint32_t handle = 0;  // of an owner and a slot that exist
+    std::uint16_t owner_index = 0;
+    std::uint32_t slot = 0;
+    TagType type = TagType::BOOL;
+    std::uint8_t flags = 0;  // TagFlag bits, and no other
+    std::string_view name;   // in the name pool of `bytes`
+};
+
+// The entry `directory_index` of the tag directory of the header `bytes`
+// that `contents` was read from. Nothing if the index is outside the
+// directory or the entry is not valid: a handle of no owner and slot of
+// this generation, a type that is none, a flag that is none, or a name that
+// lies outside the name pool or is no tag name. The name refers to `bytes`.
+[[nodiscard]] std::optional<TagEntry> directory_entry(
+    std::span<std::byte> bytes, const HeaderContents& contents,
+    std::size_t directory_index) noexcept;
+
+// The entry of the tag `name` (section 5: a binary search on the hash, then
+// a comparison of the names). Nothing if there is no such tag or its entry
+// is not valid.
+[[nodiscard]] std::optional<TagEntry> find_tag(std::span<std::byte> bytes,
+                                               const HeaderContents& contents,
+                                               std::string_view name) noexcept;
+
+// The entry of the tag in slot `slot` of owner `owner_index`, through the
+// owner's slot table. Nothing if the owner or the slot does not exist, or
+// the slot table or the entry is not valid; an entry whose handle is not
+// this owner and slot is not valid.
+[[nodiscard]] std::optional<TagEntry> slot_entry(std::span<std::byte> bytes,
+                                                 const HeaderContents& contents,
+                                                 std::size_t owner_index,
+                                                 std::uint32_t slot) noexcept;
+
 // The `header` region of one generation, mapped read-only. Move-only.
 class HeaderView {
 public:
@@ -129,6 +166,13 @@ public:
 
     // See the free function `slot_type`.
     [[nodiscard]] std::optional<TagType> slot_type(
+        std::size_t owner_index, std::uint32_t slot) const noexcept;
+
+    // See the free functions `find_tag` and `slot_entry`. The name of the
+    // result refers to the mapping and is valid as long as this object.
+    [[nodiscard]] std::optional<TagEntry> find_tag(
+        std::string_view name) const noexcept;
+    [[nodiscard]] std::optional<TagEntry> slot_entry(
         std::size_t owner_index, std::uint32_t slot) const noexcept;
 
     // `GlobalHeader.state` as it is now, or nothing for a value that is no

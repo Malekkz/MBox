@@ -1,7 +1,9 @@
 # Code shared by tests. Not installed.
 
-# Starts real processes for integration tests.
-scada_add_library(scada-test-support SOURCES src/child_process.cpp)
+# Starts real processes for integration tests, and traces the system calls
+# of one.
+scada_add_library(scada-test-support
+  SOURCES src/child_process.cpp src/syscall_trace.cpp)
 
 # main() for fuzz targets in builds without libFuzzer; see
 # scada_add_fuzz_target.

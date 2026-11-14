@@ -23,7 +23,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -241,32 +240,6 @@ Result<std::uint16_t> find_own_process(const HeaderView& header,
     return *index;
 }
 
-// The types of the slots of owner `owner_index`, in slot order.
-Result<std::vector<TagType>> slot_types(const HeaderView& header,
-                                        std::size_t owner_index,
-                                        std::string& detail) {
-    const OwnerInfo& owner = header.contents().owners.at(owner_index);
-    std::vector<TagType> types;
-    types.reserve(owner.tag_count);
-    for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
-        const std::optional<TagType> type = header.slot_type(owner_index, slot);
-        if (!type.has_value()) {
-            detail = "slot " + std::to_string(slot) + " of owner " +
-                     owner.name + " has no valid entry in the tag directory";
-            return Status(StatusCode::DATA_CORRUPT,
-                          "the tag directory is not valid");
-        }
-        types.push_back(*type);
-    }
-    if (std::ranges::count(types, TagType::STRING) != owner.string_slots) {
-        detail = "owner " + owner.name +
-                 " does not have one string slot for each STRING tag";
-        return Status(StatusCode::DATA_CORRUPT,
-                      "the tag directory is not valid");
-    }
-    return types;
-}
-
 std::size_t record_offset(std::size_t slot) noexcept {
     return sizeof(RegionHeader) + (slot * sizeof(TagRecord));
 }
@@ -348,6 +321,59 @@ Attachment::Attachment(Key /*key*/, Fd directory, HeaderView header,
       tagd_index_(header_.find_process(TAGD_PROCESS_NAME)),
       peers_(header_.contents()) {}
 
+Status Attachment::read_directory(std::string& detail) {
+    const HeaderContents& contents = header_.contents();
+    access_.reserve(contents.owners.size());
+    writer_threads_ =
+        std::vector<std::atomic<const void*>>(contents.owners.size());
+    types_.reserve(contents.tag_count);
+    for (std::size_t i = 0; i < contents.owners.size(); ++i) {
+        const OwnerInfo& owner = contents.owners[i];
+        OwnerAccess access;
+        access.index = i;
+        access.tag_count = owner.tag_count;
+        access.string_slots = owner.string_slots;
+        access.process_index = owner.process_index;
+        access.heartbeat_timeout_ms =
+            contents.processes.at(owner.process_index).heartbeat_timeout_ms;
+        access.first_type = types_.size();
+        access.first_string = string_tags_.size();
+        access.tags_slot = peers_.tags_slot(i);
+        if (owner.string_slots != 0) {
+            access.strings_slot = peers_.strings_slot(i);
+        }
+        access.proc_slot = peers_.proc_slot(owner.process_index);
+        for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
+            const std::optional<TagType> type = header_.slot_type(i, slot);
+            if (!type.has_value()) {
+                detail = "slot " + std::to_string(slot) + " of owner " +
+                         owner.name +
+                         " has no valid entry in the tag directory";
+                return {StatusCode::DATA_CORRUPT,
+                        "the tag directory is not valid"};
+            }
+            types_.push_back(*type);
+            if (*type == TagType::STRING) {
+                string_tags_.push_back(slot);
+            }
+        }
+        if (string_tags_.size() - access.first_string != owner.string_slots) {
+            detail = "owner " + owner.name +
+                     " does not have one string slot for each STRING tag";
+            return {StatusCode::DATA_CORRUPT, "the tag directory is not valid"};
+        }
+        access_.push_back(access);
+    }
+    return {};
+}
+
+std::span<const TagType> Attachment::types_of(
+    std::size_t owner_index) const noexcept {
+    const OwnerAccess& access = access_.at(owner_index);
+    return std::span<const TagType>(types_).subspan(access.first_type,
+                                                    access.tag_count);
+}
+
 Attachment::~Attachment() {
     if (proc_.valid()) {
         proc_.set_state(ProcessState::STOPPING);
@@ -365,12 +391,7 @@ void Attachment::count(const OwnRegion& region) noexcept {
 Status Attachment::attach_owner(std::size_t owner_index, std::string& detail) {
     const HeaderContents& contents = header_.contents();
     const OwnerInfo& owner = contents.owners.at(owner_index);
-    Result<std::vector<TagType>> types =
-        slot_types(header_, owner_index, detail);
-    if (!types.ok()) {
-        return types.status();
-    }
-    const std::span<const TagType> slots(types.value());
+    const std::span<const TagType> slots = types_of(owner_index);
 
     OwnedOwner owned;
     owned.owner_index = owner_index;
@@ -544,8 +565,19 @@ Status Attachment::attach_regions(std::string& detail) {
         }
     }
 
+    // Not before every owner is in `owners_`: it does not grow again, so
+    // the mappings stay where they are.
+    for (const OwnedOwner& owned : owners_) {
+        OwnerAccess& access = access_.at(owned.owner_index);
+        access.own = true;
+        access.own_tags = owned.tags.memory.bytes();
+        access.own_strings = owned.strings.memory.bytes();
+    }
+
     // Section 11.2, step 6. From here the caller writes the heartbeat.
-    proc_.heartbeat(monotonic_ns());
+    const std::int64_t now = monotonic_ns();
+    check_clock(now);
+    proc_.heartbeat(now);
     proc_.set_state(ProcessState::RUNNING);
     if (tagd_index_.has_value() && *tagd_index_ != process_index_) {
         peers_.want(directory_.get(), peers_.proc_slot(*tagd_index_),
@@ -597,6 +629,9 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
         std::unique_ptr<Attachment> attachment = std::make_unique<Attachment>(
             Key{}, std::move(current.value().directory),
             std::move(current.value().header), index.value());
+        if (Status read = attachment->read_directory(detail); !read.ok()) {
+            return read;
+        }
         if (Status attached = attachment->attach_regions(detail);
             !attached.ok()) {
             return attached;
@@ -621,6 +656,10 @@ bool Attachment::heartbeat() noexcept {
 AttachmentStatus Attachment::status() {
     const std::int64_t now = monotonic_ns();
     static_cast<void>(peers_.refresh(directory_.get(), now));
+    // Relaxed: see the declaration.
+    if (now >= next_clock_check_mono_ns_.load(std::memory_order_relaxed)) {
+        check_clock(now);
+    }
 
     AttachmentStatus status;
     status.generation = header_.contents().generation;
@@ -629,6 +668,7 @@ AttachmentStatus Attachment::status() {
     status.regions_created = regions_created_;
     status.regions_reused = regions_reused_;
     status.records_repaired = records_repaired_;
+    status.clock_syscall = clock_syscall_.load(std::memory_order_relaxed);
     if (tagd_index_.has_value()) {
         status.tagd =
             *tagd_index_ == process_index_

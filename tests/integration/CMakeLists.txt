@@ -24,3 +24,42 @@ scada_add_test(scada-tagd-integration-test KIND integration
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}")
 add_dependencies(scada-tagd-integration-test scada-tagd scada-tag-test-peer)
+
+# Tag read and write with real processes: conformance tests 2, 3, 5 and 6 of
+# the tag database contract, the part of the reader.
+scada_test_command(writer_command scada-tag-test-writer)
+# The library checks the thread of an owner (contract 13.2) only in a build
+# without NDEBUG; CMake defines NDEBUG in every build type but Debug.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(thread_check 1)
+else()
+  set(thread_check 0)
+endif()
+scada_add_test(scada-tag-access-integration-test KIND integration
+  SOURCES tag_access_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}"
+    "SCADA_TAG_WRITER_COMMAND=${writer_command}"
+    "SCADA_TAG_THREAD_CHECK=${thread_check}")
+add_dependencies(scada-tag-access-integration-test
+  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+
+# Conformance test 22: the real-time safe functions make no system call and
+# no allocation. The probe is traced as a child process. That shows nothing
+# in a sanitizer build, whose runtime makes system calls of its own, and
+# cannot work through an emulator, so the test exists only in a native
+# build without a sanitizer.
+if(NOT SCADA_SANITIZER AND NOT CMAKE_CROSSCOMPILING)
+  scada_test_command(probe_command scada-tag-rt-probe)
+  scada_add_test(scada-tag-rt-integration-test KIND integration
+    SOURCES rt_safety_integration_test.cpp
+    DEPENDS scada::tag scada::tagd scada::service scada::test-support
+    ENVIRONMENT
+      "SCADA_TAGD_COMMAND=${tagd_command}"
+      "SCADA_TAG_PEER_COMMAND=${peer_command}"
+      "SCADA_TAG_RT_PROBE_COMMAND=${probe_command}")
+  add_dependencies(scada-tag-rt-integration-test
+    scada-tagd scada-tag-test-peer scada-tag-rt-probe)
+endif()

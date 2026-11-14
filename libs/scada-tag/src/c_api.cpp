@@ -14,9 +14,11 @@
 #include "scada/tag/types.h"
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -115,6 +117,7 @@ int report_status(scada_ctx& ctx, scada_status& out) {
         status.state.has_value() ? scada::tag::to_raw(*status.state) : 0;
     report.process_index = status.process_index;
     report.tagd_down = status.tagd == scada::tag::DownReason::NONE ? 0 : 1;
+    report.clock_syscall = status.clock_syscall ? 1 : 0;
     report.regions_created = status.regions_created;
     report.regions_reused = status.regions_reused;
     report.records_repaired = status.records_repaired;
@@ -168,6 +171,86 @@ int scada_tag_status(scada_ctx* ctx, scada_status* out) {
         return SCADA_E_INVALID;
     }
     return guarded([&] { return report_status(*ctx, *out); });
+}
+
+int scada_tag_resolve(scada_ctx* ctx, const char* name, uint32_t* handle) {
+    if (handle == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *handle = SCADA_INVALID_HANDLE;
+    if (ctx == nullptr || name == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return ctx->attachment->resolve(name, *handle); });
+}
+
+int scada_tag_info(scada_ctx* ctx, uint32_t handle, scada_tag_info_t* out) {
+    if (ctx == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return ctx->attachment->info(handle, *out); });
+}
+
+SCADA_RT int scada_tag_read(scada_ctx* ctx, uint32_t handle, scada_value* out) {
+    if (ctx == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return ctx->attachment->read(handle, *out);
+}
+
+SCADA_RT int scada_tag_read_many(scada_ctx* ctx, const uint32_t* handles,
+                                 size_t n, scada_value* out, int* status) {
+    if (ctx == nullptr || (n != 0 && (handles == nullptr || out == nullptr))) {
+        return SCADA_E_INVALID;
+    }
+    // The caller states that each array holds `n` elements.
+    return ctx->attachment->read_many(
+        std::span<const std::uint32_t>(handles, n),
+        std::span<scada_value>(out, n),
+        std::span<int>(status, status == nullptr ? 0 : n));
+}
+
+SCADA_RT int scada_tag_write(scada_ctx* ctx, uint32_t handle,
+                             const scada_value* value) {
+    if (ctx == nullptr || value == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return ctx->attachment->write(handle, *value);
+}
+
+SCADA_RT int scada_tag_write_many(scada_ctx* ctx, const uint32_t* handles,
+                                  size_t n, const scada_value* values) {
+    if (ctx == nullptr ||
+        (n != 0 && (handles == nullptr || values == nullptr))) {
+        return SCADA_E_INVALID;
+    }
+    // The caller states that each array holds `n` elements.
+    return ctx->attachment->write_many(
+        std::span<const std::uint32_t>(handles, n),
+        std::span<const scada_value>(values, n));
+}
+
+int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
+                          size_t cap, size_t* len, scada_value* meta) {
+    if (ctx == nullptr || buf == nullptr || len == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    // The caller states that `buf` holds `cap` bytes.
+    return ctx->attachment->read_string(handle, std::span<char>(buf, cap), *len,
+                                        meta);
+}
+
+int scada_tag_write_string(scada_ctx* ctx, uint32_t handle, const char* text,
+                           size_t len, uint8_t quality, uint16_t flags,
+                           int64_t source_time_ns) {
+    if (ctx == nullptr || (text == nullptr && len != 0) ||
+        len > SCADA_STRING_MAX) {
+        return SCADA_E_INVALID;
+    }
+    // The caller states that `text` holds `len` bytes.
+    return ctx->attachment->write_string(
+        handle, len == 0 ? std::string_view() : std::string_view(text, len),
+        quality, flags, source_time_ns);
 }
 
 }  // extern "C"

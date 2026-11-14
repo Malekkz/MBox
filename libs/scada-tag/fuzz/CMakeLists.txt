@@ -15,3 +15,10 @@ scada_add_fuzz_target(header_region_fuzz
 # header_view.h is private to the library.
 target_include_directories(header_region_fuzz
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
+scada_add_fuzz_target(utf8_fuzz
+  SOURCES utf8_fuzz.cpp
+  DEPENDS scada::tag)
+# utf8.h is private to the library.
+target_include_directories(utf8_fuzz
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")

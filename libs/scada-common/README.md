@@ -54,9 +54,12 @@ No exception leaves the library. Functions that can fail return `Status` or
 
 - Public headers in `include/scada/common/`, namespace `scada`: `status.h`,
   `result.h`, `log.h`, `clock.h`, `fd.h`, `mapped_region.h`, `panic.h`,
-  `static_string.h`, `realtime.h`.
+  `static_string.h`, `realtime.h`, `cpu_relax.h`.
+- `cpu_relax.h` holds `cpu_relax()`, the pause for a short retry loop in
+  real-time code: `pause` on x86-64, `yield` on ARM64. It is the one place
+  outside the I/O HAL that names a processor instruction (decision D-29).
 - Uses the journal socket `/run/systemd/journal/socket`.
-- No contract; decisions D-9, D-14 and D-15 in `docs/decisions.md`.
+- No contract; decisions D-9, D-14, D-15 and D-29 in `docs/decisions.md`.
 
 ## How to use it
 

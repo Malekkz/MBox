@@ -1,6 +1,7 @@
 #include "header_view.h"
 
 #include "layout.h"
+#include "name_hash.h"
 #include "region_file.h"
 #include "resolved_tag_set.h"
 #include "shared_memory.h"
@@ -230,6 +231,9 @@ Result<HeaderContents> read_header(std::span<std::byte> bytes,
     // In range: checked by table_fits.
     contents.directory_offset =
         static_cast<std::size_t>(global.directory_offset);
+    contents.name_pool_offset =
+        static_cast<std::size_t>(global.name_pool_offset);
+    contents.name_pool_size = static_cast<std::size_t>(global.name_pool_size);
     if (Status read = read_processes(bytes, global, contents, detail);
         !read.ok()) {
         return read;
@@ -245,10 +249,78 @@ Result<HeaderContents> read_header(std::span<std::byte> bytes,
     return contents;
 }
 
-std::optional<TagType> slot_type(std::span<std::byte> bytes,
+std::optional<TagEntry> directory_entry(std::span<std::byte> bytes,
+                                        const HeaderContents& contents,
+                                        std::size_t directory_index) noexcept {
+    if (directory_index >= contents.tag_count) {
+        return std::nullopt;
+    }
+    const auto entry = copy_from<DirectoryEntry>(
+        bytes,
+        contents.directory_offset + (directory_index * sizeof(DirectoryEntry)));
+    const std::optional<HandleParts> parts = unpack_handle(entry.handle);
+    const std::optional<TagType> type = tag_type_from_raw(entry.type);
+    if (!parts.has_value() || !type.has_value() ||
+        parts->owner_index >= contents.owners.size() ||
+        parts->slot >= contents.owners[parts->owner_index].tag_count ||
+        (entry.flags & ~TAG_FLAGS_MASK) != 0 ||
+        !fits(contents.name_pool_size, entry.name_offset, entry.name_len)) {
+        return std::nullopt;
+    }
+    TagEntry tag;
+    tag.handle = entry.handle;
+    tag.owner_index = parts->owner_index;
+    tag.slot = parts->slot;
+    tag.type = *type;
+    tag.flags = entry.flags;
+    // Inside the region: the name pool was checked to lie inside it, and
+    // the name to lie inside the name pool.
+    tag.name = text_at(bytes, contents.name_pool_offset + entry.name_offset,
+                       entry.name_len);
+    if (!is_valid_name(tag.name, MAX_TAG_NAME_LENGTH)) {
+        return std::nullopt;
+    }
+    return tag;
+}
+
+std::optional<TagEntry> find_tag(std::span<std::byte> bytes,
                                  const HeaderContents& contents,
-                                 std::size_t owner_index,
-                                 std::uint32_t slot) noexcept {
+                                 std::string_view name) noexcept {
+    const std::uint64_t hash = fnv1a_64(name);
+    const auto hash_at = [&](std::size_t index) {
+        return copy_from<DirectoryEntry>(
+                   bytes,
+                   contents.directory_offset + (index * sizeof(DirectoryEntry)))
+            .name_hash;
+    };
+    // The first entry whose hash is not below `hash`. A directory that is
+    // not sorted makes the search miss; it cannot make it leave the table.
+    std::size_t first = 0;
+    std::size_t count = contents.tag_count;
+    while (count > 0) {
+        const std::size_t half = count / 2;
+        if (hash_at(first + half) < hash) {
+            first += half + 1;
+            count -= half + 1;
+        } else {
+            count = half;
+        }
+    }
+    for (std::size_t index = first;
+         index < contents.tag_count && hash_at(index) == hash; ++index) {
+        const std::optional<TagEntry> entry =
+            directory_entry(bytes, contents, index);
+        if (entry.has_value() && entry->name == name) {
+            return entry;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TagEntry> slot_entry(std::span<std::byte> bytes,
+                                   const HeaderContents& contents,
+                                   std::size_t owner_index,
+                                   std::uint32_t slot) noexcept {
     if (owner_index >= contents.owners.size()) {
         return std::nullopt;
     }
@@ -258,20 +330,25 @@ std::optional<TagType> slot_type(std::span<std::byte> bytes,
     }
     const std::size_t table_entry =
         owner.slot_table_offset + (std::size_t{slot} * SLOT_TABLE_ENTRY_SIZE);
-    const std::size_t directory_index =
-        copy_from<std::uint32_t>(bytes, table_entry);
-    if (directory_index >= contents.tag_count) {
+    const std::optional<TagEntry> entry = directory_entry(
+        bytes, contents, copy_from<std::uint32_t>(bytes, table_entry));
+    if (!entry.has_value() || entry->owner_index != owner_index ||
+        entry->slot != slot) {
         return std::nullopt;
     }
-    const auto entry = copy_from<DirectoryEntry>(
-        bytes,
-        contents.directory_offset + (directory_index * sizeof(DirectoryEntry)));
-    // In range: an owner index is below MAX_OWNERS.
-    if (entry.handle !=
-        pack_handle(static_cast<std::uint32_t>(owner_index), slot)) {
+    return entry;
+}
+
+std::optional<TagType> slot_type(std::span<std::byte> bytes,
+                                 const HeaderContents& contents,
+                                 std::size_t owner_index,
+                                 std::uint32_t slot) noexcept {
+    const std::optional<TagEntry> entry =
+        slot_entry(bytes, contents, owner_index, slot);
+    if (!entry.has_value()) {
         return std::nullopt;
     }
-    return tag_type_from_raw(entry.type);
+    return entry->type;
 }
 
 HeaderView::HeaderView(MappedRegion memory, HeaderContents contents) noexcept
@@ -346,6 +423,17 @@ std::optional<std::uint16_t> HeaderView::find_process(
 std::optional<TagType> HeaderView::slot_type(
     std::size_t owner_index, std::uint32_t slot) const noexcept {
     return scada::tag::slot_type(memory_.bytes(), contents_, owner_index, slot);
+}
+
+std::optional<TagEntry> HeaderView::find_tag(
+    std::string_view name) const noexcept {
+    return scada::tag::find_tag(memory_.bytes(), contents_, name);
+}
+
+std::optional<TagEntry> HeaderView::slot_entry(
+    std::size_t owner_index, std::uint32_t slot) const noexcept {
+    return scada::tag::slot_entry(memory_.bytes(), contents_, owner_index,
+                                  slot);
 }
 
 std::optional<GenerationState> HeaderView::state() const noexcept {

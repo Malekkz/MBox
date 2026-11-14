@@ -5,8 +5,9 @@ the shared-memory data plane goes through it. So far it holds the binary
 layout, the tag-set definition, the builder of the `header` region, the side
 of `scada-tagd` (generations, the `proc` region and liveness) and attach: a
 process joins the current generation, creates or reuses and repairs its own
-regions, and maps the regions of other processes read-only. Read, write,
-rings and queues follow in later phase 1 issues.
+regions, and maps the regions of other processes read-only; and tag read
+and write with the sequence lock. Rings and queues follow in later phase 1
+issues.
 
 ## What it does
 
@@ -34,14 +35,18 @@ rings and queues follow in later phase 1 issues.
   contract section 13): `scada_tag_attach`, `scada_tag_attach_opts`,
   `scada_tag_detach`, `scada_tag_heartbeat` and `scada_tag_status`. See
   "Attach" below.
+- Tags, in the same header: `scada_tag_resolve`, `scada_tag_info`,
+  `scada_tag_read`, `scada_tag_read_many`, `scada_tag_write`,
+  `scada_tag_write_many`, `scada_tag_read_string` and
+  `scada_tag_write_string`. See "Tag read and write" below.
 
-It cannot yet attach a process, and it reads and writes no tag. The values
-of `EventRecord.kind` are not defined: the contract names them without
-numbers.
+A write does not yet append a change entry; that comes with the change
+rings (issue P1-07). The values of `EventRecord.kind` are not defined: the
+contract names them without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.3, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.4, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -53,7 +58,7 @@ numbers.
   | `tag_set_json.h` | `parse_tag_set_json`: the temporary file format to a `TagSet` |
   | `generation_host.h` | `GenerationHost`: the side of `scada-tagd`. Only `scada-tagd` uses it |
   | `liveness.h` | `DownReason`: why a process counts as down |
-  | `scada_tag.h` | The C interface: return codes, attach, detach, heartbeat, status. Usable from C and C++ |
+  | `scada_tag.h` | The C interface: return codes, attach, detach, heartbeat, status, and the tag functions with `scada_value`. Usable from C and C++ |
 
 - Private headers in `src/`: `layout.h` (the structures, their checks and the
   enumerations only the layout uses), `name_hash.h`, `sha256.h`,
@@ -62,8 +67,11 @@ numbers.
   their checks), `proc_region.h` (the `proc` region), `own_region.h` (a
   region the process writes: found and reused, or created), `header_view.h`
   (the `header` region as an attaching process reads and validates it),
-  `peer_regions.h` (regions of other processes, mapped read-only) and
-  `attachment.h` (attach itself; the C interface is a thin layer over it).
+  `peer_regions.h` (regions of other processes, mapped read-only),
+  `attachment.h` (attach and the tag functions; the C interface is a thin
+  layer over it), `tag_record.h` (the sequence lock of a tag record),
+  `utf8.h` (the check of text for a string slot) and `clock_check.h`
+  (whether reading the clocks is a system call).
   No code outside this library may include them (decision D-25 in
   `docs/decisions.md`).
 
@@ -264,9 +272,100 @@ mapping is never removed while the process is attached, so a reader that
 holds it keeps a valid view; a region whose file is replaced more than 16
 times reads as missing until the reader attaches again.
 
+Attach also reads the tag directory through the slot table of every owner
+and keeps the type of every tag, 1 byte each; a slot without a valid entry
+fails attach with `SCADA_E_LAYOUT`. And it checks the clocks, see "Tag read
+and write".
+
 Not part of attach yet: retained values (issue P1-09), draining the `cmd`
-queues and the cursors of a new `proc` region (issue P1-08), the clock check
-of contract 13.1 (issue P1-06).
+queues and the cursors of a new `proc` region (issue P1-08).
+
+## Tag read and write
+
+Contract sections 6, 7 and 13; decision D-29.
+
+| Function | Real-time safe | What it does |
+| --- | --- | --- |
+| `scada_tag_resolve` | no | Name to handle. Maps the regions of the owner read-only, so that the first read makes no system call |
+| `scada_tag_info` | no | Name, type, flags, owner and whether the caller owns the tag |
+| `scada_tag_read` | yes | One tag into a `scada_value` |
+| `scada_tag_read_many` | yes | Several tags with one reading of the clock, and a status for each |
+| `scada_tag_write` | yes | One tag; owner thread only |
+| `scada_tag_write_many` | yes | Several tags with one pair of clock readings; all or nothing |
+| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write |
+| `scada_tag_write_string` | no | Text of at most 250 bytes of well-formed UTF-8; owner thread only |
+
+A `scada_value` is 48 bytes: type, quality, quality flags, change count,
+the value as a 64-bit pattern (BOOL 0 or 1, INT64 and UINT64 the number,
+FLOAT64 the bits of a `double`, STRING the number of its string slot),
+source time, update time (`CLOCK_REALTIME`), update time
+(`CLOCK_MONOTONIC`) and age in ns.
+
+The sequence lock is the one of contract 6.1 and 6.2. A write makes `seq`
+odd, stores the fields and makes it even. A read copies the fields between
+two loads of `seq` and uses the copy only if both loads gave the same even
+number; it tries 64 times. A string slot is written and copied inside the
+same window as its record (contract 7). Every field is accessed through
+`std::atomic_ref`, so no access is a data race and ThreadSanitizer needs no
+suppression. ThreadSanitizer does not check the order of the accesses; the
+tests with derived values do, and the model check of conformance test 4
+will.
+
+What a read returns:
+
+| Situation | Return code | Value |
+| --- | --- | --- |
+| Owner running, record between writes | `SCADA_OK` | What the owner wrote |
+| Never written | `SCADA_OK` | Quality BAD, flag NOT_INIT, times 0 |
+| Owner down, record between writes | `SCADA_OK` | The last value, quality BAD, OWNER_DOWN added |
+| Owner down, record left in the middle of a write | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
+| Region of the owner missing, or the tag was not resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
+| Owner running and mid-write at all 64 attempts | `SCADA_E_BUSY` | Output unchanged; keep the previous value |
+| Record does not hold a value of the type of the tag, or holds OWNER_DOWN | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
+| No such handle in this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+
+Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
+0 there is no value: a consumer must not plot, compare or act on them.
+
+Until `scada_tag_notify` exists (issue P1-07), a process that reads tags of
+other processes must call `scada_tag_status` about once a second from a
+thread that is not real-time. It is the only call that looks again for
+regions that were missing, so without it an owner that starts after the
+reader keeps reading as down. It is also the only call that repeats the
+clock check.
+
+An owner is down when its process is: its `proc` region is missing, its
+state is not RUNNING, or its heartbeat is older than its timeout (contract
+10.1). The library evaluates this at every read, so a clean stop shows at
+once and a kill within the heartbeat timeout, with or without `scada-tagd`.
+The `down` flag `scada-tagd` keeps is not used for it. `age_ns` is the time
+since the update and never negative.
+
+What a write refuses:
+
+| Situation | Return code |
+| --- | --- |
+| The caller's process does not own the tag | `SCADA_E_NOT_OWNER` |
+| `type` is not the type of the tag; `scada_tag_write` on a STRING tag; a string function on a tag that is no STRING | `SCADA_E_TYPE` |
+| A quality or quality flag that is none; the flag OWNER_DOWN, which only a read adds; a BOOL that is neither 0 nor 1; text that is not UTF-8 or longer than 250 bytes | `SCADA_E_INVALID` |
+
+A write sets both update times. With `source_time_ns` 0 the source time is
+the update time and LOCAL_TIME is set. `change_count` goes up by 1 when
+value, quality or quality flags change; for a STRING tag the value is its
+text.
+
+All writes to the tags of one owner come from one thread, the first that
+writes them. A library built without `NDEBUG` (the `dev` and sanitizer
+builds) stops the process when another thread writes them (contract 13.2).
+
+The real-time safe functions allocate nothing, take no lock and make no
+system call, as long as the clocks can be read from the vDSO. Attach checks
+that: `scada_status.clock_syscall` is 1 if the kernel's clock source is not
+one the vDSO reads, or one clock read takes more than 200 ns. The check is
+repeated at most once a minute from `scada_tag_status`. In the retry loop of
+a read the processor is told to pause (`scada::cpu_relax`). On ARM64 that
+pause is much shorter than on x86-64, so a read gives up sooner there; the
+rate of `SCADA_E_BUSY` was measured on x86-64 only (decision D-30).
 
 ## How to use it
 
@@ -295,13 +394,27 @@ if (tag_set.ok()) {
 }
 ```
 
-A process attaches like this:
+A process attaches, writes its own tags and reads those of others like
+this:
 
 ```c
 #include "scada/tag/scada_tag.h"
 
 scada_ctx *ctx = NULL;
 int code = scada_tag_attach("modbus", &ctx);   /* SCADA_OK or SCADA_E_... */
+
+uint32_t flow, setpoint;                       /* once, not in the cycle */
+scada_tag_resolve(ctx, "plant.pump1.flow", &flow);          /* own tag */
+scada_tag_resolve(ctx, "plant.pump1.setpoint", &setpoint);  /* of another */
+
+/* in the cycle; both calls are real-time safe */
+scada_value in;
+if (scada_tag_read(ctx, setpoint, &in) == SCADA_OK &&
+    in.quality == SCADA_QUALITY_GOOD) { /* use in.value */ }
+scada_value out = {.type = SCADA_TYPE_FLOAT64, .quality = SCADA_QUALITY_GOOD};
+memcpy(&out.value, &measured, sizeof out.value);   /* the bits of a double */
+scada_tag_write(ctx, flow, &out);
+
 /* in the main loop, at most every third of the heartbeat timeout: */
 if (scada_tag_heartbeat(ctx) == SCADA_E_RETIRING) { /* detach, attach again */ }
 scada_tag_detach(ctx);
@@ -312,7 +425,10 @@ scada_tag_detach(ctx);
 ```
 ctest --preset dev -R scada-tag-unit-test
 ctest --preset dev -R scada-tagd-integration-test
+ctest --preset dev -R scada-tag-access-integration-test
+ctest --preset dev -R scada-tag-rt-integration-test
 ctest --preset dev -R 'tag_set_json_fuzz-corpus|region_name_fuzz-corpus'
+ctest --preset dev -R 'header_region_fuzz-corpus|utf8_fuzz-corpus'
 cmake --preset perf && cmake --build --preset perf
 ctest --preset perf -R scada-tag-header-perf-test
 ```
@@ -372,9 +488,43 @@ ctest --preset perf -R scada-tag-header-perf-test
   tests: it attaches as one process through the C interface and writes its
   heartbeat until it is stopped or killed. With `mid-write` it leaves a tag
   record with an odd sequence number, as a killed writer does.
+- `TagRecordLock.*` covers the sequence lock on records in plain memory:
+  what a write stores, the sequence number, the change count, and a record
+  left in the middle of a write.
+- `TagAccess.*` covers the tag functions as an owner and a reader see them:
+  every row of the two tables in "Tag read and write", strings, and records
+  that are not valid. `ClockCheck.*` covers the rule of the clock check.
+- `TagAccess.Conformance03*` and `Conformance23*` run a writer at its
+  maximum rate against readers in other threads, with values and texts
+  whose fields are derived from one another; `Conformance05*`, `06*` and
+  `08*` are the part of those conformance tests that needs one process.
+- `scada-tag-access-integration-test` (in `tests/integration/`) uses real
+  processes: `Conformance02*` writes 50,000 tags of 10 owner threads at
+  50,000 updates per second against 4 readers, for 3 s, or for
+  `SCADA_CONFORMANCE_SECONDS` seconds (600 for the 10 minutes of the
+  contract); `Conformance03*` does the same at the maximum rate;
+  `Conformance05*` kills an owner in the middle of a write, with and
+  without `scada-tagd`; `Conformance06*` stops one cleanly.
+- `scada-tag-rt-integration-test` is conformance test 22: it traces the
+  helper `scada-tag-rt-probe` (in `tests/probe/`) and fails if a real-time
+  safe function makes a system call, calls a C++ allocation function or
+  takes a page fault, or if the library reports that the clocks of the
+  machine cannot be read without a system call. It does not see a direct
+  call of `malloc`; the banned-function check keeps those out of the
+  library. It exists only in a native build without a sanitizer.
+- `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
+  one-thread check of contract 13.2 with a real process.
+- `scada-tag-test-writer` (in `tests/writer/`) is the writing side of the
+  load tests: one process with one thread for each owner.
+- Conformance test 4, the model check of the sequence lock, is not
+  automated yet.
 - `header_region_fuzz` (in `fuzz/`) feeds the reader of the `header` region
-  with arbitrary bytes and then does with the contents what attach does.
+  with arbitrary bytes and then does with the contents what attach, resolve
+  and info do.
   Its seed corpus runs as `header_region_fuzz-corpus`.
+- `utf8_fuzz` (in `fuzz/`) feeds the check of text for a string slot with
+  arbitrary bytes and compares its answer with a decoder written another
+  way. Its seed corpus runs as `utf8_fuzz-corpus`.
 - `region_name_fuzz` (in `fuzz/`) feeds the parsers of directory entry
   names with arbitrary bytes and checks that they accept only the names this
   library writes. Its seed corpus runs as `region_name_fuzz-corpus`.
