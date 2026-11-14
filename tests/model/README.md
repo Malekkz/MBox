@@ -24,13 +24,19 @@ the order of the accesses in two parts:
 2. **The code.** `code_shape.py` disassembles the six protocol functions
    (`write_record`, `write_string_record`, `read_record`,
    `read_string_record`, `append_change`, `read_change`) from the ARM64 tag
-   library and checks that their barriers and acquire and release accesses
-   come in the order the litmus tests model: one `DMB ISH` after the odd
-   sequence number and before the field stores, a release store after them
-   and no store after it; one acquire load, the copy, one `DMB ISHLD`, the
+   library and checks, along every path from the entry to a return, that
+   their barriers and acquire and release accesses come in the order the
+   litmus tests model: one `DMB ISH` after the odd sequence number and
+   before the field stores, one release store after them and no store after
+   it; each read attempt an acquire load, the copy, `DMB ISHLD` and the
    second load. A minimum count of loads or stores between them stands for
-   the copy, since compilers do not merge atomic accesses. Without this
-   part an edit that drops a fence would leave the model passing.
+   the copy, since compilers do not merge atomic accesses. Calls of helpers
+   the compiler did not inline (GCC 13 at -O2 inlines few of them) are
+   followed; a path that ends in `panic`, a failed library assertion or the
+   stack protector is left out, since it publishes nothing. Each branch is
+   taken at most twice, so a retry loop runs once or twice. Without this
+   part an edit that drops a fence would leave the model passing. When it
+   fails it prints the disassembly of the functions concerned.
 
 What part 2 does not see: which register holds which field. A copy load
 moved after `DMB ISHLD`, while the fence stays after enough other loads,

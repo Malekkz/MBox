@@ -31,7 +31,7 @@ def blocks(text):
     for line in text.splitlines():
         header = code_shape.FUNCTION.match(line)
         if header:
-            result.append([header.group(1), []])
+            result.append([header.group(2), []])
         if result:
             result[-1][1].append(line)
     return result
@@ -52,9 +52,9 @@ def edit(text, function, change):
 
 def is_instruction(line, mnemonic, operand=None):
     match = code_shape.INSTRUCTION.match(line)
-    if not match or match.group(1) != mnemonic:
+    if not match or match.group(2) != mnemonic:
         return False
-    return operand is None or match.group(2).split()[0] == operand
+    return operand is None or match.group(3).split()[0] == operand
 
 
 def drop(mnemonic, operand=None):
@@ -84,6 +84,41 @@ def move(mnemonic, operand, next_to, after):
         lines.insert(target + 1 if after else target, moved)
         return lines
     return change
+
+
+# A writer in the shape GCC 13 gives at -O2 with -D_GLIBCXX_ASSERTIONS: the
+# field stores in a helper it did not inline, and a cold path that repeats
+# the start of the write and ends in a failed library assertion.
+GCC_STYLE_WRITER = """\
+tag_record.cpp.o:     file format elf64-littleaarch64
+
+0000000000000000 <scada::tag::(anonymous namespace)::store_fields(int)>:
+       0:\tstrb\tw1, [x0, #5]
+       4:\tstrh\tw2, [x0, #6]
+       8:\tstr\tx3, [x0, #8]
+       c:\tstr\tx4, [x0, #16]
+      10:\tstr\tx5, [x0, #24]
+      14:\tstr\tx6, [x0, #32]
+      18:\tret
+000000000000001c <scada::tag::write_record(scada::tag::TagRecord&, int)>:
+      1c:\tcbz\tx1, 38 <scada::tag::write_record(scada::tag::TagRecord&, int)+0x1c>
+      20:\tldr\tw9, [x0]
+      24:\tstr\tw10, [x0]
+      28:\tdmb\tish
+      2c:\tbl\t0 <scada::tag::(anonymous namespace)::store_fields(int)>
+      30:\tstlr\tw9, [x0]
+      34:\tret
+      38:\tstr\tw10, [x0]
+      3c:\tdmb\tish
+      40:\tbl\t0 <scada::tag::write_record(scada::tag::TagRecord&, int)>
+\t\t\t40: R_AARCH64_CALL26\tstd::__glibcxx_assert_fail(char const*, int, char const*, char const*)
+"""
+
+
+def check_gcc_style_writer(text):
+    program = code_shape.Program(text)
+    (function,) = program.find("scada::tag::write_record(")
+    return code_shape.check_function(program, function, "writer", (True, 6))
 
 
 class CodeShapeTest(unittest.TestCase):
@@ -145,6 +180,31 @@ class CodeShapeTest(unittest.TestCase):
                          "\t\t0000000000000100:  R_AARCH64_CALL26\tother()")
             return lines
         self.assert_caught("write_record", add_call)
+
+
+class GccStyleTest(unittest.TestCase):
+
+    def test_helpers_are_followed_and_paths_that_do_not_return_left_out(self):
+        self.assertIsNone(check_gcc_style_writer(GCC_STYLE_WRITER))
+
+    def test_a_helper_without_its_stores_fails(self):
+        text = GCC_STYLE_WRITER.replace("str\tx6, [x0, #32]", "nop")
+        self.assertIn("fewer than 6 stores", check_gcc_style_writer(text))
+
+    def test_a_call_that_is_not_found_fails(self):
+        text = GCC_STYLE_WRITER.replace(
+            "bl\t0 <scada::tag::(anonymous namespace)::store_fields(int)>",
+            "bl\t0 <elsewhere()>")
+        self.assertIn("unexpected instruction (C)",
+                      check_gcc_style_writer(text))
+
+    def test_a_cold_path_that_returns_is_checked(self):
+        text = GCC_STYLE_WRITER.replace(
+            "\tbl\t0 <scada::tag::write_record(scada::tag::TagRecord&, int)>\n"
+            "\t\t\t40: R_AARCH64_CALL26\tstd::__glibcxx_assert_fail("
+            "char const*, int, char const*, char const*)\n",
+            "\tret\n")
+        self.assertIn("release store", check_gcc_style_writer(text))
 
 
 if __name__ == "__main__":

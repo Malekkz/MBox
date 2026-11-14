@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 TESTS = ("seqlock.litmus", "change-ring.litmus")
 
@@ -84,12 +85,14 @@ def main():
                                 encoding="utf-8")
                 runs.append((path, "Sometimes", what))
             for path, expected, what in runs:
+                start = time.monotonic()
                 found, output = run_herd(args.herd7, args.libdir, path,
                                          args.timeout)
+                seconds = time.monotonic() - start
                 ok = found == expected
                 failures += 0 if ok else 1
                 print(f"{'ok  ' if ok else 'FAIL'} {source.stem}, {what}: "
-                      f"{found} (expected {expected})")
+                      f"{found} (expected {expected}), {seconds:.1f} s")
                 if args.verbose or not ok:
                     print(output)
     if failures:
