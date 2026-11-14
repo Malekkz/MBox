@@ -400,7 +400,7 @@ and repeats the clock check, as `scada_tag_status` does.
 | --- | --- |
 | `scada_sub_open` | Subscribes to the ring of one owner, from its end on. A ring that is not there yet is no error |
 | `scada_sub_next` | The next change, waiting up to a timeout; `SCADA_E_GAP` when changes were lost |
-| `scada_sub_stats` | Changes received, gaps, entries lost to overruns, entries refused, the epoch, owner changes and whether the owner is down |
+| `scada_sub_stats` | Changes received, gaps, entries lost to overruns, entries refused, the epoch, owner changes, whether the owner is down, and why the last gap came |
 | `scada_sub_close` | Closes it, and takes it out of its wait set |
 | `scada_waitset_create`, `_add_sub`, `_add_cycle` | Up to 127 subscriptions and cycle counters |
 | `scada_waitset_wait` | Waits for any of them with one `futex_waitv` |

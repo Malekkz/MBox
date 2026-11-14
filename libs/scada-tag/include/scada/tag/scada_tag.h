@@ -438,6 +438,23 @@ typedef struct {
                                tag record */
 } scada_change; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
+/* Why scada_sub_next returned SCADA_E_GAP (scada_sub_stats_t.last_gap).
+ * The action is the same for all of them: read the tags again. The reason
+ * is for reporting: an alarm system raises a communication alarm for
+ * SCADA_GAP_OWNER_DOWN and clears it for SCADA_GAP_OWNER_BACK. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_GAP_NONE = 0,       /* no gap yet */
+    SCADA_GAP_OVERRUN = 1,    /* fell `capacity` entries behind (8.2) */
+    SCADA_GAP_RESTART = 2,    /* the owner attached again: the epoch
+                                 changed while it was not seen down */
+    SCADA_GAP_RING = 3,       /* the ring appeared, disappeared or was
+                                 replaced */
+    SCADA_GAP_OWNER_DOWN = 4, /* the owner's process was seen going down */
+    SCADA_GAP_OWNER_BACK = 5  /* the owner's process was seen coming back;
+                                 this includes a ring that appeared with it */
+};
+
 /* What scada_sub_stats reports. 48 bytes. */
 /* NOLINTNEXTLINE(modernize-use-using): C interface */
 typedef struct {
@@ -454,7 +471,9 @@ typedef struct {
                                down or coming back; each was a gap */
     uint8_t owner_down;     /* 1 if the owner's process was down at the
                                last look (section 10.1) */
-    uint8_t reserved[3];    /* 0 */
+    uint8_t last_gap;       /* SCADA_GAP_*: why the last SCADA_E_GAP was
+                               returned, SCADA_GAP_NONE before the first */
+    uint8_t reserved[2];    /* 0 */
 } scada_sub_stats_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*

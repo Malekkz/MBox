@@ -388,6 +388,9 @@ TEST_F(CApi, TheChangeStructuresHaveTheirDocumentedSizes) {
     EXPECT_EQ(sizeof(scada_change), 32U);
     EXPECT_EQ(sizeof(scada_sub_stats_t), 48U);
     EXPECT_EQ(SCADA_WAIT_SLICE_MS, 100);
+    EXPECT_EQ(offsetof(scada_sub_stats_t, last_gap), 45U);
+    EXPECT_EQ(SCADA_GAP_NONE, 0);
+    EXPECT_EQ(SCADA_GAP_OWNER_BACK, 5);
 }
 
 // A change written through the C interface arrives through it, and the

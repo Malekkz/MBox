@@ -495,6 +495,7 @@ TEST_F(Changes, Conformance13ASlowConsumerGetsAGapExactlyWhenOverrun) {
     EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
     EXPECT_EQ(sub->stats().gaps, 1U);
     EXPECT_EQ(sub->stats().lost, RING);
+    EXPECT_EQ(sub->stats().last_gap, SCADA_GAP_OVERRUN);
     // The cursor is at the end: nothing older comes afterwards.
     EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
 
@@ -546,7 +547,8 @@ TEST_F(Changes, Conformance14AnAvalancheGivesNoGapToAConsumerThatKeepsUp) {
     const int first = next_code(sub);
     const int second = next_code(sub);
     if (first != SCADA_E_GAP || second != SCADA_E_TIMEOUT ||
-        sub.stats().gaps != 1 || sub.stats().epoch != epoch) {
+        sub.stats().gaps != 1 || sub.stats().epoch != epoch ||
+        sub.stats().last_gap != SCADA_GAP_RESTART) {
         return ::testing::AssertionFailure()
                << "codes " << first << " and " << second << ", "
                << sub.stats().gaps << " gaps, epoch " << sub.stats().epoch;
@@ -573,15 +575,20 @@ TEST_F(Changes, Conformance07AnOwnerRestartGivesEveryConsumerOneGap) {
     EXPECT_TRUE(has_next(*subs[0]) && has_next(*subs[1]));
 }
 
-// `sub` saw the owner's process change state `changes` times, and sees it
-// down now if `down`.
+// `sub` saw the owner's process change state `changes` times, sees it down
+// now if `down`, and gave the reason of that change for its last gap.
 ::testing::AssertionResult saw_owner(Subscription& sub, std::uint32_t changes,
                                      bool down) {
     const scada_sub_stats_t stats = sub.stats();
-    if (stats.owner_changes != changes || (stats.owner_down != 0) != down) {
+    std::uint8_t reason = down ? SCADA_GAP_OWNER_DOWN : SCADA_GAP_OWNER_BACK;
+    if (changes == 0) {
+        reason = SCADA_GAP_NONE;
+    }
+    if (stats.owner_changes != changes || (stats.owner_down != 0) != down ||
+        stats.last_gap != reason) {
         return ::testing::AssertionFailure()
                << stats.owner_changes << " owner changes, owner_down "
-               << int{stats.owner_down};
+               << int{stats.owner_down} << ", last gap " << int{stats.last_gap};
     }
     return ::testing::AssertionSuccess();
 }
@@ -705,6 +712,8 @@ TEST_F(Changes, ARingThatIsMissingAtOpenGivesAGapWhenItAppears) {
     scada_change change{};
     // The library looks for the region again at most once a second.
     EXPECT_EQ(sub->next(change, WAIT_LIMIT_MS), SCADA_E_GAP);
+    // The process of `bulk` came up with its ring: the owner's reason.
+    EXPECT_EQ(sub->stats().last_gap, SCADA_GAP_OWNER_BACK);
     EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
     ASSERT_EQ(bulk->write(handle_of(*bulk, bulk_tag(0)), uint_value(1)),
               SCADA_OK);

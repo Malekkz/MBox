@@ -633,6 +633,7 @@ Decision:
 - A restart gives two gaps to a consumer that looked while the owner was down, one to a consumer that did not. A ring that appears or is replaced at the same look as a change of the owner state gives one gap, not two.
 - A wait looks again at least every 100 ms, and wait sets and their descriptor thread compare the owner state too, so a waiting consumer gets the gap within the owner's heartbeat timeout plus 100 ms, and at once after a clean stop.
 - `scada_sub_stats_t` gets `owner_changes` and `owner_down` and grows from 40 to 48 bytes. Nothing had been released with 40 bytes; contract 0.5 says 48.
+- `scada_sub_stats_t.last_gap` tells why the last gap came: `SCADA_GAP_OVERRUN`, `_RESTART`, `_RING`, `_OWNER_DOWN` or `_OWNER_BACK` (0 before the first). Since a gap now has two meanings (data lost; owner state changed), an alarm system needs to tell them apart without inferring it; the action stays the same, a read of the tags. When the owner's state changes at the same look as its ring appears or is replaced, the owner's reason is given, because that is what an alarm acts on. It takes one of the three reserved bytes; the size stays 48. Added after a review of this decision with the product owner.
 Reason: a consumer of the ring learns of a dead owner from the ring, with the code it already has to handle, and the values it then reads are BAD with OWNER_DOWN. `scada-tagd` stays out of the data path.
 Consequences:
 - Conformance test 7 counts the second gap of a consumer that saw the owner down (contract 0.5, section 15).

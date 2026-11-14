@@ -127,6 +127,12 @@ void Subscription::skip_to_end(std::span<std::byte> bytes) noexcept {
     }
 }
 
+int Subscription::gap(std::uint8_t reason) noexcept {
+    ++gaps_;
+    last_gap_ = reason;
+    return SCADA_E_GAP;
+}
+
 int Subscription::poll(scada_change& out) noexcept {
     const std::span<std::byte> bytes = attachment_.changes_of(owner_index_);
     const bool owner_down = attachment_.owner_process_down(owner_index_);
@@ -134,9 +140,13 @@ int Subscription::poll(scada_change& out) noexcept {
         // The ring appeared, disappeared or was replaced (section 8.3:
         // whatever the consumer knew may be lost; it resynchronises). A
         // change of the owner's state at the same look is the same gap.
+        // The owner's reason is reported then: it is what an alarm system
+        // acts on.
+        std::uint8_t reason = SCADA_GAP_RING;
         if (owner_down != owner_down_) {
             owner_down_ = owner_down;
             ++owner_changes_;
+            reason = owner_down ? SCADA_GAP_OWNER_DOWN : SCADA_GAP_OWNER_BACK;
         }
         if (bytes.empty()) {
             mapping_ = nullptr;
@@ -144,8 +154,7 @@ int Subscription::poll(scada_change& out) noexcept {
         } else if (!follow(bytes)) {
             return SCADA_E_LAYOUT;
         }
-        ++gaps_;
-        return SCADA_E_GAP;
+        return gap(reason);
     }
     if (owner_down != owner_down_) {
         // The owner's process went down or came back (section 10.1). A dead
@@ -156,8 +165,7 @@ int Subscription::poll(scada_change& out) noexcept {
         owner_down_ = owner_down;
         ++owner_changes_;
         skip_to_end(bytes);
-        ++gaps_;
-        return SCADA_E_GAP;
+        return gap(owner_down ? SCADA_GAP_OWNER_DOWN : SCADA_GAP_OWNER_BACK);
     }
     if (bytes.empty()) {
         return SCADA_E_TIMEOUT;
@@ -171,8 +179,7 @@ int Subscription::poll(scada_change& out) noexcept {
         // last write may be lost.
         epoch_ = epoch;
         cursor_ = ring_write_seq(bytes);
-        ++gaps_;
-        return SCADA_E_GAP;
+        return gap(SCADA_GAP_RESTART);
     }
     ChangeEntry entry;
     std::uint64_t written = 0;
@@ -187,8 +194,7 @@ int Subscription::poll(scada_change& out) noexcept {
             // went backwards, which only a damaged region shows.
             lost_ += now_at > cursor_ ? now_at - cursor_ : 0;
             cursor_ = now_at;
-            ++gaps_;
-            return SCADA_E_GAP;
+            return gap(SCADA_GAP_OVERRUN);
         }
         case RingRead::ENTRY:
             break;
@@ -274,6 +280,7 @@ scada_sub_stats_t Subscription::stats() const noexcept {
     stats.process_index = process_index_;
     stats.owner_changes = owner_changes_;
     stats.owner_down = owner_down_ ? 1 : 0;
+    stats.last_gap = last_gap_;
     return stats;
 }
 

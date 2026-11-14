@@ -933,9 +933,18 @@ typedef struct {
   uint16_t process_index;
   uint32_t owner_changes;        /* owner seen going down or coming back */
   uint8_t  owner_down;           /* 1 if down at the last look */
-  uint8_t  reserved[3];
+  uint8_t  last_gap;             /* why the last GAP: 0 none, 1 overrun,
+                                    2 restart (epoch), 3 ring appeared,
+                                    disappeared or replaced, 4 owner down,
+                                    5 owner back */
+  uint8_t  reserved[2];
 } scada_sub_stats_t;             /* 48 bytes */
 ```
+
+Every GAP asks for the same action, a read of the tags. The reason is for
+reporting: a consumer that raises a communication alarm raises it on 4 and
+clears it on 5. When the owner's state changes at the same look as its ring
+appears or is replaced, the reason is the owner's.
 
 A change carries the stored quality, with the overlay of section 6.2 while
 the owner's process is down (section 8.3). A consumer that keeps copies of

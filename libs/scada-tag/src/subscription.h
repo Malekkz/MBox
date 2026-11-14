@@ -85,6 +85,9 @@ private:
     // SCADA_E_GAP, SCADA_E_LAYOUT, or SCADA_E_TIMEOUT for nothing new.
     [[nodiscard]] int poll(scada_change& out) noexcept;
 
+    // Counts a gap of `reason` (SCADA_GAP_*) and returns SCADA_E_GAP.
+    [[nodiscard]] int gap(std::uint8_t reason) noexcept;
+
     // Takes the ring in `bytes`, mapped at a new place or there for the
     // first time, as the ring to follow from its end. False if its header
     // gives another capacity than the owner table.
@@ -116,6 +119,7 @@ private:
     std::uint64_t lost_ = 0;
     std::uint64_t invalid_ = 0;
     std::uint32_t owner_changes_ = 0;
+    std::uint8_t last_gap_ = SCADA_GAP_NONE;
 
     WaitSet* wait_set_ = nullptr;
 };

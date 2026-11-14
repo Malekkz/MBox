@@ -369,15 +369,18 @@ int next_code(scada_sub* sub) {
     return ::testing::AssertionSuccess();
 }
 
-// The owner state `sub` saw: changes, and whether it is down now.
+// The owner state `sub` saw: changes, whether it is down now, and the
+// reason of its last gap, which that state gives.
 ::testing::AssertionResult saw_owner(scada_sub* sub, std::uint32_t changes,
                                      bool down) {
     scada_sub_stats_t stats{};
+    const int reason = down ? SCADA_GAP_OWNER_DOWN : SCADA_GAP_OWNER_BACK;
     if (scada_sub_stats(sub, &stats) != SCADA_OK ||
-        stats.owner_changes != changes || (stats.owner_down != 0) != down) {
+        stats.owner_changes != changes || (stats.owner_down != 0) != down ||
+        stats.last_gap != reason) {
         return ::testing::AssertionFailure()
                << stats.owner_changes << " owner changes, owner_down "
-               << int{stats.owner_down};
+               << int{stats.owner_down} << ", last gap " << int{stats.last_gap};
     }
     return ::testing::AssertionSuccess();
 }
