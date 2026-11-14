@@ -6,8 +6,9 @@ and logs data, controls field devices, and serves a web HMI and a local CLI.
 Status: design baseline frozen (version 1.0). Phase 0 (foundations) is
 built: the build skeleton, its checks and the common library
 (`libs/scada-common`: status and result types, logging, clocks). Phase 1 (data
-plane) has started with the binary layout of the tag database
-(`libs/scada-tag`).
+plane) has started: the binary layout of the tag database, the tag-set
+definition and the header builder (`libs/scada-tag`), and the daemon that
+creates the database and watches liveness (`scada-tagd`).
 
 ## Where things are
 
@@ -27,7 +28,7 @@ plane) has started with the binary layout of the tag database
 | `tests/` | Tests that span several components, and the test layout. |
 | `cmake/` | Build helpers and toolchain files. |
 | `third-party/` | Dependency list, licence allow-list, vendored code. |
-| `deploy/` | Templates for systemd units and service users, and the parts of the install tree that belong to no component. |
+| `deploy/` | Templates for systemd units and service users, directories created at boot, and the parts of the install tree that belong to no component. |
 | `docs/templates/component-README.md` | Template for a component's `README.md`. |
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |

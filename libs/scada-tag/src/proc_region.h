@@ -1,0 +1,111 @@
+#ifndef SCADA_TAG_PROC_REGION_H
+#define SCADA_TAG_PROC_REGION_H
+
+// The `proc.<process>` region (docs/contracts/tag-database.md, section 10):
+// the side of the process that owns it, and the side of a process that
+// watches it. Private to libscada-tag.
+
+#include "layout.h"
+#include "region_file.h"
+
+#include "scada/common/fd.h"
+#include "scada/common/mapped_region.h"
+#include "scada/common/realtime.h"
+#include "scada/common/result.h"
+#include "scada/tag/liveness.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace scada::tag {
+
+// What identifies the `proc` region of one process in one generation.
+struct ProcRegionParameters {
+    std::string process;  // validated process name
+    std::uint16_t process_index = 0;
+    std::uint64_t generation = 0;
+    std::size_t queue_count = 0;  // queues of the generation
+    std::uint32_t uid = 0;        // user the process runs as
+};
+
+// The RegionIdentity of that region.
+[[nodiscard]] RegionIdentity proc_region_identity(
+    const ProcRegionParameters& parameters) noexcept;
+
+// The `proc` region of the calling process, mapped read-write and locked
+// (section 10: an exclusive lock for the whole life of the process). Move-only;
+// destroying it releases the lock and the mapping, and leaves the file.
+class OwnProcRegion {
+public:
+    // Holds no region.
+    OwnProcRegion() noexcept = default;
+
+    // Attaches to the region in the generation directory open as `dir_fd`
+    // (section 11.2, step 3 and the lock of step 4):
+    // - a region that exists with the right owner, size and header and is
+    //   ready is reused;
+    // - an entry of that name owned by `parameters.uid` that is not such a
+    //   region is removed and the region is created;
+    // - an absent region is created (section 3.2), after the caller's stale
+    //   temporary files were removed.
+    // The state is STARTING afterwards and the process id is the caller's.
+    // The cursors of a new region are 0.
+    //
+    // ALREADY_EXISTS if another process holds the lock (the process name is
+    // already attached); PERMISSION_DENIED if the entry belongs to another
+    // user; RESOURCE_EXHAUSTED if the file system has no room; IO_ERROR
+    // otherwise. On an error `detail` says what was found.
+    [[nodiscard]] static Result<OwnProcRegion> attach(
+        int dir_fd, const ProcRegionParameters& parameters,
+        std::string& detail);
+
+    // True if a region is held.
+    [[nodiscard]] bool valid() const noexcept { return memory_.valid(); }
+
+    // True if `attach` found the region and reused it.
+    [[nodiscard]] bool reused() const noexcept { return reused_; }
+
+    // Writes one heartbeat taken at `mono_ns` (CLOCK_MONOTONIC). Called
+    // from one thread: the process's own main loop or cycle (section 10.1).
+    // Precondition: `valid()`.
+    SCADA_RT void heartbeat(std::int64_t mono_ns) noexcept;
+
+    // Sets the state other processes see. Precondition: `valid()`.
+    SCADA_RT void set_state(ProcessState state) noexcept;
+
+private:
+    OwnProcRegion(Fd file, MappedRegion memory, bool reused) noexcept;
+
+    [[nodiscard]] ProcHeader& header() const noexcept;
+
+    Fd file_;  // holds the lock
+    MappedRegion memory_;
+    bool reused_ = false;
+};
+
+// Watches the `proc` region of another process, mapped read-only. The
+// mapping is kept between calls and replaced when the name refers to another
+// file.
+class ProcProbe {
+public:
+    // Evaluates the first three rules of section 10.1 for the process whose
+    // region is described by `parameters`, in the generation directory open
+    // as `dir_fd`, at the time `now_mono_ns` (CLOCK_MONOTONIC). A heartbeat
+    // newer than `now_mono_ns` is fresh.
+    //
+    // A region that is absent or fails a check of section 3.1 is reported
+    // as REGION_MISSING; it is looked for again at the next call.
+    [[nodiscard]] DownReason observe(int dir_fd,
+                                     const ProcRegionParameters& parameters,
+                                     std::uint32_t heartbeat_timeout_ms,
+                                     std::int64_t now_mono_ns);
+
+private:
+    std::optional<OpenedRegion> region_;
+};
+
+}  // namespace scada::tag
+
+#endif  // SCADA_TAG_PROC_REGION_H

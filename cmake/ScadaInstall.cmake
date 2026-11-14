@@ -18,13 +18,17 @@ set(SCADA_INSTALL_CONFDIR "etc/scada")
 set(SCADA_INSTALL_STATEDIR "var/lib/scada")
 set(SCADA_INSTALL_STATE_SUBDIRS config-history hist journal retain)
 
-# Where systemd looks for units and user definitions shipped by the vendor.
+# Where systemd looks for units, user definitions and definitions of
+# directories to create at boot, shipped by the vendor.
 # These are systemd's own default locations; a distribution that builds
 # systemd with other locations overrides them here.
 set(SCADA_INSTALL_SYSTEMD_UNITDIR "usr/lib/systemd/system" CACHE STRING
   "Directory for systemd units, relative to the root of the staged tree")
 set(SCADA_INSTALL_SYSUSERSDIR "usr/lib/sysusers.d" CACHE STRING
   "Directory for sysusers.d files, relative to the root of the staged tree")
+
+set(SCADA_INSTALL_TMPFILESDIR "usr/lib/tmpfiles.d" CACHE STRING
+  "Directory for tmpfiles.d files, relative to the root of the staged tree")
 
 # The group every service belongs to (reference 4.2).
 set(SCADA_GROUP "scada")

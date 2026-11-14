@@ -31,8 +31,9 @@ scada_add_test(scada-foo-unit-test KIND unit
 
 An integration test starts its processes with `scada::test::ChildProcess`
 (`support/include/scada/test/child_process.h`) and waits with
-`wait_for_output` or `wait_for_exit`, both with a timeout. Do not sleep. Pass
-the command to start through `ENVIRONMENT`, as `integration/CMakeLists.txt`
+`wait_for_output`, `wait_for_error` or `wait_for_exit`, each with a timeout.
+Do not sleep. Pass the command to start through `ENVIRONMENT`, as
+`integration/CMakeLists.txt`
 does, so that a cross build can run it through the emulator.
 
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at

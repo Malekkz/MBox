@@ -4,6 +4,7 @@ scada_add_test(scada-common-unit-test KIND unit
     fd_test.cpp
     log_sink_test.cpp
     log_test.cpp
+    mapped_region_test.cpp
     realtime_test.cpp
     result_test.cpp
     status_test.cpp

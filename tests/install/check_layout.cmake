@@ -1,6 +1,6 @@
 # Checks the staged tree at STAGE against the directory layout of reference
-# 4.4. BINDIR, UNITDIR and SYSUSERSDIR are relative to STAGE; UNITS is the
-# list of service units.
+# 4.4. BINDIR, UNITDIR, SYSUSERSDIR and TMPFILESDIR are relative to STAGE;
+# UNITS is the list of service units.
 
 set(failures 0)
 
@@ -40,6 +40,38 @@ foreach(unit IN LISTS UNITS)
   expect_file("${UNITDIR}/${unit}")
   expect_file("${SYSUSERSDIR}/${service}.conf")
 endforeach()
+
+# The base directory of the tag database is created at boot with the owner
+# and mode of the tag database contract, section 3.1.
+expect_file("${TMPFILESDIR}/scada-tagd.conf")
+if(EXISTS "${STAGE}/${TMPFILESDIR}/scada-tagd.conf")
+  file(STRINGS "${STAGE}/${TMPFILESDIR}/scada-tagd.conf" tmpfiles_lines
+    REGEX "^[^#]")
+  if(NOT tmpfiles_lines STREQUAL "d /dev/shm/scada 2750 scada-tagd scada -")
+    message(SEND_ERROR
+      "scada-tagd.conf does not create /dev/shm/scada as the contract requires: ${tmpfiles_lines}")
+  endif()
+endif()
+
+# scada-tagd needs no capability beyond its own user and the scada group
+# (issue P1-04).
+if(EXISTS "${STAGE}/${UNITDIR}/scada-tagd.service")
+  file(STRINGS "${STAGE}/${UNITDIR}/scada-tagd.service" tagd_unit)
+  foreach(line IN ITEMS
+      "User=scada-tagd" "Group=scada-tagd" "SupplementaryGroups=scada"
+      "CapabilityBoundingSet=" "AmbientCapabilities=" "NoNewPrivileges=yes")
+    list(FIND tagd_unit "${line}" position)
+    if(position EQUAL -1)
+      message(SEND_ERROR "scada-tagd.service lacks the line: ${line}")
+    endif()
+  endforeach()
+  foreach(line IN LISTS tagd_unit)
+    if(line MATCHES "^(PrivateIPC|PrivateUsers|DynamicUser)=")
+      # Tag database contract, section 3.4.
+      message(SEND_ERROR "scada-tagd.service must not set: ${line}")
+    endif()
+  endforeach()
+endif()
 
 # Nothing may be installed outside the layout.
 file(GLOB top_level RELATIVE "${STAGE}" "${STAGE}/*")

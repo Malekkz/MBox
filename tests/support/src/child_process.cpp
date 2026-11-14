@@ -257,6 +257,12 @@ bool ChildProcess::wait_for_output(
     return wait_until([&] { return condition(out_); }, timeout);
 }
 
+bool ChildProcess::wait_for_error(
+    const std::function<bool(std::string_view)>& condition,
+    std::chrono::milliseconds timeout) {
+    return wait_until([&] { return condition(err_); }, timeout);
+}
+
 std::optional<int> ChildProcess::wait_for_end(
     std::chrono::milliseconds timeout) {
     const bool ended = wait_until(

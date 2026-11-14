@@ -65,6 +65,11 @@ public:
         const std::function<bool(std::string_view)>& condition,
         std::chrono::milliseconds timeout);
 
+    // Same as `wait_for_output`, for the standard error stream.
+    [[nodiscard]] bool wait_for_error(
+        const std::function<bool(std::string_view)>& condition,
+        std::chrono::milliseconds timeout);
+
     // Blocks until the process has exited and all its output is captured.
     // Returns its exit code, or nothing if `timeout` passes first or the
     // process was ended by a signal.
