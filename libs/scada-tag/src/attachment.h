@@ -7,9 +7,11 @@
 // Private to libscada-tag.
 
 #include "header_view.h"
+#include "layout.h"
 #include "own_region.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "tag_record.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/realtime.h"
@@ -170,8 +172,8 @@ public:
                                          std::span<scada_value> out,
                                          std::span<int> status) noexcept;
 
-    // Section 6.1. The change entry of section 8 is appended from issue
-    // P1-07 on.
+    // Section 6.1. A write that changes value, quality or flags appends a
+    // change entry to the owner's ring (section 8.1).
     SCADA_RT [[nodiscard]] int write(std::uint32_t handle,
                                      const scada_value& value) noexcept;
 
@@ -190,6 +192,61 @@ public:
     [[nodiscard]] int write_string(std::uint32_t handle, std::string_view text,
                                    std::uint8_t quality, std::uint16_t flags,
                                    std::int64_t source_time_ns) noexcept;
+
+    // Section 8.4: wakes the consumers of the rings the calling thread
+    // wrote since its previous call, advances `cycle_seq` and wakes its
+    // waiters; then does what `status` does to missing regions and the
+    // clock check. SCADA_OK, or SCADA_E_IO with errno set if a wake was
+    // refused (every wake is still tried). Not real-time.
+    [[nodiscard]] int notify();
+
+    // What the subscriptions and wait sets need (section 8). Each owner or
+    // process index must be below the count of the header; another one
+    // ends the process.
+
+    // The index of the owner `name`, or nothing.
+    [[nodiscard]] std::optional<std::size_t> find_owner(
+        std::string_view name) const noexcept;
+
+    // Asks for the `changes` region of `owner_index` and the `proc` region
+    // of its process, unless they are this process's own. Not real-time.
+    void want_changes(std::size_t owner_index);
+
+    // Asks for the `proc` region of `process_index`, unless it is this
+    // process's own. Not real-time.
+    void want_proc(std::uint16_t process_index);
+
+    // The mapped `changes` region of `owner_index`, or an empty span while
+    // it is missing. For an owner of another process the span may change
+    // when the region is mapped anew; each span stays valid as long as this
+    // object. Safe from any thread.
+    [[nodiscard]] std::span<std::byte> changes_of(
+        std::size_t owner_index) const noexcept;
+
+    // The mapped `proc` region of `process_index`, or an empty span, with
+    // the guarantees of `changes_of`.
+    [[nodiscard]] std::span<std::byte> proc_of(
+        std::uint16_t process_index) const noexcept;
+
+    // The capacity of the ring of `owner_index`, from the owner table.
+    [[nodiscard]] std::uint32_t ring_capacity(
+        std::size_t owner_index) const noexcept;
+
+    // True if `entry` is what the ring of `owner_index` may hold: a handle
+    // of that owner, the type of its tag, a quality and flags an owner may
+    // store, 0 or 1 for a BOOL and the slot number for a STRING.
+    [[nodiscard]] bool change_valid(std::size_t owner_index,
+                                    const ChangeEntry& entry) const noexcept;
+
+    // Looks again for missing regions of other processes that were asked
+    // for (`PeerRegions::refresh`, at most once a second for each). Not
+    // real-time.
+    void refresh_peers();
+
+    // The number of processes of the generation.
+    [[nodiscard]] std::size_t process_count() const noexcept {
+        return header_.contents().processes.size();
+    }
 
     [[nodiscard]] const HeaderView& header() const noexcept { return header_; }
 
@@ -236,10 +293,13 @@ private:
         // mappings `owners_` holds, which live as long as this object.
         std::span<std::byte> own_tags;
         std::span<std::byte> own_strings;
+        std::span<std::byte> own_changes;
+        std::uint32_t ring_capacity = 0;  // from the owner table
         // The slots of its regions in `peers_`, if not `own`.
         // `strings_slot` means something only if it has string slots.
         std::size_t tags_slot = 0;
         std::size_t strings_slot = 0;
+        std::size_t changes_slot = 0;
         std::size_t proc_slot = 0;
     };
 
@@ -290,10 +350,16 @@ private:
                                            const scada_value& value,
                                            TagRef& tag) const noexcept;
 
-    // Section 13.2, in a build without NDEBUG: stops the process if the
-    // tags of `owner` are written from a thread other than the first one
-    // that wrote them. Nothing in a build with NDEBUG.
+    // Records the calling thread as the writer of `owner` if it writes
+    // first, so that `notify` knows which rings the thread wrote. Section
+    // 13.2, in a build without NDEBUG: stops the process if the tags of
+    // `owner` are written from a thread other than that first one.
     SCADA_RT void check_writer_thread(const OwnerAccess& owner) noexcept;
+
+    // Appends the change of the tag `handle` that `update` wrote (section
+    // 8.1). `tag` is the tag `handle` refers to, of an own owner.
+    SCADA_RT void append_change_of(std::uint32_t handle, const TagRef& tag,
+                                   const RecordUpdate& update) noexcept;
 
     // Reads the clock source and times the clocks (section 13.1).
     void check_clock(std::int64_t now_mono_ns) noexcept;
@@ -328,6 +394,12 @@ private:
     // For every owner, what tells the thread that wrote its tags first, or
     // null (`check_writer_thread`). Sized at `attach`, never resized.
     std::vector<std::atomic<const void*>> writer_threads_;
+
+    // For every owner, the `write_seq` of its ring at the last wake by
+    // `notify`. Atomic because `notify` may run in several threads;
+    // relaxed, because only the exchange itself matters: a thread that
+    // loses it leaves the wake to the one that wins. Sized at `attach`.
+    std::vector<std::atomic<std::uint64_t>> woken_seq_;
 
     // The result of the last clock check and when the next one is due.
     // Atomic because `status` may run in several threads; relaxed, because

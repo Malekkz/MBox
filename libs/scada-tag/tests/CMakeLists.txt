@@ -2,6 +2,7 @@ scada_add_test(scada-tag-unit-test KIND unit
   SOURCES
     attachment_test.cpp
     c_api_test.cpp
+    change_ring_test.cpp
     generation_host_test.cpp
     handle_test.cpp
     header_builder_test.cpp
@@ -13,6 +14,7 @@ scada_add_test(scada-tag-unit-test KIND unit
     proc_region_test.cpp
     region_file_test.cpp
     sha256_test.cpp
+    subscription_test.cpp
     tag_access_test.cpp
     tag_record_test.cpp
     tag_set_json_test.cpp
