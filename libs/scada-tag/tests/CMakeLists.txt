@@ -13,6 +13,8 @@ scada_add_test(scada-tag-unit-test KIND unit
     proc_region_test.cpp
     region_file_test.cpp
     sha256_test.cpp
+    tag_access_test.cpp
+    tag_record_test.cpp
     tag_set_json_test.cpp
     tag_set_test.cpp
     types_test.cpp
@@ -29,3 +31,17 @@ target_link_libraries(scada-tag-test-peer PRIVATE scada::tag)
 target_include_directories(scada-tag-test-peer
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 scada_target_defaults(scada-tag-test-peer)
+
+# The writing side of conformance tests 2 and 3: one process with several
+# owner threads that write derived values at a given rate. Not installed.
+add_executable(scada-tag-test-writer writer/writer_main.cpp)
+target_link_libraries(scada-tag-test-writer PRIVATE scada::tag)
+scada_target_defaults(scada-tag-test-writer)
+
+# The program conformance test 22 traces: it calls the real-time safe
+# functions between two markers and counts its own allocations. Not
+# installed.
+add_executable(scada-tag-rt-probe probe/rt_probe_main.cpp)
+target_link_libraries(scada-tag-rt-probe
+  PRIVATE scada::tag scada::test-support)
+scada_target_defaults(scada-tag-rt-probe)

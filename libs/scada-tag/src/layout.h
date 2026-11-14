@@ -41,7 +41,11 @@ inline constexpr bool IS_SHARED_ATOMIC =
     std::atomic_ref<T>::is_always_lock_free &&
     std::atomic_ref<T>::required_alignment <= alignof(T);
 
-// The types of all fields marked `A`.
+// The types of all fields marked `A`, and of the fields of a tag record and
+// a string slot, which the sequence lock reads while their owner writes
+// them (sections 6 and 7).
+static_assert(IS_SHARED_ATOMIC<std::uint8_t>);
+static_assert(IS_SHARED_ATOMIC<std::uint16_t>);
 static_assert(IS_SHARED_ATOMIC<std::uint32_t>);
 static_assert(IS_SHARED_ATOMIC<std::uint64_t>);
 static_assert(IS_SHARED_ATOMIC<std::int64_t>);

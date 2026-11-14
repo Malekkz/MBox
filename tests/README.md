@@ -12,7 +12,7 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `tests/integration/` | Tests that start real processes | `integration` |
 | `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
 | `tests/perf/` | Performance tests against stated budgets | `perf` |
-| `tests/support/` | `scada::test-support` (start a process, wait on a condition) and the corpus replay driver | |
+| `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process) and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
 | `tests/fuzz-sample/` | Toy parser with a planted bug, and its fuzz target | `fuzz`, `unit` |
 
@@ -35,6 +35,15 @@ An integration test starts its processes with `scada::test::ChildProcess`
 Do not sleep. Pass the command to start through `ENVIRONMENT`, as
 `integration/CMakeLists.txt`
 does, so that a cross build can run it through the emulator.
+
+To show that code makes no system call, the program under test calls
+`scada::test::mark_trace_begin()` and `mark_trace_end()` around it, and the
+test runs the program with `scada::test::trace_marked_syscalls`
+(`support/include/scada/test/syscall_trace.h`), which returns the system
+calls made between the markers. `integration/rt_safety_integration_test.cpp`
+does this for the real-time safe functions of the tag library. It works in
+a native build without a sanitizer only; register such a test as that file
+is registered.
 
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
 least one seed input in `corpus/<name>/` next to it. Copy the entry point

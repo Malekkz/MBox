@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -68,6 +69,21 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 scada::tag::slot_type(region, contents, owner, slot));
         }
     }
+    // What resolve and info do: every entry of the directory, and a search
+    // for the name of each entry that is valid.
+    for (std::size_t index = 0; index < contents.tag_count; ++index) {
+        const std::optional<scada::tag::TagEntry> entry =
+            scada::tag::directory_entry(region, contents, index);
+        if (!entry.has_value()) {
+            continue;
+        }
+        if (entry->owner_index >= contents.owners.size() ||
+            entry->slot >= contents.owners[entry->owner_index].tag_count) {
+            scada::panic("a tag of no owner or slot was accepted");
+        }
+        static_cast<void>(scada::tag::find_tag(region, contents, entry->name));
+    }
+    static_cast<void>(scada::tag::find_tag(region, contents, "plant.level"));
     if (tags != contents.tag_count) {
         scada::panic("tag counts that do not add up were accepted");
     }

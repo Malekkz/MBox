@@ -79,6 +79,12 @@ public:
         return memory_.prefault();
     }
 
+    // The mapped bytes of the region, for `proc_liveness`; empty if no
+    // region is held. Valid as long as this object holds the region.
+    SCADA_RT [[nodiscard]] std::span<std::byte> bytes() const noexcept {
+        return memory_.bytes();
+    }
+
     // Sets the state other processes see. Precondition: `valid()`.
     SCADA_RT void set_state(ProcessState state) noexcept;
 

@@ -15,7 +15,10 @@
 #include "scada/common/realtime.h"
 #include "scada/common/result.h"
 #include "scada/tag/liveness.h"
+#include "scada/tag/scada_tag.h"
+#include "scada/tag/types.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -59,6 +62,9 @@ struct AttachmentStatus {
     // Tag records found with an odd sequence number and repaired
     // (section 6.3).
     std::uint32_t records_repaired = 0;
+    // True if reading the clocks was found to be a system call on this
+    // machine (section 13.1).
+    bool clock_syscall = false;
 };
 
 // The tag regions of one owner of the attached process, mapped read-write.
@@ -98,6 +104,10 @@ public:
     // section 11.2 lists it, so that a second process of the same name
     // fails before it changes anything.
     //
+    // Before step 3 the tag directory is read through every slot table
+    // (`read_directory`), and after step 4 the clocks are checked (section
+    // 13.1).
+    //
     // Not done yet, each with the issue that adds it: retained values
     // (P1-09), draining the `cmd` queues and setting the cursors of a new
     // `proc` region (P1-08).
@@ -133,8 +143,53 @@ public:
 
     // The state of the attachment now. It also looks again for the regions
     // of other processes that were asked for and are missing
-    // (`PeerRegions::refresh`). Not real-time.
+    // (`PeerRegions::refresh`), and checks the clocks again at most once a
+    // minute (section 13.1). Not real-time.
     [[nodiscard]] AttachmentStatus status();
+
+    // The tag functions of section 13. Each returns a return code of
+    // scada/tag/scada_tag.h, where the functions of the same names state
+    // their contracts; what is said here is what differs.
+
+    // The handle of the tag `name`. If another process owns the tag, the
+    // `tags` and `strings` regions of its owner and the `proc` region of
+    // that process are asked for (`PeerRegions::want`). On an error
+    // `handle` is INVALID_HANDLE. Not real-time.
+    [[nodiscard]] int resolve(std::string_view name, std::uint32_t& handle);
+
+    // Name, type, flags and owner of the tag `handle`. Not real-time.
+    [[nodiscard]] int info(std::uint32_t handle, scada_tag_info_t& out) const;
+
+    // Section 6.2 and the overlay of the owner state.
+    SCADA_RT [[nodiscard]] int read(std::uint32_t handle,
+                                    scada_value& out) noexcept;
+
+    // `out` has the size of `handles`; `status` has that size or is empty.
+    // Other sizes end the process.
+    SCADA_RT [[nodiscard]] int read_many(std::span<const std::uint32_t> handles,
+                                         std::span<scada_value> out,
+                                         std::span<int> status) noexcept;
+
+    // Section 6.1. The change entry of section 8 is appended from issue
+    // P1-07 on.
+    SCADA_RT [[nodiscard]] int write(std::uint32_t handle,
+                                     const scada_value& value) noexcept;
+
+    // `values` has the size of `handles`; another size ends the process.
+    SCADA_RT [[nodiscard]] int write_many(
+        std::span<const std::uint32_t> handles,
+        std::span<const scada_value> values) noexcept;
+
+    // Section 7. The text goes to the start of `buffer` and its length to
+    // `length`; `meta` may be null. Not real-time.
+    [[nodiscard]] int read_string(std::uint32_t handle, std::span<char> buffer,
+                                  std::size_t& length,
+                                  scada_value* meta) noexcept;
+
+    // Section 7. Not real-time.
+    [[nodiscard]] int write_string(std::uint32_t handle, std::string_view text,
+                                   std::uint8_t quality, std::uint16_t flags,
+                                   std::int64_t source_time_ns) noexcept;
 
     [[nodiscard]] const HeaderView& header() const noexcept { return header_; }
 
@@ -163,6 +218,80 @@ public:
                std::uint16_t process_index);
 
 private:
+    // What the tag functions need to know about one owner of the
+    // generation. Filled once by `attach`, then only read.
+    struct OwnerAccess {
+        std::uint32_t tag_count = 0;
+        std::uint32_t string_slots = 0;
+        std::uint32_t heartbeat_timeout_ms = 0;  // of its process
+        std::uint16_t process_index = 0;
+        // True if the owner is a thread of the attached process.
+        bool own = false;
+        // Where the types of its slots start in `types_`, and where its
+        // STRING slots start in `string_tags_`.
+        std::size_t first_type = 0;
+        std::size_t first_string = 0;
+        // Its regions, mapped read-write, if `own`. The spans refer to the
+        // mappings `owners_` holds, which live as long as this object.
+        std::span<std::byte> own_tags;
+        std::span<std::byte> own_strings;
+        // The slots of its regions in `peers_`, if not `own`.
+        // `strings_slot` means something only if it has string slots.
+        std::size_t tags_slot = 0;
+        std::size_t strings_slot = 0;
+        std::size_t proc_slot = 0;
+    };
+
+    // A tag a handle refers to.
+    struct TagRef {
+        const OwnerAccess* owner = nullptr;  // into `access_`
+        std::uint32_t slot = 0;
+        TagType type = TagType::BOOL;
+    };
+
+    // Reads the tag directory through the slot table of every owner and
+    // fills `access_`, `types_` and `string_tags_`. DATA_CORRUPT if a slot
+    // has no valid entry.
+    [[nodiscard]] Status read_directory(std::string& detail);
+
+    // The types of the slots of owner `owner_index`, in slot order.
+    [[nodiscard]] std::span<const TagType> types_of(
+        std::size_t owner_index) const noexcept;
+
+    // The tag `handle` refers to, or nothing if it is no handle of this
+    // generation: two comparisons (section 13.1).
+    SCADA_RT [[nodiscard]] std::optional<TagRef> tag_of(
+        std::uint32_t handle) const noexcept;
+
+    // The number of the string slot of the STRING tag `tag`: its rank among
+    // the STRING tags of its owner.
+    SCADA_RT [[nodiscard]] std::uint64_t string_slot_of(
+        const TagRef& tag) const noexcept;
+
+    // True if the process of `owner` is down at the time `now_mono_ns` by
+    // the three rules of section 10.1 that the library evaluates itself:
+    // its `proc` region is missing, its state is not RUNNING, or its
+    // heartbeat is older than its timeout.
+    SCADA_RT [[nodiscard]] bool owner_down(
+        const OwnerAccess& owner, std::int64_t now_mono_ns) const noexcept;
+
+    // The mapped `tags` and `strings` regions of `owner`; empty while a
+    // region of another process is missing.
+    SCADA_RT [[nodiscard]] std::span<std::byte> tags_of(
+        const OwnerAccess& owner) const noexcept;
+    SCADA_RT [[nodiscard]] std::span<std::byte> strings_of(
+        const OwnerAccess& owner) const noexcept;
+
+    SCADA_RT [[nodiscard]] int read_at(std::uint32_t handle, scada_value& out,
+                                       std::int64_t now_mono_ns) noexcept;
+    // The checks of `write` that need no clock.
+    SCADA_RT [[nodiscard]] int check_write(std::uint32_t handle,
+                                           const scada_value& value,
+                                           TagRef& tag) const noexcept;
+
+    // Reads the clock source and times the clocks (section 13.1).
+    void check_clock(std::int64_t now_mono_ns) noexcept;
+
     // Steps 3 and 4 of `attach`.
     [[nodiscard]] Status attach_regions(std::string& detail);
     [[nodiscard]] Status attach_owner(std::size_t owner_index,
@@ -182,6 +311,19 @@ private:
     std::uint32_t regions_created_ = 0;
     std::uint32_t regions_reused_ = 0;
     std::uint32_t records_repaired_ = 0;
+
+    // One entry for every owner of the generation, the type of every slot
+    // of every owner, and the STRING slots of every owner in ascending
+    // order. None of them changes after `attach`.
+    std::vector<OwnerAccess> access_;
+    std::vector<TagType> types_;
+    std::vector<std::uint32_t> string_tags_;
+
+    // The result of the last clock check and when the next one is due.
+    // Atomic because `status` may run in several threads; relaxed, because
+    // each is a value on its own.
+    std::atomic<bool> clock_syscall_{false};
+    std::atomic<std::int64_t> next_clock_check_mono_ns_{0};
 };
 
 // Initial state of the `tags` region `tags` of an owner whose slots have

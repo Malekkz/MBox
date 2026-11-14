@@ -29,6 +29,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -56,6 +57,13 @@ constexpr std::uint32_t NOT_A_POWER_OF_TWO = 1025;
 constexpr std::uint16_t NO_QUEUE_KIND = 5;
 // A value of GlobalHeader.state that is no state.
 constexpr std::uint32_t NO_STATE = 9;
+// A flag of a directory entry that is none, and a name length that reaches
+// beyond every name pool of the tests.
+constexpr std::uint8_t NO_TAG_FLAG = 0x08;
+constexpr std::uint16_t LONG_NAME_LENGTH = 0xFFFF;
+// A name offset beyond the name pool of every header of the tests.
+constexpr std::uint32_t BEYOND_NAME_POOL = 0x7FFF'FFFF;
+constexpr std::string_view SPEED_TAG = "plant.pump1.speed";
 // The number of tags of the sample tag set, and one less.
 constexpr std::uint32_t SAMPLE_TAGS = 5;
 
@@ -246,6 +254,170 @@ TEST(ReadHeader, ADirectoryEntryWithNoTypeHasNoType) {
             std::uint8_t{0});
     }
     EXPECT_EQ(slot_type(image.bytes(), contents.value(), 2, 0), std::nullopt);
+}
+
+// The header of the sample tag set, published and read.
+struct SampleHeader {
+    AlignedImage image;
+    HeaderContents contents;
+};
+
+SampleHeader sample_header() {
+    AlignedImage image(published(samples::sample()));
+    std::string detail;
+    Result<HeaderContents> read =
+        read_header(image.bytes(), GENERATION, detail);
+    EXPECT_TRUE(read.ok()) << detail;
+    return {std::move(image),
+            read.ok() ? std::move(read).value() : HeaderContents{}};
+}
+
+// The tag `tag` is found by its name, and its slot leads back to it.
+void expect_found_both_ways(SampleHeader& header, const TagDefinition& tag) {
+    const std::optional<TagEntry> found =
+        find_tag(header.image.bytes(), header.contents, tag.name);
+    if (!found.has_value()) {
+        ADD_FAILURE() << tag.name << " was not found";
+        return;
+    }
+    EXPECT_EQ(found->name, tag.name);
+    EXPECT_EQ(found->type, tag.type);
+    const std::optional<TagEntry> by_slot = slot_entry(
+        header.image.bytes(), header.contents, found->owner_index, found->slot);
+    if (!by_slot.has_value()) {
+        ADD_FAILURE() << tag.name << " has no slot entry";
+        return;
+    }
+    EXPECT_EQ(by_slot->name, tag.name);
+    EXPECT_EQ(by_slot->handle, found->handle);
+}
+
+// The position of the tag `name` in the directory of `header`, or the tag
+// count if it is not there.
+std::size_t directory_index_of(SampleHeader& header, std::string_view name) {
+    for (std::size_t index = 0; index < header.contents.tag_count; ++index) {
+        const std::optional<TagEntry> entry =
+            directory_entry(header.image.bytes(), header.contents, index);
+        if (entry.has_value() && entry->name == name) {
+            return index;
+        }
+    }
+    return header.contents.tag_count;
+}
+
+// True if the tag plant.pump1.speed is neither a valid directory entry nor
+// found by its name once `value` is stored in the field at `field` of its
+// entry.
+template <typename Value>
+bool speed_is_gone_with(std::size_t field, Value value) {
+    SampleHeader header = sample_header();
+    const std::size_t index = directory_index_of(header, SPEED_TAG);
+    if (index >= header.contents.tag_count) {
+        return false;
+    }
+    put(header.image.bytes(),
+        header.contents.directory_offset + (index * sizeof(DirectoryEntry)) +
+            field,
+        value);
+    return !directory_entry(header.image.bytes(), header.contents, index)
+                .has_value() &&
+           !find_tag(header.image.bytes(), header.contents, SPEED_TAG)
+                .has_value();
+}
+
+TEST(ReadHeader, ATagIsFoundByItsName) {
+    SampleHeader header = sample_header();
+    // io is owner 2: plant.pump1.running, plant.pump1.speed.
+    const std::optional<TagEntry> speed =
+        find_tag(header.image.bytes(), header.contents, SPEED_TAG);
+    if (!speed.has_value()) {
+        FAIL() << "plant.pump1.speed was not found";
+    }
+    EXPECT_EQ(speed->handle, pack_handle(2, 1));
+    EXPECT_EQ(speed->owner_index, 2);
+    EXPECT_EQ(speed->slot, 1U);
+    EXPECT_EQ(speed->type, TagType::FLOAT64);
+    EXPECT_EQ(speed->flags, to_raw(TagFlag::WRITABLE_BY_COMMAND));
+    EXPECT_EQ(speed->name, SPEED_TAG);
+}
+
+TEST(ReadHeader, EveryTagIsFoundByItsNameAndByItsSlot) {
+    SampleHeader header = sample_header();
+    for (const TagDefinition& tag : samples::sample().tags) {
+        expect_found_both_ways(header, tag);
+    }
+}
+
+TEST(ReadHeader, ANameThatIsNoTagIsNotFound) {
+    SampleHeader header = sample_header();
+    for (const std::string_view name :
+         {"plant.pump1.spee", "plant.pump1.speed2", "", "a", "zzz"}) {
+        EXPECT_FALSE(
+            find_tag(header.image.bytes(), header.contents, name).has_value())
+            << name;
+    }
+    EXPECT_FALSE(
+        directory_entry(header.image.bytes(), header.contents, SAMPLE_TAGS)
+            .has_value());
+}
+
+TEST(ReadHeader, ADirectoryEntryWithAnInvalidHandleTypeOrFlagIsNoTag) {
+    // A handle of no owner, of no slot, and the handle that is none.
+    EXPECT_TRUE(speed_is_gone_with(offsetof(DirectoryEntry, handle),
+                                   std::uint32_t{3U << HANDLE_SLOT_BITS}));
+    EXPECT_TRUE(
+        speed_is_gone_with(offsetof(DirectoryEntry, handle),
+                           std::uint32_t{(2U << HANDLE_SLOT_BITS) | 2U}));
+    EXPECT_TRUE(
+        speed_is_gone_with(offsetof(DirectoryEntry, handle), INVALID_HANDLE));
+    EXPECT_TRUE(
+        speed_is_gone_with(offsetof(DirectoryEntry, type), std::uint8_t{0}));
+    EXPECT_TRUE(
+        speed_is_gone_with(offsetof(DirectoryEntry, flags), NO_TAG_FLAG));
+}
+
+TEST(ReadHeader, ADirectoryEntryWithANameOutsideTheNamePoolIsNoTag) {
+    // A name that ends outside the name pool, and one that starts there.
+    EXPECT_TRUE(speed_is_gone_with(offsetof(DirectoryEntry, name_len),
+                                   LONG_NAME_LENGTH));
+    EXPECT_TRUE(speed_is_gone_with(offsetof(DirectoryEntry, name_offset),
+                                   BEYOND_NAME_POOL));
+    // A name of no bytes is no tag name.
+    EXPECT_TRUE(speed_is_gone_with(offsetof(DirectoryEntry, name_len),
+                                   std::uint16_t{0}));
+}
+
+// Another hash: the entry is still valid, but the search misses it.
+TEST(ReadHeader, ATagUnderAnotherHashIsNotFound) {
+    SampleHeader header = sample_header();
+    const std::size_t index = directory_index_of(header, SPEED_TAG);
+    ASSERT_LT(index, header.contents.tag_count);
+    put(header.image.bytes(),
+        header.contents.directory_offset + (index * sizeof(DirectoryEntry)) +
+            offsetof(DirectoryEntry, name_hash),
+        std::uint64_t{1});
+    EXPECT_TRUE(directory_entry(header.image.bytes(), header.contents, index)
+                    .has_value());
+    EXPECT_FALSE(
+        find_tag(header.image.bytes(), header.contents, SPEED_TAG).has_value());
+}
+
+TEST(ReadHeader, ANameWithBytesThatAreNoNameIsNoTag) {
+    AlignedImage image(published(samples::sample()));
+    std::string detail;
+    const Result<HeaderContents> read =
+        read_header(image.bytes(), GENERATION, detail);
+    ASSERT_TRUE(read.ok()) << detail;
+    // Every name gets an upper-case letter.
+    for (std::size_t i = 0; i < read.value().name_pool_size; ++i) {
+        put(image.bytes(), read.value().name_pool_offset + i,
+            std::uint8_t{'A'});
+    }
+    for (std::size_t i = 0; i < read.value().tag_count; ++i) {
+        EXPECT_FALSE(
+            directory_entry(image.bytes(), read.value(), i).has_value());
+    }
+    EXPECT_EQ(slot_type(image.bytes(), read.value(), 2, 0), std::nullopt);
 }
 
 TEST(ReadHeader, Conformance12AnotherLayoutVersionIsRefused) {

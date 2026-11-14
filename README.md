@@ -7,8 +7,9 @@ Status: design baseline frozen (version 1.0). Phase 0 (foundations) is
 built: the build skeleton, its checks and the common library
 (`libs/scada-common`: status and result types, logging, clocks). Phase 1 (data
 plane) has started: the binary layout of the tag database, the tag-set
-definition and the header builder (`libs/scada-tag`), and the daemon that
-creates the database and watches liveness (`scada-tagd`).
+definition, the header builder, attach and tag read and write
+(`libs/scada-tag`), and the daemon that creates the database and watches
+liveness (`scada-tagd`).
 
 ## Where things are
 

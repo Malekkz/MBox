@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace scada::tag {
@@ -52,6 +53,43 @@ SCADA_RT [[nodiscard]] Shared& shared_at(std::span<std::byte> region,
     // process.
     // NOLINTNEXTLINE(scada-banned,cppcoreguidelines-pro-type-reinterpret-cast): the reviewed helper that maps contract structures onto memory (coding standard, section 5)
     return *reinterpret_cast<Shared*>(region.subspan(offset).data());
+}
+
+// The `length` bytes at `offset` in the mapped `region` as text. The view
+// refers to the mapping and is valid as long as it is. Only for bytes that
+// do not change while the mapping lives (the name pool of a header). Bytes
+// outside the region are a defect of this library and end the process.
+SCADA_RT [[nodiscard]] inline std::string_view text_at(
+    std::span<std::byte> region, std::size_t offset,
+    std::size_t length) noexcept {
+    if (!fits(region.size(), offset, length)) {
+        panic("shared memory: text outside the region");
+    }
+    // NOLINTNEXTLINE(scada-banned,cppcoreguidelines-pro-type-reinterpret-cast): the reviewed helper that reads mapped bytes as characters (coding standard, section 5)
+    return {reinterpret_cast<const char*>(region.subspan(offset).data()),
+            length};
+}
+
+// Orders the stores of a sequence-lock write (contract, section 6.1): the
+// data stores that follow must not pass the store of the odd sequence
+// number before it.
+//
+// ThreadSanitizer does not model fences, and its build runs every atomic
+// access in one total order, in which the fence has nothing to add. The
+// compiler refuses the call in that build, so it is left out there.
+SCADA_RT inline void fence_release() noexcept {
+#if !defined(__SANITIZE_THREAD__)
+    std::atomic_thread_fence(std::memory_order_release);
+#endif
+}
+
+// Orders the loads of a sequence-lock read (contract, section 6.2): the
+// copies before it must complete before the second load of the sequence
+// number. Left out in the ThreadSanitizer build, as `fence_release`.
+SCADA_RT inline void fence_acquire() noexcept {
+#if !defined(__SANITIZE_THREAD__)
+    std::atomic_thread_fence(std::memory_order_acquire);
+#endif
 }
 
 // Reads a field that another process may be writing.
