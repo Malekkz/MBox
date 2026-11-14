@@ -80,6 +80,60 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The figures of issue #40 (decision D-31): the retry window of a tag read
+  # and the rate of SCADA_E_BUSY, on ARM64 with each pause instruction and on
+  # x86-64 for comparison. Run by hand only (workflow_dispatch): it takes
+  # about 20 minutes and measures, it does not pass or fail on a figure.
+  arm64-measurements:
+    name: measurements (${{ matrix.arch }}, ${{ matrix.pause }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+            machine: x86_64
+            pause: pause
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            pause: yield
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            pause: isb
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Check the architecture
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
+      - name: Describe the machine
+        run: |
+          lscpu
+          cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+      - name: Build (perf)
+        env:
+          # x86-64 ignores the option; yield is its default.
+          PAUSE: ${{ matrix.pause == 'isb' && 'isb' || 'yield' }}
+        run: |
+          cmake --preset perf -B build/measure -DSCADA_ARM64_PAUSE="${PAUSE}"
+          cmake --build build/measure --target \
+            scada-tag-seqlock-bench scada-tag-access-integration-test
+      - name: Measure
+        shell: bash
+        run: scripts/measure-seqlock.sh build/measure 60 600 | tee measurements.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: measurements-${{ matrix.arch }}-${{ matrix.pause }}
+          path: measurements.txt
+          if-no-files-found: error
+          retention-days: 30
+
   check:
     name: check
     runs-on: ubuntu-24.04
