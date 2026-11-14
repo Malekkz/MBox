@@ -106,8 +106,9 @@ private:
 // Evaluates the second and third rule of section 10.1 on `region`, the
 // mapped `proc` region of a process that passed the checks of section 3.1,
 // at the time `now_mono_ns` (CLOCK_MONOTONIC): NOT_RUNNING, HEARTBEAT_STALE
-// or NONE. A heartbeat exactly as old as the timeout is not yet stale, and
-// one newer than `now_mono_ns` is fresh. REGION_MISSING if `region` is too
+// or NONE. A heartbeat exactly as old as the timeout is not yet stale. One
+// newer than `now_mono_ns` is fresh up to the timeout ahead of it and stale
+// beyond (section 10.1). REGION_MISSING if `region` is too
 // small to be a `proc` region, which includes an empty span.
 SCADA_RT [[nodiscard]] DownReason proc_liveness(
     std::span<std::byte> region, std::uint32_t heartbeat_timeout_ms,
