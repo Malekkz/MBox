@@ -11,7 +11,8 @@
 // header builder.
 //
 // The order of the entries in a TagSet carries no meaning: `config_hash` and
-// `build_header` give the same result for any order.
+// `build_header` give the same result for any order. Where they sort by
+// name, they compare the bytes of the names.
 
 #include "scada/common/result.h"
 #include "scada/tag/types.h"
@@ -54,6 +55,8 @@ inline constexpr std::uint32_t DEFAULT_QUEUE_CAPACITY = 1024;
 struct ProcessDefinition {
     std::string name;
     std::uint32_t uid = 0;  // user id the process runs as
+    // Whoever fills this in applies the default that fits `realtime`:
+    // DEFAULT_REALTIME_HEARTBEAT_TIMEOUT_MS for a real-time process.
     std::uint32_t heartbeat_timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT_MS;
     bool realtime = false;
 };

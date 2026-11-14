@@ -37,6 +37,9 @@ static_assert(MAX_TAGS * MAX_TAG_NAME_LENGTH <=
 static_assert(MAX_TAG_NAME_LENGTH <= std::numeric_limits<std::uint16_t>::max());
 static_assert(MAX_SHORT_NAME_LENGTH < NAME_FIELD_SIZE);
 static_assert(CONFIG_HASH_BYTES == CONFIG_HASH_SIZE);
+// The counts in GlobalHeader and the directory index in a slot table.
+static_assert(MAX_OWNERS <= std::numeric_limits<std::uint16_t>::max());
+static_assert(MAX_TAGS <= std::numeric_limits<std::uint32_t>::max());
 
 // `value` rounded up to a multiple of OFFSET_ALIGNMENT.
 constexpr std::size_t aligned(std::size_t value) noexcept {
@@ -147,7 +150,7 @@ void write_headers(ImageWriter& image, const TagSet& tag_set,
     GlobalHeader global;
     global.state = to_raw(GenerationState::BUILDING);
     // The counts are within the limits of the contract, which fit the fields
-    // (static_asserts in tag_set.cpp).
+    // (static_asserts above and in tag_set.cpp).
     global.tag_count = static_cast<std::uint32_t>(resolved.tags.size());
     global.owner_count = static_cast<std::uint16_t>(resolved.owners.size());
     global.process_count =

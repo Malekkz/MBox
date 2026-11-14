@@ -72,6 +72,7 @@ tags.
 
 The order of the entries in a `TagSet` has no effect:
 
+- "Sorted by name" means by the bytes of the name, as unsigned values.
 - Processes, owners and queues are sorted by name. The position of a process
   is its process index, of an owner its owner index, of a queue its queue id.
 - The slots of an owner are its tags sorted by name.
