@@ -30,8 +30,9 @@ constexpr std::string_view CLOCK_SOURCE_PATH =
 constexpr std::size_t CLOCK_SOURCE_BUFFER = 64;
 
 // The clock sources the vDSO reads without a system call.
-constexpr std::array<std::string_view, 4> VDSO_CLOCK_SOURCES{
-    "tsc", "kvm-clock", "hyperv_clocksource_tsc_page", "arch_sys_counter"};
+constexpr std::array<std::string_view, 5> VDSO_CLOCK_SOURCES{
+    "tsc", "tsc-early", "kvm-clock", "hyperv_clocksource_tsc_page",
+    "arch_sys_counter"};
 
 // Reads are timed in batches, and the fastest batch counts: a batch that
 // was interrupted says nothing about the clock.

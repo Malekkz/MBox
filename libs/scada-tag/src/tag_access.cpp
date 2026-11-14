@@ -74,13 +74,40 @@ SCADA_RT scada_value absent_value(TagType type,
     return value;
 }
 
+// What a read stores in its output with an error that will not go away by
+// itself (every return code but SCADA_OK and SCADA_E_BUSY): no value and
+// quality BAD, so that a caller that keeps its output cannot hold on to a
+// good value. `type` is the raw type of the tag, 0 if the handle is none.
+SCADA_RT scada_value unusable_value(std::uint8_t type,
+                                    std::int64_t now_mono_ns) noexcept {
+    scada_value value{};
+    value.type = type;
+    value.quality = to_raw(Quality::BAD);
+    value.age_ns = age_ns(now_mono_ns, 0);
+    return value;
+}
+
+// True if `quality` and `flags` are what an owner may store: a quality, and
+// quality flags without OWNER_DOWN, which only a read adds (section 6.2).
+SCADA_RT bool storable(std::uint8_t quality, std::uint16_t flags) noexcept {
+    return quality_from_raw(quality).has_value() &&
+           quality_flags_valid(flags) &&
+           !has_flag(flags, QualityFlag::OWNER_DOWN);
+}
+
+// The address of an object every thread has its own of: what tells one
+// thread from another without a system call.
+SCADA_RT const void* thread_mark() noexcept {
+    thread_local const char mark = 0;
+    return &mark;
+}
+
 // True if `copy` holds what a record of a tag of type `type` may hold. A
 // STRING record holds the number of its string slot, `string_slot`.
 SCADA_RT bool record_valid(const RecordCopy& copy, TagType type,
                            std::uint64_t string_slot) noexcept {
     return copy.type == to_raw(type) &&
-           quality_from_raw(copy.quality).has_value() &&
-           quality_flags_valid(copy.quality_flags) &&
+           storable(copy.quality, copy.quality_flags) &&
            (type != TagType::BOOL || copy.value <= 1) &&
            (type != TagType::STRING || copy.value == string_slot);
 }
@@ -191,6 +218,23 @@ std::span<std::byte> Attachment::strings_of(
     return owner.own ? owner.own_strings : peers_.bytes(owner.strings_slot);
 }
 
+void Attachment::check_writer_thread(const OwnerAccess& owner) noexcept {
+#ifndef NDEBUG
+    std::atomic<const void*>& writer = writer_threads_[owner.index];
+    const void* const self = thread_mark();
+    const void* first = nullptr;
+    // Relaxed: the value is compared, nothing is read through it. The
+    // first thread that writes becomes the thread of the owner.
+    if (!writer.compare_exchange_strong(first, self,
+                                        std::memory_order_relaxed) &&
+        first != self) {
+        panic("tags of one owner written from two threads (contract 13.2)");
+    }
+#else
+    static_cast<void>(owner);
+#endif
+}
+
 void Attachment::check_clock(std::int64_t now_mono_ns) noexcept {
     // Relaxed: see the declaration.
     next_clock_check_mono_ns_.store(now_mono_ns + CLOCK_CHECK_INTERVAL_NS,
@@ -258,6 +302,7 @@ int Attachment::read_at(std::uint32_t handle, scada_value& out,
                         std::int64_t now_mono_ns) noexcept {
     const std::optional<TagRef> tag = tag_of(handle);
     if (!tag.has_value()) {
+        out = unusable_value(0, now_mono_ns);
         return SCADA_E_INVALID;
     }
     const bool down = owner_down(*tag->owner, now_mono_ns);
@@ -281,6 +326,7 @@ int Attachment::read_at(std::uint32_t handle, scada_value& out,
     const std::uint64_t string_slot =
         tag->type == TagType::STRING ? string_slot_of(*tag) : 0;
     if (!record_valid(copy, tag->type, string_slot)) {
+        out = unusable_value(to_raw(tag->type), now_mono_ns);
         return SCADA_E_LAYOUT;
     }
     out = value_of(copy, down, now_mono_ns);
@@ -325,8 +371,7 @@ int Attachment::check_write(std::uint32_t handle, const scada_value& value,
     if (found->type == TagType::STRING || value.type != to_raw(found->type)) {
         return SCADA_E_TYPE;
     }
-    if (!quality_from_raw(value.quality).has_value() ||
-        !quality_flags_valid(value.quality_flags) ||
+    if (!storable(value.quality, value.quality_flags) ||
         (found->type == TagType::BOOL && value.value > 1)) {
         return SCADA_E_INVALID;
     }
@@ -339,6 +384,7 @@ int Attachment::write(std::uint32_t handle, const scada_value& value) noexcept {
     if (const int code = check_write(handle, value, tag); code != SCADA_OK) {
         return code;
     }
+    check_writer_thread(*tag.owner);
     // Two clock reads for one write (section 16).
     const RecordUpdate update =
         update_of(value.quality, value.quality_flags, value.value,
@@ -369,8 +415,9 @@ int Attachment::write_many(std::span<const std::uint32_t> handles,
     for (std::size_t i = 0; i < handles.size(); ++i) {
         const std::optional<TagRef> tag = tag_of(handles[i]);
         if (!tag.has_value()) {
-            continue;  // cannot be: checked above, and nothing changed
+            panic("write_many: a handle checked a moment ago is none");
         }
+        check_writer_thread(*tag->owner);
         const RecordUpdate update = update_of(
             values[i].quality, values[i].quality_flags, values[i].value,
             values[i].source_time_ns, time_ns, mono_ns);
@@ -384,14 +431,22 @@ int Attachment::write_many(std::span<const std::uint32_t> handles,
 
 int Attachment::read_string(std::uint32_t handle, std::span<char> buffer,
                             std::size_t& length, scada_value* meta) noexcept {
+    const std::int64_t now = monotonic_ns();
+    // With an error that will not go away: no text, and BAD in `meta`.
+    const auto unusable = [&](std::uint8_t type, int code) noexcept {
+        length = 0;
+        if (meta != nullptr) {
+            *meta = unusable_value(type, now);
+        }
+        return code;
+    };
     const std::optional<TagRef> tag = tag_of(handle);
     if (!tag.has_value()) {
-        return SCADA_E_INVALID;
+        return unusable(0, SCADA_E_INVALID);
     }
     if (tag->type != TagType::STRING) {
-        return SCADA_E_TYPE;
+        return unusable(to_raw(tag->type), SCADA_E_TYPE);
     }
-    const std::int64_t now = monotonic_ns();
     const bool down = owner_down(*tag->owner, now);
     const std::span<std::byte> tags = tags_of(*tag->owner);
     const std::span<std::byte> strings = strings_of(*tag->owner);
@@ -408,7 +463,7 @@ int Attachment::read_string(std::uint32_t handle, std::span<char> buffer,
                 copy, text)) {
             if (!record_valid(copy, TagType::STRING, string_slot) ||
                 text.len > text.data.size()) {
-                return SCADA_E_LAYOUT;
+                return unusable(to_raw(TagType::STRING), SCADA_E_LAYOUT);
             }
             value = value_of(copy, down, now);
         } else if (!down) {
@@ -443,9 +498,10 @@ int Attachment::write_string(std::uint32_t handle, std::string_view text,
         return SCADA_E_TYPE;
     }
     if (text.size() > STRING_SLOT_DATA_SIZE || !is_utf8(text) ||
-        !quality_from_raw(quality).has_value() || !quality_flags_valid(flags)) {
+        !storable(quality, flags)) {
         return SCADA_E_INVALID;
     }
+    check_writer_thread(*tag->owner);
     const std::uint64_t string_slot = string_slot_of(*tag);
     std::array<std::uint8_t, STRING_SLOT_DATA_SIZE> bytes{};
     std::ranges::transform(text, bytes.begin(), [](char character) {

@@ -1,6 +1,7 @@
 // Integration test for conformance test 22 of the tag database contract:
 // the functions marked real-time safe make no system call and no
-// allocation, the first read of a tag after its resolve included.
+// allocation and take no page fault, the first read of a tag after its
+// resolve included.
 //
 // The helper scada-tag-rt-probe calls those functions between two markers.
 // This test runs it under the tracer of scada/test/syscall_trace.h, which
@@ -19,6 +20,7 @@
 
 #include <sys/syscall.h>
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <string>
@@ -63,44 +65,44 @@ protected:
         return result;
     }
 
-    // The system calls of `result` that the contract does not excuse: on a
-    // machine whose clocks cannot be read without a system call, which the
-    // library reports, reading the clock is one (section 13.1).
-    [[nodiscard]] static std::vector<long> unexcused(
-        const TraceResult& result) {
-        std::vector<long> calls = result.syscalls;
-        if (result.out.find("clock_syscall=1") != std::string::npos) {
-            std::erase(calls, long{SYS_clock_gettime});
-        }
-        return calls;
+    // The probe took no page fault and made no allocation between its
+    // markers, apart from `allocations` on purpose.
+    static void expect_quiet(const TraceResult& result, int allocations) {
+        EXPECT_NE(result.out.find(
+                      " allocations=" + std::to_string(allocations) + " "),
+                  std::string::npos)
+            << result.out;
+        EXPECT_NE(result.out.find(" page_faults=0 "), std::string::npos)
+            << result.out;
     }
 };
 
-TEST_F(RealTimeSafety, Conformance22NoSystemCallAndNoAllocation) {
+TEST_F(RealTimeSafety, Conformance22NoSystemCallAllocationOrPageFault) {
     const TraceResult result = traced_probe("");
-    EXPECT_EQ(unexcused(result), std::vector<long>{})
+    EXPECT_EQ(result.syscalls, std::vector<long>{})
         << "system calls inside real-time safe functions";
-    EXPECT_NE(result.out.find(" allocations=0 "), std::string::npos)
+    expect_quiet(result, 0);
+    // A machine whose clocks cannot be read without a system call breaks
+    // the real-time rule (contract 13.1). The library reports it, and this
+    // test does not pass on such a machine.
+    EXPECT_NE(result.out.find("clock_syscall=0"), std::string::npos)
+        << "the library reports that clock reads are system calls here: "
         << result.out;
-    // Reported, not judged: a machine without a clock in the vDSO breaks
-    // the real-time rule, and the library says so.
     RecordProperty("probe", result.out);
 }
 
 // The instrumentation itself: a system call between the markers is found.
 TEST_F(RealTimeSafety, ASystemCallBetweenTheMarkersIsFound) {
     const TraceResult result = traced_probe("syscall");
-    EXPECT_EQ(unexcused(result), std::vector<long>{SYS_getppid});
-    EXPECT_NE(result.out.find(" allocations=0 "), std::string::npos)
-        << result.out;
+    EXPECT_EQ(std::ranges::count(result.syscalls, long{SYS_getppid}), 1);
+    expect_quiet(result, 0);
 }
 
 // The instrumentation itself: an allocation between the markers is found.
 TEST_F(RealTimeSafety, AnAllocationBetweenTheMarkersIsFound) {
     const TraceResult result = traced_probe("allocation");
-    EXPECT_EQ(unexcused(result), std::vector<long>{});
-    EXPECT_NE(result.out.find(" allocations=1 "), std::string::npos)
-        << result.out;
+    EXPECT_EQ(std::ranges::count(result.syscalls, long{SYS_getppid}), 0);
+    expect_quiet(result, 1);
 }
 
 }  // namespace

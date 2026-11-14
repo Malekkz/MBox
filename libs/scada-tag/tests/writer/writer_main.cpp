@@ -5,7 +5,7 @@
 // a reader can tell a torn read. Test code; not installed.
 //
 // Usage: scada-tag-test-writer <base directory> <process> <owners>
-//            <tags per owner> <updates per second> <updates>
+//            <tags per owner> <updates per second> <updates> [second-thread]
 //
 // The owners are `<process>.w<k>`, k from 0, and the tags of owner k are
 // `<process>.w<k>.t<i>`, i from 0, of type UINT64. `updates per second` is
@@ -14,6 +14,12 @@
 //
 // The n-th write of a tag, n from 1, stores: value n, quality n % 3,
 // quality flags n & 0x0FDF, source time 1,700,000,000,000,000,000 + n.
+//
+// With `second-thread` it does something else after attaching: it writes
+// the first tag of the first owner from one thread and then from another,
+// which contract 13.2 forbids, prints "second-thread written" and exits
+// with code 0. A library built without NDEBUG stops the process at the
+// second write instead.
 //
 // It prints "attached" once it is RUNNING, "writing" when the owner threads
 // start, and "done updates=<n> elapsed_ms=<n>" when they have written
@@ -49,7 +55,8 @@ using Clock = std::chrono::steady_clock;
 
 constexpr int EXIT_FAILED = 1;
 constexpr int EXIT_USAGE = 2;
-constexpr std::size_t ARGUMENTS = 7;
+constexpr std::size_t MIN_ARGUMENTS = 7;
+constexpr std::size_t MAX_ARGUMENTS = 8;
 
 constexpr std::uint64_t MAX_OWNERS = 64;
 constexpr std::uint64_t MAX_TAGS_PER_OWNER = 100'000;
@@ -182,6 +189,27 @@ bool beat_until_stopped(scada_ctx* ctx, const sigset_t& signals,
     }
 }
 
+// Writes the first tag of `plan` from this thread and then from another
+// one: what contract 13.2 forbids. Returns the exit code.
+int write_from_two_threads(scada_ctx* ctx, const OwnerPlan& plan) {
+    const std::uint32_t handle = plan.handles.front();
+    const scada_value first = derived_value(1);
+    int second_code = SCADA_E_INVALID;
+    const int first_code = scada_tag_write(ctx, handle, &first);
+    {
+        const std::jthread other([ctx, handle, &second_code] {
+            const scada_value second = derived_value(2);
+            second_code = scada_tag_write(ctx, handle, &second);
+        });
+    }
+    if (first_code != SCADA_OK || second_code != SCADA_OK) {
+        std::cerr << "scada-tag-test-writer: a write failed\n";
+        return EXIT_FAILED;
+    }
+    std::cout << "second-thread written\n" << std::flush;
+    return 0;
+}
+
 int run(std::span<const std::string_view> args) {
     const std::optional<std::uint64_t> owners =
         parse_number(args[3], MAX_OWNERS);
@@ -193,7 +221,9 @@ int run(std::span<const std::string_view> args) {
         parse_number(args[6], MAX_UPDATES);
     if (!owners || *owners == 0 || !tags_per_owner || *tags_per_owner == 0 ||
         !per_second || (*per_second != 0 && *per_second < *owners) ||
-        !updates) {
+        !updates ||
+        (args.size() == MAX_ARGUMENTS &&
+         args[MAX_ARGUMENTS - 1] != "second-thread")) {
         std::cerr << "scada-tag-test-writer: bad argument\n";
         return EXIT_USAGE;
     }
@@ -224,6 +254,12 @@ int run(std::span<const std::string_view> args) {
     if (!plans.has_value()) {
         scada_tag_detach(ctx);
         return EXIT_FAILED;
+    }
+
+    if (args.size() == MAX_ARGUMENTS) {
+        const int code = write_from_two_threads(ctx, plans->front());
+        scada_tag_detach(ctx);
+        return code;
     }
 
     std::atomic<std::uint64_t> failures{0};
@@ -266,13 +302,13 @@ int main(int argc, char* argv[]) {
     // at once so that nothing below indexes a raw pointer.
     const std::span<char*> raw_args(
         argv, argc > 0 ? static_cast<std::size_t>(argc) : 0);
-    if (raw_args.size() != ARGUMENTS) {
-        std::cerr << "scada-tag-test-writer: expected 6 arguments\n";
+    if (raw_args.size() < MIN_ARGUMENTS || raw_args.size() > MAX_ARGUMENTS) {
+        std::cerr << "scada-tag-test-writer: expected 6 or 7 arguments\n";
         return EXIT_USAGE;
     }
-    std::array<std::string_view, ARGUMENTS> args;
+    std::array<std::string_view, MAX_ARGUMENTS> args;
     for (std::size_t i = 0; i < raw_args.size(); ++i) {
         args.at(i) = raw_args[i];
     }
-    return run(args);
+    return run(std::span<const std::string_view>(args).first(raw_args.size()));
 }

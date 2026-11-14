@@ -182,7 +182,10 @@ protected:
         std::size_t length = 0;
         EXPECT_EQ(process.info(handle, info), SCADA_E_INVALID) << handle;
         EXPECT_EQ(process.read(handle, value), SCADA_E_INVALID) << handle;
-        EXPECT_EQ(value.source_time_ns, DEVICE_TIME);
+        // No good value is left in the output of a failed read.
+        EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+        EXPECT_EQ(value.source_time_ns, 0);
+        value = level_value(LEVEL);
         EXPECT_EQ(process.write(handle, value), SCADA_E_INVALID) << handle;
         EXPECT_EQ(process.read_string(handle, buffer, length, nullptr),
                   SCADA_E_INVALID);
@@ -478,7 +481,9 @@ TEST_F(TagAccess, ReadManyGivesAStatusForEachHandle) {
     EXPECT_EQ(status,
               (std::array<int, 3>{SCADA_OK, SCADA_E_INVALID, SCADA_OK}));
     EXPECT_EQ(std::bit_cast<double>(values.at(0).value), LEVEL);
-    EXPECT_EQ(values.at(1).value, UNTOUCHED);
+    // The handle that is none leaves no value behind.
+    EXPECT_EQ(values.at(1).value, 0U);
+    EXPECT_EQ(values.at(1).quality, SCADA_QUALITY_BAD);
     EXPECT_EQ(values.at(2).value, 1U);
     // One reading of the clock: tags written together have ages that
     // differ as their update times do.
@@ -665,39 +670,81 @@ TEST_F(TagAccess, Conformance05ARecordLeftMidWriteByADeadOwnerReadsAsDown) {
     EXPECT_EQ(meta.quality_flags, SCADA_FLAG_OWNER_DOWN);
 }
 
-TEST_F(TagAccess, ARecordThatHoldsNoValueOfItsTypeIsRefused) {
+// `reader` refuses the record of `handle` and leaves no good value in its
+// output: a caller that keeps what it has must not keep a good value for
+// ever.
+void expect_refused_record(Attachment& reader, std::uint32_t handle,
+                           std::uint8_t type) {
+    scada_value value{};
+    value.value = UNTOUCHED;
+    value.quality = SCADA_QUALITY_GOOD;
+    EXPECT_EQ(reader.read(handle, value), SCADA_E_LAYOUT);
+    EXPECT_EQ(value.type, type);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(value.quality_flags, 0);
+    EXPECT_EQ(value.value, 0U);
+}
+
+TEST_F(TagAccess, ARecordWithAnInvalidQualityFlagOrTypeIsRefused) {
     const std::uint32_t level = handle_of(*web(), "plant.level");
-    const std::uint32_t running = handle_of(*web(), "plant.running");
-    const std::uint32_t note = handle_of(*web(), "plant.note");
     ASSERT_EQ(io()->write(handle_of(*io(), "plant.level"), level_value(LEVEL)),
               SCADA_OK);
     const MappedRegion tags = map_file("tags.io");
-    scada_value value{};
-    value.value = UNTOUCHED;
-
     // The owner is the only writer of these fields; the test stands in
     // for an owner with a defect.
     record(tags, SLOT_LEVEL).quality = NO_QUALITY;
-    EXPECT_EQ(web()->read(level, value), SCADA_E_LAYOUT);
+    expect_refused_record(*web(), level, SCADA_TYPE_FLOAT64);
     record(tags, SLOT_LEVEL).quality = to_raw(Quality::GOOD);
     record(tags, SLOT_LEVEL).quality_flags = NO_FLAG;
-    EXPECT_EQ(web()->read(level, value), SCADA_E_LAYOUT);
+    expect_refused_record(*web(), level, SCADA_TYPE_FLOAT64);
+    // OWNER_DOWN is laid over a value by a read and never stored.
+    record(tags, SLOT_LEVEL).quality_flags = SCADA_FLAG_OWNER_DOWN;
+    expect_refused_record(*web(), level, SCADA_TYPE_FLOAT64);
     record(tags, SLOT_LEVEL).quality_flags = 0;
     record(tags, SLOT_LEVEL).type = to_raw(TagType::INT64);
-    EXPECT_EQ(web()->read(level, value), SCADA_E_LAYOUT);
+    expect_refused_record(*web(), level, SCADA_TYPE_FLOAT64);
     record(tags, SLOT_LEVEL).type = to_raw(TagType::FLOAT64);
+    scada_value value{};
     EXPECT_EQ(web()->read(level, value), SCADA_OK);
+    EXPECT_EQ(std::bit_cast<double>(value.value), LEVEL);
+}
 
-    value.value = UNTOUCHED;
+TEST_F(TagAccess, ARecordWithAnInvalidValueIsRefused) {
+    const std::uint32_t running = handle_of(*web(), "plant.running");
+    const std::uint32_t note = handle_of(*web(), "plant.note");
+    const MappedRegion tags = map_file("tags.io");
+    record(tags, SLOT_RUNNING).quality_flags = 0;
     record(tags, SLOT_RUNNING).value = NO_BOOL;
-    EXPECT_EQ(web()->read(running, value), SCADA_E_LAYOUT);
+    expect_refused_record(*web(), running, SCADA_TYPE_BOOL);
     // A STRING record that names another string slot.
+    record(tags, SLOT_NOTE).quality_flags = 0;
     record(tags, SLOT_NOTE).value = STRING_SLOT_LABEL;
-    EXPECT_EQ(web()->read(note, value), SCADA_E_LAYOUT);
+    expect_refused_record(*web(), note, SCADA_TYPE_STRING);
     std::array<char, SCADA_STRING_MAX> buffer{};
-    std::size_t length = 0;
-    EXPECT_EQ(web()->read_string(note, buffer, length, &value), SCADA_E_LAYOUT);
-    EXPECT_EQ(value.value, UNTOUCHED);
+    std::size_t length = UNTOUCHED_LENGTH;
+    scada_value meta{};
+    meta.quality = SCADA_QUALITY_GOOD;
+    EXPECT_EQ(web()->read_string(note, buffer, length, &meta), SCADA_E_LAYOUT);
+    EXPECT_EQ(length, 0U);
+    EXPECT_EQ(meta.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(meta.type, SCADA_TYPE_STRING);
+}
+
+TEST_F(TagAccess, OwnerDownCannotBeWritten) {
+    const std::uint32_t level = handle_of(*io(), "plant.level");
+    scada_value down = level_value(LEVEL);
+    down.quality = SCADA_QUALITY_BAD;
+    down.quality_flags = SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_STALE;
+    EXPECT_EQ(io()->write(level, down), SCADA_E_INVALID);
+    const std::array<std::uint32_t, 1> handles{level};
+    const std::array<scada_value, 1> values{down};
+    EXPECT_EQ(io()->write_many(handles, values), SCADA_E_INVALID);
+    EXPECT_EQ(io()->write_string(handle_of(*io(), "plant.note"), "x",
+                                 SCADA_QUALITY_BAD, SCADA_FLAG_OWNER_DOWN, 0),
+              SCADA_E_INVALID);
+    scada_value value{};
+    ASSERT_EQ(io()->read(level, value), SCADA_OK);
+    EXPECT_EQ(value.change_count, 0U);
 }
 
 TEST_F(TagAccess, AStringIsWrittenAndReadWithItsQualityAndTimes) {
@@ -809,7 +856,7 @@ TEST_F(TagAccess, AStoredLengthBeyondTheSlotIsRefused) {
     std::size_t length = UNTOUCHED_LENGTH;
     EXPECT_EQ(web()->read_string(note, buffer, length, nullptr),
               SCADA_E_LAYOUT);
-    EXPECT_EQ(length, UNTOUCHED_LENGTH);
+    EXPECT_EQ(length, 0U);
 }
 
 TEST_F(TagAccess, ARestartedOwnerKeepsItsValuesAndReadersTheirHandles) {

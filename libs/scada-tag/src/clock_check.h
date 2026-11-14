@@ -23,7 +23,7 @@ inline constexpr std::int64_t CLOCK_CHECK_INTERVAL_NS = 60'000'000'000;
 // True if reading the clocks is a system call, judged from the name of the
 // kernel's current clock source and the time one read takes:
 // - `clock_source` is not one of the sources the vDSO of x86-64 and ARM64
-//   reads (`tsc`, `kvm-clock`, `hyperv_clocksource_tsc_page`,
+//   reads (`tsc`, `tsc-early`, `kvm-clock`, `hyperv_clocksource_tsc_page`,
 //   `arch_sys_counter`); an empty name, for a machine that does not tell,
 //   decides nothing;
 // - or `ns_per_read` is more than CLOCK_READ_LIMIT_NS.

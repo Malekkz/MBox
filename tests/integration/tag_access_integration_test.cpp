@@ -460,4 +460,38 @@ TEST_F(TagAccessProcesses, Conformance03MaximumWriteRateWithFourReaders) {
     RecordProperty("elapsed_ms", std::to_string(*elapsed_ms));
 }
 
+// Contract 13.2: all writes to the tags of one owner come from one thread.
+// A library built without NDEBUG stops a process that breaks the rule; one
+// built with NDEBUG does not check. CTest says which this build is.
+TEST_F(TagAccessProcesses, ASecondWritingThreadStopsADebugBuild) {
+    write_load_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> writer = start_helper(
+        "SCADA_TAG_WRITER_COMMAND",
+        {base(), "load", std::to_string(LOAD_OWNERS),
+         std::to_string(LOAD_TAGS_PER_OWNER), "0", "0", "second-thread"});
+    if (!writer.has_value()) {
+        return;
+    }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
+    const char* const checked = std::getenv("SCADA_TAG_THREAD_CHECK");
+    if (checked != nullptr && std::string_view(checked) == "1") {
+        EXPECT_EQ(writer->wait_for_signal_exit(WAIT_LIMIT), SIGABRT)
+            << writer->out() << writer->err();
+        EXPECT_NE(writer->err().find("written from two threads"),
+                  std::string::npos)
+            << writer->err();
+        EXPECT_EQ(writer->out().find("second-thread written"),
+                  std::string::npos);
+    } else {
+        EXPECT_EQ(writer->wait_for_exit(WAIT_LIMIT), 0) << writer->err();
+        EXPECT_NE(writer->out().find("second-thread written"),
+                  std::string::npos);
+    }
+    stop(*tagd);
+}
+
 }  // namespace

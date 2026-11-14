@@ -324,10 +324,13 @@ Attachment::Attachment(Key /*key*/, Fd directory, HeaderView header,
 Status Attachment::read_directory(std::string& detail) {
     const HeaderContents& contents = header_.contents();
     access_.reserve(contents.owners.size());
+    writer_threads_ =
+        std::vector<std::atomic<const void*>>(contents.owners.size());
     types_.reserve(contents.tag_count);
     for (std::size_t i = 0; i < contents.owners.size(); ++i) {
         const OwnerInfo& owner = contents.owners[i];
         OwnerAccess access;
+        access.index = i;
         access.tag_count = owner.tag_count;
         access.string_slots = owner.string_slots;
         access.process_index = owner.process_index;

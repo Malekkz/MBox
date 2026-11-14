@@ -14,18 +14,23 @@
 // markers on purpose, to show that the test finds it.
 //
 // It prints one line:
-//   calls=<n> failed=<n> allocations=<n> clock_syscall=<0|1>
+//   calls=<n> failed=<n> allocations=<n> page_faults=<n> clock_syscall=<0|1>
 // `calls` real-time safe calls were made, `failed` of them did not return
-// SCADA_OK, `allocations` allocations happened between the markers.
+// SCADA_OK, `allocations` calls of the C++ allocation functions happened
+// between the markers, and the thread took `page_faults` page faults there
+// (-1 if the operating system did not tell).
 // Exit code 0; 1: an error before the markers; 2: wrong arguments.
 //
 // Allocations are counted by replacing the global allocation functions of
-// this program. The replacement hands out memory from a fixed block and
-// never takes it back: the program allocates little and ends at once.
+// this program. A call of `malloc` itself would not be counted; the
+// library has none, which the banned-function check enforces. The replacement
+// hands out memory from a fixed block and never takes it back: the program
+// allocates little and ends at once.
 
 #include "scada/tag/scada_tag.h"
 #include "scada/test/syscall_trace.h"
 
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <array>
@@ -105,7 +110,18 @@ struct Outcome {
     int calls = 0;
     int failed = 0;
     std::uint64_t allocations = 0;
+    long page_faults = -1;
 };
+
+// The page faults this thread has taken so far, minor and major; -1 if the
+// operating system does not tell.
+long page_faults_so_far() noexcept {
+    rusage usage{};
+    if (::getrusage(RUSAGE_THREAD, &usage) != 0) {
+        return -1;
+    }
+    return usage.ru_minflt + usage.ru_majflt;
+}
 
 // Everything the marked part uses, prepared before it.
 struct Prepared {
@@ -134,6 +150,7 @@ void count(Outcome& outcome, int code) noexcept {
 Outcome run_marked(Prepared& prepared, std::string_view fault) {
     Outcome outcome;
     scada_value value{};
+    const long faults_before = page_faults_so_far();
     const std::uint64_t before = allocation_count.load();
     scada::test::mark_trace_begin();
 
@@ -160,6 +177,10 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
 
     scada::test::mark_trace_end();
     outcome.allocations = allocation_count.load() - before;
+    const long faults_after = page_faults_so_far();
+    if (faults_before >= 0 && faults_after >= 0) {
+        outcome.page_faults = faults_after - faults_before;
+    }
     return outcome;
 }
 
@@ -212,6 +233,7 @@ int run(std::span<const std::string_view> args) {
 
     std::cout << "calls=" << outcome.calls << " failed=" << outcome.failed
               << " allocations=" << outcome.allocations
+              << " page_faults=" << outcome.page_faults
               << " clock_syscall=" << int{status.clock_syscall} << "\n"
               << std::flush;
     scada_tag_detach(prepared.ctx);

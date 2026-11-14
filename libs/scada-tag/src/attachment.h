@@ -221,6 +221,7 @@ private:
     // What the tag functions need to know about one owner of the
     // generation. Filled once by `attach`, then only read.
     struct OwnerAccess {
+        std::size_t index = 0;  // its owner index
         std::uint32_t tag_count = 0;
         std::uint32_t string_slots = 0;
         std::uint32_t heartbeat_timeout_ms = 0;  // of its process
@@ -289,6 +290,11 @@ private:
                                            const scada_value& value,
                                            TagRef& tag) const noexcept;
 
+    // Section 13.2, in a build without NDEBUG: stops the process if the
+    // tags of `owner` are written from a thread other than the first one
+    // that wrote them. Nothing in a build with NDEBUG.
+    SCADA_RT void check_writer_thread(const OwnerAccess& owner) noexcept;
+
     // Reads the clock source and times the clocks (section 13.1).
     void check_clock(std::int64_t now_mono_ns) noexcept;
 
@@ -318,6 +324,10 @@ private:
     std::vector<OwnerAccess> access_;
     std::vector<TagType> types_;
     std::vector<std::uint32_t> string_tags_;
+
+    // For every owner, what tells the thread that wrote its tags first, or
+    // null (`check_writer_thread`). Sized at `attach`, never resized.
+    std::vector<std::atomic<const void*>> writer_threads_;
 
     // The result of the last clock check and when the next one is due.
     // Atomic because `status` may run in several threads; relaxed, because

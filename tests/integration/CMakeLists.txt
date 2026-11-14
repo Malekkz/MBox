@@ -28,13 +28,21 @@ add_dependencies(scada-tagd-integration-test scada-tagd scada-tag-test-peer)
 # Tag read and write with real processes: conformance tests 2, 3, 5 and 6 of
 # the tag database contract, the part of the reader.
 scada_test_command(writer_command scada-tag-test-writer)
+# The library checks the thread of an owner (contract 13.2) only in a build
+# without NDEBUG; CMake defines NDEBUG in every build type but Debug.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(thread_check 1)
+else()
+  set(thread_check 0)
+endif()
 scada_add_test(scada-tag-access-integration-test KIND integration
   SOURCES tag_access_integration_test.cpp
   DEPENDS scada::tag scada::tagd scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}"
-    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+    "SCADA_TAG_WRITER_COMMAND=${writer_command}"
+    "SCADA_TAG_THREAD_CHECK=${thread_check}")
 add_dependencies(scada-tag-access-integration-test
   scada-tagd scada-tag-test-peer scada-tag-test-writer)
 

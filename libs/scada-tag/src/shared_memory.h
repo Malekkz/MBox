@@ -74,9 +74,13 @@ SCADA_RT [[nodiscard]] inline std::string_view text_at(
 // data stores that follow must not pass the store of the odd sequence
 // number before it.
 //
-// ThreadSanitizer does not model fences, and its build runs every atomic
-// access in one total order, in which the fence has nothing to add. The
-// compiler refuses the call in that build, so it is left out there.
+// ThreadSanitizer does not model fences, and the compiler refuses the call
+// in that build, so it is left out there. That build runs on x86-64 only,
+// where the fence is no instruction; on ARM64 it would be a lock without
+// its barriers, so that combination does not compile.
+#if defined(__SANITIZE_THREAD__) && defined(__aarch64__)
+#error "the ThreadSanitizer build of the sequence lock is for x86-64 only"
+#endif
 SCADA_RT inline void fence_release() noexcept {
 #if !defined(__SANITIZE_THREAD__)
     std::atomic_thread_fence(std::memory_order_release);
