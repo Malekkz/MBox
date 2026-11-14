@@ -120,6 +120,7 @@ long page_faults_so_far() noexcept {
     if (::getrusage(RUSAGE_THREAD, &usage) != 0) {
         return -1;
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): the C library declares these fields of rusage inside unions
     return usage.ru_minflt + usage.ru_majflt;
 }
 

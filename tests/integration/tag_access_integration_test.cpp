@@ -14,6 +14,8 @@
 
 #include <gtest/gtest.h>
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -460,6 +462,23 @@ TEST_F(TagAccessProcesses, Conformance03MaximumWriteRateWithFourReaders) {
     RecordProperty("elapsed_ms", std::to_string(*elapsed_ms));
 }
 
+// True if CTest says that the library of this build checks the thread of an
+// owner.
+bool thread_check_is_built_in() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
+    const char* const checked = std::getenv("SCADA_TAG_THREAD_CHECK");
+    return checked != nullptr && std::string_view(checked) == "1";
+}
+
+// The library stopped `writer` when its second thread wrote.
+void expect_stopped_at_second_thread(ChildProcess& writer) {
+    EXPECT_EQ(writer.wait_for_signal_exit(WAIT_LIMIT), SIGABRT)
+        << writer.out() << writer.err();
+    EXPECT_NE(writer.err().find("written from two threads"), std::string::npos)
+        << writer.err();
+    EXPECT_EQ(writer.out().find("second-thread written"), std::string::npos);
+}
+
 // Contract 13.2: all writes to the tags of one owner come from one thread.
 // A library built without NDEBUG stops a process that breaks the rule; one
 // built with NDEBUG does not check. CTest says which this build is.
@@ -476,16 +495,8 @@ TEST_F(TagAccessProcesses, ASecondWritingThreadStopsADebugBuild) {
     if (!writer.has_value()) {
         return;
     }
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
-    const char* const checked = std::getenv("SCADA_TAG_THREAD_CHECK");
-    if (checked != nullptr && std::string_view(checked) == "1") {
-        EXPECT_EQ(writer->wait_for_signal_exit(WAIT_LIMIT), SIGABRT)
-            << writer->out() << writer->err();
-        EXPECT_NE(writer->err().find("written from two threads"),
-                  std::string::npos)
-            << writer->err();
-        EXPECT_EQ(writer->out().find("second-thread written"),
-                  std::string::npos);
+    if (thread_check_is_built_in()) {
+        expect_stopped_at_second_thread(*writer);
     } else {
         EXPECT_EQ(writer->wait_for_exit(WAIT_LIMIT), 0) << writer->err();
         EXPECT_NE(writer->out().find("second-thread written"),

@@ -173,23 +173,27 @@ protected:
     }
 
     // Every tag function refuses `handle`, which is no handle of this
-    // generation, and leaves its output.
+    // generation.
     static void expect_refused(Attachment& process, std::uint32_t handle) {
+        expect_read_refused(process, handle);
         scada_tag_info_t info{};
-        scada_value value = level_value(LEVEL);
-        value.source_time_ns = DEVICE_TIME;
         std::array<char, SCADA_STRING_MAX> buffer{};
         std::size_t length = 0;
         EXPECT_EQ(process.info(handle, info), SCADA_E_INVALID) << handle;
-        EXPECT_EQ(process.read(handle, value), SCADA_E_INVALID) << handle;
-        // No good value is left in the output of a failed read.
-        EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
-        EXPECT_EQ(value.source_time_ns, 0);
-        value = level_value(LEVEL);
-        EXPECT_EQ(process.write(handle, value), SCADA_E_INVALID) << handle;
+        EXPECT_EQ(process.write(handle, level_value(LEVEL)), SCADA_E_INVALID)
+            << handle;
         EXPECT_EQ(process.read_string(handle, buffer, length, nullptr),
                   SCADA_E_INVALID);
         EXPECT_EQ(process.write_string(handle, "x", 0, 0, 0), SCADA_E_INVALID);
+    }
+
+    // A read refuses `handle` and leaves no good value in its output.
+    static void expect_read_refused(Attachment& process, std::uint32_t handle) {
+        scada_value value = level_value(LEVEL);
+        value.source_time_ns = DEVICE_TIME;
+        EXPECT_EQ(process.read(handle, value), SCADA_E_INVALID) << handle;
+        EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+        EXPECT_EQ(value.source_time_ns, 0);
     }
 
     // `value` is LEVEL as the test AnotherProcessReadsWhatTheOwnerWrote
