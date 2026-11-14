@@ -10,6 +10,15 @@
       "url": "https://github.com/google/googletest",
       "purl": "pkg:github/google/googletest@v1.17.0",
       "link_names": ["GTest::gtest", "GTest::gtest_main"]
+    },
+    {
+      "name": "herdtools7",
+      "version": "7.58",
+      "licence": "CECILL-B",
+      "scope": "test",
+      "purpose": "herd7, the model checker of conformance test 4 (tests/model). Its Armv8 model aarch64.cat is BSD-3-Clause. Built from source in the pipeline, not linked, not shipped",
+      "url": "https://github.com/herd/herdtools7",
+      "purl": "pkg:github/herd/herdtools7@7.58"
     }
   ]
 }

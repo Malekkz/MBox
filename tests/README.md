@@ -12,6 +12,7 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `tests/integration/` | Tests that start real processes | `integration` |
 | `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
 | `tests/perf/` | Performance tests against stated budgets | `perf` |
+| `tests/model/` | Model check of the sequence lock and the change ring for the Armv8 memory model, and the check that the ARM64 code matches it | `model`, `unit` |
 | `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process) and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
 | `tests/fuzz-sample/` | Toy parser with a planted bug, and its fuzz target | `fuzz`, `unit` |
