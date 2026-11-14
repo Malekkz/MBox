@@ -1143,7 +1143,7 @@ TEST_F(TagAccess, TheStatusReportsTheClockCheck) {
     // The status reports the result of the check at attach, kept for a
     // minute. Two attachments are not compared: each times the clocks, and
     // in an instrumented build the library read can sit near the limit
-    // (D-31).
+    // (D-34).
     const bool first = io()->status().clock_syscall;
     EXPECT_EQ(io()->status().clock_syscall, first);
 }

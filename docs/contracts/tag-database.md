@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.5 (draft) |
+| Contract version | 0.6 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -440,6 +440,14 @@ struct ChangeEntry {             // 32 bytes
 A consumer takes `capacity` from the header region's owner table, not from
 this header, and checks that the two agree at open.
 
+A write appends an entry only when it changed value, quality or quality
+flags (for a STRING tag: its text), after the record's `seq` is even again
+(section 6.1). The entry holds the fields as stored, so `source_time_ns`
+and LOCAL_TIME are those the record got. An entry is outside input to the
+consumer: one whose handle is not a tag of the ring's owner, or whose type,
+quality, flags or value the record could not hold (section 6.2), is
+reported with `SCADA_E_LAYOUT` and skipped.
+
 ### 8.1 Write (owner thread only)
 
 ```
@@ -465,7 +473,23 @@ return the copy; cursor += 1
 
 ### 8.3 Gap handling
 
-A consumer remembers the ring's `epoch`. If it has changed, that is a GAP too.
+A consumer remembers the ring's `epoch`. If it has changed, that is a GAP
+too. So is a change of the owner's process between down and not down (the
+three rules of section 10.1, which the consumer evaluates at every look): a
+dead owner writes no entry, and this gap is how a consumer of the ring
+learns it. An owner that dies and restarts gives two gaps to a consumer
+that looked while it was down, one to a consumer that did not; the epoch
+change of the restart is part of the second gap. While the owner's process
+is down, an entry that still arrives (its threads may write while its main
+loop is hung) is delivered with the overlay of section 6.2: quality BAD,
+OWNER_DOWN added. So is a ring that appears, disappears or is replaced by
+another file while a consumer is subscribed: a subscription to a ring that is missing
+succeeds, and its first look at the ring once it is there is a GAP. A
+consumer reads `epoch` before `write_seq` when it sets its cursor, so that
+a restart between the two loads gives one GAP too many, never one too few.
+
+A subscription starts at the end of the ring: it delivers the entries
+written after it opened.
 
 On GAP the library reports `SCADA_E_GAP` once, counts it, and sets the cursor
 to the current `write_seq`. The consumer then resynchronises, in this order:
@@ -492,7 +516,11 @@ system call. Instead a thread calls `scada_tag_notify()`:
   since its previous call, increments the process's `cycle_seq` (section 10)
   and wakes its waiters.
 - It makes one non-blocking system call for each ring or queue written, and
-  one for the cycle. It is bounded but not RT-safe.
+  one for the cycle. It is bounded but not RT-safe. The library knows the
+  rings a thread wrote because it records, for each owner, the first thread
+  that writes its tags (section 13.2).
+- It also looks again for missing regions of other processes (section 11.2)
+  and repeats the clock check (section 13.1).
 - A real-time task calls it once at the end of each cycle, after its last
   read, write and post.
 - Non-real-time code calls it after each batch of writes and after each post
@@ -507,17 +535,28 @@ Mechanism: a futex wait on the low 32 bits of `write_seq` (or on `cycle_seq`),
 which a reader can do on a read-only shared mapping. The wait compares the
 value, so a wake between the check and the wait is not lost.
 
+- The futex is shared, not private (no `FUTEX_PRIVATE_FLAG`): the kernel
+  keys it by file and offset, so a waiter on its read-only mapping and the
+  owner waking through its read-write mapping meet although the addresses
+  differ. The targets are little-endian, so the low 32 bits of `write_seq`
+  lie at its address.
+- A consumer waits with the low 32 bits of its cursor as the expected
+  value; the owner wakes with `FUTEX_WAKE` for all waiters. A wait has an
+  absolute `CLOCK_MONOTONIC` deadline (`FUTEX_WAIT_BITSET`).
 - A consumer of several rings and queues waits on all of them at once with a
-  wait set (section 13), built on `futex_waitv`.
+  wait set (section 13), built on `futex_waitv`, at most 127 sources per
+  set.
+- A waiter on `cycle_seq` is ready when the count differs from the one its
+  previous wait returned with.
 - A thread that must also wait on sockets or serial ports asks the wait set
-  for a file descriptor. The library then runs one waiter thread in that
-  process, which turns wake-ups into a process-local eventfd usable with
+  for a file descriptor. The library then runs one waiter thread for that
+  wait set, which turns wake-ups into a process-local eventfd usable with
   `poll` and `epoll`. Nothing is passed between processes, so this does not
   depend on `scada-tagd`.
 
-This must be verified on both targets in phase 1 (section 16). The fallback,
-if it does not hold, is one eventfd per ring passed to consumers by
-`scada-tagd` over a Unix socket.
+Verified on x86-64 and ARM64 in phase 1 (P1-07, D-32). The fallback that
+was kept in reserve, one eventfd per ring passed to consumers by
+`scada-tagd` over a Unix socket, is not needed.
 
 ## 9. Reliable queues (`events.*`, `cmd.*`, `result.*`)
 
@@ -880,6 +919,47 @@ void scada_waitset_destroy(scada_waitset *ws);
 - `size` in the queue calls must equal the queue's `record_size`.
 - `scada_sub_open` subscribes to one owner's ring. The per-tag filter of
   reference section 5.7 is applied by the caller on `scada_change.handle`.
+- Every timeout is in ms and at least 0; 0 does not wait. There is no wait
+  without a timeout.
+
+```c
+typedef struct {
+  uint32_t handle;
+  uint8_t  type;                 /* TagType */
+  uint8_t  quality;              /* as stored; BAD while the owner is down */
+  uint16_t quality_flags;        /* as stored */
+  uint64_t value;                /* bit pattern; a STRING's slot number */
+  int64_t  source_time_ns;
+  int64_t  update_mono_ns;
+} scada_change;                  /* 32 bytes */
+
+typedef struct {
+  uint64_t received;             /* changes delivered */
+  uint64_t gaps;                 /* SCADA_E_GAP returned */
+  uint64_t lost;                 /* entries jumped over by overruns */
+  uint64_t invalid;              /* entries refused with SCADA_E_LAYOUT */
+  uint32_t epoch;                /* of the ring, as last seen */
+  uint16_t owner_index;
+  uint16_t process_index;
+  uint32_t owner_changes;        /* owner seen going down or coming back */
+  uint8_t  owner_down;           /* 1 if down at the last look */
+  uint8_t  last_gap;             /* why the last GAP: 0 none, 1 overrun,
+                                    2 restart (epoch), 3 ring appeared,
+                                    disappeared or replaced, 4 owner down,
+                                    5 owner back */
+  uint8_t  reserved[2];
+} scada_sub_stats_t;             /* 48 bytes */
+```
+
+Every GAP asks for the same action, a read of the tags. The reason is for
+reporting: a consumer that raises a communication alarm raises it on 4 and
+clears it on 5. When the owner's state changes at the same look as its ring
+appears or is replaced, the reason is the owner's.
+
+A change carries the stored quality, with the overlay of section 6.2 while
+the owner's process is down (section 8.3). A consumer that keeps copies of
+values reads the tags after a GAP and takes what the read gives: BAD with
+OWNER_DOWN for a dead owner, so it never holds on to a last good value.
 
 ### 13.1 Real-time safety
 
@@ -972,7 +1052,8 @@ ARM64:
    it stopped, and never hang.
 6. A process that stops cleanly reads as down at once.
 7. An owner restart repairs its region and readers recover without
-   reattaching; every consumer of its ring gets `SCADA_E_GAP` once.
+   reattaching; every consumer of its ring gets `SCADA_E_GAP` once for the
+   restart, and once more if it looked while the owner was down.
 8. A non-owner process cannot write: the mapping is read-only and the library
    returns `SCADA_E_NOT_OWNER`.
 9. A region file created by the wrong user is rejected and removed by
@@ -1032,7 +1113,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
-| Wake mechanism | Futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
+| Wake mechanism | Settled in P1-07 (D-32): futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
 | Read retry limit before `SCADA_E_BUSY` | 64 attempts | P1-06, confirmed in P1-12 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
 | Default change ring capacity per owner | 65,536 | P1-12 | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
 | Huge pages for the `tags` regions | Not used | P1-12 | Used only if the benchmark shows a lower 99.9th percentile read latency |
@@ -1099,12 +1180,17 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
 
-| 0.5 | 2026-11-14 | Issue #41 (D-31). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
+| 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
+| 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
 
-Migration, 0.4 to 0.5: none for data; the layout version stays 1 and no
+Migration, 0.5 to 0.6: none for data; the layout version stays 1 and no
 structure changed. A process whose heartbeat time lies more than its timeout
-ahead of a reader's clock, which 0.4 counted as alive, is now down. A unit
+ahead of a reader's clock, which 0.5 counted as alive, is now down. A unit
 that runs a process in a private time namespace must drop it.
+
+Migration, 0.4 to 0.5: none for data. The layout version stays 1 and no
+structure in shared memory changed. `scada_change` and `scada_sub_stats_t`
+are new; nothing used them before.
 
 Migration, 0.3 to 0.4: none for data. The layout version stays 1 and no
 structure changed, so regions written under 0.3 are read unchanged. Only

@@ -111,6 +111,21 @@ void OwnProcRegion::set_state(ProcessState state) noexcept {
     store_shared(header().state, to_raw(state), std::memory_order_release);
 }
 
+const std::uint32_t* OwnProcRegion::advance_cycle() noexcept {
+    std::uint32_t& cycle = header().cycle_seq;
+    // Release: a waiter that sees the new count also sees what the cycle
+    // wrote before it. Wraps modulo 2^32; waiters only compare.
+    fetch_add_shared(cycle, 1U, std::memory_order_release);
+    return &cycle;
+}
+
+std::uint32_t* cycle_field(std::span<std::byte> region) noexcept {
+    if (!fits(region.size(), sizeof(RegionHeader), sizeof(ProcHeader))) {
+        return nullptr;
+    }
+    return &shared_at<ProcHeader>(region, sizeof(RegionHeader)).cycle_seq;
+}
+
 DownReason ProcProbe::observe(int dir_fd,
                               const ProcRegionParameters& parameters,
                               std::uint32_t heartbeat_timeout_ms,

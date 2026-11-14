@@ -88,6 +88,11 @@ public:
     // Sets the state other processes see. Precondition: `valid()`.
     SCADA_RT void set_state(ProcessState state) noexcept;
 
+    // Increments `cycle_seq` (section 10) and returns the word to wake.
+    // Safe from several threads: no increment is lost. Precondition:
+    // `valid()`.
+    SCADA_RT const std::uint32_t* advance_cycle() noexcept;
+
 private:
     OwnProcRegion(Fd file, MappedRegion memory, bool reused) noexcept;
 
@@ -108,6 +113,13 @@ private:
 SCADA_RT [[nodiscard]] DownReason proc_liveness(
     std::span<std::byte> region, std::uint32_t heartbeat_timeout_ms,
     std::int64_t now_mono_ns) noexcept;
+
+// The `cycle_seq` field of `region`, the mapped `proc` region of a process,
+// or null if `region` is too small to be one (an empty span too). The
+// pointer is valid as long as the mapping is; the field is read with
+// `load_shared` only.
+SCADA_RT [[nodiscard]] std::uint32_t* cycle_field(
+    std::span<std::byte> region) noexcept;
 
 // Watches the `proc` region of another process, mapped read-only. The
 // mapping is kept between calls and replaced when the name refers to another

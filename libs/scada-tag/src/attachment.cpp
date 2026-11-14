@@ -326,6 +326,8 @@ Status Attachment::read_directory(std::string& detail) {
     access_.reserve(contents.owners.size());
     writer_threads_ =
         std::vector<std::atomic<const void*>>(contents.owners.size());
+    woken_seq_ =
+        std::vector<std::atomic<std::uint64_t>>(contents.owners.size());
     types_.reserve(contents.tag_count);
     for (std::size_t i = 0; i < contents.owners.size(); ++i) {
         const OwnerInfo& owner = contents.owners[i];
@@ -338,7 +340,9 @@ Status Attachment::read_directory(std::string& detail) {
             contents.processes.at(owner.process_index).heartbeat_timeout_ms;
         access.first_type = types_.size();
         access.first_string = string_tags_.size();
+        access.ring_capacity = owner.change_ring_capacity;
         access.tags_slot = peers_.tags_slot(i);
+        access.changes_slot = peers_.changes_slot(i);
         if (owner.string_slots != 0) {
             access.strings_slot = peers_.strings_slot(i);
         }
@@ -572,6 +576,7 @@ Status Attachment::attach_regions(std::string& detail) {
         access.own = true;
         access.own_tags = owned.tags.memory.bytes();
         access.own_strings = owned.strings.memory.bytes();
+        access.own_changes = owned.changes.memory.bytes();
     }
 
     // Section 11.2, step 6. From here the caller writes the heartbeat.
