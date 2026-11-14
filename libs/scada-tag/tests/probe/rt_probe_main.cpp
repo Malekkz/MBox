@@ -33,6 +33,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -62,8 +63,12 @@ constexpr std::uint64_t WRITTEN_BITS = 0x4045'4000'0000'0000U;  // 42.5
 // used. 16 MiB is many times what attach needs for the tag sets of the
 // tests; untouched pages cost nothing.
 constexpr std::size_t ARENA_BYTES = std::size_t{16} * 1024 * 1024;
+// The arena starts on a page boundary for every page size of the two
+// architectures (4 KiB to 64 KiB), so that a position in it that is a
+// multiple of the page size is the start of a page.
+constexpr std::size_t LARGEST_PAGE_BYTES = std::size_t{64} * 1024;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): the memory behind the replaced allocation functions, which cannot hold state anywhere else
-alignas(std::max_align_t) std::array<std::byte, ARENA_BYTES> arena;
+alignas(LARGEST_PAGE_BYTES) std::array<std::byte, ARENA_BYTES> arena;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): see `arena`
 std::atomic<std::size_t> arena_used{0};
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): see `arena`
@@ -83,6 +88,33 @@ void* allocate(std::size_t size, std::size_t alignment) noexcept {
         if (arena_used.compare_exchange_weak(used, start + size)) {
             return std::span<std::byte>(arena).subspan(start).data();
         }
+    }
+}
+
+// Moves the next allocation to the start of a page the arena has not yet
+// handed out, so that the allocation of the fault `allocation` lands on a
+// fresh page on every run, not only when the allocations of attach happen
+// to end near a page boundary. Without `prefault_arena` it would then take
+// a page fault on every run.
+void start_next_allocation_on_new_page(std::size_t page_size) noexcept {
+    const std::size_t used = arena_used.load();
+    const std::size_t rest = (page_size - used % page_size) % page_size;
+    if (rest != 0) {
+        static_cast<void>(allocate(rest, 1));
+    }
+}
+
+// Writes the `bytes` bytes of the arena after the part already handed out.
+// The first write to a page of the arena is a page fault; the allocation of
+// the fault `allocation` must be found as an allocation, not also as a page
+// fault, which test 22 counts on its own. The stores are atomic so that the
+// compiler keeps them although nothing reads the bytes.
+void prefault_arena(std::size_t bytes) noexcept {
+    const std::size_t used = arena_used.load();
+    const std::size_t end = used + std::min(bytes, ARENA_BYTES - used);
+    for (std::size_t i = used; i < end; ++i) {
+        std::atomic_ref<std::byte>(arena.at(i))
+            .store(std::byte{0}, std::memory_order_relaxed);
     }
 }
 
@@ -229,6 +261,20 @@ int run(std::span<const std::string_view> args) {
     prepared.own_values.assign(BATCH, written);
     scada_status status{};
     static_cast<void>(scada_tag_status(prepared.ctx, &status));
+
+    // The pages the next allocations will use, written before the markers.
+    const long page_size = ::sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 ||
+        static_cast<std::size_t>(page_size) > LARGEST_PAGE_BYTES) {
+        std::cerr << "scada-tag-rt-probe: page size not 4 KiB to 64 KiB\n";
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    const auto page = static_cast<std::size_t>(page_size);
+    if (fault == "allocation") {
+        start_next_allocation_on_new_page(page);
+    }
+    prefault_arena(2 * page);
 
     const Outcome outcome = run_marked(prepared, fault);
 

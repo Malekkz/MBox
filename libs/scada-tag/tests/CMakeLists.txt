@@ -45,3 +45,22 @@ add_executable(scada-tag-rt-probe probe/rt_probe_main.cpp)
 target_link_libraries(scada-tag-rt-probe
   PRIVATE scada::tag scada::test-support)
 scada_target_defaults(scada-tag-rt-probe)
+
+# Measures the sequence lock on the machine it runs on: the time of the 64
+# read attempts, of one write, and the rate of reads that give up (issue
+# #40, decision D-31). It uses the private headers. Not installed. The two
+# short runs keep it working; the pipeline job `arm64-measurements` runs it
+# at length.
+add_executable(scada-tag-seqlock-bench bench/seqlock_bench_main.cpp)
+target_link_libraries(scada-tag-seqlock-bench PRIVATE scada::tag)
+target_include_directories(scada-tag-seqlock-bench
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+scada_target_defaults(scada-tag-seqlock-bench)
+add_test(NAME scada-tag-seqlock-bench-timings
+  COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR}
+    $<TARGET_FILE:scada-tag-seqlock-bench> timings 10000)
+add_test(NAME scada-tag-seqlock-bench-load
+  COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR}
+    $<TARGET_FILE:scada-tag-seqlock-bench> load string 16 0 2 1)
+set_tests_properties(scada-tag-seqlock-bench-timings
+  scada-tag-seqlock-bench-load PROPERTIES LABELS perf TIMEOUT 60)
