@@ -83,7 +83,9 @@ jobs:
   check:
     name: check
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # clang-tidy takes most of this job, and its time grows with the code:
+    # the job passed 15 minutes when phase 1 added its tests.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
