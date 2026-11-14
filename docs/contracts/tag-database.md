@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.4 (draft) |
+| Contract version | 0.5 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -148,6 +148,9 @@ accepted for layout version 1:
   shared-memory files at logout (`RemoveIPC` off for them).
 - Units must not use a private IPC namespace, private users or dynamic users.
   `ProtectSystem=strict` and `PrivateTmp=yes` are compatible.
+- Processes must not run in a private time namespace: heartbeat times are
+  compared across processes on `CLOCK_MONOTONIC` (section 10.1), and an
+  offset clock would make a process look stale or keep it alive.
 - Real-time processes need a locked-memory limit that covers their mappings;
   `scada-tagd` needs write access to the retain directory.
 - `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
@@ -678,7 +681,14 @@ A process is **down** when any of these holds:
 
 - its `proc` region is missing or not ready,
 - its `state` is not RUNNING,
-- its `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`.
+- its `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`, or
+  further than `heartbeat_timeout_ms` ahead of the reader's clock.
+
+A heartbeat time ahead of the reader's clock is normal: the heartbeat was
+written after the reader read its clock. It can lie ahead only by the time
+the reader spent between the two, which is far below the timeout. A time
+further ahead comes from a corrupt region or a process on another clock, and
+counts as down so that it cannot keep a dead process alive for readers.
 
 The library evaluates these three rules itself on every use (the read
 overlay, `scada_proc_status`, `post`), so detection does not depend on
@@ -882,7 +892,13 @@ normally serve from the vDSO without a system call. Some clock sources (certain
 ARM timers, a time-stamp counter the kernel has demoted) make the read a real
 system call. The library checks at attach, and again inside
 `scada_tag_notify()` once a minute, by reading the kernel's current clock
-source name and timing a batch of reads. On failure attach still succeeds:
+source name and comparing the time of a clock read through the library with
+the time of a raw `clock_gettime` system call. The read counts as a system
+call when the source is not one the vDSO reads, or when the read takes more
+than half the time of the system call (a vDSO that falls back to the system
+call keeps the source name, for example with an ARM timer erratum
+workaround). If the raw system call is refused, only the name decides. On
+failure attach still succeeds:
 `scada_tag_status()` reports it, and the process raises a system alarm,
 because the real-time rule no longer holds on that unit.
 
@@ -1082,6 +1098,13 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.3 | 2026-11-13 | Second review P1-01 (SCADA, C++ and Linux reviewers; D-24). Owners are threads; handle split 10/22 bits. Memory fences added to the sequence lock and ring. Shared fields are plain integers; value is a 64-bit pattern. `SCADA_E_BUSY` in place of a false OWNER_DOWN. Command queues at most once, drained on restart, status ABORTED, lifetime limit, `select_request_id`. AUTO writes need an event record. Liveness evaluated by readers; clean stop is down at once; heartbeat interval tied to the timeout. Wait sets, pollable descriptor, `cycle_seq`. Change entry carries `update_mono_ns`; resynchronisation order; ring capacity tied to tag count. New quality flags. Slot tables. Regions built under a temporary name; own unready files rebuilt; instance lock; `fchmod`, `openat` and `posix_fallocate` rules; base directory created by the platform; accepted risks and deployment requirements. Mapping moved out of RT-safe functions; vDSO check specified. Retain directory ownership, directory `fsync`, CRC over the header, RETAIN_NOW. Generation change drains event queues. Return codes numbered; `scada_value` and attach options defined; batch write. Conformance tests extended from 19 to 27. |
 
 | 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
+
+| 0.5 | 2026-11-14 | Issue #41 (D-31). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
+
+Migration, 0.4 to 0.5: none for data; the layout version stays 1 and no
+structure changed. A process whose heartbeat time lies more than its timeout
+ahead of a reader's clock, which 0.4 counted as alive, is now down. A unit
+that runs a process in a private time namespace must drop it.
 
 Migration, 0.3 to 0.4: none for data. The layout version stays 1 and no
 structure changed, so regions written under 0.3 are read unchanged. Only
