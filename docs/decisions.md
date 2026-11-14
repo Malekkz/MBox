@@ -397,3 +397,21 @@ Decision (by the product owner):
 - All review findings are fixed in the pull request of #9 (contract 0.3; its section 18 lists them).
 Reason: one writer per ring keeps every path lock-free and the real-time rule intact. A command that may run twice or late is worse than one that is reported as aborted (reference 14.4). Every change to the plant leaves a record, whatever its origin (reference 3.3).
 Consequences: the tag-set definition must name the writing threads. A restart of the journal or audit consumer stops automatic control until it is back; the event volume of automatic writes has to be sized when the journal is designed (phases 5 and 7). A driver restart aborts commands in flight, and the operator repeats them. The base directory must be created by the platform at boot, which phase 0 packaging (#6) has to provide. Corrections that needed no decision, among them the memory fences for ARM64 and `SCADA_E_BUSY` in place of a false `OWNER_DOWN`, are listed in the contract's change log.
+
+## D-25: Where the tag database layout lives and how it is checked
+Date: 2026-11-13
+Phase / issue: 1, #10
+Status: accepted
+
+Context: issue #10 puts the structures of the tag database contract (sections 4 to 10) into code. The contract fixes the layout but not where the header lives, how the array fields are written, the names of enumerations it gives only as comments, or the form of the static checks.
+Options, location: a public header of `libscada-tag`; a private header in its `src/`. Options, array fields: C arrays as the contract writes them; `std::array`. Options, checks: one `static_assert` per number; constant tables checked by one `static_assert` per structure.
+Decision:
+- `libs/scada-tag/src/layout.h` holds the structures and is private to `libscada-tag`. The public headers are `scada/tag/types.h` (tag type, quality, quality flags, write request and result enumerations) and `scada/tag/handle.h`. The name hash is private too (`src/name_hash.h`).
+- Array fields (`name`, `reserved`, `config_hash`, `data`, `payload`) are `std::array`. The checks prove the layout is the one of the C array.
+- A structure the contract writes without `alignas` has its natural alignment: 8, 4 (`ProcessEntry`, `QueueEntry`) or 2 (`StringSlot`) bytes.
+- Each structure has a constant table of `LayoutCheck{actual, contract}` entries for its size, its alignment and every field offset, and two `static_assert`: the table holds, and the structure is standard-layout, trivially copyable and has unique object representations (no padding).
+- Enumerations the contract gives only in field comments are named `GenerationState`, `ProcessState`, `QueueKind`, `ProcessFlag`, `TagFlag`, `WriteOperation`, `WriteSource` and `WriteStatus`, each with the underlying type of its field.
+- `unpack_handle` rejects owner index 1023 and slot 4,194,303 as well as `SCADA_INVALID_HANDLE`, because section 14 allows 1,023 owners and 4,194,303 tags per owner.
+- The values of `EventRecord.kind` (ALARM, COMMAND, AUDIT, SYSTEM) are not defined in code: the contract gives no numbers. They must be written into the contract before the first code that posts an event (issue P1-08).
+Reason: a private header makes "no other code may depend on the binary layout" a build error, not a rule to remember. `std::array` gives checked access under the library assertions and needs no suppression for C arrays. The lint rule against unnamed numbers accepts a number only in a constant initialiser, and a table keeps each offset beside its field without several hundred suppressions.
+Consequences: the builder of the `header` region (issue P1-03) lives in `libscada-tag`, or this decision is revisited. A failed layout check names the structure, not the field; the unit test `Conformance01Layout` names the field. `layout.cpp` suppresses `misc-include-cleaner` once, because it includes `layout.h` only for its checks. `layout.h` carries 18 suppressions: 5 of `performance-enum-size`, because the underlying type is the type of the field, and 13 of the magic-number checks, one for the size of each `reserved` array.
