@@ -1,8 +1,8 @@
 # libscada-common
 
 Code shared by every component (reference 3.3): error values, structured
-logging (reference 14.6), clocks, an owning file descriptor and the real-time
-annotation.
+logging (reference 14.6), clocks, an owning file descriptor, an owning memory
+mapping and the real-time annotation.
 
 ## What it does
 
@@ -13,13 +13,16 @@ annotation.
 - `realtime_ns()` and `monotonic_ns()`: `CLOCK_REALTIME` and `CLOCK_MONOTONIC`
   in nanoseconds.
 - `Fd`: owns a file descriptor and closes it.
+- `MappedRegion`: owns a shared mapping of a file, read-only or read-write,
+  and removes it. It hands out the mapped bytes as a span; what the bytes
+  mean is the business of the caller.
 - `panic()`: ends the process after a broken invariant.
 - `SCADA_RT`: the annotation that marks a function as real-time (`CLAUDE.md`,
   "Real-time code"). The library does not enforce the real-time rules itself;
   the `check` target does, see `tools/check/README.md`.
 
-It does not provide `MappedRegion` or `narrow<T>` (coding standard, sections 3
-and 5); those are added by the first issue that needs them.
+It does not provide `narrow<T>` (coding standard, section 5); it is added by
+the first issue that needs it.
 
 No exception leaves the library. Functions that can fail return `Status` or
 `Result<T>`.
@@ -50,8 +53,8 @@ No exception leaves the library. Functions that can fail return `Status` or
 ## Interfaces
 
 - Public headers in `include/scada/common/`, namespace `scada`: `status.h`,
-  `result.h`, `log.h`, `clock.h`, `fd.h`, `panic.h`, `static_string.h`,
-  `realtime.h`.
+  `result.h`, `log.h`, `clock.h`, `fd.h`, `mapped_region.h`, `panic.h`,
+  `static_string.h`, `realtime.h`.
 - Uses the journal socket `/run/systemd/journal/socket`.
 - No contract; decisions D-9, D-14 and D-15 in `docs/decisions.md`.
 

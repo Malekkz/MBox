@@ -7,6 +7,7 @@ scada_add_library(scada-common
     src/log_sinks.cpp
     src/log_text.cpp
     src/logger.cpp
+    src/mapped_region.cpp
     src/panic.cpp
     src/status.cpp
   DEPENDS Threads::Threads)

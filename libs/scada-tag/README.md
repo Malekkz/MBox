@@ -2,8 +2,9 @@
 
 The client library of the tag database (reference section 5). All access to
 the shared-memory data plane goes through it. So far it holds the binary
-layout, the tag-set definition and the builder of the `header` region;
-attach, read, write, rings and queues follow in later phase 1 issues.
+layout, the tag-set definition, the builder of the `header` region and the
+side of `scada-tagd`: generations, the `proc` region and liveness. Attach,
+read, write, rings and queues follow in later phase 1 issues.
 
 ## What it does
 
@@ -23,9 +24,14 @@ attach, read, write, rings and queues follow in later phase 1 issues.
 - Builds the complete image of the `header` region in memory (contract,
   section 5): tables, sorted directory, slot tables, name pool.
 - Reads the temporary tag-set file of phase 1 (JSON).
+- For `scada-tagd` (`GenerationHost`): creates or reuses a generation, owns
+  `header` and `proc.tagd`, sets and clears the `down` flag of every process,
+  and removes what does not belong in the generation directory. See
+  "The side of scada-tagd" below.
 
-It does not yet map or read any memory, and it writes no file. The values of
-`EventRecord.kind` are not defined: the contract names them without numbers.
+It cannot yet attach a process, and it reads and writes no tag. The values
+of `EventRecord.kind` are not defined: the contract names them without
+numbers.
 
 ## Interfaces
 
@@ -39,11 +45,15 @@ It does not yet map or read any memory, and it writes no file. The values of
   | `tag_set.h` | `TagSet`, the limits of the contract, `validate`, `config_hash` |
   | `header_builder.h` | `build_header`: a `TagSet` to the bytes of the `header` region |
   | `tag_set_json.h` | `parse_tag_set_json`: the temporary file format to a `TagSet` |
+  | `generation_host.h` | `GenerationHost`: the side of `scada-tagd`. Only `scada-tagd` uses it |
+  | `liveness.h` | `DownReason`: why a process counts as down |
 
 - Private headers in `src/`: `layout.h` (the structures, their checks and the
-  enumerations only the layout uses), `name_hash.h`, `sha256.h` and
-  `resolved_tag_set.h`. No code outside this library may include them
-  (decision D-25 in `docs/decisions.md`).
+  enumerations only the layout uses), `name_hash.h`, `sha256.h`,
+  `resolved_tag_set.h`, `shared_memory.h` (the reviewed helpers that place
+  the structures on mapped memory), `region_file.h` (files, directories and
+  their checks) and `proc_region.h` (the `proc` region). No code outside
+  this library may include them (decision D-25 in `docs/decisions.md`).
 
 `TagSet` is the one interface between configuration and the data plane. The
 JSON file is temporary: phase 2 replaces `tag_set_json.h` with the real
@@ -145,6 +155,40 @@ The parser accepts a subset of JSON, enough for this format:
 - A document is at most 256 MiB; a list is at most as long as the contract
   allows.
 
+## The side of scada-tagd
+
+`GenerationHost::start` does what contract section 11.1 describes; decision
+D-27 records the choices the contract left open.
+
+| Step | Rule |
+| --- | --- |
+| Base directory | Must be a directory owned by the user of `scada-tagd` with mode `2750`. `scada-tagd` locks it; a second instance is refused |
+| Tag set | Must hold a process `tagd` with the user id `scada-tagd` runs as |
+| Reuse | The generation `current` points to is reused if its directory has mode `3770`, and its `header` is owned by `scada-tagd`, ready, RUNNING, and equal byte for byte to the header the tag set builds (apart from `ready`, `state`, the creation time and the `down` flags) |
+| Clean-up | Otherwise every other `gen-<n>` directory in which no process holds the lock on its `proc` region is removed |
+| Room | The file system must have room for all regions of the tag set; otherwise the start fails and nothing is created |
+| New generation | Number: the highest found plus 1. Directory mode `3770`, files `0640`, set explicitly. `header` is written under `.tmp.header.<pid>`, set ready, renamed, set RUNNING; then `current` is switched by renaming a link over it |
+| Old generation | Its state is set to RETIRING |
+| `proc.tagd` | Created or reused, locked, RUNNING, first heartbeat |
+
+`GenerationHost::check`, called every `heartbeat_check_ms`:
+
+- A process is down if its `proc` region is missing, fails a check of
+  contract 3.1 or is not ready (`region missing`); else if its state is not
+  RUNNING (`not running`); else if its heartbeat is older than its timeout
+  (`heartbeat stale`). A heartbeat exactly as old as the timeout is not down.
+- The `down` flag in the process table is set or cleared to match, and each
+  change is returned to the caller. `scada-tagd` itself is never marked.
+- Every entry of the generation directory that the header does not list, or
+  whose owner is not the user of that region, is removed and returned to the
+  caller. A file `.tmp.<region>.<pid>` of a listed region with the right
+  owner is a region being created and stays.
+
+A region file is created as contract 3.2 says: under `.tmp.<name>.<pid>`,
+mode `0640`, full size allocated at once, then set ready and renamed. The
+rename never replaces an existing file. A full file system gives an error
+here, not a signal later.
+
 ## How to use it
 
 Link the CMake target `scada::tag`:
@@ -176,7 +220,8 @@ if (tag_set.ok()) {
 
 ```
 ctest --preset dev -R scada-tag-unit-test
-ctest --preset dev -R tag_set_json_fuzz-corpus
+ctest --preset dev -R scada-tagd-integration-test
+ctest --preset dev -R 'tag_set_json_fuzz-corpus|region_name_fuzz-corpus'
 cmake --preset perf && cmake --build --preset perf
 ctest --preset perf -R scada-tag-header-perf-test
 ```
@@ -199,6 +244,31 @@ ctest --preset perf -R scada-tag-header-perf-test
   pool, and that any order of the entries gives the same bytes.
 - `TagSetJson.*` covers the file format, its defaults, and malformed input
   with the reported line and column.
+- `RegionNames.*`, `RegionSizes.*` and `RegionFile.*` cover the names and
+  sizes of regions, the base directory check, and creating and opening a
+  region: modes under umask 077, no replacement of an existing file, and
+  every reason to reject a file (wrong owner, size, header, not ready, a
+  symbolic link, a FIFO, a directory).
+- `ProcRegion.*` covers the `proc` region: create, reuse, the refusal of a
+  second process with the same name, rebuilding an unusable region, and the
+  liveness rules at their exact limits.
+- `Host.*` covers `GenerationHost`.
+- In these three groups, the tests named `Conformance05`, `06`, `09`, `10`,
+  `11` and `20` are the part of `scada-tagd` and of region creation in those
+  conformance tests of the contract; the part of the reading library follows
+  with attach and read.
+- These tests create their database in the temporary directory of the
+  machine and need no privilege. A user other than the one running the tests
+  is simulated by a header that names another user id; nothing runs as that
+  user. Conformance test 11, second part, uses a limit on the file size in
+  place of a full file system.
+- `scada-tag-test-peer` (in `tests/peer/`) is a helper for integration
+  tests: it attaches the `proc` region of one process and writes its
+  heartbeat until it is stopped or killed. It is replaced by a real attach
+  with issue P1-05.
+- `region_name_fuzz` (in `fuzz/`) feeds the parsers of directory entry
+  names with arbitrary bytes and checks that they accept only the names this
+  library writes. Its seed corpus runs as `region_name_fuzz-corpus`.
 - `tag_set_json_fuzz` (in `fuzz/`) feeds the parser, and the builder behind
   it, with arbitrary bytes. Its seed corpus runs as the unit test
   `tag_set_json_fuzz-corpus` in every build.

@@ -32,11 +32,14 @@ For ARM64 use the preset `release-arm64` and `build/release-arm64`.
 | `usr/share/doc/scada/` | Licence report and software bill of materials |
 | `usr/lib/systemd/system/` | One systemd unit per service |
 | `usr/lib/sysusers.d/` | The `scada` group and one system user per service |
+| `usr/lib/tmpfiles.d/` | Directories created at every boot: `/dev/shm/scada` |
 | `etc/scada/` | Active configuration (empty for now) |
 | `var/lib/scada/{config-history,hist,journal,retain}/` | Runtime data (empty) |
 
-`/run/scada` and `/dev/shm/scada` are on memory-backed filesystems. They are
-not in the tree; the services that own them create them at runtime.
+`/run/scada` and `/dev/shm/scada` are on memory-backed filesystems and are
+not in the tree. `/dev/shm/scada` is created at every boot from
+`usr/lib/tmpfiles.d/scada-tagd.conf`; `/run/scada` is created at runtime by
+the services that use it.
 
 ## 2. Copy it to the test machine
 
@@ -49,17 +52,20 @@ Transfer `scada-stage.tar`, then on the test machine:
 ```
 tar -C / -xf scada-stage.tar --no-same-owner --no-overwrite-dir
 systemd-sysusers
+systemd-tmpfiles --create scada-tagd.conf
 systemctl daemon-reload
 ```
 
 `--no-same-owner` makes every file owned by root. `--no-overwrite-dir` keeps
 the permissions of directories that already exist, such as `/usr`.
 `systemd-sysusers` creates the group and the service users.
+`systemd-tmpfiles` creates `/dev/shm/scada` now; after a reboot systemd
+creates it by itself.
 
-## 3. Check the unit
+## 3. Check the units
 
 ```
-systemd-analyze verify scada-hello.service
+systemd-analyze verify scada-hello.service scada-tagd.service
 ```
 
 It must print nothing and exit with code 0.
@@ -113,14 +119,59 @@ If the remount is refused because another program holds a file open for
 writing, stop that program or boot the machine with `ro` on the kernel command
 line.
 
-## 7. Remove it again
+## 7. Start the tag database daemon
+
+`scada-tagd` creates the shared-memory tag database from a tag-set file. In
+phase 1 that file is written by hand and names users by number
+(`libs/scada-tag/README.md`). The smallest one holds only `scada-tagd`
+itself:
 
 ```
-systemctl stop scada-hello.service
+cat > /etc/scada/tag-set.json <<END
+{"format": 1,
+ "processes": [{"name": "tagd", "uid": $(id -u scada-tagd)}],
+ "owners": [], "queues": [], "tags": []}
+END
+systemctl start scada-tagd.service
+systemctl status scada-tagd.service
+ls -ln /dev/shm/scada /dev/shm/scada/current/
+```
+
+The status shows `active (running)`, the user `scada-tagd` and the status
+line `Generation 1`. The directory listing shows:
+
+| Entry | Mode | Owner and group |
+| --- | --- | --- |
+| `/dev/shm/scada` | `drwxr-s---` (2750) | `scada-tagd`, `scada` |
+| `current -> gen-1` | a symbolic link | `scada-tagd`, `scada` |
+| `gen-1` | `drwxrws--T` (3770) | `scada-tagd`, `scada` |
+| `gen-1/header`, `gen-1/proc.tagd` | `-rw-r-----` (0640) | `scada-tagd`, `scada` |
+
+Restart it and see that the generation is reused:
+
+```
+systemctl restart scada-tagd.service
+journalctl -u scada-tagd.service -n 5
+readlink /dev/shm/scada/current
+```
+
+The journal shows `generation reused` with `GENERATION=1`, and `current`
+still points to `gen-1`. After a change to the tag-set file, a restart shows
+`generation created` with the next number.
+
+The service needs no capability: `systemctl show -p CapabilityBoundingSet
+scada-tagd.service` prints an empty value.
+
+## 8. Remove it again
+
+```
+systemctl stop scada-hello.service scada-tagd.service
+rm -rf /dev/shm/scada
 tar -tf scada-stage.tar | grep -v '/$' | sed 's|^\./|/|' | xargs rm -f
 rm -rf /etc/scada /var/lib/scada /usr/lib/scada /usr/share/scada
 systemctl daemon-reload
 userdel scada-hello
+userdel scada-tagd
 groupdel scada
 ```
 

@@ -16,6 +16,7 @@ add_test(NAME install-layout
     -DBINDIR=${SCADA_INSTALL_BINDIR}
     -DUNITDIR=${SCADA_INSTALL_SYSTEMD_UNITDIR}
     -DSYSUSERSDIR=${SCADA_INSTALL_SYSUSERSDIR}
+    -DTMPFILESDIR=${SCADA_INSTALL_TMPFILESDIR}
     "-DUNITS=${units}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/check_layout.cmake")
 set_tests_properties(install-layout PROPERTIES FIXTURES_REQUIRED staged-tree)
