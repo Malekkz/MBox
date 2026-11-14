@@ -17,16 +17,18 @@ namespace scada {
 // instruction (docs/decisions.md, D-29): C++20 has no portable spelling for
 // it. A target that is neither of the two supported ones does not compile.
 //
-// On ARM64 the build option SCADA_ARM64_PAUSE chooses the instruction:
-// `yield` (the default) or `isb`. The choice exists to measure both on
-// ARM64 hardware (issue #40, decision D-31); x86-64 always uses `pause`.
+// x86-64 uses `pause`. ARM64 uses `isb` (decision D-31): with `yield` the
+// 64 attempts of a read took 22 ns on a Neoverse N2, less than one string
+// write (113 ns); with `isb` they took 0.67 us, about what `pause` gives on
+// x86-64 (1.0 us to 1.6 us). The build option SCADA_ARM64_PAUSE selects
+// `yield` instead, to measure a new board both ways.
 SCADA_RT inline void cpu_relax() noexcept {
 #if defined(__x86_64__)
     asm("pause");
-#elif defined(__aarch64__) && defined(SCADA_ARM64_PAUSE_ISB)
-    asm("isb");
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) && defined(SCADA_ARM64_PAUSE_YIELD)
     asm("yield");
+#elif defined(__aarch64__)
+    asm("isb");
 #else
 #error "cpu_relax: only x86-64 and ARM64 are supported (contract, section 1)"
 #endif
@@ -37,10 +39,10 @@ SCADA_RT inline void cpu_relax() noexcept {
 inline constexpr std::string_view CPU_RELAX_INSTRUCTION =
 #if defined(__x86_64__)
     "pause";
-#elif defined(__aarch64__) && defined(SCADA_ARM64_PAUSE_ISB)
-    "isb";
-#else
+#elif defined(SCADA_ARM64_PAUSE_YIELD)
     "yield";
+#else
+    "isb";
 #endif
 
 }  // namespace scada

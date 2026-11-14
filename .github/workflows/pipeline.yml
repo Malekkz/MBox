@@ -118,8 +118,8 @@ jobs:
           cat /sys/devices/system/clocksource/clocksource0/current_clocksource
       - name: Build (perf)
         env:
-          # x86-64 ignores the option; yield is its default.
-          PAUSE: ${{ matrix.pause == 'isb' && 'isb' || 'yield' }}
+          # x86-64 ignores the option; isb is its default.
+          PAUSE: ${{ matrix.pause == 'yield' && 'yield' || 'isb' }}
         run: |
           cmake --preset perf -B build/measure -DSCADA_ARM64_PAUSE="${PAUSE}"
           cmake --build build/measure --target \

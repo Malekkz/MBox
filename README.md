@@ -34,6 +34,8 @@ liveness (`scada-tagd`).
 | `CLAUDE.md` | Rules for every change: code, tests, documentation, review. |
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
 | `scripts/create-issues.sh` | Creates those issues on GitHub. |
+| `scripts/measure-seqlock.sh` | Measures the read retry window and the rate of `SCADA_E_BUSY` on this machine (decision D-31). |
+| `docs/reports/` | Phase reports: the figures a phase is accepted on. |
 
 ## Building
 
@@ -135,6 +137,11 @@ is skipped or allowed to fail. Performance tests are not part of the pipeline
   `fuzz-findings`.
 - The tools are LLVM 18 and the GCC and CMake of the runner image; each job
   prints their versions in its step "Tool versions".
+- The job `measurements` runs only when started by hand (`workflow_dispatch`)
+  and is not a check: on ARM64 with `isb` and with `yield`, and on x86-64, it
+  runs `scripts/measure-seqlock.sh` in the `perf` build for about 20 minutes
+  and keeps the output for 30 days as the artifacts `measurements-<arch>-<pause>`
+  (decision D-31).
 - All six checks must be marked as required in the protection rule of `main`.
   GitHub cannot read this from the repository; it is a repository setting.
 
