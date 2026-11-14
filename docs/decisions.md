@@ -639,3 +639,23 @@ Consequences:
 - Conformance test 7 counts the second gap of a consumer that saw the owner down (contract 0.5, section 15).
 - `scada_sub_next` reads the owner's `proc` region and the monotonic clock at every look: two loads and one clock read from the vDSO.
 - Tests: `Changes.AnOwnerThatStopsGivesAGapAndAnotherWhenItIsBack`, `AChangeOfAnOwnerThatIsDownComesAsBad`, `AnOwnerDownAtOpenGivesNoGapUntilItComesUp`, `ABlockedConsumerLearnsThatTheOwnerStopped`, `AWaitSetWakesWhenTheOwnerStops`; across processes `ChangeRingProcesses.AKilledOwnerGivesAGapWithinItsHeartbeatTimeout`.
+
+## D-34: Smaller points of the review of P1-06: a tag that was not resolved, the length of a string, the fences of the ThreadSanitizer build
+Date: 2026-11-14
+Phase / issue: 1, #42
+Status: accepted
+
+Context: issue #42 collects six smaller points of the review of P1-06 (D-30). Each must be done or closed with a reason. Points 1 and 2 were settled with the change rings in P1-07. The product owner chose the options below for points 3, 5 and 6. Point 4 is not settled here.
+Options, point 3, a tag of another process that was never resolved in the context: BAD with OWNER_DOWN as now; `SCADA_E_INVALID`. Options, point 5, `scada_tag_read_string` with `buf` NULL and `cap` 0: refused as now; the length alone. Options, point 6, the fences in the ThreadSanitizer build: left out, x86-64 only, as now; kept with `#pragma GCC diagnostic ignored "-Wtsan"`.
+Decision:
+- Point 1, a late owner found only through `scada_tag_status`: done in P1-07. `scada_tag_notify` looks again for missing regions and repeats the clock check (D-32), and the documentation of `scada_tag_status` and of the library says so.
+- Point 2, ring consumers and a dead owner: done in P1-07. A subscription returns `SCADA_E_GAP` when the owner's process goes down and when it comes back, and an entry of an owner that is down comes with the overlay (D-33).
+- Point 3: a read of a tag whose owner is another process, when no tag of that owner was resolved in the context, returns `SCADA_E_INVALID` with type 0, value 0, times 0 and quality BAD, as for a handle that is none. `scada_tag_read`, `scada_tag_read_many` and `scada_tag_read_string` do so. Resolve asks for the owner's `tags` region, and `PeerRegions` keeps an atomic flag for each slot, set with release by the first `want` and never cleared; the read loads it with acquire. One load, no lock, real-time safe. A tag resolved while its owner's regions are missing still reads as BAD with OWNER_DOWN. Contract 0.6, section 6.2.
+- Point 5: `buf` NULL with `cap` 0 returns `SCADA_OK` with `*len` and `*meta` as a large enough buffer would give them. `buf` NULL with `cap` above 0 stays `SCADA_E_INVALID`, and a buffer that is not NULL but too small, `cap` 0 included, stays `SCADA_E_INVALID` with the length. Contract 0.6, section 13.
+- Point 6: closed without a change. The pragma names one compiler's warning, and the project allows no compiler extensions outside the I/O HAL and the one exception of D-29. Keeping the fences would not make the ThreadSanitizer build check their order, because ThreadSanitizer does not model fences; the model check of issue #39 does. The ThreadSanitizer build stays on x86-64, where the fences are no instruction, and the `#error` for ARM64 stays.
+Reason: a forgotten resolve that reads as a dead owner sends operators and alarm logic after a fault that is not there, while `SCADA_E_INVALID` names the mistake in the calling code, and quality BAD still keeps a caller that keeps its output from holding a good value. Asking for the length alone is the common C pattern and costs one comparison.
+Consequences:
+- Contract 0.6 with a migration note; layout version 1 is unchanged.
+- A process that took handles from another process (they are the same in every process) must resolve one tag of each owner it reads before the first read, as contract 0.4 already required. The library's tests do so.
+- Tests: `TagAccess.ATagThatWasNotResolvedHereIsInvalid` (replaces `ATagThatWasNotResolvedHereReadsAsOwnerDown`), `TagAccess.ATagResolvedBeforeItsOwnerStartedReadsAsOwnerDown`, and the length query in `CApi`.
+- Point 4, heartbeat gaps that `scada-tagd` does not see, stays open in issue #42. `scada-tagd` sees only the heartbeat count and time at each check, so on its own it can prove a gap longer than the timeout only when exactly one heartbeat followed the gap before the next check. A full record needs the owner's `scada_tag_heartbeat`, which knows each gap, to keep the longest one in the reserved bytes of `ProcHeader`; that is a change to the shared-memory layout and is left to the product owner.

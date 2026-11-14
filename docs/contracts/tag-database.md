@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.5 (draft) |
+| Contract version | 0.6 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -360,11 +360,12 @@ What a read returns in the other cases:
 
 | Situation | Return code | Output |
 | --- | --- | --- |
-| The owner's region is missing or not ready | `SCADA_OK` | Type of the tag, value 0, times 0, change count 0, quality BAD, OWNER_DOWN only |
+| The owner's region is missing or not ready, and a tag of the owner was resolved in this context | `SCADA_OK` | Type of the tag, value 0, times 0, change count 0, quality BAD, OWNER_DOWN only |
 | Every attempt found the record mid-write and the owner is down | `SCADA_OK` | The same: what a dead owner left half written is not a value |
 | Every attempt found the record mid-write and the owner is not down | `SCADA_E_BUSY` | Unchanged |
 | The record does not hold a value of the type of its tag: another type, a quality or flag that is none, OWNER_DOWN stored, a BOOL that is neither 0 nor 1, a STRING record that is not the number of its slot, a string length above 250 | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
 | The handle is none of this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+| The owner is another process and no tag of it was resolved in this context | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
 
 Only `SCADA_E_BUSY` leaves the output unchanged. Every other error stores
 quality BAD, so that a caller that keeps its output never holds on to a good
@@ -375,8 +376,11 @@ An owner cannot store OWNER_DOWN: a write with that flag is refused with
 `SCADA_E_INVALID`.
 
 A tag of another process must be resolved in the context that reads it:
-resolve is where its regions are mapped (section 11.2). Until then it reads as
-if its region were missing.
+resolve is where its regions are mapped (section 11.2). Resolving one tag of an
+owner maps the regions of all its tags. Until a tag of the owner is resolved,
+a read of its tags is `SCADA_E_INVALID`, so that a forgotten resolve does not
+look like a dead owner to operators and alarm logic. The library tells the two
+apart by one atomic load in the read path, without a lock.
 
 ### 6.3 Owner restart
 
@@ -907,6 +911,9 @@ void scada_waitset_destroy(scada_waitset *ws);
 - `read_many` and `write_many` read the clocks once for the whole call.
   `read_many` returns a status for each handle.
 - `size` in the queue calls must equal the queue's `record_size`.
+- `scada_tag_read_string` with `buf` NULL and `cap` 0 returns the length and
+  `meta` alone, as a large enough buffer would; `buf` NULL with `cap` above 0
+  is `SCADA_E_INVALID`.
 - `scada_sub_open` subscribes to one owner's ring. The per-tag filter of
   reference section 5.7 is applied by the caller on `scada_change.handle`.
 - Every timeout is in ms and at least 0; 0 does not wait. There is no wait
@@ -1165,6 +1172,16 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
 
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
+
+| 0.6 | 2026-11-14 | Smaller points of the review of P1-06 (issue #42, D-34). Section 6.2: a tag of another process none of whose tags was resolved in the context reads as `SCADA_E_INVALID`, not as OWNER_DOWN. Section 13: `scada_tag_read_string` can be asked for the length alone. |
+
+Migration, 0.5 to 0.6: none for data. The layout version stays 1 and no
+structure in shared memory changed. A caller that read a tag of another
+process without resolving it in its context got BAD with OWNER_DOWN and now
+gets `SCADA_E_INVALID` with quality BAD; it must resolve the tag first, as 0.4
+already required. A caller that passed `buf` NULL with `cap` 0 to
+`scada_tag_read_string` got `SCADA_E_INVALID` and now gets `SCADA_OK` with the
+length.
 
 Migration, 0.4 to 0.5: none for data. The layout version stays 1 and no
 structure in shared memory changed. `scada_change` and `scada_sub_stats_t`

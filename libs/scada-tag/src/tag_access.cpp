@@ -200,6 +200,12 @@ bool Attachment::owner_down(const OwnerAccess& owner,
            DownReason::NONE;
 }
 
+bool Attachment::resolved(const OwnerAccess& owner) const noexcept {
+    // The tags region is asked for by every resolve of a tag of the owner,
+    // so it tells whether one was resolved (section 6.2). One load.
+    return owner.own || peers_.asked(owner.tags_slot);
+}
+
 std::span<std::byte> Attachment::tags_of(
     const OwnerAccess& owner) const noexcept {
     return owner.own ? owner.own_tags : peers_.bytes(owner.tags_slot);
@@ -326,6 +332,11 @@ int Attachment::read_at(std::uint32_t handle, scada_value& out,
                         std::int64_t now_mono_ns) noexcept {
     const std::optional<TagRef> tag = tag_of(handle);
     if (!tag.has_value()) {
+        out = unusable_value(0, now_mono_ns);
+        return SCADA_E_INVALID;
+    }
+    if (!resolved(*tag->owner)) {
+        // A forgotten resolve must not look like a dead owner.
         out = unusable_value(0, now_mono_ns);
         return SCADA_E_INVALID;
     }
@@ -468,7 +479,7 @@ int Attachment::read_string(std::uint32_t handle, std::span<char> buffer,
         return code;
     };
     const std::optional<TagRef> tag = tag_of(handle);
-    if (!tag.has_value()) {
+    if (!tag.has_value() || !resolved(*tag->owner)) {
         return unusable(0, SCADA_E_INVALID);
     }
     if (tag->type != TagType::STRING) {
@@ -498,6 +509,13 @@ int Attachment::read_string(std::uint32_t handle, std::span<char> buffer,
         }
     }
     length = text.len;
+    if (buffer.data() == nullptr) {
+        // Only the length was asked for.
+        if (meta != nullptr) {
+            *meta = value;
+        }
+        return SCADA_OK;
+    }
     if (buffer.size() < text.len) {
         return SCADA_E_INVALID;
     }

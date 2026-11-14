@@ -49,7 +49,7 @@ without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.5, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.6, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -299,7 +299,7 @@ Contract sections 6, 7 and 13; decision D-29.
 | `scada_tag_read_many` | yes | Several tags with one reading of the clock, and a status for each |
 | `scada_tag_write` | yes | One tag; owner thread only |
 | `scada_tag_write_many` | yes | Several tags with one pair of clock readings; all or nothing |
-| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write |
+| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write; `buf` NULL with `cap` 0 gives the length alone |
 | `scada_tag_write_string` | no | Text of at most 250 bytes of well-formed UTF-8; owner thread only |
 
 A `scada_value` is 48 bytes: type, quality, quality flags, change count,
@@ -326,10 +326,10 @@ What a read returns:
 | Never written | `SCADA_OK` | Quality BAD, flag NOT_INIT, times 0 |
 | Owner down, record between writes | `SCADA_OK` | The last value, quality BAD, OWNER_DOWN added |
 | Owner down, record left in the middle of a write | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
-| Region of the owner missing, or the tag was not resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
+| Region of the owner missing, after a tag of the owner was resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
 | Owner running and mid-write at all 64 attempts | `SCADA_E_BUSY` | Output unchanged; keep the previous value |
 | Record does not hold a value of the type of the tag, or holds OWNER_DOWN | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
-| No such handle in this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+| No such handle in this generation, or no tag of its owner (another process) was resolved in this context | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
 
 Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
 0 there is no value: a consumer must not plot, compare or act on them.
