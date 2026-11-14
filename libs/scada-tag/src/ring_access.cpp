@@ -5,6 +5,7 @@
 #include "attachment.h"
 #include "change_ring.h"
 #include "futex.h"
+#include "header_view.h"
 #include "layout.h"
 #include "peer_regions.h"
 #include "proc_region.h"
@@ -13,7 +14,6 @@
 
 #include "scada/common/clock.h"
 #include "scada/tag/scada_tag.h"
-#include "scada/tag/tag_set.h"
 
 #include <atomic>
 #include <cerrno>

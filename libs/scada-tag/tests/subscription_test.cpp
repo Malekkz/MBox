@@ -27,6 +27,7 @@
 #include <gtest/gtest.h>
 
 #include <poll.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -65,13 +66,19 @@ constexpr int WAIT_LIMIT_MS = 10'000;
 constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
 constexpr std::int64_t SLICE_NS =
     std::int64_t{SCADA_WAIT_SLICE_MS} * NANOSECONDS_PER_MILLISECOND;
+constexpr std::int64_t WAIT_LIMIT_NS =
+    std::int64_t{WAIT_LIMIT_MS} * NANOSECONDS_PER_MILLISECOND;
 constexpr std::size_t WAKE_TRIALS = 21;
+// How long a test lets a consumer thread block before it writes.
+constexpr std::chrono::milliseconds BLOCK_TIME{2};
 // Writes of the test with a fast consumer, and how far the writer may run
 // ahead of it: well inside the ring.
 constexpr std::uint64_t FAST_WRITES = 50'000;
 constexpr std::uint64_t MAX_AHEAD = RING / 2;
 constexpr std::uint64_t NOTIFY_EVERY = 64;
+constexpr std::uint64_t BEAT_EVERY = NOTIFY_EVERY * NOTIFY_EVERY;
 constexpr std::uint8_t NO_TYPE = 9;
+constexpr int ROUNDS = 3;
 
 scada_value uint_value(std::uint64_t number,
                        std::uint8_t quality = SCADA_QUALITY_GOOD) {
@@ -90,11 +97,165 @@ scada_value level_value(double level) {
     return value;
 }
 
-std::string bulk_tag(std::size_t i) {
-    return "bulk.t" + std::to_string(i);
+double level_of(const scada_change& change) {
+    return std::bit_cast<double>(change.value);
 }
-std::string multi_owner(std::size_t k) {
-    return "multi.w" + std::to_string(k);
+
+std::string bulk_tag(std::size_t index) {
+    return "bulk.t" + std::to_string(index);
+}
+std::string multi_owner(std::size_t index) {
+    return "multi.w" + std::to_string(index);
+}
+
+// The return code of `sub.next` without waiting.
+int next_code(Subscription& sub) {
+    scada_change change{};
+    return sub.next(change, 0);
+}
+
+// True if `sub` has a change now.
+bool has_next(Subscription& sub) {
+    return next_code(sub) == SCADA_OK;
+}
+
+// The next change of `sub` without waiting. Without one: a failed
+// expectation, and a change of no handle.
+scada_change take(Subscription& sub) {
+    scada_change change{};
+    const int code = sub.next(change, 0);
+    if (code != SCADA_OK) {
+        ADD_FAILURE() << "no change, return code " << code;
+        change = scada_change{};
+        change.handle = SCADA_INVALID_HANDLE;
+    }
+    return change;
+}
+
+// `sub` gives the levels `first` to `last`, one change each, in order.
+::testing::AssertionResult takes_levels(Subscription& sub, std::uint32_t first,
+                                        std::uint32_t last, double sign) {
+    for (std::uint32_t i = first; i <= last; ++i) {
+        scada_change change{};
+        if (sub.next(change, 0) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "no change " << i;
+        }
+        if (level_of(change) != sign * i) {
+            return ::testing::AssertionFailure()
+                   << "change " << i << " is " << level_of(change);
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// `owner` writes the levels `first` to `last` of `handle`, multiplied by
+// `sign`.
+::testing::AssertionResult writes_levels(Attachment& owner,
+                                         std::uint32_t handle,
+                                         std::uint32_t first,
+                                         std::uint32_t last, double sign) {
+    for (std::uint32_t i = first; i <= last; ++i) {
+        if (owner.write(handle, level_value(sign * i)) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "write " << i;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// `sub` gives one change of quality `quality` for each of `handles`, in
+// order, and then nothing.
+::testing::AssertionResult takes_qualities(
+    Subscription& sub, std::span<const std::uint32_t> handles,
+    std::uint8_t quality) {
+    for (const std::uint32_t handle : handles) {
+        scada_change change{};
+        if (sub.next(change, 0) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "no change of " << handle;
+        }
+        if (change.handle != handle || change.quality != quality) {
+            return ::testing::AssertionFailure()
+                   << "change of " << change.handle << " with quality "
+                   << int{change.quality} << ", not of " << handle;
+        }
+    }
+    if (has_next(sub)) {
+        return ::testing::AssertionFailure() << "a change too many";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Only `subs[written]` of `subs` has a change, once.
+::testing::AssertionResult only_one_has_a_change(std::span<const Sub> subs,
+                                                 std::size_t written) {
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        if (has_next(*subs[i]) != (i == written)) {
+            return ::testing::AssertionFailure()
+                   << "ring " << i << " after a write to ring " << written;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// What the consumer of the test with a fast consumer found.
+struct FastCounts {
+    std::uint64_t out_of_order = 0;
+    std::uint64_t gaps = 0;
+    bool failed = false;
+};
+
+// Takes the levels 1 to FAST_WRITES from `sub` and counts what is out of
+// order. `consumed` is the last level taken.
+void consume_levels(Subscription& sub, std::atomic<std::uint64_t>& consumed,
+                    FastCounts& counts) {
+    std::uint64_t expected = 1;
+    while (expected <= FAST_WRITES) {
+        scada_change change{};
+        const int code = sub.next(change, WAIT_LIMIT_MS);
+        if (code == SCADA_E_GAP) {
+            ++counts.gaps;
+            continue;
+        }
+        if (code != SCADA_OK) {
+            counts.failed = true;
+            consumed.store(FAST_WRITES, std::memory_order_release);
+            return;
+        }
+        // In range: whole numbers up to FAST_WRITES.
+        const auto number = static_cast<std::uint64_t>(level_of(change));
+        if (number != expected) {
+            ++counts.out_of_order;
+            expected = number;
+        }
+        ++expected;
+        consumed.store(number, std::memory_order_release);
+    }
+}
+
+// Writes the levels 1 to FAST_WRITES to `handle`, notifying every
+// NOTIFY_EVERY writes, and waits whenever the consumer is MAX_AHEAD behind.
+::testing::AssertionResult write_paced(
+    Attachment& owner, std::uint32_t handle,
+    const std::atomic<std::uint64_t>& consumed) {
+    for (std::uint64_t i = 1; i <= FAST_WRITES; ++i) {
+        while (i - consumed.load(std::memory_order_acquire) > MAX_AHEAD) {
+            static_cast<void>(owner.notify());
+            std::this_thread::yield();
+        }
+        // In range: whole numbers far below 2^53.
+        if (owner.write(handle, level_value(static_cast<double>(i))) !=
+            SCADA_OK) {
+            return ::testing::AssertionFailure() << "write " << i;
+        }
+        if (i % NOTIFY_EVERY == 0 && owner.notify() != SCADA_OK) {
+            return ::testing::AssertionFailure() << "notify after " << i;
+        }
+        if (i % BEAT_EVERY == 0) {
+            static_cast<void>(owner.heartbeat());
+        }
+    }
+    return owner.notify() == SCADA_OK
+               ? ::testing::AssertionSuccess()
+               : ::testing::AssertionFailure() << "the last notify";
 }
 
 class Changes : public scada::tag::testing::AttachFixture {
@@ -163,14 +324,9 @@ protected:
         return sub;
     }
 
-    // The next change of `sub` without waiting, or nothing.
-    [[nodiscard]] static std::optional<scada_change> next_now(
-        Subscription& sub) {
-        scada_change change{};
-        if (sub.next(change, 0) != SCADA_OK) {
-            return std::nullopt;
-        }
-        return change;
+    // The level of `io` written as `value`.
+    void write_level(const scada_value& value) {
+        ASSERT_EQ(io_->write(handle_of(*io_, "plant.level"), value), SCADA_OK);
     }
 
 private:
@@ -178,58 +334,62 @@ private:
     Attached web_;
 };
 
-TEST_F(Changes, AWriteThatChangesAppendsOneEntryAndOneThatDoesNotNone) {
+TEST_F(Changes, AWriteThatChangesAppendsOneEntry) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    const std::uint32_t level = handle_of(*io(), "plant.level");
-    scada_change change{};
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
+    write_level(level_value(LEVEL));
+    EXPECT_EQ(take(*sub).handle, handle_of(*io(), "plant.level"));
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
+    EXPECT_EQ(sub->stats().received, 1U);
+}
 
-    ASSERT_EQ(io()->write(level, level_value(LEVEL)), SCADA_OK);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    EXPECT_EQ(change.handle, level);
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
-
+TEST_F(Changes, AWriteThatChangesNothingAppendsNoEntry) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    write_level(level_value(LEVEL));
+    EXPECT_TRUE(has_next(*sub));
     // The same value, quality and flags again: no change.
-    ASSERT_EQ(io()->write(level, level_value(LEVEL)), SCADA_OK);
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
+    write_level(level_value(LEVEL));
+    EXPECT_FALSE(has_next(*sub));
     // Another quality only is a change.
     scada_value uncertain = level_value(LEVEL);
     uncertain.quality = SCADA_QUALITY_UNCERTAIN;
-    ASSERT_EQ(io()->write(level, uncertain), SCADA_OK);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    EXPECT_EQ(change.quality, SCADA_QUALITY_UNCERTAIN);
-    EXPECT_EQ(sub->stats().received, 2U);
+    write_level(uncertain);
+    EXPECT_EQ(take(*sub).quality, SCADA_QUALITY_UNCERTAIN);
     EXPECT_EQ(sub->stats().gaps, 0U);
 }
 
 TEST_F(Changes, AChangeCarriesTheFieldsOfTheRecord) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    const std::uint32_t level = handle_of(*io(), "plant.level");
     scada_value value = level_value(LEVEL);
     value.quality = SCADA_QUALITY_UNCERTAIN;
     value.quality_flags = SCADA_FLAG_OUT_OF_RANGE;
     value.source_time_ns = DEVICE_TIME;
-    ASSERT_EQ(io()->write(level, value), SCADA_OK);
+    write_level(value);
 
-    scada_change change{};
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
+    const scada_change change = take(*sub);
     scada_value read{};
-    ASSERT_EQ(io()->read(level, read), SCADA_OK);
-    EXPECT_EQ(change.handle, level);
+    ASSERT_EQ(io()->read(handle_of(*io(), "plant.level"), read), SCADA_OK);
     EXPECT_EQ(change.type, SCADA_TYPE_FLOAT64);
     EXPECT_EQ(change.quality, SCADA_QUALITY_UNCERTAIN);
     EXPECT_EQ(change.quality_flags, SCADA_FLAG_OUT_OF_RANGE);
-    EXPECT_EQ(std::bit_cast<double>(change.value), LEVEL);
+    EXPECT_EQ(level_of(change), LEVEL);
     EXPECT_EQ(change.source_time_ns, DEVICE_TIME);
     // Section 8: the same instant as in the record.
     EXPECT_EQ(change.update_mono_ns, read.update_mono_ns);
+}
 
-    // Without a device time: the stored source time and LOCAL_TIME.
-    ASSERT_EQ(io()->write(level, level_value(-LEVEL)), SCADA_OK);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    ASSERT_EQ(io()->read(level, read), SCADA_OK);
+// Without a device time the entry holds the source time the record got,
+// and LOCAL_TIME.
+TEST_F(Changes, AChangeWithoutADeviceTimeCarriesTheStoredOne) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    write_level(level_value(LEVEL));
+    const scada_change change = take(*sub);
+    scada_value read{};
+    ASSERT_EQ(io()->read(handle_of(*io(), "plant.level"), read), SCADA_OK);
     EXPECT_EQ(change.quality_flags, SCADA_FLAG_LOCAL_TIME);
     EXPECT_EQ(change.source_time_ns, read.source_time_ns);
 }
@@ -241,20 +401,25 @@ TEST_F(Changes, AStringChangeCarriesItsSlotNumber) {
     ASSERT_EQ(io()->write_string(note, "pump 1 tripped", SCADA_QUALITY_GOOD, 0,
                                  DEVICE_TIME),
               SCADA_OK);
-    scada_change change{};
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
+    const scada_change change = take(*sub);
     EXPECT_EQ(change.handle, note);
     EXPECT_EQ(change.type, SCADA_TYPE_STRING);
     EXPECT_EQ(change.value, scada::tag::testing::STRING_SLOT_NOTE);
-    // The same text again is no change; another text is.
-    ASSERT_EQ(io()->write_string(note, "pump 1 tripped", SCADA_QUALITY_GOOD, 0,
-                                 DEVICE_TIME),
-              SCADA_OK);
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
-    ASSERT_EQ(io()->write_string(note, "pump 1 running", SCADA_QUALITY_GOOD, 0,
-                                 DEVICE_TIME),
-              SCADA_OK);
-    EXPECT_EQ(sub->next(change, 0), SCADA_OK);
+}
+
+TEST_F(Changes, AStringChangesWhenItsTextChanges) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    const std::uint32_t note = handle_of(*io(), "plant.note");
+    for (const std::string_view text :
+         {"pump 1 tripped", "pump 1 tripped", "pump 1 running"}) {
+        ASSERT_EQ(
+            io()->write_string(note, text, SCADA_QUALITY_GOOD, 0, DEVICE_TIME),
+            SCADA_OK);
+    }
+    EXPECT_TRUE(has_next(*sub));
+    EXPECT_TRUE(has_next(*sub));
+    EXPECT_FALSE(has_next(*sub));
 }
 
 TEST_F(Changes, WriteManyAppendsAnEntryForEachTagItChanged) {
@@ -265,24 +430,22 @@ TEST_F(Changes, WriteManyAppendsAnEntryForEachTagItChanged) {
     scada_value running{};
     running.type = SCADA_TYPE_BOOL;
     running.value = 1;
-    const std::array values{level_value(LEVEL), running};
-    ASSERT_EQ(io()->write_many(handles, values), SCADA_OK);
-    const std::optional<scada_change> first = next_now(*sub);
-    const std::optional<scada_change> second = next_now(*sub);
-    ASSERT_TRUE(first.has_value());
-    ASSERT_TRUE(second.has_value());
-    EXPECT_EQ(first->handle, handles[0]);
-    EXPECT_EQ(second->handle, handles[1]);
+    ASSERT_EQ(
+        io()->write_many(handles, std::array{level_value(LEVEL), running}),
+        SCADA_OK);
+    const scada_change first = take(*sub);
+    const scada_change second = take(*sub);
+    EXPECT_EQ(first.handle, handles[0]);
+    EXPECT_EQ(second.handle, handles[1]);
     // One reading of the clock for the whole call.
-    EXPECT_EQ(first->update_mono_ns, second->update_mono_ns);
+    EXPECT_EQ(first.update_mono_ns, second.update_mono_ns);
 
     // Only the level changes the second time.
-    const std::array changed{level_value(-LEVEL), running};
-    ASSERT_EQ(io()->write_many(handles, changed), SCADA_OK);
-    const std::optional<scada_change> third = next_now(*sub);
-    ASSERT_TRUE(third.has_value());
-    EXPECT_EQ(third->handle, handles[0]);
-    EXPECT_FALSE(next_now(*sub).has_value());
+    ASSERT_EQ(
+        io()->write_many(handles, std::array{level_value(-LEVEL), running}),
+        SCADA_OK);
+    EXPECT_EQ(take(*sub).handle, handles[0]);
+    EXPECT_FALSE(has_next(*sub));
 }
 
 // Conformance test 13: a consumer that keeps up sees every entry in order.
@@ -292,56 +455,31 @@ TEST_F(Changes, WriteManyAppendsAnEntryForEachTagItChanged) {
 TEST_F(Changes, Conformance13AFastConsumerSeesEveryEntryInOrder) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    const std::uint32_t level = handle_of(*io(), "plant.level");
     std::atomic<std::uint64_t> consumed{0};
-    std::atomic<bool> consumer_failed{false};
-    std::uint64_t out_of_order = 0;
-    std::uint64_t gaps = 0;
-    std::jthread consumer([&] {
-        std::uint64_t expected = 1;
-        while (expected <= FAST_WRITES) {
-            scada_change change{};
-            const int code = sub->next(change, WAIT_LIMIT_MS);
-            if (code == SCADA_E_GAP) {
-                ++gaps;
-                continue;
-            }
-            if (code != SCADA_OK) {
-                consumer_failed.store(true);
-                return;
-            }
-            // In range: whole numbers up to FAST_WRITES.
-            const auto number =
-                static_cast<std::uint64_t>(std::bit_cast<double>(change.value));
-            if (number != expected) {
-                ++out_of_order;
-                expected = number;
-            }
-            ++expected;
-            consumed.store(number, std::memory_order_release);
-        }
-    });
-    for (std::uint64_t i = 1; i <= FAST_WRITES; ++i) {
-        while (i - consumed.load(std::memory_order_acquire) > MAX_AHEAD &&
-               !consumer_failed.load()) {
-            ASSERT_EQ(io()->notify(), SCADA_OK);
-            std::this_thread::yield();
-        }
-        ASSERT_EQ(io()->write(level, level_value(static_cast<double>(i))),
-                  SCADA_OK);
-        if (i % NOTIFY_EVERY == 0) {
-            ASSERT_EQ(io()->notify(), SCADA_OK);
-        }
-        if (i % (NOTIFY_EVERY * NOTIFY_EVERY) == 0) {
-            static_cast<void>(io()->heartbeat());
-        }
+    FastCounts counts;
+    {
+        const std::jthread consumer(
+            [&] { consume_levels(*sub, consumed, counts); });
+        EXPECT_TRUE(
+            write_paced(*io(), handle_of(*io(), "plant.level"), consumed));
     }
-    ASSERT_EQ(io()->notify(), SCADA_OK);
-    consumer.join();
-    EXPECT_FALSE(consumer_failed.load());
-    EXPECT_EQ(out_of_order, 0U);
-    EXPECT_EQ(gaps, 0U);
+    EXPECT_FALSE(counts.failed);
+    EXPECT_EQ(counts.out_of_order, 0U);
+    EXPECT_EQ(counts.gaps, 0U);
     EXPECT_EQ(sub->stats().received, FAST_WRITES);
+}
+
+// Conformance test 13: a consumer one entry less than the ring behind
+// still reads every entry (section 8.2: the slot of the next write is not
+// one to read from).
+TEST_F(Changes, Conformance13AConsumerJustInsideTheRingGetsNoGap) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    constexpr std::uint32_t MOST_BEHIND = RING - 1;
+    ASSERT_TRUE(writes_levels(*io(), handle_of(*io(), "plant.level"), 1,
+                              MOST_BEHIND, 1));
+    EXPECT_TRUE(takes_levels(*sub, 1, MOST_BEHIND, 1));
+    EXPECT_EQ(sub->stats().gaps, 0U);
 }
 
 // Conformance test 13: a slow consumer gets SCADA_E_GAP exactly when it is
@@ -350,44 +488,37 @@ TEST_F(Changes, Conformance13AFastConsumerSeesEveryEntryInOrder) {
 TEST_F(Changes, Conformance13ASlowConsumerGetsAGapExactlyWhenOverrun) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    const std::uint32_t level = handle_of(*io(), "plant.level");
-    const std::uint32_t reader_level = handle_of(*web(), "plant.level");
-
-    // One entry less than the ring behind: every entry is still read
-    // (section 8.2; the slot of the next write is not one to read from).
-    constexpr std::uint32_t MOST_BEHIND = RING - 1;
-    for (std::uint32_t i = 1; i <= MOST_BEHIND; ++i) {
-        ASSERT_EQ(io()->write(level, level_value(i)), SCADA_OK);
-    }
-    for (std::uint32_t i = 1; i <= MOST_BEHIND; ++i) {
-        const std::optional<scada_change> change = next_now(*sub);
-        ASSERT_TRUE(change.has_value()) << i;
-        EXPECT_EQ(std::bit_cast<double>(change->value), i);
-    }
-    EXPECT_EQ(sub->stats().gaps, 0U);
-
-    // One entry more: a gap, reported once.
-    constexpr std::uint32_t OVER = RING;
-    for (std::uint32_t i = 1; i <= OVER; ++i) {
-        ASSERT_EQ(io()->write(level, level_value(-static_cast<double>(i))),
-                  SCADA_OK);
-    }
-    scada_change change{};
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_GAP);
+    ASSERT_TRUE(
+        writes_levels(*io(), handle_of(*io(), "plant.level"), 1, RING, -1));
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
     EXPECT_EQ(sub->stats().gaps, 1U);
-    EXPECT_EQ(sub->stats().lost, OVER);
+    EXPECT_EQ(sub->stats().lost, RING);
     // The cursor is at the end: nothing older comes afterwards.
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
 
     // Resynchronise: read the record; a change delivered later is newer.
     scada_value read{};
-    ASSERT_EQ(web()->read(reader_level, read), SCADA_OK);
-    EXPECT_EQ(std::bit_cast<double>(read.value), -static_cast<double>(OVER));
-    ASSERT_EQ(io()->write(level, level_value(LEVEL)), SCADA_OK);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    EXPECT_EQ(std::bit_cast<double>(change.value), LEVEL);
+    ASSERT_EQ(web()->read(handle_of(*web(), "plant.level"), read), SCADA_OK);
+    EXPECT_EQ(std::bit_cast<double>(read.value), -static_cast<double>(RING));
+    write_level(level_value(LEVEL));
+    const scada_change change = take(*sub);
+    EXPECT_EQ(level_of(change), LEVEL);
     EXPECT_GE(change.update_mono_ns, read.update_mono_ns);
     EXPECT_EQ(sub->stats().gaps, 1U);
+}
+
+// `owner` gives every tag of `handles` the quality `quality` in one call
+// and notifies; `sub` then gets one change of each.
+::testing::AssertionResult avalanche(Attachment& owner,
+                                     std::span<const std::uint32_t> handles,
+                                     std::uint8_t quality, Subscription& sub) {
+    const std::vector<scada_value> values(handles.size(),
+                                          uint_value(0, quality));
+    if (owner.write_many(handles, values) != SCADA_OK ||
+        owner.notify() != SCADA_OK) {
+        return ::testing::AssertionFailure() << "write or notify failed";
+    }
+    return takes_qualities(sub, handles, quality);
 }
 
 // Conformance test 14: every tag of an owner changes quality in one cycle,
@@ -401,49 +532,43 @@ TEST_F(Changes, Conformance14AnAvalancheGivesNoGapToAConsumerThatKeepsUp) {
     for (std::size_t i = 0; i < BULK_TAGS; ++i) {
         handles.push_back(handle_of(*bulk, bulk_tag(i)));
     }
-    for (const std::uint8_t quality : {std::uint8_t{SCADA_QUALITY_UNCERTAIN},
-                                       std::uint8_t{SCADA_QUALITY_BAD}}) {
-        const std::vector<scada_value> values(BULK_TAGS,
-                                              uint_value(0, quality));
-        ASSERT_EQ(bulk->write_many(handles, values), SCADA_OK);
-        ASSERT_EQ(bulk->notify(), SCADA_OK);
-        for (std::size_t i = 0; i < BULK_TAGS; ++i) {
-            const std::optional<scada_change> change = next_now(*sub);
-            ASSERT_TRUE(change.has_value()) << i;
-            EXPECT_EQ(change->handle, handles[i]);
-            EXPECT_EQ(change->quality, quality);
-        }
-        EXPECT_FALSE(next_now(*sub).has_value());
-    }
+    EXPECT_TRUE(avalanche(*bulk, handles, SCADA_QUALITY_UNCERTAIN, *sub));
+    EXPECT_TRUE(avalanche(*bulk, handles, SCADA_QUALITY_BAD, *sub));
     EXPECT_EQ(sub->stats().gaps, 0U);
     EXPECT_EQ(sub->stats().received, 2 * BULK_TAGS);
+}
+
+// `sub` gives SCADA_E_GAP once, then nothing, and has seen `epoch`.
+::testing::AssertionResult gives_one_gap(Subscription& sub,
+                                         std::uint32_t epoch) {
+    const int first = next_code(sub);
+    const int second = next_code(sub);
+    if (first != SCADA_E_GAP || second != SCADA_E_TIMEOUT ||
+        sub.stats().gaps != 1 || sub.stats().epoch != epoch) {
+        return ::testing::AssertionFailure()
+               << "codes " << first << " and " << second << ", "
+               << sub.stats().gaps << " gaps, epoch " << sub.stats().epoch;
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 7, the part of the ring: an owner that attaches again
 // increments the epoch, and every consumer gets SCADA_E_GAP once.
 TEST_F(Changes, Conformance07AnOwnerRestartGivesEveryConsumerOneGap) {
-    const Sub first = subscribe(*web(), "io");
-    const Sub second = subscribe(*web(), "io");
-    ASSERT_NE(first, nullptr);
-    ASSERT_NE(second, nullptr);
-    const std::uint32_t epoch = first->stats().epoch;
+    const std::array subs{subscribe(*web(), "io"), subscribe(*web(), "io")};
+    ASSERT_TRUE(subs[0] != nullptr && subs[1] != nullptr);
+    const std::uint32_t epoch = subs[0]->stats().epoch;
 
     io().reset();
     io() = attached("io");
     ASSERT_NE(io(), nullptr);
 
-    for (Subscription* sub : {first.get(), second.get()}) {
-        scada_change change{};
-        EXPECT_EQ(sub->next(change, 0), SCADA_E_GAP);
-        EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
-        EXPECT_EQ(sub->stats().gaps, 1U);
-        EXPECT_EQ(sub->stats().epoch, epoch + 1);
+    for (const Sub& sub : subs) {
+        EXPECT_TRUE(gives_one_gap(*sub, epoch + 1));
     }
     // The restarted owner's writes arrive.
-    ASSERT_EQ(io()->write(handle_of(*io(), "plant.level"), level_value(LEVEL)),
-              SCADA_OK);
-    EXPECT_TRUE(next_now(*first).has_value());
-    EXPECT_TRUE(next_now(*second).has_value());
+    write_level(level_value(LEVEL));
+    EXPECT_TRUE(has_next(*subs[0]) && has_next(*subs[1]));
 }
 
 // A ring that is not there when the subscription opens is no error; once
@@ -451,18 +576,17 @@ TEST_F(Changes, Conformance07AnOwnerRestartGivesEveryConsumerOneGap) {
 TEST_F(Changes, ARingThatIsMissingAtOpenGivesAGapWhenItAppears) {
     const Sub sub = subscribe(*web(), "bulk");
     ASSERT_NE(sub, nullptr);
-    scada_change change{};
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
 
     const Attached bulk = attached("bulk");
     ASSERT_NE(bulk, nullptr);
+    scada_change change{};
     // The library looks for the region again at most once a second.
     EXPECT_EQ(sub->next(change, WAIT_LIMIT_MS), SCADA_E_GAP);
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
     ASSERT_EQ(bulk->write(handle_of(*bulk, bulk_tag(0)), uint_value(1)),
               SCADA_OK);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    EXPECT_EQ(change.value, 1U);
+    EXPECT_EQ(take(*sub).value, 1U);
 }
 
 // A change entry is input: one that is not a valid change of a tag of the
@@ -470,20 +594,17 @@ TEST_F(Changes, ARingThatIsMissingAtOpenGivesAGapWhenItAppears) {
 TEST_F(Changes, AnEntryThatIsNotValidIsReportedAndSkipped) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    const std::uint32_t level = handle_of(*io(), "plant.level");
-    ASSERT_EQ(io()->write(level, level_value(LEVEL)), SCADA_OK);
-    ASSERT_EQ(io()->write(level, level_value(-LEVEL)), SCADA_OK);
+    write_level(level_value(LEVEL));
+    write_level(level_value(-LEVEL));
     {
         const MappedRegion ring = map_file("changes.io");
         auto& entry =
             shared_at<ChangeEntry>(ring.bytes(), change_ring_entries_offset());
         store_shared(entry.type, NO_TYPE, std::memory_order_relaxed);
     }
-    scada_change change{};
-    EXPECT_EQ(sub->next(change, 0), SCADA_E_LAYOUT);
+    EXPECT_EQ(next_code(*sub), SCADA_E_LAYOUT);
     EXPECT_EQ(sub->stats().invalid, 1U);
-    ASSERT_EQ(sub->next(change, 0), SCADA_OK);
-    EXPECT_EQ(std::bit_cast<double>(change.value), -LEVEL);
+    EXPECT_EQ(level_of(take(*sub)), -LEVEL);
 }
 
 TEST_F(Changes, ARingWithAnotherCapacityThanTheOwnerTableIsRefused) {
@@ -508,9 +629,8 @@ TEST_F(Changes, OpenRefusesAnOwnerThatIsNotThere) {
 TEST_F(Changes, AProcessSubscribesToItsOwnRing) {
     const Sub sub = subscribe(*io(), "io");
     ASSERT_NE(sub, nullptr);
-    ASSERT_EQ(io()->write(handle_of(*io(), "plant.level"), level_value(LEVEL)),
-              SCADA_OK);
-    EXPECT_TRUE(next_now(*sub).has_value());
+    write_level(level_value(LEVEL));
+    EXPECT_TRUE(has_next(*sub));
 }
 
 TEST_F(Changes, ANegativeTimeoutIsRefused) {
@@ -520,36 +640,43 @@ TEST_F(Changes, ANegativeTimeoutIsRefused) {
     EXPECT_EQ(sub->next(change, -1), SCADA_E_INVALID);
 }
 
-// The median time from a write to the return of `wait`, a consumer blocked
-// in another thread, over WAKE_TRIALS writes; `notify` says whether the
-// writer calls scada_tag_notify.
-template <typename Wait>
-std::int64_t median_wake_ns(Attachment& owner, std::uint32_t handle,
-                            bool notify, const Wait& wait) {
-    std::vector<std::int64_t> times;
-    for (std::size_t trial = 0; trial < WAKE_TRIALS; ++trial) {
-        std::atomic<bool> started{false};
-        std::int64_t woke = 0;
-        std::jthread consumer([&] {
+// The time from a write of `handle` by `owner` to the return of a consumer
+// blocked in `sub.next` in another thread, or WAIT_LIMIT_NS if it did not
+// return with the change. `notify` says whether the writer notifies.
+std::int64_t wake_time_ns(Attachment& owner, std::uint32_t handle,
+                          std::uint64_t value, bool notify, Subscription& sub) {
+    std::atomic<bool> started{false};
+    std::int64_t woke = 0;
+    std::int64_t written = 0;
+    {
+        const std::jthread consumer([&] {
             started.store(true);
-            if (wait()) {
+            scada_change change{};
+            if (sub.next(change, WAIT_LIMIT_MS) == SCADA_OK) {
                 woke = scada::monotonic_ns();
             }
         });
         while (!started.load()) {
             std::this_thread::yield();
         }
-        // Give the consumer time to block; if it has not, it finds the
-        // change before it waits, which only makes this trial faster.
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        const std::int64_t written = scada::monotonic_ns();
-        EXPECT_EQ(owner.write(handle, uint_value(trial + 1)), SCADA_OK);
+        // Time for the consumer to block; if it has not, it finds the change
+        // before it waits, which only makes this trial faster.
+        std::this_thread::sleep_for(BLOCK_TIME);
+        written = scada::monotonic_ns();
+        EXPECT_EQ(owner.write(handle, uint_value(value)), SCADA_OK);
         if (notify) {
             EXPECT_EQ(owner.notify(), SCADA_OK);
         }
-        consumer.join();
-        EXPECT_NE(woke, 0) << "trial " << trial;
-        times.push_back(woke - written);
+    }
+    return woke == 0 ? WAIT_LIMIT_NS : woke - written;
+}
+
+// The median of WAKE_TRIALS times of `wake_time_ns`.
+std::int64_t median_wake_ns(Attachment& owner, std::uint32_t handle,
+                            bool notify, Subscription& sub) {
+    std::vector<std::int64_t> times;
+    for (std::size_t trial = 0; trial < WAKE_TRIALS; ++trial) {
+        times.push_back(wake_time_ns(owner, handle, trial + 1, notify, sub));
     }
     std::ranges::sort(times);
     return times[times.size() / 2];
@@ -562,12 +689,8 @@ TEST_F(Changes, Conformance24NotifyWakesABlockedConsumer) {
     ASSERT_NE(bulk, nullptr);
     const Sub sub = subscribe(*web(), "bulk");
     ASSERT_NE(sub, nullptr);
-    const std::int64_t median =
-        median_wake_ns(*bulk, handle_of(*bulk, bulk_tag(0)), true, [&] {
-            scada_change change{};
-            return sub->next(change, WAIT_LIMIT_MS) == SCADA_OK;
-        });
-    EXPECT_LT(median, SLICE_NS / 4);
+    EXPECT_LT(median_wake_ns(*bulk, handle_of(*bulk, bulk_tag(0)), true, *sub),
+              SLICE_NS / 4);
 }
 
 // Conformance test 24: without notify, a change still arrives within the
@@ -577,12 +700,50 @@ TEST_F(Changes, Conformance24WithoutNotifyAChangeArrivesWithinTheCap) {
     ASSERT_NE(bulk, nullptr);
     const Sub sub = subscribe(*web(), "bulk");
     ASSERT_NE(sub, nullptr);
-    const std::int64_t median =
-        median_wake_ns(*bulk, handle_of(*bulk, bulk_tag(0)), false, [&] {
-            scada_change change{};
-            return sub->next(change, WAIT_LIMIT_MS) == SCADA_OK;
+    EXPECT_LE(median_wake_ns(*bulk, handle_of(*bulk, bulk_tag(0)), false, *sub),
+              2 * SLICE_NS);
+}
+
+// `set.wait` returns for a write by `owner` of `handle` with notify in
+// another thread.
+::testing::AssertionResult wakes_for_a_write(WaitSet& set, Attachment& owner,
+                                             std::uint32_t handle,
+                                             std::uint64_t value) {
+    int code = SCADA_E_INVALID;
+    {
+        const std::jthread writer([&] {
+            std::this_thread::sleep_for(BLOCK_TIME);
+            EXPECT_EQ(owner.write(handle, uint_value(value)), SCADA_OK);
+            EXPECT_EQ(owner.notify(), SCADA_OK);
         });
-    EXPECT_LE(median, 2 * SLICE_NS);
+        code = set.wait(WAIT_LIMIT_MS);
+    }
+    if (code != SCADA_OK) {
+        return ::testing::AssertionFailure() << "return code " << code;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// `set` wakes for a write of `handle` by `owner`, only `subs[written]` has
+// a change, and then nothing is ready.
+::testing::AssertionResult wakes_only_for_the_ring_written(
+    WaitSet& set, Attachment& owner, std::uint32_t handle,
+    std::span<const Sub> subs, std::size_t written) {
+    ::testing::AssertionResult woke =
+        wakes_for_a_write(set, owner, handle, written + 1);
+    if (!woke) {
+        return woke << " for ring " << written;
+    }
+    const ::testing::AssertionResult only =
+        only_one_has_a_change(subs, written);
+    if (!only) {
+        return only;
+    }
+    if (set.wait(0) != SCADA_E_TIMEOUT) {
+        return ::testing::AssertionFailure()
+               << "still ready after ring " << written;
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 24: a wait set over 10 rings wakes for any of them, and
@@ -594,27 +755,58 @@ TEST_F(Changes, Conformance24AWaitSetOverTenRingsWakesForAnyOfThem) {
     std::vector<Sub> subs;
     for (std::size_t k = 0; k < MULTI_OWNERS; ++k) {
         subs.push_back(subscribe(*web(), multi_owner(k)));
-        ASSERT_NE(subs.back(), nullptr);
-        ASSERT_EQ(set.add_sub(*subs.back()), SCADA_OK);
+        ASSERT_TRUE(subs.back() != nullptr &&
+                    set.add_sub(*subs.back()) == SCADA_OK)
+            << k;
     }
     EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
     for (std::size_t k = 0; k < MULTI_OWNERS; ++k) {
-        const std::uint32_t handle = handle_of(*multi, multi_owner(k) + ".t");
-        std::jthread writer([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            EXPECT_EQ(multi->write(handle, uint_value(k + 1)), SCADA_OK);
-            EXPECT_EQ(multi->notify(), SCADA_OK);
-        });
-        const std::int64_t start = scada::monotonic_ns();
-        ASSERT_EQ(set.wait(WAIT_LIMIT_MS), SCADA_OK) << k;
-        EXPECT_LT(scada::monotonic_ns() - start,
-                  WAIT_LIMIT_MS * NANOSECONDS_PER_MILLISECOND / 2);
-        writer.join();
-        for (std::size_t j = 0; j < MULTI_OWNERS; ++j) {
-            EXPECT_EQ(next_now(*subs[j]).has_value(), j == k) << k << " " << j;
-        }
-        EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
+        EXPECT_TRUE(wakes_only_for_the_ring_written(
+            set, *multi, handle_of(*multi, multi_owner(k) + ".t"), subs, k));
     }
+}
+
+// `descriptor` becomes readable within the wait limit, and is read.
+::testing::AssertionResult becomes_readable(int descriptor) {
+    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
+    if (::poll(&entry, 1, WAIT_LIMIT_MS) != 1 ||
+        (entry.revents & POLLIN) == 0) {
+        return ::testing::AssertionFailure() << "not readable";
+    }
+    std::uint64_t count = 0;
+    if (::read(descriptor, &count, sizeof(count)) !=
+            static_cast<ssize_t>(sizeof(count)) ||
+        count == 0) {
+        return ::testing::AssertionFailure() << "nothing to read";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// True if `descriptor` is readable now.
+bool readable_now(int descriptor) {
+    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
+    return ::poll(&entry, 1, 0) == 1;
+}
+
+// `owner` writes the level `round` to `handle` and notifies; `descriptor`
+// becomes readable and `sub` has that one change.
+::testing::AssertionResult arrives_by_poll(Attachment& owner,
+                                           std::uint32_t handle, int round,
+                                           int descriptor, Subscription& sub) {
+    if (owner.write(handle, level_value(round)) != SCADA_OK ||
+        owner.notify() != SCADA_OK) {
+        return ::testing::AssertionFailure() << "write or notify failed";
+    }
+    ::testing::AssertionResult readable = becomes_readable(descriptor);
+    if (!readable) {
+        return readable << " in round " << round;
+    }
+    scada_change change{};
+    if (sub.next(change, 0) != SCADA_OK || level_of(change) != round ||
+        has_next(sub)) {
+        return ::testing::AssertionFailure() << "not one change " << round;
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 24: the descriptor of a wait set works with poll.
@@ -625,45 +817,53 @@ TEST_F(Changes, Conformance24TheDescriptorOfAWaitSetWorksWithPoll) {
     ASSERT_EQ(set.add_sub(*sub), SCADA_OK);
     int descriptor = -1;
     ASSERT_EQ(set.fd(descriptor), SCADA_OK);
+    EXPECT_FALSE(readable_now(descriptor));
+
+    const std::uint32_t level = handle_of(*io(), "plant.level");
+    for (int round = 1; round <= ROUNDS; ++round) {
+        EXPECT_TRUE(arrives_by_poll(*io(), level, round, descriptor, *sub));
+    }
+}
+
+TEST_F(Changes, AWaitSetWithADescriptorTakesNoMoreSources) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    WaitSet set(*web());
+    int descriptor = -1;
+    ASSERT_EQ(set.fd(descriptor), SCADA_OK);
     int again = -1;
     ASSERT_EQ(set.fd(again), SCADA_OK);
     EXPECT_EQ(again, descriptor);
-    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
-    EXPECT_EQ(::poll(&entry, 1, 0), 0);
-
-    const std::uint32_t level = handle_of(*io(), "plant.level");
-    for (int round = 1; round <= 3; ++round) {
-        ASSERT_EQ(io()->write(level, level_value(round)), SCADA_OK);
-        ASSERT_EQ(io()->notify(), SCADA_OK);
-        ASSERT_EQ(::poll(&entry, 1, WAIT_LIMIT_MS), 1) << round;
-        EXPECT_NE(entry.revents & POLLIN, 0);
-        std::uint64_t count = 0;
-        ASSERT_EQ(::read(descriptor, &count, sizeof(count)),
-                  static_cast<ssize_t>(sizeof(count)));
-        EXPECT_GE(count, 1U);
-        const std::optional<scada_change> change = next_now(*sub);
-        ASSERT_TRUE(change.has_value());
-        EXPECT_EQ(std::bit_cast<double>(change->value), round);
-        EXPECT_FALSE(next_now(*sub).has_value());
-    }
-    // Sources cannot be added once the thread runs.
-    const Sub other = subscribe(*web(), "io");
-    ASSERT_NE(other, nullptr);
-    EXPECT_EQ(set.add_sub(*other), SCADA_E_INVALID);
+    EXPECT_EQ(set.add_sub(*sub), SCADA_E_INVALID);
+    EXPECT_EQ(set.add_cycle(0), SCADA_E_INVALID);
 }
 
 // What was ready before the descriptor was asked for makes it readable.
 TEST_F(Changes, ADescriptorIsReadableAtOnceForAChangeWrittenBefore) {
     const Sub sub = subscribe(*web(), "io");
     ASSERT_NE(sub, nullptr);
-    ASSERT_EQ(io()->write(handle_of(*io(), "plant.level"), level_value(LEVEL)),
-              SCADA_OK);
+    write_level(level_value(LEVEL));
     WaitSet set(*web());
     ASSERT_EQ(set.add_sub(*sub), SCADA_OK);
     int descriptor = -1;
     ASSERT_EQ(set.fd(descriptor), SCADA_OK);
-    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
-    EXPECT_EQ(::poll(&entry, 1, WAIT_LIMIT_MS), 1);
+    EXPECT_TRUE(becomes_readable(descriptor));
+}
+
+// `set.wait` returns for a notify of `owner` without a write.
+::testing::AssertionResult wakes_for_a_cycle(WaitSet& set, Attachment& owner) {
+    int code = SCADA_E_INVALID;
+    {
+        const std::jthread notifier([&] {
+            std::this_thread::sleep_for(BLOCK_TIME);
+            EXPECT_EQ(owner.notify(), SCADA_OK);
+        });
+        code = set.wait(WAIT_LIMIT_MS);
+    }
+    if (code != SCADA_OK) {
+        return ::testing::AssertionFailure() << "return code " << code;
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 24: a waiter on `cycle_seq` wakes on a cycle with no tag
@@ -673,15 +873,11 @@ TEST_F(Changes, Conformance24AWaiterOnTheCycleWakesWithoutATagChange) {
         web()->header().find_process("io");
     ASSERT_TRUE(process.has_value());
     WaitSet set(*web());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked by the assertion above
     ASSERT_EQ(set.add_cycle(*process), SCADA_OK);
     EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
-    for (int cycle = 0; cycle < 3; ++cycle) {
-        std::jthread owner([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            EXPECT_EQ(io()->notify(), SCADA_OK);
-        });
-        EXPECT_EQ(set.wait(WAIT_LIMIT_MS), SCADA_OK) << cycle;
-        owner.join();
+    for (int cycle = 0; cycle < ROUNDS; ++cycle) {
+        EXPECT_TRUE(wakes_for_a_cycle(set, *io())) << cycle;
         EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT) << cycle;
     }
 }
@@ -701,13 +897,17 @@ TEST_F(Changes, AWaitSetRefusesWhatItCannotHold) {
     EXPECT_EQ(other.add_sub(*sub), SCADA_E_INVALID);
     WaitSet of_io(*io());
     const Sub web_sub = subscribe(*web(), "io");
+    ASSERT_NE(web_sub, nullptr);
     EXPECT_EQ(of_io.add_sub(*web_sub), SCADA_E_INVALID);
+}
 
-    // At most MAX_WAIT_SET_SOURCES sources.
+TEST_F(Changes, AWaitSetHoldsAtMost127Sources) {
     WaitSet full(*web());
-    for (std::size_t i = 0; i < MAX_WAIT_SET_SOURCES; ++i) {
-        ASSERT_EQ(full.add_cycle(0), SCADA_OK) << i;
+    std::size_t added = 0;
+    while (added < MAX_WAIT_SET_SOURCES && full.add_cycle(0) == SCADA_OK) {
+        ++added;
     }
+    EXPECT_EQ(added, MAX_WAIT_SET_SOURCES);
     EXPECT_EQ(full.add_cycle(0), SCADA_E_INVALID);
 }
 

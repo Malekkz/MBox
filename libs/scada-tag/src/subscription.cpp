@@ -11,6 +11,7 @@
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace scada::tag {
 

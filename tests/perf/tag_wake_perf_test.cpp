@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,6 +47,11 @@ constexpr std::int64_t NANOSECONDS_PER_MICROSECOND = 1000;
 constexpr std::int64_t P99_LIMIT_NS = 1'000'000;
 constexpr std::size_t PERCENT = 100;
 constexpr std::size_t P99 = 99;
+#if defined(__x86_64__)
+constexpr bool IS_X86_64 = true;
+#else
+constexpr bool IS_X86_64 = false;
+#endif
 
 std::int64_t monotonic_now_ns() {
     timespec now{};
@@ -59,6 +65,60 @@ bool report_only() {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
     const char* const text = std::getenv("SCADA_PERF_REPORT_ONLY");
     return text != nullptr && std::string_view(text) == "1";
+}
+
+// Takes SAMPLES changes from `sub` and returns, sorted, the time from each
+// write to the return of scada_sub_next. Empty, with a failed expectation,
+// if a change did not come.
+std::vector<std::int64_t> measure(scada_sub* sub) {
+    std::vector<std::int64_t> latencies;
+    latencies.reserve(SAMPLES);
+    // The first change may have been written before this process waited.
+    scada_change change{};
+    if (scada_sub_next(sub, &change, WAIT_MS) != SCADA_OK) {
+        ADD_FAILURE() << "no first change";
+        return {};
+    }
+    while (latencies.size() < SAMPLES) {
+        const int code = scada_sub_next(sub, &change, WAIT_MS);
+        const std::int64_t woke = monotonic_now_ns();
+        if (code != SCADA_OK) {
+            ADD_FAILURE() << "code " << code << " after " << latencies.size();
+            return {};
+        }
+        latencies.push_back(woke - change.update_mono_ns);
+    }
+    std::ranges::sort(latencies);
+    return latencies;
+}
+
+// Prints and records median, 99th percentile and maximum of the sorted
+// `latencies`, and returns the 99th percentile.
+std::int64_t report(std::span<const std::int64_t> latencies) {
+    const std::int64_t median =
+        latencies[latencies.size() / 2] / NANOSECONDS_PER_MICROSECOND;
+    const std::int64_t p99 = latencies[(latencies.size() * P99) / PERCENT];
+    const std::int64_t worst = latencies.back() / NANOSECONDS_PER_MICROSECOND;
+    std::cout << "wake latency: samples=" << latencies.size()
+              << " median_us=" << median
+              << " p99_us=" << p99 / NANOSECONDS_PER_MICROSECOND
+              << " max_us=" << worst << "\n";
+    ::testing::Test::RecordProperty("median_us", std::to_string(median));
+    ::testing::Test::RecordProperty(
+        "p99_us", std::to_string(p99 / NANOSECONDS_PER_MICROSECOND));
+    ::testing::Test::RecordProperty("max_us", std::to_string(worst));
+    return p99;
+}
+
+// The 99th percentile `p99` is below 1 ms. Checked on x86-64 only: the
+// issue asks for the figure of ARM64, not a limit; and not with
+// SCADA_PERF_REPORT_ONLY.
+::testing::AssertionResult meets_target(std::int64_t p99) {
+    if (!IS_X86_64 || report_only() || p99 < P99_LIMIT_NS) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "99th percentile " << p99 << " ns, limit " << P99_LIMIT_NS;
 }
 
 class WakeLatency : public TagProcesses {};
@@ -80,39 +140,10 @@ TEST_F(WakeLatency, ABlockedConsumerWakesWithinOneMillisecond) {
     const Attached reader(base(), "reader");
     scada_sub* sub = nullptr;
     ASSERT_EQ(scada_sub_open(reader.ctx(), "load.w0", &sub), SCADA_OK);
-
-    std::vector<std::int64_t> latencies;
-    latencies.reserve(SAMPLES);
-    // The first change may have been written before this process waited.
-    scada_change change{};
-    ASSERT_EQ(scada_sub_next(sub, &change, WAIT_MS), SCADA_OK);
-    while (latencies.size() < SAMPLES) {
-        const int code = scada_sub_next(sub, &change, WAIT_MS);
-        const std::int64_t woke = monotonic_now_ns();
-        ASSERT_EQ(code, SCADA_OK) << "after " << latencies.size();
-        latencies.push_back(woke - change.update_mono_ns);
-    }
+    const std::vector<std::int64_t> latencies = measure(sub);
     scada_sub_close(sub);
-
-    std::ranges::sort(latencies);
-    const std::int64_t median = latencies[latencies.size() / 2];
-    const std::int64_t p99 = latencies[(latencies.size() * P99) / PERCENT];
-    const std::int64_t worst = latencies.back();
-    std::cout << "wake latency: samples=" << latencies.size()
-              << " median_us=" << median / NANOSECONDS_PER_MICROSECOND
-              << " p99_us=" << p99 / NANOSECONDS_PER_MICROSECOND
-              << " max_us=" << worst / NANOSECONDS_PER_MICROSECOND << "\n";
-    RecordProperty("median_us",
-                   std::to_string(median / NANOSECONDS_PER_MICROSECOND));
-    RecordProperty("p99_us", std::to_string(p99 / NANOSECONDS_PER_MICROSECOND));
-    RecordProperty("max_us",
-                   std::to_string(worst / NANOSECONDS_PER_MICROSECOND));
-#if defined(__x86_64__)
-    if (!report_only()) {
-        EXPECT_LT(p99, P99_LIMIT_NS);
-    }
-#endif
-
+    ASSERT_EQ(latencies.size(), SAMPLES);
+    EXPECT_TRUE(meets_target(report(latencies)));
     EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }

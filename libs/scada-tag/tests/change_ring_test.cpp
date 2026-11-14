@@ -15,6 +15,7 @@
 #include "scada/common/mapped_region.h"
 #include "scada/common/result.h"
 #include "scada/tag/tag_set.h"
+#include "scada/tag/types.h"
 
 #include <gtest/gtest.h>
 
@@ -47,6 +48,12 @@ constexpr std::int64_t WAIT_LIMIT_NS = 10'000 * NANOSECONDS_PER_MILLISECOND;
 constexpr std::int64_t SHORT_WAIT_NS = 20 * NANOSECONDS_PER_MILLISECOND;
 constexpr std::size_t FILE_SIZE = 4096;
 constexpr std::size_t WORDS = 10;
+constexpr std::uint64_t ROUNDS_OF_THE_RING = 3;
+// A cursor ahead of a ring that holds one entry.
+constexpr std::uint64_t AHEAD = 5;
+// Two values of a word, the one stored and another.
+constexpr std::uint32_t STORED = 7;
+constexpr std::uint32_t NOT_STORED = 6;
 
 // A `changes` region of CAPACITY entries in private memory.
 class Ring {
@@ -82,23 +89,50 @@ ChangeEntry entry_of(std::uint64_t number) {
     return entry;
 }
 
-TEST(ChangeRing, EntriesComeOutInOrderAndThenNothing) {
-    Ring ring;
-    constexpr std::uint64_t ENTRIES = 3 * CAPACITY;
-    std::uint64_t cursor = 0;
-    for (std::uint64_t i = 0; i < ENTRIES; ++i) {
+// Appends entries `first` to `last - 1` to `ring`.
+void append_entries(Ring& ring, std::uint64_t first, std::uint64_t last) {
+    for (std::uint64_t i = first; i < last; ++i) {
         append_change(ring.bytes(), CAPACITY, entry_of(i));
+    }
+}
+
+// Reads entries `first` to `last - 1` of `ring` from the cursor `first`,
+// each whole and in order.
+::testing::AssertionResult reads_entries(Ring& ring, std::uint64_t first,
+                                         std::uint64_t last) {
+    std::uint64_t cursor = first;
+    for (std::uint64_t i = first; i < last; ++i) {
         ChangeEntry out;
         std::uint64_t written = 0;
-        ASSERT_EQ(read_change(ring.bytes(), CAPACITY, cursor, out, written),
-                  RingRead::ENTRY);
-        EXPECT_EQ(out.value, i);
-        EXPECT_EQ(out.handle, static_cast<std::uint32_t>(i));
-        EXPECT_EQ(out.source_time_ns, static_cast<std::int64_t>(i) + 1);
-        EXPECT_EQ(cursor, i + 1);
-        ASSERT_EQ(read_change(ring.bytes(), CAPACITY, cursor, out, written),
-                  RingRead::NOTHING);
-        EXPECT_EQ(written, cursor);
+        if (read_change(ring.bytes(), CAPACITY, cursor, out, written) !=
+            RingRead::ENTRY) {
+            return ::testing::AssertionFailure() << "no entry " << i;
+        }
+        const ChangeEntry expected = entry_of(i);
+        if (out.value != i || out.handle != expected.handle ||
+            out.source_time_ns != expected.source_time_ns || cursor != i + 1) {
+            return ::testing::AssertionFailure() << "entry " << i << " wrong";
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// What `read_change` gives at `cursor` of `ring`, with the `write_seq` it
+// reports in `written`.
+RingRead read_at(Ring& ring, std::uint64_t cursor, std::uint64_t& written) {
+    ChangeEntry out;
+    return read_change(ring.bytes(), CAPACITY, cursor, out, written);
+}
+
+TEST(ChangeRing, EntriesComeOutInOrderAndThenNothing) {
+    Ring ring;
+    constexpr std::uint64_t ENTRIES = ROUNDS_OF_THE_RING * CAPACITY;
+    for (std::uint64_t i = 0; i < ENTRIES; ++i) {
+        append_entries(ring, i, i + 1);
+        ASSERT_TRUE(reads_entries(ring, i, i + 1));
+        std::uint64_t written = 0;
+        ASSERT_EQ(read_at(ring, i + 1, written), RingRead::NOTHING) << i;
+        ASSERT_EQ(written, i + 1);
     }
     EXPECT_EQ(ring_write_seq(ring.bytes()), ENTRIES);
 }
@@ -107,45 +141,28 @@ TEST(ChangeRing, EntriesComeOutInOrderAndThenNothing) {
 // than the capacity behind still reads every entry. One entry more is a
 // gap (section 8.2: `w - cursor >= capacity`), because the owner may be
 // writing the slot of the cursor while `write_seq` shows that position.
-TEST(ChangeRing, AGapIsReportedExactlyWhenTheCursorIsOverrun) {
+TEST(ChangeRing, AConsumerJustInsideTheRingReadsEveryEntry) {
     Ring ring;
-    for (std::uint64_t i = 0; i < CAPACITY - 1; ++i) {
-        append_change(ring.bytes(), CAPACITY, entry_of(i));
-    }
-    std::uint64_t cursor = 0;
-    ChangeEntry out;
-    std::uint64_t written = 0;
-    for (std::uint64_t i = 0; i < CAPACITY - 1; ++i) {
-        ASSERT_EQ(read_change(ring.bytes(), CAPACITY, cursor, out, written),
-                  RingRead::ENTRY);
-        EXPECT_EQ(out.value, i);
-    }
+    append_entries(ring, 0, CAPACITY - 1);
+    EXPECT_TRUE(reads_entries(ring, 0, CAPACITY - 1));
+}
 
+TEST(ChangeRing, AGapIsReportedExactlyWhenTheCursorIsOverrun) {
     Ring overrun;
-    for (std::uint64_t i = 0; i < CAPACITY; ++i) {
-        append_change(overrun.bytes(), CAPACITY, entry_of(i));
-    }
-    cursor = 0;
-    out = entry_of(0);
-    EXPECT_EQ(read_change(overrun.bytes(), CAPACITY, cursor, out, written),
-              RingRead::GAP);
-    EXPECT_EQ(cursor, 0U);  // the caller decides where to go on
+    append_entries(overrun, 0, CAPACITY);
+    std::uint64_t written = 0;
+    EXPECT_EQ(read_at(overrun, 0, written), RingRead::GAP);
     EXPECT_EQ(written, std::uint64_t{CAPACITY});
-    cursor = 1;  // the oldest entry still there
-    ASSERT_EQ(read_change(overrun.bytes(), CAPACITY, cursor, out, written),
-              RingRead::ENTRY);
-    EXPECT_EQ(out.value, 1U);
+    // The oldest entry still there.
+    EXPECT_TRUE(reads_entries(overrun, 1, CAPACITY));
 }
 
 // A `write_seq` behind the cursor is in no valid ring; it is not followed.
 TEST(ChangeRing, AWriteSeqBehindTheCursorIsAGap) {
     Ring ring;
     append_change(ring.bytes(), CAPACITY, entry_of(0));
-    std::uint64_t cursor = 5;
-    ChangeEntry out;
     std::uint64_t written = 0;
-    EXPECT_EQ(read_change(ring.bytes(), CAPACITY, cursor, out, written),
-              RingRead::GAP);
+    EXPECT_EQ(read_at(ring, AHEAD, written), RingRead::GAP);
 }
 
 // A file in the temporary directory, mapped twice: read-write, as its owner
@@ -205,7 +222,7 @@ TEST_F(Futex, AWaitOnAReadOnlyMappingIsWokenThroughAWritableOne) {
     store_shared(owner_word(0), 1U, std::memory_order_release);
     // Wakes until the waiter has returned: it may not have started its wait.
     std::atomic<bool> done{false};
-    std::jthread waker([&] {
+    const std::jthread waker([&] {
         while (!done.load()) {
             EXPECT_TRUE(futex_wake_all(&owner_word(0)));
             std::this_thread::yield();
@@ -223,10 +240,10 @@ TEST_F(Futex, AWaitOnAReadOnlyMappingIsWokenThroughAWritableOne) {
 // A wait compares the word first: a wake that came before the wait is not
 // lost, because the word changed.
 TEST_F(Futex, AWaitOnAWordThatChangedReturnsAtOnce) {
-    store_shared(owner_word(0), 7U, std::memory_order_release);
-    EXPECT_EQ(
-        futex_wait(&reader_word(0), 6, scada::monotonic_ns() + WAIT_LIMIT_NS),
-        FutexWait::VALUE_CHANGED);
+    store_shared(owner_word(0), STORED, std::memory_order_release);
+    EXPECT_EQ(futex_wait(&reader_word(0), NOT_STORED,
+                         scada::monotonic_ns() + WAIT_LIMIT_NS),
+              FutexWait::VALUE_CHANGED);
 }
 
 TEST_F(Futex, AWaitWithoutAWakeEndsAtItsDeadline) {

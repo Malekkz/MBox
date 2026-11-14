@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <poll.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <array>
@@ -24,8 +25,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace {
@@ -126,6 +127,109 @@ struct RingCounts {
     std::uint64_t other = 0;         // a return code but OK and TIMEOUT
 };
 
+// The consumer of the writer's rings: checks every change of every tag.
+class Consumer {
+public:
+    // Will follow the tags `load.w<k>.t<i>` that the writer writes, as
+    // `reader` resolves them.
+    explicit Consumer(const Attached& reader) {
+        for (std::size_t owner = 0; owner < WRITER_OWNERS; ++owner) {
+            for (std::size_t tag = 0; tag < WRITER_TAGS; ++tag) {
+                last_[reader.resolve(owner_name(owner) + ".t" +
+                                     std::to_string(tag))] = 0;
+            }
+        }
+    }
+
+    // Waits on `set` and takes what `subs` deliver until every tag has
+    // reached ROUNDS, or nothing comes for WAIT_MS. False if a wait failed.
+    bool run(scada_waitset* set,
+             std::span<const std::unique_ptr<Subscribed>> subs) {
+        const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
+        while (!complete() && Clock::now() < deadline) {
+            const int waited = scada_waitset_wait(set, WAIT_MS);
+            if (waited != SCADA_OK) {
+                return waited == SCADA_E_TIMEOUT;
+            }
+            for (std::size_t owner = 0; owner < subs.size(); ++owner) {
+                drain(subs[owner]->get(), counts_.at(owner));
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool complete() const {
+        return complete_ == WRITER_OWNERS * WRITER_TAGS;
+    }
+    [[nodiscard]] const RingCounts& counts(std::size_t owner) const {
+        return counts_.at(owner);
+    }
+
+private:
+    // Takes every change `sub` has now.
+    void drain(scada_sub* sub, RingCounts& count) {
+        for (;;) {
+            scada_change change{};
+            const int code = scada_sub_next(sub, &change, 0);
+            if (code == SCADA_E_TIMEOUT) {
+                return;
+            }
+            if (code == SCADA_OK) {
+                judge(change, count);
+            } else if (code !=
+                       SCADA_E_GAP) {  // a gap is counted by the library
+                ++count.other;
+            }
+        }
+    }
+
+    void judge(const scada_change& change, RingCounts& count) {
+        ++count.received;
+        if (!is_one_write(change)) {
+            ++count.torn;
+        }
+        const auto tag = last_.find(change.handle);
+        if (tag == last_.end()) {
+            ++count.other;
+            return;
+        }
+        if (tag->second != 0 && change.value != tag->second + 1) {
+            ++count.out_of_order;
+        }
+        tag->second = change.value;
+        if (tag->second == ROUNDS) {
+            ++complete_;
+        }
+    }
+
+    // The count each tag had last, 0 before its first change.
+    std::map<std::uint32_t, std::uint64_t> last_;
+    std::size_t complete_ = 0;  // tags that have reached ROUNDS
+    std::array<RingCounts, WRITER_OWNERS> counts_{};
+};
+
+// The consumer of one ring received changes, every one whole and in order,
+// and `sub` saw no gap and lost nothing.
+::testing::AssertionResult ring_was_clean(const RingCounts& count,
+                                          scada_sub* sub) {
+    if (count.received == 0 ||
+        count.torn + count.out_of_order + count.other != 0) {
+        return ::testing::AssertionFailure()
+               << count.received << " received, " << count.torn << " torn, "
+               << count.out_of_order << " out of order, " << count.other
+               << " other";
+    }
+    scada_sub_stats_t stats{};
+    if (scada_sub_stats(sub, &stats) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "no statistics";
+    }
+    if (stats.gaps != 0 || stats.lost != 0) {
+        return ::testing::AssertionFailure()
+               << stats.gaps << " gaps, " << stats.lost << " lost";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // Conformance test 13 across processes: a consumer that keeps up sees
 // every entry of every ring, whole and in order, woken by the notify of
 // the writer through a wait set. The consumer subscribes once the writer
@@ -148,77 +252,67 @@ TEST_F(ChangeRingProcesses, Conformance13AFastConsumerSeesEveryEntryInOrder) {
     for (std::size_t owner = 0; owner < WRITER_OWNERS; ++owner) {
         subs.push_back(
             std::make_unique<Subscribed>(reader.ctx(), owner_name(owner)));
-        ASSERT_EQ(scada_waitset_add_sub(set.get(), subs.back()->get()),
-                  SCADA_OK);
+        ASSERT_TRUE(scada_waitset_add_sub(set.get(), subs.back()->get()) ==
+                    SCADA_OK)
+            << owner;
     }
 
-    std::array<RingCounts, WRITER_OWNERS> counts{};
-    // The count each tag the writer writes had last, 0 before its first
-    // change. `complete` tags have reached ROUNDS.
-    std::map<std::uint32_t, std::uint64_t> last;
+    Consumer consumer(reader);
+    EXPECT_TRUE(consumer.run(set.get(), subs) && consumer.complete());
     for (std::size_t owner = 0; owner < WRITER_OWNERS; ++owner) {
-        for (std::size_t tag = 0; tag < WRITER_TAGS; ++tag) {
-            last[reader.resolve(owner_name(owner) + ".t" +
-                                std::to_string(tag))] = 0;
-        }
-    }
-    std::size_t complete = 0;
-    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
-    while (complete < WRITER_OWNERS * WRITER_TAGS && Clock::now() < deadline) {
-        const int waited = scada_waitset_wait(set.get(), WAIT_MS);
-        if (waited == SCADA_E_TIMEOUT) {
-            break;
-        }
-        ASSERT_EQ(waited, SCADA_OK);
-        for (std::size_t owner = 0; owner < WRITER_OWNERS; ++owner) {
-            RingCounts& count = counts.at(owner);
-            for (;;) {
-                scada_change change{};
-                const int code = scada_sub_next(subs[owner]->get(), &change, 0);
-                if (code == SCADA_E_TIMEOUT) {
-                    break;
-                }
-                if (code == SCADA_E_GAP) {
-                    continue;  // counted by the library
-                }
-                if (code != SCADA_OK) {
-                    ++count.other;
-                    continue;
-                }
-                ++count.received;
-                if (!is_one_write(change)) {
-                    ++count.torn;
-                }
-                const auto tag = last.find(change.handle);
-                if (tag == last.end()) {
-                    ++count.other;
-                    continue;
-                }
-                std::uint64_t& previous = tag->second;
-                if (previous != 0 && change.value != previous + 1) {
-                    ++count.out_of_order;
-                }
-                previous = change.value;
-                if (previous == ROUNDS) {
-                    ++complete;
-                }
-            }
-        }
-    }
-    EXPECT_EQ(complete, WRITER_OWNERS * WRITER_TAGS);
-    for (std::size_t owner = 0; owner < WRITER_OWNERS; ++owner) {
-        const RingCounts& count = counts.at(owner);
-        EXPECT_GT(count.received, 0U) << owner;
-        EXPECT_EQ(count.torn, 0U) << owner;
-        EXPECT_EQ(count.out_of_order, 0U) << owner;
-        EXPECT_EQ(count.other, 0U) << owner;
-        scada_sub_stats_t stats{};
-        ASSERT_EQ(scada_sub_stats(subs[owner]->get(), &stats), SCADA_OK);
-        EXPECT_EQ(stats.gaps, 0U) << owner;
-        EXPECT_EQ(stats.lost, 0U) << owner;
+        EXPECT_TRUE(ring_was_clean(consumer.counts(owner), subs[owner]->get()))
+            << owner;
     }
     EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
+}
+
+// `descriptor`, the descriptor of a wait set that holds `sub`, becomes
+// readable again and again until `sub` has delivered `changes` changes.
+::testing::AssertionResult receives_by_poll(int descriptor, scada_sub* sub,
+                                            int changes) {
+    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
+    int got = 0;
+    while (got < changes) {
+        if (::poll(&entry, 1, WAIT_MS) != 1) {
+            return ::testing::AssertionFailure()
+                   << "not readable after " << got << " changes";
+        }
+        std::uint64_t count = 0;
+        // Non-blocking: a second readiness may have been read already.
+        const ssize_t read = ::read(descriptor, &count, sizeof(count));
+        static_cast<void>(read);
+        scada_change change{};
+        while (scada_sub_next(sub, &change, 0) == SCADA_OK) {
+            ++got;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// The process index of the owner of the tag `name`, as `reader` sees it.
+std::uint16_t process_of(const Attached& reader, const std::string& name) {
+    scada_tag_info_t info{};
+    EXPECT_EQ(scada_tag_info(reader.ctx(), reader.resolve(name), &info),
+              SCADA_OK);
+    return info.process_index;
+}
+
+// A wait set over the cycle counter of `process_index` wakes `cycles`
+// times.
+::testing::AssertionResult wakes_for_cycles(scada_ctx* ctx,
+                                            std::uint16_t process_index,
+                                            int cycles) {
+    const WaitSet set(ctx);
+    if (scada_waitset_add_cycle(set.get(), process_index) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "cannot add the cycle";
+    }
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        if (scada_waitset_wait(set.get(), WAIT_MS) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "no cycle " << cycle;
+        }
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 24 across processes: the descriptor of a wait set
@@ -234,6 +328,7 @@ TEST_F(ChangeRingProcesses, Conformance24TheDescriptorAndTheCycleWorkAcross) {
     // has written them all.
     constexpr std::uint64_t SLOW_RATE = 100;
     constexpr std::uint64_t SLOW_UPDATES = 300;
+    constexpr int CHANGES = 5;
     std::optional<ChildProcess> writer =
         start_writer(SLOW_UPDATES, SLOW_RATE, "notify");
     if (!writer.has_value()) {
@@ -245,31 +340,33 @@ TEST_F(ChangeRingProcesses, Conformance24TheDescriptorAndTheCycleWorkAcross) {
     ASSERT_EQ(scada_waitset_add_sub(set.get(), sub.get()), SCADA_OK);
     int descriptor = -1;
     ASSERT_EQ(scada_waitset_fd(set.get(), &descriptor), SCADA_OK);
-    pollfd entry{.fd = descriptor, .events = POLLIN, .revents = 0};
-    constexpr int CHANGES = 5;
-    for (int got = 0; got < CHANGES;) {
-        ASSERT_EQ(::poll(&entry, 1, WAIT_MS), 1) << got;
-        std::uint64_t ignored = 0;
-        // Non-blocking: a second readiness may have been read already.
-        static_cast<void>(::read(descriptor, &ignored, sizeof(ignored)));
-        scada_change change{};
-        while (scada_sub_next(sub.get(), &change, 0) == SCADA_OK) {
-            ++got;
-        }
-    }
+    EXPECT_TRUE(receives_by_poll(descriptor, sub.get(), CHANGES));
 
     // The cycle counter of the writer's process.
-    scada_tag_info_t info{};
-    ASSERT_EQ(scada_tag_info(reader.ctx(), reader.resolve("load.w0.t0"), &info),
-              SCADA_OK);
-    const WaitSet cycles(reader.ctx());
-    ASSERT_EQ(scada_waitset_add_cycle(cycles.get(), info.process_index),
-              SCADA_OK);
-    for (int cycle = 0; cycle < CHANGES; ++cycle) {
-        EXPECT_EQ(scada_waitset_wait(cycles.get(), WAIT_MS), SCADA_OK) << cycle;
-    }
+    EXPECT_TRUE(wakes_for_cycles(reader.ctx(), process_of(reader, "load.w0.t0"),
+                                 CHANGES));
     EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
+}
+
+// The return code of `scada_sub_next` on `sub` without waiting.
+int next_code(scada_sub* sub) {
+    scada_change change{};
+    return scada_sub_next(sub, &change, 0);
+}
+
+// `sub` gives SCADA_E_GAP once and then nothing, and has counted one gap.
+::testing::AssertionResult gives_one_gap(scada_sub* sub) {
+    const int first = next_code(sub);
+    const int second = next_code(sub);
+    scada_sub_stats_t stats{};
+    if (first != SCADA_E_GAP || second != SCADA_E_TIMEOUT ||
+        scada_sub_stats(sub, &stats) != SCADA_OK || stats.gaps != 1) {
+        return ::testing::AssertionFailure()
+               << "codes " << first << " and " << second << ", " << stats.gaps
+               << " gaps";
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Conformance test 7, the part of the ring, across processes: the owner is
@@ -284,20 +381,15 @@ TEST_F(ChangeRingProcesses, Conformance07AKilledOwnerThatRestartsGivesOneGap) {
     }
     const Attached reader(base(), "reader");
     const Subscribed sub(reader.ctx(), "io");
-    scada_change change{};
-    EXPECT_EQ(scada_sub_next(sub.get(), &change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(sub.get()), SCADA_E_TIMEOUT);
     kill(*owner);
-    EXPECT_EQ(scada_sub_next(sub.get(), &change, 0), SCADA_E_TIMEOUT);
+    EXPECT_EQ(next_code(sub.get()), SCADA_E_TIMEOUT);
 
     std::optional<ChildProcess> again = attached_io();
     if (!again.has_value()) {
         return;
     }
-    EXPECT_EQ(scada_sub_next(sub.get(), &change, 0), SCADA_E_GAP);
-    EXPECT_EQ(scada_sub_next(sub.get(), &change, 0), SCADA_E_TIMEOUT);
-    scada_sub_stats_t stats{};
-    ASSERT_EQ(scada_sub_stats(sub.get(), &stats), SCADA_OK);
-    EXPECT_EQ(stats.gaps, 1U);
+    EXPECT_TRUE(gives_one_gap(sub.get()));
     EXPECT_TRUE(stops_cleanly(*again));
     stop(*tagd);
 }

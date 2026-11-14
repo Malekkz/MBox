@@ -334,37 +334,37 @@ int scada_waitset_create(scada_ctx* ctx, scada_waitset** out) {
     });
 }
 
-int scada_waitset_add_sub(scada_waitset* ws, scada_sub* sub) {
-    if (ws == nullptr || sub == nullptr) {
+int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub) {
+    if (set == nullptr || sub == nullptr) {
         return SCADA_E_INVALID;
     }
-    return guarded([&] { return ws->wait_set->add_sub(*sub->subscription); });
+    return guarded([&] { return set->wait_set->add_sub(*sub->subscription); });
 }
 
-int scada_waitset_add_cycle(scada_waitset* ws, uint16_t process_index) {
-    if (ws == nullptr) {
+int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index) {
+    if (set == nullptr) {
         return SCADA_E_INVALID;
     }
-    return guarded([&] { return ws->wait_set->add_cycle(process_index); });
+    return guarded([&] { return set->wait_set->add_cycle(process_index); });
 }
 
-int scada_waitset_wait(scada_waitset* ws, int timeout_ms) {
-    if (ws == nullptr || timeout_ms < 0) {
+int scada_waitset_wait(scada_waitset* set, int timeout_ms) {
+    if (set == nullptr || timeout_ms < 0) {
         return SCADA_E_INVALID;
     }
-    return guarded([&] { return ws->wait_set->wait(timeout_ms); });
+    return guarded([&] { return set->wait_set->wait(timeout_ms); });
 }
 
-int scada_waitset_fd(scada_waitset* ws, int* fd) {
-    if (ws == nullptr || fd == nullptr) {
+int scada_waitset_fd(scada_waitset* set, int* descriptor) {
+    if (set == nullptr || descriptor == nullptr) {
         return SCADA_E_INVALID;
     }
-    return guarded([&] { return ws->wait_set->fd(*fd); });
+    return guarded([&] { return set->wait_set->fd(*descriptor); });
 }
 
-void scada_waitset_destroy(scada_waitset* ws) {
+void scada_waitset_destroy(scada_waitset* set) {
     // Takes back the ownership scada_waitset_create handed to the caller.
-    const std::unique_ptr<scada_waitset> owned(ws);
+    const std::unique_ptr<scada_waitset> owned(set);
 }
 
 }  // extern "C"

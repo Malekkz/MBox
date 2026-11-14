@@ -12,6 +12,7 @@
 #include "scada/tag/scada_tag.h"
 
 #include <sys/eventfd.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -20,7 +21,6 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <optional>
 #include <span>
 #include <system_error>
@@ -40,7 +40,8 @@ std::uint32_t cycle_count(std::uint32_t& cycle) noexcept {
     return load_shared(cycle, std::memory_order_acquire);
 }
 
-// What `source` shows now: a ring of an owner, or a cycle counter.
+// What a source shows now: the ring of owner `index` if `ring`, otherwise
+// the cycle counter of process `index`.
 Seen look_at(Attachment& attachment, bool ring, std::size_t index) noexcept {
     Seen seen;
     if (ring) {
@@ -62,11 +63,45 @@ Seen look_at(Attachment& attachment, bool ring, std::size_t index) noexcept {
     return seen;
 }
 
+// The futex word of `watch` in its mapping now, if that is still the
+// mapping `seen` belongs to; null otherwise.
+const void* watched_word(Attachment& attachment, const WaitSetWatch& watch,
+                         const Seen& seen) noexcept {
+    const std::span<std::byte> bytes =
+        watch.ring
+            ? attachment.changes_of(watch.index)
+            // In range: the index was checked by `add_cycle`.
+            : attachment.proc_of(static_cast<std::uint16_t>(watch.index));
+    if (bytes.empty() || bytes.data() != seen.mapping) {
+        return nullptr;
+    }
+    if (watch.ring) {
+        return &ring_header(bytes).write_seq;
+    }
+    return cycle_field(bytes);
+}
+
+// Looks at every source of `watches` again and stores what it shows in
+// `seen`. True if any changed.
+bool look_again(Attachment& attachment, std::span<const WaitSetWatch> watches,
+                std::span<Seen> seen) noexcept {
+    bool changed = false;
+    for (std::size_t i = 0; i < watches.size(); ++i) {
+        const Seen now = look_at(attachment, watches[i].ring, watches[i].index);
+        if (now != seen[i]) {
+            seen[i] = now;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 // Makes `event_fd` readable. An eventfd counter does not overflow from
 // this; a failed write leaves it readable from an earlier one.
 void signal(int event_fd) noexcept {
     const std::uint64_t one = 1;
-    static_cast<void>(::write(event_fd, &one, sizeof(one)));
+    const ssize_t written = ::write(event_fd, &one, sizeof(one));
+    static_cast<void>(written);
 }
 
 }  // namespace
@@ -150,26 +185,8 @@ int WaitSet::wait(int timeout_ms) {
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
 
         std::array<FutexWaiter, MAX_FUTEX_WAITERS> waiters{};
-        std::size_t count = 0;
         bool missing = false;
-        for (const Subscription* subscription : subscriptions_) {
-            if (const std::optional<FutexWaiter> word =
-                    subscription->waiter()) {
-                waiters.at(count++) = *word;
-            } else {
-                missing = true;
-            }
-        }
-        for (const Cycle& cycle : cycles_) {
-            if (const std::uint32_t* field =
-                    cycle_field(attachment_.proc_of(cycle.process_index))) {
-                waiters.at(count++) = {.word = field,
-                                       .expected = cycle.seen,
-                                       .process_private = false};
-            } else {
-                missing = true;
-            }
-        }
+        const std::size_t count = collect_waiters(waiters, missing);
         if (missing) {
             // Look for missing regions again, at most once a second each.
             attachment_.refresh_peers();
@@ -183,6 +200,30 @@ int WaitSet::wait(int timeout_ms) {
             return SCADA_E_IO;
         }
     }
+}
+
+std::size_t WaitSet::collect_waiters(std::span<FutexWaiter> waiters,
+                                     bool& missing) const noexcept {
+    std::size_t count = 0;
+    missing = false;
+    for (const Subscription* subscription : subscriptions_) {
+        if (const std::optional<FutexWaiter> word = subscription->waiter()) {
+            waiters[count++] = *word;
+        } else {
+            missing = true;
+        }
+    }
+    for (const Cycle& cycle : cycles_) {
+        if (const std::uint32_t* field =
+                cycle_field(attachment_.proc_of(cycle.process_index))) {
+            waiters[count++] = {.word = field,
+                                .expected = cycle.seen,
+                                .process_private = false};
+        } else {
+            missing = true;
+        }
+    }
+    return count;
 }
 
 int WaitSet::fd(int& out) {
@@ -245,19 +286,7 @@ void WaitSet::watch(Attachment& attachment, std::span<const Watch> watches,
             .word = &stop, .expected = 0, .process_private = true};
         bool missing = false;
         for (std::size_t i = 0; i < watches.size(); ++i) {
-            const Watch& watch = watches[i];
-            const std::span<std::byte> bytes =
-                watch.ring ? attachment.changes_of(watch.index)
-                           : attachment.proc_of(
-                                 static_cast<std::uint16_t>(watch.index));
-            if (bytes.empty() || bytes.data() != seen[i].mapping) {
-                missing = true;
-                continue;
-            }
-            const void* word =
-                watch.ring
-                    ? static_cast<const void*>(&ring_header(bytes).write_seq)
-                    : static_cast<const void*>(cycle_field(bytes));
+            const void* word = watched_word(attachment, watches[i], seen[i]);
             if (word == nullptr) {
                 missing = true;
                 continue;
@@ -277,16 +306,7 @@ void WaitSet::watch(Attachment& attachment, std::span<const Watch> watches,
         if (result == FutexWait::FAILED) {
             sleep_until(monotonic_ns() + WAIT_SLICE_NS);
         }
-        bool changed = false;
-        for (std::size_t i = 0; i < watches.size(); ++i) {
-            const Seen now =
-                look_at(attachment, watches[i].ring, watches[i].index);
-            if (now != seen[i]) {
-                seen[i] = now;
-                changed = true;
-            }
-        }
-        if (changed) {
+        if (look_again(attachment, watches, seen)) {
             signal(event_fd);
         }
     }

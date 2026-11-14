@@ -519,14 +519,14 @@ void scada_sub_close(scada_sub* sub);
 int scada_waitset_create(scada_ctx* ctx, scada_waitset** out);
 
 /*
- * Adds the subscription `sub` to the wait set: scada_waitset_wait returns
+ * Adds the subscription `sub` to the wait set `set`: scada_waitset_wait returns
  * when `sub` has something to deliver (a change or a gap).
  *
  * SCADA_E_INVALID: an argument is NULL; `sub` belongs to another context
  * or is in a wait set already; the wait set holds 127 sources already; or
  * scada_waitset_fd was called on it.
  */
-int scada_waitset_add_sub(scada_waitset* ws, scada_sub* sub);
+int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub);
 
 /*
  * Adds the cycle counter of the process `process_index` (section 10):
@@ -538,7 +538,7 @@ int scada_waitset_add_sub(scada_waitset* ws, scada_sub* sub);
  * SCADA_E_INVALID as for scada_waitset_add_sub, and if `process_index` is
  * no process of the generation.
  */
-int scada_waitset_add_cycle(scada_waitset* ws, uint16_t process_index);
+int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index);
 
 /*
  * Waits up to `timeout_ms` (0: do not wait) until a source of the wait set
@@ -547,17 +547,17 @@ int scada_waitset_add_cycle(scada_waitset* ws, uint16_t process_index);
  * until it gives SCADA_E_TIMEOUT.
  *
  * SCADA_OK: a source is ready. SCADA_E_TIMEOUT: none became ready.
- * SCADA_E_INVALID: `ws` is NULL or `timeout_ms` is negative. SCADA_E_IO
+ * SCADA_E_INVALID: `set` is NULL or `timeout_ms` is negative. SCADA_E_IO
  * with errno set: the kernel refused the wait.
  *
  * Not real-time: it blocks. One thread uses a wait set and its
  * subscriptions.
  */
-int scada_waitset_wait(scada_waitset* ws, int timeout_ms);
+int scada_waitset_wait(scada_waitset* set, int timeout_ms);
 
 /*
- * Stores in `*fd` a file descriptor that becomes readable when a source of
- * the wait set may be ready, for poll and epoll. The first call starts one
+ * Stores in `*descriptor` a file descriptor that becomes readable when a source
+ * of the wait set may be ready, for poll and epoll. The first call starts one
  * thread of the library that waits on the sources and turns their wakes
  * into this process-local eventfd; later calls give the same descriptor.
  * Sources cannot be added from then on.
@@ -572,13 +572,13 @@ int scada_waitset_wait(scada_waitset* ws, int timeout_ms);
  *
  * Not real-time.
  */
-int scada_waitset_fd(scada_waitset* ws, int* fd);
+int scada_waitset_fd(scada_waitset* set, int* descriptor);
 
 /*
  * Destroys the wait set and stops its thread, if any; NULL does nothing.
  * The subscriptions in it stay open.
  */
-void scada_waitset_destroy(scada_waitset* ws);
+void scada_waitset_destroy(scada_waitset* set);
 
 #ifdef __cplusplus
 }

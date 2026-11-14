@@ -37,6 +37,13 @@ struct WaitSetSeen {
     friend bool operator==(const WaitSetSeen&, const WaitSetSeen&) = default;
 };
 
+// What the thread of `WaitSet::fd` watches: copied when it starts, so that
+// it shares nothing with the thread that uses the set.
+struct WaitSetWatch {
+    bool ring = false;      // a ring of an owner, or a cycle counter
+    std::size_t index = 0;  // owner index or process index
+};
+
 // One thread uses a wait set and its subscriptions (section 13.2). The
 // attachment must outlive it.
 class WaitSet {
@@ -75,16 +82,16 @@ private:
         std::uint32_t seen = 0;
     };
 
-    // What the thread of `fd` watches: copied when it starts, so that it
-    // shares nothing with the thread that uses the set.
-    struct Watch {
-        bool ring = false;      // a ring of an owner, or a cycle counter
-        std::size_t index = 0;  // owner index or process index
-    };
+    using Watch = WaitSetWatch;
 
     // True if a source is ready now. Cycle counters that advanced count as
     // seen from here on.
     [[nodiscard]] bool take_ready() noexcept;
+
+    // Puts the word of every source that is mapped into `waiters` and
+    // returns how many; `missing` tells whether a source is not mapped.
+    [[nodiscard]] std::size_t collect_waiters(std::span<FutexWaiter> waiters,
+                                              bool& missing) const noexcept;
 
     // The body of the thread of `fd`: waits on the sources, compares them
     // with `seen` and makes `event_fd` readable when one changed, until

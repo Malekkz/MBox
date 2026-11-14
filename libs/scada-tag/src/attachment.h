@@ -358,8 +358,9 @@ private:
 
     // Appends the change of the tag `handle` that `update` wrote (section
     // 8.1). `tag` is the tag `handle` refers to, of an own owner.
-    SCADA_RT void append_change_of(std::uint32_t handle, const TagRef& tag,
-                                   const RecordUpdate& update) noexcept;
+    SCADA_RT static void append_change_of(std::uint32_t handle,
+                                          const TagRef& tag,
+                                          const RecordUpdate& update) noexcept;
 
     // Reads the clock source and times the clocks (section 13.1).
     void check_clock(std::int64_t now_mono_ns) noexcept;
