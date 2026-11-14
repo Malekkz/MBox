@@ -4,3 +4,7 @@
 scada_add_test(scada-hello-perf-test KIND perf
   SOURCES hello_perf_test.cpp
   DEPENDS scada::hello)
+
+scada_add_test(scada-tag-header-perf-test KIND perf
+  SOURCES tag_header_perf_test.cpp
+  DEPENDS scada::tag)

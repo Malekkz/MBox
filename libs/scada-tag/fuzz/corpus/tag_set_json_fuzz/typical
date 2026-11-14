@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "heartbeat_check_ms": 250,
+  "processes": [
+    {"name": "io", "uid": 991, "heartbeat_timeout_ms": 500, "realtime": true},
+    {"name": "control", "uid": 992, "realtime": true},
+    {"name": "journal", "uid": 993}
+  ],
+  "owners": [
+    {"name": "io", "process": "io", "change_ring_capacity": 1024},
+    {"name": "control.fast", "process": "control"},
+    {"name": "control.slow", "process": "control"}
+  ],
+  "queues": [
+    {"name": "events.control.fast", "producer": "control", "consumer": "journal", "capacity": 4096},
+    {"name": "cmd.io.control.fast", "producer": "control", "consumer": "io"},
+    {"name": "result.io.control.fast", "producer": "io", "consumer": "control"}
+  ],
+  "tags": [
+    {"name": "plant.pump1.running", "owner": "io", "type": "bool"},
+    {"name": "plant.pump1.speed", "owner": "io", "type": "float64", "writable_by_command": true},
+    {"name": "plant.pump1.mode", "owner": "control.slow", "type": "int64", "retain": true, "retain_now": true},
+    {"name": "plant.pump1.starts", "owner": "control.fast", "type": "uint64", "retain": true},
+    {"name": "plant.pump1.label", "owner": "control.slow", "type": "string"}
+  ]
+}
