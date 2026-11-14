@@ -47,6 +47,17 @@ MappedRegion& MappedRegion::operator=(MappedRegion&& other) noexcept {
     return *this;
 }
 
+Status MappedRegion::prefault() const noexcept {
+    if (bytes_.empty()) {
+        return {StatusCode::FAILED_PRECONDITION, "no mapping to prefault"};
+    }
+    const int advice = writable() ? MADV_POPULATE_WRITE : MADV_POPULATE_READ;
+    if (::madvise(bytes_.data(), bytes_.size(), advice) != 0) {
+        return {StatusCode::IO_ERROR, "cannot prefault the mapping"};
+    }
+    return {};
+}
+
 void MappedRegion::reset() noexcept {
     if (!bytes_.empty()) {
         // An error is ignored: it can only mean the range was not mapped,

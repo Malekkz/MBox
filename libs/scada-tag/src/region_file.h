@@ -48,11 +48,24 @@ inline constexpr std::size_t MAX_DIRECTORY_ENTRIES = 65'536;
 [[nodiscard]] Fd open_at(int dir_fd, const std::string& name, int flags,
                          mode_t mode = 0) noexcept;
 
-// Text for the error number `error`, for a detail string.
+// Text for the error number `error`, for a detail string. The number is
+// also remembered for `last_os_error`: every place of this library that
+// reports an error of the operating system passes through here.
 [[nodiscard]] std::string errno_text(int error);
+
+// The error number last given to `errno_text` by the calling thread since
+// its last `clear_os_error`, or 0. It lets the C interface hand `errno` back
+// with SCADA_E_IO (contract, section 13.3), which a Status cannot carry.
+[[nodiscard]] int last_os_error() noexcept;
+void clear_os_error() noexcept;
 
 // "proc.<process>".
 [[nodiscard]] std::string proc_region_name(std::string_view process);
+
+// "tags.<owner>", "strings.<owner>" and "changes.<owner>".
+[[nodiscard]] std::string tags_region_name(std::string_view owner);
+[[nodiscard]] std::string strings_region_name(std::string_view owner);
+[[nodiscard]] std::string changes_region_name(std::string_view owner);
 
 // "gen-<generation>".
 [[nodiscard]] std::string generation_dir_name(std::uint64_t generation);

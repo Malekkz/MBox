@@ -43,6 +43,10 @@ constexpr mode_t CREATION_MODE = 0600;
 
 constexpr std::uint64_t CURSOR_SIZE = sizeof(std::uint64_t);
 
+// See `last_os_error`. One value for each thread, like errno itself.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): the per-thread error number behind last_os_error, the counterpart of errno
+thread_local int last_os_error_value = 0;
+
 bool is_decimal_digit(char character) noexcept {
     return character >= '0' && character <= '9';
 }
@@ -84,12 +88,39 @@ Fd open_at(int dir_fd, const std::string& name, int flags,
 }
 
 std::string errno_text(int error) {
+    last_os_error_value = error;
     return std::generic_category().message(error);
+}
+
+int last_os_error() noexcept {
+    return last_os_error_value;
+}
+
+void clear_os_error() noexcept {
+    last_os_error_value = 0;
 }
 
 std::string proc_region_name(std::string_view process) {
     std::string name("proc.");
     name += process;
+    return name;
+}
+
+std::string tags_region_name(std::string_view owner) {
+    std::string name("tags.");
+    name += owner;
+    return name;
+}
+
+std::string strings_region_name(std::string_view owner) {
+    std::string name("strings.");
+    name += owner;
+    return name;
+}
+
+std::string changes_region_name(std::string_view owner) {
+    std::string name("changes.");
+    name += owner;
     return name;
 }
 

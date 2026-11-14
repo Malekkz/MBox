@@ -53,6 +53,14 @@ public:
     // shared with other processes and can change at any time.
     [[nodiscard]] std::span<std::byte> bytes() const noexcept { return bytes_; }
 
+    // Brings every page of the mapping into memory now, so that later
+    // access does not wait for the operating system (a real-time function
+    // may touch the mapping afterwards). A writable mapping is prepared for
+    // writing. Fails with FAILED_PRECONDITION if no mapping is held and with
+    // IO_ERROR, errno set, if the operating system refuses: for example the
+    // file is shorter than the mapping. Needs Linux 5.14 or newer.
+    [[nodiscard]] Status prefault() const noexcept;
+
     // Removes the mapping, if any.
     void reset() noexcept;
 

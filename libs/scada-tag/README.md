@@ -2,9 +2,11 @@
 
 The client library of the tag database (reference section 5). All access to
 the shared-memory data plane goes through it. So far it holds the binary
-layout, the tag-set definition, the builder of the `header` region and the
-side of `scada-tagd`: generations, the `proc` region and liveness. Attach,
-read, write, rings and queues follow in later phase 1 issues.
+layout, the tag-set definition, the builder of the `header` region, the side
+of `scada-tagd` (generations, the `proc` region and liveness) and attach: a
+process joins the current generation, creates or reuses and repairs its own
+regions, and maps the regions of other processes read-only. Read, write,
+rings and queues follow in later phase 1 issues.
 
 ## What it does
 
@@ -28,6 +30,10 @@ read, write, rings and queues follow in later phase 1 issues.
   `header` and `proc.tagd`, sets and clears the `down` flag of every process,
   and removes what does not belong in the generation directory. See
   "The side of scada-tagd" below.
+- For every other process (`scada/tag/scada_tag.h`, the C interface of
+  contract section 13): `scada_tag_attach`, `scada_tag_attach_opts`,
+  `scada_tag_detach`, `scada_tag_heartbeat` and `scada_tag_status`. See
+  "Attach" below.
 
 It cannot yet attach a process, and it reads and writes no tag. The values
 of `EventRecord.kind` are not defined: the contract names them without
@@ -47,13 +53,19 @@ numbers.
   | `tag_set_json.h` | `parse_tag_set_json`: the temporary file format to a `TagSet` |
   | `generation_host.h` | `GenerationHost`: the side of `scada-tagd`. Only `scada-tagd` uses it |
   | `liveness.h` | `DownReason`: why a process counts as down |
+  | `scada_tag.h` | The C interface: return codes, attach, detach, heartbeat, status. Usable from C and C++ |
 
 - Private headers in `src/`: `layout.h` (the structures, their checks and the
   enumerations only the layout uses), `name_hash.h`, `sha256.h`,
   `resolved_tag_set.h`, `shared_memory.h` (the reviewed helpers that place
   the structures on mapped memory), `region_file.h` (files, directories and
-  their checks) and `proc_region.h` (the `proc` region). No code outside
-  this library may include them (decision D-25 in `docs/decisions.md`).
+  their checks), `proc_region.h` (the `proc` region), `own_region.h` (a
+  region the process writes: found and reused, or created), `header_view.h`
+  (the `header` region as an attaching process reads and validates it),
+  `peer_regions.h` (regions of other processes, mapped read-only) and
+  `attachment.h` (attach itself; the C interface is a thin layer over it).
+  No code outside this library may include them (decision D-25 in
+  `docs/decisions.md`).
 
 `TagSet` is the one interface between configuration and the data plane. The
 JSON file is temporary: phase 2 replaces `tag_set_json.h` with the real
@@ -189,6 +201,73 @@ mode `0640`, full size allocated at once, then set ready and renamed. The
 rename never replaces an existing file. A full file system gives an error
 here, not a signal later.
 
+## Attach
+
+`scada_tag_attach(process_name, &ctx)` follows contract section 11.2
+(decision D-28):
+
+1. The base directory must be a directory owned by the uid of the user
+   `scada-tagd` with mode `2750`. `current` is resolved once. The generation
+   directory must be owned by that uid with mode `3770`. `header` is opened
+   without following a symbolic link and must be a regular file of that uid.
+2. The header is validated before anything in it is used: magic and layout
+   version (`SCADA_E_LAYOUT` if they are not this library's), `ready`, kind,
+   generation and size, every count against the limits of contract section
+   14, every table offset against the file size, and every entry of the
+   process, owner and queue tables. The tag directory is checked entry by
+   entry when it is used.
+3. The process must be in the process table (`SCADA_E_NOT_FOUND`) and run as
+   the uid given there (`SCADA_E_PERMISSION`).
+4. `proc.<process>` is attached and locked first; a second process of the
+   same name gets `SCADA_E_BUSY` and changes nothing. Then, for every owner
+   of the process, `tags.<owner>`, `strings.<owner>` (if it has STRING tags)
+   and `changes.<owner>`, and every queue the process produces:
+
+   | Found under the name | What attach does |
+   | --- | --- |
+   | Nothing | Creates the region as contract 3.2 says |
+   | A region of the right owner, size, generation and content, ready | Reuses it |
+   | Anything else owned by the caller (not ready, wrong size, a symbolic link) | Removes it and creates the region |
+   | Anything owned by another user | Fails with `SCADA_E_PERMISSION`; the entry is left for `scada-tagd` |
+
+5. A reused `tags` region is repaired (contract 6.3): every record with an
+   odd `seq` gets quality BAD and flag NOT_INIT, its string slot gets length
+   0, then `seq + 1` is stored. Other records keep their value. The `epoch`
+   of a reused change ring is incremented.
+6. The regions are brought into memory, the state becomes RUNNING and the
+   first heartbeat is written. If the generation is RETIRING, attach starts
+   again from step 1, at most 5 times, then returns `SCADA_E_RETIRING`.
+
+A new `tags` region holds, for every record, `seq` 0, quality BAD, flag
+NOT_INIT and all times 0. The value of a STRING record is its string slot:
+its rank among the owner's STRING tags in slot order.
+
+`scada_tag_heartbeat` writes the heartbeat and returns `SCADA_E_RETIRING`
+when the generation is retiring. It makes no system call. `scada_tag_status`
+fills a `scada_status` (generation, its state, the process index, whether
+`scada-tagd` is down, and what attach created, reused and repaired) and
+returns `SCADA_E_RETIRING` or `SCADA_E_TAGD_DOWN` when that is the case.
+`scada_tag_detach` sets the state STOPPING, so the process reads as down at
+once; its region files stay for the next attach.
+
+With `SCADA_E_IO`, `errno` holds the error of the operating system call that
+failed: `ENOENT` if there is no base directory or no current generation,
+`ENOSPC` if the file system has no room for a region.
+
+Regions of other processes are mapped read-only when they are asked for
+(`PeerRegions`; the callers are tag resolve, subscriptions and queues of the
+next issues, and today the liveness of `scada-tagd` in `scada_tag_status`).
+A region that is missing, not ready or fails a check of contract 3.1 is not
+an error: it reads as missing and is looked for again at most once a second,
+from `scada_tag_status` now and from `scada_tag_notify` once it exists. A
+mapping is never removed while the process is attached, so a reader that
+holds it keeps a valid view; a region whose file is replaced more than 16
+times reads as missing until the reader attaches again.
+
+Not part of attach yet: retained values (issue P1-09), draining the `cmd`
+queues and the cursors of a new `proc` region (issue P1-08), the clock check
+of contract 13.1 (issue P1-06).
+
 ## How to use it
 
 Link the CMake target `scada::tag`:
@@ -214,6 +293,18 @@ if (tag_set.ok()) {
     // image.value().bytes is the content of the `header` file, with `ready`
     // 0 and state BUILDING; image.value().config_hash is its config hash.
 }
+```
+
+A process attaches like this:
+
+```c
+#include "scada/tag/scada_tag.h"
+
+scada_ctx *ctx = NULL;
+int code = scada_tag_attach("modbus", &ctx);   /* SCADA_OK or SCADA_E_... */
+/* in the main loop, at most every third of the heartbeat timeout: */
+if (scada_tag_heartbeat(ctx) == SCADA_E_RETIRING) { /* detach, attach again */ }
+scada_tag_detach(ctx);
 ```
 
 ## How to test it
@@ -262,10 +353,28 @@ ctest --preset perf -R scada-tag-header-perf-test
   is simulated by a header that names another user id; nothing runs as that
   user. Conformance test 11, second part, uses a limit on the file size in
   place of a full file system.
+- `ReadHeader.*` and `HeaderFile.*` cover the reader of the `header` region:
+  what a valid header gives, and 32 ways in which a header is not valid.
+- `OwnRegions.*` covers a region the process writes: created, reused, or
+  removed and created again; an entry of another user is left.
+- `Attach.*` and `TagRecords.*` cover attach: who may attach, the regions
+  created and their initial content, reuse, repair, the epoch, and what
+  happens to unusable entries under a region name.
+- `Peers.*` covers the regions of other processes: mapped on demand, missing
+  and unusable ones tolerated, looked for again at most once a second.
+- `CApi.*` covers the C interface: arguments, return codes, `errno` and the
+  status structure.
+- In these groups, the tests named `Conformance07`, `09`, `10`, `11` and
+  `12` are the part of attach in those conformance tests of the contract.
+  Test 7 lacks `SCADA_E_GAP`, which comes with the change rings (issue
+  P1-07).
 - `scada-tag-test-peer` (in `tests/peer/`) is a helper for integration
-  tests: it attaches the `proc` region of one process and writes its
-  heartbeat until it is stopped or killed. It is replaced by a real attach
-  with issue P1-05.
+  tests: it attaches as one process through the C interface and writes its
+  heartbeat until it is stopped or killed. With `mid-write` it leaves a tag
+  record with an odd sequence number, as a killed writer does.
+- `header_region_fuzz` (in `fuzz/`) feeds the reader of the `header` region
+  with arbitrary bytes and then does with the contents what attach does.
+  Its seed corpus runs as `header_region_fuzz-corpus`.
 - `region_name_fuzz` (in `fuzz/`) feeds the parsers of directory entry
   names with arbitrary bytes and checks that they accept only the names this
   library writes. Its seed corpus runs as `region_name_fuzz-corpus`.

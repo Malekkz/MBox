@@ -58,7 +58,8 @@ The integration test (`tests/integration/tagd_integration_test.cpp`) starts
 the real executable on a base directory in the temporary directory of the
 machine. A `NotifyListener` (`libscada-service`) stands in for systemd, and
 the helper `scada-tag-test-peer` (`libs/scada-tag/tests/peer`) stands in for
-another service: it attaches a `proc` region and writes its heartbeat. The
+another service: it attaches through the C interface of `libscada-tag` and
+writes its heartbeat. The
 `env` utility must be on `PATH`. It checks:
 
 - readiness after the generation exists, watchdog feeding, the stop on
@@ -69,5 +70,10 @@ another service: it attaches a `proc` region and writes its heartbeat. The
   is logged as down (`not running`);
 - conformance test 20: after a restart with the same tag set the generation
   is reused, no file is replaced, and the helper is never logged as down;
+- attach with real processes: a process creates its regions with mode
+  `0640` and the sweep leaves them alone; conformance test 7: an owner
+  killed in the middle of a write repairs its region when it is restarted;
+  conformance test 10: a second process of the same name is refused; without
+  a generation a process cannot attach;
 - a changed tag set gives the next generation; a second instance and a base
   directory with the wrong mode are refused.
