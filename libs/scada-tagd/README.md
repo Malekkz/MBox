@@ -43,7 +43,7 @@ the standard error stream.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.3, sections 3, 10
+- Contract: `docs/contracts/tag-database.md`, version 0.4, sections 3, 10
   and 11.1; decision D-27 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.

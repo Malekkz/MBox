@@ -130,7 +130,14 @@ int scada_tag_heartbeat(scada_ctx* ctx);
 /*
  * Fills `*out` with the state of the attachment. It also looks again, at
  * most once a second each, for regions of other processes that this context
- * asked for and that were missing.
+ * asked for and that were missing, and checks the clocks again at most once
+ * a minute.
+ *
+ * Until scada_tag_notify exists, this is the only call that does either.
+ * A process that reads tags of other processes calls it about once a
+ * second from a thread that is not real-time: otherwise an owner that
+ * starts after the reader resolved its tags keeps reading as BAD with
+ * OWNER_DOWN.
  *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring;
  * SCADA_E_TAGD_DOWN if the generation is not retiring and scada-tagd is
@@ -258,22 +265,32 @@ int scada_tag_resolve(scada_ctx* ctx, const char* name, uint32_t* handle);
 int scada_tag_info(scada_ctx* ctx, uint32_t handle, scada_tag_info_t* out);
 
 /*
- * Reads the tag `handle` into `*out` (section 6.2). Resolve the tag in this
- * context first: a tag of another process that was never resolved here
- * reads as BAD with OWNER_DOWN.
+ * Reads the tag `handle` into `*out` (section 6.2).
+ *
+ * RESOLVE THE TAG IN THIS CONTEXT FIRST. A handle is a number that is the
+ * same in every process, but the regions of its owner are mapped by
+ * scada_tag_resolve. A tag of another process that was never resolved in
+ * this context reads as BAD with OWNER_DOWN, as if its owner were down.
  *
  * The quality is BAD with SCADA_FLAG_OWNER_DOWN added when the process of
  * the owner is down or its region is missing. The library judges that
  * itself at every read (section 10.1): the process is not attached, has
  * stopped, or its heartbeat is older than its timeout. The value and
- * times are then the last ones the owner wrote, or 0 if the region is
- * missing or the owner died in the middle of a write.
+ * times are then the last ones the owner wrote. If the region is missing
+ * or the owner died in the middle of a write there is no value: value,
+ * times and change_count are 0 and mean nothing; do not plot them, compare
+ * them or act on them.
  *
  * SCADA_E_BUSY: the owner was in the middle of a write at each of 64
  * attempts and is not down; keep the previous value for this cycle.
  * SCADA_E_INVALID: an argument is NULL or `handle` is not a handle of this
  * generation. SCADA_E_LAYOUT: the record does not hold a value of the type
- * of the tag. On an error `*out` is unchanged.
+ * of the tag; this does not go away by itself.
+ *
+ * Only SCADA_E_BUSY leaves `*out` unchanged. With every other error `*out`
+ * gets value 0, times 0 and quality BAD (and the type of the tag, or 0 if
+ * the handle is none), so that a caller that keeps its output does not
+ * hold on to a good value.
  *
  * Real-time safe: no allocation, no lock, no system call. Safe from any
  * thread.
@@ -284,7 +301,8 @@ int scada_tag_read(scada_ctx* ctx, uint32_t handle, scada_value* out);
  * Reads the `n` tags `handles[0..n)` into `out[0..n)`, as scada_tag_read
  * does, with one reading of the clock for all of them. If `status` is not
  * NULL, `status[i]` gets the return code for `handles[i]`. `out[i]` is
- * unchanged where that code is not SCADA_OK.
+ * unchanged where that code is SCADA_E_BUSY and holds quality BAD where it
+ * is another error, so `out` is safe to use without `status`.
  *
  * SCADA_OK if every tag was read, otherwise the code of the first one that
  * was not. SCADA_E_INVALID also if `ctx` is NULL, or `n` is not 0 and
@@ -305,10 +323,13 @@ int scada_tag_read_many(scada_ctx* ctx, const uint32_t* handles, size_t n,
  * SCADA_E_NOT_OWNER: the calling process does not own the tag.
  * SCADA_E_TYPE: `value->type` is not the type of the tag, or the tag is a
  * STRING. SCADA_E_INVALID: an argument is NULL, `handle` is not a handle of
- * this generation, the quality or a quality flag is none, or a BOOL value
- * is neither 0 nor 1. On an error nothing is written.
+ * this generation, the quality or a quality flag is none,
+ * SCADA_FLAG_OWNER_DOWN is set, or a BOOL value is neither 0 nor 1. On an
+ * error nothing is written.
  *
- * Real-time safe. All writes to the tags of one owner come from one thread.
+ * Real-time safe. All writes to the tags of one owner come from one
+ * thread, the first one that writes them. A library built without NDEBUG
+ * stops the process when another thread writes them (section 13.2).
  */
 int scada_tag_write(scada_ctx* ctx, uint32_t handle, const scada_value* value);
 
@@ -336,7 +357,12 @@ int scada_tag_write_many(scada_ctx* ctx, const uint32_t* handles, size_t n,
  * less than the length of the text, which is then in `*len`; a buffer of
  * SCADA_STRING_MAX bytes is always enough. SCADA_E_BUSY and SCADA_E_LAYOUT
  * as for scada_tag_read; SCADA_E_LAYOUT also if the stored length is more
- * than SCADA_STRING_MAX. On an error `buf` and `*meta` are unchanged.
+ * than SCADA_STRING_MAX.
+ *
+ * `buf` is unchanged on every error. `*len` and `*meta` are unchanged on
+ * SCADA_E_BUSY; with a buffer that is too small `*meta` is unchanged too.
+ * With every other error `*len` is 0 and `*meta` gets quality BAD, as for
+ * scada_tag_read.
  *
  * Not real-time. Safe from any thread.
  */
@@ -352,7 +378,8 @@ int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
  * SCADA_E_TYPE: the tag is not a STRING. SCADA_E_INVALID: `ctx` is NULL,
  * `text` is NULL and `len` is not 0, `len` is more than SCADA_STRING_MAX, the
  * text is not valid UTF-8, `handle` is not a handle of this generation, or
- * the quality or a quality flag is none. On an error nothing is written.
+ * the quality or a quality flag is none, or SCADA_FLAG_OWNER_DOWN is set.
+ * On an error nothing is written.
  *
  * Not real-time. All writes to the tags of one owner come from one thread.
  */

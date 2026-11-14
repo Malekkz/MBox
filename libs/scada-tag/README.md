@@ -46,7 +46,7 @@ contract names them without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.3, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.4, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -306,8 +306,10 @@ odd, stores the fields and makes it even. A read copies the fields between
 two loads of `seq` and uses the copy only if both loads gave the same even
 number; it tries 64 times. A string slot is written and copied inside the
 same window as its record (contract 7). Every field is accessed through
-`std::atomic_ref`, so the lock is checked by ThreadSanitizer, not hidden
-from it.
+`std::atomic_ref`, so no access is a data race and ThreadSanitizer needs no
+suppression. ThreadSanitizer does not check the order of the accesses; the
+tests with derived values do, and the model check of conformance test 4
+will.
 
 What a read returns:
 
@@ -319,8 +321,18 @@ What a read returns:
 | Owner down, record left in the middle of a write | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
 | Region of the owner missing, or the tag was not resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
 | Owner running and mid-write at all 64 attempts | `SCADA_E_BUSY` | Output unchanged; keep the previous value |
-| Record does not hold a value of the type of the tag | `SCADA_E_LAYOUT` | Output unchanged |
-| No such handle in this generation | `SCADA_E_INVALID` | Output unchanged |
+| Record does not hold a value of the type of the tag, or holds OWNER_DOWN | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
+| No such handle in this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+
+Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
+0 there is no value: a consumer must not plot, compare or act on them.
+
+Until `scada_tag_notify` exists (issue P1-07), a process that reads tags of
+other processes must call `scada_tag_status` about once a second from a
+thread that is not real-time. It is the only call that looks again for
+regions that were missing, so without it an owner that starts after the
+reader keeps reading as down. It is also the only call that repeats the
+clock check.
 
 An owner is down when its process is: its `proc` region is missing, its
 state is not RUNNING, or its heartbeat is older than its timeout (contract
@@ -335,19 +347,25 @@ What a write refuses:
 | --- | --- |
 | The caller's process does not own the tag | `SCADA_E_NOT_OWNER` |
 | `type` is not the type of the tag; `scada_tag_write` on a STRING tag; a string function on a tag that is no STRING | `SCADA_E_TYPE` |
-| A quality or quality flag that is none; a BOOL that is neither 0 nor 1; text that is not UTF-8 or longer than 250 bytes | `SCADA_E_INVALID` |
+| A quality or quality flag that is none; the flag OWNER_DOWN, which only a read adds; a BOOL that is neither 0 nor 1; text that is not UTF-8 or longer than 250 bytes | `SCADA_E_INVALID` |
 
 A write sets both update times. With `source_time_ns` 0 the source time is
 the update time and LOCAL_TIME is set. `change_count` goes up by 1 when
 value, quality or quality flags change; for a STRING tag the value is its
 text.
 
+All writes to the tags of one owner come from one thread, the first that
+writes them. A library built without `NDEBUG` (the `dev` and sanitizer
+builds) stops the process when another thread writes them (contract 13.2).
+
 The real-time safe functions allocate nothing, take no lock and make no
 system call, as long as the clocks can be read from the vDSO. Attach checks
 that: `scada_status.clock_syscall` is 1 if the kernel's clock source is not
 one the vDSO reads, or one clock read takes more than 200 ns. The check is
 repeated at most once a minute from `scada_tag_status`. In the retry loop of
-a read the processor is told to pause (`scada::cpu_relax`).
+a read the processor is told to pause (`scada::cpu_relax`). On ARM64 that
+pause is much shorter than on x86-64, so a read gives up sooner there; the
+rate of `SCADA_E_BUSY` was measured on x86-64 only (decision D-30).
 
 ## How to use it
 
@@ -489,8 +507,13 @@ ctest --preset perf -R scada-tag-header-perf-test
   without `scada-tagd`; `Conformance06*` stops one cleanly.
 - `scada-tag-rt-integration-test` is conformance test 22: it traces the
   helper `scada-tag-rt-probe` (in `tests/probe/`) and fails if a real-time
-  safe function makes a system call or an allocation. It exists only in a
-  native build without a sanitizer.
+  safe function makes a system call, calls a C++ allocation function or
+  takes a page fault, or if the library reports that the clocks of the
+  machine cannot be read without a system call. It does not see a direct
+  call of `malloc`; the banned-function check keeps those out of the
+  library. It exists only in a native build without a sanitizer.
+- `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
+  one-thread check of contract 13.2 with a real process.
 - `scada-tag-test-writer` (in `tests/writer/`) is the writing side of the
   load tests: one process with one thread for each owner.
 - Conformance test 4, the model check of the sequence lock, is not

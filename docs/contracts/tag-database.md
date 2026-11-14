@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.3 (draft) |
+| Contract version | 0.4 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -281,7 +281,9 @@ enum Quality : uint8_t { GOOD = 0, UNCERTAIN = 1, BAD = 2 };
 enum QualityFlags : uint16_t {
   STALE = 1 << 0, COMM_FAIL = 1 << 1, OUT_OF_RANGE = 1 << 2,
   SUBSTITUTED = 1 << 3,     // value entered by a person in place of the source
-  NOT_INIT = 1 << 4, OWNER_DOWN = 1 << 5, TIME_UNCERTAIN = 1 << 6,
+  NOT_INIT = 1 << 4,
+  OWNER_DOWN = 1 << 5,      // added by a read (section 6.2), never stored
+  TIME_UNCERTAIN = 1 << 6,
   BLOCKED = 1 << 7,         // point out of service or blocked for transmission
   TEST = 1 << 8,            // value produced in test mode
   OVERFLOW = 1 << 9,        // counter rolled over or value exceeded its format
@@ -317,7 +319,7 @@ a tag record; its only marking is the `down` flag of section 10.1.
 s = seq.load(relaxed)
 seq.store(s + 1, relaxed)          // now odd
 atomic_thread_fence(release)       // the data stores below must not pass the odd seq
-write the fields other than seq, one 64-bit word at a time, relaxed
+write the fields other than seq, each with a relaxed atomic store
 if value or quality or quality_flags changed: change_count += 1
 seq.store(s + 2, release)          // even again
 if changed: append a change entry (section 8)
@@ -332,14 +334,14 @@ follow it. The write wakes nobody (section 8.4).
 repeat up to 64 times:
   s1 = seq.load(acquire)
   if s1 is odd: pause instruction, continue
-  copy the fields other than seq, one 64-bit word at a time, relaxed
+  copy the fields other than seq, each with a relaxed atomic load
   atomic_thread_fence(acquire)     // the copies above must complete before s2
   s2 = seq.load(relaxed)
   if s1 == s2: return the copy
 return SCADA_E_BUSY                // the output is left unchanged
 ```
 
-The word-wise relaxed copy is how the library reads memory another process is
+The copy by relaxed atomic loads is how the library reads memory another process is
 writing without a data race; it compiles to plain moves.
 
 `SCADA_E_BUSY` means the writer was in the middle of a write for the whole
@@ -349,9 +351,32 @@ a dead owner is reported through the overlay below within its heartbeat
 timeout.
 
 After a successful read the library overlays the owner state: if the owner's
-process is down (section 10.1), or the owner's region is missing or not ready,
-the returned quality is BAD with OWNER_DOWN set. The stored record is not
-changed.
+process is down, or the owner's region is missing or not ready, the returned
+quality is BAD with OWNER_DOWN set. The stored record is not changed. "Down"
+here is the reader's own judgement by the three rules of section 10.1; the
+`down` flag of `scada-tagd` is not used.
+
+What a read returns in the other cases:
+
+| Situation | Return code | Output |
+| --- | --- | --- |
+| The owner's region is missing or not ready | `SCADA_OK` | Type of the tag, value 0, times 0, change count 0, quality BAD, OWNER_DOWN only |
+| Every attempt found the record mid-write and the owner is down | `SCADA_OK` | The same: what a dead owner left half written is not a value |
+| Every attempt found the record mid-write and the owner is not down | `SCADA_E_BUSY` | Unchanged |
+| The record does not hold a value of the type of its tag: another type, a quality or flag that is none, OWNER_DOWN stored, a BOOL that is neither 0 nor 1, a STRING record that is not the number of its slot, a string length above 250 | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
+| The handle is none of this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+
+Only `SCADA_E_BUSY` leaves the output unchanged. Every other error stores
+quality BAD, so that a caller that keeps its output never holds on to a good
+value. Where value and times are 0 they mean "no value": a consumer must not
+plot, compare or act on them.
+
+An owner cannot store OWNER_DOWN: a write with that flag is refused with
+`SCADA_E_INVALID`.
+
+A tag of another process must be resolved in the context that reads it:
+resolve is where its regions are mapped (section 11.2). Until then it reads as
+if its region were missing.
 
 ### 6.3 Owner restart
 
@@ -653,12 +678,19 @@ A process is **down** when any of these holds:
 
 - its `proc` region is missing or not ready,
 - its `state` is not RUNNING,
-- its `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`,
-- `scada-tagd` has set `down` in its process table entry.
+- its `heartbeat_mono_ns` is older than its `heartbeat_timeout_ms`.
 
-The library evaluates the first three itself on every use (the read overlay,
-`scada_proc_status`, `post`), so detection does not depend on `scada-tagd`
-being alive and a clean stop is seen at once.
+The library evaluates these three rules itself on every use (the read
+overlay, `scada_proc_status`, `post`), so detection does not depend on
+`scada-tagd` being alive and a clean stop is seen at once.
+
+`scada-tagd` evaluates the same three rules every `heartbeat_check_ms` and
+keeps the result in the `down` flag of the process table entry. The flag is
+for reporting and alarms. The library does not use it to judge a process: it
+lags by up to one check interval, and a flag left by a `scada-tagd` that has
+stopped would keep a restarted process down. A reader can therefore see a
+process down for a moment that `scada-tagd` never records, when a heartbeat
+gap is longer than the timeout and shorter than the check interval.
 
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
@@ -870,8 +902,8 @@ because the real-time rule no longer holds on that unit.
 | Code | Value | Meaning |
 | --- | --- | --- |
 | `SCADA_OK` | 0 | Success |
-| `SCADA_E_INVALID` | 1 | Invalid argument or handle |
-| `SCADA_E_LAYOUT` | 2 | Layout version or magic mismatch |
+| `SCADA_E_INVALID` | 1 | Invalid argument or handle; a value an owner may not store |
+| `SCADA_E_LAYOUT` | 2 | Layout version or magic mismatch; a header or a tag record that is not valid |
 | `SCADA_E_NOT_FOUND` | 3 | Unknown tag, owner, process or queue name |
 | `SCADA_E_NOT_OWNER` | 4 | Write attempted by a process that does not own the tag |
 | `SCADA_E_TYPE` | 5 | Value type does not match the tag type |
@@ -1031,7 +1063,9 @@ Smaller points where this contract adds to or narrows the reference:
 11. The tag value is a 64-bit pattern, not a union, and shared fields are
     plain integers accessed atomically, not `std::atomic` members.
 12. A read that cannot complete returns `SCADA_E_BUSY`, not a BAD value.
-13. Liveness is also evaluated by each reader, not only by `scada-tagd`.
+13. Liveness is evaluated by each reader. The `down` flag `scada-tagd` keeps
+    is for reporting only; readers do not use it (reference 5.4 makes it the
+    source).
 14. Subscription is per owner; the tag filter is applied by the caller.
 15. `scada-tagd` does not mark tags stale itself; STALE is set by the owner.
 16. RETAIN_NOW tags are written within 1 second; the 5-second retain interval
@@ -1046,6 +1080,14 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.1 | 2026-11-13 | First draft |
 | 0.2 | 2026-11-13 | Review P1-01. `down` flag moved from the owner table to the process table. Writers no longer wake consumers; `scada_tag_notify` added. String write nested inside the tag record write. Ring `epoch` added. Record ids taken from the queue `write_seq`. Checks on the base directory, region size and queue cursors. `scada_proc_status` added. Explicit padding in `GlobalHeader`. Retain file check sum. Open points given an owning issue and a pass criterion. |
 | 0.3 | 2026-11-13 | Second review P1-01 (SCADA, C++ and Linux reviewers; D-24). Owners are threads; handle split 10/22 bits. Memory fences added to the sequence lock and ring. Shared fields are plain integers; value is a 64-bit pattern. `SCADA_E_BUSY` in place of a false OWNER_DOWN. Command queues at most once, drained on restart, status ABORTED, lifetime limit, `select_request_id`. AUTO writes need an event record. Liveness evaluated by readers; clean stop is down at once; heartbeat interval tied to the timeout. Wait sets, pollable descriptor, `cycle_seq`. Change entry carries `update_mono_ns`; resynchronisation order; ring capacity tied to tag count. New quality flags. Slot tables. Regions built under a temporary name; own unready files rebuilt; instance lock; `fchmod`, `openat` and `posix_fallocate` rules; base directory created by the platform; accepted risks and deployment requirements. Mapping moved out of RT-safe functions; vDSO check specified. Retain directory ownership, directory `fsync`, CRC over the header, RETAIN_NOW. Generation change drains event queues. Return codes numbered; `scada_value` and attach options defined; batch write. Conformance tests extended from 19 to 27. |
+
+| 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
+
+Migration, 0.3 to 0.4: none for data. The layout version stays 1 and no
+structure changed, so regions written under 0.3 are read unchanged. Only
+`libscada-tag` implements the contract, and it is at 0.4. A caller written
+against 0.3 must not rely on the output of a failed read being unchanged,
+except for `SCADA_E_BUSY`.
 
 No migration is needed: nothing implements 0.1 or 0.2, and the layout version
 stays 1.

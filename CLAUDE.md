@@ -60,7 +60,9 @@ bounds, integer, concurrency and shared-memory rules, are in
 `docs/coding-standard.md`, and they are binding.
 
 - C++20, built with CMake. No compiler extensions, no architecture-specific
-  code outside the I/O HAL.
+  code outside the I/O HAL. The one exception is `scada::cpu_relax()` in
+  `libscada-common`, the pause instruction of a short retry loop (decision
+  D-29).
 - Warnings are errors. The warning, hardening and library-assertion flags are
   listed in section 2 of the coding standard.
 - No distribution-specific paths, tools or package managers anywhere in code or

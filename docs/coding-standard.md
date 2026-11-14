@@ -214,6 +214,10 @@ archives and SVG, and the node link.
 The rules in `CLAUDE.md` apply: no allocation, no blocking, no system calls,
 no logging inside `SCADA_RT` functions. In addition:
 
+- A short retry loop on shared state (the sequence-lock read) pauses with
+  `scada::cpu_relax()` from `libscada-common`. That function is the only
+  place outside the I/O HAL that names a processor instruction; C++20 has no
+  portable spelling for it. No other code uses `asm`.
 - All memory a real-time task needs is allocated and touched before the task
   starts. Containers used inside it have their capacity reserved and never
   grow.
