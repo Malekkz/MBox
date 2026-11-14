@@ -387,6 +387,32 @@ int next_code(scada_sub* sub) {
 // thread to be scheduled on a busy machine.
 constexpr int DOWN_LIMIT_MS = IO_TIMEOUT_MS + SCADA_WAIT_SLICE_MS + 1000;
 
+// After the owner of `sub` was killed: a wait on `sub` gives SCADA_E_GAP
+// within DOWN_LIMIT_MS, the subscription sees the owner down, and the tag
+// `level` reads as OWNER_DOWN through `ctx`.
+::testing::AssertionResult gap_for_the_kill(scada_ctx* ctx, scada_sub* sub,
+                                            std::uint32_t level) {
+    const Clock::time_point killed = Clock::now();
+    scada_change change{};
+    const int code = scada_sub_next(sub, &change, WAIT_MS);
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - killed);
+    if (code != SCADA_E_GAP || took.count() > DOWN_LIMIT_MS) {
+        return ::testing::AssertionFailure()
+               << "code " << code << " after " << took.count() << " ms";
+    }
+    const ::testing::AssertionResult down = saw_owner(sub, 1, true);
+    if (!down) {
+        return down;
+    }
+    scada_value value{};
+    if (scada_tag_read(ctx, level, &value) != SCADA_OK ||
+        (value.quality_flags & SCADA_FLAG_OWNER_DOWN) == 0) {
+        return ::testing::AssertionFailure() << "the tag does not read as down";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // Issue #42, point 2, across processes: an owner killed with SIGKILL writes
 // no change; a consumer waiting on its ring gets SCADA_E_GAP within the
 // heartbeat timeout, reads the tag as OWNER_DOWN, and gets one more gap
@@ -402,19 +428,13 @@ TEST_F(ChangeRingProcesses, AKilledOwnerGivesAGapWithinItsHeartbeatTimeout) {
     const Subscribed sub(reader.ctx(), "io");
     const std::uint32_t level = reader.resolve("plant.level");
     kill(*owner);
-    const Clock::time_point killed = Clock::now();
-    scada_change change{};
-    EXPECT_EQ(scada_sub_next(sub.get(), &change, WAIT_MS), SCADA_E_GAP);
-    EXPECT_LE(Clock::now() - killed, std::chrono::milliseconds(DOWN_LIMIT_MS));
-    EXPECT_TRUE(saw_owner(sub.get(), 1, true));
-    scada_value value{};
-    EXPECT_EQ(scada_tag_read(reader.ctx(), level, &value), SCADA_OK);
-    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
+    EXPECT_TRUE(gap_for_the_kill(reader.ctx(), sub.get(), level));
 
     std::optional<ChildProcess> again = attached_io();
     if (!again.has_value()) {
         return;
     }
+    scada_change change{};
     EXPECT_EQ(scada_sub_next(sub.get(), &change, WAIT_MS), SCADA_E_GAP);
     EXPECT_TRUE(saw_owner(sub.get(), 2, false));
     EXPECT_TRUE(stops_cleanly(*again));
