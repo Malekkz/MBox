@@ -571,6 +571,26 @@ Consequences:
 - Reference section 5.4, which makes the `down` flag the source, is updated with the contract at 1.0 (contract section 17).
 - New suppressions: in `tag_access_integration_test.cpp`, `concurrency-mt-unsafe` a second time for `getenv` and `modernize-deprecated-headers` for `<signal.h>`; `cppcoreguidelines-pro-type-union-access` once in the probe, for the page fault counts of `rusage`.
 
+## D-31: The pause of a tag read on ARM64 is `isb`; no own attempt count and no shorter copy for strings
+Date: 2026-11-14
+Phase / issue: 1, #40
+Status: accepted
+
+Context: D-30 left `yield` as the pause of `scada::cpu_relax()` on ARM64 and asked for measurements on ARM64 hardware: whether 64 attempts of a read last long enough for an owner to finish a write, and the rate of `SCADA_E_BUSY`. The issue asks to decide from the figures whether ARM64 uses `isb`, whether the string functions get their own attempt count, and whether the string copy window is shortened. It forbids clock reads in the retry loop and a change of the limit of 64 for the real-time read before issue P1-12. The session that did the work has no ARM64 machine; the product owner chose the ARM64 runner of the pipeline.
+Options, where to measure: the ARM64 runner of the pipeline; the target board, by hand; an emulator (gives no timing). Options, the pause on ARM64: `yield`; `isb`; no instruction. Options, strings: as now; an attempt count of their own; copy only `len` bytes or 64-bit words.
+Decision:
+- Measured on the pipeline runners with `scripts/measure-seqlock.sh` and the program `scada-tag-seqlock-bench`, in the `perf` build, by the manual job `arm64-measurements`. The figures are in `docs/reports/phase-1.md`.
+- ARM64 uses `isb`. With `yield` the 64 attempts took 22 ns on a Neoverse N2, a fifth of one string write (113 ns), and 1 read in 80,625 of 1,000 string tags at 50,000 writes per second gave up. With `isb` they took 0.67 us and 1 read in 54 million gave up, against 1 in 25 million on the x86-64 runner with `pause`. A read of a record nobody writes takes the same time with both (15 ns to 17 ns); only a read that finds a write in progress waits longer, at most 0.67 us before it gives up.
+- The build option `SCADA_ARM64_PAUSE` (`isb` or `yield`, default `isb`) is kept, so that a new board can be measured both ways. It is a definition of the whole build. x86-64 ignores it.
+- The string functions keep the 64 attempts of the scalar read, and the copy stays as it is: with `isb` the window covers a string write about six times over, and the rate for string tags is below the criterion of the scalar ones.
+- The limit of 64 is not changed; P1-12 confirms it. There are no clock reads in the retry loop.
+Reason: 64 attempts must outlast the longest write a running owner makes, or a reader reports `SCADA_E_BUSY` while nothing is wrong. `isb` gives ARM64 the window x86-64 has with `pause`, without a clock read and without a second attempt count to keep consistent.
+Consequences:
+- The reference load (conformance test 2, 600 s, 4 readers, 50,000 tags, 50,000 updates per second) gave `SCADA_E_BUSY` for 0 of 33.1 billion reads with `yield` and 5 of 32.5 billion with `isb` on ARM64, and 0 of 26.1 billion on x86-64: all far below 1 in 1,000,000. On 2 processors 4 readers, 10 owner threads and `scada-tagd` share the cores, so a read that gives up there is an owner preempted mid-write, which no pause covers.
+- One string tag rewritten without pause (one write every 195 ns) gives up for almost every read on both architectures: a 103 ns copy does not fit between writes. That is not a load of the reference document and is not addressed here.
+- The runners are shared virtual machines with 2 processors, not the target board. The measurement is repeated on the board with the same script when it is available; issue #41 also needs the board.
+- The job `arm64-measurements` runs only when started by hand (`workflow_dispatch`). It is not one of the checks of a pull request.
+
 ## D-32: Change rings and the wake mechanism: futex on read-only mappings, subscriptions, notify and wait sets
 Date: 2026-11-14
 Phase / issue: 1, #15

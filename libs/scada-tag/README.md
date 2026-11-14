@@ -371,10 +371,13 @@ system call, as long as the clocks can be read from the vDSO. Attach checks
 that: `scada_status.clock_syscall` is 1 if the kernel's clock source is not
 one the vDSO reads, or one clock read takes more than 200 ns. The check is
 repeated at most once a minute from `scada_tag_notify` and
-`scada_tag_status`. In the retry loop of
-a read the processor is told to pause (`scada::cpu_relax`). On ARM64 that
-pause is much shorter than on x86-64, so a read gives up sooner there; the
-rate of `SCADA_E_BUSY` was measured on x86-64 only (decision D-30).
+`scada_tag_status`. In the retry loop of a read the processor is told to
+pause (`scada::cpu_relax`): a read that finds a write in progress gives up
+with `SCADA_E_BUSY` after about 0.7 us on ARM64 and 1 us to 1.6 us on
+x86-64, longer than a write of a running owner takes. The rate of
+`SCADA_E_BUSY` at the reference load is in `docs/reports/phase-1.md`
+(decision D-31). `scada-tag-seqlock-bench` and `scripts/measure-seqlock.sh`
+measure it again on another machine.
 
 ## Change rings and waking
 
