@@ -95,12 +95,14 @@ SCADA_RT bool storable(std::uint8_t quality, std::uint16_t flags) noexcept {
            !has_flag(flags, QualityFlag::OWNER_DOWN);
 }
 
+#ifndef NDEBUG
 // The address of an object every thread has its own of: what tells one
 // thread from another without a system call.
 SCADA_RT const void* thread_mark() noexcept {
     thread_local const char mark = 0;
     return &mark;
 }
+#endif
 
 // True if `copy` holds what a record of a tag of type `type` may hold. A
 // STRING record holds the number of its string slot, `string_slot`.
