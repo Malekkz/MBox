@@ -244,6 +244,9 @@ Result<std::vector<std::string>> list_directory(int dir_fd,
             names.emplace_back(name);
         }
     }
+    // The operating system gives no order; a fixed one makes what callers
+    // do, and what they log, the same on every file system.
+    std::ranges::sort(names);
     return names;
 }
 

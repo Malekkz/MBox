@@ -104,7 +104,8 @@ struct RegionIdentity {
                                              std::string& detail);
 
 // The names in the directory open as `dir_fd`, without "." and "..", at
-// most MAX_DIRECTORY_ENTRIES of them. The names are outside input.
+// most MAX_DIRECTORY_ENTRIES of them, sorted by their bytes. The names are
+// outside input.
 [[nodiscard]] Result<std::vector<std::string>> list_directory(
     int dir_fd, std::string& detail);
 
