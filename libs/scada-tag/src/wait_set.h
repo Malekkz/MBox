@@ -32,7 +32,8 @@ inline constexpr std::size_t MAX_WAIT_SET_SOURCES = MAX_FUTEX_WAITERS - 1;
 struct WaitSetSeen {
     const std::byte* mapping = nullptr;
     std::uint32_t epoch = 0;
-    std::uint32_t word = 0;  // the futex word: write_seq or cycle_seq
+    std::uint32_t word = 0;   // the futex word: write_seq or cycle_seq
+    bool owner_down = false;  // of a ring: its owner's process is down
 
     friend bool operator==(const WaitSetSeen&, const WaitSetSeen&) = default;
 };

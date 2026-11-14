@@ -369,9 +369,61 @@ int next_code(scada_sub* sub) {
     return ::testing::AssertionSuccess();
 }
 
+// The owner state `sub` saw: changes, and whether it is down now.
+::testing::AssertionResult saw_owner(scada_sub* sub, std::uint32_t changes,
+                                     bool down) {
+    scada_sub_stats_t stats{};
+    if (scada_sub_stats(sub, &stats) != SCADA_OK ||
+        stats.owner_changes != changes || (stats.owner_down != 0) != down) {
+        return ::testing::AssertionFailure()
+               << stats.owner_changes << " owner changes, owner_down "
+               << int{stats.owner_down};
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// How long after the kill of an owner a waiting consumer may still not
+// have its gap: the heartbeat timeout, the wait slice, and time for this
+// thread to be scheduled on a busy machine.
+constexpr int DOWN_LIMIT_MS = IO_TIMEOUT_MS + SCADA_WAIT_SLICE_MS + 1000;
+
+// Issue #42, point 2, across processes: an owner killed with SIGKILL writes
+// no change; a consumer waiting on its ring gets SCADA_E_GAP within the
+// heartbeat timeout, reads the tag as OWNER_DOWN, and gets one more gap
+// when the owner is back.
+TEST_F(ChangeRingProcesses, AKilledOwnerGivesAGapWithinItsHeartbeatTimeout) {
+    write_small_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<ChildProcess> owner = attached_io();
+    if (!tagd.has_value() || !owner.has_value()) {
+        return;
+    }
+    const Attached reader(base(), "reader");
+    const Subscribed sub(reader.ctx(), "io");
+    const std::uint32_t level = reader.resolve("plant.level");
+    kill(*owner);
+    const Clock::time_point killed = Clock::now();
+    scada_change change{};
+    EXPECT_EQ(scada_sub_next(sub.get(), &change, WAIT_MS), SCADA_E_GAP);
+    EXPECT_LE(Clock::now() - killed, std::chrono::milliseconds(DOWN_LIMIT_MS));
+    EXPECT_TRUE(saw_owner(sub.get(), 1, true));
+    scada_value value{};
+    EXPECT_EQ(scada_tag_read(reader.ctx(), level, &value), SCADA_OK);
+    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
+
+    std::optional<ChildProcess> again = attached_io();
+    if (!again.has_value()) {
+        return;
+    }
+    EXPECT_EQ(scada_sub_next(sub.get(), &change, WAIT_MS), SCADA_E_GAP);
+    EXPECT_TRUE(saw_owner(sub.get(), 2, false));
+    EXPECT_TRUE(stops_cleanly(*again));
+    stop(*tagd);
+}
+
 // Conformance test 7, the part of the ring, across processes: the owner is
-// killed and starts again; a consumer gets SCADA_E_GAP once and then the
-// writes of the new owner.
+// killed and starts again; a consumer that does not look meanwhile gets
+// SCADA_E_GAP once (one more if it sees the owner down, as above).
 TEST_F(ChangeRingProcesses, Conformance07AKilledOwnerThatRestartsGivesOneGap) {
     write_small_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
@@ -383,7 +435,6 @@ TEST_F(ChangeRingProcesses, Conformance07AKilledOwnerThatRestartsGivesOneGap) {
     const Subscribed sub(reader.ctx(), "io");
     EXPECT_EQ(next_code(sub.get()), SCADA_E_TIMEOUT);
     kill(*owner);
-    EXPECT_EQ(next_code(sub.get()), SCADA_E_TIMEOUT);
 
     std::optional<ChildProcess> again = attached_io();
     if (!again.has_value()) {

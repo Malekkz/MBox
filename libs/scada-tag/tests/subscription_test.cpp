@@ -78,6 +78,8 @@ constexpr std::uint64_t MAX_AHEAD = RING / 2;
 constexpr std::uint64_t NOTIFY_EVERY = 64;
 constexpr std::uint64_t BEAT_EVERY = NOTIFY_EVERY * NOTIFY_EVERY;
 constexpr std::uint8_t NO_TYPE = 9;
+// Longer than the heartbeat timeout of every process of the fixture.
+constexpr std::int64_t LONG_AGO_NS = 10'000 * NANOSECONDS_PER_MILLISECOND;
 constexpr int ROUNDS = 3;
 
 scada_value uint_value(std::uint64_t number,
@@ -569,6 +571,126 @@ TEST_F(Changes, Conformance07AnOwnerRestartGivesEveryConsumerOneGap) {
     // The restarted owner's writes arrive.
     write_level(level_value(LEVEL));
     EXPECT_TRUE(has_next(*subs[0]) && has_next(*subs[1]));
+}
+
+// `sub` saw the owner's process change state `changes` times, and sees it
+// down now if `down`.
+::testing::AssertionResult saw_owner(Subscription& sub, std::uint32_t changes,
+                                     bool down) {
+    const scada_sub_stats_t stats = sub.stats();
+    if (stats.owner_changes != changes || (stats.owner_down != 0) != down) {
+        return ::testing::AssertionFailure()
+               << stats.owner_changes << " owner changes, owner_down "
+               << int{stats.owner_down};
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// The tag plant.level, as `reader` reads it, has OWNER_DOWN.
+bool reads_as_down(Attachment& reader, std::uint32_t handle) {
+    scada_value value{};
+    return reader.read(handle, value) == SCADA_OK &&
+           has_flag(value.quality_flags, QualityFlag::OWNER_DOWN);
+}
+
+// Issue #42, point 2: an owner that stops writes no change; the consumer of
+// its ring gets a gap when it is seen down, reads the tags as OWNER_DOWN,
+// and gets one more gap when the owner is back.
+TEST_F(Changes, AnOwnerThatStopsGivesAGapAndAnotherWhenItIsBack) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    const std::uint32_t level = handle_of(*web(), "plant.level");
+    write_level(level_value(LEVEL));
+    EXPECT_TRUE(has_next(*sub));
+
+    io().reset();  // a clean stop: down at once
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
+    EXPECT_TRUE(saw_owner(*sub, 1, true));
+    EXPECT_TRUE(reads_as_down(*web(), level));
+
+    io() = attached("io");
+    ASSERT_NE(io(), nullptr);
+    // One gap for the return; the epoch it incremented is part of it.
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
+    EXPECT_EQ(next_code(*sub), SCADA_E_TIMEOUT);
+    EXPECT_TRUE(saw_owner(*sub, 2, false));
+    EXPECT_EQ(sub->stats().gaps, 2U);
+}
+
+// An owner whose heartbeat stopped may still have threads that write. Its
+// changes then come with the overlay of a read: BAD and OWNER_DOWN.
+TEST_F(Changes, AChangeOfAnOwnerThatIsDownComesAsBad) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    {
+        const MappedRegion proc = map_file("proc.io");
+        store_shared(shared_at<ProcHeader>(proc.bytes(), sizeof(RegionHeader))
+                         .heartbeat_mono_ns,
+                     scada::monotonic_ns() - LONG_AGO_NS,
+                     std::memory_order_release);
+    }
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
+    write_level(level_value(LEVEL));
+    const scada_change down = take(*sub);
+    EXPECT_EQ(down.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(down.quality_flags,
+              SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_LOCAL_TIME);
+    EXPECT_EQ(level_of(down), LEVEL);
+
+    EXPECT_TRUE(io()->heartbeat());
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
+    write_level(level_value(-LEVEL));
+    EXPECT_EQ(take(*sub).quality, SCADA_QUALITY_GOOD);
+    EXPECT_TRUE(saw_owner(*sub, 2, false));
+}
+
+// An owner that is down when the subscription opens is the starting point:
+// no gap until it comes up.
+TEST_F(Changes, AnOwnerDownAtOpenGivesNoGapUntilItComesUp) {
+    io().reset();
+    const Sub after = subscribe(*web(), "io");
+    ASSERT_NE(after, nullptr);
+    EXPECT_TRUE(saw_owner(*after, 0, true));
+    EXPECT_EQ(next_code(*after), SCADA_E_TIMEOUT);
+}
+
+// `wait` of a consumer blocked in another thread returns when the owner
+// stops, without a write.
+template <typename Wait>
+::testing::AssertionResult wakes_when_the_owner_stops(Attached& owner,
+                                                      const Wait& wait) {
+    int code = SCADA_E_INVALID;
+    {
+        const std::jthread consumer([&] { code = wait(); });
+        std::this_thread::sleep_for(BLOCK_TIME);
+        owner.reset();
+    }
+    if (code != SCADA_OK) {
+        return ::testing::AssertionFailure() << "return code " << code;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+TEST_F(Changes, ABlockedConsumerLearnsThatTheOwnerStopped) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    EXPECT_TRUE(wakes_when_the_owner_stops(io(), [&] {
+        scada_change change{};
+        return sub->next(change, WAIT_LIMIT_MS) == SCADA_E_GAP
+                   ? SCADA_OK
+                   : SCADA_E_INVALID;
+    }));
+}
+
+TEST_F(Changes, AWaitSetWakesWhenTheOwnerStops) {
+    const Sub sub = subscribe(*web(), "io");
+    ASSERT_NE(sub, nullptr);
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_sub(*sub), SCADA_OK);
+    EXPECT_TRUE(wakes_when_the_owner_stops(
+        io(), [&] { return set.wait(WAIT_LIMIT_MS); }));
+    EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
 }
 
 // A ring that is not there when the subscription opens is no error; once

@@ -228,6 +228,11 @@ public:
     [[nodiscard]] std::span<std::byte> proc_of(
         std::uint16_t process_index) const noexcept;
 
+    // True if the process of the owner `owner_index` is down now, by the
+    // three rules of section 10.1 (as the overlay of a read judges it).
+    [[nodiscard]] bool owner_process_down(
+        std::size_t owner_index) const noexcept;
+
     // The capacity of the ring of `owner_index`, from the owner table.
     [[nodiscard]] std::uint32_t ring_capacity(
         std::size_t owner_index) const noexcept;

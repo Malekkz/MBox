@@ -90,6 +90,10 @@ private:
     // gives another capacity than the owner table.
     [[nodiscard]] bool follow(std::span<std::byte> bytes) noexcept;
 
+    // Moves the cursor to the end of the ring in `bytes` and takes its
+    // epoch, as after any gap; nothing for an empty span.
+    void skip_to_end(std::span<std::byte> bytes) noexcept;
+
     Attachment& attachment_;
     std::size_t owner_index_ = 0;
     std::uint16_t process_index_ = 0;
@@ -101,6 +105,9 @@ private:
     const std::byte* mapping_ = nullptr;
     // The ring header of `mapping_` gives another capacity.
     bool wrong_capacity_ = false;
+    // Whether the owner's process was down at the last look; a change of it
+    // is a gap.
+    bool owner_down_ = false;
     std::uint64_t cursor_ = 0;  // the next position wanted
     std::uint32_t epoch_ = 0;   // of the ring, as last seen
 
@@ -108,6 +115,7 @@ private:
     std::uint64_t gaps_ = 0;
     std::uint64_t lost_ = 0;
     std::uint64_t invalid_ = 0;
+    std::uint32_t owner_changes_ = 0;
 
     WaitSet* wait_set_ = nullptr;
 };

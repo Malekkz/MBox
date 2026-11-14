@@ -397,7 +397,7 @@ and repeats the clock check, as `scada_tag_status` does.
 | --- | --- |
 | `scada_sub_open` | Subscribes to the ring of one owner, from its end on. A ring that is not there yet is no error |
 | `scada_sub_next` | The next change, waiting up to a timeout; `SCADA_E_GAP` when changes were lost |
-| `scada_sub_stats` | Changes received, gaps, entries lost to overruns, entries refused, the epoch |
+| `scada_sub_stats` | Changes received, gaps, entries lost to overruns, entries refused, the epoch, owner changes and whether the owner is down |
 | `scada_sub_close` | Closes it, and takes it out of its wait set |
 | `scada_waitset_create`, `_add_sub`, `_add_cycle` | Up to 127 subscriptions and cycle counters |
 | `scada_waitset_wait` | Waits for any of them with one `futex_waitv` |
@@ -413,15 +413,18 @@ within 100 ms.
 
 `scada_sub_next` returns `SCADA_E_GAP` once for each of these: the
 subscription fell `capacity` entries behind (contract 8.2), the owner
-attached again (the epoch changed), or the ring appeared, disappeared or
-was replaced. The subscription then continues at the end of the ring; the
+attached again (the epoch changed), the ring appeared, disappeared or was
+replaced, or the owner's process went down or came back (decision D-32). The subscription then continues at the end of the ring; the
 consumer reads the tags it cares about and drops any later change older
 than what it read. A change entry is input: one that is not a valid change
 of a tag of the owner gives `SCADA_E_LAYOUT` and is skipped.
 
-Changes carry the stored quality. An owner that dies writes no change, so
-a consumer that must see it (alarms, the historian) reads the tags or
-watches the process as well (issue #42).
+An owner that dies writes no change; the gap when its process is seen
+down tells the consumer, which then reads the tags and gets BAD with
+OWNER_DOWN. A waiting consumer gets that gap within the owner's heartbeat
+timeout plus 100 ms, at once after a clean stop. While the owner is down, a
+change that still arrives comes as BAD with OWNER_DOWN, as a read would
+give it. `scada_sub_stats` counts these owner changes.
 
 ## How to use it
 

@@ -471,8 +471,16 @@ return the copy; cursor += 1
 ### 8.3 Gap handling
 
 A consumer remembers the ring's `epoch`. If it has changed, that is a GAP
-too. So is a ring that appears, disappears or is replaced by another file
-while a consumer is subscribed: a subscription to a ring that is missing
+too. So is a change of the owner's process between down and not down (the
+three rules of section 10.1, which the consumer evaluates at every look): a
+dead owner writes no entry, and this gap is how a consumer of the ring
+learns it. An owner that dies and restarts gives two gaps to a consumer
+that looked while it was down, one to a consumer that did not; the epoch
+change of the restart is part of the second gap. While the owner's process
+is down, an entry that still arrives (its threads may write while its main
+loop is hung) is delivered with the overlay of section 6.2: quality BAD,
+OWNER_DOWN added. So is a ring that appears, disappears or is replaced by
+another file while a consumer is subscribed: a subscription to a ring that is missing
 succeeds, and its first look at the ring once it is there is a GAP. A
 consumer reads `epoch` before `write_seq` when it sets its cursor, so that
 a restart between the two loads gives one GAP too many, never one too few.
@@ -908,7 +916,7 @@ void scada_waitset_destroy(scada_waitset *ws);
 typedef struct {
   uint32_t handle;
   uint8_t  type;                 /* TagType */
-  uint8_t  quality;              /* as stored, without the overlay of 6.2 */
+  uint8_t  quality;              /* as stored; BAD while the owner is down */
   uint16_t quality_flags;        /* as stored */
   uint64_t value;                /* bit pattern; a STRING's slot number */
   int64_t  source_time_ns;
@@ -923,12 +931,16 @@ typedef struct {
   uint32_t epoch;                /* of the ring, as last seen */
   uint16_t owner_index;
   uint16_t process_index;
-} scada_sub_stats_t;             /* 40 bytes */
+  uint32_t owner_changes;        /* owner seen going down or coming back */
+  uint8_t  owner_down;           /* 1 if down at the last look */
+  uint8_t  reserved[3];
+} scada_sub_stats_t;             /* 48 bytes */
 ```
 
-A change carries the stored quality. An owner that dies writes no change;
-a consumer that must see it reads the tags (section 6.2) or the owner's
-process status.
+A change carries the stored quality, with the overlay of section 6.2 while
+the owner's process is down (section 8.3). A consumer that keeps copies of
+values reads the tags after a GAP and takes what the read gives: BAD with
+OWNER_DOWN for a dead owner, so it never holds on to a last good value.
 
 ### 13.1 Real-time safety
 
@@ -1015,7 +1027,8 @@ ARM64:
    it stopped, and never hang.
 6. A process that stops cleanly reads as down at once.
 7. An owner restart repairs its region and readers recover without
-   reattaching; every consumer of its ring gets `SCADA_E_GAP` once.
+   reattaching; every consumer of its ring gets `SCADA_E_GAP` once for the
+   restart, and once more if it looked while the owner was down.
 8. A non-owner process cannot write: the mapping is read-only and the library
    returns `SCADA_E_NOT_OWNER`.
 9. A region file created by the wrong user is rejected and removed by
@@ -1142,7 +1155,7 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.4 | 2026-11-14 | Review of P1-06 (SCADA, C++ and Linux reviewers; D-29, D-30), confirmed by the product owner. Section 10.1: a process is down by three rules; the `down` flag of `scada-tagd` is for reporting and is not used by readers. Section 6.2: what a read returns for a missing region, for a record left mid-write by a dead owner and for a record that is not valid; only `SCADA_E_BUSY` leaves the output unchanged; OWNER_DOWN is never stored; a tag is resolved in the context that reads it. Sections 6.1 and 6.2: fields are accessed one by one, not as 64-bit words. Return codes `SCADA_E_INVALID` and `SCADA_E_LAYOUT` widened. |
 
-| 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-31). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 16: wake mechanism settled. |
+| 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-31). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-32); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 
 Migration, 0.4 to 0.5: none for data. The layout version stays 1 and no
 structure in shared memory changed. `scada_change` and `scada_sub_stats_t`

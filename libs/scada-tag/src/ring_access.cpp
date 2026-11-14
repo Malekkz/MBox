@@ -109,6 +109,10 @@ std::span<std::byte> Attachment::proc_of(
     return peers_.bytes(peers_.proc_slot(process_index));
 }
 
+bool Attachment::owner_process_down(std::size_t owner_index) const noexcept {
+    return owner_down(access_.at(owner_index), monotonic_ns());
+}
+
 std::uint32_t Attachment::ring_capacity(
     std::size_t owner_index) const noexcept {
     return access_.at(owner_index).ring_capacity;

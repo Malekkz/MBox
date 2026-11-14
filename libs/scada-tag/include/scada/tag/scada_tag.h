@@ -427,9 +427,10 @@ enum { SCADA_WAIT_SLICE_MS = 100 };
 typedef struct {
     uint32_t handle;        /* the tag; of the owner of the subscription */
     uint8_t type;           /* SCADA_TYPE_* */
-    uint8_t quality;        /* SCADA_QUALITY_* as stored, without the
-                               overlay of the owner state */
-    uint16_t quality_flags; /* SCADA_FLAG_* bits as stored */
+    uint8_t quality;        /* SCADA_QUALITY_* as stored; BAD while the
+                               owner's process is down */
+    uint16_t quality_flags; /* SCADA_FLAG_* bits as stored; OWNER_DOWN
+                               added while the owner's process is down */
     uint64_t value;         /* bit pattern; for a STRING its slot number:
                                read the text with scada_tag_read_string */
     int64_t source_time_ns; /* CLOCK_REALTIME */
@@ -437,7 +438,7 @@ typedef struct {
                                tag record */
 } scada_change; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
-/* What scada_sub_stats reports. 40 bytes. */
+/* What scada_sub_stats reports. 48 bytes. */
 /* NOLINTNEXTLINE(modernize-use-using): C interface */
 typedef struct {
     uint64_t received;      /* entries delivered with SCADA_OK */
@@ -449,6 +450,11 @@ typedef struct {
     uint32_t epoch;         /* epoch of the ring as last seen */
     uint16_t owner_index;   /* of the owner in the owner table */
     uint16_t process_index; /* of the process that owner is a thread of */
+    uint32_t owner_changes; /* times the owner's process was seen going
+                               down or coming back; each was a gap */
+    uint8_t owner_down;     /* 1 if the owner's process was down at the
+                               last look (section 10.1) */
+    uint8_t reserved[3];    /* 0 */
 } scada_sub_stats_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*
@@ -478,7 +484,8 @@ int scada_sub_open(scada_ctx* ctx, const char* owner, scada_sub** out);
  * SCADA_OK: `*out` holds a change. SCADA_E_TIMEOUT: none arrived.
  * SCADA_E_GAP (section 8.3): changes were lost because the subscription
  * fell behind by the capacity of the ring, the owner attached again (the
- * epoch changed), or the ring appeared, disappeared or was replaced. The
+ * epoch changed), the ring appeared, disappeared or was replaced, or the
+ * owner's process was seen going down or coming back (section 10.1). The
  * subscription now continues at the end of the ring; read every tag of
  * the owner you care about again, and drop a change older than that read.
  * Reported once for each such event. SCADA_E_LAYOUT: the next entry is not
@@ -489,8 +496,16 @@ int scada_sub_open(scada_ctx* ctx, const char* owner, scada_sub** out);
  * SCADA_E_IO with errno set: the kernel refused the wait. `*out` is
  * changed only with SCADA_OK.
  *
- * Changes carry the stored quality: an owner that dies writes no change.
- * Read the tags, or watch the owner's process, to see it down.
+ * An owner that dies writes no change; the gap when its process is seen
+ * down is what tells the consumer. The tags it then reads give BAD with
+ * SCADA_FLAG_OWNER_DOWN, and a consumer that keeps a copy of the values
+ * must take those, not hold on to the last good ones. The process is seen
+ * down within its heartbeat timeout plus SCADA_WAIT_SLICE_MS of a waiting
+ * call, at once after a clean stop. An owner that restarts gives at most
+ * two gaps (down, back), one if the subscription did not look while it
+ * was down. A change that still arrives while the owner's process is
+ * down (its threads may write while its main loop is hung) comes with
+ * quality BAD and SCADA_FLAG_OWNER_DOWN, as a read would give it.
  *
  * Not real-time: it may block. One thread uses a subscription.
  */

@@ -10,6 +10,7 @@
 #include "scada/common/clock.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
+#include "scada/tag/types.h"
 
 #include <atomic>
 #include <cerrno>
@@ -78,6 +79,8 @@ int Subscription::open(Attachment& attachment, std::string_view owner,
     // Mapped and brought into memory here (section 11.2).
     attachment.want_changes(*index);
     auto subscription = std::make_unique<Subscription>(attachment, *index);
+    // The state at open is the starting point, not a change.
+    subscription->owner_down_ = attachment.owner_process_down(*index);
     const std::span<std::byte> bytes = attachment.changes_of(*index);
     if (!bytes.empty() && !subscription->follow(bytes)) {
         return SCADA_E_LAYOUT;
@@ -116,17 +119,43 @@ bool Subscription::follow(std::span<std::byte> bytes) noexcept {
     return true;
 }
 
+void Subscription::skip_to_end(std::span<std::byte> bytes) noexcept {
+    if (!bytes.empty() && !wrong_capacity_) {
+        // The epoch first, as in `follow`.
+        epoch_ = ring_epoch(bytes);
+        cursor_ = ring_write_seq(bytes);
+    }
+}
+
 int Subscription::poll(scada_change& out) noexcept {
     const std::span<std::byte> bytes = attachment_.changes_of(owner_index_);
+    const bool owner_down = attachment_.owner_process_down(owner_index_);
     if (bytes.data() != mapping_) {
         // The ring appeared, disappeared or was replaced (section 8.3:
-        // whatever the consumer knew may be lost; it resynchronises).
+        // whatever the consumer knew may be lost; it resynchronises). A
+        // change of the owner's state at the same look is the same gap.
+        if (owner_down != owner_down_) {
+            owner_down_ = owner_down;
+            ++owner_changes_;
+        }
         if (bytes.empty()) {
             mapping_ = nullptr;
             wrong_capacity_ = false;
         } else if (!follow(bytes)) {
             return SCADA_E_LAYOUT;
         }
+        ++gaps_;
+        return SCADA_E_GAP;
+    }
+    if (owner_down != owner_down_) {
+        // The owner's process went down or came back (section 10.1). A dead
+        // owner writes no change, so this is how a consumer of the ring
+        // learns it: it reads the tags, which give OWNER_DOWN, or values
+        // again. Whatever the ring holds up to here, the epoch included, is
+        // passed over: the reads after the gap supersede it.
+        owner_down_ = owner_down;
+        ++owner_changes_;
+        skip_to_end(bytes);
         ++gaps_;
         return SCADA_E_GAP;
     }
@@ -169,6 +198,12 @@ int Subscription::poll(scada_change& out) noexcept {
         return SCADA_E_LAYOUT;
     }
     out = change_of(entry);
+    if (owner_down_) {
+        // The overlay of a read (section 6.2): an owner whose process is
+        // down, whose threads may still write, gives no good value.
+        out.quality = to_raw(Quality::BAD);
+        out.quality_flags |= to_raw(QualityFlag::OWNER_DOWN);
+    }
     ++received_;
     return SCADA_OK;
 }
@@ -207,7 +242,8 @@ int Subscription::next(scada_change& out, int timeout_ms) {
 
 bool Subscription::ready() const noexcept {
     const std::span<std::byte> bytes = attachment_.changes_of(owner_index_);
-    if (bytes.data() != mapping_) {
+    if (bytes.data() != mapping_ ||
+        attachment_.owner_process_down(owner_index_) != owner_down_) {
         return true;
     }
     if (bytes.empty() || wrong_capacity_) {
@@ -236,6 +272,8 @@ scada_sub_stats_t Subscription::stats() const noexcept {
     // Below MAX_OWNERS, which fits 16 bits.
     stats.owner_index = static_cast<std::uint16_t>(owner_index_);
     stats.process_index = process_index_;
+    stats.owner_changes = owner_changes_;
+    stats.owner_down = owner_down_ ? 1 : 0;
     return stats;
 }
 

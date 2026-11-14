@@ -51,6 +51,8 @@ Seen look_at(Attachment& attachment, bool ring, std::size_t index) noexcept {
             seen.epoch = ring_epoch(bytes);
             seen.word = futex_word_of(ring_write_seq(bytes));
         }
+        // A dead owner wakes nobody: the slice of the wait finds it.
+        seen.owner_down = attachment.owner_process_down(index);
         return seen;
     }
     // In range: the index was checked by `add_cycle`.

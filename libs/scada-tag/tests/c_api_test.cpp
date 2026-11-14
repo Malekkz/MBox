@@ -386,7 +386,7 @@ TEST_F(CApi, NullArgumentsOfTheTagFunctionsAreInvalid) {
 
 TEST_F(CApi, TheChangeStructuresHaveTheirDocumentedSizes) {
     EXPECT_EQ(sizeof(scada_change), 32U);
-    EXPECT_EQ(sizeof(scada_sub_stats_t), 40U);
+    EXPECT_EQ(sizeof(scada_sub_stats_t), 48U);
     EXPECT_EQ(SCADA_WAIT_SLICE_MS, 100);
 }
 
