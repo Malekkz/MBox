@@ -1,0 +1,111 @@
+#ifndef SCADA_TAG_PEER_REGIONS_H
+#define SCADA_TAG_PEER_REGIONS_H
+
+// The regions of other processes, mapped read-only on demand
+// (docs/contracts/tag-database.md, section 11.2, last paragraph). A region
+// that is missing, not ready or fails a check of section 3.1 is not an
+// error: it reads as missing and is looked for again later. Private to
+// libscada-tag.
+
+#include "header_view.h"
+#include "region_file.h"
+
+#include "scada/common/realtime.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace scada::tag {
+
+// The shortest time between two looks at one region, in ns (section 11.2:
+// at most once a second for each missing region).
+inline constexpr std::int64_t PEER_RETRY_INTERVAL_NS = 1'000'000'000;
+
+// How often one region may be mapped anew because its file was replaced. A
+// replaced mapping stays until this object is destroyed, because a reader
+// may still be using it; the limit bounds the memory a process that keeps
+// replacing its region can take from its readers. Beyond it the region
+// reads as missing until the reader attaches again.
+inline constexpr std::uint32_t MAX_MAPPINGS_PER_REGION = 16;
+
+// One slot for every region the header of a generation lists. Safe to use
+// from several threads: `bytes` from any thread at any time, `want` and
+// `refresh` from threads that may block.
+class PeerRegions {
+public:
+    // Slots for the regions of the generation `contents` describes.
+    // Nothing is mapped yet.
+    explicit PeerRegions(const HeaderContents& contents);
+
+    ~PeerRegions();
+    PeerRegions(const PeerRegions&) = delete;
+    PeerRegions& operator=(const PeerRegions&) = delete;
+    PeerRegions(PeerRegions&&) = delete;
+    PeerRegions& operator=(PeerRegions&&) = delete;
+
+    // The slot of a region. Each index must be below the count of the
+    // header; a slot of `strings_slot` exists only for an owner with string
+    // slots. A wrong index ends the process.
+    [[nodiscard]] std::size_t proc_slot(std::size_t process_index) const;
+    [[nodiscard]] std::size_t tags_slot(std::size_t owner_index) const;
+    [[nodiscard]] std::size_t strings_slot(std::size_t owner_index) const;
+    [[nodiscard]] std::size_t changes_slot(std::size_t owner_index) const;
+    [[nodiscard]] std::size_t queue_slot(std::size_t queue_id) const;
+
+    // Asks for the region of `slot`: it is looked for now, in the
+    // generation directory open as `dir_fd`, and from then on by `refresh`.
+    // Calling it again for the same slot does nothing. Not real-time.
+    void want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns);
+
+    // The mapped bytes of the region of `slot`, read-only and brought into
+    // memory, or an empty span while the region is missing. The span stays
+    // valid until this object is destroyed, also when the region is mapped
+    // anew meanwhile. Storing through it ends the process with a signal.
+    SCADA_RT [[nodiscard]] std::span<std::byte> bytes(
+        std::size_t slot) const noexcept;
+
+    // Looks again at every region that was asked for and not looked at for
+    // PEER_RETRY_INTERVAL_NS: a missing one is mapped if it is there now, a
+    // mapped one whose file is gone or was replaced is dropped or mapped
+    // anew. Returns how many slots changed. Called from scada_tag_notify
+    // and scada_tag_status; not real-time.
+    std::size_t refresh(int dir_fd, std::int64_t now_mono_ns);
+
+private:
+    struct Slot {
+        std::string name;
+        RegionIdentity identity;
+        bool exists = false;  // the header lists this region
+        // What follows is guarded by `mutex_`.
+        bool wanted = false;
+        std::int64_t next_look_mono_ns = 0;
+        std::uint32_t mappings = 0;
+        // Points into `mappings_`, or null while the region is missing.
+        // Written under `mutex_`, read without it.
+        std::atomic<const OpenedRegion*> current{nullptr};
+    };
+
+    [[nodiscard]] std::size_t checked(std::size_t slot) const;
+
+    // Looks at one slot. True if what `bytes` returns changed.
+    bool look(int dir_fd, Slot& slot);
+
+    std::size_t process_count_ = 0;
+    std::size_t owner_count_ = 0;
+    std::vector<Slot> slots_;  // never resized after construction
+
+    std::mutex mutex_;
+    std::vector<std::size_t> wanted_;  // guarded by mutex_
+    // Every mapping ever made, kept until destruction. Guarded by mutex_.
+    std::vector<std::unique_ptr<const OpenedRegion>> mappings_;
+};
+
+}  // namespace scada::tag
+
+#endif  // SCADA_TAG_PEER_REGIONS_H

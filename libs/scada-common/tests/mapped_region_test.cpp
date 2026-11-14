@@ -134,4 +134,38 @@ TEST(MappedRegion, MoveTransfersTheMappingAndResetRemovesIt) {
     assigned.reset();  // a second reset does nothing
 }
 
+TEST(MappedRegion, PrefaultBringsAReadOnlyMappingIntoMemory) {
+    const Fd file = make_file();
+    ASSERT_TRUE(file.valid());
+    const Result<MappedRegion> region =
+        MappedRegion::map(file.get(), FILE_SIZE, MapAccess::READ_ONLY);
+    ASSERT_TRUE(region.ok());
+    EXPECT_TRUE(region.value().prefault().ok());
+    EXPECT_EQ(region.value().bytes().back(), std::byte{0});
+}
+
+TEST(MappedRegion, PrefaultBringsAWritableMappingIntoMemory) {
+    const Fd file = make_file();
+    ASSERT_TRUE(file.valid());
+    const Result<MappedRegion> region =
+        MappedRegion::map(file.get(), FILE_SIZE, MapAccess::READ_WRITE);
+    ASSERT_TRUE(region.ok());
+    EXPECT_TRUE(region.value().prefault().ok());
+    region.value().bytes().back() = MARK;
+    EXPECT_EQ(region.value().bytes().back(), MARK);
+    EXPECT_EQ(MappedRegion().prefault().code(),
+              StatusCode::FAILED_PRECONDITION);
+}
+
+TEST(MappedRegion, PrefaultFailsWithAnErrorWhenTheFileIsTooShort) {
+    const Fd file = make_file();
+    ASSERT_TRUE(file.valid());
+    const Result<MappedRegion> region =
+        MappedRegion::map(file.get(), FILE_SIZE, MapAccess::READ_ONLY);
+    ASSERT_TRUE(region.ok());
+    // Touching the mapping now would end the process with a signal.
+    ASSERT_EQ(::ftruncate(file.get(), 0), 0);
+    EXPECT_EQ(region.value().prefault().code(), StatusCode::IO_ERROR);
+}
+
 }  // namespace

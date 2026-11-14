@@ -1,8 +1,13 @@
 scada_add_library(scada-tag
   SOURCES
+    src/attachment.cpp
+    src/c_api.cpp
     src/generation_host.cpp
     src/header_builder.cpp
+    src/header_view.cpp
     src/layout.cpp
+    src/own_region.cpp
+    src/peer_regions.cpp
     src/proc_region.cpp
     src/region_file.cpp
     src/sha256.cpp

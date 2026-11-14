@@ -55,6 +55,14 @@ constexpr std::chrono::minutes QUIET_WATCHDOG{10};
 // the heartbeat timeout of `io`: 30 messages, at least 50 ms apart.
 constexpr int FEEDS_BEYOND_IO_TIMEOUT = 30;
 
+// Watchdog messages with the short interval, 50 ms apart, in which the
+// liveness check and the sweep run several times.
+constexpr int FEEDS_OVER_SEVERAL_CHECKS = 4;
+
+// Exit codes of the helper process.
+constexpr int PEER_EXIT_FAILED = 1;
+constexpr int PEER_EXIT_BUSY = 3;
+
 // Modes of the tag database contract, section 3.1.
 constexpr mode_t BASE_DIR_MODE = 02750;
 constexpr mode_t GENERATION_DIR_MODE = 03770;
@@ -119,6 +127,20 @@ struct RunningTagd {
     NotifyListener listener;
     ChildProcess child;
 };
+
+// Waits until the output of `process` holds `text`.
+::testing::AssertionResult prints(ChildProcess& process,
+                                  std::string_view text) {
+    const bool found = process.wait_for_output(
+        [&](std::string_view out) {
+            return out.find(text) != std::string_view::npos;
+        },
+        WAIT_LIMIT);
+    return found ? ::testing::AssertionSuccess()
+                 : ::testing::AssertionFailure()
+                       << "no '" << text << "' in: " << process.out()
+                       << process.err();
+}
 
 // Waits until the log of `tagd` holds `line` at or after position `from`.
 ::testing::AssertionResult logs(RunningTagd& tagd, std::string_view line,
@@ -299,23 +321,35 @@ protected:
         return tagd;
     }
 
-    // Starts the helper that attaches as the process `io` of generation 1
-    // and writes its heartbeat, and waits until it has attached. Nothing,
-    // with a failed expectation, if it could not be started.
-    [[nodiscard]] std::optional<ChildProcess> attached_io() const {
-        const std::vector<std::string> command = command_from(
-            "SCADA_TAG_PEER_COMMAND", {generation_one().string(), "io", "0",
-                                       "1", "0", std::to_string(IO_PERIOD_MS)});
+    // Starts the helper that attaches as the process `io` through the C
+    // interface and writes its heartbeat, with `extra` as further
+    // arguments. Nothing, with a failed expectation, if it could not be
+    // started.
+    [[nodiscard]] std::optional<ChildProcess> start_io(
+        const std::vector<std::string>& extra = {}) const {
+        std::vector<std::string> arguments{base().string(), "io",
+                                           std::to_string(IO_PERIOD_MS)};
+        arguments.insert(arguments.end(), extra.begin(), extra.end());
+        const std::vector<std::string> command =
+            command_from("SCADA_TAG_PEER_COMMAND", arguments);
         if (command.empty()) {
             return std::nullopt;
         }
         std::optional<ChildProcess> helper = ChildProcess::start(command);
         if (!helper.has_value()) {
             ADD_FAILURE() << "could not start the helper process";
-            return std::nullopt;
         }
-        EXPECT_TRUE(helper->wait_for_output(attached, WAIT_LIMIT))
-            << helper->err();
+        return helper;
+    }
+
+    // As `start_io`, and waits until the helper has attached.
+    [[nodiscard]] std::optional<ChildProcess> attached_io(
+        const std::vector<std::string>& extra = {}) const {
+        std::optional<ChildProcess> helper = start_io(extra);
+        if (helper.has_value()) {
+            EXPECT_TRUE(helper->wait_for_output(attached, WAIT_LIMIT))
+                << helper->err();
+        }
         return helper;
     }
 
@@ -474,6 +508,96 @@ TEST_F(TagdService, Conformance20RestartLeavesTheOtherProcessRunning) {
         << second->child.err();
     // The helper never stopped: it still answers a stop request.
     EXPECT_TRUE(stops_cleanly(*helper));
+}
+
+// Attach with real processes (issue P1-05): the process creates its own
+// regions with the modes of the contract, and the sweep of scada-tagd, which
+// runs every 50 ms, leaves them alone.
+TEST_F(TagdService, AnAttachedProcessCreatesItsRegionsAndTheyStay) {
+    std::optional<RunningTagd> tagd = ready_tagd(FAST_WATCHDOG);
+    std::optional<ChildProcess> helper = attached_io();
+    if (!tagd.has_value() || !helper.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*helper, "regions created=3 reused=0 repaired=0\n"));
+    EXPECT_TRUE(logs(*tagd, IO_UP));
+    // Several liveness checks and sweeps later the regions are still there.
+    EXPECT_TRUE(feeds_watchdog(*tagd, FEEDS_OVER_SEVERAL_CHECKS));
+    const std::vector<mode_t> modes{mode_of(generation_one() / "proc.io"),
+                                    mode_of(generation_one() / "tags.io"),
+                                    mode_of(generation_one() / "changes.io")};
+    EXPECT_EQ(modes, std::vector<mode_t>(3, REGION_FILE_MODE));
+    EXPECT_EQ(tagd->child.err().find("removed"), std::string::npos)
+        << tagd->child.err();
+    stop(*tagd);
+}
+
+// Conformance test 7 with real processes: an owner killed with SIGKILL in
+// the middle of a write repairs its region when it is restarted, and reuses
+// every region it had.
+TEST_F(TagdService, Conformance07AKilledOwnerRepairsItsRegionOnRestart) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<ChildProcess> helper = attached_io({"mid-write"});
+    if (!tagd.has_value() || !helper.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*helper, "mid-write\n"));
+    kill(*helper);
+    EXPECT_TRUE(logs(*tagd, IO_HEARTBEAT_STALE));
+
+    const std::size_t mark = tagd->child.err().size();
+    std::optional<ChildProcess> again = attached_io();
+    if (!again.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*again, "regions created=0 reused=3 repaired=1\n"));
+    EXPECT_TRUE(logs(*tagd, IO_UP, mark));
+    EXPECT_TRUE(stops_cleanly(*again));
+    stop(*tagd);
+}
+
+// Conformance test 7, continued: a restart after a clean stop finds nothing
+// to repair.
+TEST_F(TagdService, Conformance07ARestartAfterACleanStopRepairsNothing) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<ChildProcess> helper = attached_io();
+    if (!tagd.has_value() || !helper.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(stops_cleanly(*helper));
+    std::optional<ChildProcess> again = attached_io();
+    if (!again.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*again, "regions created=0 reused=3 repaired=0\n"));
+    stop(*tagd);
+}
+
+// Conformance test 10, second part, with real processes: a second process
+// of the same name is refused and does not disturb the first.
+TEST_F(TagdService, Conformance10ASecondProcessOfTheSameNameIsRefused) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<ChildProcess> first = attached_io();
+    std::optional<ChildProcess> second = start_io();
+    if (!tagd.has_value() || !first.has_value() || !second.has_value()) {
+        return;
+    }
+    EXPECT_EQ(second->wait_for_exit(WAIT_LIMIT), PEER_EXIT_BUSY)
+        << second->err();
+    EXPECT_TRUE(logs(*tagd, IO_UP));
+    EXPECT_TRUE(stops_cleanly(*first));
+    stop(*tagd);
+}
+
+// A process cannot attach before scada-tagd has published a generation.
+TEST_F(TagdService, WithoutAGenerationAProcessCannotAttach) {
+    std::optional<ChildProcess> helper = start_io();
+    if (!helper.has_value()) {
+        return;
+    }
+    EXPECT_EQ(helper->wait_for_exit(WAIT_LIMIT), PEER_EXIT_FAILED)
+        << helper->err();
+    EXPECT_TRUE(std::filesystem::is_empty(base()));
 }
 
 TEST_F(TagdService, ChangedTagSetCreatesTheNextGeneration) {

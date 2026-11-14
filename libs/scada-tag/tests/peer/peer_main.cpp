@@ -1,28 +1,35 @@
-// scada-tag-test-peer: stands in for a service in the integration tests of
-// scada-tagd, until the library can attach a process (issue P1-05). It
-// attaches the `proc` region of one process and writes its heartbeat until
-// it is stopped or killed. Test code; not installed.
+// scada-tag-test-peer: stands in for a service in the integration tests. It
+// attaches to the tag database as one process through the C interface and
+// writes its heartbeat until it is stopped or killed. Test code; not
+// installed.
 //
-// Usage: scada-tag-test-peer <generation directory> <process>
-//            <process index> <generation> <queue count> <period in ms>
+// Usage: scada-tag-test-peer <base directory> <process> <period in ms>
+//            [mid-write]
 //
-// It prints "attached" once the region is RUNNING. On SIGTERM it sets the
-// state STOPPING and exits with code 0. Exit code 1: an error; 2: wrong
-// arguments; 3: the process name is already attached.
+// The uid of scada-tagd is taken to be the user of the caller, as in the
+// tests. It prints "attached" once the process is RUNNING, and then
+// "regions created=<n> reused=<n> repaired=<n>". With `mid-write` it then
+// leaves the first tag record of the owner named like the process as a
+// write leaves it half way, with an odd sequence number, and prints
+// "mid-write"; the test kills it in that state.
+//
+// On SIGTERM it detaches and exits with code 0. Exit code 1: an error; 2:
+// wrong arguments; 3: the process name is already attached.
 
 #include "layout.h"
-#include "proc_region.h"
+#include "shared_memory.h"
 
-#include "scada/common/clock.h"
 #include "scada/common/fd.h"
+#include "scada/common/mapped_region.h"
 #include "scada/common/result.h"
-#include "scada/common/status.h"
+#include "scada/tag/scada_tag.h"
 
 #include <fcntl.h>
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <cstddef>
@@ -34,7 +41,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <utility>
 
 namespace {
 
@@ -42,7 +48,8 @@ constexpr int EXIT_FAILED = 1;
 constexpr int EXIT_USAGE = 2;
 constexpr int EXIT_BUSY = 3;
 
-constexpr std::size_t ARGUMENT_COUNT = 7;
+constexpr std::size_t MIN_ARGUMENTS = 4;
+constexpr std::size_t MAX_ARGUMENTS = 5;
 constexpr std::uint64_t MAX_PERIOD_MS = 60'000;
 constexpr std::int64_t MILLISECONDS_PER_SECOND = 1000;
 constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
@@ -60,20 +67,34 @@ std::optional<std::uint64_t> parse_number(std::string_view text,
     return value;
 }
 
-int run(std::span<const std::string_view> args) {
-    using scada::tag::OwnProcRegion;
-    using scada::tag::ProcessState;
+// Leaves the first record of `tags.<owner>` of the current generation with
+// an odd sequence number, as an owner that dies in the middle of a write
+// does. The file is this process's own.
+bool leave_mid_write(const std::string& base, const std::string& owner) {
+    const std::string path = base + "/current/tags." + owner;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+    const scada::Fd file(::open(path.c_str(), O_RDWR | O_CLOEXEC));
+    const std::size_t size =
+        sizeof(scada::tag::RegionHeader) + sizeof(scada::tag::TagRecord);
+    const scada::Result<scada::MappedRegion> memory = scada::MappedRegion::map(
+        file.get(), size, scada::MapAccess::READ_WRITE);
+    if (!memory.ok()) {
+        return false;
+    }
+    auto& record = scada::tag::shared_at<scada::tag::TagRecord>(
+        memory.value().bytes(), sizeof(scada::tag::RegionHeader));
+    const std::uint32_t seq =
+        scada::tag::load_shared(record.seq, std::memory_order_relaxed);
+    scada::tag::store_shared(record.seq, seq | 1U, std::memory_order_release);
+    return true;
+}
 
-    const std::optional<std::uint64_t> index =
-        parse_number(args[3], UINT16_MAX);
-    const std::optional<std::uint64_t> generation =
-        parse_number(args[4], UINT64_MAX);
-    const std::optional<std::uint64_t> queues =
-        parse_number(args[5], UINT16_MAX);
+int run(std::span<const std::string_view> args) {
     const std::optional<std::uint64_t> period =
-        parse_number(args[6], MAX_PERIOD_MS);
-    if (!index || !generation || !queues || !period || *period == 0) {
-        std::cerr << "scada-tag-test-peer: bad number\n";
+        parse_number(args[3], MAX_PERIOD_MS);
+    const bool mid_write = args.size() == MAX_ARGUMENTS;
+    if (!period || *period == 0 || (mid_write && args[4] != "mid-write")) {
+        std::cerr << "scada-tag-test-peer: bad argument\n";
         return EXIT_USAGE;
     }
 
@@ -84,31 +105,33 @@ int run(std::span<const std::string_view> args) {
         return EXIT_FAILED;
     }
 
-    const std::string path(args[1]);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
-    const int raw = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    const scada::Fd directory(raw);
-    scada::tag::ProcRegionParameters parameters;
-    parameters.process = args[2];
-    // In range: checked against the limits above.
-    parameters.process_index = static_cast<std::uint16_t>(*index);
-    parameters.generation = *generation;
-    parameters.queue_count = static_cast<std::size_t>(*queues);
-    parameters.uid = ::geteuid();
-    std::string detail;
-    scada::Result<OwnProcRegion> attached =
-        OwnProcRegion::attach(directory.get(), parameters, detail);
-    if (!attached.ok()) {
-        std::cerr << "scada-tag-test-peer: " << attached.status().message()
-                  << " (" << detail << ")\n";
-        return attached.status().code() == scada::StatusCode::ALREADY_EXISTS
-                   ? EXIT_BUSY
-                   : EXIT_FAILED;
+    const std::string base(args[1]);
+    const std::string process(args[2]);
+    const scada_attach_opts options{.base_dir = base.c_str(),
+                                    .retain_dir = nullptr,
+                                    .tagd_uid = std::int64_t{::geteuid()}};
+    scada_ctx* context = nullptr;
+    const int attached =
+        scada_tag_attach_opts(process.c_str(), &options, &context);
+    if (attached != SCADA_OK) {
+        std::cerr << "scada-tag-test-peer: attach failed with code " << attached
+                  << "\n";
+        return attached == SCADA_E_BUSY ? EXIT_BUSY : EXIT_FAILED;
     }
-    OwnProcRegion region = std::move(attached).value();
-    region.set_state(ProcessState::RUNNING);
-    region.heartbeat(scada::monotonic_ns());
-    std::cout << "attached\n" << std::flush;
+    scada_status status{};
+    static_cast<void>(scada_tag_status(context, &status));
+    std::cout << "attached\nregions created=" << status.regions_created
+              << " reused=" << status.regions_reused
+              << " repaired=" << status.records_repaired << "\n"
+              << std::flush;
+    if (mid_write) {
+        if (!leave_mid_write(base, process)) {
+            std::cerr << "scada-tag-test-peer: cannot reach the tags region\n";
+            scada_tag_detach(context);
+            return EXIT_FAILED;
+        }
+        std::cout << "mid-write\n" << std::flush;
+    }
 
     timespec wait{};
     // In range: the period is at most MAX_PERIOD_MS.
@@ -118,14 +141,17 @@ int run(std::span<const std::string_view> args) {
                                      NANOSECONDS_PER_MILLISECOND);
     for (;;) {
         if (::sigtimedwait(&signals, nullptr, &wait) >= 0) {
-            region.set_state(ProcessState::STOPPING);
+            scada_tag_detach(context);
             return 0;
         }
         if (errno != EAGAIN && errno != EINTR) {
             std::cerr << "scada-tag-test-peer: waiting failed\n";
+            scada_tag_detach(context);
             return EXIT_FAILED;
         }
-        region.heartbeat(scada::monotonic_ns());
+        // A retiring generation is no reason to stop here: the tests that
+        // change the generation look at scada-tagd, not at this helper.
+        static_cast<void>(scada_tag_heartbeat(context));
     }
 }
 
@@ -136,13 +162,13 @@ int main(int argc, char* argv[]) {
     // at once so that nothing below indexes a raw pointer.
     const std::span<char*> raw_args(
         argv, argc > 0 ? static_cast<std::size_t>(argc) : 0);
-    if (raw_args.size() != ARGUMENT_COUNT) {
-        std::cerr << "scada-tag-test-peer: expected 6 arguments\n";
+    if (raw_args.size() < MIN_ARGUMENTS || raw_args.size() > MAX_ARGUMENTS) {
+        std::cerr << "scada-tag-test-peer: expected 3 or 4 arguments\n";
         return EXIT_USAGE;
     }
-    std::array<std::string_view, ARGUMENT_COUNT> args;
-    for (std::size_t i = 0; i < ARGUMENT_COUNT; ++i) {
+    std::array<std::string_view, MAX_ARGUMENTS> args;
+    for (std::size_t i = 0; i < raw_args.size(); ++i) {
         args.at(i) = raw_args[i];
     }
-    return run(args);
+    return run(std::span<const std::string_view>(args).first(raw_args.size()));
 }
