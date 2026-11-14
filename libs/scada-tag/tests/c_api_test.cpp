@@ -384,4 +384,97 @@ TEST_F(CApi, NullArgumentsOfTheTagFunctionsAreInvalid) {
               SCADA_E_INVALID);
 }
 
+TEST_F(CApi, TheChangeStructuresHaveTheirDocumentedSizes) {
+    EXPECT_EQ(sizeof(scada_change), 32U);
+    EXPECT_EQ(sizeof(scada_sub_stats_t), 48U);
+    EXPECT_EQ(SCADA_WAIT_SLICE_MS, 100);
+    EXPECT_EQ(offsetof(scada_sub_stats_t, last_gap), 45U);
+    EXPECT_EQ(SCADA_GAP_NONE, 0);
+    EXPECT_EQ(SCADA_GAP_OWNER_BACK, 5);
+}
+
+// A change written through the C interface arrives through it, and the
+// wait set and notify work there too.
+TEST_F(CApi, AChangeIsWrittenAndReceivedThroughTheCInterface) {
+    start_host();
+    Context feeder;
+    Context web;
+    ASSERT_EQ(attach("io", feeder), SCADA_OK);
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    scada_sub* sub = nullptr;
+    ASSERT_EQ(scada_sub_open(web.get(), "io", &sub), SCADA_OK);
+    scada_waitset* set = nullptr;
+    ASSERT_EQ(scada_waitset_create(web.get(), &set), SCADA_OK);
+    ASSERT_EQ(scada_waitset_add_sub(set, sub), SCADA_OK);
+    ASSERT_EQ(scada_waitset_add_cycle(set, PROCESS_IO), SCADA_OK);
+
+    std::uint32_t handle = 0;
+    ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.level", &handle),
+              SCADA_OK);
+    scada_value value{};
+    value.type = SCADA_TYPE_FLOAT64;
+    value.value = LEVEL_BITS;
+    ASSERT_EQ(scada_tag_write(feeder.get(), handle, &value), SCADA_OK);
+    ASSERT_EQ(scada_tag_notify(feeder.get()), SCADA_OK);
+    EXPECT_EQ(scada_waitset_wait(set, 0), SCADA_OK);
+    scada_change change{};
+    ASSERT_EQ(scada_sub_next(sub, &change, 0), SCADA_OK);
+    EXPECT_EQ(change.handle, handle);
+    EXPECT_EQ(change.value, LEVEL_BITS);
+    EXPECT_EQ(scada_sub_next(sub, &change, 0), SCADA_E_TIMEOUT);
+    scada_sub_stats_t stats{};
+    ASSERT_EQ(scada_sub_stats(sub, &stats), SCADA_OK);
+    EXPECT_EQ(stats.received, 1U);
+    EXPECT_EQ(stats.owner_index, scada::tag::testing::OWNER_IO);
+    EXPECT_EQ(stats.process_index, PROCESS_IO);
+    int descriptor = -1;
+    ASSERT_EQ(scada_waitset_fd(set, &descriptor), SCADA_OK);
+    EXPECT_GE(descriptor, 0);
+    scada_waitset_destroy(set);
+    scada_sub_close(sub);
+}
+
+TEST_F(CApi, NullArgumentsOfTheChangeFunctionsAreInvalid) {
+    start_host();
+    Context web;
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    scada_ctx* const ctx = web.get();
+    EXPECT_EQ(scada_tag_notify(nullptr), SCADA_E_INVALID);
+
+    scada_sub* sub = nullptr;
+    EXPECT_EQ(scada_sub_open(nullptr, "io", &sub), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_open(ctx, nullptr, &sub), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_open(ctx, "io", nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_open(ctx, "nobody", &sub), SCADA_E_NOT_FOUND);
+    EXPECT_EQ(sub, nullptr);
+    ASSERT_EQ(scada_sub_open(ctx, "io", &sub), SCADA_OK);
+    scada_change change{};
+    scada_sub_stats_t stats{};
+    EXPECT_EQ(scada_sub_next(nullptr, &change, 0), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_next(sub, nullptr, 0), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_next(sub, &change, -1), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_stats(nullptr, &stats), SCADA_E_INVALID);
+    EXPECT_EQ(scada_sub_stats(sub, nullptr), SCADA_E_INVALID);
+
+    scada_waitset* set = nullptr;
+    int descriptor = -1;
+    EXPECT_EQ(scada_waitset_create(nullptr, &set), SCADA_E_INVALID);
+    EXPECT_EQ(set, nullptr);
+    EXPECT_EQ(scada_waitset_create(ctx, nullptr), SCADA_E_INVALID);
+    ASSERT_EQ(scada_waitset_create(ctx, &set), SCADA_OK);
+    EXPECT_EQ(scada_waitset_add_sub(nullptr, sub), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_add_sub(set, nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_add_cycle(nullptr, 0), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_wait(nullptr, 0), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_wait(set, -1), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_fd(nullptr, &descriptor), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_fd(set, nullptr), SCADA_E_INVALID);
+
+    // Closing and destroying NULL does nothing.
+    scada_sub_close(nullptr);
+    scada_waitset_destroy(nullptr);
+    scada_waitset_destroy(set);
+    scada_sub_close(sub);
+}
+
 }  // namespace

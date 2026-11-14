@@ -113,6 +113,16 @@ SCADA_RT void store_shared(Field& field, std::type_identity_t<Field> value,
     std::atomic_ref<Field>(field).store(value, order);
 }
 
+// Adds `value` to a field that other processes may be reading, in one
+// atomic step, so that writers in several threads lose no addition. The
+// field must lie in a mapping that is writable.
+template <typename Field>
+    requires IS_SHARED_ATOMIC<Field>
+SCADA_RT Field fetch_add_shared(Field& field, std::type_identity_t<Field> value,
+                                std::memory_order order) noexcept {
+    return std::atomic_ref<Field>(field).fetch_add(value, order);
+}
+
 // Returns a copy of the value of type `Value` stored at `offset` in `bytes`,
 // which are private to the caller (an image or a snapshot, not a mapping
 // another process writes). A value that does not fit is a defect of this

@@ -46,6 +46,18 @@ scada_add_test(scada-tag-access-integration-test KIND integration
 add_dependencies(scada-tag-access-integration-test
   scada-tagd scada-tag-test-peer scada-tag-test-writer)
 
+# The change rings with real processes: conformance tests 7 (the ring), 13
+# and 24.
+scada_add_test(scada-tag-change-ring-integration-test KIND integration
+  SOURCES change_ring_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}"
+    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+add_dependencies(scada-tag-change-ring-integration-test
+  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+
 # Conformance test 22: the real-time safe functions make no system call and
 # no allocation. The probe is traced as a child process. That shows nothing
 # in a sanitizer build, whose runtime makes system calls of its own, and

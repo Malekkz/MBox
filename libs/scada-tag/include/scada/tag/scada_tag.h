@@ -6,9 +6,11 @@
  * (docs/contracts/tag-database.md, section 13). It is the stable interface;
  * this header can be included from C and from C++.
  *
- * Present so far: attach, detach, heartbeat, status, and the tag functions
- * (resolve, info, read, write and their batch and string forms). The other
- * functions of section 13 are added by the issues that implement them.
+ * Present so far: attach, detach, heartbeat, notify, status, the tag
+ * functions (resolve, info, read, write and their batch and string forms),
+ * the change rings (scada_sub_*) and the wait sets (scada_waitset_*,
+ * without queues). The other functions of section 13 are added by the
+ * issues that implement them.
  */
 
 #include <stddef.h>
@@ -128,16 +130,34 @@ void scada_tag_detach(scada_ctx* ctx);
 int scada_tag_heartbeat(scada_ctx* ctx);
 
 /*
+ * Wakes the consumers of every change ring the calling thread wrote since
+ * its previous call, increments the cycle counter of the process and wakes
+ * the threads that wait on it (section 8.4). It also looks again, at most
+ * once a second each, for regions of other processes that this context
+ * asked for and that were missing, and checks the clocks again at most
+ * once a minute.
+ *
+ * A real-time task calls it once at the end of each cycle, after its last
+ * read and write; other code after each batch of writes. A process that
+ * reads tags of other processes and writes none still calls it about once
+ * a second (or scada_tag_status), or an owner that starts after the reader
+ * resolved its tags keeps reading as BAD with OWNER_DOWN.
+ *
+ * SCADA_OK; SCADA_E_INVALID if `ctx` is NULL; SCADA_E_IO with errno set if
+ * the kernel refused a wake, in which case consumers still receive within
+ * 100 ms.
+ *
+ * Bounded, not real-time: one system call that does not block for each
+ * ring written and one for the cycle, and the looks for missing regions.
+ * Safe from any thread; it acts for the calling thread.
+ */
+int scada_tag_notify(scada_ctx* ctx);
+
+/*
  * Fills `*out` with the state of the attachment. It also looks again, at
  * most once a second each, for regions of other processes that this context
  * asked for and that were missing, and checks the clocks again at most once
- * a minute.
- *
- * Until scada_tag_notify exists, this is the only call that does either.
- * A process that reads tags of other processes calls it about once a
- * second from a thread that is not real-time: otherwise an owner that
- * starts after the reader resolved its tags keeps reading as BAD with
- * OWNER_DOWN.
+ * a minute, as scada_tag_notify does.
  *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring;
  * SCADA_E_TAGD_DOWN if the generation is not retiring and scada-tagd is
@@ -386,6 +406,213 @@ int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
 int scada_tag_write_string(scada_ctx* ctx, uint32_t handle, const char* text,
                            size_t len, uint8_t quality, uint16_t flags,
                            int64_t source_time_ns);
+
+/* A subscription to the change ring of one owner (section 8). */
+/* NOLINTNEXTLINE(modernize-use-using,readability-identifier-naming): C interface; the name is fixed by the contract, section 13 */
+typedef struct scada_sub scada_sub;
+
+/* A set of change rings and cycle counters to wait on together (section
+ * 8.4). */
+/* NOLINTNEXTLINE(modernize-use-using,readability-identifier-naming): C interface; the name is fixed by the contract, section 13 */
+typedef struct scada_waitset scada_waitset;
+
+/* The longest wait of the library: a wait longer than this looks at the
+ * ring again at least this often, so that a missed wake delays an entry by
+ * at most this much (section 8.4). In ms. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum { SCADA_WAIT_SLICE_MS = 100 };
+
+/* One change of a tag, as its owner wrote it (section 8). 32 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint32_t handle;        /* the tag; of the owner of the subscription */
+    uint8_t type;           /* SCADA_TYPE_* */
+    uint8_t quality;        /* SCADA_QUALITY_* as stored; BAD while the
+                               owner's process is down */
+    uint16_t quality_flags; /* SCADA_FLAG_* bits as stored; OWNER_DOWN
+                               added while the owner's process is down */
+    uint64_t value;         /* bit pattern; for a STRING its slot number:
+                               read the text with scada_tag_read_string */
+    int64_t source_time_ns; /* CLOCK_REALTIME */
+    int64_t update_mono_ns; /* CLOCK_MONOTONIC; the same instant as in the
+                               tag record */
+} scada_change; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/* Why scada_sub_next returned SCADA_E_GAP (scada_sub_stats_t.last_gap).
+ * The action is the same for all of them: read the tags again. The reason
+ * is for reporting: an alarm system raises a communication alarm for
+ * SCADA_GAP_OWNER_DOWN and clears it for SCADA_GAP_OWNER_BACK. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_GAP_NONE = 0,       /* no gap yet */
+    SCADA_GAP_OVERRUN = 1,    /* fell `capacity` entries behind (8.2) */
+    SCADA_GAP_RESTART = 2,    /* the owner attached again: the epoch
+                                 changed while it was not seen down */
+    SCADA_GAP_RING = 3,       /* the ring appeared, disappeared or was
+                                 replaced */
+    SCADA_GAP_OWNER_DOWN = 4, /* the owner's process was seen going down */
+    SCADA_GAP_OWNER_BACK = 5  /* the owner's process was seen coming back;
+                                 this includes a ring that appeared with it */
+};
+
+/* What scada_sub_stats reports. 48 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint64_t received;      /* entries delivered with SCADA_OK */
+    uint64_t gaps;          /* times SCADA_E_GAP was returned */
+    uint64_t lost;          /* entries overwritten before they were read,
+                               as far as overruns tell; an owner restart
+                               adds none */
+    uint64_t invalid;       /* entries refused with SCADA_E_LAYOUT */
+    uint32_t epoch;         /* epoch of the ring as last seen */
+    uint16_t owner_index;   /* of the owner in the owner table */
+    uint16_t process_index; /* of the process that owner is a thread of */
+    uint32_t owner_changes; /* times the owner's process was seen going
+                               down or coming back; each was a gap */
+    uint8_t owner_down;     /* 1 if the owner's process was down at the
+                               last look (section 10.1) */
+    uint8_t last_gap;       /* SCADA_GAP_*: why the last SCADA_E_GAP was
+                               returned, SCADA_GAP_NONE before the first */
+    uint8_t reserved[2];    /* 0 */
+} scada_sub_stats_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/*
+ * Subscribes to the change ring of the owner `owner` and stores the
+ * subscription in `*out`. The subscription starts at the end of the ring:
+ * it delivers the changes written from now on. To know the state before,
+ * read the tags of the owner after this call; drop a change whose
+ * update_mono_ns is older than what a read gave for the same tag. If the
+ * ring is missing (the owner has not attached yet), the call succeeds and
+ * the first look at the ring once it is there gives SCADA_E_GAP.
+ *
+ * SCADA_E_INVALID: an argument is NULL or `owner` is no owner name.
+ * SCADA_E_NOT_FOUND: no owner has this name. SCADA_E_LAYOUT: the ring
+ * header gives another capacity than the owner table. On an error `*out`
+ * is NULL.
+ *
+ * Not real-time. Close the subscription before detaching `ctx`.
+ */
+int scada_sub_open(scada_ctx* ctx, const char* owner, scada_sub** out);
+
+/*
+ * Stores the next change of the ring in `*out`, waiting up to `timeout_ms`
+ * (0: do not wait) for one (section 8.2). A wait looks at the ring at
+ * least every SCADA_WAIT_SLICE_MS, so a missed wake delays a change by
+ * that much at most.
+ *
+ * SCADA_OK: `*out` holds a change. SCADA_E_TIMEOUT: none arrived.
+ * SCADA_E_GAP (section 8.3): changes were lost because the subscription
+ * fell behind by the capacity of the ring, the owner attached again (the
+ * epoch changed), the ring appeared, disappeared or was replaced, or the
+ * owner's process was seen going down or coming back (section 10.1). The
+ * subscription now continues at the end of the ring; read every tag of
+ * the owner you care about again, and drop a change older than that read.
+ * Reported once for each such event. SCADA_E_LAYOUT: the next entry is not
+ * a valid change of a tag of this owner; it is skipped and counted, and
+ * the next call goes on with the entry after it; also, at every call, if
+ * the ring header gives another capacity than the owner table.
+ * SCADA_E_INVALID: an argument is NULL or `timeout_ms` is negative.
+ * SCADA_E_IO with errno set: the kernel refused the wait. `*out` is
+ * changed only with SCADA_OK.
+ *
+ * An owner that dies writes no change; the gap when its process is seen
+ * down is what tells the consumer. The tags it then reads give BAD with
+ * SCADA_FLAG_OWNER_DOWN, and a consumer that keeps a copy of the values
+ * must take those, not hold on to the last good ones. The process is seen
+ * down within its heartbeat timeout plus SCADA_WAIT_SLICE_MS of a waiting
+ * call, at once after a clean stop. An owner that restarts gives at most
+ * two gaps (down, back), one if the subscription did not look while it
+ * was down. A change that still arrives while the owner's process is
+ * down (its threads may write while its main loop is hung) comes with
+ * quality BAD and SCADA_FLAG_OWNER_DOWN, as a read would give it.
+ *
+ * Not real-time: it may block. One thread uses a subscription.
+ */
+int scada_sub_next(scada_sub* sub, scada_change* out, int timeout_ms);
+
+/*
+ * Fills `*out` with the counts of the subscription.
+ *
+ * SCADA_OK; SCADA_E_INVALID if an argument is NULL.
+ */
+int scada_sub_stats(scada_sub* sub, scada_sub_stats_t* out);
+
+/*
+ * Closes the subscription; NULL does nothing. It also leaves the wait set
+ * it was added to.
+ */
+void scada_sub_close(scada_sub* sub);
+
+/*
+ * Creates an empty wait set of `ctx` and stores it in `*out`.
+ *
+ * SCADA_E_INVALID: an argument is NULL. On an error `*out` is NULL.
+ *
+ * Not real-time. Destroy the wait set before detaching `ctx`.
+ */
+int scada_waitset_create(scada_ctx* ctx, scada_waitset** out);
+
+/*
+ * Adds the subscription `sub` to the wait set `set`: scada_waitset_wait returns
+ * when `sub` has something to deliver (a change or a gap).
+ *
+ * SCADA_E_INVALID: an argument is NULL; `sub` belongs to another context
+ * or is in a wait set already; the wait set holds 127 sources already; or
+ * scada_waitset_fd was called on it.
+ */
+int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub);
+
+/*
+ * Adds the cycle counter of the process `process_index` (section 10):
+ * scada_waitset_wait returns when that process has called
+ * scada_tag_notify since the previous return, whether or not it changed a
+ * tag. The `proc` region of the process is mapped here; while it is
+ * missing the source is not ready.
+ *
+ * SCADA_E_INVALID as for scada_waitset_add_sub, and if `process_index` is
+ * no process of the generation.
+ */
+int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index);
+
+/*
+ * Waits up to `timeout_ms` (0: do not wait) until a source of the wait set
+ * is ready, with one system call for all of them (futex_waitv, Linux
+ * 5.16). Then call scada_sub_next with timeout 0 on each subscription
+ * until it gives SCADA_E_TIMEOUT.
+ *
+ * SCADA_OK: a source is ready. SCADA_E_TIMEOUT: none became ready.
+ * SCADA_E_INVALID: `set` is NULL or `timeout_ms` is negative. SCADA_E_IO
+ * with errno set: the kernel refused the wait.
+ *
+ * Not real-time: it blocks. One thread uses a wait set and its
+ * subscriptions.
+ */
+int scada_waitset_wait(scada_waitset* set, int timeout_ms);
+
+/*
+ * Stores in `*descriptor` a file descriptor that becomes readable when a source
+ * of the wait set may be ready, for poll and epoll. The first call starts one
+ * thread of the library that waits on the sources and turns their wakes
+ * into this process-local eventfd; later calls give the same descriptor.
+ * Sources cannot be added from then on.
+ *
+ * When the descriptor is readable: read 8 bytes from it, then call
+ * scada_sub_next with timeout 0 on each subscription until it gives
+ * SCADA_E_TIMEOUT. A cycle counter that advanced makes it readable too. The
+ * descriptor is non-blocking and belongs to the wait set: do not close it.
+ *
+ * SCADA_E_INVALID: an argument is NULL. SCADA_E_IO with errno set: the
+ * eventfd or the thread could not be created.
+ *
+ * Not real-time.
+ */
+int scada_waitset_fd(scada_waitset* set, int* descriptor);
+
+/*
+ * Destroys the wait set and stops its thread, if any; NULL does nothing.
+ * The subscriptions in it stay open.
+ */
+void scada_waitset_destroy(scada_waitset* set);
 
 #ifdef __cplusplus
 }

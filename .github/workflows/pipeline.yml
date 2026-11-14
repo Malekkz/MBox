@@ -56,6 +56,15 @@ jobs:
       - name: Test (release)
         run: ctest --preset release
 
+      # Issue P1-07 asks for the wake-up latency of a change ring consumer
+      # on both targets, and this runner is the only ARM64 machine the
+      # project has (decision D-32). The figures are printed, not gated on:
+      # shared runners are not fit for that (D-13).
+      - name: Wake-up latency, reported only (release)
+        env:
+          SCADA_PERF_REPORT_ONLY: "1"
+        run: ctest --test-dir build/release -R '^scada-tag-wake-perf-test$' -V
+
       - name: Staged install tree
         run: cmake --install build/release --prefix stage
       - uses: actions/upload-artifact@v6

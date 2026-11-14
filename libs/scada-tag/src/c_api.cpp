@@ -6,6 +6,8 @@
 #include "attachment.h"
 #include "layout.h"
 #include "region_file.h"
+#include "subscription.h"
+#include "wait_set.h"
 
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -27,6 +29,19 @@
 struct
     scada_ctx {  // NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13
     std::unique_ptr<scada::tag::Attachment> attachment;
+};
+
+// A subscription of the C interface.
+struct
+    scada_sub {  // NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13
+    std::unique_ptr<scada::tag::Subscription> subscription;
+};
+
+// A wait set of the C interface. Destroyed before the subscriptions in it
+// or after them: either way the wait set lets go of them.
+struct
+    scada_waitset {  // NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13
+    std::unique_ptr<scada::tag::WaitSet> wait_set;
 };
 
 namespace {
@@ -166,6 +181,13 @@ SCADA_RT int scada_tag_heartbeat(scada_ctx* ctx) {
     return ctx->attachment->heartbeat() ? SCADA_OK : SCADA_E_RETIRING;
 }
 
+int scada_tag_notify(scada_ctx* ctx) {
+    if (ctx == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return ctx->attachment->notify(); });
+}
+
 int scada_tag_status(scada_ctx* ctx, scada_status* out) {
     if (ctx == nullptr || out == nullptr) {
         return SCADA_E_INVALID;
@@ -251,6 +273,98 @@ int scada_tag_write_string(scada_ctx* ctx, uint32_t handle, const char* text,
     return ctx->attachment->write_string(
         handle, len == 0 ? std::string_view() : std::string_view(text, len),
         quality, flags, source_time_ns);
+}
+
+int scada_sub_open(scada_ctx* ctx, const char* owner, scada_sub** out) {
+    if (out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = nullptr;
+    if (ctx == nullptr || owner == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] {
+        auto sub = std::make_unique<scada_sub>();
+        const int code = scada::tag::Subscription::open(*ctx->attachment, owner,
+                                                        sub->subscription);
+        if (code == SCADA_OK) {
+            // The caller owns it from here and gives it back to
+            // scada_sub_close.
+            *out = sub.release();
+        }
+        return code;
+    });
+}
+
+int scada_sub_next(scada_sub* sub, scada_change* out, int timeout_ms) {
+    if (sub == nullptr || out == nullptr || timeout_ms < 0) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return sub->subscription->next(*out, timeout_ms); });
+}
+
+int scada_sub_stats(scada_sub* sub, scada_sub_stats_t* out) {
+    if (sub == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = sub->subscription->stats();
+    return SCADA_OK;
+}
+
+void scada_sub_close(scada_sub* sub) {
+    // Takes back the ownership scada_sub_open handed to the caller.
+    const std::unique_ptr<scada_sub> owned(sub);
+}
+
+int scada_waitset_create(scada_ctx* ctx, scada_waitset** out) {
+    if (out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = nullptr;
+    if (ctx == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] {
+        auto set = std::make_unique<scada_waitset>();
+        set->wait_set = std::make_unique<scada::tag::WaitSet>(*ctx->attachment);
+        // The caller owns it from here and gives it back to
+        // scada_waitset_destroy.
+        *out = set.release();
+        return SCADA_OK;
+    });
+}
+
+int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub) {
+    if (set == nullptr || sub == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return set->wait_set->add_sub(*sub->subscription); });
+}
+
+int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index) {
+    if (set == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return set->wait_set->add_cycle(process_index); });
+}
+
+int scada_waitset_wait(scada_waitset* set, int timeout_ms) {
+    if (set == nullptr || timeout_ms < 0) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return set->wait_set->wait(timeout_ms); });
+}
+
+int scada_waitset_fd(scada_waitset* set, int* descriptor) {
+    if (set == nullptr || descriptor == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return set->wait_set->fd(*descriptor); });
+}
+
+void scada_waitset_destroy(scada_waitset* set) {
+    // Takes back the ownership scada_waitset_create handed to the caller.
+    const std::unique_ptr<scada_waitset> owned(set);
 }
 
 }  // extern "C"

@@ -39,14 +39,17 @@ issues.
   `scada_tag_read`, `scada_tag_read_many`, `scada_tag_write`,
   `scada_tag_write_many`, `scada_tag_read_string` and
   `scada_tag_write_string`. See "Tag read and write" below.
+- Change rings and waking, in the same header: `scada_tag_notify`,
+  `scada_sub_open`, `scada_sub_next`, `scada_sub_stats`, `scada_sub_close`
+  and the wait sets `scada_waitset_*` (without queues, which come with issue
+  P1-08). See "Change rings and waking" below.
 
-A write does not yet append a change entry; that comes with the change
-rings (issue P1-07). The values of `EventRecord.kind` are not defined: the
-contract names them without numbers.
+The values of `EventRecord.kind` are not defined: the contract names them
+without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.4, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.5, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -58,7 +61,7 @@ contract names them without numbers.
   | `tag_set_json.h` | `parse_tag_set_json`: the temporary file format to a `TagSet` |
   | `generation_host.h` | `GenerationHost`: the side of `scada-tagd`. Only `scada-tagd` uses it |
   | `liveness.h` | `DownReason`: why a process counts as down |
-  | `scada_tag.h` | The C interface: return codes, attach, detach, heartbeat, status, and the tag functions with `scada_value`. Usable from C and C++ |
+  | `scada_tag.h` | The C interface: return codes, attach, detach, heartbeat, notify, status, the tag functions with `scada_value`, subscriptions with `scada_change`, and wait sets. Usable from C and C++ |
 
 - Private headers in `src/`: `layout.h` (the structures, their checks and the
   enumerations only the layout uses), `name_hash.h`, `sha256.h`,
@@ -70,8 +73,11 @@ contract names them without numbers.
   `peer_regions.h` (regions of other processes, mapped read-only),
   `attachment.h` (attach and the tag functions; the C interface is a thin
   layer over it), `tag_record.h` (the sequence lock of a tag record),
-  `utf8.h` (the check of text for a string slot) and `clock_check.h`
-  (whether reading the clocks is a system call).
+  `utf8.h` (the check of text for a string slot), `clock_check.h`
+  (whether reading the clocks is a system call), `change_ring.h` (the
+  protocol of a change ring), `futex.h` (waiting and waking on shared
+  words), `thread_mark.h` (what tells threads apart), `subscription.h` and
+  `wait_set.h` (the classes under `scada_sub` and `scada_waitset`).
   No code outside this library may include them (decision D-25 in
   `docs/decisions.md`).
 
@@ -263,11 +269,12 @@ failed: `ENOENT` if there is no base directory or no current generation,
 `ENOSPC` if the file system has no room for a region.
 
 Regions of other processes are mapped read-only when they are asked for
-(`PeerRegions`; the callers are tag resolve, subscriptions and queues of the
-next issues, and today the liveness of `scada-tagd` in `scada_tag_status`).
-A region that is missing, not ready or fails a check of contract 3.1 is not
-an error: it reads as missing and is looked for again at most once a second,
-from `scada_tag_status` now and from `scada_tag_notify` once it exists. A
+(`PeerRegions`; the callers are tag resolve, subscriptions, wait sets, the
+queues of issue P1-08, and the liveness of `scada-tagd` in
+`scada_tag_status`). A region that is missing, not ready or fails a check
+of contract 3.1 is not an error: it reads as missing and is looked for
+again at most once a second, from `scada_tag_notify`, `scada_tag_status`,
+and a subscription or wait set that waits on it. A
 mapping is never removed while the process is attached, so a reader that
 holds it keeps a valid view; a region whose file is replaced more than 16
 times reads as missing until the reader attaches again.
@@ -327,12 +334,11 @@ What a read returns:
 Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
 0 there is no value: a consumer must not plot, compare or act on them.
 
-Until `scada_tag_notify` exists (issue P1-07), a process that reads tags of
-other processes must call `scada_tag_status` about once a second from a
-thread that is not real-time. It is the only call that looks again for
-regions that were missing, so without it an owner that starts after the
-reader keeps reading as down. It is also the only call that repeats the
-clock check.
+A process that reads tags of other processes calls `scada_tag_notify` (or
+`scada_tag_status`) about once a second from a thread that is not
+real-time, also if it writes nothing. Those are the calls that look again
+for regions that were missing, so without them an owner that starts after
+the reader keeps reading as down. They also repeat the clock check.
 
 An owner is down when its process is: its `proc` region is missing, its
 state is not RUNNING, or its heartbeat is older than its timeout (contract
@@ -355,20 +361,73 @@ value, quality or quality flags change; for a STRING tag the value is its
 text.
 
 All writes to the tags of one owner come from one thread, the first that
-writes them. A library built without `NDEBUG` (the `dev` and sanitizer
-builds) stops the process when another thread writes them (contract 13.2).
+writes them; the library records it, so that `scada_tag_notify` knows the
+rings of the calling thread. A library built without `NDEBUG` (the `dev`
+and sanitizer builds) stops the process when another thread writes them
+(contract 13.2).
 
 The real-time safe functions allocate nothing, take no lock and make no
 system call, as long as the clocks can be read from the vDSO. Attach checks
 that: `scada_status.clock_syscall` is 1 if the kernel's clock source is not
 one the vDSO reads, or one clock read takes more than 200 ns. The check is
-repeated at most once a minute from `scada_tag_status`. In the retry loop of
-a read the processor is told to pause (`scada::cpu_relax`): a read that
-finds a write in progress gives up with `SCADA_E_BUSY` after about 0.7 us on
-ARM64 and 1 us to 1.6 us on x86-64, longer than a write of a running owner
-takes. The rate of `SCADA_E_BUSY` at the reference load is in
-`docs/reports/phase-1.md` (decision D-31). `scada-tag-seqlock-bench` and
-`scripts/measure-seqlock.sh` measure it again on another machine.
+repeated at most once a minute from `scada_tag_notify` and
+`scada_tag_status`. In the retry loop of a read the processor is told to
+pause (`scada::cpu_relax`): a read that finds a write in progress gives up
+with `SCADA_E_BUSY` after about 0.7 us on ARM64 and 1 us to 1.6 us on
+x86-64, longer than a write of a running owner takes. The rate of
+`SCADA_E_BUSY` at the reference load is in `docs/reports/phase-1.md`
+(decision D-31). `scada-tag-seqlock-bench` and `scripts/measure-seqlock.sh`
+measure it again on another machine.
+
+## Change rings and waking
+
+Contract section 8; decision D-32.
+
+A write that changes value, quality or quality flags (for a STRING tag:
+its text) appends one change entry to the ring of its owner, after the
+record is whole again. The append is real-time safe: no system call. The
+entry holds the stored fields: the source time the record got, LOCAL_TIME
+included, and the same `update_mono_ns`.
+
+`scada_tag_notify` wakes the consumers: for every ring the calling thread
+wrote since its previous call, one `FUTEX_WAKE` on the low 32 bits of the
+ring's `write_seq`; then it increments the process's `cycle_seq` and wakes
+its waiters. A real-time task calls it once at the end of a cycle; other
+code after each batch of writes. It also looks again for missing regions
+and repeats the clock check, as `scada_tag_status` does.
+
+| Function | What it does |
+| --- | --- |
+| `scada_sub_open` | Subscribes to the ring of one owner, from its end on. A ring that is not there yet is no error |
+| `scada_sub_next` | The next change, waiting up to a timeout; `SCADA_E_GAP` when changes were lost |
+| `scada_sub_stats` | Changes received, gaps, entries lost to overruns, entries refused, the epoch, owner changes, whether the owner is down, and why the last gap came |
+| `scada_sub_close` | Closes it, and takes it out of its wait set |
+| `scada_waitset_create`, `_add_sub`, `_add_cycle` | Up to 127 subscriptions and cycle counters |
+| `scada_waitset_wait` | Waits for any of them with one `futex_waitv` |
+| `scada_waitset_fd` | An eventfd for `poll` and `epoll`; starts one thread for the wait set |
+| `scada_waitset_destroy` | Stops the thread, leaves the subscriptions open |
+
+A consumer waits on the futex word of a ring through its read-only
+mapping; a wake through the owner's read-write mapping reaches it, because
+the kernel keys a shared futex by file and offset (the experiment of issue
+P1-07, decision D-32). Every wait looks at the ring again at least every
+100 ms, so a process that never calls `scada_tag_notify` still delivers
+within 100 ms.
+
+`scada_sub_next` returns `SCADA_E_GAP` once for each of these: the
+subscription fell `capacity` entries behind (contract 8.2), the owner
+attached again (the epoch changed), the ring appeared, disappeared or was
+replaced, or the owner's process went down or came back (decision D-33). The subscription then continues at the end of the ring; the
+consumer reads the tags it cares about and drops any later change older
+than what it read. A change entry is input: one that is not a valid change
+of a tag of the owner gives `SCADA_E_LAYOUT` and is skipped.
+
+An owner that dies writes no change; the gap when its process is seen
+down tells the consumer, which then reads the tags and gets BAD with
+OWNER_DOWN. A waiting consumer gets that gap within the owner's heartbeat
+timeout plus 100 ms, at once after a clean stop. While the owner is down, a
+change that still arrives comes as BAD with OWNER_DOWN, as a read would
+give it. `scada_sub_stats` counts these owner changes.
 
 ## How to use it
 
@@ -430,10 +489,12 @@ ctest --preset dev -R scada-tag-unit-test
 ctest --preset dev -R scada-tagd-integration-test
 ctest --preset dev -R scada-tag-access-integration-test
 ctest --preset dev -R scada-tag-rt-integration-test
+ctest --preset dev -R scada-tag-change-ring-integration-test
 ctest --preset dev -R 'tag_set_json_fuzz-corpus|region_name_fuzz-corpus'
 ctest --preset dev -R 'header_region_fuzz-corpus|utf8_fuzz-corpus'
 cmake --preset perf && cmake --build --preset perf
 ctest --preset perf -R scada-tag-header-perf-test
+ctest --preset perf -R scada-tag-wake-perf-test
 ```
 
 - `Conformance01Layout.*` is conformance test 1 of the contract: for each
@@ -485,8 +546,7 @@ ctest --preset perf -R scada-tag-header-perf-test
   status structure.
 - In these groups, the tests named `Conformance07`, `09`, `10`, `11` and
   `12` are the part of attach in those conformance tests of the contract.
-  Test 7 lacks `SCADA_E_GAP`, which comes with the change rings (issue
-  P1-07).
+  `SCADA_E_GAP` of test 7 is tested with the change rings.
 - `scada-tag-test-peer` (in `tests/peer/`) is a helper for integration
   tests: it attaches as one process through the C interface and writes its
   heartbeat until it is stopped or killed. With `mid-write` it leaves a tag
@@ -501,6 +561,26 @@ ctest --preset perf -R scada-tag-header-perf-test
   maximum rate against readers in other threads, with values and texts
   whose fields are derived from one another; `Conformance05*`, `06*` and
   `08*` are the part of those conformance tests that needs one process.
+- `ChangeRing.*` covers the ring protocol on memory of the test: order,
+  nothing after the last entry, and a gap exactly at `capacity` entries
+  behind. `Futex.*` is the experiment of issue P1-07: a wait on a read-only
+  mapping of a file is woken through a read-write mapping of it, alone and
+  with `futex_waitv` over several words; a changed word and a deadline end
+  a wait.
+- `Changes.*` covers the rings as owners and consumers use them: what a
+  write appends, gaps by overrun, owner restart and a ring that appears,
+  entries that are not valid, notify against the 100 ms slice, and wait
+  sets with `futex_waitv`, the eventfd and `cycle_seq`. The tests named
+  `Conformance07`, `13`, `14` and `24` are those conformance tests in one
+  process.
+- `scada-tag-change-ring-integration-test` (in `tests/integration/`) runs
+  conformance tests 7 (the ring), 13 and 24 with a writer process, which
+  `scada-tag-test-writer` plays with the argument `notify`.
+- `scada-tag-wake-perf-test` (in `tests/perf/`) measures the time from a
+  write in another process to the return of a blocked `scada_sub_next`. It
+  fails on x86-64 if the 99th percentile is 1 ms or more, and prints the
+  figures on every target. With `SCADA_PERF_REPORT_ONLY=1` it only prints
+  them, as the pipeline runs it.
 - `scada-tag-access-integration-test` (in `tests/integration/`) uses real
   processes: `Conformance02*` writes 50,000 tags of 10 owner threads at
   50,000 updates per second against 4 readers, for 3 s, or for

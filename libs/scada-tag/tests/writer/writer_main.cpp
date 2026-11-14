@@ -5,7 +5,8 @@
 // a reader can tell a torn read. Test code; not installed.
 //
 // Usage: scada-tag-test-writer <base directory> <process> <owners>
-//            <tags per owner> <updates per second> <updates> [second-thread]
+//            <tags per owner> <updates per second> <updates>
+//            [second-thread|notify]
 //
 // The owners are `<process>.w<k>`, k from 0, and the tags of owner k are
 // `<process>.w<k>.t<i>`, i from 0, of type UINT64. `updates per second` is
@@ -14,6 +15,9 @@
 //
 // The n-th write of a tag, n from 1, stores: value n, quality n % 3,
 // quality flags n & 0x0FDF, source time 1,700,000,000,000,000,000 + n.
+//
+// With `notify` every owner thread calls scada_tag_notify after each write,
+// so that consumers of its ring are woken at once (contract, section 8.4).
 //
 // With `second-thread` it does something else after attaching: it writes
 // the first tag of the first owner from one thread and then from another,
@@ -93,6 +97,7 @@ struct OwnerPlan {
     std::vector<std::uint32_t> handles;  // its tags
     std::uint64_t updates = 0;           // how many it writes in all
     std::uint64_t per_second = 0;        // its rate; 0: as fast as it can
+    bool notify = false;                 // notify after each write
 };
 
 // The value of the `count`-th write of a tag.
@@ -120,7 +125,8 @@ void write_as_owner(scada_ctx* ctx, const OwnerPlan& plan,
         const std::size_t tag = written % tags;
         const std::uint64_t count = (written / tags) + 1;
         const scada_value value = derived_value(count);
-        if (scada_tag_write(ctx, plan.handles[tag], &value) != SCADA_OK) {
+        if (scada_tag_write(ctx, plan.handles[tag], &value) != SCADA_OK ||
+            (plan.notify && scada_tag_notify(ctx) != SCADA_OK)) {
             failures.fetch_add(1, std::memory_order_relaxed);
         }
         if (plan.per_second != 0) {
@@ -223,7 +229,8 @@ int run(std::span<const std::string_view> args) {
         !per_second || (*per_second != 0 && *per_second < *owners) ||
         !updates ||
         (args.size() == MAX_ARGUMENTS &&
-         args[MAX_ARGUMENTS - 1] != "second-thread")) {
+         args[MAX_ARGUMENTS - 1] != "second-thread" &&
+         args[MAX_ARGUMENTS - 1] != "notify")) {
         std::cerr << "scada-tag-test-writer: bad argument\n";
         return EXIT_USAGE;
     }
@@ -249,19 +256,24 @@ int run(std::span<const std::string_view> args) {
     }
     std::cout << "attached\n" << std::flush;
 
-    const std::optional<std::vector<OwnerPlan>> plans = make_plans(
+    std::optional<std::vector<OwnerPlan>> plans = make_plans(
         ctx, process, *owners, *tags_per_owner, *per_second, *updates);
     if (!plans.has_value()) {
         scada_tag_detach(ctx);
         return EXIT_FAILED;
     }
 
-    if (args.size() == MAX_ARGUMENTS) {
+    const bool notify =
+        args.size() == MAX_ARGUMENTS && args[MAX_ARGUMENTS - 1] == "notify";
+    if (args.size() == MAX_ARGUMENTS && !notify) {
         const int code = write_from_two_threads(ctx, plans->front());
         scada_tag_detach(ctx);
         return code;
     }
 
+    for (OwnerPlan& plan : *plans) {
+        plan.notify = notify;
+    }
     std::atomic<std::uint64_t> failures{0};
     std::atomic<bool> writers_done{false};
     bool stopped = false;

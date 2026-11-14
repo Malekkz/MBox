@@ -3,6 +3,7 @@
 // itself is in tag_record.cpp.
 
 #include "attachment.h"
+#include "change_ring.h"
 #include "clock_check.h"
 #include "header_view.h"
 #include "layout.h"
@@ -10,6 +11,7 @@
 #include "proc_region.h"
 #include "shared_memory.h"
 #include "tag_record.h"
+#include "thread_mark.h"
 #include "utf8.h"
 
 #include "scada/common/clock.h"
@@ -94,15 +96,6 @@ SCADA_RT bool storable(std::uint8_t quality, std::uint16_t flags) noexcept {
            quality_flags_valid(flags) &&
            !has_flag(flags, QualityFlag::OWNER_DOWN);
 }
-
-#ifndef NDEBUG
-// The address of an object every thread has its own of: what tells one
-// thread from another without a system call.
-SCADA_RT const void* thread_mark() noexcept {
-    thread_local const char MARK = 0;
-    return &MARK;
-}
-#endif
 
 // True if `copy` holds what a record of a tag of type `type` may hold. A
 // STRING record holds the number of its string slot, `string_slot`.
@@ -221,20 +214,35 @@ std::span<std::byte> Attachment::strings_of(
 }
 
 void Attachment::check_writer_thread(const OwnerAccess& owner) noexcept {
-#ifndef NDEBUG
     std::atomic<const void*>& writer = writer_threads_[owner.index];
     const void* const self = thread_mark();
-    const void* first = nullptr;
     // Relaxed: the value is compared, nothing is read through it. The
-    // first thread that writes becomes the thread of the owner.
-    if (!writer.compare_exchange_strong(first, self,
-                                        std::memory_order_relaxed) &&
-        first != self) {
-        panic("tags of one owner written from two threads (contract 13.2)");
+    // first thread that writes becomes the thread of the owner; after that
+    // a write costs one load here.
+    const void* first = writer.load(std::memory_order_relaxed);
+    if (first == self) {
+        return;
     }
-#else
-    static_cast<void>(owner);
+    if (first == nullptr && writer.compare_exchange_strong(
+                                first, self, std::memory_order_relaxed)) {
+        return;
+    }
+#ifndef NDEBUG
+    panic("tags of one owner written from two threads (contract 13.2)");
 #endif
+}
+
+void Attachment::append_change_of(std::uint32_t handle, const TagRef& tag,
+                                  const RecordUpdate& update) noexcept {
+    ChangeEntry entry;
+    entry.update_mono_ns = update.update_mono_ns;
+    entry.handle = handle;
+    entry.type = to_raw(tag.type);
+    entry.quality = update.quality;
+    entry.quality_flags = update.quality_flags;
+    entry.value = update.value;
+    entry.source_time_ns = update.source_time_ns;
+    append_change(tag.owner->own_changes, tag.owner->ring_capacity, entry);
 }
 
 void Attachment::check_clock(std::int64_t now_mono_ns) noexcept {
@@ -243,6 +251,20 @@ void Attachment::check_clock(std::int64_t now_mono_ns) noexcept {
                                     std::memory_order_relaxed);
     clock_syscall_.store(clock_reads_enter_kernel_now(),
                          std::memory_order_relaxed);
+}
+
+bool Attachment::change_valid(std::size_t owner_index,
+                              const ChangeEntry& entry) const noexcept {
+    const std::optional<TagRef> tag = tag_of(entry.handle);
+    if (!tag.has_value() || tag->owner->index != owner_index) {
+        return false;
+    }
+    const std::uint64_t string_slot =
+        tag->type == TagType::STRING ? string_slot_of(*tag) : 0;
+    return entry.type == to_raw(tag->type) &&
+           storable(entry.quality, entry.quality_flags) &&
+           (tag->type != TagType::BOOL || entry.value <= 1) &&
+           (tag->type != TagType::STRING || entry.value == string_slot);
 }
 
 int Attachment::resolve(std::string_view name, std::uint32_t& handle) {
@@ -391,10 +413,12 @@ int Attachment::write(std::uint32_t handle, const scada_value& value) noexcept {
     const RecordUpdate update =
         update_of(value.quality, value.quality_flags, value.value,
                   value.source_time_ns, realtime_ns(), monotonic_ns());
-    // The change entry of section 8 is appended here from issue P1-07 on.
-    static_cast<void>(write_record(
-        shared_at<TagRecord>(tag.owner->own_tags, record_offset(tag.slot)),
-        update));
+    // Section 6.1: the change entry follows the write.
+    if (write_record(
+            shared_at<TagRecord>(tag.owner->own_tags, record_offset(tag.slot)),
+            update)) {
+        append_change_of(handle, tag, update);
+    }
     return SCADA_OK;
 }
 
@@ -423,10 +447,11 @@ int Attachment::write_many(std::span<const std::uint32_t> handles,
         const RecordUpdate update = update_of(
             values[i].quality, values[i].quality_flags, values[i].value,
             values[i].source_time_ns, time_ns, mono_ns);
-        static_cast<void>(
-            write_record(shared_at<TagRecord>(tag->owner->own_tags,
+        if (write_record(shared_at<TagRecord>(tag->owner->own_tags,
                                               record_offset(tag->slot)),
-                         update));
+                         update)) {
+            append_change_of(handles[i], *tag, update);
+        }
     }
     return SCADA_OK;
 }
@@ -512,12 +537,14 @@ int Attachment::write_string(std::uint32_t handle, std::string_view text,
     const RecordUpdate update =
         update_of(quality, flags, string_slot, source_time_ns, realtime_ns(),
                   monotonic_ns());
-    // The change entry of section 8 is appended here from issue P1-07 on.
-    static_cast<void>(write_string_record(
-        shared_at<TagRecord>(tag->owner->own_tags, record_offset(tag->slot)),
-        shared_at<StringSlot>(tag->owner->own_strings,
-                              string_slot_offset(string_slot)),
-        std::span<const std::uint8_t>(bytes).first(text.size()), update));
+    if (write_string_record(
+            shared_at<TagRecord>(tag->owner->own_tags,
+                                 record_offset(tag->slot)),
+            shared_at<StringSlot>(tag->owner->own_strings,
+                                  string_slot_offset(string_slot)),
+            std::span<const std::uint8_t>(bytes).first(text.size()), update)) {
+        append_change_of(handle, *tag, update);
+    }
     return SCADA_OK;
 }
 
