@@ -14,6 +14,7 @@
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
 #include "scada/test/child_process.h"
+#include "scada/test/temp_directory.h"
 
 #include <gtest/gtest.h>
 
@@ -22,12 +23,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
-#include <system_error>
+#include <utility>
 #include <vector>
 
 namespace scada::test::tagd {
@@ -139,20 +139,29 @@ private:
 class TagProcesses : public ::testing::Test {
 protected:
     void SetUp() override {
-        std::string pattern =
-            (std::filesystem::temp_directory_path() / "scada-tag-it-XXXXXX")
-                .string();
-        ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
-        root_ = pattern;
+        // Removed by a cleaner process even if the test binary is killed
+        // (decision D-45).
+        std::optional<TempDirectory> temp =
+            TempDirectory::create("scada-tag-it-");
+        if (!temp.has_value()) {
+            FAIL() << "no temporary directory";
+        }
+        temp_.emplace(std::move(*temp));
+        root_ = temp_->path();
         base_ = root_ / "base";
         std::filesystem::create_directory(base_);
         // The owner and mode the platform gives /dev/shm/scada.
         ASSERT_EQ(::chmod(base_.c_str(), BASE_DIR_MODE), 0);
     }
 
-    void TearDown() override {
-        std::error_code ignored;
-        std::filesystem::remove_all(root_, ignored);
+    void TearDown() override { temp_.reset(); }
+
+    // The temporary directory that holds everything of the test.
+    [[nodiscard]] const std::filesystem::path& root() const { return root_; }
+
+    // The process id of the cleaner of `root()`.
+    [[nodiscard]] int cleaner_pid() const {
+        return temp_.has_value() ? temp_->cleaner_pid() : -1;
     }
 
     [[nodiscard]] std::string base() const { return base_.string(); }
@@ -279,6 +288,7 @@ protected:
     }
 
 private:
+    std::optional<TempDirectory> temp_;
     std::filesystem::path root_;
     std::filesystem::path base_;
 };

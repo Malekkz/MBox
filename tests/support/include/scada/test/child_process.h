@@ -40,7 +40,10 @@ private:
 // A child process whose standard output and standard error are captured.
 // Its standard input is empty. If the process is still running when the
 // object is destroyed, it is killed and reaped, so a failed test leaves
-// nothing behind.
+// nothing behind. It is also killed with SIGKILL when the thread that
+// started it ends, which is when the test process ends however it ends,
+// SIGKILL included, as long as tests start processes from the main thread
+// (decision D-45). Processes the child starts itself are not covered.
 class ChildProcess {
 public:
     // Starts `command`: the program followed by its arguments. A program
@@ -48,7 +51,9 @@ public:
     // environment. Returns nothing if `command` is empty or the process
     // could not be started. A program that cannot be executed is normally
     // reported that way too, but under a user-mode emulator it shows as a
-    // process that exits with code 127.
+    // process that exits with code 127. A program that resets its
+    // parent-death signal, or a set-user-ID program, is not killed with the
+    // test process.
     [[nodiscard]] static std::optional<ChildProcess> start(
         std::span<const std::string> command);
 
@@ -85,6 +90,10 @@ public:
     // Sends the signal `signal_number` to the process. Returns false if the
     // process has already been reaped or the signal could not be sent.
     [[nodiscard]] bool send_signal(int signal_number) noexcept;
+
+    // The process id, for tests that look at the process from outside. It
+    // may belong to another process once this one has been reaped.
+    [[nodiscard]] int pid() const noexcept { return pid_; }
 
     // Everything captured so far.
     [[nodiscard]] const std::string& out() const noexcept { return out_; }
