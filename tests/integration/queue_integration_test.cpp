@@ -17,8 +17,10 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <optional>
@@ -37,8 +39,8 @@ using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t ONE_MILLION = 1'000'000;
 constexpr int NEXT_WAIT_MS = 1000;
 constexpr int HIST_TIMEOUT_MS = 1000;
-// Long, so that a request posted right after the driver was killed is
-// still accepted (the residual window of contract 9.3).
+// Long against the helper's heartbeat period of 50 ms, so that a busy
+// machine does not make the running driver look down.
 constexpr int IO_DRIVER_TIMEOUT_MS = 10'000;
 // The pause between two looks at a condition that has no event to wait
 // on (whether a post is accepted), in ms.
@@ -385,8 +387,8 @@ TEST_F(QueueProcesses, Conformance16RedeliveryAfterAConsumerIsKilled) {
     stop(*tagd);
 }
 
-// `web` posts a request, which `holder` prints it took; `holder` is then
-// killed and `web` posts a second request within its heartbeat timeout.
+// `web` posts a request, which `holder` prints it took, and a second one,
+// which `holder` does not take; then `holder` is killed.
 ::testing::AssertionResult driver_dies_holding_one(const Attached& web,
                                                    scada_queue* requests,
                                                    ChildProcess& holder) {
@@ -398,12 +400,15 @@ TEST_F(QueueProcesses, Conformance16RedeliveryAfterAConsumerIsKilled) {
         !took) {
         return took;
     }
-    kill(holder);
-    // Within the heartbeat timeout of the driver: accepted.
+    // Posted before the kill, so that it does not depend on how long the
+    // dead driver still counts as up: `holder` takes no second request, so
+    // this one is still queued when the driver attaches again, as a request
+    // posted in the residual window of contract 9.3 would be.
     const scada_write_request queued = direct_request();
     if (scada_queue_post(requests, &queued, sizeof(queued)) != SCADA_OK) {
         return ::testing::AssertionFailure() << "the second post failed";
     }
+    kill(holder);
     return ::testing::AssertionSuccess();
 }
 
@@ -463,6 +468,44 @@ TEST_F(QueueProcesses, Conformance17ARequestIsNeverExecutedTwice) {
     EXPECT_TRUE(stops_cleanly(*driver));
     EXPECT_EQ(numbers_after(driver->out(), "took "),
               std::vector<std::uint64_t>{2});
+    stop(*tagd);
+}
+
+// The library checks the thread of a queue (contract 13.2) in every build:
+// one built without NDEBUG stops the process, another refuses the post.
+// CTest says which this build is.
+bool stops_on_a_second_thread() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
+    const char* const checked = std::getenv("SCADA_TAG_THREAD_CHECK");
+    return checked != nullptr && std::string_view(checked) == "1";
+}
+
+// Decision D-38, condition 4: a second thread that posts to a queue stops a
+// debug build and is refused with SCADA_E_INVALID by any other build.
+TEST_F(QueueProcesses, ASecondPostingThreadIsStoppedOrRefused) {
+    write_queue_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    const Attached web(base(), "web");
+    const OpenQueue reader(web.ctx(), "events.feed");
+    std::optional<ChildProcess> feed =
+        start_queue_helper("feed", "two-threads", "events.feed");
+    if (!feed.has_value()) {
+        return;
+    }
+    if (stops_on_a_second_thread()) {
+        EXPECT_EQ(feed->wait_for_signal_exit(WAIT_LIMIT), SIGABRT)
+            << feed->out() << feed->err();
+        EXPECT_NE(feed->err().find("posted from two threads"),
+                  std::string::npos)
+            << feed->err();
+    } else {
+        EXPECT_TRUE(
+            prints(*feed, "second=" + std::to_string(SCADA_E_INVALID) + "\n"));
+        EXPECT_TRUE(stops_cleanly(*feed));
+    }
     stop(*tagd);
 }
 

@@ -674,6 +674,13 @@ If the consumer's region is missing or its process is down, `post` returns
   its heartbeat timeout. Records accepted in that window are in shared memory
   and are delivered when the consumer restarts, unless the unit loses power
   first.
+- Second residual window, open until the base sequence of section 16: when
+  a queue's file is removed, shrunk or damaged and its producer creates it
+  anew inside the generation, a post made before the consumer's next look at
+  the file (up to about 1 s) returns `SCADA_OK`, and the record is then lost.
+  On an event queue that is an action taken without an audit record. A
+  consumer that was not attached during the recreation cannot tell the new
+  file from the old one, and may deliver records whose ids repeat.
 
 Decided by the product owner in review P1-01 (D-23, D-24).
 
@@ -1197,7 +1204,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 21, with a value changed immediately before the change |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-38) | P1-13 | Decided before 1.0 |
-| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-38, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Until then a post made between the recreation and the consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is lost; on an event queue that is an action without an audit record (9.3). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-38, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
 
 ## 17. Differences from the reference document
 

@@ -58,7 +58,7 @@ public:
     [[nodiscard]] bool ready() const noexcept;
 
     // The word to wait on for the next record, if the queue region is
-    // mapped. Consumer only.
+    // mapped and the queue is not stopped. Consumer only.
     [[nodiscard]] std::optional<FutexWaiter> waiter() const noexcept;
 
     [[nodiscard]] Attachment& attachment() const noexcept {

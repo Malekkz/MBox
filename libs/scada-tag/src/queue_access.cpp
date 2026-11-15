@@ -382,7 +382,7 @@ int Attachment::post_record(std::size_t queue_id,
     return SCADA_OK;
 }
 
-bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
+bool Attachment::bind_queue_thread(std::size_t queue_id) noexcept {
     static_cast<void>(queue(queue_id));
     std::atomic<const void*>& writer = queue_threads_[queue_id];
     const void* const self = thread_mark();
@@ -391,8 +391,12 @@ bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
     if (first == self) {
         return true;
     }
-    if (first == nullptr && writer.compare_exchange_strong(
-                                first, self, std::memory_order_relaxed)) {
+    return first == nullptr && writer.compare_exchange_strong(
+                                   first, self, std::memory_order_relaxed);
+}
+
+bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
+    if (bind_queue_thread(queue_id)) {
         return true;
     }
 #ifndef NDEBUG
@@ -403,8 +407,20 @@ bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
 
 void Attachment::release_queue_thread(std::size_t queue_id) noexcept {
     static_cast<void>(queue(queue_id));
-    // Relaxed: as in `check_writer_thread`.
-    queue_threads_[queue_id].store(nullptr, std::memory_order_relaxed);
+    const void* self = thread_mark();
+    // Relaxed: as in `check_writer_thread`. Only the recorded thread lets
+    // go of its record.
+    static_cast<void>(queue_threads_[queue_id].compare_exchange_strong(
+        self, nullptr, std::memory_order_relaxed));
+}
+
+bool Attachment::answer_queue_in_use(std::size_t queue_id) const noexcept {
+    for (const QueueAccess& access : queue_access_) {
+        if (access.answer_queue == queue_id && queue_open(access.id, false)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QueueCounters& Attachment::counters(std::size_t queue_id) noexcept {

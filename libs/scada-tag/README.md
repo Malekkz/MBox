@@ -468,7 +468,8 @@ survives a producer restart, so no id is reused in a generation; it also
 sets `posted_mono_ns` of a request to the time of the post (a guard against
 a caller's bug, not a security boundary: the consumer bounds the lifetime on
 its own clock). One thread posts to a queue, in every build: a second one
-is refused with `SCADA_E_INVALID` (a debug build stops). A post wakes
+is refused with `SCADA_E_INVALID` (a debug build stops). Only the thread
+that holds a queue lets go of it, when it closes its side. A post wakes
 nobody; `scada_tag_notify` wakes the consumers of the queues the calling
 thread posted to.
 
@@ -485,8 +486,10 @@ When a record is taken its id must also be its position. A record that
 fails is passed over with `SCADA_E_LAYOUT`. A cursor out of range is not
 followed: `scada_queue_next` gives `SCADA_E_LAYOUT` and the producer
 `SCADA_E_PEER_DOWN` until the next generation; each look is counted in
-`out_of_range`. The library does not log it: the process logs once when it
-starts and ends, and does not spin on `SCADA_E_LAYOUT`.
+`out_of_range`. On such a stopped queue `scada_queue_next` waits out its
+timeout before it returns `SCADA_E_LAYOUT`, and a wait set sleeps in slices
+of 100 ms, so neither spins. The library does not log it: the process logs
+once when it starts.
 
 Delivery (contract 9.2):
 
@@ -516,7 +519,12 @@ A queue whose file is replaced, removed or shrunk inside the generation is
 dead: the consumer remembers the first mapping it saw, gets `SCADA_E_LAYOUT`
 when it finds another or none, counts `replaced`, and stores an all-ones
 cursor so that the producer gets `SCADA_E_PEER_DOWN`. It stays so until a
-tag-set change or a reboot (decision D-38, issue #53).
+tag-set change or a reboot (decision D-38, issue #53). Two gaps remain until
+#53 adds a base sequence: a post made between the recreation and the
+consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is
+lost, which on an event queue is an action without an audit record; and a
+consumer that was not attached during the recreation cannot tell the new
+file from the old one, so it may deliver records whose ids repeat.
 
 ## How to use it
 

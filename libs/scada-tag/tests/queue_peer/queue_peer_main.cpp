@@ -19,6 +19,11 @@
 //                of the same name after the prefix.
 //   drive-hold   takes one request, prints "took <request_id>" and answers
 //                nothing; the test kills it in that state.
+//   request      posts one write request with a lifetime of 1 ms to a cmd
+//                queue, retrying on SCADA_E_PEER_DOWN, and prints "posted".
+//   two-threads  posts one event, then one more from a second thread, and
+//                prints "second=<return code>". A library built without
+//                NDEBUG stops the process at the second post instead.
 //
 // The uid of scada-tagd is taken to be the user of the caller, as in the
 // tests. After attach and open it prints "attached aborted=<n>
@@ -42,6 +47,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 
 namespace {
 
@@ -60,6 +66,14 @@ constexpr long BACKOFF_NS = 100'000;
 constexpr std::uint64_t PAYLOAD_FACTOR = 0x9E37'79B9'7F4A'7C15U;
 constexpr std::size_t PAYLOAD_BYTES = 8;
 constexpr unsigned BITS_PER_BYTE = 8;
+constexpr long REQUEST_LIFETIME_NS = 1'000'000;
+
+std::int64_t monotonic_now() noexcept {
+    timespec now{};
+    static_cast<void>(::clock_gettime(CLOCK_MONOTONIC, &now));
+    constexpr std::int64_t NANOSECONDS_PER_SECOND = 1'000'000'000;
+    return (std::int64_t{now.tv_sec} * NANOSECONDS_PER_SECOND) + now.tv_nsec;
+}
 
 // The whole of `text` as a decimal number of at most `limit`.
 std::optional<std::uint64_t> parse_number(std::string_view text,
@@ -130,6 +144,35 @@ public:
         static_cast<void>(scada_tag_notify(context_));
         std::cout << "posted " << count << "\n" << std::flush;
         return 0;
+    }
+
+    // Posts one request that expires 1 ms after it is posted.
+    int request(scada_queue* queue) {
+        for (;;) {
+            scada_write_request record{};
+            record.target_handle = 0;
+            record.operation = SCADA_OP_READ_NOW;
+            record.source = SCADA_SOURCE_AUTO;
+            record.expiry_mono_ns = monotonic_now() + REQUEST_LIFETIME_NS;
+            const int code = scada_queue_post(queue, &record, sizeof(record));
+            if (code == SCADA_OK) {
+                static_cast<void>(scada_tag_notify(context_));
+                std::cout << "posted\n" << std::flush;
+                return 0;
+            }
+            if (code != SCADA_E_PEER_DOWN) {
+                std::cerr << "post failed with code " << code << "\n";
+                return EXIT_FAILED;
+            }
+            // The consumer attached after this process asked for its
+            // region: notify looks for it again, at most once a second.
+            static_cast<void>(scada_tag_notify(context_));
+            if (stopping()) {
+                return 0;
+            }
+            const timespec pause{.tv_sec = 0, .tv_nsec = BACKOFF_NS};
+            static_cast<void>(::nanosleep(&pause, nullptr));
+        }
     }
 
     // Takes `count` records, or one if `hold`, then returns.
@@ -220,7 +263,8 @@ int run(std::span<const std::string_view> args) {
         }
         count = *parsed;
     } else if (args.size() != MIN_ARGUMENTS ||
-               (mode != "hold" && mode != "drive" && mode != "drive-hold")) {
+               (mode != "hold" && mode != "drive" && mode != "drive-hold" &&
+                mode != "request" && mode != "two-threads")) {
         std::cerr << "scada-tag-test-queue: bad argument\n";
         return EXIT_USAGE;
     }
@@ -267,6 +311,22 @@ int run(std::span<const std::string_view> args) {
     int exit_code = 0;
     if (mode == "post") {
         exit_code = helper.post(queue, count);
+    } else if (mode == "request") {
+        exit_code = helper.request(queue);
+    } else if (mode == "two-threads") {
+        exit_code = helper.post(queue, 1);
+        if (exit_code == 0) {
+            scada_event_record record{};
+            record.kind = SCADA_EVENT_SYSTEM;
+            record.source_handle = SCADA_INVALID_HANDLE;
+            int second = -1;
+            {
+                const std::jthread other([&second, queue, &record] {
+                    second = scada_queue_post(queue, &record, sizeof(record));
+                });
+            }
+            std::cout << "second=" << second << "\n" << std::flush;
+        }
     } else if (driver) {
         exit_code = helper.drive(queue, results, mode == "drive-hold");
     } else {

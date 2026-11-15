@@ -724,13 +724,15 @@ int scada_queue_post(scada_queue* queue, const void* record, size_t size);
  * SCADA_OK: `record` holds a record. SCADA_E_TIMEOUT: none arrived.
  * SCADA_E_LAYOUT: the next record is not valid (its id is not its
  * position, or a check of scada_queue_post fails); it is passed over and
- * the next call goes on with the one after it. Also at every call while
- * the cursor and the queue's position are no valid pair: nothing is
- * consumed then (section 9.2), and the queue stays stopped until the next
- * generation. SCADA_E_INVALID: an argument is NULL, `queue` is the producer's
- * side, `size` is not the record size, or `timeout_ms` is negative.
- * SCADA_E_IO with errno set: the kernel refused the wait. `record` is
- * changed only with SCADA_OK.
+ * the next call goes on with the one after it. Also when the queue is
+ * stopped: its cursor and position are no valid pair, or its file was
+ * replaced inside the generation (section 9.2). Nothing is consumed then,
+ * the call returns only when `timeout_ms` has passed, so that a loop over
+ * this call does not spin, and the queue stays stopped until a tag-set
+ * change or a reboot; log it once. SCADA_E_INVALID: an argument is NULL,
+ * `queue` is the producer's side, `size` is not the record size, or
+ * `timeout_ms` is negative. SCADA_E_IO with errno set: the kernel refused the
+ * wait. `record` is changed only with SCADA_OK.
  *
  * Not real-time: it may block. One thread uses the consumer's side.
  */

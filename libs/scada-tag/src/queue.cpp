@@ -80,18 +80,20 @@ Queue::~Queue() {
     if (wait_set_ != nullptr) {
         wait_set_->remove(*this);
     }
-    // The thread of a side is bound for as long as the side is open. The
-    // answer queue of a `cmd` queue is bound by the consumer of the `cmd`
-    // queue, unless its own producer side is open and holds it.
+    // The thread of a side is bound for as long as the side is open, and
+    // only that thread lets go of it. The answer queue of a `cmd` queue
+    // stays bound while the side that consumes the `cmd` queue, or its own
+    // producer side, is open.
+    attachment_.release_queue(id_, producer_);
     if (producer_) {
-        attachment_.release_queue_thread(id_);
+        if (!attachment_.answer_queue_in_use(id_)) {
+            attachment_.release_queue_thread(id_);
+        }
     } else if (const std::optional<std::size_t> answer =
                    attachment_.queue(id_).answer_queue;
-               answer.has_value() && answer_bound_ &&
-               !attachment_.queue_open(*answer, true)) {
+               answer.has_value() && !attachment_.queue_open(*answer, true)) {
         attachment_.release_queue_thread(*answer);
     }
-    attachment_.release_queue(id_, producer_);
 }
 
 scada_queue_stats_t Queue::stats() noexcept {
@@ -230,20 +232,27 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         // The thread that takes the requests is the one that posts to the
         // answer queue (decision D-38). Bound at the first call; a thread
         // that may not post there gets no answer posted, and the drops are
-        // counted.
-        answer_bound_ = attachment_.check_queue_thread(*access.answer_queue);
+        // counted, in every build: this is the library's own post, not a
+        // misuse by the caller.
+        answer_bound_ = attachment_.bind_queue_thread(*access.answer_queue);
     }
     const std::int64_t deadline = deadline_after(monotonic_ns(), timeout_ms);
     // Expired requests passed over without a look at the clock: at most a
     // queue's worth, then the deadline is looked at.
     std::uint32_t answered = 0;
+    bool stopped = false;
     for (;;) {
         switch (poll(out)) {
             case Look::DELIVERED:
                 return SCADA_OK;
             case Look::INVALID:
+                return SCADA_E_LAYOUT;  // one record passed over: progress
             case Look::BAD_RANGE:
-                return SCADA_E_LAYOUT;
+                // A stopped queue (section 9.2, decision D-38) does not end
+                // the wait early: a caller that loops on next must not spin.
+                // It is reported when the timeout has passed.
+                stopped = true;
+                break;
             case Look::ANSWERED:
                 if (++answered < access.capacity) {
                     continue;  // look at the next request at once
@@ -258,15 +267,16 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         }
         const std::int64_t now = monotonic_ns();
         if (now >= deadline) {
-            return SCADA_E_TIMEOUT;
+            return stopped ? SCADA_E_LAYOUT : SCADA_E_TIMEOUT;
         }
         // Section 8.4: no wait is longer than the slice.
         const std::int64_t slice_end =
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
         const std::optional<FutexWaiter> word = waiter();
         if (!word.has_value()) {
-            // The producer has not created the queue yet: look for it again
-            // (at most once a second), and meanwhile wait a slice.
+            // The producer has not created the queue yet, or the queue is
+            // stopped: look for its region again (at most once a second),
+            // and meanwhile wait a slice.
             attachment_.refresh_peers();
             sleep_until(slice_end);
             continue;
@@ -308,12 +318,19 @@ bool Queue::ready() const noexcept {
 
 std::optional<FutexWaiter> Queue::waiter() const noexcept {
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
-    if (producer_ || bytes.empty()) {
+    if (producer_ || bytes.empty() || attachment_.queue_is_dead(id_)) {
         return std::nullopt;
     }
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read =
         load_shared(attachment_.own_cursor(id_), std::memory_order_relaxed);
+    // A stopped queue gives no word: a wait on it would end at once, since
+    // `write_seq` never equals the cursor, and its waiter would spin. The
+    // caller sleeps a slice instead.
+    if (out_of_range(read, queue_write_seq(bytes),
+                     attachment_.queue(id_).capacity)) {
+        return std::nullopt;
+    }
     return FutexWaiter{.word = &queue_header(bytes).write_seq,
                        .expected = futex_word_of(read),
                        .process_private = false};

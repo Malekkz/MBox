@@ -354,8 +354,21 @@ public:
     SCADA_RT [[nodiscard]] bool check_queue_thread(
         std::size_t queue_id) noexcept;
 
-    // Forgets the thread recorded for `queue_id`: its side was closed.
+    // As `check_queue_thread`, but never stops the process: for the answers
+    // `scada_queue_next` posts itself, which a thread that is not the
+    // recorded one drops and counts in every build (decision D-38).
+    SCADA_RT [[nodiscard]] bool bind_queue_thread(
+        std::size_t queue_id) noexcept;
+
+    // Forgets the thread recorded for `queue_id` if it is the calling
+    // thread: its side was closed. Another thread's record stays, so that
+    // closing a handle in a thread that was refused cannot unbind the
+    // thread that posts (review of PR #56).
     void release_queue_thread(std::size_t queue_id) noexcept;
+
+    // True if the side that consumes a `cmd` queue whose answer queue is
+    // `queue_id` is open in this context: its thread posts the answers.
+    [[nodiscard]] bool answer_queue_in_use(std::size_t queue_id) const noexcept;
 
     // The counts of `queue_id` in this context.
     [[nodiscard]] QueueCounters& counters(std::size_t queue_id) noexcept;

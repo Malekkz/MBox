@@ -28,6 +28,7 @@
 
 #include <poll.h>
 #include <sys/types.h>
+#include <time.h>  // NOLINT(modernize-deprecated-headers): clock_gettime and CLOCK_THREAD_CPUTIME_ID are POSIX, declared here
 #include <unistd.h>
 
 #include <algorithm>
@@ -37,6 +38,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -59,6 +61,7 @@ constexpr std::uint32_t CAPACITY = 4;
 // Queue ids of the tag set: their position in name order.
 constexpr std::size_t CMD_WEB = 1;
 constexpr std::size_t EVENTS_IO = 2;
+constexpr std::size_t RESULT_WEB = 4;
 // Records that pass through a queue of CAPACITY places in the ordering test,
 // and how many are posted between two looks of the consumer.
 constexpr std::uint64_t MANY = 1000;
@@ -526,6 +529,41 @@ TEST_F(Queues, AWriteSeqTooFarAheadIsRejected) {
     EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
 }
 
+// The CPU time the calling thread has used so far, in ns.
+std::int64_t thread_cpu_ns() {
+    timespec now{};
+    EXPECT_EQ(::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now), 0);
+    constexpr std::int64_t NANOSECONDS_PER_SECOND = 1'000'000'000;
+    return (std::int64_t{now.tv_sec} * NANOSECONDS_PER_SECOND) + now.tv_nsec;
+}
+
+// Review of PR #56: a stopped queue must not make its consumer spin. A wait
+// of 300 ms on it, through next and through a wait set, sleeps in slices
+// and uses a small part of that as CPU time. A spinning wait uses nearly
+// all of it; the bound leaves room for a slow sanitizer build.
+TEST_F(Queues, AWaitOnAStoppedQueueDoesNotSpin) {
+    constexpr int WAIT_MS = 300;
+    constexpr std::int64_t CPU_LIMIT_NS = 60 * NANOSECONDS_PER_MILLISECOND;
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    set_cursor("web", EVENTS_IO, 2);  // beyond write_seq: stopped
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+
+    scada_event_record record{};
+    std::int64_t start = thread_cpu_ns();
+    const std::int64_t called = scada::monotonic_ns();
+    EXPECT_EQ(next(*reader, record, WAIT_MS), SCADA_E_LAYOUT);
+    // It waited out its timeout, so that a loop over it does not spin.
+    EXPECT_GE(scada::monotonic_ns() - called,
+              std::int64_t{WAIT_MS} * NANOSECONDS_PER_MILLISECOND);
+    EXPECT_LT(thread_cpu_ns() - start, CPU_LIMIT_NS) << "next spun";
+    start = thread_cpu_ns();
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_E_TIMEOUT);
+    EXPECT_LT(thread_cpu_ns() - start, CPU_LIMIT_NS) << "the wait set spun";
+}
+
 // A record that is not valid is passed over with SCADA_E_LAYOUT.
 TEST_F(Queues, ARecordThatIsNotValidIsPassedOver) {
     const QueuePtr out = open(*io(), "events.io");
@@ -777,43 +815,121 @@ TEST_F(Queues, ARequestChangedAfterItWasTakenIsNotTakenAgain) {
     EXPECT_EQ(reader->stats().expired, 0U);
 }
 
-// Decision D-38, condition 3: the EXPIRED answer is posted without a wake;
-// a requester waiting for it gets it within the slice of 100 ms.
-TEST_F(Queues, AnExpiredAnswerArrivesWithoutNotifyWithinTheSlice) {
-    constexpr std::size_t TRIALS = 5;
-    // The slice, and room for a busy machine to schedule the waiter.
-    constexpr std::int64_t LIMIT_NS =
-        (std::int64_t{SCADA_WAIT_SLICE_MS} + SCADA_WAIT_SLICE_MS / 2) *
-        NANOSECONDS_PER_MILLISECOND;
+// True once the thread `tid` of this process sleeps in the kernel (state
+// S in its stat file), looked at until WAIT_LIMIT_MS has passed.
+bool sleeps_soon(pid_t tid) {
+    const std::string path = "/proc/self/task/" + std::to_string(tid) + "/stat";
+    const std::int64_t deadline =
+        scada::monotonic_ns() +
+        (std::int64_t{WAIT_LIMIT_MS} * NANOSECONDS_PER_MILLISECOND);
+    while (scada::monotonic_ns() < deadline) {
+        std::ifstream file(path);
+        std::string stat;
+        std::getline(file, stat);
+        // The state follows the name in parentheses, which may hold spaces.
+        const std::size_t name_end = stat.rfind(')');
+        if (name_end != std::string::npos && name_end + 2 < stat.size() &&
+            stat[name_end + 2] == 'S') {
+            return true;
+        }
+        std::this_thread::yield();
+    }
+    return false;
+}
+
+// Decision D-38, condition 3: the EXPIRED answer is posted without a wake,
+// and a requester already waiting for it still gets it. Nothing ever wakes
+// the requester here, so only the look at the end of each wait slice can
+// deliver the answer: its arrival shows that look. The length of the slice
+// is shown by the wait tests of the change rings (`Changes.*`).
+TEST_F(Queues, AnExpiredAnswerArrivesWithoutNotify) {
     const QueuePtr out = open(*web(), "cmd.io.web");
     const QueuePtr reader = open(*io(), "cmd.io.web");
     const QueuePtr results = open(*web(), "result.io.web");
-    std::vector<std::int64_t> delays;
-    for (std::size_t trial = 0; trial < TRIALS; ++trial) {
-        ASSERT_TRUE(posts(*out, request()));
-        change_record<WriteRequest>(
-            "cmd.io.web", trial, [](WriteRequest& record) {
-                record.expiry_mono_ns = record.posted_mono_ns;
-            });
-        std::atomic<int> code{-1};
-        std::atomic<std::int64_t> arrived{0};
-        std::thread requester([&results, &code, &arrived] {
-            scada_write_result answer{};
-            code.store(next(*results, answer, WAIT_LIMIT_MS));
-            arrived.store(scada::monotonic_ns());
-            static_cast<void>(results->ack());
-        });
-        // Let the requester block first: a wait that compares a word cannot
-        // miss the post, so this only makes the test meaningful.
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        const std::int64_t answered = scada::monotonic_ns();
-        EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));
-        requester.join();
-        ASSERT_EQ(code.load(), SCADA_OK);
-        delays.push_back(arrived.load() - answered);
+    ASSERT_TRUE(posts(*out, request()));
+    change_record<WriteRequest>("cmd.io.web", 0, [](WriteRequest& record) {
+        record.expiry_mono_ns = record.posted_mono_ns;
+    });
+    std::atomic<pid_t> tid{0};
+    std::atomic<int> code{-1};
+    std::thread requester([&results, &code, &tid] {
+        tid.store(::gettid());
+        scada_write_result answer{};
+        code.store(next(*results, answer, WAIT_LIMIT_MS));
+    });
+    while (tid.load() == 0) {
+        std::this_thread::yield();
     }
-    std::ranges::sort(delays);
-    EXPECT_LT(delays[TRIALS / 2], LIMIT_NS) << "median of " << TRIALS;
+    // The requester is blocked in its wait before the answer is posted, so
+    // the answer cannot be seen by its first look.
+    EXPECT_TRUE(sleeps_soon(tid.load()));
+    EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));
+    requester.join();
+    EXPECT_EQ(code.load(), SCADA_OK);
+    EXPECT_EQ(reader->stats().expired, 1U);
+}
+
+// The result of `call` run in a thread of its own, which the thread marks
+// of the library tell from the test's thread.
+template <typename Call>
+bool in_other_thread(Call call) {
+    bool result = false;
+    std::thread other([&result, &call] { result = call(); });
+    other.join();
+    return result;
+}
+
+// Review of PR #56: a thread that was refused, and closes and opens its
+// handle again, cannot take the answer queue from the thread that takes the
+// requests. Before the fix its close let go of the other thread's binding.
+TEST_F(Queues, ClosingAHandleDoesNotUnbindAnotherThread) {
+    const QueuePtr requests = open(*io(), "cmd.io.web");
+    // The test's thread takes the requests, so it posts their answers.
+    ASSERT_TRUE(gives<scada_write_request>(*requests, SCADA_E_TIMEOUT));
+    Attachment& driver = *io();
+    EXPECT_FALSE(in_other_thread([this, &driver] {
+        {
+            const QueuePtr results = open(driver, "result.io.web");
+        }  // closed without posting: no stop, also in a debug build
+        const QueuePtr results = open(driver, "result.io.web");
+        return driver.bind_queue_thread(RESULT_WEB);
+    }));
+    // Still the test's thread, also once a producer side was opened and
+    // closed here.
+    { const QueuePtr results = open(driver, "result.io.web"); }
+    EXPECT_TRUE(driver.bind_queue_thread(RESULT_WEB));
+}
+
+// Decision D-38, condition 4: the ABORTED answers of the drain at attach do
+// not bind the attaching thread; the driver's thread can post its answers.
+TEST_F(Queues, TheDrainAtAttachBindsNoThread) {
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    ASSERT_TRUE(posts(*out, request()));
+    restart(io(), "io");  // drains in the test's thread
+    Attachment& driver = *io();
+    EXPECT_TRUE(in_other_thread(
+        [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
+}
+
+// Decision D-38, condition 3: a thread that takes requests while another
+// thread holds the answer queue gets no answer posted; the request is not
+// delivered, and the drop is counted, in every build.
+TEST_F(Queues, AnAnswerOfAnUnboundThreadIsDroppedAndCounted) {
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    const QueuePtr reader = open(*io(), "cmd.io.web");
+    Attachment& driver = *io();
+    ASSERT_TRUE(in_other_thread(
+        [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
+    ASSERT_TRUE(posts(*out, request()));
+    change_record<WriteRequest>("cmd.io.web", 0, [](WriteRequest& record) {
+        record.expiry_mono_ns = record.posted_mono_ns;
+    });
+    EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));
+    const scada_queue_stats_t stats = reader->stats();
+    EXPECT_EQ(stats.expired, 1U);
+    EXPECT_EQ(stats.answers_dropped, 1U);
+    const QueuePtr results = open(*web(), "result.io.web");
+    EXPECT_TRUE(gives<scada_write_result>(*results, SCADA_E_TIMEOUT));
 }
 
 #ifdef NDEBUG

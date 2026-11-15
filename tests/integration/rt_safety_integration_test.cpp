@@ -3,8 +3,9 @@
 // allocation and take no page fault, the first read of a tag after its
 // resolve included.
 //
-// The helper scada-tag-rt-probe calls those functions, scada_queue_post
-// among them, and scada_queue_next without waiting, between two markers.
+// The helper scada-tag-rt-probe calls those functions between two markers:
+// scada_queue_post of an event, a request and a result among them, and
+// scada_queue_next without waiting, which answers an expired request.
 // This test runs it under the tracer of scada/test/syscall_trace.h, which
 // records every system call between the markers; the helper counts its own
 // allocations there. The test is not registered in the sanitizer builds,
@@ -36,20 +37,29 @@ using scada::test::TraceResult;
 
 constexpr std::chrono::seconds PROBE_LIMIT{60};
 // The real-time safe calls the probe makes between its markers.
-constexpr std::string_view ALL_CALLS_PASSED = "calls=9 failed=0 ";
+constexpr std::string_view ALL_CALLS_PASSED = "calls=11 failed=0 ";
+// Its look at the request queue answered the expired request, and the
+// answer was posted.
+constexpr std::string_view EXPIRED_ANSWERED = " expired=1 dropped=0\n";
 
 class RealTimeSafety : public TagProcesses {
 protected:
-    // Runs the probe as the process `probe` against a running scada-tagd
-    // and a running owner `io`, with `fault` as its last argument unless
-    // empty.
+    // Runs the probe as the process `probe` against a running scada-tagd,
+    // a running owner `io` and `feeder`, which posts one request to the
+    // probe that expires 1 ms later, with `fault` as its last argument
+    // unless empty.
     [[nodiscard]] TraceResult traced_probe(const std::string& fault) {
         write_small_tag_set();
         std::optional<RunningTagd> tagd = ready_tagd();
         std::optional<ChildProcess> owner = attached_io();
-        if (!tagd.has_value() || !owner.has_value()) {
+        std::optional<ChildProcess> feeder =
+            start_helper("SCADA_TAG_QUEUE_COMMAND",
+                         {base(), "feeder", "request", "cmd.probe.feeder"});
+        if (!tagd.has_value() || !owner.has_value() || !feeder.has_value()) {
             return {};
         }
+        // The probe's wait set finds the request, which the feeder posts
+        // once the probe is up; the feeder's output is not waited for.
         std::vector<std::string> arguments{base(), "probe", "probe.out",
                                            "plant.level"};
         if (!fault.empty()) {
@@ -61,6 +71,9 @@ protected:
         EXPECT_EQ(result.exit_code, 0) << result.out;
         EXPECT_EQ(result.marked_parts, 1);
         EXPECT_TRUE(result.out.starts_with(ALL_CALLS_PASSED)) << result.out;
+        EXPECT_NE(result.out.find(EXPIRED_ANSWERED), std::string::npos)
+            << result.out;
+        EXPECT_TRUE(stops_cleanly(*feeder));
         EXPECT_TRUE(stops_cleanly(*owner));
         stop(*tagd);
         return result;

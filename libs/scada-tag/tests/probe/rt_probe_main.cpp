@@ -10,14 +10,19 @@
 //
 // `own tag` is a FLOAT64 tag the process owns. The process produces the
 // event queue `events.<process>`, whose consumer is attached, and consumes
-// the empty request queue `cmd.<process>.io`, which it looks at without
-// waiting. The uid of scada-tagd is taken to be the user of the caller, as
-// in the tests. With `syscall` or
-// `allocation` it makes one system call or one allocation between the
-// markers on purpose, to show that the test finds it.
+// the request queue `cmd.<process>.feeder`, into which another process
+// posts one request that expires 1 ms later. Before the markers it waits
+// until the request is there and has expired; between them it looks at the
+// queue without waiting, which answers the request EXPIRED in
+// `result.<process>.feeder` (decision D-38). It also posts one request to
+// `io` in `cmd.io.<process>` and one answer in `result.<process>.feeder`. The
+// uid of scada-tagd is taken to be the user of the caller, as in the tests.
+// With `syscall` or `allocation` it makes one system call or one allocation
+// between the markers on purpose, to show that the test finds it.
 //
 // It prints one line:
 //   calls=<n> failed=<n> allocations=<n> page_faults=<n> clock_syscall=<0|1>
+//   expired=<n> dropped=<n>
 // `calls` real-time safe calls were made, `failed` of them did not return
 // SCADA_OK, `allocations` calls of the C++ allocation functions happened
 // between the markers, and the thread took `page_faults` page faults there
@@ -42,6 +47,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -173,6 +179,11 @@ struct Prepared {
     scada_event_record event{};
     scada_queue* requests = nullptr;
     scada_write_request request{};
+    // A request it posts to `io`, and the answer it posts to the feeder.
+    scada_queue* commands = nullptr;
+    scada_write_request command{};
+    scada_queue* answers = nullptr;
+    scada_write_result answer{};
     // What the fault `allocation` allocates. Kept, so that the compiler
     // cannot remove the allocation.
     std::unique_ptr<int> wasted;
@@ -216,6 +227,10 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
           scada_queue_next(prepared.requests, &prepared.request,
                            sizeof(prepared.request), 0),
           SCADA_E_TIMEOUT);
+    count(outcome, scada_queue_post(prepared.commands, &prepared.command,
+                                    sizeof(prepared.command)));
+    count(outcome, scada_queue_post(prepared.answers, &prepared.answer,
+                                    sizeof(prepared.answer)));
     if (fault == "syscall") {
         static_cast<void>(::getppid());
     }
@@ -230,6 +245,35 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
         outcome.page_faults = faults_after - faults_before;
     }
     return outcome;
+}
+
+// The time of CLOCK_MONOTONIC, in ns.
+std::int64_t monotonic_now() noexcept {
+    timespec now{};
+    static_cast<void>(::clock_gettime(CLOCK_MONOTONIC, &now));
+    constexpr std::int64_t NANOSECONDS_PER_SECOND = 1'000'000'000;
+    return (std::int64_t{now.tv_sec} * NANOSECONDS_PER_SECOND) + now.tv_nsec;
+}
+
+// Waits until the request queue holds a record, without taking it, and
+// then until the 1 ms lifetime of that record has passed: it was posted
+// before the wait returned.
+bool wait_for_expired_request(Prepared& prepared) {
+    constexpr int WAIT_LIMIT_MS = 30'000;
+    constexpr std::int64_t LIFETIME_NS = 1'000'000;
+    scada_waitset* set = nullptr;
+    if (scada_waitset_create(prepared.ctx, &set) != SCADA_OK) {
+        return false;
+    }
+    const bool arrived =
+        scada_waitset_add_queue(set, prepared.requests) == SCADA_OK &&
+        scada_waitset_wait(set, WAIT_LIMIT_MS) == SCADA_OK;
+    scada_waitset_destroy(set);
+    const std::int64_t expired_after = monotonic_now() + LIFETIME_NS;
+    while (monotonic_now() <= expired_after) {
+        // The clock is the condition: a lifetime is a time.
+    }
+    return arrived;
 }
 
 int run(std::span<const std::string_view> args) {
@@ -281,11 +325,39 @@ int run(std::span<const std::string_view> args) {
         scada_tag_detach(prepared.ctx);
         return EXIT_FAILED;
     }
-    const std::string requests_name = "cmd." + process + ".io";
+    const std::string requests_name = "cmd." + process + ".feeder";
     if (scada_queue_open(prepared.ctx, requests_name.c_str(),
                          &prepared.requests) != SCADA_OK) {
         std::cerr << "scada-tag-rt-probe: cannot open " << requests_name
                   << "\n";
+        scada_queue_close(prepared.queue);
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    const std::string commands_name = "cmd.io." + process;
+    const std::string answers_name = "result." + process + ".feeder";
+    if (scada_queue_open(prepared.ctx, commands_name.c_str(),
+                         &prepared.commands) != SCADA_OK ||
+        scada_queue_open(prepared.ctx, answers_name.c_str(),
+                         &prepared.answers) != SCADA_OK) {
+        std::cerr << "scada-tag-rt-probe: cannot open the queues of "
+                     "requests and answers\n";
+        scada_queue_close(prepared.commands);
+        scada_queue_close(prepared.requests);
+        scada_queue_close(prepared.queue);
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    constexpr std::int64_t COMMAND_LIFETIME_NS = 30'000'000'000;
+    prepared.command.target_handle = prepared.own;
+    prepared.command.operation = SCADA_OP_READ_NOW;
+    prepared.command.source = SCADA_SOURCE_AUTO;
+    prepared.command.expiry_mono_ns = monotonic_now() + COMMAND_LIFETIME_NS;
+    prepared.answer.request_id = 1;
+    prepared.answer.status = SCADA_RESULT_OK;
+    if (!wait_for_expired_request(prepared)) {
+        std::cerr << "scada-tag-rt-probe: no request arrived\n";
+        scada_queue_close(prepared.requests);
         scada_queue_close(prepared.queue);
         scada_tag_detach(prepared.ctx);
         return EXIT_FAILED;
@@ -310,12 +382,18 @@ int run(std::span<const std::string_view> args) {
     prefault_arena(2 * page);
 
     const Outcome outcome = run_marked(prepared, fault);
+    scada_queue_stats_t stats{};
+    static_cast<void>(scada_queue_stats(prepared.requests, &stats));
 
     std::cout << "calls=" << outcome.calls << " failed=" << outcome.failed
               << " allocations=" << outcome.allocations
               << " page_faults=" << outcome.page_faults
-              << " clock_syscall=" << int{status.clock_syscall} << "\n"
+              << " clock_syscall=" << int{status.clock_syscall}
+              << " expired=" << stats.expired
+              << " dropped=" << stats.answers_dropped << "\n"
               << std::flush;
+    scada_queue_close(prepared.answers);
+    scada_queue_close(prepared.commands);
     scada_queue_close(prepared.requests);
     scada_queue_close(prepared.queue);
     scada_tag_detach(prepared.ctx);
