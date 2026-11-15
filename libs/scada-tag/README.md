@@ -208,6 +208,8 @@ D-27 records the choices the contract left open.
   is not down.
 - The `down` flag in the process table is set or cleared to match, and each
   change is returned to the caller. `scada-tagd` itself is never marked.
+  A new generation starts with the flag set for every other process, so a
+  process that attached before the first check is returned as up (D-38).
 - Every entry of the generation directory that the header does not list, or
   whose owner is not the user of that region, is removed and returned to the
   caller. A file `.tmp.<region>.<pid>` of a listed region with the right

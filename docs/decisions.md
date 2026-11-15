@@ -681,6 +681,23 @@ Consequences:
 - The pipeline has seven checks; `model check` is added to the required checks of `main` (a repository setting, README.md, "Pipeline").
 - D-21: the allow-list holds `CECILL-B` too.
 
+## D-38: A new generation starts with every process but `scada-tagd` down
+Date: 2026-11-15
+Phase / issue: 1, #44
+Status: accepted
+
+Context: the builder wrote every `down` flag as 0, and the first liveness check, which D-27 made quiet, set it to 1 for every process that had not attached. A process that attached before that check was found up while its flag was already 0: no change, so `scada-tagd` never logged `process up` for it. The tests start the helper as soon as `READY=1` arrives, so `TagdService.Conformance06CleanlyStoppedProcessIsMarkedDown`, `Conformance10ASecondProcessOfTheSameNameIsRefused`, `AnAttachedProcessCreatesItsRegionsAndTheyStay` and `Conformance20RestartLeavesTheOtherProcessRunning` waited 30 s for that line and failed under load. Readers do not use the flag (D-30), so only the report of `scada-tagd` was wrong.
+Options: run the first heartbeat and check before `READY=1`; start every `down` flag of a new generation at 1, except that of `tagd`; log `process up` for every process found up at the first check.
+Decision:
+- `scada-tagd` writes the header of a new generation with `down` 1 for every process but `tagd` before it publishes the header, so before `current` points to it. The header builder is unchanged; the reuse test already ignores the flags.
+- A process that is found up at the first check is a change and is logged `process up` (NOTICE). A process that has not attached is no change and is not logged. The first check is no longer quiet: the INFO `process down ... REASON="region missing"` of D-27 at the start of a new generation is gone, and every `process down` is a WARNING.
+- A reused generation keeps the flags the previous `scada-tagd` left (D-27), as before.
+Reason: the flag then holds the result of the rules of contract 10.1 from the moment the header can be seen, because a process that has not attached has no region. A process can attach as soon as `current` is switched, which is before `READY=1` (a process that moves to the new generation after RETIRING does not wait for readiness), so a check before `READY=1` would narrow the window but not close it. Logging every process up at the first check would keep a flag of 0 that is false until that check.
+Consequences:
+- Contract text for 1.0 (issue P1-13): the start value of `ProcessEntry.down` in a new generation.
+- The log of a new generation no longer lists the processes that are not attached yet; each appears as `process up` once it has attached.
+- Tests: `Host.AProcessThatAttachesBeforeTheFirstCheckIsReportedUp` fails without the change; `Host.Conformance05EveryProcessIsDownUntilItAttaches`, `DownFlagIsWhatOtherProcessesSeeInTheHeader` and `Conformance20RunningProcessStaysUpAcrossTheRestart` now expect the start value 1. `TagdService.Conformance05KilledProcessIsMarkedDown` no longer waits for the line of the first check.
+
 ## D-38: Reliable queues: the C interface, record checks, ids, expiry answered by the library, the drain at attach, counts, and cursors out of range
 Date: 2026-11-15
 Phase / issue: 1, #16
