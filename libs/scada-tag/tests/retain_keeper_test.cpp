@@ -284,6 +284,35 @@ TEST_F(Keeper, AfterGoodThenBadTheTagStartsAgainBadAndNotInit) {
     EXPECT_EQ(value.quality_flags, SCADA_FLAG_NOT_INIT);
 }
 
+// Re-check of PR #69: a restore that failed leaves the records NOT_INIT;
+// that says nothing about the values on file, which must survive.
+TEST_F(Keeper, AFailedRestoreDoesNotEraseTheValuesOnFile) {
+    RetainFile kept;
+    kept.values = {{"plant.level", TagType::FLOAT64, VALUE_5, 0},
+                   {"plant.mode", TagType::INT64, 2, 0}};
+    {
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", kept, detail).ok());
+    }
+    start_host(retained_set());
+    AttachOptions unusable = options();
+    unusable.retain_dir = (root() / "no-such-directory").string();
+    std::string detail;
+    Result<Attached> feeder = Attachment::attach("io", unusable, detail);
+    ASSERT_TRUE(feeder.ok()) << detail;
+    ASSERT_EQ(feeder.value()->status().directory_unusable, 1U);
+    const std::int64_t now = scada::monotonic_ns();
+    static_cast<void>(round(now));
+    static_cast<void>(round(now + INTERVAL_NS));
+    static_cast<void>(host().flush_retained());
+    static_cast<void>(host().wait_retained_written());
+    const RetainFile file = file_of("io");
+    EXPECT_EQ(value_in(file, "plant.mode"), 2U);
+    EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
+}
+
 TEST_F(Keeper, FlushWritesWhatChangedSinceTheLastWrite) {
     start_host(retained_set());
     const Attached feeder = attached("io");

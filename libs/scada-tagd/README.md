@@ -25,8 +25,10 @@ process. The executable in `services/scada-tagd` only calls it.
   `retain_now` tag. The files are written by a thread of their own, so that
   a slow `fsync` does not hold up the heartbeat; the removal of old files
   and its directory `fsync` run there too. A record read consistently that
-  is BAD or NOT_INIT removes the tag from the file; one that cannot be read
-  consistently (mid-write) leaves the value on file. No FINAL file is
+  is BAD, written by the owner (no NOT_INIT), removes the tag from the
+  file; one that is NOT_INIT (not written yet, for example after a failed
+  restore) leaves the value on file, as does one that cannot be read
+  consistently (mid-write). No FINAL file is
   written over newer values: not for an owner that has a ready `tags`
   region in a newer generation, nor one whose file is already FINAL for a
   newer generation.

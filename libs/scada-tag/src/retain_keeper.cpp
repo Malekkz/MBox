@@ -57,6 +57,14 @@ bool holds_value(const RecordCopy& copy, TagType type) noexcept {
            (type != TagType::BOOL || copy.value <= 1);
 }
 
+// True if `copy` says its owner marked the value bad: quality BAD, written
+// by the owner (NOT_INIT not set). Its record is removed from the file
+// (decision D-45). A NOT_INIT record says nothing about the value on file.
+bool disowned(const RecordCopy& copy) noexcept {
+    return copy.quality == to_raw(Quality::BAD) &&
+           (copy.quality_flags & to_raw(QualityFlag::NOT_INIT)) == 0;
+}
+
 // The later of two identities, by generation number.
 GenerationIdentity newer(const std::optional<GenerationIdentity>& kept,
                          const GenerationIdentity& seen) noexcept {
@@ -422,14 +430,20 @@ bool RetainKeeper::read_owner(const Watched& watched,
             copy.type != to_raw(tag.type)) {
             continue;  // nothing learned: the record on file stays
         }
-        if (!holds_value(copy, tag.type)) {
-            // BAD or NOT_INIT, read consistently: the owner disowned the
-            // value, and the tag starts again BAD with NOT_INIT (decision
-            // D-45, reference 14.4).
+        if (disowned(copy)) {
+            // BAD without NOT_INIT, read consistently: the owner wrote the
+            // tag and marked it bad, so the tag starts again BAD with
+            // NOT_INIT (decision D-45, reference 14.4).
             if (state.values.erase(tag.name) != 0) {
                 state.dirty = true;
                 state.urgent = state.urgent || tag.now;
             }
+            continue;
+        }
+        if (!holds_value(copy, tag.type)) {
+            // NOT_INIT: the owner has not written the tag in this life, for
+            // example because its restore failed; nothing learned, the
+            // record on file stays. So does anything else that is no value.
             continue;
         }
         const auto known = state.values.find(tag.name);
