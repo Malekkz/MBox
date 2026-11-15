@@ -89,6 +89,13 @@ public:
     // Precondition: `valid()`.
     void first_heartbeat(std::int64_t mono_ns) noexcept;
 
+    // Counts this life in `starts` (section 10.1): lives of the process that
+    // reached RUNNING in this region. Called once by attach, at step 6, just
+    // before the state is RUNNING, so that a failed attach counts nothing;
+    // the release store of RUNNING publishes it. Never reset within a
+    // region. Precondition: `valid()`.
+    void count_start() noexcept;
+
     // Writes one heartbeat taken at `mono_ns` (CLOCK_MONOTONIC). Safe from
     // several threads (contract 13.2): no count is lost, and the published
     // time never goes back; a time not newer than the published one is not
@@ -185,6 +192,10 @@ public:
     // nothing while it maps none.
     [[nodiscard]] std::optional<LateBeats> late_beats() const noexcept;
 
+    // `starts_of` the region `observe` mapped last, or nothing while it
+    // maps none.
+    [[nodiscard]] std::optional<std::uint32_t> starts() const noexcept;
+
     // How many times `observe` has mapped a region: a new value means a
     // new file, whose counts do not continue the old ones.
     [[nodiscard]] std::uint64_t mappings() const noexcept { return mappings_; }
@@ -193,6 +204,14 @@ private:
     std::optional<OpenedRegion> region_;
     std::uint64_t mappings_ = 0;
 };
+
+// The `starts` field of `region`, the mapped `proc` region of a process,
+// read after its state, or nothing if the region is too small to be one or
+// its state is not RUNNING: a RUNNING state seen with acquire implies the
+// count of that life (section 10.1). For diagnosis only. The value is input:
+// the owner writes it.
+[[nodiscard]] std::optional<std::uint32_t> starts_of(
+    std::span<std::byte> region) noexcept;
 
 // The late-heartbeat fields of `region`, the mapped `proc` region of a
 // process, or nothing if it is too small to be one. For diagnosis only

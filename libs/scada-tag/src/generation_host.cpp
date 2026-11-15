@@ -71,6 +71,10 @@ struct Peer {
     // it was seen in; nothing before the first sample of a mapping.
     std::optional<std::uint32_t> late_seen;
     std::uint64_t late_mapping = 0;
+    // The same for the count of lives (`starts`), sampled only while the
+    // process is up.
+    std::optional<std::uint32_t> starts_seen;
+    std::uint64_t starts_mapping = 0;
 };
 
 // Region file names of the generation, each with the user that writes it.
@@ -582,6 +586,13 @@ private:
     // baseline: reported only if it is not 0, and marked as such.
     void note_late_beats(Peer& peer, CheckReport& report) const;
 
+    // Adds to `report` the lives `peer` started since the previous sample
+    // (section 10.1), if it is up at this check. `came_up` says that this
+    // check found it up after it was down. The first sample of a mapping is
+    // a baseline and is not reported.
+    static void note_starts(Peer& peer, bool is_up, bool came_up,
+                            CheckReport& report);
+
     [[nodiscard]] std::uint32_t& down_flag(const Peer& peer) const noexcept {
         return shared_at<ProcessEntry>(open_.header.bytes(), peer.entry_offset)
             .down;
@@ -768,6 +779,9 @@ Status GenerationHost::Impl::attach_own_region(std::string& detail) {
     }
     proc_ = std::move(proc).value();
     proc_.count_late_after(own->heartbeat_timeout_ms);
+    // Counted like the lives of other processes (section 10.1), for the
+    // readers of `proc.tagd`; scada-tagd does not watch its own count.
+    proc_.count_start();
     proc_.set_state(ProcessState::RUNNING);
     proc_.first_heartbeat(monotonic_ns());
     return {};
@@ -836,10 +850,15 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
         const bool down = reason != DownReason::NONE;
         std::uint32_t& flag = down_flag(peer);
         // Relaxed load: this process is the only writer of the flag.
-        if ((load_shared(flag, std::memory_order_relaxed) != 0U) != down) {
+        const bool changed =
+            (load_shared(flag, std::memory_order_relaxed) != 0U) != down;
+        if (changed) {
             store_shared(flag, down ? 1U : 0U, std::memory_order_release);
             report.changes.push_back(
                 ProcessChange{peer.region.process, reason});
+        }
+        if (!peer.self) {
+            note_starts(peer, !down, changed && !down, report);
         }
         note_late_beats(peer, report);
     }
@@ -875,6 +894,41 @@ void GenerationHost::Impl::note_late_beats(Peer& peer,
         .longest_gap_ns = beats->longest_gap_ns,
         .last_late_mono_ns = beats->last_late_mono_ns,
         .baseline = baseline,
+    });
+}
+
+void GenerationHost::Impl::note_starts(Peer& peer, bool is_up, bool came_up,
+                                       CheckReport& report) {
+    if (!is_up) {
+        // Sampled only while up: a life counts itself just before RUNNING,
+        // so a sample while starting would be taken before the "up" it
+        // belongs to. The previous sample stays.
+        return;
+    }
+    const std::optional<std::uint32_t> starts = peer.probe.starts();
+    if (!starts.has_value()) {
+        // Not RUNNING any more since `observe`: sampled at the next check.
+        return;
+    }
+    const std::uint64_t mapping = peer.probe.mappings();
+    const bool baseline =
+        !peer.starts_seen.has_value() || peer.starts_mapping != mapping;
+    // Modulo 2^32: the count wraps.
+    const std::uint32_t added = baseline ? 0U : *starts - *peer.starts_seen;
+    peer.starts_seen = starts;
+    peer.starts_mapping = mapping;
+    if (added == 0) {
+        return;
+    }
+    // A process found up after it was down at a check: the latest of the
+    // lives is one scada-tagd saw as down and up; the others came and went
+    // between two checks.
+    const std::uint32_t unseen = came_up ? added - 1U : added;
+    report.restarts.push_back(Restarts{
+        .process = peer.region.process,
+        .added = added,
+        .unseen = unseen,
+        .total = *starts,
     });
 }
 

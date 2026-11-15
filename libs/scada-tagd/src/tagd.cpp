@@ -1,5 +1,8 @@
 #include "scada/tagd/tagd.h"
 
+#include "late_log.h"
+#include "report_log.h"
+
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/log.h"
@@ -7,7 +10,6 @@
 #include "scada/common/status.h"
 #include "scada/service/notify.h"
 #include "scada/tag/generation_host.h"
-#include "scada/tag/liveness.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/tag_set_json.h"
 
@@ -39,12 +41,7 @@ namespace {
 
 using scada::service::Notifier;
 using scada::service::NotifySettings;
-using scada::tag::CheckReport;
-using scada::tag::DownReason;
 using scada::tag::GenerationHost;
-using scada::tag::LateHeartbeats;
-using scada::tag::ProcessChange;
-using scada::tag::SweptEntry;
 using scada::tag::TagSet;
 
 constexpr std::string_view USAGE =
@@ -203,61 +200,6 @@ Wake wait_for_signal(const sigset_t& signals,
     return Wake::STOP;
 }
 
-// Writes what one liveness check changed to the log.
-void log_report(Logger& logger, const CheckReport& report) {
-    for (const ProcessChange& change : report.changes) {
-        if (change.reason == DownReason::NONE) {
-            logger.log(LogLevel::NOTICE, "process up",
-                       {{"PROCESS", change.process}});
-        } else {
-            logger.log(LogLevel::WARNING, "process down",
-                       {{"PROCESS", change.process},
-                        {"REASON", scada::tag::to_string(change.reason)}});
-        }
-    }
-    for (const LateHeartbeats& late : report.late) {
-        // A late heartbeat is a moment in which readers saw the process
-        // down (BAD with OWNER_DOWN, a gap on its rings), also when no
-        // check fell into it. WARNING also when a change of the same
-        // process was logged above: the gap length is only here. What the
-        // first look at a region finds is a baseline, logged at INFO.
-        // The texts live until the end of the iteration: a field borrows.
-        const std::string added = std::to_string(late.added);
-        const std::string total = std::to_string(late.total);
-        const std::string longest =
-            std::to_string(late.longest_gap_ns / NANOSECONDS_PER_MILLISECOND);
-        const std::string last = std::to_string(late.last_late_mono_ns);
-        const std::array<LogField, 5> fields{{
-            {"PROCESS", late.process},
-            {"LATE_BEATS", added},
-            {"LATE_BEATS_TOTAL", total},
-            {"LONGEST_GAP_MS", longest},
-            {"LAST_LATE_MONO_NS", last},
-        }};
-        if (late.baseline) {
-            // Counted before this scada-tagd looked; not new.
-            logger.log(LogLevel::INFO, "heartbeat late before this check",
-                       fields);
-        } else {
-            logger.log(LogLevel::WARNING, "heartbeat late", fields);
-        }
-    }
-    for (const SweptEntry& entry : report.swept) {
-        // The name is outside input; the sinks escape it and cut it.
-        if (entry.removed) {
-            logger.log(LogLevel::WARNING,
-                       "removed an entry that does not belong in the "
-                       "generation directory",
-                       {{"ENTRY", entry.name}});
-        } else {
-            logger.log(LogLevel::ERROR,
-                       "cannot remove an entry that does not belong in the "
-                       "generation directory",
-                       {{"ENTRY", entry.name}});
-        }
-    }
-}
-
 // The time between two watchdog messages, or nothing if no watchdog applies
 // to this process.
 std::optional<std::int64_t> feed_period_ns(
@@ -296,12 +238,13 @@ int serve(GenerationHost& host, Notifier& notifier,
     bool feeding = true;  // the last watchdog message was sent
     std::int64_t next_feed = monotonic_ns();
     std::int64_t next = monotonic_ns();
+    LateLog late_log;
     for (;;) {
         const std::int64_t now = monotonic_ns();
         // The heartbeat, the check and the watchdog share this loop, so
         // that a hung loop stops all three (contract, sections 3.4, 10.1).
         host.heartbeat(now);
-        log_report(logger, host.check(now));
+        log_report(logger, host.check(now), late_log, now);
         if (feed_period.has_value() && now >= next_feed) {
             const bool fed = notifier.watchdog().ok();
             if (!fed && feeding) {
@@ -323,6 +266,8 @@ int serve(GenerationHost& host, Notifier& notifier,
             case Wake::CHECK_DUE:
                 break;
             case Wake::STOP:
+                // Late heartbeats held back by the rate limit are not lost.
+                log_late(logger, late_log.drain());
                 host.stop();
                 // Best effort: the process exits either way, and the
                 // service manager sees the exit.

@@ -21,7 +21,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -497,6 +499,13 @@ TEST_F(LateHeartbeat, AFirstHeartbeatReplacesATimeAheadOfIt) {
 // Contract 13.2: scada_tag_heartbeat is safe from any thread. Before
 // D-36 a count could be lost and an older time could overwrite a newer one,
 // which shows a live process down to readers.
+//
+// This test needs at least two CPUs to fail with the old writer: on one
+// CPU the threads rarely interleave inside a heartbeat (issue #61, D-44).
+// That a time not newer is never published is tested on one thread by
+// ATimeThatIsNotNewerIsNeitherPublishedNorCounted, whatever the CPUs; that
+// no count is lost rests on the read-modify-write `fetch_add`, which only
+// this test exercises. The pipeline's runners have four CPUs.
 TEST_F(LateHeartbeat, HeartbeatsFromSeveralThreadsLoseNoCountAndNeverGoBack) {
     Result<OwnProcRegion> region = running();
     ASSERT_TRUE(region.ok());
@@ -520,6 +529,41 @@ TEST_F(LateHeartbeat, HeartbeatsFromSeveralThreadsLoseNoCountAndNeverGoBack) {
     EXPECT_EQ(proc.heartbeat, 1U + (std::uint64_t{THREADS} * BEATS));
     EXPECT_EQ(proc.heartbeat_mono_ns, clock.load());
     EXPECT_EQ(proc.late_beats, 0U);
+}
+
+// Issue #61 (D-44): `starts` counts the lives that reached RUNNING, is kept
+// on a reused region, and is read only while the state is RUNNING.
+TEST_F(LateHeartbeat, StartsCountsLivesAndIsReadOnlyWhileRunning) {
+    {
+        Result<OwnProcRegion> first = attach();
+        ASSERT_TRUE(first.ok());
+        const OpenedRegion region = open();
+        EXPECT_FALSE(starts_of(region.memory.bytes()).has_value());
+        first.value().count_start();
+        // Counted, but not RUNNING yet: a reader does not take it.
+        EXPECT_FALSE(starts_of(region.memory.bytes()).has_value());
+        first.value().set_state(ProcessState::RUNNING);
+        EXPECT_EQ(starts_of(region.memory.bytes()),
+                  std::optional<std::uint32_t>{1U});
+    }
+    Result<OwnProcRegion> second = attach();
+    ASSERT_TRUE(second.ok());
+    ASSERT_TRUE(second.value().reused());
+    second.value().count_start();
+    second.value().set_state(ProcessState::RUNNING);
+    EXPECT_EQ(copy().starts, 2U);
+
+    ProcProbe probe;
+    EXPECT_FALSE(probe.starts().has_value());
+    // Mapped by observe, whatever it finds of the heartbeat.
+    static_cast<void>(observe(probe, START_NS));
+    EXPECT_EQ(probe.starts(), std::optional<std::uint32_t>{2U});
+}
+
+TEST_F(LateHeartbeat, ARegionTooSmallHasNoStarts) {
+    // Only the region header, without the ProcHeader after it.
+    std::array<std::byte, sizeof(RegionHeader)> small{};
+    EXPECT_FALSE(starts_of(small).has_value());
 }
 
 }  // namespace

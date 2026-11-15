@@ -72,11 +72,29 @@ struct LateHeartbeats {
     bool baseline = false;
 };
 
+// Lives a process started in its region since the previous sample, from
+// the `starts` count of its `proc` region (section 10.1). A process that
+// restarts into its reused region between two checks is otherwise not seen
+// by them. For diagnosis only. The figures are input: the process writes
+// them, and a life of a library before contract 0.11 counts nothing, so
+// they are a lower bound.
+struct Restarts {
+    std::string process;
+    // Lives started since the previous sample, at least 1.
+    std::uint32_t added = 0;
+    // Of those, the lives no check saw as down and up again: `added` minus
+    // 1 if this check found the process up after it was down, else
+    // `added`.
+    std::uint32_t unseen = 0;
+    std::uint32_t total = 0;  // since the region was created; wraps
+};
+
 // What one liveness check changed.
 struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
     std::vector<LateHeartbeats> late;
+    std::vector<Restarts> restarts;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -144,7 +162,8 @@ public:
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
     // clears it for every process that is not, reads the late heartbeats
-    // every process recorded, then removes every entry of the generation
+    // every process recorded and the lives every other process started
+    // since the previous check, then removes every entry of the generation
     // directory that the header does not list or whose owner is wrong
     // (section 3.1). Returns what changed.
     //
