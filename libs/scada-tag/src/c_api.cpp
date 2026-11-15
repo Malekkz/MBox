@@ -349,6 +349,7 @@ int scada_tag_retain_status(scada_ctx* ctx, scada_retain_status_t* out) {
         out->values_restored = status.values_restored;
         out->files_rejected = status.files_rejected;
         out->final_waits_expired = status.final_waits_expired;
+        out->directory_unusable = status.directory_unusable;
         return SCADA_OK;
     });
 }

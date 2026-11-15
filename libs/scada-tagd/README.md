@@ -23,8 +23,13 @@ process. The executable in `services/scada-tagd` only calls it.
   the file `<owner>.bin` in the retain directory is written when a value
   changed, at most every `--retain-interval-ms`, at the next check for a
   `retain_now` tag. The files are written by a thread of their own, so that
-  a slow `fsync` does not hold up the heartbeat. A record that is BAD,
-  NOT_INIT or mid-write leaves the value on file.
+  a slow `fsync` does not hold up the heartbeat; the removal of old files
+  and its directory `fsync` run there too. A record read consistently that
+  is BAD or NOT_INIT removes the tag from the file; one that cannot be read
+  consistently (mid-write) leaves the value on file. No FINAL file is
+  written over newer values: not for an owner that has a ready `tags`
+  region in a newer generation, nor one whose file is already FINAL for a
+  newer generation.
 - Retired generations (contract, section 11.3): every generation in the base
   directory other than the current one is watched, also after a restart.
   Once the process of an owner has left one (its state is not RUNNING, or it
@@ -32,10 +37,13 @@ process. The executable in `services/scada-tagd` only calls it.
   are written to its file marked FINAL, which its attach to the new
   generation waits for. Once every owner is done and no `proc` region is
   locked, the generation is removed. After 30 s it is removed anyway; the
-  values of a process still attached are written, but not marked FINAL.
+  values of a process still attached are written, but not marked FINAL. A
+  generation that cannot be removed is tried for at most 60 s after it
+  retired, then logged as abandoned and left to the next boot.
 - Once no generation is retired and every owner has its file, files of
   owners the tag set no longer has are removed.
-- On `SIGTERM` or `SIGINT`: writes the retained values that changed, marks
+- On `SIGTERM` or `SIGINT`: writes the retained values that changed,
+  waiting for the writer at most 5 s (logged if values stay unsaved), marks
   itself as stopping and exits. The generation stays, so that the other
   services keep running.
 

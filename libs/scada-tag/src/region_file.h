@@ -116,6 +116,16 @@ struct RegionIdentity {
                                              std::uint32_t tagd_uid,
                                              std::string& detail);
 
+// Opens the retain directory `path` (contract, section 12) with the checks
+// of `open_base_directory`: a directory, not a symbolic link, owned by
+// `tagd_uid`, mode 2750; and the group of the base directory open as
+// `base_fd`, which is the group of the database. The codes of
+// `open_base_directory`; PERMISSION_DENIED for another group.
+[[nodiscard]] Result<Fd> open_retain_directory(const std::string& path,
+                                               std::uint32_t tagd_uid,
+                                               int base_fd,
+                                               std::string& detail);
+
 // The names in the directory open as `dir_fd`, without "." and "..", at
 // most MAX_DIRECTORY_ENTRIES of them, sorted by their bytes. The names are
 // outside input.
@@ -213,7 +223,9 @@ void remove_stale_temporaries(int dir_fd, std::string_view name,
 // `name` in the directory open as `dir_fd` for its whole life (section 10).
 // To find out, the lock is tried without waiting and, if it was free,
 // released at once; a process that attaches at that very moment fails with
-// "already attached" and may try again. False if there is no such file.
+// "already attached" and may try again. False only if there is no such
+// file or the lock could be taken: any other error counts as held, so that
+// a live process is never taken as gone (decision D-45).
 [[nodiscard]] bool proc_lock_held(int dir_fd, const std::string& name) noexcept;
 
 // True if a process holds the lock on any `proc` region in the generation

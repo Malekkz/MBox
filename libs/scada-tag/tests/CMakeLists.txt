@@ -19,6 +19,7 @@ scada_add_test(scada-tag-unit-test KIND unit
     retain_keeper_test.cpp
     retain_power_loss_test.cpp
     retain_restore_test.cpp
+    retain_writer_test.cpp
     sha256_test.cpp
     subscription_test.cpp
     tag_access_test.cpp

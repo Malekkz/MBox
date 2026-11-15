@@ -292,6 +292,11 @@ void log_retained(Logger& logger, const CheckReport& report) {
                              "with processes still attached"
                            : "retired generation removed",
                        {{"GENERATION", generation}});
+        } else if (retired.abandoned) {
+            logger.log(LogLevel::ERROR,
+                       "a retired generation cannot be removed; it stays "
+                       "until the next boot",
+                       {{"GENERATION", generation}});
         } else {
             logger.log(LogLevel::ERROR, "cannot remove a retired generation",
                        {{"GENERATION", generation}});

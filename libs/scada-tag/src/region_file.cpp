@@ -243,6 +243,33 @@ Result<Fd> open_base_directory(const std::string& path, std::uint32_t tagd_uid,
     return directory;
 }
 
+Result<Fd> open_retain_directory(const std::string& path,
+                                 std::uint32_t tagd_uid, int base_fd,
+                                 std::string& detail) {
+    Result<Fd> directory = open_base_directory(path, tagd_uid, detail);
+    if (!directory.ok()) {
+        detail = "retain directory: " + detail;
+        return directory;
+    }
+    struct stat retain {};
+    struct stat base {};
+    if (::fstat(directory.value().get(), &retain) != 0 ||
+        ::fstat(base_fd, &base) != 0) {
+        detail = describe("cannot examine the retain directory", path, errno);
+        return Status(StatusCode::IO_ERROR,
+                      "cannot examine the retain directory");
+    }
+    if (retain.st_gid != base.st_gid) {
+        detail = "the retain directory " + path + " has group " +
+                 std::to_string(retain.st_gid) +
+                 ", not the group of the base directory, " +
+                 std::to_string(base.st_gid);
+        return Status(StatusCode::PERMISSION_DENIED,
+                      "the retain directory has the wrong group");
+    }
+    return directory;
+}
+
 Result<std::vector<std::string>> list_directory(int dir_fd,
                                                 std::string& detail) {
     // A descriptor of its own: the stream takes it over, moves its position
@@ -513,9 +540,15 @@ void remove_stale_temporaries(int dir_fd, std::string_view name,
 bool proc_lock_held(int dir_fd, const std::string& name) noexcept {
     const Fd file =
         open_at(dir_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-    // The lock taken here, if any, ends when `file` is closed.
-    return file.valid() && ::flock(file.get(), LOCK_EX | LOCK_NB) != 0 &&
-           errno == EWOULDBLOCK;
+    if (!file.valid()) {
+        // Only a region that is not there is known to have no process.
+        // Any other error (EMFILE, EACCES, ...) leaves it unknown, which
+        // counts as held: a live process must never be taken as gone.
+        return errno != ENOENT;
+    }
+    // The lock taken here, if any, ends when `file` is closed. EWOULDBLOCK
+    // means held; any other failure is unknown, and counts as held too.
+    return ::flock(file.get(), LOCK_EX | LOCK_NB) != 0;
 }
 
 bool has_live_process(int base_fd, const std::string& name) {

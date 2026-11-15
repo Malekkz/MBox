@@ -572,18 +572,26 @@ void Attachment::restore_retained(std::span<std::byte> tags,
     if (wanted.empty()) {
         return;
     }
-    const Fd directory =
-        open_at(AT_FDCWD, retain_dir_, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (!directory.valid()) {
+    std::string why_unusable;
+    const Result<Fd> opened = open_retain_directory(retain_dir_, tagd_uid_,
+                                                    base_.get(), why_unusable);
+    if (!opened.ok()) {
+        // Nothing restored, and counted (scada_tag_retain_status).
+        ++directory_unusable_;
         return;
     }
+    const Fd& directory = opened.value();
 
     // Decision D-45: values written in a RETIRING generation after the last
     // periodic write reach the files only once scada-tagd has seen their
     // owners leave it. The wait is bounded; without scada-tagd it runs out
     // and the files are taken as they are.
     std::vector<FinalWanted> waiting = finals_wanted(wanted);
-    const std::int64_t deadline = monotonic_ns() + RETAIN_FINAL_WAIT_NS;
+    // One deadline for the whole attach, not one per owner.
+    if (!final_deadline_.has_value()) {
+        final_deadline_ = monotonic_ns() + RETAIN_FINAL_WAIT_NS;
+    }
+    const std::int64_t deadline = *final_deadline_;
     while (!waiting.empty()) {
         std::erase_if(waiting, [&](const FinalWanted& final) {
             struct stat info {};
@@ -964,6 +972,7 @@ AttachmentStatus Attachment::status() {
     status.values_restored = values_restored_;
     status.final_waits_expired = final_waits_expired_;
     status.files_rejected = files_rejected_;
+    status.directory_unusable = directory_unusable_;
     status.clock_syscall = clock_syscall_.load(std::memory_order_relaxed);
     if (tagd_index_.has_value()) {
         status.tagd =

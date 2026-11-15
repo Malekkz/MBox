@@ -97,6 +97,10 @@ struct AttachmentStatus {
     std::uint32_t final_waits_expired = 0;
     // Retain files that failed their checks and were ignored.
     std::uint32_t files_rejected = 0;
+    // Owners whose retained values were not restored because the retain
+    // directory could not be used (missing, or another owner, mode or
+    // group).
+    std::uint32_t directory_unusable = 0;
     // True if reading the clocks was found to be a system call on this
     // machine (section 13.1).
     bool clock_syscall = false;
@@ -680,6 +684,10 @@ private:
     std::uint32_t values_restored_ = 0;
     std::uint32_t final_waits_expired_ = 0;
     std::uint32_t files_rejected_ = 0;
+    std::uint32_t directory_unusable_ = 0;
+    // When the waits for FINAL files of this attach end (one deadline for
+    // all owners); set by the first wait.
+    std::optional<std::int64_t> final_deadline_;
 
     // One entry for every owner of the generation, the type of every slot
     // of every owner, and the STRING slots of every owner in ascending

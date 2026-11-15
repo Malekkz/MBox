@@ -47,6 +47,7 @@ using Attached = std::unique_ptr<Attachment>;
 constexpr std::uint64_t LEVEL_BITS = 0x4045'0000'0000'0000ULL;  // 42.0
 constexpr std::int64_t SOURCE_TIME = 1'700'000'000'000'000'000;
 constexpr mode_t RETAIN_DIR_MODE = 02750;
+constexpr mode_t WRITABLE_BY_OTHERS_MODE = 02752;
 constexpr std::uint64_t COUNT_ON_FILE = 9;
 // A value no field of a status holds, to see that the call clears it.
 constexpr std::uint32_t NOT_CLEARED = 7;
@@ -325,6 +326,61 @@ TEST_F(RestoreAfterChange, TheWaitIsBoundedAndTakesTheFileAsItIs) {
     EXPECT_EQ(read(*feeder, "plant.mode").value, 1U);
 }
 
+// Review of PR #69, point 8: one deadline for the whole attach, however
+// many former owners it waits for.
+TEST_F(Restore, TheFinalWaitForTwoFormerOwnersEndsAtOneDeadline) {
+    TagSet split = retained_set();
+    // plant.mode moves from the owner `web` to `io`.
+    split.owners.push_back({.name = "web",
+                            .process = "web",
+                            .change_ring_capacity = MIN_CHANGE_RING_CAPACITY});
+    split.tags.at(1).owner = "web";
+    start_host(split);
+    drop_host();
+    start_host(retained_set());
+    ASSERT_EQ(host().generation(), 2U);
+    RetainFile stale = values_file();
+    stale.final = true;
+    stale.source = {1, 1};  // FINAL of another generation 1: never the one
+    write_file("io", stale);
+    write_file("web", stale);
+    const std::int64_t start = scada::monotonic_ns();
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t waited = scada::monotonic_ns() - start;
+    EXPECT_GE(waited, RETAIN_FINAL_WAIT_NS);
+    EXPECT_LT(waited, RETAIN_FINAL_WAIT_NS + (RETAIN_FINAL_WAIT_NS / 2));
+    EXPECT_EQ(feeder->status().final_waits_expired, 1U);
+}
+
+// Review of PR #69, point 7: a retain directory that cannot be used is
+// counted, and attach still succeeds, without retained values.
+TEST_F(Restore, ARetainDirectoryWithTheWrongModeIsCountedAndAttachSucceeds) {
+    write_file("io", values_file());
+    ASSERT_EQ(::chmod(retain().c_str(), WRITABLE_BY_OTHERS_MODE), 0);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().directory_unusable, 1U);
+    EXPECT_EQ(feeder->status().values_restored, 0U);
+}
+
+TEST_F(Restore, ARetainDirectoryThatIsASymbolicLinkIsCounted) {
+    write_file("io", values_file());
+    const std::filesystem::path link = root() / "retain-link";
+    std::filesystem::create_directory_symlink(retain(), link);
+    start_host(retained_set());
+    std::string detail;
+    Result<Attached> result = Attachment::attach("io",
+                                                 {.base_dir = base().string(),
+                                                  .retain_dir = link.string(),
+                                                  .tagd_uid = uid()},
+                                                 detail);
+    ASSERT_TRUE(result.ok()) << detail;
+    EXPECT_EQ(result.value()->status().directory_unusable, 1U);
+    EXPECT_EQ(result.value()->status().values_restored, 0U);
+}
+
 TEST_F(RestoreAfterChange, AnOwnerTheRetiringGenerationDoesNotListDoesNotWait) {
     std::filesystem::remove_all(generation_dir(1));
     write_file("io", values_file());
@@ -351,13 +407,13 @@ TEST_F(Restore, TheCInterfaceReportsWhatAttachDidWithRetainedValues) {
     scada_ctx* ctx = nullptr;
     ASSERT_EQ(scada_tag_attach_opts("io", &opts, &ctx), SCADA_OK);
     scada_retain_status_t status{};
-    status.reserved = NOT_CLEARED;
+    status.directory_unusable = NOT_CLEARED;
     ASSERT_EQ(scada_tag_retain_status(ctx, &status), SCADA_OK);
     EXPECT_EQ(status.values_restored, 2U);
     // The own file serves both tags: the broken one is not looked at.
     EXPECT_EQ(status.files_rejected, 0U);
     EXPECT_EQ(status.final_waits_expired, 0U);
-    EXPECT_EQ(status.reserved, 0U);
+    EXPECT_EQ(status.directory_unusable, 0U);
     EXPECT_EQ(scada_tag_retain_status(ctx, nullptr), SCADA_E_INVALID);
     EXPECT_EQ(scada_tag_retain_status(nullptr, &status), SCADA_E_INVALID);
     scada_tag_detach(ctx);

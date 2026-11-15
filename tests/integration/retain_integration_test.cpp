@@ -41,6 +41,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -58,6 +59,7 @@ constexpr std::chrono::milliseconds RETAIN_NOW_LIMIT{1000};
 constexpr int KILL_ROUNDS = 30;
 constexpr std::uint32_t KILL_SEED = 17;
 constexpr double TAGD_FIRST_ODDS = 0.5;
+constexpr double FEEDER_SURVIVES_ODDS = 0.5;
 // Write periods of the retainer, in ms.
 constexpr int FAST_PERIOD_MS = 10;
 constexpr int SLOW_PERIOD_MS = 100;
@@ -178,7 +180,8 @@ protected:
         ChildProcess& feeder, RunningTagd& second) const;
 
     [[nodiscard]] std::optional<std::int64_t> kill_round(
-        std::chrono::milliseconds after, bool tagd_first);
+        std::chrono::milliseconds after, bool tagd_first, bool feeder_survives,
+        std::optional<ChildProcess>& feeder);
 
 private:
     std::filesystem::path root_;
@@ -311,11 +314,16 @@ std::vector<std::string> temporaries_in(const std::string& retain) {
     return names;
 }
 
-// One round of the kill test: scada-tagd and the retainer, both killed
-// after `after` ms, in the order `tagd_first` says. The value on file
-// after it, or nothing if there is no valid one.
+// One round of the kill test: scada-tagd, and the retainer `feeder` (one
+// is started if there is none), killed after `after` ms in the order
+// `tagd_first` says. With `feeder_survives` the retainer is left running
+// into the next round, whose scada-tagd has the other tag set: that one
+// builds a new generation while the retainer is attached to the old one,
+// so the next kill can come during the FINAL handshake. The value on file
+// after the round, or nothing if there is no valid one.
 std::optional<std::int64_t> Retained::kill_round(
-    std::chrono::milliseconds after, bool tagd_first) {
+    std::chrono::milliseconds after, bool tagd_first, bool feeder_survives,
+    std::optional<ChildProcess>& feeder) {
     // Temporary files a killed scada-tagd left are gone once the next one
     // is ready. Only those: the new one may be writing a file of its own
     // at that moment.
@@ -329,25 +337,41 @@ std::optional<std::int64_t> Retained::kill_round(
             std::filesystem::exists(std::filesystem::path(retain()) / name))
             << name;
     }
-    std::optional<ChildProcess> feeder = retainer(1);
-    if (!feeder.has_value() ||
-        !feeder->wait_for_output(
-            [](std::string_view out) { return has(out, "attached"); },
-            WAIT_LIMIT)) {
-        return std::nullopt;
+    // A retainer left from the round before may have ended by itself: its
+    // attach fails while no scada-tagd runs.
+    if (feeder.has_value() && !feeder->send_signal(0)) {
+        feeder.reset();
+    }
+    if (!feeder.has_value()) {
+        std::optional<ChildProcess> started = retainer(1);
+        if (!started.has_value()) {
+            return std::nullopt;
+        }
+        feeder.emplace(std::move(*started));
+        if (!feeder->wait_for_output(
+                [](std::string_view out) { return has(out, "attached"); },
+                WAIT_LIMIT)) {
+            return std::nullopt;
+        }
     }
     // A random point to kill at, not a wait for a condition.
     std::this_thread::sleep_for(after);
-    ChildProcess& one = tagd_first ? service->child : *feeder;
-    ChildProcess& other = tagd_first ? *feeder : service->child;
-    kill(one);
-    kill(other);
+    if (feeder_survives) {
+        kill(service->child);
+    } else if (tagd_first) {
+        kill(service->child);
+        kill(*feeder);
+        feeder.reset();
+    } else {
+        kill(*feeder);
+        feeder.reset();
+        kill(service->child);
+    }
     return on_file();
 }
 
 TEST_F(Retained,
        SigkillOfEveryProcessAtRandomPointsNeverLeavesAnUnreadableFile) {
-    write_tag_set(true, false);
     // A fixed seed: the same kill points at every run, so that a failure
     // can be repeated.
     // NOLINTNEXTLINE(cert-msc32-c,cert-msc51-cpp): a fixed seed keeps the test repeatable
@@ -355,11 +379,16 @@ TEST_F(Retained,
     std::uniform_int_distribution<int> after(KILL_AFTER_MIN_MS,
                                              KILL_AFTER_MAX_MS);
     std::bernoulli_distribution tagd_first(TAGD_FIRST_ODDS);
+    std::bernoulli_distribution feeder_survives(FEEDER_SURVIVES_ODDS);
+    std::optional<ChildProcess> feeder;
     std::int64_t previous = -1;
     for (int round = 0; round < KILL_ROUNDS; ++round) {
+        // Another tag set at every round: each scada-tagd builds a new
+        // generation, and the one before retires.
+        write_tag_set(true, round % 2 == 1);
         const std::int64_t value =
             kill_round(std::chrono::milliseconds(after(random)),
-                       tagd_first(random))
+                       tagd_first(random), feeder_survives(random), feeder)
                 .value_or(-1);
         // Every value comes back, and the counter never goes back.
         ASSERT_GE(value, 0) << "no valid retain file, round " << round;

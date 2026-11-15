@@ -241,7 +241,9 @@ typedef struct {
     uint32_t final_waits_expired; /* waits for the FINAL retain files of a
                                      retiring generation that ran out; the
                                      files were then taken as they were */
-    uint32_t reserved;            /* 0 */
+    uint32_t directory_unusable;  /* owners not restored because the retain
+                                     directory was missing or had another
+                                     owner, mode or group */
 } scada_retain_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*

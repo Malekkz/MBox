@@ -7,6 +7,7 @@
 #include "attach_fixture.h"
 #include "attachment.h"
 #include "layout.h"
+#include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
 #include "temp_database.h"
@@ -23,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -182,6 +184,9 @@ protected:
         report.retain_problems.insert(report.retain_problems.end(),
                                       written.retain_problems.begin(),
                                       written.retain_problems.end());
+        report.retain_files_removed.insert(report.retain_files_removed.end(),
+                                           written.retain_files_removed.begin(),
+                                           written.retain_files_removed.end());
         return report;
     }
 
@@ -241,16 +246,42 @@ TEST_F(Keeper, AnOtherChangeWaitsForTheRetainInterval) {
     EXPECT_EQ(value_in(file_of("io"), "plant.level"), VALUE_6);
 }
 
-TEST_F(Keeper, ARecordWithoutAValueLeavesTheValueOnFile) {
+// Decision D-45: a value the owner stored BAD is disowned; it leaves the
+// file, and the tag starts again BAD with NOT_INIT.
+TEST_F(Keeper, AValueTheOwnerMarkedBadIsRemovedFromTheFile) {
     start_host(retained_set());
     const Attached feeder = attached("io");
     ASSERT_NE(feeder, nullptr);
     const std::int64_t now = scada::monotonic_ns();
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
     ASSERT_EQ(round(now).retain_written.size(), 1U);
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_9, SCADA_QUALITY_BAD);
-    EXPECT_TRUE(round(now + INTERVAL_NS).retain_written.empty());
-    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), 2U);
+    // plant.mode is RETAIN_NOW: written at the next check.
+    EXPECT_EQ(round(now + 1).retain_written.size(), 1U);
+    const RetainFile file = file_of("io");
+    EXPECT_FALSE(value_in(file, "plant.mode").has_value());
+    EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
+}
+
+TEST_F(Keeper, AfterGoodThenBadTheTagStartsAgainBadAndNotInit) {
+    start_host(retained_set());
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2, SCADA_QUALITY_BAD);
+    drop_host();
+    start_host(changed_set());
+    feeder.reset();
+    ASSERT_EQ(two_rounds(scada::monotonic_ns()).retired.size(), 1U);
+    const Attached again = attached("io");
+    ASSERT_NE(again, nullptr);
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(again->resolve("plant.mode", handle), SCADA_OK);
+    scada_value value{};
+    ASSERT_EQ(again->read(handle, value), SCADA_OK);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_NOT_INIT);
 }
 
 TEST_F(Keeper, FlushWritesWhatChangedSinceTheLastWrite) {
@@ -485,6 +516,49 @@ TEST_F(Keeper, AnObserverInARemovedGenerationIsToldAndObservesAgain) {
     const Attached again = observer();
     ASSERT_NE(again, nullptr);
     EXPECT_EQ(again->status().generation, 2U);
+}
+
+// Review of PR #69, blocking 1: a generation finished at start must not
+// write its FINAL file over newer values of a later generation that is
+// still there.
+TEST_F(Keeper, AFinalFileOfAnOlderGenerationNeverReplacesNewerValues) {
+    start_host(retained_set());
+    Attached first = attached("io");  // generation 1
+    ASSERT_NE(first, nullptr);
+    write(*first, "plant.mode", SCADA_TYPE_INT64, VALUE_6);
+    drop_host();
+    start_host(changed_set());  // generation 2; io is still in 1
+    // A second io in generation 2; its wait for generation 1 runs out.
+    const Attached second = attached("io");
+    ASSERT_NE(second, nullptr);
+    write(*second, "plant.mode", SCADA_TYPE_INT64, VALUE_9);
+    static_cast<void>(round(scada::monotonic_ns()));
+    ASSERT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_9);
+    // scada-tagd stops, the process of generation 1 ends, and scada-tagd
+    // starts with a third tag set while the one of generation 2 runs.
+    drop_host();
+    first.reset();
+    TagSet third = changed_set();
+    third.tags.push_back(
+        {.name = "plant.third", .owner = "io", .type = TagType::BOOL});
+    start_host(third);
+    EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_9);
+}
+
+class ProcLock : public scada::tag::testing::TempDatabase {};
+
+TEST_F(ProcLock, OnlyAMissingRegionOrAFreeLockReadsAsNotHeld) {
+    const Fd directory = scada::tag::testing::open_directory(base());
+    EXPECT_FALSE(proc_lock_held(directory.get(), "proc.none"));
+    scada::tag::testing::touch(base() / "proc.free");
+    EXPECT_FALSE(proc_lock_held(directory.get(), "proc.free"));
+    const Fd held = scada::tag::testing::open_file(base() / "proc.free");
+    ASSERT_EQ(::flock(held.get(), LOCK_EX | LOCK_NB), 0);
+    EXPECT_TRUE(proc_lock_held(directory.get(), "proc.free"));
+    // An error that is not "no such file" leaves it unknown: held.
+    scada::tag::testing::touch(base() / "file");
+    EXPECT_TRUE(proc_lock_held(directory.get(), "file/proc.x"));
 }
 
 }  // namespace

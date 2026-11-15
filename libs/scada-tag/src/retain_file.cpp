@@ -247,8 +247,10 @@ Status decode_header(Reader& input, RetainFile& file, std::uint32_t& count,
                                    " is not known");
     }
     if (!input.get(count) || !input.get(file.source.generation) ||
-        !input.get(created) || !input.get(written) || !input.get(flags) ||
-        !input.skip_zeros(sizeof(std::uint32_t))) {
+        !input.get(created) || !input.get(written) || !input.get(flags)) {
+        return corrupt(detail, "the header is cut off");
+    }
+    if (!input.skip_zeros(sizeof(std::uint32_t))) {
         return corrupt(detail, "a reserved field is not 0");
     }
     if ((flags & ~RETAIN_FLAG_FINAL) != 0) {

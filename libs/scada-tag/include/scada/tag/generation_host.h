@@ -120,6 +120,9 @@ struct RetiredGeneration {
     // region, as "<process> (pid <pid>)". Their values were written, but
     // not marked FINAL.
     std::vector<std::string> still_attached;
+    // True if it could not be removed by twice the timeout: it is no
+    // longer tried and stays until the next boot (section 3.3).
+    bool abandoned = false;
 };
 
 // What one liveness check changed.

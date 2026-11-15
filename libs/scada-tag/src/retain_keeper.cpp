@@ -19,10 +19,10 @@
 #include "scada/tag/types.h"
 
 #include <fcntl.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -52,7 +52,7 @@ constexpr std::int64_t RETIRED_TIMEOUT_NS =
 bool holds_value(const RecordCopy& copy, TagType type) noexcept {
     const bool quality = copy.quality == to_raw(Quality::GOOD) ||
                          copy.quality == to_raw(Quality::UNCERTAIN);
-    return copy.type == to_raw(type) && quality &&
+    return quality &&
            (copy.quality_flags & to_raw(QualityFlag::NOT_INIT)) == 0 &&
            (type != TagType::BOOL || copy.value <= 1);
 }
@@ -80,9 +80,9 @@ RetainWriter::RetainWriter(int dir_fd, RetainFileOps& ops)
       thread_([this](const std::stop_token& stop) { run(stop); }) {}
 
 RetainWriter::~RetainWriter() {
+    // The thread ends after the file it is writing, if any; files still
+    // waiting are not written (`flush` is what writes them at a stop).
     thread_.request_stop();
-    // The thread waits on `changed_` with its stop token, which the request
-    // wakes; jthread joins.
 }
 
 void RetainWriter::submit(const std::string& owner, RetainFile file,
@@ -94,6 +94,14 @@ void RetainWriter::submit(const std::string& owner, RetainFile file,
     changed_.notify_all();
 }
 
+void RetainWriter::submit_removal(std::vector<std::string> names) {
+    {
+        const std::scoped_lock lock(mutex_);
+        removals_.insert(removals_.end(), names.begin(), names.end());
+    }
+    changed_.notify_all();
+}
+
 std::vector<RetainWriter::Done> RetainWriter::take_done() {
     const std::scoped_lock lock(mutex_);
     std::vector<Done> done = std::move(done_);
@@ -101,32 +109,68 @@ std::vector<RetainWriter::Done> RetainWriter::take_done() {
     return done;
 }
 
-void RetainWriter::wait_idle() {
+std::uint64_t RetainWriter::lost() const {
+    const std::scoped_lock lock(mutex_);
+    return lost_;
+}
+
+bool RetainWriter::wait_idle(std::chrono::milliseconds limit) {
     std::unique_lock lock(mutex_);
-    changed_.wait(lock, [this] { return waiting_.empty() && !busy_; });
+    return changed_.wait_for(lock, limit, [this] {
+        return waiting_.empty() && removals_.empty() && !busy_;
+    });
+}
+
+RetainWriter::Done RetainWriter::remove_files(
+    const std::vector<std::string>& names) {
+    Done done;
+    done.removal = true;
+    for (const std::string& name : names) {
+        if (ops_.unlink(dir_fd_, name) == 0) {
+            done.removed.push_back(name);
+        }
+    }
+    // The removals are on disk only once the directory is.
+    done.written = done.removed.empty() || ops_.sync_directory(dir_fd_) == 0;
+    if (!done.written) {
+        done.detail = "cannot flush the retain directory";
+    }
+    return done;
 }
 
 void RetainWriter::run(const std::stop_token& stop) {
     std::unique_lock lock(mutex_);
     for (;;) {
-        if (!changed_.wait(lock, stop, [this] { return !waiting_.empty(); })) {
-            return;  // stop requested
+        const bool ready = changed_.wait(lock, stop, [this] {
+            return !waiting_.empty() || !removals_.empty();
+        });
+        if (!ready || stop.stop_requested()) {
+            return;
         }
-        auto job = waiting_.extract(waiting_.begin());
+        const std::vector<std::string> removals = std::move(removals_);
+        removals_.clear();
+        std::optional<decltype(waiting_)::node_type> job;
+        if (removals.empty()) {
+            job = waiting_.extract(waiting_.begin());
+        }
         busy_ = true;
         lock.unlock();
 
         Done done;
-        done.owner = std::move(job.key());
-        done.token = job.mapped().token;
-        done.values = job.mapped().file.values.size();
-        done.final = job.mapped().file.final;
-        done.source = job.mapped().file.source;
         try {
-            done.written =
-                write_retain_file(dir_fd_, done.owner, job.mapped().file,
-                                  done.detail, ops_)
-                    .ok();
+            if (job.has_value()) {
+                done.owner = std::move(job->key());
+                done.token = job->mapped().token;
+                done.values = job->mapped().file.values.size();
+                done.final = job->mapped().file.final;
+                done.source = job->mapped().file.source;
+                done.written =
+                    write_retain_file(dir_fd_, done.owner, job->mapped().file,
+                                      done.detail, ops_)
+                        .ok();
+            } else {
+                done = remove_files(removals);
+            }
         } catch (const std::exception& error) {
             // Nothing may leave the thread; a failed allocation is a failed
             // write, tried again later.
@@ -135,8 +179,14 @@ void RetainWriter::run(const std::stop_token& stop) {
         }
 
         lock.lock();
-        done_.push_back(std::move(done));
         busy_ = false;
+        try {
+            done_.push_back(std::move(done));
+        } catch (const std::exception&) {
+            // The result is lost; the keeper treats every file it waits
+            // for as failed and writes it again.
+            ++lost_;
+        }
         changed_.notify_all();
     }
 }
@@ -156,14 +206,14 @@ RetainKeeper::RetainKeeper(Key /*key*/, Fd directory, std::uint32_t tagd_uid,
 RetainKeeper::~RetainKeeper() = default;
 
 Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
-    const std::string& retain_dir, std::uint32_t tagd_uid,
+    const std::string& retain_dir, std::uint32_t tagd_uid, int base_fd,
     std::uint32_t interval_ms, const ConfigHash& config_hash,
     std::string& detail) {
     Fd directory;
     if (!retain_dir.empty()) {
-        Result<Fd> opened = open_base_directory(retain_dir, tagd_uid, detail);
+        Result<Fd> opened =
+            open_retain_directory(retain_dir, tagd_uid, base_fd, detail);
         if (!opened.ok()) {
-            detail = "retain directory: " + detail;
             return opened.status();
         }
         directory = std::move(opened).value();
@@ -369,8 +419,18 @@ bool RetainKeeper::read_owner(const Watched& watched,
         // owner that has left wrote last is what is kept.
         RecordCopy copy;
         if (!read_record(shared_at<TagRecord>(tags, offset), copy) ||
-            !holds_value(copy, tag.type)) {
-            continue;  // mid-write, BAD or NOT_INIT: the value on file stays
+            copy.type != to_raw(tag.type)) {
+            continue;  // nothing learned: the record on file stays
+        }
+        if (!holds_value(copy, tag.type)) {
+            // BAD or NOT_INIT, read consistently: the owner disowned the
+            // value, and the tag starts again BAD with NOT_INIT (decision
+            // D-45, reference 14.4).
+            if (state.values.erase(tag.name) != 0) {
+                state.dirty = true;
+                state.urgent = state.urgent || tag.now;
+            }
+            continue;
         }
         const auto known = state.values.find(tag.name);
         if (known != state.values.end() && known->second.type == tag.type &&
@@ -440,7 +500,28 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
     if (!persists()) {
         return;
     }
+    if (const std::uint64_t lost = writer_->lost(); lost != writer_lost_) {
+        // A result the writer could not record: every file waited for is
+        // taken as failed and written again.
+        writer_lost_ = lost;
+        for (auto& [name, state] : states_) {
+            if (state.done_token != state.token) {
+                state.done_token = state.token;
+                state.dirty = true;
+            }
+        }
+    }
     for (const RetainWriter::Done& done : writer_->take_done()) {
+        if (done.removal) {
+            report.retain_files_removed.insert(
+                report.retain_files_removed.end(), done.removed.begin(),
+                done.removed.end());
+            if (!done.written) {
+                report.retain_problems.push_back(
+                    {"retain directory", done.detail});
+            }
+            continue;
+        }
         OwnerState& state = states_[done.owner];
         state.done_token = std::max(state.done_token, done.token);
         if (done.written) {
@@ -466,7 +547,72 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
     }
 }
 
-void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
+bool RetainKeeper::newer_region_exists(int base_fd, std::uint64_t generation,
+                                       const std::string& owner,
+                                       std::int64_t now_mono_ns) const {
+    // The file already marks a newer generation as left.
+    if (const auto state = states_.find(owner); state != states_.end()) {
+        const std::optional<GenerationIdentity>& mark =
+            state->second.final_on_disk;
+        if (mark.has_value() && mark->generation > generation) {
+            return true;
+        }
+    }
+    std::string ignored;
+    const Result<std::vector<std::string>> entries =
+        list_directory(base_fd, ignored);
+    if (!entries.ok()) {
+        return false;
+    }
+    for (const std::string& entry : entries.value()) {
+        const std::uint64_t newer =
+            parse_generation_dir_name(entry).value_or(0);
+        if (newer <= generation) {
+            continue;
+        }
+        const Fd directory = open_at(
+            base_fd, entry, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        Result<HeaderView> header =
+            directory.valid()
+                ? HeaderView::open(directory.get(), newer, tagd_uid_, ignored)
+                : Result<HeaderView>(Status(StatusCode::NOT_FOUND, "gone"));
+        if (!header.ok()) {
+            continue;
+        }
+        const auto& owners = header.value().contents().owners;
+        const auto found = std::ranges::find(owners, owner, &OwnerInfo::name);
+        if (found == owners.end()) {
+            continue;
+        }
+        PeerRegions peers(header.value().contents());
+        const std::size_t slot =
+            peers.tags_slot(static_cast<std::size_t>(found - owners.begin()));
+        peers.want(directory.get(), slot, now_mono_ns);
+        if (!peers.bytes(slot).empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RetainKeeper::has_left(Watched& watched, const WatchedOwner& owner,
+                            std::int64_t now_mono_ns) {
+    // Left: the owner stored a state other than RUNNING after its last
+    // write, or holds its lock no more. A stale heartbeat alone is not
+    // enough: a hung owner can go on writing (decision D-45).
+    if (owner.process_index >= watched.processes.size()) {
+        return true;
+    }
+    WatchedProcess& process = watched.processes[owner.process_index];
+    return !proc_lock_held(watched.dir_fd,
+                           proc_region_name(process.region.process)) ||
+           process.probe.observe(watched.dir_fd, process.region,
+                                 process.heartbeat_timeout_ms,
+                                 now_mono_ns) == DownReason::NOT_RUNNING;
+}
+
+void RetainKeeper::finish(int base_fd, Watched& watched,
+                          std::int64_t now_mono_ns) {
     const bool timed_out =
         now_mono_ns - watched.retired_mono_ns >= RETIRED_TIMEOUT_NS;
     if (watched.peers != nullptr) {
@@ -493,20 +639,12 @@ void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
             }
             continue;
         }
-        // Left: the owner stored a state other than RUNNING after its last
-        // write, or holds its lock no more. A stale heartbeat alone is not
-        // enough: a hung owner can go on writing (decision D-45).
-        bool left = true;
-        if (owner.process_index < watched.processes.size()) {
-            WatchedProcess& process = watched.processes[owner.process_index];
-            left =
-                !proc_lock_held(watched.dir_fd,
-                                proc_region_name(process.region.process)) ||
-                process.probe.observe(watched.dir_fd, process.region,
-                                      process.heartbeat_timeout_ms,
-                                      now_mono_ns) == DownReason::NOT_RUNNING;
-        }
-        if (left) {
+        const bool left = has_left(watched, owner, now_mono_ns);
+        if (left && newer_region_exists(base_fd, watched.generation, owner.name,
+                                        now_mono_ns)) {
+            // A newer generation holds newer values: nothing from this one.
+            owner.done = true;
+        } else if (left) {
             static_cast<void>(read_owner(watched, owner));
             state.final_source = newer(state.final_source, watched.identity);
             submit(owner.name, now_mono_ns);
@@ -534,7 +672,12 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
         if (!owners_done || (!timed_out && has_live_process(base_fd, name))) {
             return false;
         }
-        RetiredGeneration retired{watched->generation, false, timed_out, {}};
+        // Something in it cannot be removed (section 3.3, for example a
+        // directory another user filled): it stays until the next boot.
+        const bool give_up =
+            now_mono_ns - watched->retired_mono_ns >= 2 * RETIRED_TIMEOUT_NS;
+        RetiredGeneration retired{
+            watched->generation, false, timed_out, {}, false};
         if (timed_out) {
             for (WatchedProcess& process : watched->processes) {
                 if (!proc_lock_held(watched->dir_fd,
@@ -555,15 +698,16 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
         // still hold stay valid, and go with them.
         retired.removed = remove_generation(base_fd, name);
         const bool removed = retired.removed;
-        if (removed || !watched->removal_reported) {
+        retired.abandoned = !removed && give_up;
+        if (removed || retired.abandoned || !watched->removal_reported) {
             watched->removal_reported = true;
             report.retired.push_back(std::move(retired));
         }
-        return removed;
+        return removed || give_up;
     });
 }
 
-void RetainKeeper::remove_files_of_gone_owners(CheckReport& report) {
+void RetainKeeper::remove_files_of_gone_owners() {
     if (gone_owners_removed_ || !persists() || !retired_.empty() ||
         current_ == nullptr) {
         return;
@@ -584,22 +728,19 @@ void RetainKeeper::remove_files_of_gone_owners(CheckReport& report) {
     if (!entries.ok()) {
         return;
     }
+    std::vector<std::string> gone;
     for (const std::string& entry : entries.value()) {
         const std::optional<std::string_view> owner =
             owner_of_retain_file(entry);
-        if (!owner.has_value() ||
-            std::ranges::find(current_->owners, *owner, &WatchedOwner::name) !=
+        if (owner.has_value() &&
+            std::ranges::find(current_->owners, *owner, &WatchedOwner::name) ==
                 current_->owners.end()) {
-            continue;
-        }
-        if (::unlinkat(directory_.get(), entry.c_str(), 0) == 0) {
-            report.retain_files_removed.push_back(entry);
+            gone.push_back(entry);
         }
     }
-    if (!report.retain_files_removed.empty() &&
-        ::fsync(directory_.get()) != 0) {
-        report.retain_problems.push_back(
-            {"retain directory", "cannot flush: " + errno_text(errno)});
+    // Unlinked and the directory synced by the writer thread, not here.
+    if (!gone.empty()) {
+        writer_->submit_removal(std::move(gone));
     }
 }
 
@@ -614,13 +755,18 @@ void RetainKeeper::finish_now(int base_fd, std::uint64_t generation,
     std::map<std::string, std::vector<std::string>, std::less<>> ignored;
     load_watched(*watched, ignored);
     for (const WatchedOwner& owner : watched->owners) {
+        // Decision D-45: a newer generation that holds a region of the
+        // owner holds newer values; nothing is written from this one.
+        if (newer_region_exists(base_fd, generation, owner.name, now_mono_ns)) {
+            continue;
+        }
         static_cast<void>(read_owner(*watched, owner));
         OwnerState& state = states_[owner.name];
         state.final_source = newer(state.final_source, watched->identity);
         submit(owner.name, now_mono_ns);
     }
     // The generation is removed when this returns: its files first.
-    writer_->wait_idle();
+    wait_bounded(report);
     collect(now_mono_ns, report);
 }
 
@@ -635,7 +781,7 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
         read_current();
     }
     for (const std::unique_ptr<Watched>& watched : retired_) {
-        finish(*watched, now_mono_ns);
+        finish(base_fd, *watched, now_mono_ns);
     }
     for (auto& [name, state] : states_) {
         if (!state.dirty || now_mono_ns < state.next_retry_mono_ns) {
@@ -647,7 +793,7 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
         }
     }
     remove_done(base_fd, now_mono_ns, report);
-    remove_files_of_gone_owners(report);
+    remove_files_of_gone_owners();
 }
 
 void RetainKeeper::flush(CheckReport& report) {
@@ -663,13 +809,28 @@ void RetainKeeper::flush(CheckReport& report) {
             submit(name, now);
         }
     }
-    writer_->wait_idle();
+    wait_bounded(report);
     collect(now, report);
+    for (const auto& [name, state] : states_) {
+        if (state.dirty || state.done_token != state.token) {
+            report.retain_problems.push_back(
+                {name, "retained values not saved at the stop"});
+        }
+    }
+}
+
+void RetainKeeper::wait_bounded(CheckReport& report) {
+    if (!writer_->wait_idle(RETAIN_WAIT_LIMIT)) {
+        report.retain_problems.push_back(
+            {"retain writer", "files not written within " +
+                                  std::to_string(RETAIN_WAIT_LIMIT.count()) +
+                                  " ms"});
+    }
 }
 
 void RetainKeeper::wait_written(CheckReport& report) {
     if (persists()) {
-        writer_->wait_idle();
+        wait_bounded(report);
         collect(monotonic_ns(), report);
     }
 }

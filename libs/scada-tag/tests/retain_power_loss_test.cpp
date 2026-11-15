@@ -389,6 +389,25 @@ TEST_F(PowerLoss, WithoutAFormerFileALossLeavesNoFileOrTheNewOne) {
     }
 }
 
+// Review of PR #69, point 6: once a write reported success, every state
+// a loss can leave holds the new values; the old ones never come back.
+TEST_F(PowerLoss, AfterASuccessfulWriteEveryStateLoadsTheNewValues) {
+    for (const bool with_old : {true, false}) {
+        PowerLossModel model;
+        if (with_old) {
+            model.put("io.bin", encoded(values(OLD)));
+        }
+        std::string detail;
+        ASSERT_TRUE(
+            write_retain_file(dir(), "io", values(NEW), detail, model).ok())
+            << detail;
+        for (const std::optional<Bytes>& state : states(model)) {
+            EXPECT_EQ(load(state), NEW)
+                << (with_old ? "with" : "without") << " a former file";
+        }
+    }
+}
+
 // The model finds the fault it is there for: without fsync a loss after
 // the rename can leave a file that does not load.
 TEST_F(PowerLoss, TheModelCatchesAWriterWithoutFsync) {

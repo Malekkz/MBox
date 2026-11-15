@@ -790,9 +790,9 @@ Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
     if (!hash.ok()) {
         return hash.status();
     }
-    Result<std::unique_ptr<RetainKeeper>> keeper =
-        RetainKeeper::open(options.retain_dir, options.tagd_uid,
-                           options.retain_interval_ms, hash.value(), detail);
+    Result<std::unique_ptr<RetainKeeper>> keeper = RetainKeeper::open(
+        options.retain_dir, options.tagd_uid, impl->base_.get(),
+        options.retain_interval_ms, hash.value(), detail);
     if (!keeper.ok()) {
         return keeper.status();
     }

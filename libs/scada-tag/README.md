@@ -98,6 +98,7 @@ and a sentence that names the entry, when:
 | Rule | Status code |
 | --- | --- |
 | A name is empty, too long (127 bytes for tags, 31 bytes for processes, owners and queues) or has a character outside `[a-z0-9_.-]` | `INVALID_ARGUMENT` |
+| An owner name starts with `.` (its retain file would look like a temporary one) | `INVALID_ARGUMENT` |
 | Two processes, two owners, two queues or two tags have the same name | `ALREADY_EXISTS` |
 | A tag names an owner, or an owner or queue names a process, that the tag set does not have | `NOT_FOUND` |
 | More than 1,024 processes, 1,023 owners, 4,096 queues or 1,000,000 tags | `OUT_OF_RANGE` |
@@ -303,19 +304,25 @@ and write".
 Retained values (contract, section 12; decision D-45): a `tags` region that
 attach creates gets the values of its owner's `retain` tags before it is
 published, with quality UNCERTAIN, flag RESTORED, the stored source time and
-the time of the restore as update time. A value is taken from
+the time of the restore as update time. RESTORED stays, with no time
+limit, until the owner writes the tag; tell a restored value by that flag,
+since `age_ns` counts from the restore. A value is taken from
 `<owner>.bin` in the retain directory (`scada_attach_opts.retain_dir`),
 otherwise, for a tag that moved, from the most recently written other file
 that has it with the same type; at most 1,023 files of at most 64 MiB are
-read. A file is used only if it is a regular file with one name, owned by
+read. The retain directory must pass the checks of `scada-tagd` (opened
+with `O_NOFOLLOW`; owner, mode 2750, group of the base directory);
+otherwise nothing is restored and it is counted. A file is used only if it
+is a regular file with one name, owned by
 `scada-tagd`, and passes every check of its format (`src/retain_file.h`,
 fuzz target `retain_file_fuzz`); otherwise it is ignored and counted. If a
 RETIRING generation still in the base directory has an owner that held one
 of these tags, attach first waits, at most 2 s, looking every 20 ms, for
 that owner's file to be marked FINAL for that generation, or for the
 generation's directory to be gone. A reused region keeps its values.
-`scada_tag_retain_status` reports the values restored, the files rejected
-and the waits that ran out. String tags cannot be retained.
+`scada_tag_retain_status` reports the values restored, the files rejected,
+the waits that ran out (one deadline per attach) and the restores not done
+because the retain directory was unusable. String tags cannot be retained.
 
 ## Tag read and write
 
