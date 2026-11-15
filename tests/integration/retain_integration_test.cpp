@@ -273,13 +273,22 @@ TEST_F(Retained,
     std::bernoulli_distribution tagd_first(0.5);
     std::int64_t previous = -1;
     for (int round = 0; round < KILL_ROUNDS; ++round) {
-        std::optional<RunningTagd> service = tagd();
-        ASSERT_TRUE(service.has_value());
-        // A temporary file a killed scada-tagd left is gone at its start.
+        // Temporary files a killed scada-tagd left are gone once the next
+        // one is ready. Only those: the new one may be writing a file of
+        // its own at that moment.
+        std::vector<std::string> stale;
         for (const auto& entry :
              std::filesystem::directory_iterator(retain())) {
-            EXPECT_FALSE(entry.path().filename().string().starts_with(".tmp."))
-                << "round " << round;
+            if (entry.path().filename().string().starts_with(".tmp.")) {
+                stale.push_back(entry.path().filename().string());
+            }
+        }
+        std::optional<RunningTagd> service = tagd();
+        ASSERT_TRUE(service.has_value());
+        for (const std::string& name : stale) {
+            EXPECT_FALSE(
+                std::filesystem::exists(std::filesystem::path(retain()) / name))
+                << name << ", round " << round;
         }
         std::optional<ChildProcess> io = retainer(1);
         ASSERT_TRUE(io.has_value());
