@@ -348,18 +348,15 @@ TEST_F(PowerLoss, TheCallsComeInTheOrderOfTheContract) {
     std::string detail;
     ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok())
         << detail;
-    // unlink of a stale temporary file of this process id, then the write.
-    ASSERT_GE(model.disk().calls.size(), 6U);
-    EXPECT_EQ(model.disk().calls.front(), "unlink");
-    EXPECT_EQ(model.disk().calls[1], "create");
-    EXPECT_EQ(model.disk().calls[2], "set_mode");
-    const std::size_t last = model.disk().calls.size() - 1;
-    for (std::size_t i = 3; i < last - 2; ++i) {
-        EXPECT_EQ(model.disk().calls[i], "write") << i;
-    }
-    EXPECT_EQ(model.disk().calls[last - 2], "sync");
-    EXPECT_EQ(model.disk().calls[last - 1], "rename");
-    EXPECT_EQ(model.disk().calls[last], "sync_directory");
+    // unlink of a stale temporary file of this process id, then the write;
+    // the model takes at most 37 bytes per write.
+    const std::vector<std::string>& calls = model.disk().calls;
+    constexpr std::size_t FIXED_CALLS = 6;
+    ASSERT_GT(calls.size(), FIXED_CALLS);
+    std::vector<std::string> expected{"unlink", "create", "set_mode"};
+    expected.insert(expected.end(), calls.size() - FIXED_CALLS, "write");
+    expected.insert(expected.end(), {"sync", "rename", "sync_directory"});
+    EXPECT_EQ(calls, expected);
     EXPECT_EQ(model.disk().entries.size(), 1U);
 }
 

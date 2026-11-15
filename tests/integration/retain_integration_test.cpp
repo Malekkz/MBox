@@ -174,6 +174,9 @@ protected:
     [[nodiscard]] const std::filesystem::path& base() const { return base_; }
     [[nodiscard]] const std::string& retain() const { return retain_; }
 
+    [[nodiscard]] ::testing::AssertionResult restored_after_change(
+        ChildProcess& feeder, RunningTagd& second) const;
+
     [[nodiscard]] std::optional<std::int64_t> kill_round(
         std::chrono::milliseconds after, bool tagd_first);
 
@@ -198,6 +201,34 @@ bool reattached(std::string_view out) {
            out.find('\n', again) != std::string_view::npos;
 }
 
+// After a generation change that `second` made: the retainer reattached
+// within CHANGE_LIMIT, restored the last value it wrote, UNCERTAIN with
+// RESTORED (contract, section 12), and the old generation is gone.
+::testing::AssertionResult Retained::restored_after_change(
+    ChildProcess& feeder, RunningTagd& second) const {
+    const auto ready = std::chrono::steady_clock::now();
+    if (!feeder.wait_for_output(reattached, WAIT_LIMIT)) {
+        return ::testing::AssertionFailure()
+               << "no reattach: " << feeder.out() << second.child.err();
+    }
+    if (std::chrono::steady_clock::now() - ready >= CHANGE_LIMIT) {
+        return ::testing::AssertionFailure() << "reattach took too long";
+    }
+    const std::string& out = feeder.out();
+    const std::int64_t last = last_number(out, "leaving last=").value_or(-1);
+    const std::int64_t restored =
+        last_number(out, "attached value=").value_or(-1);
+    if (last <= 1 || restored != last ||
+        !has(out.substr(out.rfind("attached")), "quality=1 flags=1024")) {
+        return ::testing::AssertionFailure() << "not restored: " << out;
+    }
+    if (!logs(second, "retired generation removed") ||
+        std::filesystem::exists(base() / "gen-1")) {
+        return ::testing::AssertionFailure() << "gen-1 was not removed";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
     std::optional<RunningTagd> first = tagd();
     std::optional<ChildProcess> feeder = retainer(FAST_PERIOD_MS);
@@ -217,22 +248,7 @@ TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
     if (!second.has_value()) {
         return;
     }
-    const auto ready = std::chrono::steady_clock::now();
-    ASSERT_TRUE(feeder->wait_for_output(reattached, WAIT_LIMIT))
-        << feeder->out() << second->child.err();
-    EXPECT_LT(std::chrono::steady_clock::now() - ready, CHANGE_LIMIT);
-    const std::int64_t last =
-        last_number(feeder->out(), "leaving last=").value_or(-1);
-    const std::int64_t restored =
-        last_number(feeder->out(), "attached value=").value_or(-1);
-    EXPECT_GT(last, 1);
-    EXPECT_EQ(restored, last) << feeder->out();
-    // UNCERTAIN with RESTORED (contract, section 12).
-    EXPECT_TRUE(has(feeder->out().substr(feeder->out().rfind("attached")),
-                    "quality=1 flags=1024"))
-        << feeder->out();
-    EXPECT_TRUE(logs(*second, "retired generation removed"));
-    EXPECT_FALSE(std::filesystem::exists(base() / "gen-1"));
+    EXPECT_TRUE(restored_after_change(*feeder, *second));
     EXPECT_TRUE(stops_cleanly(*feeder));
     stop(*second);
 }
@@ -275,8 +291,11 @@ TEST_F(Retained, Conformance25ARetainNowTagIsOnDiskWithinOneSecond) {
     const std::int64_t last =
         last_number(feeder->out(), "stopped last=").value_or(-1);
     ASSERT_GT(last, 0);
-    EXPECT_TRUE(file_reaches(last, RETAIN_NOW_LIMIT));
-    EXPECT_LT(std::chrono::steady_clock::now() - stopped, RETAIN_NOW_LIMIT);
+    // On disk within the limit, counted from the stop.
+    EXPECT_TRUE(file_reaches(
+        last,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            RETAIN_NOW_LIMIT - (std::chrono::steady_clock::now() - stopped))));
     EXPECT_EQ(on_file(), last);
     stop(*service);
 }
@@ -331,8 +350,8 @@ TEST_F(Retained,
     write_tag_set(true, false);
     // A fixed seed: the same kill points at every run, so that a failure
     // can be repeated.
-    std::mt19937 random(
-        KILL_SEED);  // NOLINT(cert-msc32-c,cert-msc51-cpp): a fixed seed keeps the test repeatable
+    // NOLINTNEXTLINE(cert-msc32-c,cert-msc51-cpp): a fixed seed keeps the test repeatable
+    std::mt19937 random(KILL_SEED);
     std::uniform_int_distribution<int> after(KILL_AFTER_MIN_MS,
                                              KILL_AFTER_MAX_MS);
     std::bernoulli_distribution tagd_first(TAGD_FIRST_ODDS);
