@@ -320,7 +320,7 @@ TEST_F(QueueProcesses, OneMillionRecordsWithoutLossDuplicationOrReordering) {
     stop(*tagd);
 }
 
-// Issue #53 (D-45), with the real scada-tagd: a queue whose consumer's
+// Issue #53 (D-46), with the real scada-tagd: a queue whose consumer's
 // cursor is out of range is logged as broken, and an events queue file
 // removed under a running producer as missing. The cursor is changed in
 // the file, as damage would: `proc.web` holds it after the RegionHeader and

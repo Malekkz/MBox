@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.12 (draft) |
+| Contract version | 0.13 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -172,7 +172,7 @@ accepted for layout version 1:
   suspended, so after a resume a write request would be executed later in
   real time than its requester allowed, and every heartbeat would still
   look fresh. Whether the platform disabled suspend cannot be checked from
-  inside a unit, so `scada-tagd` looks for its traces (D-45): it logs at
+  inside a unit, so `scada-tagd` looks for its traces (D-46): it logs at
   start, once at INFO, the sleep states the kernel offers
   (`/sys/power/state`), and a WARNING when `CLOCK_BOOTTIME` minus
   `CLOCK_MONOTONIC`, the time spent suspended since boot, is above 0 at
@@ -1463,7 +1463,7 @@ Smaller points where this contract adds to or narrows the reference:
     (section 9.2), while reference 6.1 puts command queue handling in
     `libscada-driver`. A driver never sees an expired OPERATE or CANCEL, so
     drivers time out selections themselves.
-20. The unit must not suspend or hibernate (section 3.4, D-45). The
+20. The unit must not suspend or hibernate (section 3.4, D-46). The
     reference says nothing about system sleep; `scada-tagd` reports a
     suspend it detects, and does not act on it.
 
@@ -1484,9 +1484,9 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
 | 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
-| 0.12 | 2026-11-15 | Issue #53, points 1 and 5 (D-45). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
+| 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
 
-Migration, 0.11 to 0.12: none for data; the layout version stays 1 and no
+Migration, 0.12 to 0.13: none for data; the layout version stays 1 and no
 structure in shared memory changed. `scada-tagd` now maps every queue
 region read-only. A unit that allowed suspend, hibernate or hybrid sleep
 must disable them (`docs/install.md`).

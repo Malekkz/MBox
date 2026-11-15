@@ -124,7 +124,7 @@ line.
 ### Disable system sleep first
 
 The unit must never suspend, hibernate or hybrid-sleep (contract 3.4,
-decision D-45): the monotonic clock stops meanwhile, so a write request
+decision D-46): the monotonic clock stops meanwhile, so a write request
 could be executed after a resume, later than its requester allowed. These
 lines are for the test machine, run as root; they use only systemd, which
 this guide requires, and a package will ship the same settings later. Mask

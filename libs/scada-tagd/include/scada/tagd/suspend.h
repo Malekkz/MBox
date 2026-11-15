@@ -2,7 +2,7 @@
 #define SCADA_TAGD_SUSPEND_H
 
 // Detection of a system suspend (docs/contracts/tag-database.md, section
-// 3.4; decision D-45). The unit must not suspend or hibernate, because
+// 3.4; decision D-46). The unit must not suspend or hibernate, because
 // CLOCK_MONOTONIC, on which every age and timeout of the tag database is
 // measured, does not advance meanwhile. Masking the sleep targets cannot be
 // checked from inside a unit, so scada-tagd looks for the traces: the
