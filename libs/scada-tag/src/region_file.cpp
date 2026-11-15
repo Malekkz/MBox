@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>  // NOLINT(modernize-deprecated-headers): renameat2 and RENAME_NOREPLACE are declared here, not in <cstdio>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -507,6 +508,51 @@ void remove_stale_temporaries(int dir_fd, std::string_view name,
             static_cast<void>(::unlinkat(dir_fd, entry.c_str(), 0));
         }
     }
+}
+
+bool proc_lock_held(int dir_fd, const std::string& name) noexcept {
+    const Fd file = open_at(dir_fd, name,
+                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    // The lock taken here, if any, ends when `file` is closed.
+    return file.valid() && ::flock(file.get(), LOCK_EX | LOCK_NB) != 0 &&
+           errno == EWOULDBLOCK;
+}
+
+bool has_live_process(int base_fd, const std::string& name) {
+    const Fd directory = open_at(base_fd, name,
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (!directory.valid()) {
+        return false;
+    }
+    std::string ignored;
+    const Result<std::vector<std::string>> entries =
+        list_directory(directory.get(), ignored);
+    if (!entries.ok()) {
+        return false;
+    }
+    return std::ranges::any_of(entries.value(), [&](const std::string& entry) {
+        return entry.starts_with("proc.") && proc_lock_held(directory.get(), entry);
+    });
+}
+
+bool remove_generation(int base_fd, const std::string& name) {
+    const Fd directory = open_at(base_fd, name,
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory.valid()) {
+        std::string ignored;
+        const Result<std::vector<std::string>> entries =
+            list_directory(directory.get(), ignored);
+        if (entries.ok()) {
+            for (const std::string& entry : entries.value()) {
+                if (::unlinkat(directory.get(), entry.c_str(), 0) != 0 &&
+                    errno == EISDIR) {
+                    static_cast<void>(::unlinkat(directory.get(), entry.c_str(),
+                                                 AT_REMOVEDIR));
+                }
+            }
+        }
+    }
+    return ::unlinkat(base_fd, name.c_str(), AT_REMOVEDIR) == 0;
 }
 
 }  // namespace scada::tag

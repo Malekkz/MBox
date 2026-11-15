@@ -228,6 +228,7 @@ Result<HeaderContents> read_header(std::span<std::byte> bytes,
     contents.tag_count = global.tag_count;
     contents.heartbeat_check_ms = global.heartbeat_check_ms;
     contents.config_hash = global.config_hash;
+    contents.created_time_ns = global.created_time_ns;
     // In range: checked by table_fits.
     contents.directory_offset =
         static_cast<std::size_t>(global.directory_offset);

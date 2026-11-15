@@ -336,6 +336,11 @@ Result<std::uint8_t> tag_flags(const TagDefinition& tag, std::string& detail) {
         detail = about(TAG, tag.name, "retain_now needs retain");
         return INVALID_VALUE;
     }
+    if (tag.retain && tag.type == TagType::STRING) {
+        // A retain file holds 64-bit values only (decision D-43).
+        detail = about(TAG, tag.name, "a string tag cannot be retained");
+        return INVALID_VALUE;
+    }
     if (tag.writable_by_command && tag.type == TagType::STRING) {
         detail =
             about(TAG, tag.name, "a string tag cannot be writable_by_command");

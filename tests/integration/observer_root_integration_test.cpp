@@ -159,7 +159,12 @@ int database_owner(const std::string& base, int ready, int stop) {
     std::string detail;
     scada::Result<scada::tag::GenerationHost> host =
         scada::tag::GenerationHost::start(
-            tag_set(), {.base_dir = base, .tagd_uid = DB_UID}, detail);
+            tag_set(),
+            {.base_dir = base,
+             .tagd_uid = DB_UID,
+             .retain_dir = {},
+             .retain_interval_ms = scada::tag::DEFAULT_RETAIN_INTERVAL_MS},
+            detail);
     if (!host.ok()) {
         return CHILD_FAILED;
     }

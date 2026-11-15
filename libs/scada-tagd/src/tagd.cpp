@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -49,6 +50,7 @@ using scada::tag::TagSet;
 
 constexpr std::string_view USAGE =
     "Usage: scada-tagd [--tag-set <file>] [--base-dir <directory>]\n"
+    "                  [--retain-dir <directory>] [--retain-interval-ms <ms>]\n"
     "       scada-tagd --help\n"
     "\n"
     "Creates the shared-memory tag database from the tag-set file and watches\n"
@@ -60,6 +62,17 @@ constexpr std::string_view USAGE =
     "heartbeat_check_ms (from the tag-set file, 250 ms by default) which\n"
     "processes are down, and logs every change.\n"
     "\n"
+    "Retained values: the tags marked retain are written to <owner>.bin in\n"
+    "the retain directory when they changed, at most once per retain\n"
+    "interval; a tag marked retain_now within 1 s of its change; all of them\n"
+    "on a clean stop. A file that fails its checks is ignored and logged.\n"
+    "\n"
+    "Generation change: the generation that was current is set to\n"
+    "RETIRING. Once the process of an owner has left it, that owner's\n"
+    "retained values there are written, so that its attach to the new\n"
+    "generation restores them. Once every process has left, or after 30 s,\n"
+    "the old generation is removed.\n"
+    "\n"
     "Options:\n"
     "  --tag-set <file>        Tag-set file (JSON). It must hold a process\n"
     "                          named tagd whose uid is the user this program\n"
@@ -67,10 +80,20 @@ constexpr std::string_view USAGE =
     "  --base-dir <directory>  Directory of the tag database. It must exist,\n"
     "                          be owned by the user this program runs as and\n"
     "                          have mode 2750. Default: /dev/shm/scada\n"
+    "  --retain-dir <directory>\n"
+    "                          Directory of the retained values. It must\n"
+    "                          exist, be owned by the user this program runs\n"
+    "                          as and have mode 2750.\n"
+    "                          Default: /var/lib/scada/retain\n"
+    "  --retain-interval-ms <ms>\n"
+    "                          Shortest time between two writes of the\n"
+    "                          retained values of one owner, 100 to\n"
+    "                          3600000. Default: 5000\n"
     "  --help                  Show this text and exit.\n"
     "\n"
     "Signals:\n"
-    "  SIGTERM, SIGINT  Stop and exit with code 0. The generation stays.\n"
+    "  SIGTERM, SIGINT  Write the retained values that changed, stop and exit\n"
+    "                   with code 0. The generation stays.\n"
     "\n"
     "Environment (set by systemd):\n"
     "  NOTIFY_SOCKET    Socket for readiness and watchdog messages.\n"
@@ -96,17 +119,38 @@ constexpr std::int64_t FEEDS_PER_WATCHDOG_INTERVAL = 4;
 // Bytes read from the tag-set file in one call.
 constexpr std::size_t READ_CHUNK = std::size_t{64} * 1024;
 
+// Limits of --retain-interval-ms.
+constexpr std::uint32_t MIN_RETAIN_INTERVAL_MS = 100;
+constexpr std::uint32_t MAX_RETAIN_INTERVAL_MS = 3'600'000;
+
 struct Options {
     std::string tag_set_path{DEFAULT_TAG_SET_PATH};
     std::string base_dir{scada::tag::DEFAULT_BASE_DIR};
+    std::string retain_dir{scada::tag::DEFAULT_RETAIN_DIR_PATH};
+    std::uint32_t retain_interval_ms = scada::tag::DEFAULT_RETAIN_INTERVAL_MS;
     bool help = false;
 };
+
+// A whole number of milliseconds within the limits of --retain-interval-ms,
+// or nothing.
+std::optional<std::uint32_t> parse_interval(std::string_view text) noexcept {
+    std::uint32_t value = 0;
+    const char* const end = text.data() + text.size();
+    const auto [last, error] = std::from_chars(text.data(), end, value);
+    if (error != std::errc() || last != end || value < MIN_RETAIN_INTERVAL_MS ||
+        value > MAX_RETAIN_INTERVAL_MS) {
+        return std::nullopt;
+    }
+    return value;
+}
 
 // Parses the command line. Nothing if it is not valid.
 std::optional<Options> parse_options(std::span<const std::string_view> args) {
     Options options;
     bool tag_set_given = false;
     bool base_dir_given = false;
+    bool retain_dir_given = false;
+    bool interval_given = false;
     if (args.size() == 1 && args.front() == "--help") {
         options.help = true;
         return options;
@@ -128,6 +172,16 @@ std::optional<Options> parse_options(std::span<const std::string_view> args) {
         } else if (arg == "--base-dir" && !base_dir_given) {
             options.base_dir = value;
             base_dir_given = true;
+        } else if (arg == "--retain-dir" && !retain_dir_given) {
+            options.retain_dir = value;
+            retain_dir_given = true;
+        } else if (arg == "--retain-interval-ms" && !interval_given) {
+            const std::optional<std::uint32_t> interval = parse_interval(value);
+            if (!interval.has_value()) {
+                return std::nullopt;
+            }
+            options.retain_interval_ms = *interval;
+            interval_given = true;
         } else {
             return std::nullopt;
         }
@@ -242,6 +296,48 @@ void log_report(Logger& logger, const CheckReport& report) {
             logger.log(LogLevel::WARNING, "heartbeat late", fields);
         }
     }
+    for (const scada::tag::RetainWrite& written : report.retain_written) {
+        // DEBUG for a periodic write: it happens every few seconds on a
+        // busy unit. A FINAL one belongs to a generation change.
+        const std::string values = std::to_string(written.values);
+        logger.log(written.final ? LogLevel::INFO : LogLevel::DEBUG,
+                   written.final ? "retained values written after the owner "
+                                   "left a retired generation"
+                                 : "retained values written",
+                   {{"OWNER", written.owner}, {"VALUES", values}});
+    }
+    for (const scada::tag::RetainProblem& problem : report.retain_problems) {
+        // The subject may be a file name found in the directory: outside
+        // input, which the sinks escape and cut.
+        logger.log(LogLevel::WARNING, "retained values",
+                   {{"SUBJECT", problem.subject}, {"DETAIL", problem.detail}});
+    }
+    for (const scada::tag::RetiredGeneration& retired : report.retired) {
+        const std::string generation = std::to_string(retired.generation);
+        for (const std::string& process : retired.still_attached) {
+            // Reference 5.5: a process that did not move to the new
+            // generation in time. Its values were written, not marked FINAL.
+            logger.log(LogLevel::WARNING,
+                       "process still attached to a retired generation",
+                       {{"GENERATION", generation}, {"PROCESS", process}});
+        }
+        if (retired.removed) {
+            logger.log(retired.timed_out ? LogLevel::WARNING : LogLevel::NOTICE,
+                       retired.timed_out
+                           ? "retired generation removed after the timeout, "
+                             "with processes still attached"
+                           : "retired generation removed",
+                       {{"GENERATION", generation}});
+        } else {
+            logger.log(LogLevel::ERROR, "cannot remove a retired generation",
+                       {{"GENERATION", generation}});
+        }
+    }
+    for (const std::string& file : report.retain_files_removed) {
+        logger.log(LogLevel::NOTICE,
+                   "removed the retain file of an owner that is gone",
+                   {{"FILE", file}});
+    }
     for (const SweptEntry& entry : report.swept) {
         // The name is outside input; the sinks escape it and cut it.
         if (entry.removed) {
@@ -323,6 +419,8 @@ int serve(GenerationHost& host, Notifier& notifier,
             case Wake::CHECK_DUE:
                 break;
             case Wake::STOP:
+                // Section 12: the retained values on clean shutdown.
+                log_report(logger, host.flush_retained());
                 host.stop();
                 // Best effort: the process exits either way, and the
                 // service manager sees the exit.
@@ -402,7 +500,11 @@ int start(const Options& options, std::ostream& err) {
 
     Result<GenerationHost> host = GenerationHost::start(
         tag_set.value(),
-        {.base_dir = options.base_dir, .tagd_uid = ::geteuid()}, detail);
+        {.base_dir = options.base_dir,
+         .tagd_uid = ::geteuid(),
+         .retain_dir = options.retain_dir,
+         .retain_interval_ms = options.retain_interval_ms},
+        detail);
     if (!host.ok()) {
         fail(&logger.value(), err, "cannot start the tag database",
              host.status(), detail);

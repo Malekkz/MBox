@@ -230,6 +230,28 @@ int scada_tag_notify(scada_ctx* ctx);
  */
 int scada_tag_status(scada_ctx* ctx, scada_status* out);
 
+/* What attach did with retained values (section 12), counted since attach.
+ * 16 bytes. All 0 for an observer. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint32_t values_restored;     /* retained values loaded into new `tags`
+                                     regions */
+    uint32_t files_rejected;      /* retain files that failed their checks and
+                                     were ignored, counted at each look */
+    uint32_t final_waits_expired; /* waits for the FINAL retain files of a
+                                     retiring generation that ran out; the
+                                     files were then taken as they were */
+    uint32_t reserved;            /* 0 */
+} scada_retain_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/*
+ * Fills `*out` with what attach did with retained values (section 12).
+ * SCADA_E_INVALID if an argument is NULL.
+ *
+ * Not real-time.
+ */
+int scada_tag_retain_status(scada_ctx* ctx, scada_retain_status_t* out);
+
 /* The handle that refers to no tag (section 5.1). */
 #define SCADA_INVALID_HANDLE UINT32_C(0xFFFFFFFF)
 

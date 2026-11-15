@@ -237,4 +237,10 @@ std::size_t PeerRegions::refresh(int dir_fd, std::int64_t now_mono_ns) {
     return changed;
 }
 
+bool PeerRegions::look_now(int dir_fd, std::size_t slot) {
+    Slot& wanted = slots_.at(checked(slot));
+    const std::scoped_lock lock(mutex_);
+    return wanted.wanted && look(dir_fd, wanted);
+}
+
 }  // namespace scada::tag

@@ -15,6 +15,10 @@ scada_add_test(scada-tag-unit-test KIND unit
     proc_region_test.cpp
     queue_test.cpp
     region_file_test.cpp
+    retain_file_test.cpp
+    retain_keeper_test.cpp
+    retain_power_loss_test.cpp
+    retain_restore_test.cpp
     sha256_test.cpp
     subscription_test.cpp
     tag_access_test.cpp
@@ -75,3 +79,10 @@ set_tests_properties(scada-tag-seqlock-bench-timings
 add_executable(scada-tag-test-queue queue_peer/queue_peer_main.cpp)
 target_link_libraries(scada-tag-test-queue PRIVATE scada::tag)
 scada_target_defaults(scada-tag-test-queue)
+
+# A process that writes a retained counter and follows a generation change,
+# for the integration tests of retained values (contract, sections 11.3 and
+# 12). Not installed.
+add_executable(scada-tag-test-retainer retainer/retainer_main.cpp)
+target_link_libraries(scada-tag-test-retainer PRIVATE scada::tag)
+scada_target_defaults(scada-tag-test-retainer)

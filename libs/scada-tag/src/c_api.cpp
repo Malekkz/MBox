@@ -67,8 +67,10 @@ constexpr std::size_t OWNER_INFO = 48;
 constexpr std::size_t PROC_STATUS = 88;
 constexpr std::size_t PROC_STATUS_RESERVED = 82;
 constexpr std::size_t QUEUE_STATS = 80;  // decision D-40
+constexpr std::size_t RETAIN_STATUS = 16;  // decision D-43
 }  // namespace sizes
 static_assert(sizeof(scada_status) == sizes::STATUS);
+static_assert(sizeof(scada_retain_status_t) == sizes::RETAIN_STATUS);
 static_assert(offsetof(scada_status, records_repaired) ==
               sizes::STATUS_RECORDS_REPAIRED);
 static_assert(offsetof(scada_status, owner_count) == sizes::STATUS_OWNER_COUNT);
@@ -335,6 +337,20 @@ int scada_tag_status(scada_ctx* ctx, scada_status* out) {
         return SCADA_E_INVALID;
     }
     return guarded([&] { return report_status(*ctx, *out); });
+}
+
+int scada_tag_retain_status(scada_ctx* ctx, scada_retain_status_t* out) {
+    if (ctx == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] {
+        const scada::tag::AttachmentStatus status = ctx->attachment->status();
+        *out = scada_retain_status_t{};
+        out->values_restored = status.values_restored;
+        out->files_rejected = status.files_rejected;
+        out->final_waits_expired = status.final_waits_expired;
+        return SCADA_OK;
+    });
 }
 
 int scada_tag_resolve(scada_ctx* ctx, const char* name, uint32_t* handle) {

@@ -107,7 +107,12 @@ protected:
     void start_host(const TagSet& set = tag_set()) {
         std::string detail;
         Result<GenerationHost> host = GenerationHost::start(
-            set, {.base_dir = base().string(), .tagd_uid = uid()}, detail);
+            set,
+            {.base_dir = base().string(),
+             .tagd_uid = uid(),
+             .retain_dir = host_retain_dir_,
+             .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS},
+            detail);
         ASSERT_TRUE(host.ok()) << host.status().message() << ": " << detail;
         host_ = std::make_unique<GenerationHost>(std::move(host).value());
     }
@@ -141,6 +146,9 @@ protected:
             shared_at<GlobalHeader>(header.bytes(), sizeof(RegionHeader)).state,
             to_raw(state), std::memory_order_release);
     }
+
+    // The retain directory `start_host` gives the host; empty: none.
+    std::string host_retain_dir_;
 
 private:
     std::unique_ptr<GenerationHost> host_;

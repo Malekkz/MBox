@@ -6,6 +6,7 @@
 #include "peer_regions.h"
 #include "proc_region.h"
 #include "region_file.h"
+#include "retain_file.h"
 #include "shared_memory.h"
 
 #include "scada/common/clock.h"
@@ -13,6 +14,7 @@
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
+#include "scada/tag/handle.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
@@ -20,10 +22,12 @@
 
 #include <fcntl.h>
 #include <pwd.h>
+#include <time.h>  // NOLINT(modernize-deprecated-headers): clock_nanosleep is declared here, not in <ctime>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -421,8 +425,9 @@ Status Attachment::attach_owner(std::size_t owner_index, std::string& detail) {
     spec.name = tags_region_name(owner.name);
     spec.identity.kind = RegionKind::TAGS;
     spec.identity.size_bytes = tags_region_size(owner.tag_count);
-    spec.initialise = [slots](std::span<std::byte> bytes) {
+    spec.initialise = [this, slots, owner_index](std::span<std::byte> bytes) {
         initialise_tag_records(bytes, slots);
+        restore_retained(bytes, owner_index);
     };
     spec.usable = [slots](std::span<std::byte> bytes) {
         return has_tag_types(bytes, slots);
@@ -495,6 +500,142 @@ Status Attachment::attach_owner(std::size_t owner_index, std::string& detail) {
     }
     owners_.push_back(std::move(owned));
     return {};
+}
+
+std::vector<Attachment::FinalWanted> Attachment::finals_wanted(
+    std::span<const WantedValue> names) const {
+    std::vector<FinalWanted> wanted;
+    std::string ignored;
+    const Result<std::vector<std::string>> entries =
+        list_directory(base_.get(), ignored);
+    if (!entries.ok()) {
+        return wanted;
+    }
+    const std::uint64_t own_generation = header_.contents().generation;
+    for (const std::string& entry : entries.value()) {
+        const std::optional<std::uint64_t> generation =
+            parse_generation_dir_name(entry);
+        if (!generation.has_value() || *generation >= own_generation) {
+            continue;
+        }
+        const Fd directory =
+            open_at(base_.get(), entry,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (!directory.valid()) {
+            continue;
+        }
+        const Result<HeaderView> header =
+            HeaderView::open(directory.get(), *generation, tagd_uid_, ignored);
+        if (!header.ok() ||
+            header.value().state() != GenerationState::RETIRING) {
+            continue;
+        }
+        const GenerationIdentity identity{
+            *generation, header.value().contents().created_time_ns};
+        for (const WantedValue& name : names) {
+            const std::optional<TagEntry> tag =
+                header.value().find_tag(name.name);
+            if (!tag.has_value()) {
+                continue;
+            }
+            const std::string& owner =
+                header.value().contents().owners.at(tag->owner_index).name;
+            const auto known =
+                std::ranges::find(wanted, owner, &FinalWanted::owner);
+            if (known == wanted.end()) {
+                wanted.push_back({owner, identity, entry});
+            } else if (known->generation.generation < *generation) {
+                known->generation = identity;
+                known->directory = entry;
+            }
+        }
+    }
+    return wanted;
+}
+
+void Attachment::restore_retained(std::span<std::byte> tags,
+                                  std::size_t owner_index) {
+    const OwnerInfo& owner = header_.contents().owners.at(owner_index);
+    std::vector<std::uint32_t> slots;
+    std::vector<WantedValue> wanted;
+    for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
+        const std::optional<TagEntry> entry = header_.slot_entry(owner_index, slot);
+        // A STRING tag is never retained (decision D-43); the builder
+        // refuses the flag, and a header from elsewhere is not trusted.
+        if (entry.has_value() && (entry->flags & to_raw(TagFlag::RETAIN)) != 0 &&
+            entry->type != TagType::STRING) {
+            slots.push_back(slot);
+            wanted.push_back({entry->name, entry->type});
+        }
+    }
+    if (wanted.empty()) {
+        return;
+    }
+    const Fd directory = open_at(AT_FDCWD, retain_dir_,
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (!directory.valid()) {
+        return;
+    }
+
+    // Decision D-43: values written in a RETIRING generation after the last
+    // periodic write reach the files only once scada-tagd has seen their
+    // owners leave it. The wait is bounded; without scada-tagd it runs out
+    // and the files are taken as they are.
+    std::vector<FinalWanted> waiting = finals_wanted(wanted);
+    const std::int64_t deadline = monotonic_ns() + RETAIN_FINAL_WAIT_NS;
+    while (!waiting.empty()) {
+        std::erase_if(waiting, [&](const FinalWanted& final) {
+            struct stat info {};
+            // scada-tagd removes a generation only once its files are on
+            // disk, or after its timeout.
+            if (::fstatat(base_.get(), final.directory.c_str(), &info,
+                          AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT) {
+                return true;
+            }
+            std::string ignored;
+            const Result<RetainFile> file =
+                read_retain_file(directory.get(), retain_file_name(final.owner),
+                                 tagd_uid_, ignored);
+            return file.ok() && file.value().final &&
+                   (file.value().source == final.generation ||
+                    file.value().source.generation >
+                        final.generation.generation);
+        });
+        if (waiting.empty()) {
+            break;
+        }
+        if (monotonic_ns() >= deadline) {
+            ++final_waits_expired_;
+            break;
+        }
+        timespec pause{};
+        pause.tv_nsec = RETAIN_FINAL_POLL_NS;
+        static_cast<void>(
+            ::clock_nanosleep(CLOCK_MONOTONIC, 0, &pause, nullptr));
+    }
+
+    const LoadedValues loaded =
+        load_retained(directory.get(), tagd_uid_, owner.name, wanted);
+    // At most MAX_OWNERS + 1 files are read.
+    files_rejected_ += static_cast<std::uint32_t>(loaded.rejected.size());
+    const std::int64_t now_real = realtime_ns();
+    const std::int64_t now_mono = monotonic_ns();
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const std::optional<RetainedValue>& value = loaded.values.at(i);
+        if (!value.has_value()) {
+            continue;
+        }
+        // Not shared yet: the file has no name others look for.
+        TagRecord& record = shared_at<TagRecord>(tags, record_offset(slots[i]));
+        record.value = value->value;
+        record.quality = to_raw(Quality::UNCERTAIN);
+        record.quality_flags = to_raw(QualityFlag::RESTORED);
+        record.source_time_ns = value->source_time_ns;
+        record.update_time_ns = now_real;
+        record.update_mono_ns = now_mono;
+        ++values_restored_;
+    }
 }
 
 Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
@@ -654,11 +795,24 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
         std::unique_ptr<Attachment> attachment = std::make_unique<Attachment>(
             Key{}, std::move(current.value().directory),
             std::move(current.value().header), index.value());
+        attachment->base_ = std::move(current.value().base);
+        attachment->tagd_uid_ = tagd_uid.value();
+        attachment->retain_dir_ = options.retain_dir.empty()
+                                      ? std::string(DEFAULT_RETAIN_DIR)
+                                      : options.retain_dir;
         if (Status read = attachment->read_directory(detail); !read.ok()) {
             return read;
         }
         if (Status attached = attachment->attach_regions(detail);
             !attached.ok()) {
+            // The lock of a `proc` region in a RETIRING generation may be
+            // held for a moment by scada-tagd, which tests it to learn
+            // whether the process left (decision D-43): that is the
+            // generation retiring, not a second process of this name.
+            if (attached.code() == StatusCode::ALREADY_EXISTS &&
+                attachment->header_.state() == GenerationState::RETIRING) {
+                continue;
+            }
             return attached;
         }
         // Section 11.2, step 7: the generation may have been retired while
@@ -801,6 +955,9 @@ AttachmentStatus Attachment::status() {
     status.regions_created = regions_created_;
     status.regions_reused = regions_reused_;
     status.records_repaired = records_repaired_;
+    status.values_restored = values_restored_;
+    status.final_waits_expired = final_waits_expired_;
+    status.files_rejected = files_rejected_;
     status.clock_syscall = clock_syscall_.load(std::memory_order_relaxed);
     if (tagd_index_.has_value()) {
         status.tagd =

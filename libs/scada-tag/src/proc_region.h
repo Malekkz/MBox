@@ -189,6 +189,11 @@ public:
     // new file, whose counts do not continue the old ones.
     [[nodiscard]] std::uint64_t mappings() const noexcept { return mappings_; }
 
+    // The region `observe` mapped last, or an empty span.
+    [[nodiscard]] std::span<std::byte> bytes() const noexcept {
+        return region_.has_value() ? region_->memory.bytes() : std::span<std::byte>{};
+    }
+
 private:
     std::optional<OpenedRegion> region_;
     std::uint64_t mappings_ = 0;

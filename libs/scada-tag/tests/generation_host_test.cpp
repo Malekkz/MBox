@@ -97,7 +97,10 @@ protected:
     [[nodiscard]] Result<GenerationHost> start(const TagSet& set = tag_set()) {
         detail_.clear();
         return GenerationHost::start(
-            set, {.base_dir = base().string(), .tagd_uid = uid()}, detail_);
+            set, {.base_dir = base().string(), .tagd_uid = uid(),
+                   .retain_dir = {},
+                   .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS},
+            detail_);
     }
 
     // Starts and expects success; null otherwise.
@@ -591,7 +594,10 @@ TEST_F(Host, Conformance09BaseDirectoryWithWrongOwnerOrModeIsRefused) {
     std::string why;
     EXPECT_EQ(
         GenerationHost::start(
-            set, {.base_dir = base().string(), .tagd_uid = other_uid()}, why)
+            set, {.base_dir = base().string(), .tagd_uid = other_uid(),
+                   .retain_dir = {},
+                   .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS},
+            why)
             .status()
             .code(),
         StatusCode::PERMISSION_DENIED);
@@ -603,7 +609,10 @@ TEST_F(Host, MissingBaseDirectoryIsNotCreated) {
     const std::filesystem::path missing = root() / "none";
     EXPECT_EQ(
         GenerationHost::start(
-            tag_set(), {.base_dir = missing.string(), .tagd_uid = uid()}, why)
+            tag_set(), {.base_dir = missing.string(), .tagd_uid = uid(),
+                   .retain_dir = {},
+                   .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS},
+            why)
             .status()
             .code(),
         StatusCode::NOT_FOUND);

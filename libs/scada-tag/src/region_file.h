@@ -209,6 +209,23 @@ struct OpenedRegion {
 void remove_stale_temporaries(int dir_fd, std::string_view name,
                               std::uint32_t uid) noexcept;
 
+// True if a process holds the exclusive lock it keeps on the `proc` region
+// `name` in the directory open as `dir_fd` for its whole life (section 10).
+// To find out, the lock is tried without waiting and, if it was free,
+// released at once; a process that attaches at that very moment fails with
+// "already attached" and may try again. False if there is no such file.
+[[nodiscard]] bool proc_lock_held(int dir_fd, const std::string& name) noexcept;
+
+// True if a process holds the lock on any `proc` region in the generation
+// directory `name` of the base directory open as `base_fd`: the generation
+// has a live process (decision D-27).
+[[nodiscard]] bool has_live_process(int base_fd, const std::string& name);
+
+// Removes the generation directory `name` of the base directory open as
+// `base_fd` with what is in it. Best effort (section 3.3): false if
+// something stays.
+[[nodiscard]] bool remove_generation(int base_fd, const std::string& name);
+
 }  // namespace scada::tag
 
 #endif  // SCADA_TAG_REGION_FILE_H

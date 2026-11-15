@@ -12,6 +12,7 @@
 #include "peer_regions.h"
 #include "proc_region.h"
 #include "queue_region.h"
+#include "retain_file.h"
 #include "tag_record.h"
 
 #include "scada/common/fd.h"
@@ -43,8 +44,9 @@ inline constexpr std::string_view TAGD_USER_NAME = "scada-tagd";
 struct AttachOptions {
     // The database directory; empty: /dev/shm/scada.
     std::string base_dir;
-    // The directory of the retained values; empty: /var/lib/scada/retain.
-    // Not read yet: retained values are loaded from issue P1-09 on.
+    // The directory of the retained values (section 12); empty:
+    // /var/lib/scada/retain. A directory that cannot be opened restores
+    // nothing.
     std::string retain_dir;
     // The uid of scada-tagd; nothing: the uid of the user `scada-tagd`.
     std::optional<std::uint32_t> tagd_uid;
@@ -56,6 +58,14 @@ inline constexpr std::uint16_t NO_PROCESS_INDEX = 0xFFFF;
 // The shortest time between two readings of `current` by an observer, in
 // ns (section 11.4: at most once a second).
 inline constexpr std::int64_t CURRENT_RECHECK_INTERVAL_NS = 1'000'000'000;
+
+// The longest an attach waits for scada-tagd to write the FINAL retain files
+// of the owners that held its retained tags in a RETIRING generation
+// (decision D-43), and the pause between two looks, in ns. scada-tagd
+// writes such a file at its next liveness check after the owner's process
+// left, 250 ms by default.
+inline constexpr std::int64_t RETAIN_FINAL_WAIT_NS = 2'000'000'000;
+inline constexpr std::int64_t RETAIN_FINAL_POLL_NS = 20'000'000;
 
 // Looks in a row at which an observer finds no readable `current` (or no
 // base directory) before it counts the generation as gone (section 11.4).
@@ -80,6 +90,13 @@ struct AttachmentStatus {
     // Tag records found with an odd sequence number and repaired
     // (section 6.3).
     std::uint32_t records_repaired = 0;
+    // Retained values loaded into new `tags` regions (section 12), and the
+    // waits for a FINAL retain file that ran out (decision D-43). Not in
+    // scada_status, which keeps its size.
+    std::uint32_t values_restored = 0;
+    std::uint32_t final_waits_expired = 0;
+    // Retain files that failed their checks and were ignored.
+    std::uint32_t files_rejected = 0;
     // True if reading the clocks was found to be a system call on this
     // machine (section 13.1).
     bool clock_syscall = false;
@@ -179,7 +196,9 @@ public:
     // (`read_directory`), and after step 5 the clocks are checked (section
     // 13.1).
     //
-    // Not done yet: retained values (P1-09).
+    // A `tags` region that is created gets the retained values of its
+    // owner's RETAIN tags before it is published (section 12,
+    // `restore_retained`).
     //
     // INVALID_ARGUMENT for a name that is no process name; NOT_FOUND if the
     // process is not in the process table; PERMISSION_DENIED for a wrong
@@ -598,6 +617,29 @@ private:
                                       std::string& detail);
     void count(const OwnRegion& region) noexcept;
 
+    // Section 12 and decision D-43: loads the retained values of the RETAIN
+    // tags of `owner_index` into `tags`, a new `tags` region whose records
+    // are in their initial state and which nobody else sees yet. First
+    // waits, at most RETAIN_FINAL_WAIT_NS, until every owner that held one
+    // of these tags in a RETIRING generation still in the base directory
+    // has its FINAL file of the newest such generation, or that
+    // generation's directory is gone. A value restored has
+    // quality UNCERTAIN, flag RESTORED, its stored source time, and the
+    // time of the restore as update time. Nothing is restored when the
+    // retain directory or the file cannot be read.
+    void restore_retained(std::span<std::byte> tags, std::size_t owner_index);
+    // A FINAL retain file an attach waits for: that of `owner` for the
+    // RETIRING generation `generation`, whose directory is `directory`.
+    struct FinalWanted {
+        std::string owner;
+        GenerationIdentity generation;
+        std::string directory;
+    };
+    // For each owner that holds one of the tags `names` in a RETIRING
+    // generation older than this one, the newest such generation.
+    [[nodiscard]] std::vector<FinalWanted> finals_wanted(
+        std::span<const WantedValue> names) const;
+
     // Fills `queue_access_` once the own queues are attached, and asks for
     // the regions of other processes the queues of this process need.
     void prepare_queues();
@@ -619,9 +661,9 @@ private:
 
     Fd directory_;  // the generation directory
     HeaderView header_;
-    // For an observer, the base directory as it was opened, its path and
-    // the uid of scada-tagd, to look at `current` again; nothing for a
-    // process.
+    // The base directory as it was opened. An observer looks at `current`
+    // again through it and `base_path_`; a process looks for RETIRING
+    // generations when it restores retained values.
     Fd base_;
     std::string base_path_;
     std::uint16_t process_index_ = 0;
@@ -633,7 +675,11 @@ private:
     std::uint32_t regions_created_ = 0;
     std::uint32_t regions_reused_ = 0;
     std::uint32_t records_repaired_ = 0;
-    std::uint32_t tagd_uid_ = 0;  // for an observer, with base_path_
+    std::uint32_t tagd_uid_ = 0;
+    std::string retain_dir_;  // for a process: where retained values are
+    std::uint32_t values_restored_ = 0;
+    std::uint32_t final_waits_expired_ = 0;
+    std::uint32_t files_rejected_ = 0;
 
     // One entry for every owner of the generation, the type of every slot
     // of every owner, and the STRING slots of every owner in ascending

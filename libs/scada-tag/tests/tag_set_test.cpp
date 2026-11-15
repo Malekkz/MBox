@@ -313,6 +313,15 @@ TEST(TagSetValidate, RejectsInvalidValuesAndFlagCombinations) {
                         "tag 't': a string tag cannot be writable_by_command");
     }
     {
+        TagSet tag_set = samples::one_owner();
+        tag_set.tags.push_back({.name = "t",
+                                .owner = "p",
+                                .type = TagType::STRING,
+                                .retain = true});
+        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
+                        "tag 't': a string tag cannot be retained");
+    }
+    {
         constexpr std::uint8_t NOT_A_TYPE = 6;
         TagSet tag_set = samples::one_owner();
         tag_set.tags.push_back({.name = "t",
