@@ -88,6 +88,8 @@ private:
     Attachment& attachment_;
     std::size_t id_ = 0;
     bool producer_ = false;
+    // True once `open` has claimed the side (`Attachment::claim_queue`).
+    bool claimed_ = false;
     // EVENTS and RESULT: a record was delivered and not yet acknowledged;
     // its position.
     bool pending_ = false;

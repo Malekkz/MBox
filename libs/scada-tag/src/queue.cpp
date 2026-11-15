@@ -23,6 +23,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace scada::tag {
 
@@ -58,9 +59,14 @@ int Queue::open(Attachment& attachment, std::string_view name,
     if (!access.produced && !access.consumed) {
         return SCADA_E_NOT_OWNER;
     }
+    auto queue = std::make_unique<Queue>(attachment, *queue_id,
+                                         access.produced);
     if (!attachment.claim_queue(*queue_id, access.produced)) {
         return SCADA_E_BUSY;
     }
+    // From here the handle owns the side: if what follows fails, its
+    // destructor closes it.
+    queue->claimed_ = true;
     // Mapped and brought into memory here (section 11.2), if attach did not.
     attachment.want_queue(*queue_id);
     if (access.consumed) {
@@ -68,7 +74,7 @@ int Queue::open(Attachment& attachment, std::string_view name,
         static_cast<void>(attachment.queue_dead(
             *queue_id, attachment.queue_bytes(*queue_id)));
     }
-    out = std::make_unique<Queue>(attachment, *queue_id, access.produced);
+    out = std::move(queue);
     return SCADA_OK;
 }
 
@@ -82,16 +88,10 @@ Queue::~Queue() {
     }
     // A queue stays bound to its thread while any side that posts to it is
     // open: its producer side, and for an answer queue the side that
-    // consumes its `cmd` queue. When the last of them closes, the binding
-    // is cleared, whichever thread closes: with no such side open nobody
-    // can post (review of PR #56).
-    attachment_.release_queue(id_, producer_);
-    const std::optional<std::size_t> posted =
-        producer_ ? std::optional<std::size_t>(id_)
-                  : attachment_.queue(id_).answer_queue;
-    if (posted.has_value() && !attachment_.queue_open(*posted, true) &&
-        !attachment_.answer_queue_in_use(*posted)) {
-        attachment_.release_queue_thread(*posted);
+    // consumes its `cmd` queue. The close of the last of them clears the
+    // binding, whichever thread closes (review of PR #56).
+    if (claimed_) {
+        attachment_.close_queue(id_, producer_);
     }
 }
 

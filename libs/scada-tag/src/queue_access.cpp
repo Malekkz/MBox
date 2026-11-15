@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -69,7 +70,7 @@ void Attachment::prepare_queues() {
     const std::size_t count = contents.queues.size();
     queue_threads_ = std::vector<std::atomic<const void*>>(count);
     queue_woken_seq_ = std::vector<std::atomic<std::uint64_t>>(count);
-    queue_open_ = std::vector<std::atomic<std::uint8_t>>(count);
+    queue_open_ = std::vector<std::uint8_t>(count, 0);
     queue_counters_ = std::vector<QueueCounters>(count);
     queue_mappings_ = std::vector<std::atomic<const std::byte*>>(count);
     queue_dead_ = std::vector<std::atomic<bool>>(count);
@@ -245,28 +246,45 @@ const QueueAccess& Attachment::queue(std::size_t queue_id) const noexcept {
     return queue_access_[queue_id];
 }
 
-bool Attachment::claim_queue(std::size_t queue_id, bool producer) noexcept {
+bool Attachment::claim_queue(std::size_t queue_id, bool producer) {
     const std::uint8_t bit = producer ? OPEN_PRODUCER : OPEN_CONSUMER;
     static_cast<void>(queue(queue_id));
-    // Relaxed: only the bit itself matters.
-    return (queue_open_[queue_id].fetch_or(bit, std::memory_order_relaxed) &
-            bit) == 0;
+    // Under the mutex, so that `close_queue` sees the side open or clears
+    // the binding before this side's thread can bind (decision D-40).
+    const std::scoped_lock lock(queue_sides_mutex_);
+    std::uint8_t& open = queue_open_[queue_id];
+    if ((open & bit) != 0) {
+        return false;
+    }
+    open = static_cast<std::uint8_t>(open | bit);
+    return true;
 }
 
-void Attachment::release_queue(std::size_t queue_id, bool producer) noexcept {
+void Attachment::close_queue(std::size_t queue_id, bool producer) {
     const std::uint8_t bit = producer ? OPEN_PRODUCER : OPEN_CONSUMER;
-    static_cast<void>(queue(queue_id));
-    // Relaxed: see `claim_queue`.
-    queue_open_[queue_id].fetch_and(static_cast<std::uint8_t>(~bit),
-                                    std::memory_order_relaxed);
+    const QueueAccess& access = queue(queue_id);
+    const std::optional<std::size_t> posted =
+        producer ? std::optional<std::size_t>(queue_id) : access.answer_queue;
+    // One step with `claim_queue`: no side can open between the test that
+    // no posting side is open and the clear (review of PR #56). A lock that
+    // fails ends the process: the destructor that calls this cannot throw.
+    const std::scoped_lock lock(queue_sides_mutex_);
+    std::uint8_t& open = queue_open_[queue_id];
+    open = static_cast<std::uint8_t>(open & static_cast<std::uint8_t>(~bit));
+    if (!posted.has_value() || queue_side_open(*posted, true) ||
+        answer_queue_in_use(*posted)) {
+        return;
+    }
+    // Relaxed: every bind is made by the thread of an open side, before
+    // that side's close takes the mutex; the mutex orders it before this
+    // store.
+    queue_threads_[*posted].store(nullptr, std::memory_order_relaxed);
 }
 
-bool Attachment::queue_open(std::size_t queue_id,
-                            bool producer) const noexcept {
+bool Attachment::queue_side_open(std::size_t queue_id,
+                                 bool producer) const noexcept {
     const std::uint8_t bit = producer ? OPEN_PRODUCER : OPEN_CONSUMER;
-    static_cast<void>(queue(queue_id));
-    // Relaxed: see `claim_queue`.
-    return (queue_open_[queue_id].load(std::memory_order_relaxed) & bit) != 0;
+    return (queue_open_[queue_id] & bit) != 0;
 }
 
 void Attachment::want_queue(std::size_t queue_id) {
@@ -396,6 +414,12 @@ bool Attachment::bind_queue_thread(std::size_t queue_id) noexcept {
                                    first, self, std::memory_order_relaxed);
 }
 
+bool Attachment::queue_thread_recorded(std::size_t queue_id) const noexcept {
+    static_cast<void>(queue(queue_id));
+    // Relaxed: as in `check_writer_thread`.
+    return queue_threads_[queue_id].load(std::memory_order_relaxed) != nullptr;
+}
+
 bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
     if (bind_queue_thread(queue_id)) {
         return true;
@@ -406,16 +430,11 @@ bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
     return false;
 }
 
-void Attachment::release_queue_thread(std::size_t queue_id) noexcept {
-    static_cast<void>(queue(queue_id));
-    // Relaxed: as in `check_writer_thread`.
-    queue_threads_[queue_id].store(nullptr, std::memory_order_relaxed);
-}
-
 bool Attachment::answer_queue_in_use(std::size_t queue_id) const noexcept {
     return std::ranges::any_of(queue_access_, [this, queue_id](
                                                   const QueueAccess& access) {
-        return access.answer_queue == queue_id && queue_open(access.id, false);
+        return access.answer_queue == queue_id &&
+               queue_side_open(access.id, false);
     });
 }
 

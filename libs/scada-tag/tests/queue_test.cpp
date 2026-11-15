@@ -981,6 +981,45 @@ TEST_F(Queues, AnAnswerQueueIsFreeWhenItsSidesCloseInEitherOrder) {
         [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
 }
 
+// Review of PR #56: a close that finds no posting side open clears the
+// binding in one step with that test, so a side opened by another thread
+// at the same time keeps the binding it takes. One thread opens and closes
+// the side that takes the requests; the other opens the answer queue,
+// binds it, and checks that it stays bound while its side is open. Without
+// the step, the close cleared the binding under the open side within a few
+// thousand rounds.
+TEST_F(Queues, AQueueStaysBoundWhileASideOpensAsAnotherCloses) {
+    constexpr int ROUNDS = 50'000;
+    Attachment& driver = *io();
+    std::atomic<bool> stop{false};
+    std::atomic<int> unbound{0};
+    std::jthread closer([&driver, &stop] {
+        while (!stop.load()) {
+            QueuePtr requests;
+            if (Queue::open(driver, "cmd.io.web", requests) != SCADA_OK) {
+                return;
+            }
+        }
+    });
+    std::jthread poster([&driver, &stop, &unbound] {
+        for (int round = 0; round < ROUNDS; ++round) {
+            QueuePtr results;
+            if (Queue::open(driver, "result.io.web", results) != SCADA_OK ||
+                !driver.bind_queue_thread(RESULT_WEB)) {
+                unbound.fetch_add(1);
+                break;
+            }
+            if (!driver.queue_thread_recorded(RESULT_WEB)) {
+                unbound.fetch_add(1);
+            }
+        }
+        stop.store(true);
+    });
+    poster.join();
+    closer.join();
+    EXPECT_EQ(unbound.load(), 0);
+}
+
 // Decision D-40, condition 4: the ABORTED answers of the drain at attach do
 // not bind the attaching thread; the driver's thread can post its answers.
 TEST_F(Queues, TheDrainAtAttachBindsNoThread) {

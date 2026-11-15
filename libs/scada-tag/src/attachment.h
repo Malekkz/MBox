@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -314,15 +315,14 @@ public:
 
     // Marks the producing (`producer`) or consuming side of `queue_id` as
     // open in this context. False if it is open already: one handle for each
-    // side (section 13.2: one thread). Safe from any thread.
-    [[nodiscard]] bool claim_queue(std::size_t queue_id,
-                                   bool producer) noexcept;
-    // Undoes `claim_queue`.
-    void release_queue(std::size_t queue_id, bool producer) noexcept;
-
-    // True if that side of `queue_id` is open in this context.
-    [[nodiscard]] bool queue_open(std::size_t queue_id,
-                                  bool producer) const noexcept;
+    // side (section 13.2: one thread). Safe from any thread; not real-time.
+    [[nodiscard]] bool claim_queue(std::size_t queue_id, bool producer);
+    // Undoes `claim_queue`. If then no side that posts to the queue the
+    // closed side posts to is open (its producer side, and for an answer
+    // queue the side that consumes its `cmd` queue), forgets the thread
+    // recorded for it, in one step with the test. Safe from any thread;
+    // not real-time.
+    void close_queue(std::size_t queue_id, bool producer);
 
     // Asks for the regions of other processes that the open side of
     // `queue_id` needs: the consumer's `proc` region for the producer, the
@@ -362,16 +362,9 @@ public:
     SCADA_RT [[nodiscard]] bool bind_queue_thread(
         std::size_t queue_id) noexcept;
 
-    // Forgets the thread recorded for `queue_id`. The caller has made sure
-    // that no side that posts to the queue is open in this context: its
-    // producer side, and for an answer queue the side that consumes its
-    // `cmd` queue (`answer_queue_in_use`). While one of them is open the
-    // binding stays, whichever thread closes a handle (review of PR #56).
-    void release_queue_thread(std::size_t queue_id) noexcept;
-
-    // True if the side that consumes a `cmd` queue whose answer queue is
-    // `queue_id` is open in this context: its thread posts the answers.
-    [[nodiscard]] bool answer_queue_in_use(std::size_t queue_id) const noexcept;
+    // True if a thread is recorded as the one that posts to `queue_id`.
+    [[nodiscard]] bool queue_thread_recorded(
+        std::size_t queue_id) const noexcept;
 
     // The counts of `queue_id` in this context.
     [[nodiscard]] QueueCounters& counters(std::size_t queue_id) noexcept;
@@ -433,6 +426,15 @@ public:
                std::uint16_t process_index);
 
 private:
+    // True if that side of `queue_id` is open in this context. The caller
+    // holds `queue_sides_mutex_`.
+    [[nodiscard]] bool queue_side_open(std::size_t queue_id,
+                                       bool producer) const noexcept;
+    // True if the side that consumes a `cmd` queue whose answer queue is
+    // `queue_id` is open in this context: its thread posts the answers. The
+    // caller holds `queue_sides_mutex_`.
+    [[nodiscard]] bool answer_queue_in_use(std::size_t queue_id) const noexcept;
+
     // What the tag functions need to know about one owner of the
     // generation. Filled once by `attach`, then only read.
     struct OwnerAccess {
@@ -584,7 +586,14 @@ private:
     std::vector<QueueAccess> queue_access_;
     std::vector<std::atomic<const void*>> queue_threads_;
     std::vector<std::atomic<std::uint64_t>> queue_woken_seq_;
-    std::vector<std::atomic<std::uint8_t>> queue_open_;
+    // Which sides are open, and the binding rule of the queue threads
+    // (decision D-40): a thread binds itself (`bind_queue_thread`) only
+    // through a side that posts to the queue and is open, from its open to
+    // its close; `close_queue` clears a binding only when no such side is
+    // open, and tests and clears under `queue_sides_mutex_`, which
+    // `claim_queue` also takes. Neither is held by real-time code.
+    std::mutex queue_sides_mutex_;
+    std::vector<std::uint8_t> queue_open_;  // guarded by queue_sides_mutex_
     std::vector<QueueCounters> queue_counters_;
     // The first mapping seen of each queue, and whether it died (see
     // `queue_dead`).
