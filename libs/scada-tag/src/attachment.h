@@ -48,12 +48,22 @@ struct AttachOptions {
     std::optional<std::uint32_t> tagd_uid;
 };
 
+// The process index of an observer, which is no process (section 11.4).
+inline constexpr std::uint16_t NO_PROCESS_INDEX = 0xFFFF;
+
+// The shortest time between two readings of `current` by an observer, in
+// ns (section 11.4: at most once a second).
+inline constexpr std::int64_t CURRENT_RECHECK_INTERVAL_NS = 1'000'000'000;
+
 // What `Attachment::status` reports.
 struct AttachmentStatus {
     std::uint64_t generation = 0;
     // `GlobalHeader.state` now; nothing for a value that is no state.
     std::optional<GenerationState> state;
-    std::uint16_t process_index = 0;
+    // For an observer: true once `current` was found to name another
+    // generation than this one. Always false for a process.
+    bool moved = false;
+    std::uint16_t process_index = 0;  // NO_PROCESS_INDEX for an observer
     // Whether scada-tagd is down, by the rules of section 10.1 applied to
     // `proc.tagd`. REGION_MISSING also if the generation has no process
     // `tagd`.
@@ -129,6 +139,28 @@ public:
         std::string_view process, const AttachOptions& options,
         std::string& detail);
 
+    // Opens an observer of the current generation (section 11.4): step 1
+    // of `attach`, the reading of the tag directory and the clock check,
+    // and nothing else. An observer has the process index
+    // NO_PROCESS_INDEX, owns no owner and no region, takes no lock and
+    // writes nothing to shared memory; every region of another process is
+    // mapped read-only by `PeerRegions` when it is asked for. It keeps the
+    // base directory open, to read `current` again in `status`. Starts
+    // again from step 1, a limited number of times, if the generation is
+    // RETIRING.
+    //
+    // PERMISSION_DENIED if the caller may not open the base directory or
+    // the generation directory, or a directory or the header has the
+    // wrong owner or mode; the other errors as for `attach`, except
+    // NOT_FOUND and ALREADY_EXISTS, which an observer never gets.
+    [[nodiscard]] static Result<std::unique_ptr<Attachment>> observe(
+        const AttachOptions& options, std::string& detail);
+
+    // True for an observer.
+    [[nodiscard]] bool observer() const noexcept {
+        return process_index_ == NO_PROCESS_INDEX;
+    }
+
     // Detaches: the state becomes STOPPING, so that the process reads as
     // down at once (section 10.1), and mappings and the lock are released.
     // The region files stay.
@@ -141,12 +173,15 @@ public:
     // Writes the heartbeat of the process, taken now. False if the
     // generation is RETIRING: the caller detaches and attaches again
     // (section 11.3). Call it from the main loop or cycle of the process.
+    // An observer has no heartbeat: it writes nothing and returns true.
     SCADA_RT [[nodiscard]] bool heartbeat() noexcept;
 
     // The state of the attachment now. It also looks again for the regions
     // of other processes that were asked for and are missing
     // (`PeerRegions::refresh`), and checks the clocks again at most once a
-    // minute (section 13.1). Not real-time.
+    // minute (section 13.1). An observer also reads `current` again, at
+    // most every CURRENT_RECHECK_INTERVAL_NS, and reports in `moved` that
+    // it names another generation. Not real-time.
     [[nodiscard]] AttachmentStatus status();
 
     // The tag functions of section 13. Each returns a return code of
@@ -161,6 +196,19 @@ public:
 
     // Name, type, flags and owner of the tag `handle`. Not real-time.
     [[nodiscard]] int info(std::uint32_t handle, scada_tag_info_t& out) const;
+
+    // Name, tag count, ring capacity and process of the owner
+    // `owner_index`. Not real-time.
+    [[nodiscard]] int owner_info(std::uint16_t owner_index,
+                                 scada_owner_info_t& out) const;
+
+    // The index of the process `name`; asks for its `proc` region unless it
+    // is the attached process. Not real-time.
+    [[nodiscard]] int proc_resolve(std::string_view name, std::uint16_t& index);
+
+    // The state of the process `index` now (section 10.1).
+    SCADA_RT [[nodiscard]] int proc_status(
+        std::uint16_t index, scada_proc_status_t& out) const noexcept;
 
     // Section 6.2 and the overlay of the owner state.
     SCADA_RT [[nodiscard]] int read(std::uint32_t handle,
@@ -197,7 +245,8 @@ public:
     // wrote since its previous call, advances `cycle_seq` and wakes its
     // waiters; then does what `status` does to missing regions and the
     // clock check. SCADA_OK, or SCADA_E_IO with errno set if a wake was
-    // refused (every wake is still tried). Not real-time.
+    // refused (every wake is still tried). An observer wakes nobody: it
+    // gets SCADA_E_INVALID, and nothing is done. Not real-time.
     [[nodiscard]] int notify();
 
     // What the subscriptions and wait sets need (section 8). Each owner or
@@ -378,8 +427,15 @@ private:
                                       std::string& detail);
     void count(const OwnRegion& region) noexcept;
 
+    // For an observer: true if `current` names another generation now,
+    // looked at no more than every CURRENT_RECHECK_INTERVAL_NS.
+    [[nodiscard]] bool current_moved(std::int64_t now_mono_ns);
+
     Fd directory_;  // the generation directory
     HeaderView header_;
+    // For an observer, the base directory, to read `current` again; no
+    // descriptor for a process.
+    Fd base_;
     std::uint16_t process_index_ = 0;
     std::optional<std::uint16_t> tagd_index_;
     OwnProcRegion proc_;
@@ -412,6 +468,12 @@ private:
     // each is a value on its own.
     std::atomic<bool> clock_syscall_{false};
     std::atomic<std::int64_t> next_clock_check_mono_ns_{0};
+
+    // For an observer: whether `current` was found to name another
+    // generation, which does not change back, and when it is read next.
+    // Atomic and relaxed for the reasons of the two above.
+    std::atomic<bool> moved_{false};
+    std::atomic<std::int64_t> next_current_check_mono_ns_{0};
 };
 
 // Initial state of the `tags` region `tags` of an owner whose slots have

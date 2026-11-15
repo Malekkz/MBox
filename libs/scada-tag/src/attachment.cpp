@@ -141,10 +141,17 @@ Result<Fd> open_generation_directory(int base_fd, std::uint64_t generation,
         const int error = errno;
         detail = "cannot open " + name + ": " + errno_text(error);
         // Gone between reading `current` and here: a generation change.
-        return error == ENOENT ? Status(StatusCode::UNAVAILABLE,
-                                        "the current generation is gone")
-                               : Status(StatusCode::IO_ERROR,
-                                        "cannot open the generation directory");
+        if (error == ENOENT) {
+            return Status(StatusCode::UNAVAILABLE,
+                          "the current generation is gone");
+        }
+        // The caller is not in the group of the database (section 3.1).
+        if (error == EACCES || error == EPERM) {
+            return Status(StatusCode::PERMISSION_DENIED,
+                          "no permission to open the generation directory");
+        }
+        return Status(StatusCode::IO_ERROR,
+                      "cannot open the generation directory");
     }
     struct stat info {};
     if (::fstat(directory.get(), &info) != 0) {
@@ -171,8 +178,10 @@ Result<std::uint32_t> tagd_uid_of(const AttachOptions& options,
     return lookup_tagd_uid(detail);
 }
 
-// The current generation: its directory and its header.
+// The current generation: the base directory, the generation directory
+// and its header.
 struct CurrentGeneration {
+    Fd base;
     Fd directory;
     HeaderView header;
 };
@@ -192,7 +201,7 @@ Status absent_as_unavailable(const Status& status) noexcept {
 Result<CurrentGeneration> open_current_generation(const std::string& base_dir,
                                                   std::uint32_t tagd_uid,
                                                   std::string& detail) {
-    const Result<Fd> base = open_base_directory(base_dir, tagd_uid, detail);
+    Result<Fd> base = open_base_directory(base_dir, tagd_uid, detail);
     if (!base.ok()) {
         return absent_as_unavailable(base.status());
     }
@@ -211,7 +220,8 @@ Result<CurrentGeneration> open_current_generation(const std::string& base_dir,
     if (!header.ok()) {
         return absent_as_unavailable(header.status());
     }
-    return CurrentGeneration{std::move(directory).value(),
+    return CurrentGeneration{std::move(base).value(),
+                             std::move(directory).value(),
                              std::move(header).value()};
 }
 
@@ -653,7 +663,90 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
                   "the generation is retiring");
 }
 
+Result<std::unique_ptr<Attachment>> Attachment::observe(
+    const AttachOptions& options, std::string& detail) {
+    const Result<std::uint32_t> tagd_uid = tagd_uid_of(options, detail);
+    if (!tagd_uid.ok()) {
+        return tagd_uid.status();
+    }
+    const std::string base_dir = options.base_dir.empty()
+                                     ? std::string(DEFAULT_BASE_DIR)
+                                     : options.base_dir;
+
+    for (int attempt = 0; attempt < RETIRING_ATTEMPTS; ++attempt) {
+        Result<CurrentGeneration> current =
+            open_current_generation(base_dir, tagd_uid.value(), detail);
+        if (!current.ok()) {
+            return current.status();
+        }
+        const HeaderView& header = current.value().header;
+        const std::optional<GenerationState> state = header.state();
+        if (state == GenerationState::RETIRING) {
+            continue;  // `current` has moved on: resolve it again
+        }
+        if (state != GenerationState::RUNNING) {
+            detail = "generation " +
+                     std::to_string(header.contents().generation) +
+                     " is not RUNNING";
+            return Status(StatusCode::UNAVAILABLE,
+                          "the generation is not running");
+        }
+        std::unique_ptr<Attachment> observer = std::make_unique<Attachment>(
+            Key{}, std::move(current.value().directory),
+            std::move(current.value().header), NO_PROCESS_INDEX);
+        observer->base_ = std::move(current.value().base);
+        if (Status read = observer->read_directory(detail); !read.ok()) {
+            return read;
+        }
+        const std::int64_t now = monotonic_ns();
+        observer->check_clock(now);
+        observer->next_current_check_mono_ns_.store(
+            now + CURRENT_RECHECK_INTERVAL_NS, std::memory_order_relaxed);
+        if (observer->tagd_index_.has_value()) {
+            observer->peers_.want(observer->directory_.get(),
+                                  observer->peers_.proc_slot(
+                                      *observer->tagd_index_),
+                                  now);
+        }
+        if (observer->header_.state() == GenerationState::RETIRING) {
+            continue;
+        }
+        return observer;
+    }
+    detail = "every generation found was RETIRING";
+    return Status(StatusCode::FAILED_PRECONDITION,
+                  "the generation is retiring");
+}
+
+bool Attachment::current_moved(std::int64_t now_mono_ns) {
+    // Relaxed: see the declaration.
+    if (moved_.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    if (now_mono_ns <
+        next_current_check_mono_ns_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    next_current_check_mono_ns_.store(
+        now_mono_ns + CURRENT_RECHECK_INTERVAL_NS, std::memory_order_relaxed);
+    std::string ignored;
+    const Result<std::uint64_t> generation = read_current(base_.get(), ignored);
+    // A `current` that cannot be read now (scada-tagd is switching it, or
+    // the database is being set up again) is no evidence of a change; the
+    // next look decides.
+    if (generation.ok() &&
+        generation.value() != header_.contents().generation) {
+        moved_.store(true, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
+}
+
 bool Attachment::heartbeat() noexcept {
+    // An observer has no `proc` region to write (section 11.4).
+    if (!proc_.valid()) {
+        return true;
+    }
     proc_.heartbeat(monotonic_ns());
     return header_.state() != GenerationState::RETIRING;
 }
@@ -669,6 +762,7 @@ AttachmentStatus Attachment::status() {
     AttachmentStatus status;
     status.generation = header_.contents().generation;
     status.state = header_.state();
+    status.moved = observer() && current_moved(now);
     status.process_index = process_index_;
     status.regions_created = regions_created_;
     status.regions_reused = regions_reused_;

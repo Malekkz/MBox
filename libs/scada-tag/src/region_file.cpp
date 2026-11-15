@@ -214,6 +214,11 @@ Result<Fd> open_base_directory(const std::string& path, std::uint32_t tagd_uid,
             return Status(StatusCode::PERMISSION_DENIED,
                           "the base directory is not a directory");
         }
+        // The caller is not in the group of the database (section 3.1).
+        if (error == EACCES || error == EPERM) {
+            return Status(StatusCode::PERMISSION_DENIED,
+                          "no permission to open the base directory");
+        }
         return Status(StatusCode::IO_ERROR, "cannot open the base directory");
     }
     struct stat info {};

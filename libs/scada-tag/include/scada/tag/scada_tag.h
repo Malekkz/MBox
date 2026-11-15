@@ -6,11 +6,12 @@
  * (docs/contracts/tag-database.md, section 13). It is the stable interface;
  * this header can be included from C and from C++.
  *
- * Present so far: attach, detach, heartbeat, notify, status, the tag
- * functions (resolve, info, read, write and their batch and string forms),
- * the change rings (scada_sub_*) and the wait sets (scada_waitset_*,
- * without queues). The other functions of section 13 are added by the
- * issues that implement them.
+ * Present so far: attach, observe, detach, heartbeat, notify, status, the
+ * owner and process functions (scada_owner_info, scada_proc_resolve,
+ * scada_proc_status), the tag functions (resolve, info, read, write and
+ * their batch and string forms), the change rings (scada_sub_*) and the
+ * wait sets (scada_waitset_*, without queues). The other functions of
+ * section 13 are added by the issues that implement them.
  */
 
 #include <stddef.h>
@@ -65,12 +66,17 @@ enum {
     SCADA_GENERATION_RETIRING = 3
 };
 
+/* The process index of an observer context, which is no process
+ * (section 11.4): scada_status.process_index of an observer. */
+#define SCADA_NO_PROCESS UINT16_C(0xFFFF)
+
 /* What scada_tag_status reports. 32 bytes. */
 /* NOLINTNEXTLINE(modernize-use-using): C interface */
 typedef struct {
     uint64_t generation;       /* number of the generation attached to */
     uint32_t generation_state; /* SCADA_GENERATION_*, or 0 if not valid */
-    uint16_t process_index;    /* of the calling process in the process table */
+    uint16_t process_index;    /* of the calling process in the process
+                                  table; SCADA_NO_PROCESS for an observer */
     uint8_t tagd_down;         /* 1 if scada-tagd is down (section 10.1) */
     uint8_t clock_syscall;     /* 1 if reading the clocks is a system call on
                                   this machine, so that the functions marked
@@ -78,7 +84,10 @@ typedef struct {
     uint32_t regions_created;  /* own regions the attach created */
     uint32_t regions_reused;   /* own regions the attach found and reused */
     uint32_t records_repaired; /* tag records repaired at attach (6.3) */
-    uint32_t reserved1;        /* 0 */
+    uint16_t owner_count;      /* owners of the generation (owner indexes
+                                  0 to owner_count - 1) */
+    uint16_t process_count;    /* processes of the generation (process
+                                  indexes 0 to process_count - 1) */
 } scada_status; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*
@@ -111,9 +120,49 @@ int scada_tag_attach_opts(const char* process_name,
                           const scada_attach_opts* opts, scada_ctx** out);
 
 /*
+ * Opens an observer context on the current generation and stores it in
+ * `*out` (section 11.4). An observer is no process: it needs no entry in
+ * the process table and may run as any user who can read the database
+ * (section 3.1: a member of the group scada, or root). It makes the checks
+ * of attach step 1 (base directory, `current`, generation directory,
+ * header, layout version) and maps every region it reads read-only. It
+ * creates no file, takes no lock and writes nothing to shared memory, so
+ * any number of observers may run beside the processes of the generation.
+ *
+ * In an observer context: every function that reads works as for a
+ * process that owns no tag; scada_tag_write, scada_tag_write_many and
+ * scada_tag_write_string return SCADA_E_NOT_OWNER (SCADA_E_INVALID for a
+ * handle that is none); scada_tag_heartbeat and scada_tag_notify return
+ * SCADA_E_INVALID and do nothing. scada_tag_status takes over what notify
+ * does for a process: call it about once a second. It also reports a
+ * generation change, which an observer does not see through a heartbeat:
+ * SCADA_E_RETIRING when the generation is RETIRING or `current` names
+ * another one. The observer then detaches, observes again and resolves
+ * its handles again (section 11.3).
+ *
+ * SCADA_E_INVALID: `out` is NULL, or tagd_uid is neither -1 nor a uid.
+ * SCADA_E_PERMISSION: the caller may not read the base directory or the
+ * generation directory, or one of them or the header has the wrong owner
+ * or mode. SCADA_E_LAYOUT: magic or layout version of the header are not
+ * those of this library, or the header is not valid. SCADA_E_RETIRING:
+ * the generation is retiring and no new one was found. SCADA_E_IO with
+ * errno set: ENOENT if there is no base directory or no current
+ * generation, EAGAIN if the generation is not running. On an error `*out`
+ * is NULL.
+ *
+ * Not real-time.
+ */
+int scada_tag_observe(scada_ctx** out);
+
+/* As scada_tag_observe, with the base directory and the uid of scada-tagd
+ * replaced (section 3: for tests). `retain_dir` is not used. */
+int scada_tag_observe_opts(const scada_attach_opts* opts, scada_ctx** out);
+
+/*
  * Detaches and frees `ctx`; NULL does nothing. The process reads as down at
- * once (section 10.1). Its regions stay for its next attach. No other
- * thread may use `ctx` during or after the call.
+ * once (section 10.1). Its regions stay for its next attach. An observer
+ * context writes nothing here either. No other thread may use `ctx` during
+ * or after the call.
  */
 void scada_tag_detach(scada_ctx* ctx);
 
@@ -123,7 +172,7 @@ void scada_tag_detach(scada_ctx* ctx);
  *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring: the heartbeat
  * was written, and the caller detaches and attaches again (section 11.3);
- * SCADA_E_INVALID if `ctx` is NULL.
+ * SCADA_E_INVALID if `ctx` is NULL or an observer, which has no heartbeat.
  *
  * Real-time safe: no allocation, no lock, no system call.
  */
@@ -143,7 +192,8 @@ int scada_tag_heartbeat(scada_ctx* ctx);
  * a second (or scada_tag_status), or an owner that starts after the reader
  * resolved its tags keeps reading as BAD with OWNER_DOWN.
  *
- * SCADA_OK; SCADA_E_INVALID if `ctx` is NULL; SCADA_E_IO with errno set if
+ * SCADA_OK; SCADA_E_INVALID if `ctx` is NULL or an observer, which wakes
+ * nobody and calls scada_tag_status instead; SCADA_E_IO with errno set if
  * the kernel refused a wake, in which case consumers still receive within
  * 100 ms.
  *
@@ -157,9 +207,11 @@ int scada_tag_notify(scada_ctx* ctx);
  * Fills `*out` with the state of the attachment. It also looks again, at
  * most once a second each, for regions of other processes that this context
  * asked for and that were missing, and checks the clocks again at most once
- * a minute, as scada_tag_notify does.
+ * a minute, as scada_tag_notify does. In an observer context it also reads
+ * `current` again, at most once a second.
  *
- * SCADA_OK; SCADA_E_RETIRING if the generation is retiring;
+ * SCADA_OK; SCADA_E_RETIRING if the generation is retiring, or, for an
+ * observer, if `current` names another generation;
  * SCADA_E_TAGD_DOWN if the generation is not retiring and scada-tagd is
  * down, in which case existing mappings keep working. `*out` is filled in
  * all three cases. SCADA_E_INVALID if an argument is NULL.
@@ -256,6 +308,124 @@ typedef struct {
     char name[SCADA_TAG_NAME_SIZE];    /* the tag name, NUL-terminated */
     char owner[SCADA_OWNER_NAME_SIZE]; /* the owner name, NUL-terminated */
 } scada_tag_info_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/* What scada_owner_info reports about an owner (section 5). 48 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    char name[SCADA_OWNER_NAME_SIZE]; /* the owner name, NUL-terminated */
+    uint32_t tag_count;               /* its tags: slots 0 to tag_count - 1 */
+    uint32_t change_ring_capacity;    /* entries of its change ring */
+    uint16_t process_index;           /* the process it is a thread of */
+    uint8_t owned;                    /* 1 if the calling process is that
+                                         process */
+    uint8_t reserved0;                /* 0 */
+    uint32_t reserved1;               /* 0 */
+} scada_owner_info_t; /* NOLINT(readability-identifier-naming): named like the other structures of section 13 */
+
+/*
+ * Fills `*out` with name, tag count, ring capacity and process of the
+ * owner `owner_index` (0 to scada_status.owner_count - 1). With
+ * scada_tag_handle and scada_tag_info it lists every tag of the
+ * generation.
+ *
+ * SCADA_E_INVALID: an argument is NULL or `owner_index` is no owner of
+ * this generation.
+ *
+ * Not real-time.
+ */
+int scada_owner_info(scada_ctx* ctx, uint16_t owner_index,
+                     scada_owner_info_t* out);
+
+/*
+ * The handle of the tag in slot `slot` of owner `owner_index` (section
+ * 5.1), or SCADA_INVALID_HANDLE if the two do not fit a handle. Whether the
+ * tag exists is checked by the function the handle is passed to; slots 0
+ * to scada_owner_info_t.tag_count - 1 exist.
+ *
+ * Real-time safe; needs no context.
+ */
+uint32_t scada_tag_handle(uint16_t owner_index, uint32_t slot);
+
+/* Why scada_proc_status reports a process as down (section 10.1): the
+ * first rule that holds. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_DOWN_NONE = 0,           /* not down */
+    SCADA_DOWN_REGION_MISSING = 1, /* its proc region is missing, unusable
+                                      or not ready, or was not resolved in
+                                      this context */
+    SCADA_DOWN_NOT_RUNNING = 2,    /* its state is not RUNNING */
+    SCADA_DOWN_HEARTBEAT_STALE = 3 /* its heartbeat is older than its
+                                      timeout, or too far ahead */
+};
+
+/* Values of scada_proc_status_t.state (section 10). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_PROC_STARTING = 1,
+    SCADA_PROC_RUNNING = 2,
+    SCADA_PROC_STOPPING = 3
+};
+
+/* What scada_proc_status reports about a process (section 10). 88 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    char name[SCADA_OWNER_NAME_SIZE]; /* the process name, NUL-terminated */
+    uint64_t heartbeat;             /* heartbeat counter; 0 if no region */
+    int64_t heartbeat_mono_ns;      /* CLOCK_MONOTONIC of the last
+                                       heartbeat; 0 if no region */
+    int64_t heartbeat_age_ns;       /* time since then, never negative; 0
+                                       if no region */
+    uint32_t heartbeat_timeout_ms;  /* from the process table */
+    uint32_t state;                 /* SCADA_PROC_* as stored; 0 if no
+                                       region */
+    uint32_t cycle_seq;             /* advanced by scada_tag_notify */
+    uint32_t pid;                   /* as the process stored it; for
+                                       diagnosis only */
+    uint32_t uid;                   /* from the process table */
+    uint16_t process_index;         /* in the process table */
+    uint8_t down;                   /* 1 if down by the rules of section
+                                       10.1, as the library judges it now */
+    uint8_t down_reason;            /* SCADA_DOWN_* */
+    uint8_t marked_down;            /* 1 if scada-tagd has set the `down`
+                                       flag of the process table; lags up
+                                       to one check interval */
+    uint8_t realtime;               /* 1 if the process table marks it
+                                       REALTIME */
+    uint8_t reserved[6];            /* 0 */
+} scada_proc_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/*
+ * Stores in `*index` the process index of the process `process_name` and
+ * maps its proc region read-only, so that scada_proc_status makes no system
+ * call. A region that is not there yet is looked for again by
+ * scada_tag_notify and scada_tag_status, at most once a second.
+ *
+ * SCADA_E_NOT_FOUND: no process has this name. SCADA_E_INVALID: an
+ * argument is NULL or `process_name` is no process name.
+ *
+ * Not real-time.
+ */
+int scada_proc_resolve(scada_ctx* ctx, const char* process_name,
+                       uint16_t* index);
+
+/*
+ * Fills `*out` with the state of the process `index` (0 to
+ * scada_status.process_count - 1) now. RESOLVE IT IN THIS CONTEXT FIRST:
+ * the proc region of a process that was never resolved, and that is not
+ * the caller, reads as missing (SCADA_DOWN_REGION_MISSING).
+ *
+ * The fields of the proc region are read one by one; they belong to the
+ * same heartbeat only as far as diagnosis needs.
+ *
+ * SCADA_E_INVALID: an argument is NULL or `index` is no process of this
+ * generation.
+ *
+ * Real-time safe: no allocation, no lock, no system call. Safe from any
+ * thread.
+ */
+int scada_proc_status(scada_ctx* ctx, uint16_t index,
+                      scada_proc_status_t* out);
 
 /*
  * Stores in `*handle` the handle of the tag `name` (section 5.1). The

@@ -114,6 +114,22 @@ SCADA_RT [[nodiscard]] DownReason proc_liveness(
     std::span<std::byte> region, std::uint32_t heartbeat_timeout_ms,
     std::int64_t now_mono_ns) noexcept;
 
+// The fields of a `proc` region as a watcher reads them, each on its own.
+struct ProcFields {
+    std::uint64_t heartbeat = 0;
+    std::int64_t heartbeat_mono_ns = 0;
+    std::uint32_t pid = 0;
+    std::uint32_t state = 0;  // as stored; may be no ProcessState
+    std::uint32_t cycle_seq = 0;
+};
+
+// The fields of `region`, the mapped `proc` region of a process, or
+// nothing if `region` is too small to be one (an empty span too). Each
+// field is read with `load_shared`; together they need not belong to one
+// heartbeat.
+SCADA_RT [[nodiscard]] std::optional<ProcFields> read_proc_fields(
+    std::span<std::byte> region) noexcept;
+
 // The `cycle_seq` field of `region`, the mapped `proc` region of a process,
 // or null if `region` is too small to be one (an empty span too). The
 // pointer is valid as long as the mapping is; the field is read with

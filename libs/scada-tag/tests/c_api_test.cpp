@@ -97,7 +97,10 @@ TEST_F(CApi, AttachHeartbeatStatusDetach) {
     EXPECT_EQ(status.regions_reused, 0U);
     EXPECT_EQ(status.records_repaired, 0U);
     EXPECT_LE(status.clock_syscall, 1);
-    EXPECT_EQ(status.reserved1, 0U);
+    // The fixture has one owner and four processes (contract 0.8: the two
+    // counts took the place of `reserved1`).
+    EXPECT_EQ(status.owner_count, 1U);
+    EXPECT_EQ(status.process_count, 4U);
 
     static_cast<void>(host().check(scada::monotonic_ns()));
     EXPECT_EQ(host().is_down("io"), false);

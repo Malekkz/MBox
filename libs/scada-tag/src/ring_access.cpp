@@ -26,6 +26,10 @@
 namespace scada::tag {
 
 int Attachment::notify() {
+    // An observer wakes nobody and has no cycle counter (section 11.4).
+    if (observer()) {
+        return SCADA_E_INVALID;
+    }
     const void* const self = thread_mark();
     int error = 0;
     for (const OwnedOwner& owned : owners_) {
