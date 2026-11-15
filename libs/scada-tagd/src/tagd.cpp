@@ -1,4 +1,5 @@
 #include "scada/tagd/tagd.h"
+#include "scada/tagd/suspend.h"
 
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
@@ -44,6 +45,8 @@ using scada::tag::DownReason;
 using scada::tag::GenerationHost;
 using scada::tag::LateHeartbeats;
 using scada::tag::ProcessChange;
+using scada::tag::QueueChange;
+using scada::tag::QueueEvent;
 using scada::tag::SweptEntry;
 using scada::tag::TagSet;
 
@@ -58,7 +61,9 @@ constexpr std::string_view USAGE =
     "so that a restart does not disturb the other services. Otherwise it\n"
     "creates the next generation and switches to it. It then checks every\n"
     "heartbeat_check_ms (from the tag-set file, 250 ms by default) which\n"
-    "processes are down, and logs every change.\n"
+    "processes are down and which reliable queues are broken (cursor and\n"
+    "write_seq out of range) or missing, and logs every change. It warns\n"
+    "when the system can suspend or was suspended, which a unit must not.\n"
     "\n"
     "Options:\n"
     "  --tag-set <file>        Tag-set file (JSON). It must hold a process\n"
@@ -242,6 +247,38 @@ void log_report(Logger& logger, const CheckReport& report) {
             logger.log(LogLevel::WARNING, "heartbeat late", fields);
         }
     }
+    for (const QueueChange& queue : report.queues) {
+        // A broken queue refuses every post and delivers nothing until the
+        // next generation (contract 9.2): actions that need it are refused.
+        // Each is logged once per change, not at every check.
+        const std::string cursor = std::to_string(queue.cursor);
+        const std::string written = std::to_string(queue.write_seq);
+        const std::string capacity = std::to_string(queue.capacity);
+        const std::array<LogField, 5> fields{{
+            {"QUEUE", queue.queue},
+            {"CURSOR", cursor},
+            {"WRITE_SEQ", written},
+            {"CAPACITY", capacity},
+            {"REASON", queue.replaced ? "replaced" : "out of range"},
+        }};
+        switch (queue.event) {
+            case QueueEvent::BROKEN:
+                logger.log(LogLevel::WARNING, "queue broken", fields);
+                break;
+            case QueueEvent::NO_LONGER_BROKEN:
+                logger.log(LogLevel::NOTICE, "queue no longer broken",
+                           std::span(fields).first(4));
+                break;
+            case QueueEvent::MISSING:
+                logger.log(LogLevel::WARNING, "queue file missing",
+                           std::span(fields).first(1));
+                break;
+            case QueueEvent::FOUND:
+                logger.log(LogLevel::NOTICE, "queue file found again",
+                           std::span(fields).first(1));
+                break;
+        }
+    }
     for (const SweptEntry& entry : report.swept) {
         // The name is outside input; the sinks escape it and cut it.
         if (entry.removed) {
@@ -256,6 +293,25 @@ void log_report(Logger& logger, const CheckReport& report) {
                        {{"ENTRY", entry.name}});
         }
     }
+}
+
+// Logs what a sample of the clocks showed about a system suspend (contract
+// 3.4): the unit must not suspend, and a suspend makes write requests
+// expire later in real time than their requesters meant.
+void note_suspend(Logger& logger, SuspendWatch& watch) {
+    const std::optional<SuspendFinding> finding =
+        watch.observe(sample_clocks());
+    if (!finding.has_value()) {
+        return;
+    }
+    // Rounded up, so that a suspend shorter than 1 ms does not read as 0.
+    const std::string suspended = std::to_string(
+        (finding->suspended_ns + NANOSECONDS_PER_MILLISECOND - 1) /
+        NANOSECONDS_PER_MILLISECOND);
+    logger.log(LogLevel::WARNING,
+               finding->at_start ? "the system was suspended since boot"
+                                 : "the system was suspended",
+               {{"SUSPENDED_MS", suspended}});
 }
 
 // The time between two watchdog messages, or nothing if no watchdog applies
@@ -290,7 +346,7 @@ std::int64_t loop_period_ns(const GenerationHost& host,
 // Runs until a stop signal arrives. Returns the process exit code.
 int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
-          Logger& logger) {
+          Logger& logger, SuspendWatch& suspend) {
     const std::int64_t period = loop_period_ns(host, settings);
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
     bool feeding = true;  // the last watchdog message was sent
@@ -302,6 +358,7 @@ int serve(GenerationHost& host, Notifier& notifier,
         // that a hung loop stops all three (contract, sections 3.4, 10.1).
         host.heartbeat(now);
         log_report(logger, host.check(now));
+        note_suspend(logger, suspend);
         if (feed_period.has_value() && now >= next_feed) {
             const bool fed = notifier.watchdog().ok();
             if (!fed && feeding) {
@@ -408,6 +465,20 @@ int start(const Options& options, std::ostream& err) {
              host.status(), detail);
         return EXIT_ERROR;
     }
+    // Contract 3.4: the unit must not suspend. Whether the sleep targets
+    // are masked cannot be seen from here. Most kernels offer sleep states
+    // even when they are, so what the kernel offers is INFO, logged once;
+    // a measured suspend (below, and in every round) is the WARNING.
+    if (const std::string states =
+            read_sleep_states(std::string(SLEEP_STATES_PATH));
+        !states.empty()) {
+        logger.value().log(LogLevel::INFO,
+                           "the kernel offers sleep states; the unit must "
+                           "not suspend",
+                           {{"STATES", states}});
+    }
+    SuspendWatch suspend;
+    note_suspend(logger.value(), suspend);
     for (const std::string& note : host.value().notes()) {
         logger.value().log(LogLevel::NOTICE, note);
     }
@@ -427,7 +498,7 @@ int start(const Options& options, std::ostream& err) {
     // Best effort: the status line only helps the person looking.
     static_cast<void>(notifier.set_status_text("Generation " + generation));
     return serve(host.value(), notifier, settings.value(), signals,
-                 logger.value());
+                 logger.value(), suspend);
 }
 
 }  // namespace
