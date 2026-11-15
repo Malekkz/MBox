@@ -788,12 +788,12 @@ Consequences:
 - Accepted deviation (review of #55): RETIRING and `current` are looked at only in `scada_tag_status`, so calling it about once a second, detaching and observing again are the caller's duty (contract 11.4, items 5 and 6). The perf case with 8 observers reports only: its 99th percentile is noisy on shared machines.
 - Open for phase 10, not changed now: (a) reference 11.6 gives direct mode to group `scada-emergency`, but the base directory is `2750 scada-tagd:scada`, so such a user cannot enter it; (b) the audit record of a `scadactl` invocation belongs in `scadactl`, not in the library.
 
-## D-39: scadactl in phase 1: commands, output forms, marks and the watch
+## D-43: scadactl in phase 1: commands, output forms, marks and the watch
 Date: 2026-11-15
 Phase / issue: 1, #19 (P1-11)
 Status: accepted
 
-Context: issue #19 asks for `scadactl status`, `tag list [pattern]`, `tag get <name>` and `tag watch <pattern>` on shared memory, human-readable and `--json`, with bad and stale quality clearly marked. Reference 11.5 fixes the command names and that JSON comes with `--json`; it leaves open the pattern syntax, the form of the output, how bad and stale are marked, what the watch does on a gap or a generation change, and the exit codes. It reads through the observer context of D-38.
+Context: issue #19 asks for `scadactl status`, `tag list [pattern]`, `tag get <name>` and `tag watch <pattern>` on shared memory, human-readable and `--json`, with bad and stale quality clearly marked. Reference 11.5 fixes the command names and that JSON comes with `--json`; it leaves open the pattern syntax, the form of the output, how bad and stale are marked, what the watch does on a gap or a generation change, and the exit codes. It reads through the observer context of D-42.
 Options, patterns: shell-style glob; regular expressions; prefix only. Options, marks: a column of words only; colour; a leading mark character. Options, watch output in JSON: one array at the end; one document per line.
 Decision:
 - Patterns are globs over the tag-name alphabet: `*` any characters, dots included, `?` exactly one; at most 127 bytes; a pattern without them matches only the name it spells.
@@ -803,6 +803,6 @@ Decision:
 - `SCADA_E_TAGD_DOWN` from status means "values may be stale": `tag list` and `tag get` start with `! scada-tagd down: values may be stale` and carry `"tagd_down"` in JSON; `tag watch` writes a line or a `tagd` event when the state changes.
 - `status` shows no uid and no pid, in neither form: they identify accounts and processes and must not reach a later Viewer role through scripts that pass the output on (review of #55).
 - Exit codes 0 success, 1 error, 2 wrong arguments, as `scada-tagd`. Options may stand before or after the command words; `--` ends them. `--base-dir` and `--tagd-uid` select a database other than `/dev/shm/scada` of the user `scada-tagd`, for tests.
-- No `--direct` flag and no action: phase 1 has only read commands; reference 11.6 adds the four actions, the `scada-emergency` group and the audit record in phase 10 (D-38, open points).
+- No `--direct` flag and no action: phase 1 has only read commands; reference 11.6 adds the four actions, the `scada-emergency` group and the audit record in phase 10 (D-42, open points).
 Reason: globs are what operators type for tag names and need no escaping of the dot; a mark in the first column survives `grep`, a terminal without colour and a copy into a ticket. JSON Lines lets a script read a watch as it runs.
 Consequences: the text form is for people and may change; scripts use `--json`. A STRING change shows the text the tag holds when the line is written, which can be that of a later write, because the ring holds the slot, not the text.

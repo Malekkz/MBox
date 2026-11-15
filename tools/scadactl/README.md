@@ -9,7 +9,7 @@ mode of section 11.5 comes with phase 4.
 ## What it does
 
 `scadactl` opens an observer context of `libscada-tag` (tag database
-contract, section 11.4, decision D-38). An observer needs no entry in the tag
+contract, section 11.4, decision D-42). An observer needs no entry in the tag
 set, writes nothing to shared memory and maps every region read-only. Any
 number of `scadactl` may run beside the services.
 

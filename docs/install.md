@@ -183,7 +183,7 @@ Membership of the group `scada` means unaudited read access to every tag:
 creating files in the generation directory and locking the `proc` region
 of a process, which can keep that process from attaching. That is a power
 the group already has for the services; `scadactl` uses neither. Add only
-accounts to `scada` that are trusted that far (decision D-38).
+accounts to `scada` that are trusted that far (decision D-42).
 
 ## 9. Remove it again
 
