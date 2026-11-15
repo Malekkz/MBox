@@ -368,9 +368,15 @@ Step Watch::wait(const StopSignals& stop) {
     }
     for (std::size_t index = 1; index < polled.size(); ++index) {
         if ((polled[index].revents & POLLIN) != 0) {
+            // Takes the count, so that the descriptor is not readable
+            // again for the same wake. A failed read (another thread took
+            // it first, EAGAIN) only means one more look at the rings.
             std::array<std::byte, sizeof(std::uint64_t)> counter{};
-            static_cast<void>(
-                ::read(polled[index].fd, counter.data(), counter.size()));
+            if (::read(polled[index].fd, counter.data(), counter.size()) < 0 &&
+                errno != EAGAIN) {
+                err_ << "scadactl: waiting for changes failed\n";
+                return Step::FAILED;
+            }
         }
     }
     return Step::GO_ON;
