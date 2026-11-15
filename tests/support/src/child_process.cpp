@@ -79,7 +79,10 @@ bool set_non_blocking(const UniqueFd& descriptor) {
         }
     }
     const char failed = 1;
-    static_cast<void>(::write(status, &failed, 1));
+    // Nothing is left to do if the parent is gone; the result is kept only
+    // because the release build checks that it is used.
+    const ssize_t written = ::write(status, &failed, 1);
+    static_cast<void>(written);
     ::_exit(EXIT_NOT_STARTED);
 }
 
