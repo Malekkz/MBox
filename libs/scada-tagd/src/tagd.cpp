@@ -44,6 +44,7 @@ using scada::tag::DownReason;
 using scada::tag::GenerationHost;
 using scada::tag::LateHeartbeats;
 using scada::tag::ProcessChange;
+using scada::tag::QueueChange;
 using scada::tag::SweptEntry;
 using scada::tag::TagSet;
 
@@ -58,7 +59,8 @@ constexpr std::string_view USAGE =
     "so that a restart does not disturb the other services. Otherwise it\n"
     "creates the next generation and switches to it. It then checks every\n"
     "heartbeat_check_ms (from the tag-set file, 250 ms by default) which\n"
-    "processes are down, and logs every change.\n"
+    "processes are down and which reliable queues are broken (cursor and\n"
+    "write_seq out of range), and logs every change.\n"
     "\n"
     "Options:\n"
     "  --tag-set <file>        Tag-set file (JSON). It must hold a process\n"
@@ -240,6 +242,27 @@ void log_report(Logger& logger, const CheckReport& report) {
                        fields);
         } else {
             logger.log(LogLevel::WARNING, "heartbeat late", fields);
+        }
+    }
+    for (const QueueChange& queue : report.queues) {
+        // A broken queue refuses every post and delivers nothing until the
+        // next generation (contract 9.2): actions that need it are refused.
+        // Logged once per change, not at every check.
+        const std::string cursor = std::to_string(queue.cursor);
+        const std::string written = std::to_string(queue.write_seq);
+        const std::string capacity = std::to_string(queue.capacity);
+        const std::array<LogField, 5> fields{{
+            {"QUEUE", queue.queue},
+            {"CURSOR", cursor},
+            {"WRITE_SEQ", written},
+            {"CAPACITY", capacity},
+            {"REASON", queue.replaced ? "replaced" : "out of range"},
+        }};
+        if (queue.broken) {
+            logger.log(LogLevel::WARNING, "queue broken", fields);
+        } else {
+            logger.log(LogLevel::NOTICE, "queue no longer broken",
+                       std::span(fields).first(4));
         }
     }
     for (const SweptEntry& entry : report.swept) {

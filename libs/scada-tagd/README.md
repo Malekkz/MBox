@@ -38,6 +38,8 @@ the standard error stream.
 | `process up` | NOTICE | `PROCESS` |
 | `heartbeat late` | WARNING, at most once per process and check. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous check), `LATE_BEATS_TOTAL`, `LONGEST_GAP_MS`, `LAST_LATE_MONO_NS` (CLOCK_MONOTONIC) |
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
+| `queue broken` | WARNING, once when a queue's cursor and `write_seq` become a pair out of range (contract 9.2). The queue refuses posts and delivers nothing until the next generation | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY`, `REASON`: `replaced` (the consumer found the queue file replaced) or `out of range` |
+| `queue no longer broken` | NOTICE, once | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY` |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
@@ -50,8 +52,8 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.5, sections 3, 10
-  and 11.1; decision D-27 in `docs/decisions.md`.
+- Contract: `docs/contracts/tag-database.md`, version 0.11, sections 3,
+  9.2, 10 and 11.1; decisions D-27 and D-43 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),

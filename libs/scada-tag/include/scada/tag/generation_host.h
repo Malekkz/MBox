@@ -72,11 +72,30 @@ struct LateHeartbeats {
     bool baseline = false;
 };
 
+// A reliable queue whose state changed at a liveness check (section 9.2,
+// issue #53): its consumer's cursor and its `write_seq` became, or stopped
+// being, a pair out of range. Such a queue is stopped: its consumer gets
+// SCADA_E_LAYOUT and its producer SCADA_E_PEER_DOWN. The values are input:
+// the producer and the consumer write them.
+struct QueueChange {
+    std::string queue;
+    bool broken = false;  // false: it was broken and is no longer
+    // The values that were judged; for a queue that is no longer broken,
+    // the pair that was found in range.
+    std::uint64_t cursor = 0;
+    std::uint64_t write_seq = 0;
+    std::uint32_t capacity = 0;
+    // The cursor is the all-ones value a consumer stores when it found the
+    // queue file replaced inside the generation (decision D-40).
+    bool replaced = false;
+};
+
 // What one liveness check changed.
 struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
     std::vector<LateHeartbeats> late;
+    std::vector<QueueChange> queues;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -144,9 +163,12 @@ public:
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
     // clears it for every process that is not, reads the late heartbeats
-    // every process recorded, then removes every entry of the generation
-    // directory that the header does not list or whose owner is wrong
-    // (section 3.1). Returns what changed.
+    // every process recorded, applies the range rule of section 9.2 to
+    // every queue whose region and consumer's `proc` region are both there,
+    // then removes every entry of the generation directory that the header
+    // does not list or whose owner is wrong (section 3.1). Returns what
+    // changed. A queue is reported when it becomes broken and when it is
+    // no longer broken, not at every check.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.

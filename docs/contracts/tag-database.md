@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.10 (draft) |
+| Contract version | 0.11 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -162,6 +162,12 @@ accepted for layout version 1:
 - `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
 - A process feeds the service manager's watchdog from the same loop that
   writes its heartbeat.
+- The unit does not suspend or hibernate: the platform disables both (for
+  example by masking the service manager's sleep targets). `CLOCK_MONOTONIC`
+  does not advance while the system is suspended, so after a resume a write
+  request would expire later in real time than its requester intended, and
+  every heartbeat would still look fresh. A unit that resumed from a suspend
+  is treated as restarted (D-43; proposed, awaiting the committee).
 
 ## 4. Region header
 
@@ -660,6 +666,16 @@ producer gets `SCADA_E_PEER_DOWN` (section 16). The all-ones cursor
 (2^64 - 1) is reserved: no `write_seq` reaches it (a post that would make
 `write_seq` equal to it is refused with `SCADA_E_FULL`), so by the range rule
 every reader of a cursor finds it out of range and consumes nothing.
+`scada-tagd` applies the same range rule to every queue at each liveness
+check (section 10.1), for reporting only: it reads `write_seq`, then the
+consumer's cursor, then `write_seq` again, and finds the queue broken when
+the cursor is beyond the second `write_seq` or the first `write_seq` is more
+than the capacity beyond the cursor. While both sides run, this order
+cannot find a pair broken that was in range at every moment. A queue whose
+region or whose consumer's `proc` region is missing is not judged. It logs
+a queue that became broken, and again one that no longer is, with its
+name, cursor, `write_seq` and capacity, once per change. The library does
+not use the result.
 On a stopped queue `scada_queue_next` waits out its timeout before it
 reports it, and a wait set never reports a stopped queue as ready, so
 neither spins; a consumer that calls `scada_queue_next` only after a wake
@@ -1435,6 +1451,11 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
+| 0.11 | 2026-11-15 | Issue #53, points 1 and 5 (D-43). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue. Section 3.4: no system suspend. |
+
+Migration, 0.10 to 0.11: none for data; the layout version stays 1 and no
+structure in shared memory changed. `scada-tagd` now maps every queue
+region read-only. A unit that allowed suspend must disable it.
 
 Migration, 0.9 to 0.10: none for data; the layout version stays 1 and no
 structure in shared memory changed. The queue functions are new; nothing

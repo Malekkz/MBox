@@ -2,6 +2,7 @@
 
 #include "layout.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "region_file.h"
 #include "resolved_tag_set.h"
 #include "shared_memory.h"
@@ -72,6 +73,53 @@ struct Peer {
     std::optional<std::uint32_t> late_seen;
     std::uint64_t late_mapping = 0;
 };
+
+// One reliable queue, as the liveness check sees it (issue #53).
+struct WatchedQueue {
+    std::string name;
+    RegionIdentity identity;
+    std::uint32_t capacity = 0;
+    std::size_t queue_id = 0;
+    std::uint16_t consumer_process = 0;
+    // The queue region, mapped read-only, without its descriptor: a
+    // generation may have 4,096 queues.
+    std::optional<OpenedRegion> region;
+    // Broken at the last check that could judge it.
+    bool broken = false;
+};
+
+// Keeps `region` mapped to the file `name` of the directory open as
+// `dir_fd`, as ProcProbe does for `proc` regions: drops the mapping when the
+// name is gone, refers to another file or the file was shrunk (section
+// 3.3), and maps the file again if it passes the checks of section 3.1.
+// True if a mapping is held afterwards.
+bool follow_region(int dir_fd, const std::string& name,
+                   const RegionIdentity& identity,
+                   std::optional<OpenedRegion>& region) {
+    struct stat info {};
+    if (::fstatat(dir_fd, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
+        region.reset();
+        return false;
+    }
+    if (region.has_value() &&
+        (info.st_dev != region->device || info.st_ino != region->inode ||
+         info.st_size < 0 ||
+         static_cast<std::uint64_t>(info.st_size) != identity.size_bytes)) {
+        region.reset();
+    }
+    if (region.has_value()) {
+        return true;
+    }
+    std::string ignored;
+    Result<OpenedRegion> opened =
+        open_region(dir_fd, name, identity, MapAccess::READ_ONLY, ignored);
+    if (!opened.ok()) {
+        return false;
+    }
+    region = std::move(opened).value();
+    region->file.reset();
+    return true;
+}
 
 // Region file names of the generation, each with the user that writes it.
 using ExpectedEntries = std::map<std::string, std::uint32_t, std::less<>>;
@@ -582,6 +630,11 @@ private:
     // baseline: reported only if it is not 0, and marked as such.
     void note_late_beats(Peer& peer, CheckReport& report) const;
 
+    // Applies the range rule of section 9.2 to `queue` and adds to
+    // `report` a change of its state. Called after every `proc` region was
+    // observed in this check.
+    void judge_queue(WatchedQueue& queue, CheckReport& report);
+
     [[nodiscard]] std::uint32_t& down_flag(const Peer& peer) const noexcept {
         return shared_at<ProcessEntry>(open_.header.bytes(), peer.entry_offset)
             .down;
@@ -595,7 +648,8 @@ private:
     std::uint32_t heartbeat_check_ms_ = 0;
     std::uint32_t heartbeat_timeout_ms_ = 0;
     std::uint32_t tagd_uid_ = 0;
-    std::vector<Peer> peers_;  // in process index order
+    std::vector<Peer> peers_;           // in process index order
+    std::vector<WatchedQueue> queues_;  // in queue id order
     ExpectedEntries expected_;
     // Entries that could not be removed and were reported.
     std::set<std::string, std::less<>> stuck_;
@@ -630,10 +684,28 @@ void GenerationHost::Impl::describe(const TagSet& tag_set,
             expected_.emplace("strings." + name, uid);
         }
     }
-    for (const ResolvedQueue& queue : resolved.queues) {
+    for (std::size_t i = 0; i < resolved.queues.size(); ++i) {
+        const ResolvedQueue& queue = resolved.queues[i];
+        const QueueDefinition& definition = tag_set.queues.at(queue.definition);
         // The region of a queue is written by its producer.
-        expected_.emplace(tag_set.queues.at(queue.definition).name,
-                          peers_.at(queue.producer_process).region.uid);
+        const std::uint32_t uid = peers_.at(queue.producer_process).region.uid;
+        expected_.emplace(definition.name, uid);
+        WatchedQueue watched;
+        watched.name = definition.name;
+        watched.capacity = definition.capacity;
+        watched.queue_id = i;
+        watched.consumer_process = queue.consumer_process;
+        watched.identity.kind = queue_region_kind(queue.kind);
+        watched.identity.generation = open_.generation;
+        watched.identity.size_bytes = queue_region_size(
+            definition.capacity, queue_record_size(queue.kind));
+        // As the library maps it (PeerRegions): the owner index of a queue
+        // region is its producer's process index. Below MAX_QUEUES, which
+        // fits 16 bits.
+        watched.identity.owner_index = queue.producer_process;
+        watched.identity.queue_id = static_cast<std::uint16_t>(i);
+        watched.identity.uid = uid;
+        queues_.push_back(std::move(watched));
     }
 }
 
@@ -843,8 +915,47 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
         }
         note_late_beats(peer, report);
     }
+    for (WatchedQueue& queue : queues_) {
+        judge_queue(queue, report);
+    }
     sweep(report);
     return report;
+}
+
+void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
+                                       CheckReport& report) {
+    if (!follow_region(open_.directory.get(), queue.name, queue.identity,
+                       queue.region)) {
+        return;  // no queue yet, or one being replaced: nothing to judge
+    }
+    const Peer& consumer = peers_.at(queue.consumer_process);
+    const std::span<std::byte> proc =
+        consumer.self ? proc_.bytes() : consumer.probe.bytes();
+    const std::uint64_t* const cursor = cursor_field(proc, queue.queue_id);
+    if (cursor == nullptr) {
+        return;  // the consumer's region is missing
+    }
+    const std::span<std::byte> bytes = queue.region->memory.bytes();
+    // Both sides may run while this reads: in this order neither can make
+    // a valid pair look broken (queue_pair_broken). Acquire, as the two
+    // sides load each other's field.
+    const std::uint64_t written_before = queue_write_seq(bytes);
+    const std::uint64_t read = load_shared(*cursor, std::memory_order_acquire);
+    const std::uint64_t written_after = queue_write_seq(bytes);
+    const bool broken =
+        queue_pair_broken(written_before, read, written_after, queue.capacity);
+    if (broken == queue.broken) {
+        return;
+    }
+    queue.broken = broken;
+    report.queues.push_back(QueueChange{
+        .queue = queue.name,
+        .broken = broken,
+        .cursor = read,
+        .write_seq = written_after,
+        .capacity = queue.capacity,
+        .replaced = read == DEAD_CURSOR,
+    });
 }
 
 void GenerationHost::Impl::note_late_beats(Peer& peer,
