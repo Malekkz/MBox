@@ -240,6 +240,8 @@ private:
         close_end(stop_[0]);
         pollfd wait{.fd = ready_[0], .events = POLLIN, .revents = 0};
         ASSERT_EQ(::poll(&wait, 1, WAIT_MS), 1) << "the database did not start";
+        // Does not block: the poll above, with its limit, found the end
+        // readable, by a byte or by the end of the file.
         char byte = 0;
         ASSERT_EQ(::read(ready_[0], &byte, 1), 1)
             << "the database owner ended early (can it become user " << DB_UID
