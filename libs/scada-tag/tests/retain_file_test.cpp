@@ -14,14 +14,14 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
+#include <ios>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,7 +32,6 @@ namespace {
 using namespace scada::tag;
 using scada::Fd;
 using scada::Result;
-using scada::Status;
 using scada::StatusCode;
 using scada::tag::testing::TempDatabase;
 
@@ -42,11 +41,68 @@ constexpr std::int64_t CREATED_TIME = 1'600'000'000'000'000'000;
 constexpr std::int64_t WRITTEN_TIME = 1'650'000'000'000'000'000;
 constexpr std::uint64_t GENERATION = 7;
 constexpr std::uint8_t HASH_BYTE = 0xA5;
+constexpr std::size_t BITS_PER_BYTE = 8;
+constexpr std::uint32_t LOW_BYTE = 0xFFU;
+// Times of three files of the precedence test, and values in them.
+constexpr std::int64_t OWN_WRITTEN = 10;
+constexpr std::int64_t OLDER_WRITTEN = 20;
+constexpr std::int64_t NEWER_WRITTEN = 30;
+constexpr std::uint64_t OLDER_A = 100;
+constexpr std::uint64_t OLDER_C = 300;
+constexpr std::uint64_t NEWER_C = 333;
+constexpr std::uint64_t OTHER_A = 5;
+
+// One damaged byte behind a valid check sum, and what it damages.
+struct Damage {
+    std::size_t offset = 0;
+    std::uint8_t value = 0;
+    const char* what = "";
+};
+// Offsets in the file of `sample()`: the header, then the first record
+// ("a.flag", BOOL) at RETAIN_HEADER_BYTES.
+constexpr std::size_t FIRST = RETAIN_HEADER_BYTES;
+constexpr std::array<Damage, 13> DAMAGES{{
+    {8, 2, "format version"},
+    {12, 5, "record count beyond the file"},
+    {12, 3, "record count below the records"},
+    {40, 2, "unknown flag"},
+    {44, 1, "reserved field"},
+    {FIRST, 5, "STRING type"},
+    {FIRST, 0, "no type"},
+    {FIRST + 2, 1, "reserved byte of a record"},
+    {FIRST + 8, 2, "BOOL of 2"},
+    {FIRST + 24, 'A', "name with an upper-case letter"},
+    {FIRST + 24 + 6, 1, "padding byte"},
+    {FIRST + 1, 0, "empty name"},
+    {FIRST + 24, 'q', "first name after the second"},
+}};
+
+// True if `left` and `right` hold the same values.
+bool same_values(const RetainFile& left, const RetainFile& right) {
+    if (left.values.size() != right.values.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < left.values.size(); ++i) {
+        const RetainedValue& one = left.values[i];
+        const RetainedValue& other = right.values[i];
+        if (one.name != other.name || one.type != other.type ||
+            one.value != other.value ||
+            one.source_time_ns != other.source_time_ns) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The value `loaded` has for wanted tag `index`; 0 if it has none.
+std::uint64_t value_at(const LoadedValues& loaded, std::size_t index) {
+    return loaded.values.at(index).value_or(RetainedValue{}).value;
+}
 
 std::vector<std::byte> bytes_of(std::string_view text) {
     std::vector<std::byte> bytes;
-    for (const char c : text) {
-        bytes.push_back(static_cast<std::byte>(c));
+    for (const char character : text) {
+        bytes.push_back(static_cast<std::byte>(character));
     }
     return bytes;
 }
@@ -79,7 +135,8 @@ void reseal(std::vector<std::byte>& bytes) {
     const std::size_t body = bytes.size() - RETAIN_CRC_BYTES;
     const std::uint32_t crc = crc32(std::span(bytes).first(body));
     for (std::size_t i = 0; i < RETAIN_CRC_BYTES; ++i) {
-        bytes.at(body + i) = static_cast<std::byte>((crc >> (8 * i)) & 0xFFU);
+        bytes.at(body + i) =
+            static_cast<std::byte>((crc >> (BITS_PER_BYTE * i)) & LOW_BYTE);
     }
 }
 
@@ -97,8 +154,10 @@ TEST(RetainFile, RoundTripsEveryField) {
     const RetainFile file = sample();
     const std::vector<std::byte> bytes = encoded(file);
     // Header, four records of 24 bytes and their padded names, check sum.
-    EXPECT_EQ(bytes.size(), RETAIN_HEADER_BYTES + (4 * 24) + 8 + 16 + 16 + 8 +
-                                RETAIN_CRC_BYTES);
+    constexpr std::size_t NAMES = 8 + 16 + 16 + 8;
+    EXPECT_EQ(bytes.size(), RETAIN_HEADER_BYTES +
+                                (std::size_t{4} * RETAIN_RECORD_FIXED_BYTES) +
+                                NAMES + RETAIN_CRC_BYTES);
     std::string detail;
     const Result<RetainFile> decoded = decode_retain_file(bytes, detail);
     ASSERT_TRUE(decoded.ok()) << detail;
@@ -106,18 +165,11 @@ TEST(RetainFile, RoundTripsEveryField) {
     EXPECT_EQ(decoded.value().written_time_ns, WRITTEN_TIME);
     EXPECT_TRUE(decoded.value().final);
     EXPECT_EQ(decoded.value().config_hash, file.config_hash);
-    ASSERT_EQ(decoded.value().values.size(), file.values.size());
-    for (std::size_t i = 0; i < file.values.size(); ++i) {
-        EXPECT_EQ(decoded.value().values[i].name, file.values[i].name);
-        EXPECT_EQ(decoded.value().values[i].type, file.values[i].type);
-        EXPECT_EQ(decoded.value().values[i].value, file.values[i].value);
-        EXPECT_EQ(decoded.value().values[i].source_time_ns,
-                  file.values[i].source_time_ns);
-    }
+    EXPECT_TRUE(same_values(decoded.value(), file));
 }
 
 TEST(RetainFile, AnEmptyFileIsValid) {
-    RetainFile file;
+    const RetainFile file;
     const std::vector<std::byte> bytes = encoded(file);
     EXPECT_EQ(bytes.size(), RETAIN_HEADER_BYTES + RETAIN_CRC_BYTES);
     EXPECT_EQ(decode_code(bytes), StatusCode::OK);
@@ -150,7 +202,7 @@ TEST(RetainFile, EncodeRefusesWhatTheFormatCannotHold) {
 TEST(RetainFile, EveryFlippedBitIsRejected) {
     const std::vector<std::byte> bytes = encoded(sample());
     for (std::size_t i = 0; i < bytes.size(); ++i) {
-        for (unsigned bit = 0; bit < 8; ++bit) {
+        for (std::size_t bit = 0; bit < BITS_PER_BYTE; ++bit) {
             std::vector<std::byte> damaged = bytes;
             damaged[i] ^= static_cast<std::byte>(1U << bit);
             ASSERT_EQ(decode_code(damaged), StatusCode::DATA_CORRUPT)
@@ -174,31 +226,12 @@ TEST(RetainFile, EveryTruncationIsRejected) {
 // Damage that comes with a valid check sum, as a bug in a writer would make.
 TEST(RetainFile, FieldChecksHoldBehindAValidCheckSum) {
     const std::vector<std::byte> bytes = encoded(sample());
-    const auto damaged = [&](std::size_t offset, std::byte value) {
+    for (const Damage& damage : DAMAGES) {
         std::vector<std::byte> copy = bytes;
-        copy.at(offset) = value;
+        copy.at(damage.offset) = static_cast<std::byte>(damage.value);
         reseal(copy);
-        return decode_code(copy);
-    };
-    EXPECT_EQ(damaged(8, std::byte{2}), StatusCode::DATA_CORRUPT);   // version
-    EXPECT_EQ(damaged(12, std::byte{5}), StatusCode::DATA_CORRUPT);  // count
-    EXPECT_EQ(damaged(12, std::byte{3}), StatusCode::DATA_CORRUPT);  // count
-    EXPECT_EQ(damaged(40, std::byte{2}), StatusCode::DATA_CORRUPT);  // flag
-    EXPECT_EQ(damaged(44, std::byte{1}), StatusCode::DATA_CORRUPT);  // reserved
-    const std::size_t first = RETAIN_HEADER_BYTES;
-    EXPECT_EQ(damaged(first, std::byte{5}),
-              StatusCode::DATA_CORRUPT);  // STRING
-    EXPECT_EQ(damaged(first, std::byte{0}),
-              StatusCode::DATA_CORRUPT);  // no type
-    EXPECT_EQ(damaged(first + 2, std::byte{1}), StatusCode::DATA_CORRUPT);
-    EXPECT_EQ(damaged(first + 8, std::byte{2}),
-              StatusCode::DATA_CORRUPT);  // BOOL 2
-    EXPECT_EQ(damaged(first + 24, std::byte{'A'}), StatusCode::DATA_CORRUPT);
-    EXPECT_EQ(damaged(first + 24 + 6, std::byte{1}), StatusCode::DATA_CORRUPT);
-    EXPECT_EQ(damaged(first + 1, std::byte{0}),
-              StatusCode::DATA_CORRUPT);  // no name
-    // The first name made to sort after the second.
-    EXPECT_EQ(damaged(first + 24, std::byte{'q'}), StatusCode::DATA_CORRUPT);
+        EXPECT_EQ(decode_code(copy), StatusCode::DATA_CORRUPT) << damage.what;
+    }
 }
 
 TEST(RetainFile, FileNames) {
@@ -293,17 +326,17 @@ TEST_F(RetainDirectory, StaleTemporariesAreRemovedAndNothingElse) {
 
 TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
     RetainFile own;
-    own.written_time_ns = 10;
+    own.written_time_ns = OWN_WRITTEN;
     own.values = {{"t.a", TagType::INT64, 1, 0}, {"t.b", TagType::INT64, 2, 0}};
     write("ctl", own);
     RetainFile older;
-    older.written_time_ns = 20;
-    older.values = {{"t.a", TagType::INT64, 100, 0},
-                    {"t.c", TagType::INT64, 300, 0}};
+    older.written_time_ns = OLDER_WRITTEN;
+    older.values = {{"t.a", TagType::INT64, OLDER_A, 0},
+                    {"t.c", TagType::INT64, OLDER_C, 0}};
     write("old", older);
     RetainFile newer;
-    newer.written_time_ns = 30;
-    newer.values = {{"t.c", TagType::INT64, 333, 0},
+    newer.written_time_ns = NEWER_WRITTEN;
+    newer.values = {{"t.c", TagType::INT64, NEWER_C, 0},
                     {"t.d", TagType::BOOL, 1, 0}};
     write("new", newer);
     scada::tag::testing::touch(base() / "broken.bin");
@@ -316,10 +349,10 @@ TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
     const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
     ASSERT_EQ(loaded.values.size(), wanted.size());
     ASSERT_TRUE(loaded.values[0].has_value());
-    EXPECT_EQ(loaded.values[0]->value, 1U);      // own file, not the other
+    EXPECT_EQ(value_at(loaded, 0), 1U);          // own file, not the other
     EXPECT_FALSE(loaded.values[1].has_value());  // another type
     ASSERT_TRUE(loaded.values[2].has_value());
-    EXPECT_EQ(loaded.values[2]->value, 333U);    // the newest other file
+    EXPECT_EQ(value_at(loaded, 2), NEWER_C);     // the newest other file
     EXPECT_FALSE(loaded.values[3].has_value());  // another type
     EXPECT_FALSE(loaded.values[4].has_value());
     ASSERT_TRUE(loaded.own.has_value());
@@ -330,14 +363,14 @@ TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
 TEST_F(RetainDirectory, ACorruptOwnFileIsRejectedAndOthersStillServe) {
     scada::tag::testing::touch(base() / "ctl.bin");
     RetainFile other;
-    other.values = {{"t.a", TagType::INT64, 5, 0}};
+    other.values = {{"t.a", TagType::INT64, OTHER_A, 0}};
     write("other", other);
     const std::vector<WantedValue> wanted = {{"t.a", TagType::INT64}};
     const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
     EXPECT_FALSE(loaded.own.has_value());
     ASSERT_EQ(loaded.rejected.size(), 1U);
     ASSERT_TRUE(loaded.values[0].has_value());
-    EXPECT_EQ(loaded.values[0]->value, 5U);
+    EXPECT_EQ(value_at(loaded, 0), OTHER_A);
 }
 
 }  // namespace

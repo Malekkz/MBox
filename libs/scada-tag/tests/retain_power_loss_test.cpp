@@ -8,7 +8,6 @@
 // written data was not synced: nothing of it, a prefix, damaged bytes, or
 // all of it. Each such state is written to a real directory and loaded.
 
-#include "region_file.h"
 #include "retain_file.h"
 #include "temp_database.h"
 
@@ -19,13 +18,17 @@
 
 #include <gtest/gtest.h>
 
-#include <unistd.h>
+#include <sys/types.h>
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <map>
 #include <memory>
 #include <optional>
@@ -49,37 +52,48 @@ public:
         Bytes written;
     };
 
-    // Each call counts as one step; once `crash_after` steps were made,
-    // every later call fails and changes nothing: the machine is off.
-    std::optional<std::size_t> crash_after;
-    // The call named `fail_on` fails once with `fail_errno`.
-    std::string fail_on;
-    int fail_errno = 0;
-    // Without the guarantee of fsync: a model of a writer that leaves it out.
-    bool sync_does_nothing = false;
+    // What the test makes go wrong.
+    struct Faults {
+        // Each call counts as one step; once `crash_after` steps were made,
+        // every later call fails and changes nothing: the machine is off.
+        std::optional<std::size_t> crash_after;
+        // The call named `fail_on` fails once with `fail_errno`.
+        std::string fail_on;
+        int fail_errno = 0;
+        // Without the guarantee of fsync: a writer that leaves it out.
+        bool sync_does_nothing = false;
+    };
 
-    std::vector<std::string> calls;
-    std::map<std::string, std::size_t> entries;
-    std::map<std::string, std::size_t> synced_entries;
-    std::vector<Inode> inodes;
+    // The directory: its entries now and as last synced, the files, and the
+    // calls made, in order.
+    struct Disk {
+        std::vector<std::string> calls;
+        std::map<std::string, std::size_t> entries;
+        std::map<std::string, std::size_t> synced_entries;
+        std::vector<Inode> inodes;
+    };
+
+    [[nodiscard]] Faults& faults() noexcept { return faults_; }
+    [[nodiscard]] Disk& disk() noexcept { return disk_; }
+    [[nodiscard]] const Disk& disk() const noexcept { return disk_; }
 
     // A file that is there and on disk, as before the write.
     void put(const std::string& name, const Bytes& bytes) {
-        inodes.push_back({bytes, bytes});
-        entries[name] = inodes.size() - 1;
-        synced_entries = entries;
+        disk_.inodes.push_back({bytes, bytes});
+        disk_.entries[name] = disk_.inodes.size() - 1;
+        disk_.synced_entries = disk_.entries;
     }
 
     // One call. False if it must fail (crash or injected error).
     [[nodiscard]] int step(const std::string& call) {
-        if (crash_after.has_value() && steps_ >= *crash_after) {
+        if (faults_.crash_after.has_value() && steps_ >= *faults_.crash_after) {
             return EIO;
         }
         ++steps_;
-        calls.push_back(call);
-        if (call == fail_on) {
-            fail_on.clear();
-            return fail_errno;
+        disk_.calls.push_back(call);
+        if (call == faults_.fail_on) {
+            faults_.fail_on.clear();
+            return faults_.fail_errno;
         }
         return 0;
     }
@@ -100,7 +114,7 @@ public:
             // Short writes, so that the loop of the writer is used.
             constexpr std::size_t MOST = 37;
             written = std::min(bytes.size(), MOST);
-            Bytes& data = model_.inodes[inode_].written;
+            Bytes& data = model_.disk().inodes[inode_].written;
             data.insert(data.end(), bytes.begin(),
                         bytes.begin() + static_cast<std::ptrdiff_t>(written));
             return 0;
@@ -109,8 +123,9 @@ public:
             if (const int error = model_.step("sync"); error != 0) {
                 return error;
             }
-            if (!model_.sync_does_nothing) {
-                model_.inodes[inode_].synced = model_.inodes[inode_].written;
+            if (!model_.faults().sync_does_nothing) {
+                model_.disk().inodes[inode_].synced =
+                    model_.disk().inodes[inode_].written;
             }
             return 0;
         }
@@ -125,33 +140,33 @@ public:
         if (const int error = step("create"); error != 0) {
             return error;
         }
-        if (entries.contains(name)) {
+        if (disk_.entries.contains(name)) {
             return EEXIST;
         }
-        inodes.push_back({});
-        entries[name] = inodes.size() - 1;
-        out = std::make_unique<File>(*this, inodes.size() - 1);
+        disk_.inodes.push_back({});
+        disk_.entries[name] = disk_.inodes.size() - 1;
+        out = std::make_unique<File>(*this, disk_.inodes.size() - 1);
         return 0;
     }
     int rename(int /*dir_fd*/, const std::string& from,
-               const std::string& to) noexcept override {
+               const std::string& target) noexcept override {
         if (const int error = step("rename"); error != 0) {
             return error;
         }
-        const auto found = entries.find(from);
-        if (found == entries.end()) {
+        const auto found = disk_.entries.find(from);
+        if (found == disk_.entries.end()) {
             return ENOENT;
         }
-        entries[to] = found->second;
-        entries.erase(from);
+        disk_.entries[target] = found->second;
+        disk_.entries.erase(from);
         return 0;
     }
     int sync_directory(int /*dir_fd*/) noexcept override {
         if (const int error = step("sync_directory"); error != 0) {
             return error;
         }
-        if (!sync_does_nothing) {
-            synced_entries = entries;
+        if (!faults_.sync_does_nothing) {
+            disk_.synced_entries = disk_.entries;
         }
         return 0;
     }
@@ -159,12 +174,17 @@ public:
         if (const int error = step("unlink"); error != 0) {
             return error;
         }
-        return entries.erase(name) == 1 ? 0 : ENOENT;
+        return disk_.entries.erase(name) == 1 ? 0 : ENOENT;
     }
 
 private:
+    Faults faults_;
+    Disk disk_;
     std::size_t steps_ = 0;
 };
+
+// What damaged bytes are XORed with.
+constexpr std::byte DAMAGE_PATTERN{0x5A};
 
 // What a file whose written data was not all synced holds after the loss.
 enum class Loss : std::uint8_t { NOTHING, PREFIX, DAMAGED, ALL };
@@ -179,13 +199,13 @@ Bytes after_loss(const PowerLossModel::Inode& inode, Loss loss) {
         case Loss::NOTHING:
             return inode.synced;
         case Loss::PREFIX:
-            return Bytes(inode.written.begin(),
-                         inode.written.begin() + static_cast<std::ptrdiff_t>(
-                                                     inode.written.size() / 2));
+            return {inode.written.begin(),
+                    inode.written.begin() +
+                        static_cast<std::ptrdiff_t>(inode.written.size() / 2)};
         case Loss::DAMAGED: {
             Bytes bytes = inode.written;
             for (std::size_t i = 0; i < bytes.size(); i += 3) {
-                bytes[i] ^= std::byte{0x5A};
+                bytes[i] ^= DAMAGE_PATTERN;
             }
             return bytes;
         }
@@ -238,17 +258,18 @@ protected:
     }
 
     // Every state a power loss can leave of `model` for "io.bin".
-    [[nodiscard]] std::vector<std::optional<Bytes>> states(
-        const PowerLossModel& model) const {
+    [[nodiscard]] static std::vector<std::optional<Bytes>> states(
+        const PowerLossModel& model) {
         std::vector<std::optional<Bytes>> result;
-        for (const auto* names : {&model.synced_entries, &model.entries}) {
+        for (const auto* names :
+             {&model.disk().synced_entries, &model.disk().entries}) {
             const auto found = names->find("io.bin");
             for (const Loss loss : LOSSES) {
                 if (found == names->end()) {
                     result.emplace_back(std::nullopt);
                 } else {
-                    result.emplace_back(
-                        after_loss(model.inodes.at(found->second), loss));
+                    result.emplace_back(after_loss(
+                        model.disk().inodes.at(found->second), loss));
                 }
             }
         }
@@ -256,6 +277,54 @@ protected:
     }
 
     [[nodiscard]] int dir() const { return directory_.get(); }
+
+    // True if every state `model` can leave after a loss loads, with the
+    // old values or the new ones.
+    [[nodiscard]] bool every_state_loads_old_or_new(
+        const PowerLossModel& model) {
+        return std::ranges::all_of(states(model), [&](const auto& state) {
+            const std::optional<std::uint64_t> level = load(state);
+            return level == OLD || level == NEW;
+        });
+    }
+
+    // A write that fails at `call` with `error`: it reports the error, the
+    // old file is the only one left and loads, and the next write starts
+    // with a fresh file and works.
+    [[nodiscard]] ::testing::AssertionResult fails_and_keeps_the_old_file(
+        const std::string& call, int error) {
+        PowerLossModel model;
+        model.put("io.bin", encoded(values(OLD)));
+        model.faults().fail_on = call;
+        model.faults().fail_errno = error;
+        std::string detail;
+        const scada::Status status =
+            write_retain_file(dir(), "io", values(NEW), detail, model);
+        const StatusCode expected = error == ENOSPC
+                                        ? StatusCode::RESOURCE_EXHAUSTED
+                                        : StatusCode::IO_ERROR;
+        if (status.ok() || status.code() != expected) {
+            return ::testing::AssertionFailure() << call << ": wrong status";
+        }
+        const PowerLossModel::Disk& disk = model.disk();
+        if (disk.entries.size() != 1 || !disk.entries.contains("io.bin") ||
+            load(disk.inodes.at(disk.entries.at("io.bin")).written) != OLD) {
+            return ::testing::AssertionFailure()
+                   << call << ": the old file is not the one left";
+        }
+        if (!write_retain_file(dir(), "io", values(NEW), detail, model).ok() ||
+            load(disk.inodes.at(disk.entries.at("io.bin")).written) != NEW) {
+            return ::testing::AssertionFailure()
+                   << call << ": the next write failed: " << detail;
+        }
+        // Each fsync of the second write was on a file of its own.
+        const std::size_t files = call == "create" ? 2U : 3U;
+        if (disk.inodes.size() != files) {
+            return ::testing::AssertionFailure()
+                   << call << ": " << disk.inodes.size() << " files";
+        }
+        return ::testing::AssertionSuccess();
+    }
 
     // The number of steps of one complete write.
     [[nodiscard]] std::size_t steps_of_a_write(bool with_old) {
@@ -266,7 +335,7 @@ protected:
         std::string detail;
         EXPECT_TRUE(
             write_retain_file(dir(), "io", values(NEW), detail, model).ok());
-        return model.calls.size();
+        return model.disk().calls.size();
     }
 
 private:
@@ -280,18 +349,18 @@ TEST_F(PowerLoss, TheCallsComeInTheOrderOfTheContract) {
     ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok())
         << detail;
     // unlink of a stale temporary file of this process id, then the write.
-    ASSERT_GE(model.calls.size(), 6U);
-    EXPECT_EQ(model.calls.front(), "unlink");
-    EXPECT_EQ(model.calls[1], "create");
-    EXPECT_EQ(model.calls[2], "set_mode");
-    const std::size_t last = model.calls.size() - 1;
+    ASSERT_GE(model.disk().calls.size(), 6U);
+    EXPECT_EQ(model.disk().calls.front(), "unlink");
+    EXPECT_EQ(model.disk().calls[1], "create");
+    EXPECT_EQ(model.disk().calls[2], "set_mode");
+    const std::size_t last = model.disk().calls.size() - 1;
     for (std::size_t i = 3; i < last - 2; ++i) {
-        EXPECT_EQ(model.calls[i], "write") << i;
+        EXPECT_EQ(model.disk().calls[i], "write") << i;
     }
-    EXPECT_EQ(model.calls[last - 2], "sync");
-    EXPECT_EQ(model.calls[last - 1], "rename");
-    EXPECT_EQ(model.calls[last], "sync_directory");
-    EXPECT_EQ(model.entries.size(), 1U);
+    EXPECT_EQ(model.disk().calls[last - 2], "sync");
+    EXPECT_EQ(model.disk().calls[last - 1], "rename");
+    EXPECT_EQ(model.disk().calls[last], "sync_directory");
+    EXPECT_EQ(model.disk().entries.size(), 1U);
 }
 
 TEST_F(PowerLoss, ALossAtAnyStepLeavesTheOldOrTheNewValues) {
@@ -299,15 +368,12 @@ TEST_F(PowerLoss, ALossAtAnyStepLeavesTheOldOrTheNewValues) {
     for (std::size_t crash = 0; crash <= steps; ++crash) {
         PowerLossModel model;
         model.put("io.bin", encoded(values(OLD)));
-        model.crash_after = crash;
+        model.faults().crash_after = crash;
         std::string detail;
         static_cast<void>(
             write_retain_file(dir(), "io", values(NEW), detail, model));
-        for (const std::optional<Bytes>& state : states(model)) {
-            const std::optional<std::uint64_t> level = load(state);
-            ASSERT_TRUE(level == OLD || level == NEW)
-                << "crash after step " << crash;
-        }
+        ASSERT_TRUE(every_state_loads_old_or_new(model))
+            << "crash after step " << crash;
     }
 }
 
@@ -315,7 +381,7 @@ TEST_F(PowerLoss, WithoutAFormerFileALossLeavesNoFileOrTheNewOne) {
     const std::size_t steps = steps_of_a_write(false);
     for (std::size_t crash = 0; crash <= steps; ++crash) {
         PowerLossModel model;
-        model.crash_after = crash;
+        model.faults().crash_after = crash;
         std::string detail;
         static_cast<void>(
             write_retain_file(dir(), "io", values(NEW), detail, model));
@@ -331,56 +397,26 @@ TEST_F(PowerLoss, WithoutAFormerFileALossLeavesNoFileOrTheNewOne) {
 TEST_F(PowerLoss, TheModelCatchesAWriterWithoutFsync) {
     PowerLossModel model;
     model.put("io.bin", encoded(values(OLD)));
-    model.sync_does_nothing = true;
+    model.faults().sync_does_nothing = true;
     std::string detail;
     ASSERT_TRUE(
         write_retain_file(dir(), "io", values(NEW), detail, model).ok());
-    bool unreadable = false;
-    for (const std::optional<Bytes>& state : states(model)) {
-        const std::optional<std::uint64_t> level = load(state);
-        unreadable = unreadable || !(level == OLD || level == NEW);
-    }
-    EXPECT_TRUE(unreadable);
+    EXPECT_FALSE(every_state_loads_old_or_new(model));
 }
 
 TEST_F(PowerLoss,
        AnErrorOnWriteFsyncOrRenameKeepsTheOldFileAndRemovesTheTemporary) {
     for (const std::string call :
          {"create", "set_mode", "write", "sync", "rename"}) {
-        for (const int error : {ENOSPC, EIO}) {
-            PowerLossModel model;
-            model.put("io.bin", encoded(values(OLD)));
-            model.fail_on = call;
-            model.fail_errno = error;
-            std::string detail;
-            const scada::Status status =
-                write_retain_file(dir(), "io", values(NEW), detail, model);
-            ASSERT_FALSE(status.ok()) << call;
-            EXPECT_EQ(status.code(), error == ENOSPC
-                                         ? StatusCode::RESOURCE_EXHAUSTED
-                                         : StatusCode::IO_ERROR)
-                << call;
-            // Only the old file is left, and it loads.
-            ASSERT_EQ(model.entries.size(), 1U) << call;
-            ASSERT_TRUE(model.entries.contains("io.bin")) << call;
-            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written),
-                      OLD);
-            // The next write starts with a fresh file and works.
-            ASSERT_TRUE(
-                write_retain_file(dir(), "io", values(NEW), detail, model).ok())
-                << call << ": " << detail;
-            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written),
-                      NEW);
-            // Each fsync of the second write was on a file of its own.
-            EXPECT_EQ(model.inodes.size(), call == "create" ? 2U : 3U) << call;
-        }
+        EXPECT_TRUE(fails_and_keeps_the_old_file(call, ENOSPC));
+        EXPECT_TRUE(fails_and_keeps_the_old_file(call, EIO));
     }
 }
 
 TEST_F(PowerLoss, AFailedDirectorySyncIsReported) {
     PowerLossModel model;
-    model.fail_on = "sync_directory";
-    model.fail_errno = EIO;
+    model.faults().fail_on = "sync_directory";
+    model.faults().fail_errno = EIO;
     std::string detail;
     EXPECT_EQ(write_retain_file(dir(), "io", values(NEW), detail, model).code(),
               StatusCode::IO_ERROR);

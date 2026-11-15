@@ -257,45 +257,9 @@ Wake wait_for_signal(const sigset_t& signals,
     return Wake::STOP;
 }
 
-// Writes what one liveness check changed to the log.
-void log_report(Logger& logger, const CheckReport& report) {
-    for (const ProcessChange& change : report.changes) {
-        if (change.reason == DownReason::NONE) {
-            logger.log(LogLevel::NOTICE, "process up",
-                       {{"PROCESS", change.process}});
-        } else {
-            logger.log(LogLevel::WARNING, "process down",
-                       {{"PROCESS", change.process},
-                        {"REASON", scada::tag::to_string(change.reason)}});
-        }
-    }
-    for (const LateHeartbeats& late : report.late) {
-        // A late heartbeat is a moment in which readers saw the process
-        // down (BAD with OWNER_DOWN, a gap on its rings), also when no
-        // check fell into it. WARNING also when a change of the same
-        // process was logged above: the gap length is only here. What the
-        // first look at a region finds is a baseline, logged at INFO.
-        // The texts live until the end of the iteration: a field borrows.
-        const std::string added = std::to_string(late.added);
-        const std::string total = std::to_string(late.total);
-        const std::string longest =
-            std::to_string(late.longest_gap_ns / NANOSECONDS_PER_MILLISECOND);
-        const std::string last = std::to_string(late.last_late_mono_ns);
-        const std::array<LogField, 5> fields{{
-            {"PROCESS", late.process},
-            {"LATE_BEATS", added},
-            {"LATE_BEATS_TOTAL", total},
-            {"LONGEST_GAP_MS", longest},
-            {"LAST_LATE_MONO_NS", last},
-        }};
-        if (late.baseline) {
-            // Counted before this scada-tagd looked; not new.
-            logger.log(LogLevel::INFO, "heartbeat late before this check",
-                       fields);
-        } else {
-            logger.log(LogLevel::WARNING, "heartbeat late", fields);
-        }
-    }
+// Writes what one check did with retained values and retired generations
+// to the log (contract, sections 11.3 and 12).
+void log_retained(Logger& logger, const CheckReport& report) {
     for (const scada::tag::RetainWrite& written : report.retain_written) {
         // DEBUG for a periodic write: it happens every few seconds on a
         // busy unit. A FINAL one belongs to a generation change.
@@ -338,6 +302,48 @@ void log_report(Logger& logger, const CheckReport& report) {
                    "removed the retain file of an owner that is gone",
                    {{"FILE", file}});
     }
+}
+
+// Writes what one liveness check changed to the log.
+void log_report(Logger& logger, const CheckReport& report) {
+    for (const ProcessChange& change : report.changes) {
+        if (change.reason == DownReason::NONE) {
+            logger.log(LogLevel::NOTICE, "process up",
+                       {{"PROCESS", change.process}});
+        } else {
+            logger.log(LogLevel::WARNING, "process down",
+                       {{"PROCESS", change.process},
+                        {"REASON", scada::tag::to_string(change.reason)}});
+        }
+    }
+    for (const LateHeartbeats& late : report.late) {
+        // A late heartbeat is a moment in which readers saw the process
+        // down (BAD with OWNER_DOWN, a gap on its rings), also when no
+        // check fell into it. WARNING also when a change of the same
+        // process was logged above: the gap length is only here. What the
+        // first look at a region finds is a baseline, logged at INFO.
+        // The texts live until the end of the iteration: a field borrows.
+        const std::string added = std::to_string(late.added);
+        const std::string total = std::to_string(late.total);
+        const std::string longest =
+            std::to_string(late.longest_gap_ns / NANOSECONDS_PER_MILLISECOND);
+        const std::string last = std::to_string(late.last_late_mono_ns);
+        const std::array<LogField, 5> fields{{
+            {"PROCESS", late.process},
+            {"LATE_BEATS", added},
+            {"LATE_BEATS_TOTAL", total},
+            {"LONGEST_GAP_MS", longest},
+            {"LAST_LATE_MONO_NS", last},
+        }};
+        if (late.baseline) {
+            // Counted before this scada-tagd looked; not new.
+            logger.log(LogLevel::INFO, "heartbeat late before this check",
+                       fields);
+        } else {
+            logger.log(LogLevel::WARNING, "heartbeat late", fields);
+        }
+    }
+    log_retained(logger, report);
     for (const SweptEntry& entry : report.swept) {
         // The name is outside input; the sinks escape it and cut it.
         if (entry.removed) {

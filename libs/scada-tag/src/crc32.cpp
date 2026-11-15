@@ -38,7 +38,7 @@ std::uint32_t crc32(std::span<const std::byte> bytes) noexcept {
         const std::uint32_t index =
             (crc ^ std::to_integer<std::uint32_t>(byte)) & LOW_BYTE;
         // In range: masked to the low byte.
-        crc = TABLE[index] ^ (crc >> static_cast<unsigned>(BITS_PER_BYTE));
+        crc = TABLE.at(index) ^ (crc >> static_cast<unsigned>(BITS_PER_BYTE));
     }
     return crc ^ ALL_ONES;
 }

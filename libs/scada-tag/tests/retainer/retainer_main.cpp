@@ -38,6 +38,12 @@ namespace {
 constexpr int EXIT_FAILED = 1;
 constexpr int EXIT_USAGE = 2;
 constexpr std::size_t ARGUMENTS = 6;
+// Positions of the arguments after the program name.
+constexpr std::size_t ARG_BASE = 1;
+constexpr std::size_t ARG_RETAIN = 2;
+constexpr std::size_t ARG_PROCESS = 3;
+constexpr std::size_t ARG_TAG = 4;
+constexpr std::size_t ARG_PERIOD = 5;
 constexpr std::uint64_t MAX_PERIOD_MS = 60'000;
 constexpr long NANOSECONDS_PER_MILLISECOND = 1'000'000;
 constexpr long MILLISECONDS_PER_SECOND = 1000;
@@ -75,7 +81,7 @@ bool attach(const scada_attach_opts& opts, const std::string& process,
 
 int run(std::span<const std::string_view> args) {
     std::uint64_t period = 0;
-    if (!parse_period(args[5], period)) {
+    if (!parse_period(args[ARG_PERIOD], period)) {
         std::cerr << "scada-tag-test-retainer: bad argument\n";
         return EXIT_USAGE;
     }
@@ -84,10 +90,10 @@ int run(std::span<const std::string_view> args) {
         ::pthread_sigmask(SIG_BLOCK, &signals, nullptr) != 0) {
         return EXIT_FAILED;
     }
-    const std::string base(args[1]);
-    const std::string retain(args[2]);
-    const std::string process(args[3]);
-    const std::string tag(args[4]);
+    const std::string base(args[ARG_BASE]);
+    const std::string retain(args[ARG_RETAIN]);
+    const std::string process(args[ARG_PROCESS]);
+    const std::string tag(args[ARG_TAG]);
     const scada_attach_opts opts{.base_dir = base.c_str(),
                                  .retain_dir = retain.c_str(),
                                  .tagd_uid = ::geteuid()};
@@ -132,8 +138,12 @@ int run(std::span<const std::string_view> args) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    const std::vector<std::string_view> args(argv, argv + argc);
+int main(int argc, char* argv[]) {
+    // argv is the one C array the language hands us; wrapped with its length
+    // at once, as in the other helpers.
+    const std::span<char*> raw_args(
+        argv, argc > 0 ? static_cast<std::size_t>(argc) : 0);
+    const std::vector<std::string_view> args(raw_args.begin(), raw_args.end());
     if (args.size() != ARGUMENTS) {
         std::cerr << "usage: scada-tag-test-retainer <base directory> "
                      "<retain directory> <process> <tag> <period in ms>\n";

@@ -66,7 +66,8 @@ inline constexpr std::string_view RETAIN_FILE_SUFFIX = ".bin";
 struct GenerationIdentity {
     std::uint64_t generation = 0;
     std::int64_t created_time_ns = 0;
-    bool operator==(const GenerationIdentity&) const = default;
+    friend bool operator==(const GenerationIdentity&,
+                           const GenerationIdentity&) = default;
 };
 
 // One retained value.
@@ -157,7 +158,7 @@ public:
                                      std::unique_ptr<RetainWriteFile>& out) = 0;
     // renameat(2) within `dir_fd`.
     [[nodiscard]] virtual int rename(int dir_fd, const std::string& from,
-                                     const std::string& to) noexcept = 0;
+                                     const std::string& target) noexcept = 0;
     // fsync(2) of the directory.
     [[nodiscard]] virtual int sync_directory(int dir_fd) noexcept = 0;
     // unlinkat(2).

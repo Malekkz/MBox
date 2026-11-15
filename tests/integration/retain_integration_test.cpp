@@ -24,20 +24,23 @@
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
-#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <random>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -54,18 +57,22 @@ constexpr std::chrono::seconds CHANGE_LIMIT{5};
 constexpr std::chrono::milliseconds RETAIN_NOW_LIMIT{1000};
 constexpr int KILL_ROUNDS = 30;
 constexpr std::uint32_t KILL_SEED = 17;
+constexpr double TAGD_FIRST_ODDS = 0.5;
+// Write periods of the retainer, in ms.
+constexpr int FAST_PERIOD_MS = 10;
+constexpr int SLOW_PERIOD_MS = 100;
 constexpr int KILL_AFTER_MIN_MS = 20;
 constexpr int KILL_AFTER_MAX_MS = 400;
 
 // The number after `key` in the last line of `text` that has it.
 std::optional<std::int64_t> last_number(std::string_view text,
                                         std::string_view key) {
-    const std::size_t at = text.rfind(key);
-    if (at == std::string_view::npos) {
+    const std::size_t found = text.rfind(key);
+    if (found == std::string_view::npos) {
         return std::nullopt;
     }
     std::int64_t value = 0;
-    const std::string_view rest = text.substr(at + key.size());
+    const std::string_view rest = text.substr(found + key.size());
     const auto [end, error] =
         std::from_chars(rest.data(), rest.data() + rest.size(), value);
     if (error != std::errc{}) {
@@ -167,6 +174,9 @@ protected:
     [[nodiscard]] const std::filesystem::path& base() const { return base_; }
     [[nodiscard]] const std::string& retain() const { return retain_; }
 
+    [[nodiscard]] std::optional<std::int64_t> kill_round(
+        std::chrono::milliseconds after, bool tagd_first);
+
 private:
     std::filesystem::path root_;
     std::filesystem::path base_;
@@ -177,12 +187,24 @@ bool has(std::string_view text, std::string_view part) {
     return text.find(part) != std::string_view::npos;
 }
 
+// True once the retainer has left the old generation and attached again.
+bool reattached(std::string_view out) {
+    const std::size_t left = out.find("leaving last=");
+    if (left == std::string_view::npos) {
+        return false;
+    }
+    const std::size_t again = out.find("attached", left);
+    return again != std::string_view::npos &&
+           out.find('\n', again) != std::string_view::npos;
+}
+
 TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
     std::optional<RunningTagd> first = tagd();
-    ASSERT_TRUE(first.has_value());
-    std::optional<ChildProcess> io = retainer(10);
-    ASSERT_TRUE(io.has_value());
-    ASSERT_TRUE(io->wait_for_output(
+    std::optional<ChildProcess> feeder = retainer(FAST_PERIOD_MS);
+    if (!first.has_value() || !feeder.has_value()) {
+        return;  // the helpers reported it
+    }
+    ASSERT_TRUE(feeder->wait_for_output(
         [](std::string_view out) { return has(out, "attached value=0"); },
         WAIT_LIMIT));
     // The first write of the owner is on disk; later ones wait for the hour.
@@ -192,33 +214,26 @@ TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
     // The tag set changes; the retainer goes on counting meanwhile.
     write_tag_set(false, true);
     std::optional<RunningTagd> second = tagd();
-    ASSERT_TRUE(second.has_value());
+    if (!second.has_value()) {
+        return;
+    }
     const auto ready = std::chrono::steady_clock::now();
-    ASSERT_TRUE(io->wait_for_output(
-        [](std::string_view out) {
-            const std::size_t left = out.find("leaving last=");
-            return left != std::string_view::npos &&
-                   out.find("attached", left) != std::string_view::npos &&
-                   out.find('\n', out.find("attached", left)) !=
-                       std::string_view::npos;
-        },
-        WAIT_LIMIT))
-        << io->out() << second->child.err();
+    ASSERT_TRUE(feeder->wait_for_output(reattached, WAIT_LIMIT))
+        << feeder->out() << second->child.err();
     EXPECT_LT(std::chrono::steady_clock::now() - ready, CHANGE_LIMIT);
-    const std::optional<std::int64_t> last =
-        last_number(io->out(), "leaving last=");
-    const std::optional<std::int64_t> restored =
-        last_number(io->out(), "attached value=");
-    ASSERT_TRUE(last.has_value());
-    EXPECT_GT(*last, 1);
-    EXPECT_EQ(restored, last) << io->out();
+    const std::int64_t last =
+        last_number(feeder->out(), "leaving last=").value_or(-1);
+    const std::int64_t restored =
+        last_number(feeder->out(), "attached value=").value_or(-1);
+    EXPECT_GT(last, 1);
+    EXPECT_EQ(restored, last) << feeder->out();
     // UNCERTAIN with RESTORED (contract, section 12).
-    EXPECT_TRUE(has(io->out().substr(io->out().rfind("attached")),
+    EXPECT_TRUE(has(feeder->out().substr(feeder->out().rfind("attached")),
                     "quality=1 flags=1024"))
-        << io->out();
+        << feeder->out();
     EXPECT_TRUE(logs(*second, "retired generation removed"));
     EXPECT_FALSE(std::filesystem::exists(base() / "gen-1"));
-    EXPECT_TRUE(stops_cleanly(*io));
+    EXPECT_TRUE(stops_cleanly(*feeder));
     stop(*second);
 }
 
@@ -230,85 +245,107 @@ TEST_F(Retained,
         damaged << "SCADARTN and nothing a retain file holds";
     }
     std::optional<RunningTagd> service = tagd();
-    ASSERT_TRUE(service.has_value());
-    std::optional<ChildProcess> io = retainer(10);
-    ASSERT_TRUE(io.has_value());
-    ASSERT_TRUE(io->wait_for_output(
+    std::optional<ChildProcess> feeder = retainer(FAST_PERIOD_MS);
+    if (!service.has_value() || !feeder.has_value()) {
+        return;
+    }
+    ASSERT_TRUE(feeder->wait_for_output(
         [](std::string_view out) { return has(out, "\n"); }, WAIT_LIMIT));
     // BAD with NOT_INIT: nothing restored.
-    EXPECT_TRUE(has(io->out(), "attached value=0 quality=2 flags=16"))
-        << io->out();
+    EXPECT_TRUE(has(feeder->out(), "attached value=0 quality=2 flags=16"))
+        << feeder->out();
     EXPECT_TRUE(logs(*service, R"(retained values SUBJECT="io.bin")"));
     // The next write replaces it with a valid file.
     EXPECT_TRUE(file_reaches(1, WAIT_LIMIT));
-    EXPECT_TRUE(stops_cleanly(*io));
+    EXPECT_TRUE(stops_cleanly(*feeder));
     stop(*service);
 }
 
 TEST_F(Retained, Conformance25ARetainNowTagIsOnDiskWithinOneSecond) {
     write_tag_set(true, false);
     std::optional<RunningTagd> service = tagd();
-    ASSERT_TRUE(service.has_value());
-    std::optional<ChildProcess> io = retainer(100);
-    ASSERT_TRUE(io.has_value());
+    std::optional<ChildProcess> feeder = retainer(SLOW_PERIOD_MS);
+    if (!service.has_value() || !feeder.has_value()) {
+        return;
+    }
     ASSERT_TRUE(file_reaches(3, WAIT_LIMIT));
     // The last write of the retainer comes at most one period before this.
-    ASSERT_TRUE(stops_cleanly(*io));
+    ASSERT_TRUE(stops_cleanly(*feeder));
     const auto stopped = std::chrono::steady_clock::now();
-    const std::optional<std::int64_t> last =
-        last_number(io->out(), "stopped last=");
-    ASSERT_TRUE(last.has_value());
-    EXPECT_TRUE(file_reaches(*last, RETAIN_NOW_LIMIT));
+    const std::int64_t last =
+        last_number(feeder->out(), "stopped last=").value_or(-1);
+    ASSERT_GT(last, 0);
+    EXPECT_TRUE(file_reaches(last, RETAIN_NOW_LIMIT));
     EXPECT_LT(std::chrono::steady_clock::now() - stopped, RETAIN_NOW_LIMIT);
     EXPECT_EQ(on_file(), last);
     stop(*service);
 }
 
+// The temporary files in the retain directory `retain`.
+std::vector<std::string> temporaries_in(const std::string& retain) {
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(retain)) {
+        if (entry.path().filename().string().starts_with(".tmp.")) {
+            names.push_back(entry.path().filename().string());
+        }
+    }
+    return names;
+}
+
+// One round of the kill test: scada-tagd and the retainer, both killed
+// after `after` ms, in the order `tagd_first` says. The value on file
+// after it, or nothing if there is no valid one.
+std::optional<std::int64_t> Retained::kill_round(
+    std::chrono::milliseconds after, bool tagd_first) {
+    // Temporary files a killed scada-tagd left are gone once the next one
+    // is ready. Only those: the new one may be writing a file of its own
+    // at that moment.
+    const std::vector<std::string> stale = temporaries_in(retain());
+    std::optional<RunningTagd> service = tagd();
+    if (!service.has_value()) {
+        return std::nullopt;
+    }
+    for (const std::string& name : stale) {
+        EXPECT_FALSE(
+            std::filesystem::exists(std::filesystem::path(retain()) / name))
+            << name;
+    }
+    std::optional<ChildProcess> feeder = retainer(1);
+    if (!feeder.has_value() ||
+        !feeder->wait_for_output(
+            [](std::string_view out) { return has(out, "attached"); },
+            WAIT_LIMIT)) {
+        return std::nullopt;
+    }
+    // A random point to kill at, not a wait for a condition.
+    std::this_thread::sleep_for(after);
+    ChildProcess& one = tagd_first ? service->child : *feeder;
+    ChildProcess& other = tagd_first ? *feeder : service->child;
+    kill(one);
+    kill(other);
+    return on_file();
+}
+
 TEST_F(Retained,
        SigkillOfEveryProcessAtRandomPointsNeverLeavesAnUnreadableFile) {
     write_tag_set(true, false);
-    std::mt19937 random(KILL_SEED);
+    // A fixed seed: the same kill points at every run, so that a failure
+    // can be repeated.
+    std::mt19937 random(
+        KILL_SEED);  // NOLINT(cert-msc32-c,cert-msc51-cpp): a fixed seed keeps the test repeatable
     std::uniform_int_distribution<int> after(KILL_AFTER_MIN_MS,
                                              KILL_AFTER_MAX_MS);
-    std::bernoulli_distribution tagd_first(0.5);
+    std::bernoulli_distribution tagd_first(TAGD_FIRST_ODDS);
     std::int64_t previous = -1;
     for (int round = 0; round < KILL_ROUNDS; ++round) {
-        // Temporary files a killed scada-tagd left are gone once the next
-        // one is ready. Only those: the new one may be writing a file of
-        // its own at that moment.
-        std::vector<std::string> stale;
-        for (const auto& entry :
-             std::filesystem::directory_iterator(retain())) {
-            if (entry.path().filename().string().starts_with(".tmp.")) {
-                stale.push_back(entry.path().filename().string());
-            }
-        }
-        std::optional<RunningTagd> service = tagd();
-        ASSERT_TRUE(service.has_value());
-        for (const std::string& name : stale) {
-            EXPECT_FALSE(
-                std::filesystem::exists(std::filesystem::path(retain()) / name))
-                << name << ", round " << round;
-        }
-        std::optional<ChildProcess> io = retainer(1);
-        ASSERT_TRUE(io.has_value());
-        ASSERT_TRUE(io->wait_for_output(
-            [](std::string_view out) { return has(out, "attached"); },
-            WAIT_LIMIT));
-        std::this_thread::sleep_for(std::chrono::milliseconds(after(
-            random)));  // NOLINT(readability-magic-numbers): a random point to kill at, not a wait for a condition
-        if (tagd_first(random)) {
-            kill(service->child);
-            kill(*io);
-        } else {
-            kill(*io);
-            kill(service->child);
-        }
-        const std::optional<std::int64_t> value = on_file();
-        ASSERT_TRUE(value.has_value()) << "round " << round;
+        const std::int64_t value =
+            kill_round(std::chrono::milliseconds(after(random)),
+                       tagd_first(random))
+                .value_or(-1);
         // Every value comes back, and the counter never goes back.
-        EXPECT_GE(*value, previous) << "round " << round;
-        previous = *value;
+        ASSERT_GE(value, 0) << "no valid retain file, round " << round;
+        EXPECT_GE(value, previous) << "round " << round;
+        previous = value;
     }
 }
 

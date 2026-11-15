@@ -14,7 +14,6 @@
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
-#include "scada/tag/handle.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
@@ -513,9 +512,9 @@ std::vector<Attachment::FinalWanted> Attachment::finals_wanted(
     }
     const std::uint64_t own_generation = header_.contents().generation;
     for (const std::string& entry : entries.value()) {
-        const std::optional<std::uint64_t> generation =
-            parse_generation_dir_name(entry);
-        if (!generation.has_value() || *generation >= own_generation) {
+        const std::uint64_t generation =
+            parse_generation_dir_name(entry).value_or(own_generation);
+        if (generation >= own_generation) {
             continue;
         }
         const Fd directory =
@@ -525,13 +524,13 @@ std::vector<Attachment::FinalWanted> Attachment::finals_wanted(
             continue;
         }
         const Result<HeaderView> header =
-            HeaderView::open(directory.get(), *generation, tagd_uid_, ignored);
+            HeaderView::open(directory.get(), generation, tagd_uid_, ignored);
         if (!header.ok() ||
             header.value().state() != GenerationState::RETIRING) {
             continue;
         }
         const GenerationIdentity identity{
-            *generation, header.value().contents().created_time_ns};
+            generation, header.value().contents().created_time_ns};
         for (const WantedValue& name : names) {
             const std::optional<TagEntry> tag =
                 header.value().find_tag(name.name);
@@ -544,7 +543,7 @@ std::vector<Attachment::FinalWanted> Attachment::finals_wanted(
                 std::ranges::find(wanted, owner, &FinalWanted::owner);
             if (known == wanted.end()) {
                 wanted.push_back({owner, identity, entry});
-            } else if (known->generation.generation < *generation) {
+            } else if (known->generation.generation < generation) {
                 known->generation = identity;
                 known->directory = entry;
             }
@@ -629,7 +628,7 @@ void Attachment::restore_retained(std::span<std::byte> tags,
             continue;
         }
         // Not shared yet: the file has no name others look for.
-        TagRecord& record = shared_at<TagRecord>(tags, record_offset(slots[i]));
+        auto& record = shared_at<TagRecord>(tags, record_offset(slots[i]));
         record.value = value->value;
         record.quality = to_raw(Quality::UNCERTAIN);
         record.quality_flags = to_raw(QualityFlag::RESTORED);

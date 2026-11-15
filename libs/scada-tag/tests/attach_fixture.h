@@ -147,10 +147,13 @@ protected:
             to_raw(state), std::memory_order_release);
     }
 
-    // The retain directory `start_host` gives the host; empty: none.
-    std::string host_retain_dir_;
+    // Sets the retain directory `start_host` gives the host; empty: none.
+    void use_retain_dir(std::string path) {
+        host_retain_dir_ = std::move(path);
+    }
 
 private:
+    std::string host_retain_dir_;
     std::unique_ptr<GenerationHost> host_;
 };
 

@@ -6,9 +6,7 @@
 
 #include "attach_fixture.h"
 #include "attachment.h"
-#include "header_view.h"
 #include "layout.h"
-#include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
 #include "temp_database.h"
@@ -16,6 +14,7 @@
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
 #include "scada/tag/handle.h"
 #include "scada/tag/scada_tag.h"
@@ -25,9 +24,11 @@
 #include <gtest/gtest.h>
 
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -35,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -50,6 +52,12 @@ constexpr std::int64_t INTERVAL_NS =
 constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 constexpr mode_t RETAIN_DIR_MODE = 02750;
+// Values the tests write and expect back; only their difference matters.
+constexpr std::uint64_t VALUE_5 = 5;
+constexpr std::uint64_t VALUE_6 = 6;
+constexpr std::uint64_t VALUE_7 = 7;
+constexpr std::uint64_t VALUE_8 = 8;
+constexpr std::uint64_t VALUE_9 = 9;
 
 class Keeper : public scada::tag::testing::AttachFixture {
 protected:
@@ -59,7 +67,7 @@ protected:
         ASSERT_EQ(
             ::mkdir(retain_.c_str(), scada::tag::testing::PRIVATE_DIR_MODE), 0);
         ASSERT_EQ(::chmod(retain_.c_str(), RETAIN_DIR_MODE), 0);
-        host_retain_dir_ = retain_.string();
+        use_retain_dir(retain_.string());
     }
 
     // `io` owns plant.level (retain), plant.mode (retain_now) and
@@ -110,17 +118,17 @@ protected:
         return result.ok() ? std::move(result).value() : nullptr;
     }
 
-    static void write(Attachment& io, std::string_view name, std::uint8_t type,
-                      std::uint64_t value,
+    static void write(Attachment& feeder, std::string_view name,
+                      std::uint8_t type, std::uint64_t value,
                       std::uint8_t quality = SCADA_QUALITY_GOOD) {
         std::uint32_t handle = SCADA_INVALID_HANDLE;
-        ASSERT_EQ(io.resolve(name, handle), SCADA_OK);
-        scada_value v{};
-        v.type = type;
-        v.quality = quality;
-        v.value = value;
-        v.source_time_ns = static_cast<std::int64_t>(value) + 1;
-        ASSERT_EQ(io.write(handle, v), SCADA_OK);
+        ASSERT_EQ(feeder.resolve(name, handle), SCADA_OK);
+        scada_value written{};
+        written.type = type;
+        written.quality = quality;
+        written.value = value;
+        written.source_time_ns = static_cast<std::int64_t>(value) + 1;
+        ASSERT_EQ(feeder.write(handle, written), SCADA_OK);
     }
 
     [[nodiscard]] static std::uint64_t read(Attachment& process,
@@ -132,15 +140,24 @@ protected:
         return value.value;
     }
 
-    // The retain file of `owner`, if there is a valid one.
-    [[nodiscard]] std::optional<RetainFile> file_of(
-        std::string_view owner) const {
+    // True if `owner` has a valid retain file.
+    [[nodiscard]] bool has_file(std::string_view owner) const {
+        const Fd directory = scada::tag::testing::open_directory(retain_);
+        std::string detail;
+        return read_retain_file(directory.get(), retain_file_name(owner), uid(),
+                                detail)
+            .ok();
+    }
+
+    // The retain file of `owner`; an empty one, with a failed expectation,
+    // if there is no valid one.
+    [[nodiscard]] RetainFile file_of(std::string_view owner) const {
         const Fd directory = scada::tag::testing::open_directory(retain_);
         std::string detail;
         Result<RetainFile> file = read_retain_file(
             directory.get(), retain_file_name(owner), uid(), detail);
-        return file.ok() ? std::optional<RetainFile>(std::move(file).value())
-                         : std::nullopt;
+        EXPECT_TRUE(file.ok()) << detail;
+        return file.ok() ? std::move(file).value() : RetainFile{};
     }
 
     [[nodiscard]] static std::optional<std::uint64_t> value_in(
@@ -187,82 +204,81 @@ private:
 
 TEST_F(Keeper, ARetainNowChangeIsWrittenAtTheNextCheck) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     const std::int64_t now = scada::monotonic_ns();
     // Nothing on file and nothing written yet: no file.
     EXPECT_TRUE(round(now).retain_written.empty());
-    EXPECT_FALSE(file_of("io").has_value());
+    EXPECT_FALSE(has_file("io"));
 
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     const CheckReport report = round(now + 1);
     ASSERT_EQ(report.retain_written.size(), 1U);
     EXPECT_EQ(report.retain_written[0].owner, "io");
     EXPECT_FALSE(report.retain_written[0].final);
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_EQ(value_in(*file, "plant.mode"), 2U);
-    EXPECT_EQ(find_retained(*file, "plant.mode")->source_time_ns, 3);
-    EXPECT_FALSE(value_in(*file, "plant.count").has_value());
-    EXPECT_FALSE(file->final);
-    EXPECT_EQ(file->source.generation, 1U);
+    const RetainFile file = file_of("io");
+    EXPECT_EQ(value_in(file, "plant.mode"), 2U);
+    EXPECT_EQ(find_retained(file, "plant.mode")->source_time_ns, 3);
+    EXPECT_FALSE(value_in(file, "plant.count").has_value());
+    EXPECT_FALSE(file.final);
+    EXPECT_EQ(file.source.generation, 1U);
     // No change: no write.
     EXPECT_TRUE(round(now + 2).retain_written.empty());
 }
 
 TEST_F(Keeper, AnOtherChangeWaitsForTheRetainInterval) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     const std::int64_t now = scada::monotonic_ns();
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 5);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
     // The first write of an owner is not held back.
     EXPECT_EQ(round(now).retain_written.size(), 1U);
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 6);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_6);
     EXPECT_TRUE(round(now + INTERVAL_NS - 1).retain_written.empty());
-    EXPECT_EQ(value_in(*file_of("io"), "plant.level"), 5U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.level"), VALUE_5);
     EXPECT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
-    EXPECT_EQ(value_in(*file_of("io"), "plant.level"), 6U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.level"), VALUE_6);
 }
 
 TEST_F(Keeper, ARecordWithoutAValueLeavesTheValueOnFile) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     const std::int64_t now = scada::monotonic_ns();
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     ASSERT_EQ(round(now).retain_written.size(), 1U);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 9, SCADA_QUALITY_BAD);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_9, SCADA_QUALITY_BAD);
     EXPECT_TRUE(round(now + INTERVAL_NS).retain_written.empty());
-    EXPECT_EQ(value_in(*file_of("io"), "plant.mode"), 2U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), 2U);
 }
 
 TEST_F(Keeper, FlushWritesWhatChangedSinceTheLastWrite) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 5);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
     ASSERT_EQ(round(scada::monotonic_ns()).retain_written.size(), 1U);
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 7);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_7);
     // Not checked since: the flush reads the generation itself.
     EXPECT_EQ(host().flush_retained().retain_written.size(), 1U);
-    EXPECT_EQ(value_in(*file_of("io"), "plant.level"), 7U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.level"), VALUE_7);
     EXPECT_TRUE(host().flush_retained().retain_written.empty());
 }
 
 TEST_F(Keeper, AFileThatFailsItsChecksIsReportedOnceAndReplaced) {
     scada::tag::testing::touch(retain() / "io.bin");
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     const std::int64_t now = scada::monotonic_ns();
     const CheckReport first = round(now);
     ASSERT_EQ(first.retain_problems.size(), 1U);
     EXPECT_EQ(first.retain_problems[0].subject, "io.bin");
     EXPECT_TRUE(round(now + 1).retain_problems.empty());
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     EXPECT_EQ(round(now + 2).retain_written.size(), 1U);
-    EXPECT_TRUE(file_of("io").has_value());
+    EXPECT_TRUE(has_file("io"));
 }
 
 TEST_F(Keeper, StaleTemporaryFilesAreRemovedAtStart) {
@@ -291,9 +307,9 @@ TEST_F(Keeper, ARetainDirectoryWithTheWrongModeIsRefused) {
 TEST_F(Keeper,
        AnOwnerThatLeavesARetiredGenerationGetsItsFinalFileThenItIsRemoved) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     ASSERT_EQ(round(scada::monotonic_ns()).retain_written.size(), 1U);
 
     // scada-tagd restarts with a changed tag set while io runs.
@@ -301,15 +317,15 @@ TEST_F(Keeper,
     start_host(changed_set());
     ASSERT_EQ(host().generation(), 2U);
     // Changed after the last write: only the FINAL file has it.
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 3);
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 8);
-    std::int64_t now = scada::monotonic_ns();
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 3);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_8);
+    const std::int64_t now = scada::monotonic_ns();
     CheckReport report = round(now);
     EXPECT_TRUE(report.retired.empty());  // io is still in it
     EXPECT_TRUE(std::filesystem::exists(generation_dir(1)));
-    EXPECT_FALSE(file_of("io")->final);
+    EXPECT_FALSE(file_of("io").final);
 
-    io.reset();  // detaches: state STOPPING, lock released
+    feeder.reset();  // detaches: state STOPPING, lock released
     report = round(now + 1);
     ASSERT_EQ(report.retain_written.size(), 1U);
     EXPECT_TRUE(report.retain_written[0].final);
@@ -321,49 +337,47 @@ TEST_F(Keeper,
     EXPECT_TRUE(report.retired[0].removed);
     EXPECT_FALSE(report.retired[0].timed_out);
     EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->final);
-    EXPECT_EQ(file->source.generation, 1U);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 3U);
-    EXPECT_EQ(value_in(*file, "plant.level"), 8U);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(file.source.generation, 1U);
+    EXPECT_EQ(value_in(file, "plant.mode"), 3U);
+    EXPECT_EQ(value_in(file, "plant.level"), VALUE_8);
 
     // io attaches to generation 2 and gets them back.
     const Attached again = attached("io");
     ASSERT_NE(again, nullptr);
     EXPECT_EQ(again->status().final_waits_expired, 0U);
     EXPECT_EQ(read(*again, "plant.mode"), 3U);
-    EXPECT_EQ(read(*again, "plant.level"), 8U);
+    EXPECT_EQ(read(*again, "plant.level"), VALUE_8);
     // The restored values are what is on file: nothing to write.
     EXPECT_TRUE(round(now + 3).retain_written.empty());
 }
 
 TEST_F(Keeper, AFinalFileStaysMarkedFinalWhenLaterValuesAreWritten) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     drop_host();
     start_host(changed_set());
-    io.reset();
+    feeder.reset();
     const std::int64_t now = scada::monotonic_ns();
     ASSERT_EQ(two_rounds(now).retired.size(), 1U);
     const Attached again = attached("io");
     ASSERT_NE(again, nullptr);
     write(*again, "plant.mode", SCADA_TYPE_INT64, 4);
     ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->final);
-    EXPECT_EQ(file->source.generation, 1U);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 4U);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(file.source.generation, 1U);
+    EXPECT_EQ(value_in(file, "plant.mode"), 4U);
 }
 
 TEST_F(Keeper,
        ARetiredGenerationIsRemovedAfterTheTimeoutWithAProcessStillInIt) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 5);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
     drop_host();
     start_host(changed_set());
     const std::int64_t now = scada::monotonic_ns();
@@ -374,18 +388,18 @@ TEST_F(Keeper,
     EXPECT_TRUE(report.retired[0].removed);
     EXPECT_TRUE(report.retired[0].timed_out);
     EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
-    EXPECT_EQ(value_in(*file_of("io"), "plant.mode"), 5U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_5);
     // The process still has its mappings and is told to move on.
-    EXPECT_EQ(io->heartbeat(), SCADA_E_RETIRING);
-    EXPECT_EQ(read(*io, "plant.mode"), 5U);
+    EXPECT_EQ(feeder->heartbeat(), SCADA_E_RETIRING);
+    EXPECT_EQ(read(*feeder, "plant.mode"), VALUE_5);
 }
 
 TEST_F(Keeper, ARetiredGenerationLeftBeforeTheStartIsFinishedAtTheFirstCheck) {
     start_host(retained_set());
     {
-        const Attached io = attached("io");
-        ASSERT_NE(io, nullptr);
-        write(*io, "plant.mode", SCADA_TYPE_INT64, 6);
+        const Attached feeder = attached("io");
+        ASSERT_NE(feeder, nullptr);
+        write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_6);
     }
     // scada-tagd stopped before it read the change.
     drop_host();
@@ -393,23 +407,22 @@ TEST_F(Keeper, ARetiredGenerationLeftBeforeTheStartIsFinishedAtTheFirstCheck) {
     const CheckReport report = two_rounds(scada::monotonic_ns());
     ASSERT_EQ(report.retired.size(), 1U);
     EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->final);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 6U);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_6);
 }
 
 TEST_F(Keeper,
        AnOlderGenerationWithoutLiveProcessIsFinishedAtStartBeforeItIsRemoved) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 6);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_6);
     // Generation 2 replaces 1 while io is in it; scada-tagd stops at once.
     drop_host();
     start_host(changed_set());
     drop_host();
-    io.reset();
+    feeder.reset();
     // Generation 3: generation 1 is neither current nor alive.
     TagSet third = changed_set();
     third.tags.push_back(
@@ -417,11 +430,10 @@ TEST_F(Keeper,
     start_host(third);
     ASSERT_EQ(host().generation(), 3U);
     EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->final);
-    EXPECT_EQ(file->source.generation, 1U);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 6U);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(file.source.generation, 1U);
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_6);
     // The write at start is reported by the first check, which also
     // finishes generation 2.
     const CheckReport report = two_rounds(scada::monotonic_ns());
@@ -431,34 +443,34 @@ TEST_F(Keeper,
 }
 
 TEST_F(Keeper, WithoutARetainDirectoryARetiredGenerationIsStillRemoved) {
-    host_retain_dir_.clear();
+    use_retain_dir({});
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
     drop_host();
     start_host(changed_set());
     const std::int64_t now = scada::monotonic_ns();
     EXPECT_TRUE(round(now).retired.empty());
-    io.reset();
+    feeder.reset();
     EXPECT_EQ(round(now + 1).retired.size(), 1U);
     EXPECT_FALSE(std::filesystem::exists(generation_dir(1)));
-    EXPECT_FALSE(file_of("io").has_value());
+    EXPECT_FALSE(has_file("io"));
 }
 
 // Contract 11.4: an observer holds no lock, so it does not keep a retired
 // generation; it is told by scada_tag_status and observes again.
 TEST_F(Keeper, AnObserverInARemovedGenerationIsToldAndObservesAgain) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 7);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_7);
     Attached watcher = observer();
     ASSERT_NE(watcher, nullptr);
-    EXPECT_EQ(read(*watcher, "plant.mode"), 7U);
+    EXPECT_EQ(read(*watcher, "plant.mode"), VALUE_7);
 
     drop_host();
     start_host(changed_set());
-    io.reset();
+    feeder.reset();
     ASSERT_EQ(two_rounds(scada::monotonic_ns()).retired.size(), 1U);
     ASSERT_FALSE(std::filesystem::exists(generation_dir(1)));
 
@@ -483,9 +495,9 @@ constexpr std::int64_t HEARTBEAT_STALE_NS = std::int64_t{4000} * NS_PER_MS;
 
 TEST_F(Keeper, AHungOwnerIsNotTakenAsLeftBeforeTheTimeoutAndItsFileIsNotFinal) {
     start_host(retained_set());
-    const Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 5);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
     drop_host();
     start_host(changed_set());
     const std::int64_t now = scada::monotonic_ns();
@@ -494,68 +506,66 @@ TEST_F(Keeper, AHungOwnerIsNotTakenAsLeftBeforeTheTimeoutAndItsFileIsNotFinal) {
     CheckReport report = round(now + HEARTBEAT_STALE_NS);
     EXPECT_TRUE(report.retired.empty());
     EXPECT_TRUE(std::ranges::none_of(
-        report.retain_written, [](const RetainWrite& w) { return w.final; }));
+        report.retain_written,
+        [](const RetainWrite& write) { return write.final; }));
     report = two_rounds(now + RETIRED_TIMEOUT_NS);
     ASSERT_EQ(report.retired.size(), 1U);
     EXPECT_TRUE(report.retired[0].timed_out);
     ASSERT_EQ(report.retired[0].still_attached.size(), 1U);
     EXPECT_EQ(report.retired[0].still_attached[0],
               "io (pid " + std::to_string(::getpid()) + ")");
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_FALSE(file->final);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 5U);
+    const RetainFile file = file_of("io");
+    EXPECT_FALSE(file.final);
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_5);
 }
 
 TEST_F(Keeper, AnOwnerKilledMidWriteLeavesTheValueOnFile) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     ASSERT_EQ(round(scada::monotonic_ns()).retain_written.size(), 1U);
     drop_host();
     start_host(changed_set());
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 3);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 3);
     // The record of plant.mode (slot 1 in name order) is left mid-write.
     std::uint32_t handle = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(io->resolve("plant.mode", handle), SCADA_OK);
-    TagRecord& record = shared_at<TagRecord>(
-        io->owners()[0].tags.memory.bytes(),
+    ASSERT_EQ(feeder->resolve("plant.mode", handle), SCADA_OK);
+    auto& record = shared_at<TagRecord>(
+        feeder->owners()[0].tags.memory.bytes(),
         sizeof(RegionHeader) +
             ((handle & MAX_TAGS_PER_OWNER) * sizeof(TagRecord)));
     store_shared(record.seq,
                  load_shared(record.seq, std::memory_order_relaxed) + 1,
                  std::memory_order_release);
-    io.reset();
+    feeder.reset();
     const CheckReport report = two_rounds(scada::monotonic_ns());
     ASSERT_EQ(report.retired.size(), 1U);
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->final);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 2U);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(value_in(file, "plant.mode"), 2U);
 }
 
 TEST_F(Keeper, NothingIsWrittenFromAnOlderGenerationOnceTheNewRegionExists) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     drop_host();
     start_host(changed_set());
     const std::int64_t now = scada::monotonic_ns();
-    io.reset();
+    feeder.reset();
     // io attaches to generation 2 before scada-tagd looked: its wait runs
     // out, and it writes a newer value there.
     const Attached again = attached("io");
     ASSERT_NE(again, nullptr);
     EXPECT_EQ(again->status().final_waits_expired, 1U);
-    write(*again, "plant.mode", SCADA_TYPE_INT64, 9);
+    write(*again, "plant.mode", SCADA_TYPE_INT64, VALUE_9);
     const CheckReport report = two_rounds(now);
     ASSERT_EQ(report.retired.size(), 1U);
-    const std::optional<RetainFile> file = file_of("io");
-    ASSERT_TRUE(file.has_value());
-    EXPECT_FALSE(file->final);
-    EXPECT_EQ(value_in(*file, "plant.mode"), 9U);
+    const RetainFile file = file_of("io");
+    EXPECT_FALSE(file.final);
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_9);
 }
 
 TEST_F(Keeper, AMovedTagWaitsForTheFinalFileOfItsFormerOwner) {
@@ -566,9 +576,9 @@ TEST_F(Keeper, AMovedTagWaitsForTheFinalFileOfItsFormerOwner) {
     TagSet after = before;
     after.tags.at(0).owner = "web";  // plant.level moves from io to web
     start_host(before);
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.level", SCADA_TYPE_FLOAT64, 8);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_8);
     drop_host();
     start_host(after);
     // web attaches while io is still in generation 1; io leaves and
@@ -580,12 +590,12 @@ TEST_F(Keeper, AMovedTagWaitsForTheFinalFileOfItsFormerOwner) {
            !std::filesystem::exists(generation_dir(2) / "proc.web")) {
         std::this_thread::yield();
     }
-    io.reset();
+    feeder.reset();
     static_cast<void>(round(scada::monotonic_ns()));
     attaching.join();
     ASSERT_NE(web, nullptr);
     EXPECT_EQ(web->status().final_waits_expired, 0U);
-    EXPECT_EQ(read(*web, "plant.level"), 8U);
+    EXPECT_EQ(read(*web, "plant.level"), VALUE_8);
 }
 
 TEST_F(Keeper, FilesOfOwnersThatAreGoneAreRemovedOnceEveryOwnerHasOne) {
@@ -600,7 +610,7 @@ TEST_F(Keeper, FilesOfOwnersThatAreGoneAreRemovedOnceEveryOwnerHasOne) {
     start_host(retained_set());
     // io has a value (from old.owner) but no file: written at the first
     // check; old.owner is removed at the one after.
-    std::int64_t now = scada::monotonic_ns();
+    const std::int64_t now = scada::monotonic_ns();
     CheckReport report = round(now);
     EXPECT_EQ(report.retain_written.size(), 1U);
     report = round(now + 1);
@@ -608,25 +618,25 @@ TEST_F(Keeper, FilesOfOwnersThatAreGoneAreRemovedOnceEveryOwnerHasOne) {
               std::vector<std::string>{"old.owner.bin"});
     EXPECT_EQ(scada::tag::testing::names_in(retain()),
               std::vector<std::string>{"io.bin"});
-    EXPECT_EQ(value_in(*file_of("io"), "plant.level"), 1U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.level"), 1U);
 }
 
 TEST_F(Keeper, TwoGenerationChangesInARowKeepTheLastValue) {
     start_host(retained_set());
-    Attached io = attached("io");
-    ASSERT_NE(io, nullptr);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 1);
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 1);
     drop_host();
     start_host(changed_set());  // generation 2
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 2);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 2);
     drop_host();
     TagSet third = changed_set();
     third.tags.push_back(
         {.name = "plant.third", .owner = "io", .type = TagType::BOOL});
     start_host(third);  // generation 3; 1 and 2 are retired, io is in 1
     ASSERT_EQ(host().generation(), 3U);
-    write(*io, "plant.mode", SCADA_TYPE_INT64, 3);
-    io.reset();
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, 3);
+    feeder.reset();
     const CheckReport report = two_rounds(scada::monotonic_ns());
     EXPECT_EQ(report.retired.size(), 2U);
     const Attached again = attached("io");

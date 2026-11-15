@@ -203,7 +203,7 @@ private:
         GenerationIdentity identity;
         Fd directory;  // retired generations only; the current one is borrowed
         int dir_fd = -1;
-        std::optional<HeaderView> header;
+        std::unique_ptr<HeaderView> header;
         std::unique_ptr<PeerRegions> peers;
         std::vector<WatchedOwner> owners;
         std::vector<WatchedProcess> processes;

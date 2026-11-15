@@ -22,9 +22,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -238,7 +241,7 @@ Status RetainKeeper::watch_current(int dir_fd, std::uint64_t generation,
     auto watched = std::make_unique<Watched>();
     watched->generation = generation;
     watched->dir_fd = dir_fd;
-    watched->header.emplace(std::move(header).value());
+    watched->header = std::make_unique<HeaderView>(std::move(header).value());
     watched->identity = {generation,
                          watched->header->contents().created_time_ns};
     watched->peers = std::make_unique<PeerRegions>(watched->header->contents());
@@ -263,7 +266,8 @@ std::optional<GenerationState> RetainKeeper::watch_retired(
             HeaderView::open(watched->dir_fd, generation, tagd_uid_, ignored);
         if (header.ok()) {
             state = header.value().state();
-            watched->header.emplace(std::move(header).value());
+            watched->header =
+                std::make_unique<HeaderView>(std::move(header).value());
             watched->identity = {generation,
                                  watched->header->contents().created_time_ns};
             watched->peers =
@@ -418,9 +422,11 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     }
     RetainFile file;
     file.final = state.final_source.has_value();
-    file.source = file.final ? *state.final_source
-                             : (current_ != nullptr ? current_->identity
-                                                    : GenerationIdentity{});
+    if (file.final) {
+        file.source = *state.final_source;
+    } else if (current_ != nullptr) {
+        file.source = current_->identity;
+    }
     file.written_time_ns = realtime_ns();
     file.config_hash = config_hash_;
     file.values.reserve(state.values.size());
@@ -434,7 +440,7 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
     if (!persists()) {
         return;
     }
-    for (RetainWriter::Done& done : writer_->take_done()) {
+    for (const RetainWriter::Done& done : writer_->take_done()) {
         OwnerState& state = states_[done.owner];
         state.done_token = std::max(state.done_token, done.token);
         if (done.written) {
@@ -607,7 +613,7 @@ void RetainKeeper::finish_now(int base_fd, std::uint64_t generation,
     }
     std::map<std::string, std::vector<std::string>, std::less<>> ignored;
     load_watched(*watched, ignored);
-    for (WatchedOwner& owner : watched->owners) {
+    for (const WatchedOwner& owner : watched->owners) {
         static_cast<void>(read_owner(*watched, owner));
         OwnerState& state = states_[owner.name];
         state.final_source = newer(state.final_source, watched->identity);
