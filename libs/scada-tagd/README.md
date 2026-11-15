@@ -34,8 +34,13 @@ the standard error stream.
 | --- | --- | --- |
 | `generation created`, `generation reused` | NOTICE | `GENERATION` |
 | A note of the start, for example `gen-3 is not reused: the tag set changed` or `gen-2 was removed` | NOTICE | |
-| `process down` | WARNING; INFO at the first check of a new generation | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
+| `process down` | WARNING | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
 | `process up` | NOTICE | `PROCESS` |
+
+A new generation starts with every other process down, so a process that has
+not attached yet is not logged; each is logged `process up` once it has
+attached, also when that happens before the first check. A reused generation
+keeps what the previous `scada-tagd` recorded and logs only changes from it.
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |

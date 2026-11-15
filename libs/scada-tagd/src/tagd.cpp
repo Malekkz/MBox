@@ -202,16 +202,14 @@ Wake wait_for_signal(const sigset_t& signals,
     return Wake::STOP;
 }
 
-// Writes what one liveness check changed to the log. `quiet` is for the
-// first check of a new generation, when no process has attached yet.
-void log_report(Logger& logger, const CheckReport& report, bool quiet) {
+// Writes what one liveness check changed to the log.
+void log_report(Logger& logger, const CheckReport& report) {
     for (const ProcessChange& change : report.changes) {
         if (change.reason == DownReason::NONE) {
             logger.log(LogLevel::NOTICE, "process up",
                        {{"PROCESS", change.process}});
         } else {
-            logger.log(quiet ? LogLevel::INFO : LogLevel::WARNING,
-                       "process down",
+            logger.log(LogLevel::WARNING, "process down",
                        {{"PROCESS", change.process},
                         {"REASON", scada::tag::to_string(change.reason)}});
         }
@@ -266,7 +264,6 @@ int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
           Logger& logger) {
     const std::int64_t period = loop_period_ns(host, settings);
-    bool quiet = !host.reused();
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
     bool feeding = true;  // the last watchdog message was sent
     std::int64_t next_feed = monotonic_ns();
@@ -276,8 +273,7 @@ int serve(GenerationHost& host, Notifier& notifier,
         // The heartbeat, the check and the watchdog share this loop, so
         // that a hung loop stops all three (contract, sections 3.4, 10.1).
         host.heartbeat(now);
-        log_report(logger, host.check(now), quiet);
-        quiet = false;
+        log_report(logger, host.check(now));
         if (feed_period.has_value() && now >= next_feed) {
             const bool fed = notifier.watchdog().ok();
             if (!fed && feeding) {

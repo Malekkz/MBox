@@ -366,7 +366,7 @@ TEST_F(Host, Conformance20RunningProcessStaysUpAcrossTheRestart) {
         peer = running_io(1, START_NS);
         ASSERT_TRUE(peer.valid());
         EXPECT_EQ(changes_of(first->check(START_NS)),
-                  (Changes{{"web", DownReason::REGION_MISSING}}));
+                  (Changes{{"io", DownReason::NONE}}));
     }
     const std::unique_ptr<GenerationHost> host = started();
     ASSERT_NE(host, nullptr);
@@ -643,17 +643,17 @@ TEST_F(Host, StartAfterAFailedStartBeginsAtGenerationOne) {
 TEST_F(Host, Conformance05EveryProcessIsDownUntilItAttaches) {
     const std::unique_ptr<GenerationHost> host = started();
     ASSERT_NE(host, nullptr);
-    EXPECT_EQ(host->is_down("io"), false);
+    // A new generation starts with every process down but scada-tagd,
+    // which is never down.
+    EXPECT_EQ(host->is_down("io"), true);
+    EXPECT_EQ(host->is_down("web"), true);
+    EXPECT_EQ(host->is_down("tagd"), false);
     EXPECT_EQ(host->is_down("nobody"), std::nullopt);
 
-    // Nobody has attached yet. scada-tagd itself is never down.
-    EXPECT_EQ(changes_of(host->check(START_NS)),
-              (Changes{{"io", DownReason::REGION_MISSING},
-                       {"web", DownReason::REGION_MISSING}}));
+    // Nobody has attached yet: that is no change.
+    EXPECT_TRUE(host->check(START_NS).changes.empty());
     EXPECT_EQ(host->is_down("io"), true);
     EXPECT_EQ(host->is_down("tagd"), false);
-    // A state that does not change is not reported again.
-    EXPECT_TRUE(host->check(START_NS).changes.empty());
 
     // Attached but still STARTING: down until it is RUNNING and beats.
     OwnProcRegion peer = attach_io(1);
@@ -664,6 +664,19 @@ TEST_F(Host, Conformance05EveryProcessIsDownUntilItAttaches) {
     EXPECT_EQ(changes_of(host->check(START_NS)),
               (Changes{{"io", DownReason::NONE}}));
     EXPECT_EQ(host->is_down("io"), false);
+}
+
+// Issue #44: a process can attach as soon as `current` is switched, before
+// the first liveness check of scada-tagd. It is reported up at that check.
+TEST_F(Host, AProcessThatAttachesBeforeTheFirstCheckIsReportedUp) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    const OwnProcRegion peer = running_io(1, START_NS);
+    ASSERT_TRUE(peer.valid());
+    EXPECT_EQ(changes_of(host->check(START_NS)),
+              (Changes{{"io", DownReason::NONE}}));
+    EXPECT_EQ(host->is_down("io"), false);
+    EXPECT_EQ(host->is_down("web"), true);
 }
 
 TEST_F(Host, Conformance05ProcessIsDownOnceItsHeartbeatIsOlderThanItsTimeout) {
@@ -722,7 +735,7 @@ TEST_F(Host, DownFlagIsWhatOtherProcessesSeeInTheHeader) {
     const MappedRegion header = map_header(1);
     ASSERT_TRUE(header.valid());
     // In process index order: io, tagd, web.
-    EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{0, 0, 0}));
+    EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{1, 0, 1}));
     static_cast<void>(host->check(START_NS));
     EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{1, 0, 1}));
 
