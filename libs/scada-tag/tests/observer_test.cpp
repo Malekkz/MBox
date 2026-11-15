@@ -278,10 +278,42 @@ TEST_F(Observer, HasNoHeartbeatAndWakesNobody) {
     EXPECT_EQ(snapshot(generation_dir()), before);
 }
 
+// Section 11.4, item 4: in an observer context, scada_queue_open gives
+// SCADA_E_NOT_OWNER for every name and leaves `*out` NULL.
+::testing::AssertionResult opens_no_queue(scada_ctx* observer) {
+    for (const char* name : {"events.io", "cmd.io.web", "events.none", ""}) {
+        scada_queue* queue = nullptr;
+        const int code = scada_queue_open(observer, name, &queue);
+        if (code != SCADA_E_NOT_OWNER || queue != nullptr) {
+            scada_queue_close(queue);
+            return ::testing::AssertionFailure()
+                   << "open of \"" << name << "\" gave " << code;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Without a handle, post, ack and scada_waitset_add_queue of an observer
+// refuse with SCADA_E_INVALID.
+::testing::AssertionResult refuses_queue_calls(scada_ctx* observer) {
+    scada_queue* none = nullptr;
+    const scada_event_record event{};
+    scada_waitset* set = nullptr;
+    const int created = scada_waitset_create(observer, &set);
+    const std::vector<int> codes{scada_queue_post(none, &event, sizeof(event)),
+                                 scada_queue_ack(none), created,
+                                 scada_waitset_add_queue(set, none)};
+    scada_waitset_destroy(set);
+    if (codes != std::vector<int>{SCADA_E_INVALID, SCADA_E_INVALID, SCADA_OK,
+                                  SCADA_E_INVALID}) {
+        return ::testing::AssertionFailure() << "unexpected codes";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // Section 11.4, item 4: an observer has no side in any queue. Open is
-// refused with SCADA_E_NOT_OWNER for every name, before anything is
-// mapped, so there is no handle to post to, acknowledge or add to a wait
-// set; those calls refuse the handle that open left NULL.
+// refused before anything is mapped, so there is no handle to post to,
+// acknowledge or add to a wait set; no mapping or file changes.
 TEST_F(Observer, HasNoQueue) {
     start_host();
     Context feeder;
@@ -295,22 +327,9 @@ TEST_F(Observer, HasNoQueue) {
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
     const auto mapped_observing = mappings_under(generation_dir());
-    for (const char* name : {"events.io", "cmd.io.web", "events.none", ""}) {
-        scada_queue* queue = nullptr;
-        EXPECT_EQ(scada_queue_open(observer.get(), name, &queue),
-                  SCADA_E_NOT_OWNER)
-            << name;
-        EXPECT_EQ(queue, nullptr) << name;
-    }
+    EXPECT_TRUE(opens_no_queue(observer.get()));
     EXPECT_EQ(mappings_under(generation_dir()), mapped_observing);
-    scada_queue* none = nullptr;
-    const scada_event_record event{};
-    EXPECT_EQ(scada_queue_post(none, &event, sizeof(event)), SCADA_E_INVALID);
-    EXPECT_EQ(scada_queue_ack(none), SCADA_E_INVALID);
-    scada_waitset* set = nullptr;
-    ASSERT_EQ(scada_waitset_create(observer.get(), &set), SCADA_OK);
-    EXPECT_EQ(scada_waitset_add_queue(set, none), SCADA_E_INVALID);
-    scada_waitset_destroy(set);
+    EXPECT_TRUE(refuses_queue_calls(observer.get()));
     observer.detach();
     EXPECT_EQ(mappings_under(generation_dir()), mapped_before);
     EXPECT_EQ(snapshot(generation_dir()), before);
