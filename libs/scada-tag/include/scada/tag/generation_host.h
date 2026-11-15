@@ -125,6 +125,36 @@ struct RetiredGeneration {
     bool abandoned = false;
 };
 
+// What changed about a reliable queue at a liveness check (issue #53).
+enum class QueueEvent : std::uint8_t {
+    // Its consumer's cursor and its `write_seq` became a pair out of range
+    // (section 9.2). Such a queue is stopped: its consumer gets
+    // SCADA_E_LAYOUT and its producer SCADA_E_PEER_DOWN.
+    BROKEN,
+    // A broken queue's pair is in range again.
+    NO_LONGER_BROKEN,
+    // An events or command queue has had no usable file at two checks in a
+    // row while its producer was not down. A producer creates its queue
+    // files when it attaches, so the file was removed or damaged.
+    MISSING,
+    // A queue reported MISSING has a usable file again.
+    FOUND,
+};
+
+// A reliable queue whose state changed at a liveness check. The values are
+// input: the producer and the consumer write them.
+struct QueueChange {
+    std::string queue;
+    QueueEvent event = QueueEvent::BROKEN;
+    // BROKEN and NO_LONGER_BROKEN: the values that were judged.
+    std::uint64_t cursor = 0;
+    std::uint64_t write_seq = 0;
+    std::uint32_t capacity = 0;
+    // BROKEN: the cursor is the all-ones value a consumer stores when it
+    // found the queue file replaced inside the generation (decision D-40).
+    bool replaced = false;
+};
+
 // What one liveness check changed.
 struct CheckReport {
     std::vector<ProcessChange> changes;
@@ -138,6 +168,7 @@ struct CheckReport {
     // generation is retired (decision D-45). Names found in the
     // directory: outside input.
     std::vector<std::string> retain_files_removed;
+    std::vector<QueueChange> queues;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -205,9 +236,14 @@ public:
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
     // clears it for every process that is not, reads the late heartbeats
-    // every process recorded, then removes every entry of the generation
-    // directory that the header does not list or whose owner is wrong
-    // (section 3.1). Returns what changed.
+    // every process recorded, applies the range rule of section 9.2 to
+    // every queue whose region and consumer's `proc` region are both there,
+    // then removes every entry of the generation directory that the header
+    // does not list or whose owner is wrong (section 3.1). Returns what
+    // changed. A queue is reported when it becomes broken, when it is no
+    // longer broken, when an events or command queue file has been missing
+    // at two checks in a row while its producer was not down, and when it
+    // is there again; not at every check.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.

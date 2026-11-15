@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.12 (draft) |
+| Contract version | 0.13 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -144,6 +144,10 @@ accepted for layout version 1:
   another service, which the supervisor restarts. Preventing it would need
   sealed memory handed out by `scada-tagd`, which contradicts section 17,
   item 3.
+- `scada-tagd` maps every queue region read-only for its report (section
+  9.2), so a producer that shrinks its queue file in place can stop
+  `scada-tagd` by `SIGBUS` too, between its size check and its read. The
+  service manager restarts it, and a restart reuses the generation.
 - A group member can create a file or directory under a name it does not own.
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
@@ -163,6 +167,18 @@ accepted for layout version 1:
 - `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
 - A process feeds the service manager's watchdog from the same loop that
   writes its heartbeat.
+- The unit does not suspend, hibernate or hybrid-sleep: the platform
+  disables them (`docs/install.md` says how). `CLOCK_MONOTONIC` stays the
+  clock of every `*_mono_ns` and does not advance while the system is
+  suspended, so after a resume a write request would be executed later in
+  real time than its requester allowed, and every heartbeat would still
+  look fresh. Whether the platform disabled suspend cannot be checked from
+  inside a unit, so `scada-tagd` looks for its traces (D-46): it logs at
+  start, once at INFO, the sleep states the kernel offers
+  (`/sys/power/state`), and a WARNING when `CLOCK_BOOTTIME` minus
+  `CLOCK_MONOTONIC`, the time spent suspended since boot, is above 0 at
+  start or grows. A virtual machine that is paused stops both clocks and
+  is seen by neither check.
 
 ## 4. Region header
 
@@ -662,6 +678,20 @@ producer gets `SCADA_E_PEER_DOWN` (section 16). The all-ones cursor
 (2^64 - 1) is reserved: no `write_seq` reaches it (a post that would make
 `write_seq` equal to it is refused with `SCADA_E_FULL`), so by the range rule
 every reader of a cursor finds it out of range and consumes nothing.
+`scada-tagd` applies the same range rule to every queue at each liveness
+check (section 10.1), for reporting only: it reads `write_seq`, then the
+consumer's cursor, then `write_seq` again, and finds the queue broken when
+the cursor is beyond the second `write_seq` or the first `write_seq` is more
+than the capacity beyond the cursor. While both sides run, this order
+cannot find a pair broken that was in range at every moment. A queue whose
+region or whose consumer's `proc` region is missing, or whose consumer is
+not RUNNING (its cursors are set at attach, 11.2), is not judged. It logs
+a queue that became broken, and again one that no longer is, with its
+name, cursor, `write_seq` and capacity, once per change. It also logs an
+events or command queue that has had no usable file at two checks in a
+row while its producer was not down, and again when the file is there.
+It unmaps a queue file once the name refers to another file. The library
+does not use the result.
 On a stopped queue `scada_queue_next` waits out its timeout before it
 reports it, and a wait set never reports a stopped queue as ready, so
 neither spins; a consumer that calls `scada_queue_next` only after a wake
@@ -1471,6 +1501,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
 | A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Until then a post made between the recreation and the consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is lost; on an event queue that is an action without an audit record (9.3). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-40, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
 
 ## 17. Differences from the reference document
 
@@ -1528,7 +1559,10 @@ Smaller points where this contract adds to or narrows the reference:
     (section 9.2), while reference 6.1 puts command queue handling in
     `libscada-driver`. A driver never sees an expired OPERATE or CANCEL, so
     drivers time out selections themselves.
-20. String tags cannot be retained (section 12); reference 5 does not
+20. The unit must not suspend or hibernate (section 3.4, D-46). The
+    reference says nothing about system sleep; `scada-tagd` reports a
+    suspend it detects, and does not act on it.
+21. String tags cannot be retained (section 12); reference 5 does not
     restrict RETAIN to a type.
 
 ## 18. Change log
@@ -1548,7 +1582,13 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
 | 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
-| 0.12 | 2026-11-15 | Retained values and the removal of retired generations (P1-09, D-45). Section 11.2, step 7: a lock failure in a RETIRING generation counts as RETIRING. Section 11.3: tag writes stay allowed in a retiring generation; step 3, when an owner has left, its FINAL retain file, removal after the FINAL files or after 30 s, unlink only. Section 12: what counts as a value, the writer thread and the exact write sequence, the format, FINAL, the checks of the loader, the precedence for a moved tag, the bounded wait at attach, restored update times and the RESTORED flag, no STRING, removal of files of owners that are gone, BAD or NOT_INIT records removed from the file, no FINAL over newer values, the checks of the retain directory, the bounded waits for the writer, the give-up on a generation that cannot be removed. Section 1: an owner name does not start with `.`. Section 13: `scada_tag_retain_status`. Section 16: retained values across a generation change settled. Section 17: item 20. |
+| 0.12 | 2026-11-15 | Retained values and the removal of retired generations (P1-09, D-45). Section 11.2, step 7: a lock failure in a RETIRING generation counts as RETIRING. Section 11.3: tag writes stay allowed in a retiring generation; step 3, when an owner has left, its FINAL retain file, removal after the FINAL files or after 30 s, unlink only. Section 12: what counts as a value, the writer thread and the exact write sequence, the format, FINAL, the checks of the loader, the precedence for a moved tag, the bounded wait at attach, restored update times and the RESTORED flag, no STRING, removal of files of owners that are gone, BAD or NOT_INIT records removed from the file, no FINAL over newer values, the checks of the retain directory, the bounded waits for the writer, the give-up on a generation that cannot be removed. Section 1: an owner name does not start with `.`. Section 13: `scada_tag_retain_status`. Section 16: retained values across a generation change settled. Section 17: item 21. |
+| 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
+
+Migration, 0.12 to 0.13: none for data; the layout version stays 1 and no
+structure in shared memory changed. `scada-tagd` now maps every queue
+region read-only. A unit that allowed suspend, hibernate or hybrid sleep
+must disable them (`docs/install.md`).
 
 Migration, 0.11 to 0.12: none for data; the layout version stays 1 and no
 structure in shared memory changed. The retain file is new, so no file of

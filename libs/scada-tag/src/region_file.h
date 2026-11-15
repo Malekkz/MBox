@@ -96,6 +96,9 @@ void clear_os_error() noexcept;
 [[nodiscard]] std::uint64_t queue_region_size(
     std::uint64_t capacity, std::uint64_t record_size) noexcept;
 
+// The region kind of a queue of kind `kind`.
+[[nodiscard]] RegionKind queue_region_kind(QueueKind kind) noexcept;
+
 // What a region file must be to be used (section 3.1): the user that writes
 // it and the fields of its RegionHeader.
 struct RegionIdentity {

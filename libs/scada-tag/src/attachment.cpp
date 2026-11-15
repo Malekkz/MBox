@@ -61,18 +61,6 @@ constexpr std::size_t CURRENT_TARGET_BUFFER = 25;
 constexpr std::size_t USER_BUFFER_START = 1024;
 constexpr std::size_t USER_BUFFER_LIMIT = std::size_t{1024} * 1024;
 
-RegionKind region_kind_of(QueueKind kind) noexcept {
-    switch (kind) {
-        case QueueKind::EVENTS:
-            return RegionKind::EVENTS;
-        case QueueKind::CMD:
-            return RegionKind::CMD;
-        case QueueKind::RESULT:
-            return RegionKind::RESULT;
-    }
-    return RegionKind::EVENTS;
-}
-
 // The uid of the user `scada-tagd` (section 3.1: looked up by name at
 // attach).
 Result<std::uint32_t> lookup_tagd_uid(std::string& detail) {
@@ -655,7 +643,7 @@ Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
 
     OwnRegionSpec spec;
     spec.name = queue.name;
-    spec.identity.kind = region_kind_of(queue.kind);
+    spec.identity.kind = queue_region_kind(queue.kind);
     spec.identity.generation = contents.generation;
     spec.identity.size_bytes = queue_region_size(capacity, record_size);
     spec.identity.owner_index = process_index_;

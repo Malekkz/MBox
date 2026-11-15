@@ -54,7 +54,7 @@ and write with the sequence lock; change rings; and reliable queues.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.10, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.13, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |

@@ -393,12 +393,11 @@ TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     }
     EXPECT_TRUE(moves_to_generation_two_and_stops(*watch));
     EXPECT_TRUE(nothing_of_the_old_generation(watch->out()));
-    // scada-sim ends by itself (exit code 1) once it sees the generation
-    // retire, which can come before the kill; either end is fine here.
-    static_cast<void>(writer->send_signal(SIGKILL));
-    const std::optional<int> code = writer->wait_for_exit(WAIT_LIMIT);
-    EXPECT_TRUE(code == 1 ||
-                writer->wait_for_signal_exit(WAIT_LIMIT) == SIGKILL)
+    // scada-sim stops by itself, with code 1, once its generation retires
+    // (D-41); a kill raced with that exit and failed when it came first
+    // (pipeline of PR #68, ThreadSanitizer build).
+    constexpr int SIM_EXIT_RETIRED = 1;
+    EXPECT_EQ(writer->wait_for_exit(WAIT_LIMIT), SIM_EXIT_RETIRED)
         << writer->err();
     stop(*second);
 }

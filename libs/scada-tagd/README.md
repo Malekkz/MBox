@@ -62,6 +62,12 @@ the standard error stream.
 | `process up` | NOTICE | `PROCESS` |
 | `heartbeat late` | WARNING, at most once per process and check. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous check), `LATE_BEATS_TOTAL`, `LONGEST_GAP_MS`, `LAST_LATE_MONO_NS` (CLOCK_MONOTONIC) |
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
+| `queue broken` | WARNING, once when a queue's cursor and `write_seq` become a pair out of range (contract 9.2). The queue refuses posts and delivers nothing until the next generation | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY`, `REASON`: `replaced` (the consumer found the queue file replaced) or `out of range` |
+| `queue no longer broken` | NOTICE, once | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY` |
+| `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
+| `queue file found again` | NOTICE, once | `QUEUE` |
+| `the kernel offers sleep states; the unit must not suspend` | INFO, once at start, when `/sys/power/state` is not empty (contract 3.4). Expected on most kernels, also with sleep disabled | `STATES` |
+| `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound, rounded up to whole ms |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
@@ -82,8 +88,8 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.5, sections 3, 10
-  and 11.1; decision D-27 in `docs/decisions.md`.
+- Contract: `docs/contracts/tag-database.md`, version 0.13, sections 3,
+  9.2, 10 and 11.1; decisions D-27 and D-46 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),
