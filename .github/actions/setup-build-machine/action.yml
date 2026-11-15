@@ -4,11 +4,17 @@ name: Set up the build machine
 description: >
   Installs LLVM at the one version the pipeline uses, puts its tools on PATH
   under their plain names, and prints the versions of every build tool.
+  Optionally builds herd7 for the model check.
 
 inputs:
   llvm-version:
     description: LLVM major version for clang-format, clang-tidy, clang-query and Clang.
     default: "18"
+  herd7:
+    description: >
+      "true" also builds herd7 of herdtools7 from source, for the model check
+      (tests/model/README.md, decision D-37).
+    default: "false"
 
 runs:
   using: composite
@@ -40,6 +46,33 @@ runs:
         echo "${bin}" >> "${GITHUB_PATH}"
         echo "CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)" >> "${GITHUB_ENV}"
 
+    # herd7 is not packaged by the distribution. It is built from the tag of
+    # the version in third-party/dependencies.json, checked against its
+    # commit, with the OCaml tools of the distribution, and installed with
+    # the layout `make install` of herdtools7 gives (bin/, share/herdtools7/),
+    # which is where the binary looks for its models.
+    - name: Build herd7
+      if: inputs.herd7 == 'true'
+      shell: bash
+      env:
+        HERDTOOLS_VERSION: "7.58"
+        HERDTOOLS_COMMIT: 1ca343e16a2038e406d1ac674e7e3a1b722b36c7
+      run: |
+        sudo apt-get install --yes --quiet --no-install-recommends \
+          ocaml-nox ocaml-dune menhir libmenhir-ocaml-dev libzarith-ocaml-dev
+        src="${RUNNER_TEMP}/herdtools7-src"
+        prefix="${RUNNER_TEMP}/herdtools7"
+        git clone --quiet --depth 1 --branch "${HERDTOOLS_VERSION}" \
+          https://github.com/herd/herdtools7 "${src}"
+        test "$(git -C "${src}" rev-parse HEAD)" = "${HERDTOOLS_COMMIT}"
+        cd "${src}"
+        sh ./version-gen.sh "${prefix}"
+        dune build --profile release herd/herd.exe
+        mkdir -p "${prefix}/bin" "${prefix}/share/herdtools7"
+        cp _build/default/herd/herd.exe "${prefix}/bin/herd7"
+        cp -R herd/libdir "${prefix}/share/herdtools7/herd"
+        echo "${prefix}/bin" >> "${GITHUB_PATH}"
+
     - name: Tool versions
       shell: bash
       run: |
@@ -50,3 +83,4 @@ runs:
         clang-format --version
         clang-tidy --version | grep -i version
         python3 --version
+        if command -v herd7 > /dev/null; then herd7 -version; fi

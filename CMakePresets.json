@@ -181,6 +181,19 @@
       }
     },
     {
+      "name": "model",
+      "inherits": "base",
+      "configurePreset": "dev",
+      "filter": {
+        "include": {
+          "label": "model"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
       "name": "asan-ubsan",
       "inherits": "functional",
       "configurePreset": "asan-ubsan"
