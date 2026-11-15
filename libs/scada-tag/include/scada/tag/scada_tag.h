@@ -121,6 +121,11 @@ void scada_tag_detach(scada_ctx* ctx);
  * Writes the heartbeat of the process (section 10.1). Call it from the main
  * loop or cycle of the process, never from a helper thread.
  *
+ * A heartbeat that comes more than the heartbeat timeout after the one
+ * before is counted as late in the `proc` region, with the longest gap, and
+ * scada-tagd logs it: readers saw the process down meanwhile. Safe from
+ * several threads: the published time never goes back.
+ *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring: the heartbeat
  * was written, and the caller detaches and attaches again (section 11.3);
  * SCADA_E_INVALID if `ctx` is NULL.

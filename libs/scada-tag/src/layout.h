@@ -555,8 +555,12 @@ struct alignas(REGION_ALIGNMENT) ProcHeader {
     std::uint32_t pid = 0;    // for diagnosis only; never used for a decision
     std::uint32_t state = 0;  // A; ProcessState
     std::uint32_t cycle_seq = 0;  // A; incremented by scada_tag_notify
+    // For diagnosis only, never used to judge liveness (section 10.1):
+    std::uint32_t late_beats = 0;        // A; heartbeats later than the timeout
+    std::int64_t longest_gap_ns = 0;     // A; between two published times
+    std::int64_t last_late_mono_ns = 0;  // A; end of the latest late gap
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): size of a reserved field, fixed by the contract
-    std::array<std::uint8_t, 36> reserved{};
+    std::array<std::uint8_t, 16> reserved{};
 };
 inline constexpr std::array PROC_HEADER_CHECKS{
     LayoutCheck{sizeof(ProcHeader), 64},
@@ -566,7 +570,10 @@ inline constexpr std::array PROC_HEADER_CHECKS{
     LayoutCheck{offsetof(ProcHeader, pid), 16},
     LayoutCheck{offsetof(ProcHeader, state), 20},
     LayoutCheck{offsetof(ProcHeader, cycle_seq), 24},
-    LayoutCheck{offsetof(ProcHeader, reserved), 28},
+    LayoutCheck{offsetof(ProcHeader, late_beats), 28},
+    LayoutCheck{offsetof(ProcHeader, longest_gap_ns), 32},
+    LayoutCheck{offsetof(ProcHeader, last_late_mono_ns), 40},
+    LayoutCheck{offsetof(ProcHeader, reserved), 48},
 };
 static_assert(IS_SHARED_STRUCT<ProcHeader>);
 static_assert(all_hold(PROC_HEADER_CHECKS));

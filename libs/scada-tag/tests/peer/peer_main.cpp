@@ -4,14 +4,15 @@
 // installed.
 //
 // Usage: scada-tag-test-peer <base directory> <process> <period in ms>
-//            [mid-write]
+//            [mid-write | late=<ms>]
 //
 // The uid of scada-tagd is taken to be the user of the caller, as in the
 // tests. It prints "attached" once the process is RUNNING, and then
 // "regions created=<n> reused=<n> repaired=<n>". With `mid-write` it then
 // leaves the first tag record of the owner named like the process as a
 // write leaves it half way, with an odd sequence number, and prints
-// "mid-write"; the test kills it in that state.
+// "mid-write"; the test kills it in that state. With `late=<ms>` the first
+// heartbeat after attach comes <ms> late, after which it prints "late".
 //
 // On SIGTERM it detaches and exits with code 0. Exit code 1: an error; 2:
 // wrong arguments; 3: the process name is already attached.
@@ -89,11 +90,30 @@ bool leave_mid_write(const std::string& base, const std::string& owner) {
     return true;
 }
 
+// `ms` milliseconds as a time for sigtimedwait.
+timespec interval(std::int64_t ms) {
+    timespec time{};
+    time.tv_sec = static_cast<std::time_t>(ms / MILLISECONDS_PER_SECOND);
+    time.tv_nsec = static_cast<long>((ms % MILLISECONDS_PER_SECOND) *
+                                     NANOSECONDS_PER_MILLISECOND);
+    return time;
+}
+
 int run(std::span<const std::string_view> args) {
     const std::optional<std::uint64_t> period =
         parse_number(args[3], MAX_PERIOD_MS);
-    const bool mid_write = args.size() == MAX_ARGUMENTS;
-    if (!period || *period == 0 || (mid_write && args[4] != "mid-write")) {
+    const bool extra = args.size() == MAX_ARGUMENTS;
+    const bool mid_write = extra && args[4] == "mid-write";
+    constexpr std::string_view LATE_PREFIX = "late=";
+    std::optional<std::uint64_t> late;
+    if (extra && args[4].starts_with(LATE_PREFIX)) {
+        late = parse_number(args[4].substr(LATE_PREFIX.size()), MAX_PERIOD_MS);
+        if (!late) {
+            std::cerr << "scada-tag-test-peer: bad argument\n";
+            return EXIT_USAGE;
+        }
+    }
+    if (!period || *period == 0 || (extra && !mid_write && !late)) {
         std::cerr << "scada-tag-test-peer: bad argument\n";
         return EXIT_USAGE;
     }
@@ -133,14 +153,14 @@ int run(std::span<const std::string_view> args) {
         std::cout << "mid-write\n" << std::flush;
     }
 
-    timespec wait{};
-    // In range: the period is at most MAX_PERIOD_MS.
-    const auto period_ms = static_cast<std::int64_t>(*period);
-    wait.tv_sec = static_cast<std::time_t>(period_ms / MILLISECONDS_PER_SECOND);
-    wait.tv_nsec = static_cast<long>((period_ms % MILLISECONDS_PER_SECOND) *
-                                     NANOSECONDS_PER_MILLISECOND);
+    // In range: both are at most MAX_PERIOD_MS.
+    const timespec wait = interval(static_cast<std::int64_t>(*period));
+    const timespec late_wait =
+        interval(static_cast<std::int64_t>(late.value_or(*period)));
+    bool first = true;
     for (;;) {
-        if (::sigtimedwait(&signals, nullptr, &wait) >= 0) {
+        if (::sigtimedwait(&signals, nullptr, first ? &late_wait : &wait) >=
+            0) {
             scada_tag_detach(context);
             return 0;
         }
@@ -152,6 +172,10 @@ int run(std::span<const std::string_view> args) {
         // A retiring generation is no reason to stop here: the tests that
         // change the generation look at scada-tagd, not at this helper.
         static_cast<void>(scada_tag_heartbeat(context));
+        if (first && late) {
+            std::cout << "late\n" << std::flush;
+        }
+        first = false;
     }
 }
 

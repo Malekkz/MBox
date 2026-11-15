@@ -49,7 +49,7 @@ without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.7, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.8, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |

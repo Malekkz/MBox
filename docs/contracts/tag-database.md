@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.7 (draft) |
+| Contract version | 0.8 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -705,7 +705,10 @@ struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint32_t pid;                  // for diagnosis only; never used for a decision
   uint32_t state;                // A; 1 STARTING, 2 RUNNING, 3 STOPPING
   uint32_t cycle_seq;            // A; incremented by scada_tag_notify
-  uint8_t  reserved[36];
+  uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
+  int64_t  longest_gap_ns;       // A; longest gap between two published heartbeats
+  int64_t  last_late_mono_ns;    // A; end of the latest late gap, CLOCK_MONOTONIC
+  uint8_t  reserved[16];
 };
 // followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
 ```
@@ -742,8 +745,26 @@ keeps the result in the `down` flag of the process table entry. The flag is
 for reporting and alarms. The library does not use it to judge a process: it
 lags by up to one check interval, and a flag left by a `scada-tagd` that has
 stopped would keep a restarted process down. A reader can therefore see a
-process down for a moment that `scada-tagd` never records, when a heartbeat
-gap is longer than the timeout and shorter than the check interval.
+process down for a moment that no check of `scada-tagd` falls into, when a
+heartbeat gap is longer than the timeout and shorter than the check interval.
+The process records such gaps itself, so that they can be traced:
+
+- `scada_tag_heartbeat()` publishes `heartbeat_mono_ns` only when the new time
+  is later than the published one; with several threads the published time
+  never goes back and no `heartbeat` count is lost. The thread that publishes
+  a time owns the gap since the time before it.
+- A gap strictly longer than `heartbeat_timeout_ms` is late: some reader could
+  have seen the process down. The process then stores `last_late_mono_ns`
+  (relaxed) and increments `late_beats` (release). `longest_gap_ns` holds the
+  longest gap of any heartbeat. The first heartbeat after attach is not
+  measured: the gap since a previous life is a restart. A reused region keeps
+  its figures; a new region starts at 0.
+- `scada-tagd` reads `late_beats` (acquire) and the gap fields at every check
+  and logs `heartbeat late` (WARNING) when the count grew, at most once per
+  process and check. A count found at its first look at a region is logged
+  once at INFO.
+- The three fields are for diagnosis only and are never used to judge
+  whether a process is down. They are input to their readers.
 
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
@@ -993,6 +1014,8 @@ because the real-time rule no longer holds on that unit.
 
 - `scada_ctx` may be used from several threads. The read functions,
   `scada_proc_status` and `scada_tag_heartbeat` are safe from any thread.
+  Heartbeats from several threads never move the published time back
+  (section 10.1).
 - All writes to the tags of one owner come from one thread. A `scada_sub`, a
   `scada_queue` and a `scada_waitset` are each used by one thread.
 - `scada_tag_notify` acts for the calling thread: it wakes the consumers of
@@ -1190,6 +1213,12 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 | 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
 | 0.7 | 2026-11-14 | Smaller points of the review of P1-06 (issue #42, D-35). Section 6.2: a tag of another process none of whose tags was resolved in the context reads as `SCADA_E_INVALID`, not as OWNER_DOWN. Section 13: `scada_tag_read_string` can be asked for the length alone. |
+| 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
+
+Migration, 0.7 to 0.8: none for data. The layout version stays 1: the new
+fields were reserved and zero, and 0 reads as "none recorded". A region
+written by a 0.7 library holds zeros there, and a 0.7 `scada-tagd` ignores
+them. Nothing judges liveness by them.
 
 Migration, 0.6 to 0.7: none for data. The layout version stays 1 and no
 structure in shared memory changed. A caller that read a tag of another

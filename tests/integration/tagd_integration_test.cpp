@@ -342,6 +342,21 @@ TEST_F(TagdService, Conformance20RestartLeavesTheOtherProcessRunning) {
     EXPECT_TRUE(stops_cleanly(*helper));
 }
 
+// Issue #42, point 4 (D-36): a process whose heartbeat comes later than its
+// timeout records it, and scada-tagd logs it, so that the moment readers
+// saw the process down can be traced.
+TEST_F(TagdService, ALateHeartbeatIsLogged) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    // Half a timeout beyond the timeout of `io`.
+    std::optional<ChildProcess> helper = attached_io(
+        {"late=" + std::to_string(IO_TIMEOUT_MS + (IO_TIMEOUT_MS / 2))});
+    if (!tagd.has_value() || !helper.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*helper, "late\n"));
+    EXPECT_TRUE(logs(*tagd, R"(heartbeat late PROCESS="io" LATE_BEATS="1")"));
+}
+
 // Attach with real processes (issue P1-05): the process creates its own
 // regions with the modes of the contract, and the sweep of scada-tagd, which
 // runs every 50 ms, leaves them alone.

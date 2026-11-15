@@ -25,8 +25,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -362,6 +365,157 @@ TEST_F(ProcRegion, ProbeTreatsAnUnusableRegionAsMissing) {
     // mapping the probe holds is dropped (contract, section 3.3).
     ASSERT_EQ(::truncate(path().c_str(), OTHER_SIZE), 0);
     EXPECT_EQ(observe(probe, START_NS), DownReason::REGION_MISSING);
+}
+
+// Issue #42, point 4 (D-36): the process records its own late heartbeats,
+// so that a moment in which readers saw it down can be traced although no
+// check of scada-tagd fell into it.
+class LateHeartbeat : public ProcRegion {
+protected:
+    // The region attached and RUNNING, with the first heartbeat at
+    // START_NS and late heartbeats counted against TIMEOUT_MS.
+    [[nodiscard]] Result<OwnProcRegion> running() {
+        Result<OwnProcRegion> region = attach();
+        if (region.ok()) {
+            region.value().count_late_after(TIMEOUT_MS);
+            region.value().first_heartbeat(START_NS);
+            region.value().set_state(ProcessState::RUNNING);
+        }
+        return region;
+    }
+
+    // What a watching process reads from the region.
+    [[nodiscard]] LateBeats seen() {
+        const OpenedRegion region = open();
+        const std::optional<LateBeats> beats =
+            late_beats_of(region.memory.bytes());
+        EXPECT_TRUE(beats.has_value());
+        return beats.value_or(LateBeats{});
+    }
+
+    [[nodiscard]] ProcHeader copy() {
+        const OpenedRegion region = open();
+        return shared_at<ProcHeader>(region.memory.bytes(),
+                                     sizeof(RegionHeader));
+    }
+};
+
+TEST_F(LateHeartbeat, AGapStrictlyLongerThanTheTimeoutIsCounted) {
+    Result<OwnProcRegion> region = running();
+    ASSERT_TRUE(region.ok());
+    EXPECT_EQ(seen().count, 0U);
+
+    // Exactly the timeout: no reader saw the process down (proc_liveness).
+    region.value().heartbeat(START_NS + TIMEOUT_NS);
+    EXPECT_EQ(seen().count, 0U);
+    EXPECT_EQ(seen().longest_gap_ns, TIMEOUT_NS);
+    EXPECT_EQ(seen().last_late_mono_ns, 0);
+
+    const std::int64_t late = START_NS + TIMEOUT_NS + TIMEOUT_NS + 1;
+    region.value().heartbeat(late);
+    EXPECT_EQ(seen().count, 1U);
+    EXPECT_EQ(seen().longest_gap_ns, TIMEOUT_NS + 1);
+    EXPECT_EQ(seen().last_late_mono_ns, late);
+
+    // A short gap after it changes neither the count nor the longest gap.
+    region.value().heartbeat(late + 1);
+    EXPECT_EQ(seen().count, 1U);
+    EXPECT_EQ(seen().longest_gap_ns, TIMEOUT_NS + 1);
+    EXPECT_EQ(seen().last_late_mono_ns, late);
+
+    // The probe of scada-tagd reads the same figures.
+    ProcProbe probe;
+    EXPECT_EQ(observe(probe, late + 1), DownReason::NONE);
+    ASSERT_TRUE(probe.late_beats().has_value());
+    EXPECT_EQ(probe.late_beats()->count, 1U);
+}
+
+TEST_F(LateHeartbeat, NoTimeoutCountsNoLateHeartbeat) {
+    Result<OwnProcRegion> region = attach();
+    ASSERT_TRUE(region.ok());
+    region.value().first_heartbeat(START_NS);
+    region.value().heartbeat(START_NS + (4 * TIMEOUT_NS));
+    EXPECT_EQ(seen().count, 0U);
+    EXPECT_EQ(seen().longest_gap_ns, 4 * TIMEOUT_NS);
+}
+
+TEST_F(LateHeartbeat, ATimeThatIsNotNewerIsNeitherPublishedNorCounted) {
+    Result<OwnProcRegion> region = running();
+    ASSERT_TRUE(region.ok());
+    region.value().heartbeat(START_NS + 10);
+    region.value().heartbeat(START_NS + 5);
+    region.value().heartbeat(START_NS + 10);
+    const ProcHeader proc = copy();
+    EXPECT_EQ(proc.heartbeat_mono_ns, START_NS + 10);
+    // Every call counts as a heartbeat, published or not.
+    EXPECT_EQ(proc.heartbeat, 4U);
+    EXPECT_EQ(proc.longest_gap_ns, 10);
+    EXPECT_EQ(proc.late_beats, 0U);
+}
+
+TEST_F(LateHeartbeat, TheFirstHeartbeatAfterAttachIsNotMeasured) {
+    const std::int64_t late = START_NS + TIMEOUT_NS + 1;
+    {
+        Result<OwnProcRegion> first = running();
+        ASSERT_TRUE(first.ok());
+        first.value().heartbeat(late);
+        EXPECT_EQ(seen().count, 1U);
+    }
+    // The next life starts long after: the restart is not a late
+    // heartbeat, and the figures of the reused region are kept.
+    Result<OwnProcRegion> second = attach();
+    ASSERT_TRUE(second.ok());
+    ASSERT_TRUE(second.value().reused());
+    second.value().count_late_after(TIMEOUT_MS);
+    const std::int64_t restart = late + (100 * TIMEOUT_NS);
+    second.value().first_heartbeat(restart);
+    second.value().heartbeat(restart + 1);
+    EXPECT_EQ(seen().count, 1U);
+    EXPECT_EQ(seen().longest_gap_ns, TIMEOUT_NS + 1);
+    EXPECT_EQ(seen().last_late_mono_ns, late);
+}
+
+TEST_F(LateHeartbeat, AFirstHeartbeatReplacesATimeAheadOfIt) {
+    {
+        Result<OwnProcRegion> first = running();
+        ASSERT_TRUE(first.ok());
+        first.value().heartbeat(START_NS + (10 * TIMEOUT_NS));
+    }
+    // A previous life left a time ahead of this one's clock: it must not
+    // hold back the heartbeats of this life.
+    Result<OwnProcRegion> second = attach();
+    ASSERT_TRUE(second.ok());
+    second.value().first_heartbeat(START_NS + 1);
+    second.value().heartbeat(START_NS + 2);
+    EXPECT_EQ(copy().heartbeat_mono_ns, START_NS + 2);
+}
+
+// Contract 13.2: scada_tag_heartbeat is safe from any thread. Before
+// D-36 a count could be lost and an older time could overwrite a newer one,
+// which shows a live process down to readers.
+TEST_F(LateHeartbeat, HeartbeatsFromSeveralThreadsLoseNoCountAndNeverGoBack) {
+    Result<OwnProcRegion> region = running();
+    ASSERT_TRUE(region.ok());
+    constexpr int THREADS = 4;
+    constexpr int BEATS = 20'000;
+    // Each heartbeat takes the next time; the threads publish in any order.
+    std::atomic<std::int64_t> clock{START_NS};
+    std::vector<std::thread> threads;
+    threads.reserve(THREADS);
+    for (int i = 0; i < THREADS; ++i) {
+        threads.emplace_back([&] {
+            for (int beat = 0; beat < BEATS; ++beat) {
+                region.value().heartbeat(clock.fetch_add(1) + 1);
+            }
+        });
+    }
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    const ProcHeader proc = copy();
+    EXPECT_EQ(proc.heartbeat, 1U + (std::uint64_t{THREADS} * BEATS));
+    EXPECT_EQ(proc.heartbeat_mono_ns, clock.load());
+    EXPECT_EQ(proc.late_beats, 0U);
 }
 
 }  // namespace

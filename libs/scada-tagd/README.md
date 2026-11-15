@@ -36,6 +36,8 @@ the standard error stream.
 | A note of the start, for example `gen-3 is not reused: the tag set changed` or `gen-2 was removed` | NOTICE | |
 | `process down` | WARNING; INFO at the first check of a new generation | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
 | `process up` | NOTICE | `PROCESS` |
+| `heartbeat late` | WARNING; INFO at the first check of a new generation. At most once per process and check. Readers saw the process down for a moment, also when no check fell into it | `PROCESS`, `LATE_BEATS` (since the previous check), `LATE_BEATS_TOTAL`, `LONGEST_GAP_MS`, `LAST_LATE_MONO_NS` (CLOCK_MONOTONIC) |
+| `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
