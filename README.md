@@ -85,6 +85,7 @@ or `fuzz`. `ctest` prints the time per label at the end of a run.
 | `ctest --preset dev` | Unit and integration tests (not `perf` or `model`) |
 | `ctest --preset unit` | Unit tests only (uses the `dev` build) |
 | `ctest --preset integration` | Integration tests only (uses the `dev` build) |
+| `sudo ctest --preset root` | Tests that must run as root to become other users (label `root`, uses the `dev` build); the other presets leave them out. Run by hand, it leaves `build/dev/Testing` owned by root, so that a later unprivileged `ctest --preset dev` cannot write its log there: `sudo chown -R "$USER" build/dev/Testing` afterwards. The pipeline runs it on GitHub-hosted runners only, which are discarded after the job; a self-hosted runner must not run it |
 | `ctest --preset perf` | Performance tests, in the `perf` build |
 | `ctest --preset model` | Model check of the sequence lock, the change ring and the repair after an owner restart (conformance test 4); needs herd7, see `tests/model/README.md`. Only this preset runs it. |
 | `ctest --preset asan-ubsan` | Unit and integration tests under AddressSanitizer with leak detection and UndefinedBehaviorSanitizer |
@@ -116,7 +117,7 @@ commands above and nothing else:
 
 | Check | Runs | Machine |
 | --- | --- | --- |
-| `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree | x86-64 |
+| `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree; the `root` tests of `dev` with sudo | x86-64 |
 | `build and test (ARM64)` | The same, built and run natively | ARM64 |
 | `check` | The `check` target | x86-64 |
 | `sanitizers (asan-ubsan)` | Build and tests of the `asan-ubsan` preset | x86-64 |

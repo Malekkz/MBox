@@ -21,6 +21,7 @@
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
 #include "scada/tag/liveness.h"
+#include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
 
@@ -231,7 +232,7 @@ TEST_F(Attach, TheProcessIsRunningWithAFreshHeartbeatAndDownAfterDetach) {
     static_cast<void>(host().check(scada::monotonic_ns()));
     EXPECT_EQ(host().is_down("io"), false);
 
-    EXPECT_TRUE(feeder->heartbeat());
+    EXPECT_EQ(feeder->heartbeat(), SCADA_OK);
     // Conformance test 6: a process that stops cleanly reads as down at
     // once.
     feeder.reset();
@@ -345,9 +346,9 @@ TEST_F(Attach, TheHeartbeatAndTheStatusReportARetiringGeneration) {
     start_host();
     const Attached feeder = attached("io");
     ASSERT_NE(feeder, nullptr);
-    EXPECT_TRUE(feeder->heartbeat());
+    EXPECT_EQ(feeder->heartbeat(), SCADA_OK);
     set_generation_state(GenerationState::RETIRING);
-    EXPECT_FALSE(feeder->heartbeat());
+    EXPECT_EQ(feeder->heartbeat(), SCADA_E_RETIRING);
     EXPECT_EQ(feeder->status().state, GenerationState::RETIRING);
 }
 
@@ -361,7 +362,7 @@ TEST_F(Attach, TheStatusFollowsTheLivenessOfTagd) {
     // working.
     host().stop();
     EXPECT_EQ(feeder->status().tagd, DownReason::NOT_RUNNING);
-    EXPECT_TRUE(feeder->heartbeat());
+    EXPECT_EQ(feeder->heartbeat(), SCADA_OK);
 }
 
 TEST_F(Attach, ARestartReusesTheRegionsAndKeepsTheirContent) {

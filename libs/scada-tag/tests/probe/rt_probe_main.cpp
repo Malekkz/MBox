@@ -184,6 +184,8 @@ struct Prepared {
     scada_write_request command{};
     scada_queue* answers = nullptr;
     scada_write_result answer{};
+    // The process of the other tag, resolved, for scada_proc_status.
+    std::uint16_t other_process = 0;
     // What the fault `allocation` allocates. Kept, so that the compiler
     // cannot remove the allocation.
     std::unique_ptr<int> wasted;
@@ -231,6 +233,14 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
                                     sizeof(prepared.command)));
     count(outcome, scada_queue_post(prepared.answers, &prepared.answer,
                                     sizeof(prepared.answer)));
+    scada_proc_status_t proc{};
+    count(outcome,
+          scada_proc_status(prepared.ctx, prepared.other_process, &proc));
+    // No context and no return code: counted as a call that passed when it
+    // gives the handle the tag has.
+    count(outcome, scada_tag_handle(0, 0) != SCADA_INVALID_HANDLE
+                       ? SCADA_OK
+                       : SCADA_E_INVALID);
     if (fault == "syscall") {
         static_cast<void>(::getppid());
     }
@@ -307,6 +317,29 @@ int run(std::span<const std::string_view> args) {
         scada_tag_detach(prepared.ctx);
         return EXIT_FAILED;
     }
+    scada_tag_info_t other_info{};
+    if (scada_tag_info(prepared.ctx, prepared.other, &other_info) != SCADA_OK) {
+        std::cerr << "scada-tag-rt-probe: no info of the other tag\n";
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    // Resolved by name, which maps the region before the marked part.
+    std::uint16_t resolved = 0;
+    scada_proc_status_t named{};
+    if (scada_proc_status(prepared.ctx, other_info.process_index, &named) ==
+            SCADA_E_INVALID &&
+        named.name[0] == '\0') {
+        std::cerr << "scada-tag-rt-probe: no process of the other tag\n";
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    if (scada_proc_resolve(prepared.ctx, std::data(named.name), &resolved) !=
+        SCADA_OK) {
+        std::cerr << "scada-tag-rt-probe: cannot resolve the process\n";
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    prepared.other_process = resolved;
     for (std::size_t i = 0; i < BATCH; ++i) {
         prepared.handles.push_back(i % 2 == 0 ? prepared.other : prepared.own);
     }

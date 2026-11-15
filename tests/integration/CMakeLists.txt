@@ -71,6 +71,26 @@ scada_add_test(scada-tag-queue-integration-test KIND integration
 add_dependencies(scada-tag-queue-integration-test
   scada-tagd scada-tag-test-queue)
 
+# Observer contexts with real processes (contract, section 11.4).
+scada_add_test(scada-tag-observer-integration-test KIND integration
+  SOURCES observer_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}"
+    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+add_dependencies(scada-tag-observer-integration-test
+  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+
+# Who may observe, with real users (contract, sections 3.1 and 11.4). It
+# must run as root to become other users, so it has the label `root`
+# instead of `integration`: the presets that run unprivileged leave it out,
+# and `ctest --preset root` runs it (the pipeline does so with sudo).
+scada_add_test(scada-tag-observer-users-test KIND integration
+  SOURCES observer_root_integration_test.cpp
+  DEPENDS scada::tag)
+set_tests_properties(scada-tag-observer-users-test PROPERTIES LABELS root)
+
 # Conformance test 22: the real-time safe functions make no system call and
 # no allocation. The probe is traced as a child process. That shows nothing
 # in a sanitizer build, whose runtime makes system calls of its own, and

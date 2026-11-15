@@ -455,7 +455,7 @@ TEST_F(Queues, APostIsRefusedWhileTheConsumerIsDown) {
     ASSERT_TRUE(posts(*out, event()));
     stop_heartbeat("web");
     EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
-    ASSERT_TRUE(web()->heartbeat());
+    ASSERT_EQ(web()->heartbeat(), SCADA_OK);
     ASSERT_TRUE(posts(*out, event()));
     const QueuePtr reader = open(*web(), "events.io");
     // The refused posts left nothing behind.

@@ -37,7 +37,7 @@ using scada::test::TraceResult;
 
 constexpr std::chrono::seconds PROBE_LIMIT{60};
 // The real-time safe calls the probe makes between its markers.
-constexpr std::string_view ALL_CALLS_PASSED = "calls=11 failed=0 ";
+constexpr std::string_view ALL_CALLS_PASSED = "calls=13 failed=0 ";
 // Its look at the request queue answered the expired request, and the
 // answer was posted.
 constexpr std::string_view EXPIRED_ANSWERED = " expired=1 dropped=0\n";

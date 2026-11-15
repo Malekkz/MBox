@@ -50,12 +50,26 @@ struct AttachOptions {
     std::optional<std::uint32_t> tagd_uid;
 };
 
+// The process index of an observer, which is no process (section 11.4).
+inline constexpr std::uint16_t NO_PROCESS_INDEX = 0xFFFF;
+
+// The shortest time between two readings of `current` by an observer, in
+// ns (section 11.4: at most once a second).
+inline constexpr std::int64_t CURRENT_RECHECK_INTERVAL_NS = 1'000'000'000;
+
+// Looks in a row at which an observer finds no readable `current` (or no
+// base directory) before it counts the generation as gone (section 11.4).
+inline constexpr std::uint32_t CURRENT_UNREADABLE_LOOKS = 2;
+
 // What `Attachment::status` reports.
 struct AttachmentStatus {
     std::uint64_t generation = 0;
     // `GlobalHeader.state` now; nothing for a value that is no state.
     std::optional<GenerationState> state;
-    std::uint16_t process_index = 0;
+    // For an observer: true once `current` was found to name another
+    // generation than this one. Always false for a process.
+    bool moved = false;
+    std::uint16_t process_index = 0;  // NO_PROCESS_INDEX for an observer
     // Whether scada-tagd is down, by the rules of section 10.1 applied to
     // `proc.tagd`. REGION_MISSING also if the generation has no process
     // `tagd`.
@@ -182,6 +196,28 @@ public:
         std::string_view process, const AttachOptions& options,
         std::string& detail);
 
+    // Opens an observer of the current generation (section 11.4): step 1
+    // of `attach`, the reading of the tag directory and the clock check,
+    // and nothing else. An observer has the process index
+    // NO_PROCESS_INDEX, owns no owner and no region, takes no lock and
+    // writes nothing to shared memory; every region of another process is
+    // mapped read-only by `PeerRegions` when it is asked for. It keeps the
+    // base directory open, to read `current` again in `status`. Starts
+    // again from step 1, a limited number of times, if the generation is
+    // RETIRING.
+    //
+    // PERMISSION_DENIED if the caller may not open the base directory or
+    // the generation directory, or a directory or the header has the
+    // wrong owner or mode; the other errors as for `attach`, except
+    // NOT_FOUND and ALREADY_EXISTS, which an observer never gets.
+    [[nodiscard]] static Result<std::unique_ptr<Attachment>> observe(
+        const AttachOptions& options, std::string& detail);
+
+    // True for an observer.
+    [[nodiscard]] bool observer() const noexcept {
+        return process_index_ == NO_PROCESS_INDEX;
+    }
+
     // Detaches: the state becomes STOPPING, so that the process reads as
     // down at once (section 10.1), and mappings and the lock are released.
     // The region files stay.
@@ -191,15 +227,19 @@ public:
     Attachment(Attachment&&) = delete;
     Attachment& operator=(Attachment&&) = delete;
 
-    // Writes the heartbeat of the process, taken now. False if the
-    // generation is RETIRING: the caller detaches and attaches again
-    // (section 11.3). Call it from the main loop or cycle of the process.
-    SCADA_RT [[nodiscard]] bool heartbeat() noexcept;
+    // Writes the heartbeat of the process, taken now. SCADA_E_RETIRING if
+    // the generation is RETIRING: the caller detaches and attaches again
+    // (section 11.3). SCADA_E_INVALID for an observer, which has no
+    // heartbeat, and writes nothing. Call it from the main loop or cycle of
+    // the process.
+    SCADA_RT [[nodiscard]] int heartbeat() noexcept;
 
     // The state of the attachment now. It also looks again for the regions
     // of other processes that were asked for and are missing
     // (`PeerRegions::refresh`), and checks the clocks again at most once a
-    // minute (section 13.1). Not real-time.
+    // minute (section 13.1). An observer also reads `current` again, at
+    // most every CURRENT_RECHECK_INTERVAL_NS, and reports in `moved` that
+    // it names another generation. Not real-time.
     [[nodiscard]] AttachmentStatus status();
 
     // The tag functions of section 13. Each returns a return code of
@@ -214,6 +254,19 @@ public:
 
     // Name, type, flags and owner of the tag `handle`. Not real-time.
     [[nodiscard]] int info(std::uint32_t handle, scada_tag_info_t& out) const;
+
+    // Name, tag count, ring capacity and process of the owner
+    // `owner_index`. Not real-time.
+    [[nodiscard]] int owner_info(std::uint16_t owner_index,
+                                 scada_owner_info_t& out) const;
+
+    // The index of the process `name`; asks for its `proc` region unless it
+    // is the attached process. Not real-time.
+    [[nodiscard]] int proc_resolve(std::string_view name, std::uint16_t& index);
+
+    // The state of the process `index` now (section 10.1).
+    SCADA_RT [[nodiscard]] int proc_status(
+        std::uint16_t index, scada_proc_status_t& out) const noexcept;
 
     // Section 6.2 and the overlay of the owner state.
     SCADA_RT [[nodiscard]] int read(std::uint32_t handle,
@@ -252,7 +305,8 @@ public:
     // wrote since its previous call, advances `cycle_seq` and wakes its
     // waiters; then does what `status` does to missing regions and the
     // clock check. SCADA_OK, or SCADA_E_IO with errno set if a wake was
-    // refused (every wake is still tried). Not real-time.
+    // refused (every wake is still tried). An observer wakes nobody: it
+    // gets SCADA_E_INVALID, and nothing is done. Not real-time.
     [[nodiscard]] int notify();
 
     // What the subscriptions and wait sets need (section 8). Each owner or
@@ -268,8 +322,14 @@ public:
     void want_changes(std::size_t owner_index);
 
     // Asks for the `proc` region of `process_index`, unless it is this
-    // process's own. Not real-time.
+    // process's own, and records that it was asked for. Not real-time.
     void want_proc(std::uint16_t process_index);
+
+    // True if the `proc` region of `process_index` was asked for with
+    // `want_proc`, or is this process's own: then `proc_of` tells whether
+    // it is there. False for a process index that is none.
+    SCADA_RT [[nodiscard]] bool proc_asked(
+        std::uint16_t process_index) const noexcept;
 
     // The mapped `changes` region of `owner_index`, or an empty span while
     // it is missing. For an owner of another process the span may change
@@ -280,7 +340,7 @@ public:
 
     // The mapped `proc` region of `process_index`, or an empty span, with
     // the guarantees of `changes_of`.
-    [[nodiscard]] std::span<std::byte> proc_of(
+    SCADA_RT [[nodiscard]] std::span<std::byte> proc_of(
         std::uint16_t process_index) const noexcept;
 
     // True if the process of the owner `owner_index` is down now, by the
@@ -549,9 +609,21 @@ private:
     // The drain of one `cmd` queue the process consumes. True if an answer
     // was posted.
     [[nodiscard]] bool drain_queue(const QueueAccess& access) noexcept;
+    // For an observer: true if `current` names another generation now,
+    // looked at no more than every CURRENT_RECHECK_INTERVAL_NS.
+    [[nodiscard]] bool current_moved(std::int64_t now_mono_ns);
+    // One look: true if the base directory under its path is another one,
+    // `current` names another generation, or neither could be read for
+    // CURRENT_UNREADABLE_LOOKS looks in a row.
+    [[nodiscard]] bool current_names_another_generation();
 
     Fd directory_;  // the generation directory
     HeaderView header_;
+    // For an observer, the base directory as it was opened, its path and
+    // the uid of scada-tagd, to look at `current` again; nothing for a
+    // process.
+    Fd base_;
+    std::string base_path_;
     std::uint16_t process_index_ = 0;
     std::optional<std::uint16_t> tagd_index_;
     OwnProcRegion proc_;
@@ -561,6 +633,7 @@ private:
     std::uint32_t regions_created_ = 0;
     std::uint32_t regions_reused_ = 0;
     std::uint32_t records_repaired_ = 0;
+    std::uint32_t tagd_uid_ = 0;  // for an observer, with base_path_
 
     // One entry for every owner of the generation, the type of every slot
     // of every owner, and the STRING slots of every owner in ascending
@@ -599,12 +672,26 @@ private:
     // `queue_dead`).
     std::vector<std::atomic<const std::byte*>> queue_mappings_;
     std::vector<std::atomic<bool>> queue_dead_;
+    // For every process, whether its `proc` region was asked for by
+    // `want_proc` (scada_proc_resolve, a wait set, scada-tagd at attach),
+    // so that scada_proc_status can tell a process that is down from one
+    // that was never resolved. Sized at construction, never resized; set
+    // once, never cleared.
+    std::vector<std::atomic<bool>> proc_asked_;
 
     // The result of the last clock check and when the next one is due.
     // Atomic because `status` may run in several threads; relaxed, because
     // each is a value on its own.
-    std::atomic<bool> clock_syscall_{false};
     std::atomic<std::int64_t> next_clock_check_mono_ns_{0};
+
+    // For an observer: when `current` is read next, how many looks in a
+    // row found it unreadable, and whether it was found to name another
+    // generation, which does not change back. Atomic and relaxed for the
+    // reasons of the clock check above. Ordered by size, not by topic.
+    std::atomic<std::int64_t> next_current_check_mono_ns_{0};
+    std::atomic<std::uint32_t> unreadable_looks_{0};
+    std::atomic<bool> clock_syscall_{false};  // the last clock check, above
+    std::atomic<bool> moved_{false};
 };
 
 // Initial state of the `tags` region `tags` of an owner whose slots have

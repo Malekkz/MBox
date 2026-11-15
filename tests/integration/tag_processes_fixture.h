@@ -79,6 +79,31 @@ private:
     scada_ctx* ctx_ = nullptr;
 };
 
+// An observer context of the test process (contract, section 11.4);
+// detached when it goes out of scope.
+class Observed {
+public:
+    // Observes the database in `base_dir`, whose scada-tagd runs as the
+    // user of the test. A failure is a failed expectation, and `ctx()` is
+    // null.
+    explicit Observed(const std::string& base_dir) {
+        const scada_attach_opts options{.base_dir = base_dir.c_str(),
+                                        .retain_dir = nullptr,
+                                        .tagd_uid = std::int64_t{::geteuid()}};
+        EXPECT_EQ(scada_tag_observe_opts(&options, &ctx_), SCADA_OK);
+    }
+    ~Observed() { scada_tag_detach(ctx_); }
+    Observed(const Observed&) = delete;
+    Observed& operator=(const Observed&) = delete;
+    Observed(Observed&&) = delete;
+    Observed& operator=(Observed&&) = delete;
+
+    [[nodiscard]] scada_ctx* ctx() const { return ctx_; }
+
+private:
+    scada_ctx* ctx_ = nullptr;
+};
+
 class TagProcesses : public ::testing::Test {
 protected:
     void SetUp() override {

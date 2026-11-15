@@ -43,6 +43,11 @@ bool out_of_range(std::uint64_t read, std::uint64_t written,
 int Queue::open(Attachment& attachment, std::string_view name,
                 std::unique_ptr<Queue>& out) {
     out.reset();
+    if (attachment.observer()) {
+        // An observer has no side in any queue (section 11.4, item 4), and
+        // no queue table: refused before anything is looked up or mapped.
+        return SCADA_E_NOT_OWNER;
+    }
     if (!is_valid_name(name, MAX_SHORT_NAME_LENGTH)) {
         return SCADA_E_INVALID;
     }
