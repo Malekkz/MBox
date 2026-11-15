@@ -89,9 +89,6 @@ int Attachment::proc_status(std::uint16_t index,
         return SCADA_E_INVALID;
     }
     const ProcessInfo& process = contents.processes[index];
-    const std::int64_t now = monotonic_ns();
-    const std::span<std::byte> region = proc_of(index);
-
     scada_proc_status_t status{};
     copy_name(status.name, process.name);
     status.heartbeat_timeout_ms = process.heartbeat_timeout_ms;
@@ -99,6 +96,16 @@ int Attachment::proc_status(std::uint16_t index,
     status.process_index = index;
     status.realtime = process.realtime ? 1 : 0;
     status.marked_down = header_.marked_down(index) ? 1 : 0;
+    // A process never resolved here has no mapped region, which must not
+    // read as a process that is down (the trap issue #42 closed for tags).
+    if (!proc_asked(index)) {
+        status.down = 1;
+        status.down_reason = SCADA_DOWN_NOT_RESOLVED;
+        out = status;
+        return SCADA_E_INVALID;
+    }
+    const std::int64_t now = monotonic_ns();
+    const std::span<std::byte> region = proc_of(index);
     const DownReason reason =
         proc_liveness(region, process.heartbeat_timeout_ms, now);
     status.down = reason == DownReason::NONE ? 0 : 1;

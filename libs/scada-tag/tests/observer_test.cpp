@@ -7,6 +7,7 @@
 
 #include "attach_fixture.h"
 #include "layout.h"
+#include "temp_database.h"
 
 #include "scada/common/clock.h"
 #include "scada/tag/handle.h"
@@ -482,19 +483,31 @@ TEST_F(Observer, ReportsAStoppedProcessBeforeScadaTagdDoes) {
     EXPECT_EQ(status.marked_down, 1);
 }
 
-TEST_F(Observer, ReportsAProcessThatWasNotResolvedAsMissing) {
+TEST_F(Observer, RefusesTheStatusOfAProcessThatWasNotResolved) {
     start_host();
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
+    // Not down: not judged, with a code that says so, and the name to
+    // resolve it by.
     scada_proc_status_t status{};
-    ASSERT_EQ(scada_proc_status(observer.get(), PROCESS_GUEST, &status),
-              SCADA_OK);
+    EXPECT_EQ(scada_proc_status(observer.get(), PROCESS_GUEST, &status),
+              SCADA_E_INVALID);
     EXPECT_STREQ(std::data(status.name), "guest");
+    EXPECT_EQ(status.down_reason, SCADA_DOWN_NOT_RESOLVED);
+    EXPECT_EQ(status.down, 1);
+    EXPECT_EQ(status.heartbeat + status.state, 0U);
+    std::uint16_t index = 0;
+    ASSERT_EQ(scada_proc_resolve(observer.get(), "guest", &index), SCADA_OK);
+    EXPECT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);
     EXPECT_EQ(status.down_reason, SCADA_DOWN_REGION_MISSING);
-    EXPECT_EQ(status.heartbeat, 0U);
-    EXPECT_EQ(status.state, 0U);
-    // scada-tagd is asked for by observe itself.
+}
+
+TEST_F(Observer, NeedsNoResolveForScadaTagd) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
     host().heartbeat(scada::monotonic_ns());
+    scada_proc_status_t status{};
     ASSERT_EQ(scada_proc_status(observer.get(), PROCESS_TAGD, &status),
               SCADA_OK);
     EXPECT_EQ(status.down, 0);
@@ -609,6 +622,36 @@ TEST_F(Observer, ReportsACurrentThatNamesAnotherGeneration) {
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RUNNING);
     // It stays reported.
     EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_E_RETIRING);
+}
+
+TEST_F(Observer, ReportsACurrentThatStaysUnreadable) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    // The database taken down under the observer: no `current` any more.
+    std::filesystem::remove(base() / "current");
+    scada_status status{};
+    EXPECT_TRUE(becomes_retiring(observer.get(), status));
+    EXPECT_EQ(status.generation, 1U);
+}
+
+TEST_F(Observer, ReportsABaseDirectoryThatWasSetUpAgain) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    drop_host();
+    // The directory removed and created anew, as at a reboot: the old one
+    // still holds generation 1 for the observer's descriptor.
+    std::filesystem::rename(base(), root() / "old-base");
+    ASSERT_EQ(::mkdir(base().c_str(), scada::tag::testing::PRIVATE_DIR_MODE),
+              0);
+    ASSERT_EQ(::chmod(base().c_str(), BASE_MODE), 0);
+    start_host();
+    scada_status status{};
+    EXPECT_TRUE(becomes_retiring(observer.get(), status));
+    observer.detach();
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_OK);
 }
 
 TEST_F(Observer, NeedsADatabase) {

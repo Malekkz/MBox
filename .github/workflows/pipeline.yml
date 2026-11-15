@@ -50,7 +50,8 @@ jobs:
         run: ctest --preset dev
       # Tests that become other users (label `root`): who may observe the
       # tag database (decision D-38). The runner user has sudo without a
-      # password.
+      # password. For GitHub-hosted runners only, which are discarded after
+      # the job: a self-hosted runner must not run tests as root.
       - name: Test as root (dev)
         run: sudo "$(command -v ctest)" --preset root
 

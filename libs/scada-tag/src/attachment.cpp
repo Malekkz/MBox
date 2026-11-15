@@ -14,6 +14,7 @@
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
 #include "scada/tag/liveness.h"
+#include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
 
@@ -329,7 +330,8 @@ Attachment::Attachment(Key /*key*/, Fd directory, HeaderView header,
       header_(std::move(header)),
       process_index_(process_index),
       tagd_index_(header_.find_process(TAGD_PROCESS_NAME)),
-      peers_(header_.contents()) {}
+      peers_(header_.contents()),
+      proc_asked_(header_.contents().processes.size()) {}
 
 Status Attachment::read_directory(std::string& detail) {
     const HeaderContents& contents = header_.contents();
@@ -595,8 +597,7 @@ Status Attachment::attach_regions(std::string& detail) {
     proc_.heartbeat(now);
     proc_.set_state(ProcessState::RUNNING);
     if (tagd_index_.has_value() && *tagd_index_ != process_index_) {
-        peers_.want(directory_.get(), peers_.proc_slot(*tagd_index_),
-                    monotonic_ns());
+        want_proc(*tagd_index_);
     }
     return {};
 }
@@ -695,6 +696,8 @@ Result<std::unique_ptr<Attachment>> Attachment::observe(
             Key{}, std::move(current.value().directory),
             std::move(current.value().header), NO_PROCESS_INDEX);
         observer->base_ = std::move(current.value().base);
+        observer->base_path_ = base_dir;
+        observer->tagd_uid_ = tagd_uid.value();
         if (Status read = observer->read_directory(detail); !read.ok()) {
             return read;
         }
@@ -704,8 +707,7 @@ Result<std::unique_ptr<Attachment>> Attachment::observe(
             now + CURRENT_RECHECK_INTERVAL_NS, std::memory_order_relaxed);
         if (const std::optional<std::uint16_t> tagd = observer->tagd_index_;
             tagd.has_value()) {
-            observer->peers_.want(observer->directory_.get(),
-                                  observer->peers_.proc_slot(*tagd), now);
+            observer->want_proc(*tagd);
         }
         if (observer->header_.state() == GenerationState::RETIRING) {
             continue;
@@ -728,26 +730,50 @@ bool Attachment::current_moved(std::int64_t now_mono_ns) {
     }
     next_current_check_mono_ns_.store(now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
                                       std::memory_order_relaxed);
-    std::string ignored;
-    const Result<std::uint64_t> generation = read_current(base_.get(), ignored);
-    // A `current` that cannot be read now (scada-tagd is switching it, or
-    // the database is being set up again) is no evidence of a change; the
-    // next look decides.
-    if (generation.ok() &&
-        generation.value() != header_.contents().generation) {
+    if (current_names_another_generation()) {
         moved_.store(true, std::memory_order_relaxed);
         return true;
     }
     return false;
 }
 
-bool Attachment::heartbeat() noexcept {
+bool Attachment::current_names_another_generation() {
+    // The base directory by its path, not by the descriptor kept since
+    // observe: a database set up again (the directory removed and created
+    // anew) has another directory under the same path.
+    std::string ignored;
+    const Result<Fd> base = open_base_directory(base_path_, tagd_uid_, ignored);
+    Result<std::uint64_t> generation =
+        Status(StatusCode::UNAVAILABLE, "no base directory");
+    if (base.ok()) {
+        struct stat now {};
+        struct stat then {};
+        if (::fstat(base.value().get(), &now) == 0 &&
+            ::fstat(base_.get(), &then) == 0 &&
+            (now.st_dev != then.st_dev || now.st_ino != then.st_ino)) {
+            return true;
+        }
+        generation = read_current(base.value().get(), ignored);
+    }
+    if (generation.ok()) {
+        unreadable_looks_.store(0, std::memory_order_relaxed);
+        return generation.value() != header_.contents().generation;
+    }
+    // A `current` that cannot be read at one look may be scada-tagd
+    // replacing it; at CURRENT_UNREADABLE_LOOKS looks in a row, a second
+    // apart, the generation is gone. Relaxed: a count of its own.
+    return unreadable_looks_.fetch_add(1, std::memory_order_relaxed) + 1 >=
+           CURRENT_UNREADABLE_LOOKS;
+}
+
+int Attachment::heartbeat() noexcept {
     // An observer has no `proc` region to write (section 11.4).
     if (!proc_.valid()) {
-        return true;
+        return SCADA_E_INVALID;
     }
     proc_.heartbeat(monotonic_ns());
-    return header_.state() != GenerationState::RETIRING;
+    return header_.state() == GenerationState::RETIRING ? SCADA_E_RETIRING
+                                                        : SCADA_OK;
 }
 
 AttachmentStatus Attachment::status() {

@@ -81,6 +81,8 @@ typedef struct {
     uint8_t clock_syscall;     /* 1 if reading the clocks is a system call on
                                   this machine, so that the functions marked
                                   real-time safe are not (section 13.1) */
+    /* The three counts below are 0 for an observer, which has no regions
+       of its own. */
     uint32_t regions_created;  /* own regions the attach created */
     uint32_t regions_reused;   /* own regions the attach found and reused */
     uint32_t records_repaired; /* tag records repaired at attach (6.3) */
@@ -350,13 +352,15 @@ uint32_t scada_tag_handle(uint16_t owner_index, uint32_t slot);
  * first rule that holds. */
 /* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
 enum {
-    SCADA_DOWN_NONE = 0,           /* not down */
-    SCADA_DOWN_REGION_MISSING = 1, /* its proc region is missing, unusable
-                                      or not ready, or was not resolved in
-                                      this context */
-    SCADA_DOWN_NOT_RUNNING = 2,    /* its state is not RUNNING */
-    SCADA_DOWN_HEARTBEAT_STALE = 3 /* its heartbeat is older than its
-                                      timeout, or too far ahead */
+    SCADA_DOWN_NONE = 0,            /* not down */
+    SCADA_DOWN_REGION_MISSING = 1,  /* its proc region is missing, unusable
+                                       or not ready */
+    SCADA_DOWN_NOT_RUNNING = 2,     /* its state is not RUNNING */
+    SCADA_DOWN_HEARTBEAT_STALE = 3, /* its heartbeat is older than its
+                                       timeout, or too far ahead */
+    SCADA_DOWN_NOT_RESOLVED = 4     /* not judged: the process was not
+                                       resolved in this context; with
+                                       SCADA_E_INVALID */
 };
 
 /* Values of scada_proc_status_t.state (section 10). */
@@ -412,15 +416,20 @@ int scada_proc_resolve(scada_ctx* ctx, const char* process_name,
 
 /*
  * Fills `*out` with the state of the process `index` (0 to
- * scada_status.process_count - 1) now. RESOLVE IT IN THIS CONTEXT FIRST:
- * the proc region of a process that was never resolved, and that is not
- * the caller, reads as missing (SCADA_DOWN_REGION_MISSING).
+ * scada_status.process_count - 1) now. Resolve it in this context first
+ * (scada_proc_resolve); the caller's own process and scada-tagd need no
+ * resolve.
  *
  * The fields of the proc region are read one by one; they belong to the
  * same heartbeat only as far as diagnosis needs.
  *
- * SCADA_E_INVALID: an argument is NULL or `index` is no process of this
- * generation.
+ * SCADA_E_INVALID: an argument is NULL, `index` is no process of this
+ * generation, or the process was not resolved in this context. In the last
+ * case `*out` still gets the fields of the process table (name, uid,
+ * timeout, realtime flag, index, the `down` flag of scada-tagd), with down
+ * 1 and down_reason SCADA_DOWN_NOT_RESOLVED, so that a caller that does
+ * not check the code does not take it for a process that is up; resolve
+ * it by that name.
  *
  * Real-time safe: no allocation, no lock, no system call. Safe from any
  * thread.
