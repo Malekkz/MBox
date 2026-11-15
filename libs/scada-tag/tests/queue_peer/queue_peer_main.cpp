@@ -146,7 +146,7 @@ public:
         return 0;
     }
 
-    // Posts one request that expires 1 ms after it is posted.
+    // Posts one request that expires 1 ms after it is stamped.
     int request(scada_queue* queue) {
         for (;;) {
             scada_write_request record{};
@@ -159,6 +159,14 @@ public:
                 static_cast<void>(scada_tag_notify(context_));
                 std::cout << "posted\n" << std::flush;
                 return 0;
+            }
+            if (code == SCADA_E_INVALID &&
+                monotonic_now() >= record.expiry_mono_ns) {
+                // The library refuses a request that has expired when it
+                // is posted (contract 9.4), and on a loaded machine 1 ms
+                // can pass between the stamp and the post (issue #62).
+                // Stamped again; any other refusal still fails.
+                continue;
             }
             if (code != SCADA_E_PEER_DOWN) {
                 std::cerr << "post failed with code " << code << "\n";
