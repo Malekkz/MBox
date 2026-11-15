@@ -304,8 +304,10 @@ void note_suspend(Logger& logger, SuspendWatch& watch) {
     if (!finding.has_value()) {
         return;
     }
-    const std::string suspended =
-        std::to_string(finding->suspended_ns / NANOSECONDS_PER_MILLISECOND);
+    // Rounded up, so that a suspend shorter than 1 ms does not read as 0.
+    const std::string suspended = std::to_string(
+        (finding->suspended_ns + NANOSECONDS_PER_MILLISECOND - 1) /
+        NANOSECONDS_PER_MILLISECOND);
     logger.log(LogLevel::WARNING,
                finding->at_start ? "the system was suspended since boot"
                                  : "the system was suspended",

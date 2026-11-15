@@ -355,6 +355,15 @@ protected:
                      std::memory_order_release);
     }
 
+    // Sets the state of the `proc` region of `process`, as its attach or
+    // stop does.
+    void set_state(const std::string& process, ProcessState state) const {
+        const MappedRegion proc = map_file("proc." + process);
+        store_shared(
+            shared_at<ProcHeader>(proc.bytes(), sizeof(RegionHeader)).state,
+            to_raw(state), std::memory_order_release);
+    }
+
     // Sets the cursor of `queue_id` in the `proc` region of `process`.
     void set_cursor(const std::string& process, std::size_t queue_id,
                     std::uint64_t value) const {
@@ -558,6 +567,29 @@ TEST_F(Queues, TagdReportsAQueueWhoseCursorIsOutOfRange) {
     EXPECT_EQ(repaired.queues[0].write_seq, 1U);
 }
 
+// Review of PR #68: a consumer whose `proc` region was just created holds
+// cursor 0 until its attach sets the cursors to `write_seq`. A check in
+// that window must not report the queue broken: it is judged only while
+// the consumer is RUNNING. Fails without that rule.
+TEST_F(Queues, TagdJudgesNoQueueOfAConsumerThatIsNotRunning) {
+    const QueuePtr reader = open(*web(), "events.io");
+    {
+        const MappedRegion region = map_file("events.io");
+        store_shared(queue_header(region.bytes()).write_seq,
+                     std::uint64_t{CAPACITY} + 1, std::memory_order_release);
+    }
+    set_cursor("web", EVENTS_IO, 0);
+    set_state("web", ProcessState::STARTING);
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    set_state("web", ProcessState::STOPPING);
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    // The same pair with the consumer running is broken.
+    set_state("web", ProcessState::RUNNING);
+    const CheckReport report = host().check(scada::monotonic_ns());
+    ASSERT_EQ(report.queues.size(), 1U);
+    EXPECT_EQ(report.queues[0].event, QueueEvent::BROKEN);
+}
+
 TEST_F(Queues, TagdReportsAWriteSeqTooFarAhead) {
     const QueuePtr reader = open(*web(), "events.io");
     {
@@ -612,6 +644,25 @@ TEST_F(Queues, TagdReportsAQueueFileMissingForMoreThanOneCheck) {
     ASSERT_EQ(found.queues.size(), 1U);
     EXPECT_EQ(found.queues[0].queue, "events.io");
     EXPECT_EQ(found.queues[0].event, QueueEvent::FOUND);
+}
+
+// Review of PR #68: a fast restart of the producer after its queue file was
+// deleted gives no report. Its old heartbeat is still fresh, so the first
+// check counts the file missing; the attach sets the reused region
+// STARTING, which is down, and creates the file, so the count never
+// reaches two, however many checks the attach spans.
+TEST_F(Queues, TagdReportsNoMissingFileAcrossAFastRestartOfTheProducer) {
+    std::filesystem::remove(generation_dir() / "events.io");
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    // The attach of the restarted producer, before it creates the file.
+    set_state("io", ProcessState::STARTING);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    }
+    restart(io(), "io");  // reuses its proc region, creates the queue file
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    }
 }
 
 // A producer that is down may not have created its queue files yet, and a

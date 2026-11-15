@@ -682,7 +682,8 @@ consumer's cursor, then `write_seq` again, and finds the queue broken when
 the cursor is beyond the second `write_seq` or the first `write_seq` is more
 than the capacity beyond the cursor. While both sides run, this order
 cannot find a pair broken that was in range at every moment. A queue whose
-region or whose consumer's `proc` region is missing is not judged. It logs
+region or whose consumer's `proc` region is missing, or whose consumer is
+not RUNNING (its cursors are set at attach, 11.2), is not judged. It logs
 a queue that became broken, and again one that no longer is, with its
 name, cursor, `write_seq` and capacity, once per change. It also logs an
 events or command queue that has had no usable file at two checks in a

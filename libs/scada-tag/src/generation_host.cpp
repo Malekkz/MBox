@@ -969,6 +969,14 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
     if (cursor == nullptr) {
         return;  // the consumer's region is missing
     }
+    // Only a consumer that is RUNNING has set its cursors: a `proc` region
+    // created anew holds 0 from its rename until attach sets them to
+    // `write_seq` (section 9.2), and that is no broken queue (review of
+    // PR #68). Acquire: pairs with the release store of the state.
+    if (const std::optional<ProcFields> fields = read_proc_fields(proc);
+        !fields.has_value() || fields->state != to_raw(ProcessState::RUNNING)) {
+        return;
+    }
     const std::span<std::byte> bytes = queue.region->memory.bytes();
     // Both sides may run while this reads: in this order neither can make
     // a valid pair look broken (queue_pair_broken). Acquire, as the two
