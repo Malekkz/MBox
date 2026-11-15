@@ -157,6 +157,7 @@ ctest --preset dev          # unit and integration tests
 ctest --preset unit         # unit tests only (dev build)
 ctest --preset integration  # integration tests only (dev build)
 ctest --preset perf         # performance tests
+ctest --preset model        # model check, conformance test 4 (needs herd7)
 cmake --install build/dev --prefix stage   # staged install tree
 ```
 

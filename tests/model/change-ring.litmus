@@ -1,0 +1,54 @@
+AArch64 change-ring
+"Change ring, contract 0.6 sections 8.1 and 8.2"
+(*
+ * A ring of capacity 2. P0 is the owner thread: three calls of
+ * append_change (libs/scada-tag/src/change_ring.cpp), each the load of
+ * write_seq, `fence_release`, the stores of the entry, the release store
+ * of write_seq + 1. Entry 0 goes to slot 0 (a0, b0, value 1), entry 1 to
+ * slot 1 (a1, b1, value 2), entry 2 to slot 0 again (value 3). Two
+ * locations per slot stand for the fields of an entry.
+ *
+ * The owner is the only writer of write_seq, so its relaxed load gives the
+ * number it stored last; the test writes the numbers as constants. The
+ * fence follows that load in the code and orders the release store before
+ * it with the entry stores after it, which is what the test keeps.
+ *
+ * P1 is read_change with cursor 0: the acquire load of write_seq, the copy
+ * of slot 0, `fence_acquire`, the second load of write_seq. With cursor 0
+ * and capacity 2 the library delivers the copy only if the first load gave
+ * 1 (0 is "nothing new", 2 or more a gap) and the second load gave less
+ * than 2, so 1.
+ *
+ * fence_release compiles to DMB ISH, fence_acquire to DMB ISHLD, the
+ * release store to STLR, the acquire load to LDAR (GCC and Clang, -O2).
+ * tests/model/code_shape.py checks that the library still compiles to this
+ * order.
+ *
+ * The condition is a copy the library delivers that is not entry 0 whole:
+ * a part not yet written (0) or already overwritten by entry 2 (3).
+ *)
+{
+0:X0=wseq; 0:X1=a0; 0:X2=b0; 0:X3=a1; 0:X4=b1;
+1:X0=wseq; 1:X1=a0; 1:X2=b0;
+}
+ P0             | P1             ;
+ DMB ISH        | LDAR X5,[X0]   ;
+ MOV W6,#1      | LDR W6,[X1]    ;
+ STR W6,[X1]    | LDR W7,[X2]    ;
+ STR W6,[X2]    | DMB ISHLD      ;
+ MOV X7,#1      | LDR X8,[X0]    ;
+ STLR X7,[X0]   |                ;
+ DMB ISH        |                ;
+ MOV W9,#2      |                ;
+ STR W9,[X3]    |                ;
+ STR W9,[X4]    |                ;
+ MOV X10,#2     |                ;
+ STLR X10,[X0]  |                ;
+ DMB ISH        |                ;
+ MOV W12,#3     |                ;
+ STR W12,[X1]   |                ;
+ STR W12,[X2]   |                ;
+ MOV X13,#3     |                ;
+ STLR X13,[X0]  |                ;
+exists
+(1:X5=1 /\ 1:X8=1 /\ ~(1:X6=1 /\ 1:X7=1))
