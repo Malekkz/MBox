@@ -49,7 +49,7 @@ without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.6, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.7, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -202,7 +202,9 @@ D-27 records the choices the contract left open.
 - A process is down if its `proc` region is missing, fails a check of
   contract 3.1 or is not ready (`region missing`); else if its state is not
   RUNNING (`not running`); else if its heartbeat is older than its timeout
-  (`heartbeat stale`). A heartbeat exactly as old as the timeout is not down.
+  (`heartbeat stale`), or further than the timeout ahead of the checker's
+  clock (also `heartbeat stale`). A heartbeat exactly as old as the timeout
+  is not down.
 - The `down` flag in the process table is set or cleared to match, and each
   change is returned to the caller. `scada-tagd` itself is never marked.
 - Every entry of the generation directory that the header does not list, or
@@ -369,7 +371,8 @@ and sanitizer builds) stops the process when another thread writes them
 The real-time safe functions allocate nothing, take no lock and make no
 system call, as long as the clocks can be read from the vDSO. Attach checks
 that: `scada_status.clock_syscall` is 1 if the kernel's clock source is not
-one the vDSO reads, or one clock read takes more than 200 ns. The check is
+one the vDSO reads, or one clock read through the library takes more than
+half the time of a raw `clock_gettime` system call. The check is
 repeated at most once a minute from `scada_tag_notify` and
 `scada_tag_status`. In the retry loop of a read the processor is told to
 pause (`scada::cpu_relax`): a read that finds a write in progress gives up
