@@ -9,9 +9,9 @@ namespace scada::ctl {
 
 namespace {
 
-bool is_name_char(char c) noexcept {
-    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
-           c == '.' || c == '-';
+bool is_name_char(char chr) noexcept {
+    return (chr >= 'a' && chr <= 'z') || (chr >= '0' && chr <= '9') ||
+           chr == '_' || chr == '.' || chr == '-';
 }
 
 }  // namespace
@@ -26,8 +26,8 @@ std::optional<TagPattern> TagPattern::parse(std::string_view text,
         detail = "the pattern is longer than 127 bytes";
         return std::nullopt;
     }
-    for (const char c : text) {
-        if (!is_name_char(c) && c != '*' && c != '?') {
+    for (const char chr : text) {
+        if (!is_name_char(chr) && chr != '*' && chr != '?') {
             detail =
                 "the pattern holds a character other than a-z, 0-9, '_', "
                 "'.', '-', '*' and '?'";
@@ -44,31 +44,31 @@ bool TagPattern::matches(std::string_view name) const noexcept {
     // the work is bounded by the product of the lengths at worst and is
     // linear in practice.
     const std::string_view pattern = text_;
-    std::size_t p = 0;
-    std::size_t n = 0;
+    std::size_t pat = 0;
+    std::size_t pos = 0;
     std::optional<std::size_t> star;
-    std::size_t star_n = 0;
-    while (n < name.size()) {
-        if (p < pattern.size() &&
-            (pattern[p] == '?' || pattern[p] == name[n])) {
-            ++p;
-            ++n;
-        } else if (p < pattern.size() && pattern[p] == '*') {
-            star = p;
-            star_n = n;
-            ++p;
+    std::size_t star_pos = 0;
+    while (pos < name.size()) {
+        if (pat < pattern.size() &&
+            (pattern[pat] == '?' || pattern[pat] == name[pos])) {
+            ++pat;
+            ++pos;
+        } else if (pat < pattern.size() && pattern[pat] == '*') {
+            star = pat;
+            star_pos = pos;
+            ++pat;
         } else if (star) {
-            p = *star + 1;
-            ++star_n;
-            n = star_n;
+            pat = *star + 1;
+            ++star_pos;
+            pos = star_pos;
         } else {
             return false;
         }
     }
-    while (p < pattern.size() && pattern[p] == '*') {
-        ++p;
+    while (pat < pattern.size() && pattern[pat] == '*') {
+        ++pat;
     }
-    return p == pattern.size();
+    return pat == pattern.size();
 }
 
 }  // namespace scada::ctl

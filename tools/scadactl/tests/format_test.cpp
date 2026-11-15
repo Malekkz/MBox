@@ -18,6 +18,19 @@ namespace {
 
 constexpr std::int64_t SOME_MONO_NS = 123'456'789;
 
+// U+202E in UTF-8, built from its bytes so that no literal of this file
+// holds it.
+std::string right_to_left_override() {
+    return {'\xe2', '\x80', '\xae'};
+}
+
+// Times for the age and time tests, in ns.
+constexpr std::int64_t AGE_12_MS = 12'345'678;
+constexpr std::int64_t AGE_61_S = 61'000'000'000;
+constexpr std::int64_t NEGATIVE_AGE = -5;
+// 2026-11-15T10:20:30.123456789Z
+constexpr std::int64_t SOME_TIME_NS = 1'794'738'030'123'456'789;
+
 scada_value value_of(std::uint8_t type, std::uint64_t bits) {
     scada_value value{};
     value.type = type;
@@ -74,9 +87,9 @@ TEST(Format, TypeAndQualityNames) {
 TEST(Format, FlagNamesInBitOrderAndUnknownBitsInHex) {
     EXPECT_EQ(flags(0), "");
     EXPECT_EQ(flags(SCADA_FLAG_STALE), "STALE");
-    EXPECT_EQ(flags(SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_STALE |
-                    SCADA_FLAG_LOCAL_TIME),
-              "STALE,OWNER_DOWN,LOCAL_TIME");
+    EXPECT_EQ(
+        flags(SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_STALE | SCADA_FLAG_LOCAL_TIME),
+        "STALE,OWNER_DOWN,LOCAL_TIME");
     EXPECT_EQ(flags(0x8000), "0x8000");
     EXPECT_EQ(flags(0x1000 | SCADA_FLAG_COMM_FAIL), "COMM_FAIL,0x1000");
 }
@@ -100,24 +113,25 @@ TEST(Format, BadAndStaleAreMarked) {
 TEST(Format, ValuesOfEachType) {
     EXPECT_EQ(text_of(value_of(SCADA_TYPE_BOOL, 1)), "true");
     EXPECT_EQ(text_of(value_of(SCADA_TYPE_BOOL, 0)), "false");
-    EXPECT_EQ(text_of(value_of(SCADA_TYPE_INT64,
-                               std::bit_cast<std::uint64_t>(std::int64_t{-42}))),
+    EXPECT_EQ(text_of(value_of(SCADA_TYPE_INT64, std::bit_cast<std::uint64_t>(
+                                                     std::int64_t{-42}))),
               "-42");
-    EXPECT_EQ(
-        text_of(value_of(SCADA_TYPE_UINT64,
-                         std::numeric_limits<std::uint64_t>::max())),
-        "18446744073709551615");
-    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(0.1))),
+    EXPECT_EQ(text_of(value_of(SCADA_TYPE_UINT64,
+                               std::numeric_limits<std::uint64_t>::max())),
+              "18446744073709551615");
+    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(0.1))),
               "0.1");
     EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64,
                                std::bit_cast<std::uint64_t>(-1.5e300))),
               "-1.5e+300");
     EXPECT_EQ(text_of(value_of(SCADA_TYPE_STRING, 0), "on"), "\"on\"");
     EXPECT_EQ(json_of(value_of(SCADA_TYPE_BOOL, 1)), "true");
-    EXPECT_EQ(json_of(value_of(SCADA_TYPE_INT64,
-                               std::bit_cast<std::uint64_t>(std::int64_t{-42}))),
+    EXPECT_EQ(json_of(value_of(SCADA_TYPE_INT64, std::bit_cast<std::uint64_t>(
+                                                     std::int64_t{-42}))),
               "-42");
-    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(2.5))),
+    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(2.5))),
               "2.5");
     EXPECT_EQ(json_of(value_of(SCADA_TYPE_STRING, 0), "a\"b"), "\"a\\\"b\"");
 }
@@ -125,13 +139,17 @@ TEST(Format, ValuesOfEachType) {
 TEST(Format, DoublesThatAreNotFinite) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
-    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(nan))),
+    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(nan))),
               "nan");
-    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(-inf))),
+    EXPECT_EQ(text_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(-inf))),
               "-inf");
-    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(nan))),
+    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(nan))),
               "\"nan\"");
-    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64, std::bit_cast<std::uint64_t>(inf))),
+    EXPECT_EQ(json_of(value_of(SCADA_TYPE_FLOAT64,
+                               std::bit_cast<std::uint64_t>(inf))),
               "\"inf\"");
 }
 
@@ -157,9 +175,14 @@ TEST(Format, TerminalSafeText) {
     EXPECT_EQ(safe(std::string_view("\0\x7f", 2)), "\\x00\\x7f");
     // Well-formed UTF-8 stays, a C1 control and a direction override do
     // not, and neither does a byte that is not UTF-8.
-    EXPECT_EQ(safe("Druck \xc2\xb0" "C"), "Druck \xc2\xb0" "C");
-    EXPECT_EQ(safe("\xc2\x9b" "31m"), "\\u009b31m");
-    EXPECT_EQ(safe("a\xe2\x80\xae" "b"), "a\\u202eb");
+    EXPECT_EQ(safe("Druck \xc2\xb0"
+                   "C"),
+              "Druck \xc2\xb0"
+              "C");
+    EXPECT_EQ(safe("\xc2\x9b"
+                   "31m"),
+              "\\u009b31m");
+    EXPECT_EQ(safe("a" + right_to_left_override() + "b"), "a\\u202eb");
     EXPECT_EQ(safe("\xff\xc0\xaf"), "\\xff\\xc0\\xaf");
     // A surrogate and an overlong form are not well-formed.
     EXPECT_EQ(safe("\xed\xa0\x80"), "\\xed\\xa0\\x80");
@@ -173,8 +196,10 @@ TEST(Format, JsonStrings) {
     EXPECT_EQ(json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
     EXPECT_EQ(json_string("\n\x01\x7f"), "\"\\n\\u0001\\u007f\"");
     EXPECT_EQ(json_string("\xc2\xb0"), "\"\xc2\xb0\"");
-    EXPECT_EQ(json_string("\xff" "a"), "\"\\ufffda\"");
-    EXPECT_EQ(json_string("\xe2\x80\xae"), "\"\\u202e\"");
+    EXPECT_EQ(json_string("\xff"
+                          "a"),
+              "\"\\ufffda\"");
+    EXPECT_EQ(json_string(right_to_left_override()), "\"\\u202e\"");
 }
 
 TEST(Format, Ages) {
@@ -182,13 +207,13 @@ TEST(Format, Ages) {
     append_age(out, 0);
     EXPECT_EQ(out, "0.000 s");
     out.clear();
-    append_age(out, 12'345'678);
+    append_age(out, AGE_12_MS);
     EXPECT_EQ(out, "0.012 s");
     out.clear();
-    append_age(out, 61'000'000'000);
+    append_age(out, AGE_61_S);
     EXPECT_EQ(out, "61.000 s");
     out.clear();
-    append_age(out, -5);
+    append_age(out, NEGATIVE_AGE);
     EXPECT_EQ(out, "0.000 s");
 }
 
@@ -197,8 +222,7 @@ TEST(Format, UtcTimes) {
     append_utc_time(out, 0);
     EXPECT_EQ(out, "-");
     out.clear();
-    // 2026-11-15T10:20:30.123456789Z
-    append_utc_time(out, 1'794'738'030'123'456'789);
+    append_utc_time(out, SOME_TIME_NS);
     EXPECT_EQ(out, "2026-11-15T10:20:30.123Z");
     out.clear();
     append_utc_time(out, 1);

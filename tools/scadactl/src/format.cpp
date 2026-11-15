@@ -2,6 +2,7 @@
 
 #include "scada/tag/scada_tag.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <charconv>
@@ -12,7 +13,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
 
 namespace scada::ctl {
 
@@ -20,9 +20,9 @@ namespace {
 
 // The names of the quality flags, bit 0 first (contract, section 6).
 constexpr std::array<std::string_view, 12> FLAG_NAMES = {
-    "STALE",          "COMM_FAIL", "OUT_OF_RANGE", "SUBSTITUTED",
-    "NOT_INIT",       "OWNER_DOWN", "TIME_UNCERTAIN", "BLOCKED",
-    "TEST",           "OVERFLOW",  "RESTORED",     "LOCAL_TIME"};
+    "STALE",    "COMM_FAIL",  "OUT_OF_RANGE",   "SUBSTITUTED",
+    "NOT_INIT", "OWNER_DOWN", "TIME_UNCERTAIN", "BLOCKED",
+    "TEST",     "OVERFLOW",   "RESTORED",       "LOCAL_TIME"};
 
 constexpr std::string_view HEX_DIGITS = "0123456789abcdef";
 
@@ -35,9 +35,39 @@ struct CodePoint {
     std::size_t length = 0;
 };
 
-std::uint32_t byte_at(std::string_view bytes, std::size_t i) noexcept {
-    return static_cast<unsigned char>(bytes[i]);
+std::uint32_t byte_at(std::string_view bytes, std::size_t index) noexcept {
+    return static_cast<unsigned char>(bytes[index]);
 }
+
+constexpr std::uint32_t ASCII_END = 0x80;
+
+// The lead bytes of a sequence of `length` bytes, the bits of the lead
+// byte that belong to the code point, and the smallest code point the
+// sequence may hold, so that an overlong form is refused (RFC 3629).
+struct SequenceForm {
+    std::uint32_t first_lead;
+    std::uint32_t last_lead;
+    std::size_t length;
+    std::uint32_t lead_mask;
+    std::uint32_t minimum;
+};
+constexpr std::array<SequenceForm, 3> SEQUENCE_FORMS = {{
+    {.first_lead = 0xC2,
+     .last_lead = 0xDF,
+     .length = 2,
+     .lead_mask = 0x1F,
+     .minimum = 0x80},
+    {.first_lead = 0xE0,
+     .last_lead = 0xEF,
+     .length = 3,
+     .lead_mask = 0x0F,
+     .minimum = 0x800},
+    {.first_lead = 0xF0,
+     .last_lead = 0xF4,
+     .length = 4,
+     .lead_mask = 0x07,
+     .minimum = 0x10000},
+}};
 
 // The code point at the start of `bytes`, or nothing if `bytes` does not
 // start with a well-formed UTF-8 sequence (no overlong forms, no
@@ -51,27 +81,20 @@ std::optional<CodePoint> decode_utf8(std::string_view bytes) noexcept {
         return std::nullopt;
     }
     const std::uint32_t lead = byte_at(bytes, 0);
-    std::size_t length = 0;
-    std::uint32_t value = 0;
-    std::uint32_t minimum = 0;
-    if (lead < 0x80) {
+    if (lead < ASCII_END) {
         return CodePoint{.value = lead, .length = 1};
     }
-    if (lead >= 0xC2 && lead <= 0xDF) {
-        length = 2;
-        value = lead & 0x1FU;
-        minimum = 0x80;
-    } else if (lead >= 0xE0 && lead <= 0xEF) {
-        length = 3;
-        value = lead & 0x0FU;
-        minimum = 0x800;
-    } else if (lead >= 0xF0 && lead <= 0xF4) {
-        length = 4;
-        value = lead & 0x07U;
-        minimum = 0x10000;
-    } else {
+    const auto* const form = std::find_if(
+        SEQUENCE_FORMS.begin(), SEQUENCE_FORMS.end(),
+        [lead](const SequenceForm& candidate) {
+            return lead >= candidate.first_lead && lead <= candidate.last_lead;
+        });
+    if (form == SEQUENCE_FORMS.end()) {
         return std::nullopt;
     }
+    const std::size_t length = form->length;
+    std::uint32_t value = lead & form->lead_mask;
+    const std::uint32_t minimum = form->minimum;
     if (bytes.size() < length) {
         return std::nullopt;
     }
@@ -121,7 +144,9 @@ bool is_unsafe_code_point(std::uint32_t value) noexcept {
 
 template <typename T>
 void append_number(std::string& out, T value) {
-    std::array<char, 32> buffer{};
+    // Holds any 64-bit integer and the shortest form of any double.
+    constexpr std::size_t NUMBER_CHARS = 32;
+    std::array<char, NUMBER_CHARS> buffer{};
     const auto result =
         std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
     // The buffer holds any 64-bit integer and the shortest form of any
@@ -296,13 +321,13 @@ void append_terminal_safe(std::string& out, std::string_view bytes) {
     constexpr std::uint32_t LAST_PRINTABLE = 0x7E;
     constexpr std::size_t BYTE_DIGITS = 2;
     constexpr std::size_t CODE_POINT_DIGITS = 4;
-    std::size_t i = 0;
-    while (i < bytes.size()) {
-        const auto point = decode_utf8(bytes.substr(i));
+    std::size_t pos = 0;
+    while (pos < bytes.size()) {
+        const auto point = decode_utf8(bytes.substr(pos));
         if (!point) {
             out.append("\\x");
-            append_hex(out, byte_at(bytes, i), BYTE_DIGITS);
-            ++i;
+            append_hex(out, byte_at(bytes, pos), BYTE_DIGITS);
+            ++pos;
             continue;
         }
         const std::uint32_t value = point->value;
@@ -322,9 +347,9 @@ void append_terminal_safe(std::string& out, std::string_view bytes) {
             out.append("\\u");
             append_hex(out, value, CODE_POINT_DIGITS);
         } else {
-            out.append(bytes.substr(i, point->length));
+            out.append(bytes.substr(pos, point->length));
         }
-        i += point->length;
+        pos += point->length;
     }
 }
 
@@ -333,12 +358,12 @@ void append_json_string(std::string& out, std::string_view bytes) {
     constexpr std::uint32_t DELETE = 0x7F;
     constexpr std::size_t CODE_POINT_DIGITS = 4;
     out.push_back('"');
-    std::size_t i = 0;
-    while (i < bytes.size()) {
-        const auto point = decode_utf8(bytes.substr(i));
+    std::size_t pos = 0;
+    while (pos < bytes.size()) {
+        const auto point = decode_utf8(bytes.substr(pos));
         if (!point) {
             out.append("\\ufffd");
-            ++i;
+            ++pos;
             continue;
         }
         const std::uint32_t value = point->value;
@@ -356,19 +381,19 @@ void append_json_string(std::string& out, std::string_view bytes) {
             out.append("\\u");
             append_hex(out, value, CODE_POINT_DIGITS);
         } else {
-            out.append(bytes.substr(i, point->length));
+            out.append(bytes.substr(pos, point->length));
         }
-        i += point->length;
+        pos += point->length;
     }
     out.push_back('"');
 }
 
 void append_age(std::string& out, std::int64_t age_ns) {
     constexpr std::size_t MS_DIGITS = 3;
-    const std::int64_t ms = age_ns > 0 ? age_ns / NS_PER_MS : 0;
-    append_number(out, ms / MS_PER_S);
+    const std::int64_t millis = age_ns > 0 ? age_ns / NS_PER_MS : 0;
+    append_number(out, millis / MS_PER_S);
     out.push_back('.');
-    append_padded(out, ms % MS_PER_S, MS_DIGITS);
+    append_padded(out, millis % MS_PER_S, MS_DIGITS);
     out.append(" s");
 }
 
@@ -382,9 +407,9 @@ void append_utc_time(std::string& out, std::int64_t time_ns) {
     using std::chrono::milliseconds;
     using std::chrono::nanoseconds;
     using std::chrono::sys_days;
+    using std::chrono::system_clock;
     using std::chrono::time_point;
     using std::chrono::year_month_day;
-    using std::chrono::system_clock;
     constexpr std::size_t TWO = 2;
     constexpr std::size_t THREE = 3;
     constexpr std::size_t FOUR = 4;

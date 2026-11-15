@@ -67,8 +67,8 @@ TEST(TagPattern, RejectsWhatIsNoPattern) {
     EXPECT_FALSE(TagPattern::parse("a/b", detail).has_value());
     EXPECT_FALSE(TagPattern::parse("[ab]", detail).has_value());
     EXPECT_FALSE(TagPattern::parse(std::string("a\0b", 3), detail).has_value());
-    EXPECT_FALSE(
-        TagPattern::parse(std::string(PATTERN_MAX + 1, 'a'), detail).has_value());
+    EXPECT_FALSE(TagPattern::parse(std::string(PATTERN_MAX + 1, 'a'), detail)
+                     .has_value());
     EXPECT_TRUE(
         TagPattern::parse(std::string(PATTERN_MAX, 'a'), detail).has_value());
 }
