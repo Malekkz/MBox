@@ -144,11 +144,11 @@ AllowSuspendThenHibernate=no
 END
 ```
 
-`scada-tagd` cannot see this setting. It logs a WARNING at start when the
-kernel offers sleep states (`/sys/power/state` is not empty, which is
-normal on most kernels even with the targets masked), and a WARNING
-`the system was suspended` with `SUSPENDED_MS` when it finds that the
-system slept. A virtual machine that is paused is not seen: its clocks stop
+`scada-tagd` cannot see this setting. At start it logs, once at INFO, the
+sleep states the kernel offers (`/sys/power/state`); that line is expected,
+since most kernels offer them even with the targets masked. It logs a
+WARNING `the system was suspended` (or `... since boot` at start) with
+`SUSPENDED_MS` when it measures that the system slept. A virtual machine that is paused is not seen: its clocks stop
 too. Do not pause a virtual machine that runs the unit.
 
 ### Start it

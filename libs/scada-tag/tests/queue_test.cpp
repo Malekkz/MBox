@@ -665,9 +665,10 @@ TEST(QueuePairBroken, APairThatDoesNotMoveIsJudgedByTheRangeRule) {
 
 // No false report while both sides run: a producer and a consumer pass
 // records through a queue of CAPACITY places while the check runs as often
-// as it can. This shows the reads in the running code; the window between
-// two loads is too short for it to show a wrong order (the cases above
-// do that).
+// as it can. It checks the reads of the running code, but it cannot catch
+// a wrong read order: tried against a single read of `write_seq`, it still
+// passed, since the window between two loads is too short to hit. The
+// explicit interleavings of QueuePairBroken above catch that.
 TEST_F(Queues, TagdReportsNoBrokenQueueWhileBothSidesRun) {
     constexpr std::uint64_t RECORDS = 50'000;
     const QueuePtr out = open(*io(), "events.io");

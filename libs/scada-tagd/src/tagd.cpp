@@ -464,12 +464,13 @@ int start(const Options& options, std::ostream& err) {
         return EXIT_ERROR;
     }
     // Contract 3.4: the unit must not suspend. Whether the sleep targets
-    // are masked cannot be seen from here; that the kernel could suspend,
-    // and that it did, can.
+    // are masked cannot be seen from here. Most kernels offer sleep states
+    // even when they are, so what the kernel offers is INFO, logged once;
+    // a measured suspend (below, and in every round) is the WARNING.
     if (const std::string states =
             read_sleep_states(std::string(SLEEP_STATES_PATH));
         !states.empty()) {
-        logger.value().log(LogLevel::WARNING,
+        logger.value().log(LogLevel::INFO,
                            "the kernel offers sleep states; the unit must "
                            "not suspend",
                            {{"STATES", states}});

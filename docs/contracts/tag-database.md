@@ -172,9 +172,9 @@ accepted for layout version 1:
   suspended, so after a resume a write request would be executed later in
   real time than its requester allowed, and every heartbeat would still
   look fresh. Whether the platform disabled suspend cannot be checked from
-  inside a unit, so `scada-tagd` looks for its traces (D-44): it logs a
-  WARNING at start when the kernel offers sleep states (`/sys/power/state`
-  is not empty), and a WARNING when `CLOCK_BOOTTIME` minus
+  inside a unit, so `scada-tagd` looks for its traces (D-44): it logs at
+  start, once at INFO, the sleep states the kernel offers
+  (`/sys/power/state`), and a WARNING when `CLOCK_BOOTTIME` minus
   `CLOCK_MONOTONIC`, the time spent suspended since boot, is above 0 at
   start or grows. A virtual machine that is paused stops both clocks and
   is seen by neither check.
