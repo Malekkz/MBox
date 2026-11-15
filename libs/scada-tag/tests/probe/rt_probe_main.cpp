@@ -48,7 +48,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <new>
 #include <span>
@@ -257,6 +259,30 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
     return outcome;
 }
 
+// DIAGNOSTIC ONLY (not for merge): kB of Rss and Anonymous per mapping.
+std::map<std::string, std::pair<long, long>> smaps_snapshot() {
+    std::map<std::string, std::pair<long, long>> result;
+    std::ifstream file("/proc/self/smaps");
+    std::string line;
+    std::string current;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.find(':') != std::string::npos &&
+            line.find(" kB") != std::string::npos) {
+            const std::size_t colon = line.find(':');
+            const std::string key = line.substr(0, colon);
+            const long kb = std::strtol(line.c_str() + colon + 1, nullptr, 10);
+            if (key == "Rss") {
+                result[current].first = kb;
+            } else if (key == "Anonymous") {
+                result[current].second = kb;
+            }
+        } else {
+            current = line;
+        }
+    }
+    return result;
+}
+
 // The time of CLOCK_MONOTONIC, in ns.
 std::int64_t monotonic_now() noexcept {
     timespec now{};
@@ -412,9 +438,22 @@ int run(std::span<const std::string_view> args) {
     if (fault == "allocation") {
         start_next_allocation_on_new_page(page);
     }
+    const auto smaps_before = smaps_snapshot();
     prefault_arena(2 * page);
 
     const Outcome outcome = run_marked(prepared, fault);
+    const auto smaps_after = smaps_snapshot();
+    for (const auto& [mapping, after] : smaps_after) {
+        const auto found = smaps_before.find(mapping);
+        const std::pair<long, long> before =
+            found == smaps_before.end() ? std::pair<long, long>{-1, -1}
+                                        : found->second;
+        if (before != after) {
+            std::cerr << "DIAG " << mapping << " rss " << before.first
+                      << "->" << after.first << " anon " << before.second
+                      << "->" << after.second << "\n";
+        }
+    }
     scada_queue_stats_t stats{};
     static_cast<void>(scada_queue_stats(prepared.requests, &stats));
 
