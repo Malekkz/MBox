@@ -33,8 +33,8 @@ void append_flag_names(std::string& out, std::uint16_t flags,
 // How a value is marked in the human-readable output, so that a reader
 // never takes a bad or stale value for a good one.
 enum class Mark : std::uint8_t {
-    NONE,       // GOOD and not STALE
-    ATTENTION,  // UNCERTAIN, or STALE with a quality that is not BAD
+    NONE,       // GOOD with no flag, or only RESTORED or LOCAL_TIME
+    ATTENTION,  // UNCERTAIN, or GOOD with any other flag
     BAD,        // BAD (OWNER_DOWN included), a quality that is no quality,
                 // or no value could be read
 };

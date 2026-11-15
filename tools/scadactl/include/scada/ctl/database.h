@@ -43,11 +43,18 @@ public:
     Database(Database&&) = delete;
     Database& operator=(Database&&) = delete;
 
+    // How reopen ended.
+    enum class Reopened : std::uint8_t {
+        YES,      // a generation is observed
+        NO,       // none could be observed; `detail` says why
+        STOPPED,  // `stop` became readable while it waited
+    };
+
     // Detaches and observes again, after a generation change, up to a few
-    // times while the generation is changing. False, with `detail`, if no
-    // generation could be observed; the object then holds no context and
-    // must not be used again.
-    [[nodiscard]] bool reopen(std::string& detail);
+    // times while the generation is changing. Between two tries it waits
+    // on `stop` (-1: on nothing), so that a stop request is not held up.
+    // Unless YES, the object holds no context and must not be used again.
+    [[nodiscard]] Reopened reopen(std::string& detail, int stop = -1);
 
     // scada_tag_status: looks again for missing regions and reports a
     // generation change as SCADA_E_RETIRING. Call it about once a second.

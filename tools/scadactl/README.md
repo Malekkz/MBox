@@ -29,16 +29,33 @@ Bad and stale values are marked in both forms:
 | | Text | JSON |
 | --- | --- | --- |
 | BAD (OWNER_DOWN included), or no value could be read | `!` in the first column | `"bad": true` |
-| UNCERTAIN, or STALE | `~` in the first column | `"stale": true` for STALE; `"quality": "UNCERTAIN"` |
+| UNCERTAIN, or GOOD with a flag other than RESTORED and LOCAL_TIME (STALE, COMM_FAIL, SUBSTITUTED, TEST, ...) | `~` in the first column | `"attention": true`; also `"stale": true` for STALE |
 | No value (never written, owner missing) | value `-`, age `-` | `"value": null`, `"age_ns": null` |
 
 In `status`, a process or owner that is down starts with `!`.
 
-When `scada-tagd` is down its liveness check has stopped, so a value may be
-stale without a mark: `tag list` and `tag get` then start with `! scada-tagd
-down: values may be stale` and carry `"tagd_down": true` in JSON, and `tag
-watch` writes such a line (or `{"event":"tagd","down":...}`) when it goes
-down or comes back.
+Every JSON document has `"schema": 1`; the number goes up when a field is
+removed or changes its meaning, not when one is added. A time that is not
+there (`source_time_ns`, `update_time_ns`, `age_ns`) is `null`. A FLOAT64
+that is not finite is the string `"nan"`, `"inf"` or `"-inf"`, as JSON has
+no number for it. A `change` line of `tag watch` has no `update_time_ns`
+and no `change_count`: the change ring does not hold them; a `now` line
+has both.
+
+When `scada-tagd` is down, `tag list` and `tag get` start with `! scada-tagd
+down: liveness is still checked; TAGD FLAG is not updated` and carry
+`"tagd_down": true` in JSON, and `tag watch` writes such a line (or
+`{"event":"tagd","down":...}`) when it goes down or comes back. The marks
+stay right: every reader judges each process itself (contract 10.1), so a
+dead owner still gives OWNER_DOWN. What stops is the `down` flag that
+`scada-tagd` keeps (`TAGD FLAG` in `status`, `"marked_down"` in JSON), and
+no new generation is made.
+
+The exit code is 0 when the command ran, also when `scada-tagd` is down or
+every tag is BAD: the output says so. It is 1 for an error, including
+output that cannot be written (a closed pipe with SIGPIPE ignored, a full
+disk) and a change ring that does not match the database, and 2 for wrong
+arguments.
 
 Nothing read from a generation that was retired meanwhile is shown.
 `scadactl` calls `scada_tag_status` after it reads and before it shows
@@ -57,7 +74,13 @@ gap it prints a `gap` line with the reason, reads that owner's tags again
 and drops any later change older than what it read (contract 8.3). It
 waits at most a second at a time and calls `scada_tag_status` before it
 shows what it took from the rings; on a generation change it closes its
-subscriptions, detaches, observes again and starts over.
+subscriptions, detaches, observes again and starts over, and a stop
+signal ends it while it waits for the new generation. It takes at most
+1024 results from one ring before it shows them and looks at the
+generation again, so a fast owner cannot hold up that check. An entry
+that is no valid change is skipped; a ring that cannot be read at all
+(its capacity is not that of the owner table) ends the watch with exit
+code 1.
 
 ## Who may run it
 

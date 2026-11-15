@@ -163,8 +163,13 @@ void append_json_flags(std::string& out, std::uint16_t flags) {
 }
 
 // The fields of a tag as JSON, without the braces.
-void append_tag_fields(std::string& out, const TagRow& row) {
+// The fields of `row`. A change of a ring carries no record fields: no
+// update_time_ns and no change_count (contract 8).
+enum class Fields : std::uint8_t { RECORD, CHANGE };
+
+void append_tag_fields(std::string& out, const TagRow& row, Fields fields) {
     const bool value_there = row_has_value(row);
+    const Mark mark = row_mark(row);
     append_json_text(out, "name", row.name);
     out.push_back(',');
     append_json_text(out, "type", type_name(row.type));
@@ -186,7 +191,9 @@ void append_tag_fields(std::string& out, const TagRow& row) {
     append_json_flags(out, row.read_code == SCADA_OK ? row.value.quality_flags
                                                      : std::uint16_t{0});
     out.push_back(',');
-    append_json_bool(out, "bad", row_mark(row) == Mark::BAD);
+    append_json_bool(out, "bad", mark == Mark::BAD);
+    out.push_back(',');
+    append_json_bool(out, "attention", mark == Mark::ATTENTION);
     out.push_back(',');
     append_json_bool(out, "stale",
                      row.read_code == SCADA_OK &&
@@ -197,8 +204,14 @@ void append_tag_fields(std::string& out, const TagRow& row) {
     append_json_key(out, "age_ns");
     out.append(value_there ? std::to_string(row.value.age_ns) : "null");
     out.push_back(',');
+    // 0 is "no time" in the tag database (contract 6.2): null here.
     append_json_key(out, "source_time_ns");
-    out.append(value_there ? std::to_string(row.value.source_time_ns) : "null");
+    out.append(value_there && row.value.source_time_ns != 0
+                   ? std::to_string(row.value.source_time_ns)
+                   : "null");
+    if (fields == Fields::CHANGE) {
+        return;
+    }
     out.push_back(',');
     append_json_key(out, "update_time_ns");
     out.append(value_there && row.value.update_time_ns != 0
@@ -206,6 +219,13 @@ void append_tag_fields(std::string& out, const TagRow& row) {
                    : "null");
     out.push_back(',');
     append_json_number(out, "change_count", row.value.change_count);
+}
+
+// Opens a JSON document with its schema version.
+void open_document(std::string& out) {
+    out.push_back('{');
+    append_json_number(out, "schema", JSON_SCHEMA);
+    out.push_back(',');
 }
 
 std::string_view generation_state_name(std::uint32_t state) {
@@ -296,17 +316,19 @@ void render_tag_table(std::string& out, std::span<const TagRow> rows) {
 
 void render_tag_json(std::string& out, const TagRow& row) {
     out.push_back('{');
-    append_tag_fields(out, row);
+    append_tag_fields(out, row, Fields::RECORD);
     out.push_back('}');
 }
 
 void render_tagd_warning(std::string& out) {
-    out.append("! scada-tagd down: values may be stale\n");
+    out.append(
+        "! scada-tagd down: liveness is still checked; TAGD FLAG is not "
+        "updated\n");
 }
 
 void render_tag_list_json(std::string& out, std::uint64_t generation,
                           bool tagd_down, std::span<const TagRow> rows) {
-    out.push_back('{');
+    open_document(out);
     append_json_number(out, "generation", generation);
     out.push_back(',');
     append_json_bool(out, "tagd_down", tagd_down);
@@ -323,8 +345,8 @@ void render_tag_list_json(std::string& out, std::uint64_t generation,
 }
 
 void render_tag_get_json(std::string& out, const TagRow& row, bool tagd_down) {
-    out.push_back('{');
-    append_tag_fields(out, row);
+    open_document(out);
+    append_tag_fields(out, row, Fields::RECORD);
     out.push_back(',');
     append_json_bool(out, "tagd_down", tagd_down);
     out.append("}\n");
@@ -415,7 +437,7 @@ void render_status_text(std::string& out, const StatusView& view) {
 
 void render_status_json(std::string& out, const StatusView& view) {
     const scada_status& status = view.status;
-    out.push_back('{');
+    open_document(out);
     append_json_number(out, "generation", status.generation);
     out.push_back(',');
     append_json_text(out, "state",
@@ -496,10 +518,12 @@ void render_watch_text(std::string& out, WatchEvent event, const TagRow& row) {
 }
 
 void render_watch_json(std::string& out, WatchEvent event, const TagRow& row) {
-    out.push_back('{');
+    open_document(out);
     append_json_text(out, "event", event_name(event));
     out.push_back(',');
-    append_tag_fields(out, row);
+    append_tag_fields(
+        out, row,
+        event == WatchEvent::CHANGE ? Fields::CHANGE : Fields::RECORD);
     out.append("}\n");
 }
 
@@ -514,7 +538,7 @@ void render_gap_text(std::string& out, std::string_view owner,
 
 void render_gap_json(std::string& out, std::string_view owner,
                      std::uint8_t reason) {
-    out.push_back('{');
+    open_document(out);
     append_json_text(out, "event", "gap");
     out.push_back(',');
     append_json_text(out, "owner", owner);
@@ -524,12 +548,13 @@ void render_gap_json(std::string& out, std::string_view owner,
 }
 
 void render_tagd_text(std::string& out, bool down) {
-    out.append(down ? "! scada-tagd down: values may be stale\n"
+    out.append(down ? "! scada-tagd down: liveness is still checked; TAGD FLAG "
+                      "is not updated\n"
                     : "  scada-tagd up\n");
 }
 
 void render_tagd_json(std::string& out, bool down) {
-    out.push_back('{');
+    open_document(out);
     append_json_text(out, "event", "tagd");
     out.push_back(',');
     append_json_bool(out, "down", down);
@@ -543,7 +568,7 @@ void render_generation_text(std::string& out, std::uint64_t generation) {
 }
 
 void render_generation_json(std::string& out, std::uint64_t generation) {
-    out.push_back('{');
+    open_document(out);
     append_json_text(out, "event", "generation");
     out.push_back(',');
     append_json_number(out, "generation", generation);

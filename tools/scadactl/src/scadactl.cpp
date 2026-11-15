@@ -49,7 +49,7 @@ Checked read_checked(Database& database, std::ostream& err, Read read) {
             return checked;
         }
         std::string detail;
-        if (!database.reopen(detail)) {
+        if (database.reopen(detail) != Database::Reopened::YES) {
             err << "scadactl: " << detail << "\n";
             return checked;
         }
@@ -75,8 +75,7 @@ int show_status(Database& database, const Arguments& args, std::ostream& out,
     } else {
         render_status_text(text, view);
     }
-    out << text << std::flush;
-    return EXIT_OK;
+    return write_out(out, err, text) ? EXIT_OK : EXIT_ERROR;
 }
 
 int list_tags(Database& database, const Arguments& args, std::ostream& out,
@@ -105,8 +104,7 @@ int list_tags(Database& database, const Arguments& args, std::ostream& out,
             render_tag_table(text, rows);
         }
     }
-    out << text << std::flush;
-    return EXIT_OK;
+    return write_out(out, err, text) ? EXIT_OK : EXIT_ERROR;
 }
 
 int get_tag(Database& database, const Arguments& args, std::ostream& out,
@@ -138,11 +136,19 @@ int get_tag(Database& database, const Arguments& args, std::ostream& out,
         }
         render_tag_detail(text, row);
     }
-    out << text << std::flush;
-    return EXIT_OK;
+    return write_out(out, err, text) ? EXIT_OK : EXIT_ERROR;
 }
 
 }  // namespace
+
+bool write_out(std::ostream& out, std::ostream& err, std::string_view text) {
+    out << text << std::flush;
+    if (out) {
+        return true;
+    }
+    err << "scadactl: writing the output failed\n";
+    return false;
+}
 
 int run(std::span<const std::string_view> args, std::ostream& out,
         std::ostream& err) {
@@ -153,8 +159,7 @@ int run(std::span<const std::string_view> args, std::ostream& out,
         return EXIT_USAGE;
     }
     if (parsed->command == Command::HELP) {
-        out << USAGE << std::flush;
-        return EXIT_OK;
+        return write_out(out, err, USAGE) ? EXIT_OK : EXIT_ERROR;
     }
     const std::unique_ptr<Database> database = Database::open(*parsed, detail);
     if (database == nullptr) {

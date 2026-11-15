@@ -9,6 +9,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -94,10 +95,27 @@ TEST(Format, FlagNamesInBitOrderAndUnknownBitsInHex) {
     EXPECT_EQ(flags(0x1000 | SCADA_FLAG_COMM_FAIL), "COMM_FAIL,0x1000");
 }
 
+TEST(Format, AGoodValueWithAQualifyingFlagIsMarked) {
+    for (const std::uint16_t flag : std::initializer_list<std::uint16_t>{
+             SCADA_FLAG_STALE, SCADA_FLAG_COMM_FAIL, SCADA_FLAG_OUT_OF_RANGE,
+             SCADA_FLAG_SUBSTITUTED, SCADA_FLAG_NOT_INIT,
+             SCADA_FLAG_TIME_UNCERTAIN, SCADA_FLAG_BLOCKED, SCADA_FLAG_TEST,
+             SCADA_FLAG_OVERFLOW, 0x1000}) {
+        EXPECT_EQ(mark_of(SCADA_QUALITY_GOOD, flag), Mark::ATTENTION) << flag;
+        EXPECT_EQ(
+            mark_of(SCADA_QUALITY_GOOD,
+                    static_cast<std::uint16_t>(flag | SCADA_FLAG_LOCAL_TIME)),
+            Mark::ATTENTION)
+            << flag;
+    }
+}
+
 TEST(Format, BadAndStaleAreMarked) {
     EXPECT_EQ(mark_of(SCADA_QUALITY_GOOD, 0), Mark::NONE);
     EXPECT_EQ(mark_of(SCADA_QUALITY_GOOD, SCADA_FLAG_LOCAL_TIME), Mark::NONE);
-    EXPECT_EQ(mark_of(SCADA_QUALITY_GOOD, SCADA_FLAG_STALE), Mark::ATTENTION);
+    EXPECT_EQ(mark_of(SCADA_QUALITY_GOOD,
+                      SCADA_FLAG_RESTORED | SCADA_FLAG_LOCAL_TIME),
+              Mark::NONE);
     EXPECT_EQ(mark_of(SCADA_QUALITY_UNCERTAIN, 0), Mark::ATTENTION);
     EXPECT_EQ(mark_of(SCADA_QUALITY_UNCERTAIN, SCADA_FLAG_STALE),
               Mark::ATTENTION);

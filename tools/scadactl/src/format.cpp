@@ -234,7 +234,13 @@ void append_flag_names(std::string& out, std::uint16_t flags,
 
 Mark mark_of(std::uint8_t quality, std::uint16_t flags) noexcept {
     if (quality == SCADA_QUALITY_GOOD) {
-        return (flags & SCADA_FLAG_STALE) != 0 ? Mark::ATTENTION : Mark::NONE;
+        // RESTORED and LOCAL_TIME say where the value or its time came
+        // from; every other flag, an unknown one included, qualifies it.
+        constexpr std::uint16_t PLAIN =
+            SCADA_FLAG_RESTORED | SCADA_FLAG_LOCAL_TIME;
+        return (flags & static_cast<std::uint16_t>(~PLAIN)) != 0
+                   ? Mark::ATTENTION
+                   : Mark::NONE;
     }
     if (quality == SCADA_QUALITY_UNCERTAIN) {
         return Mark::ATTENTION;

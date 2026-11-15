@@ -15,6 +15,11 @@
 
 namespace scada::ctl {
 
+// The version of the JSON output, in the field "schema" of every document:
+// raised when a field is removed or changes its meaning, not when one is
+// added.
+inline constexpr std::uint32_t JSON_SCHEMA = 1;
+
 // One tag as it was read.
 struct TagRow {
     std::string name;
@@ -72,12 +77,15 @@ enum class WatchEvent : std::uint8_t {
 // name, type, value, quality, flags, age and owner.
 void render_tag_table(std::string& out, std::span<const TagRow> rows);
 
-// The fields of `row` as one JSON object.
+// The fields of `row` as one JSON object. "bad" and "attention" are the
+// marks '!' and '~' of the text; a non-finite FLOAT64 value is the string
+// "nan", "inf" or "-inf"; a time that is not there is null.
 void render_tag_json(std::string& out, const TagRow& row);
 
-// The line that `tag list` and `tag get` put first when scada-tagd is down:
-// its liveness check has stopped, so a value may be stale without a mark
-// (contract 10.1).
+// The line that `tag list` and `tag get` put first when scada-tagd is down.
+// Readers still judge every process themselves (contract 10.1), so
+// OWNER_DOWN and the marks stay right; what stops is the `down` flag that
+// scada-tagd keeps (TAGD FLAG in `status`), and no new generation is made.
 void render_tagd_warning(std::string& out);
 
 // `tag list --json`: {"generation": ..., "tagd_down": ..., "tags": [...]}.
@@ -96,7 +104,9 @@ void render_status_text(std::string& out, const StatusView& view);
 // `status --json`.
 void render_status_json(std::string& out, const StatusView& view);
 
-// One line of `tag watch` for the tag `row`, ending in a newline.
+// One line of `tag watch` for the tag `row`, ending in a newline. A CHANGE
+// in JSON has no "update_time_ns" and no "change_count": a change ring does
+// not hold them (contract 8).
 void render_watch_text(std::string& out, WatchEvent event, const TagRow& row);
 void render_watch_json(std::string& out, WatchEvent event, const TagRow& row);
 

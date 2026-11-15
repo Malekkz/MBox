@@ -34,6 +34,11 @@ namespace {
 constexpr int STATUS_INTERVAL_MS = 1000;
 // The most sources of one wait set (contract 8.4).
 constexpr std::size_t SOURCES_PER_WAIT_SET = 127;
+// The most results taken from one subscription before the pending lines
+// are shown and the generation is looked at again: an owner that writes
+// faster than the watch shows cannot delay the status check, nor grow the
+// pending lines without bound.
+constexpr std::size_t RESULTS_PER_DRAIN = 1024;
 
 // Blocks SIGINT and SIGTERM in the calling thread and turns them into a
 // readable descriptor; restores the signal mask when destroyed.
@@ -89,6 +94,8 @@ struct OwnerWatch {
     std::string name;
     scada_sub* sub = nullptr;
     std::vector<std::size_t> tags;  // indexes into Watch::tags_
+    // `invalid` of the subscription's statistics when last looked at.
+    std::uint64_t invalid = 0;
 };
 
 // What a step of the watch leads to. RESTARTED: a generation change was
@@ -123,15 +130,22 @@ private:
     // the pending changes reach --count.
     [[nodiscard]] Step drain_all();
     [[nodiscard]] Step drain(OwnerWatch& owner);
+    // After SCADA_E_LAYOUT: GO_ON if it refused one entry, which is
+    // skipped; FAILED, with a message, if the ring itself cannot be read
+    // (its capacity is not that of the owner table: every call gives
+    // SCADA_E_LAYOUT again, contract 8).
+    [[nodiscard]] Step refused(OwnerWatch& owner);
+    void show_gap(const OwnerWatch& owner);
     // Writes the pending lines, but only after scada_tag_status says that
     // the generation they were read from is still the current one: a line
     // is never shown for a retired generation (contract 11.4). If it was
     // retired, the lines are dropped and the watch starts over in the new
     // generation (RESTARTED: the lines of the new start are pending). A
     // change of the state of scada-tagd is shown first.
-    [[nodiscard]] Step publish();
-    // Observes again and opens the watch on the new generation.
-    [[nodiscard]] Step restart();
+    [[nodiscard]] Step publish(const StopSignals& stop);
+    // Observes again and opens the watch on the new generation. DONE if a
+    // stop signal came while it waited for the new generation.
+    [[nodiscard]] Step restart(const StopSignals& stop);
     [[nodiscard]] Step wait(const StopSignals& stop);
     void emit(const std::string& line);
 
@@ -152,6 +166,9 @@ private:
     std::string pending_;
     std::uint64_t pending_changes_ = 0;
     std::uint64_t changes_shown_ = 0;
+    // Whether a subscription had more than RESULTS_PER_DRAIN results: the
+    // next round starts without waiting.
+    bool more_ = false;
     // Whether the last line about scada-tagd said it is down.
     bool tagd_down_shown_ = false;
 };
@@ -174,8 +191,10 @@ bool Watch::open(std::string& detail) {
         const auto [where, added] =
             owner_of.try_emplace(tags_[index].owner_index, owners_.size());
         if (added) {
-            owners_.push_back(
-                {.name = tags_[index].owner, .sub = nullptr, .tags = {}});
+            owners_.push_back({.name = tags_[index].owner,
+                               .sub = nullptr,
+                               .tags = {},
+                               .invalid = 0});
         }
         owners_.at(where->second).tags.push_back(index);
     }
@@ -294,51 +313,70 @@ Step Watch::show_change(const scada_change& change) {
 }
 
 Step Watch::drain(OwnerWatch& owner) {
-    for (;;) {
+    for (std::size_t taken = 0; taken < RESULTS_PER_DRAIN; ++taken) {
         scada_change change{};
         const int code = scada_sub_next(owner.sub, &change, 0);
         if (code == SCADA_E_TIMEOUT) {
             return Step::GO_ON;
         }
+        Step step = Step::GO_ON;
         if (code == SCADA_OK) {
-            if (show_change(change) == Step::DONE) {
-                return Step::DONE;
-            }
-            continue;
+            step = show_change(change);
+        } else if (code == SCADA_E_GAP) {
+            show_gap(owner);
+        } else if (code == SCADA_E_LAYOUT) {
+            step = refused(owner);
+        } else {
+            err_ << "scadactl: reading the changes of " << owner.name
+                 << " failed (code " << code << ")\n";
+            step = Step::FAILED;
         }
-        if (code == SCADA_E_GAP) {
-            scada_sub_stats_t stats{};
-            static_cast<void>(scada_sub_stats(owner.sub, &stats));
-            std::string line;
-            if (args_.json) {
-                render_gap_json(line, owner.name, stats.last_gap);
-            } else {
-                render_gap_text(line, owner.name, stats.last_gap);
-            }
-            emit(line);
-            // A gap may come with a generation change: `publish` looks
-            // before these lines are shown.
-            for (const std::size_t tag : owner.tags) {
-                show_now(tag);
-            }
-            continue;
+        if (step != Step::GO_ON) {
+            return step;
         }
-        if (code == SCADA_E_LAYOUT) {
-            continue;  // an entry that is no valid change, skipped
-        }
-        err_ << "scadactl: reading the changes of " << owner.name
-             << " failed (code " << code << ")\n";
-        return Step::FAILED;
+    }
+    more_ = true;
+    return Step::GO_ON;
+}
+
+void Watch::show_gap(const OwnerWatch& owner) {
+    scada_sub_stats_t stats{};
+    static_cast<void>(scada_sub_stats(owner.sub, &stats));
+    std::string line;
+    if (args_.json) {
+        render_gap_json(line, owner.name, stats.last_gap);
+    } else {
+        render_gap_text(line, owner.name, stats.last_gap);
+    }
+    emit(line);
+    // A gap may come with a generation change: `publish` looks before
+    // these lines are shown.
+    for (const std::size_t tag : owner.tags) {
+        show_now(tag);
     }
 }
 
-Step Watch::publish() {
+Step Watch::refused(OwnerWatch& owner) {
+    // `invalid` counts the entries refused with SCADA_E_LAYOUT (contract
+    // 13, scada_sub_stats); a refusal it does not count is the ring's.
+    scada_sub_stats_t stats{};
+    if (scada_sub_stats(owner.sub, &stats) == SCADA_OK &&
+        stats.invalid != owner.invalid) {
+        owner.invalid = stats.invalid;
+        return Step::GO_ON;  // an entry that is no valid change, skipped
+    }
+    err_ << "scadactl: the change ring of " << owner.name
+         << " does not match the tag database\n";
+    return Step::FAILED;
+}
+
+Step Watch::publish(const StopSignals& stop) {
     scada_status status{};
     const int code = db_.status(status);
     if (code == SCADA_E_RETIRING) {
         pending_.clear();
         pending_changes_ = 0;
-        return restart();
+        return restart(stop);
     }
     const bool tagd_down = code == SCADA_E_TAGD_DOWN;
     std::string lines;
@@ -351,8 +389,8 @@ Step Watch::publish() {
         tagd_down_shown_ = tagd_down;
     }
     lines.append(pending_);
-    if (!lines.empty()) {
-        out_ << lines << std::flush;
+    if (!lines.empty() && !write_out(out_, err_, lines)) {
+        return Step::FAILED;
     }
     changes_shown_ += pending_changes_;
     pending_.clear();
@@ -360,12 +398,17 @@ Step Watch::publish() {
     return Step::GO_ON;
 }
 
-Step Watch::restart() {
+Step Watch::restart(const StopSignals& stop) {
     close();
     std::string detail;
-    if (!db_.reopen(detail)) {
-        err_ << "scadactl: " << detail << "\n";
-        return Step::FAILED;
+    switch (db_.reopen(detail, stop.descriptor())) {
+        case Database::Reopened::YES:
+            break;
+        case Database::Reopened::STOPPED:
+            return Step::DONE;
+        case Database::Reopened::NO:
+            err_ << "scadactl: " << detail << "\n";
+            return Step::FAILED;
     }
     scada_status status{};
     static_cast<void>(db_.status(status));
@@ -389,7 +432,10 @@ Step Watch::wait(const StopSignals& stop) {
     for (const int descriptor : descriptors_) {
         polled.push_back({.fd = descriptor, .events = POLLIN, .revents = 0});
     }
-    const int ready = ::poll(polled.data(), polled.size(), STATUS_INTERVAL_MS);
+    // With results left in a ring, only the stop signal is looked at.
+    const int ready =
+        ::poll(polled.data(), more_ ? std::size_t{1} : polled.size(),
+               more_ ? 0 : STATUS_INTERVAL_MS);
     if (ready < 0 && errno != EINTR) {
         err_ << "scadactl: waiting for changes failed\n";
         return Step::FAILED;
@@ -431,9 +477,9 @@ int Watch::run() {
         if (drained == Step::FAILED) {
             return EXIT_ERROR;
         }
-        const Step published = publish();
-        if (published == Step::FAILED) {
-            return EXIT_ERROR;
+        const Step published = publish(stop);
+        if (published == Step::FAILED || published == Step::DONE) {
+            return published == Step::DONE ? EXIT_OK : EXIT_ERROR;
         }
         if (published == Step::RESTARTED) {
             continue;  // the new start is pending: publish it first
@@ -449,6 +495,7 @@ int Watch::run() {
 }
 
 Step Watch::drain_all() {
+    more_ = false;
     for (OwnerWatch& owner : owners_) {
         if (const Step step = drain(owner); step != Step::GO_ON) {
             return step;

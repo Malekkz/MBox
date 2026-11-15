@@ -6,9 +6,10 @@
 #include "scada/ctl/view.h"
 #include "scada/tag/scada_tag.h"
 
+#include <poll.h>
+
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -17,7 +18,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,7 +28,7 @@ namespace {
 // After a generation change scada-tagd needs a moment to finish the new
 // one; observe is tried this often, this far apart.
 constexpr int REOPEN_ATTEMPTS = 20;
-constexpr std::chrono::milliseconds REOPEN_PAUSE{250};
+constexpr int REOPEN_PAUSE_MS = 250;
 
 constexpr std::string_view DEFAULT_BASE_DIR = "/dev/shm/scada";
 
@@ -100,7 +100,7 @@ Database::~Database() {
     scada_tag_detach(ctx_);
 }
 
-bool Database::reopen(std::string& detail) {
+Database::Reopened Database::reopen(std::string& detail, int stop) {
     scada_tag_detach(ctx_);
     ctx_ = nullptr;
     int code = SCADA_OK;
@@ -109,7 +109,7 @@ bool Database::reopen(std::string& detail) {
         code = observe(base_dir_, tagd_uid_, ctx_);
         os_error = errno;
         if (code == SCADA_OK) {
-            return true;
+            return Reopened::YES;
         }
         // Only a database in the middle of a change is worth waiting for.
         const bool changing =
@@ -118,10 +118,14 @@ bool Database::reopen(std::string& detail) {
         if (!changing) {
             break;
         }
-        std::this_thread::sleep_for(REOPEN_PAUSE);
+        // poll ignores a negative descriptor: then this only waits.
+        pollfd wait{.fd = stop, .events = POLLIN, .revents = 0};
+        if (::poll(&wait, 1, REOPEN_PAUSE_MS) > 0) {
+            return Reopened::STOPPED;
+        }
     }
     detail = describe_observe_error(code, os_error, base_dir_);
-    return false;
+    return Reopened::NO;
 }
 
 int Database::status(scada_status& out) {
@@ -226,11 +230,18 @@ StatusView Database::status_view() {
         if (scada_owner_info(ctx_, index, &row.info) != SCADA_OK) {
             continue;
         }
-        if (row.info.process_index < view.processes.size()) {
-            const scada_proc_status_t& process =
-                view.processes[row.info.process_index].status;
-            row.process = text_of(std::data(process.name));
-            row.owner_down = process.down != 0;
+        // Found by its index, not by its place: a process whose status
+        // could not be read has no row. An owner without its process is
+        // shown down.
+        const auto process = std::ranges::find_if(
+            view.processes, [&row](const ProcessRow& candidate) {
+                return candidate.status.process_index == row.info.process_index;
+            });
+        if (process != view.processes.end()) {
+            row.process = text_of(std::data(process->status.name));
+            row.owner_down = process->status.down != 0;
+        } else {
+            row.owner_down = true;
         }
         view.owners.push_back(row);
     }

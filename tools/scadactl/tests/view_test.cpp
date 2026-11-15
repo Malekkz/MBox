@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -125,7 +126,7 @@ TEST(TagJson, CarriesBadStaleAndTheValue) {
     EXPECT_EQ(out,
               R"({"name":"plant.flow","type":"float64","owner":"io",)"
               R"("value":4.25,"quality":"GOOD","flags":["STALE"],"bad":false,)"
-              R"("stale":true,"read":"ok","age_ns":12000000,)"
+              R"("attention":true,"stale":true,"read":"ok","age_ns":12000000,)"
               R"("source_time_ns":1794738030123000000,)"
               R"("update_time_ns":1794738030123000000,"change_count":3})");
     out.clear();
@@ -134,6 +135,27 @@ TEST(TagJson, CarriesBadStaleAndTheValue) {
     EXPECT_TRUE(contains(out, R"("bad":true)")) << out;
     EXPECT_TRUE(contains(out, R"("age_ns":null)")) << out;
     EXPECT_TRUE(contains(out, R"("flags":["OWNER_DOWN"])")) << out;
+    EXPECT_TRUE(contains(out, R"("attention":false)")) << out;
+}
+
+TEST(TagJson, ATimeThatIsNotThereIsNull) {
+    TagRow row = good_row();
+    row.value.source_time_ns = 0;
+    row.value.update_time_ns = 0;
+    std::string out;
+    render_tag_json(out, row);
+    EXPECT_TRUE(contains(out, R"("source_time_ns":null,)")) << out;
+    EXPECT_TRUE(contains(out, R"("update_time_ns":null,)")) << out;
+    EXPECT_TRUE(contains(out, R"("attention":false)")) << out;
+}
+
+TEST(TagJson, ANonFiniteValueIsAString) {
+    TagRow row = good_row();
+    row.value.value =
+        std::bit_cast<std::uint64_t>(std::numeric_limits<double>::infinity());
+    std::string out;
+    render_tag_json(out, row);
+    EXPECT_TRUE(contains(out, R"("value":"inf",)")) << out;
 }
 
 TEST(TagJson, EscapesStringValues) {
@@ -155,31 +177,37 @@ TEST(TagList, JsonHoldsTheGenerationAndEveryRow) {
     std::string out;
     render_tag_list_json(out, GENERATION, false, rows);
     EXPECT_TRUE(out.starts_with(
-        R"({"generation":7,"tagd_down":false,"tags":[{"name":"plant.level")"))
+        R"({"schema":1,"generation":7,"tagd_down":false,"tags":[{"name":"plant.level")"))
         << out;
     EXPECT_TRUE(out.ends_with("}]}\n")) << out;
     out.clear();
     render_tag_list_json(out, 1, true, {});
-    EXPECT_EQ(out, "{\"generation\":1,\"tagd_down\":true,\"tags\":[]}\n");
+    EXPECT_EQ(
+        out,
+        "{\"schema\":1,\"generation\":1,\"tagd_down\":true,\"tags\":[]}\n");
 }
 
 TEST(TagdDown, IsSaidInBothFormsOfTagGetAndWatch) {
     std::string out;
     render_tagd_warning(out);
-    EXPECT_EQ(out, "! scada-tagd down: values may be stale\n");
+    EXPECT_EQ(out,
+              "! scada-tagd down: liveness is still checked; TAGD FLAG is not "
+              "updated\n");
     out.clear();
     render_tag_get_json(out, good_row(), true);
-    EXPECT_TRUE(out.starts_with(R"({"name":"plant.level",)")) << out;
+    EXPECT_TRUE(out.starts_with(R"({"schema":1,"name":"plant.level",)")) << out;
     EXPECT_TRUE(out.ends_with(R"("tagd_down":true})"
                               "\n"))
         << out;
     out.clear();
     render_tagd_text(out, true);
     render_tagd_text(out, false);
-    EXPECT_EQ(out, "! scada-tagd down: values may be stale\n  scada-tagd up\n");
+    EXPECT_EQ(out,
+              "! scada-tagd down: liveness is still checked; TAGD FLAG is not "
+              "updated\n  scada-tagd up\n");
     out.clear();
     render_tagd_json(out, true);
-    EXPECT_EQ(out, "{\"event\":\"tagd\",\"down\":true}\n");
+    EXPECT_EQ(out, "{\"schema\":1,\"event\":\"tagd\",\"down\":true}\n");
 }
 
 TEST(TagDetail, OneFieldPerLineWithTheMark) {
@@ -267,7 +295,7 @@ TEST(Status, Json) {
     std::string out;
     render_status_json(out, sample_status());
     EXPECT_TRUE(out.starts_with(
-        R"({"generation":2,"state":"RUNNING","generation_changed":false,)"
+        R"({"schema":1,"generation":2,"state":"RUNNING","generation_changed":false,)"
         R"("tagd_down":false,"clock_syscall":false,"processes":[)"))
         << out;
     EXPECT_TRUE(contains(out, R"("name":"probe","index":1,"state":"MISSING",)"
@@ -298,9 +326,17 @@ TEST(Watch, TextLines) {
 TEST(Watch, JsonLines) {
     std::string out;
     render_watch_json(out, WatchEvent::CHANGE, bad_row());
-    EXPECT_TRUE(out.starts_with(R"({"event":"change","name":"plant.temp",)"))
+    EXPECT_TRUE(
+        out.starts_with(R"({"schema":1,"event":"change","name":"plant.temp",)"))
         << out;
     EXPECT_TRUE(contains(out, R"("bad":true)")) << out;
+    // A change ring holds no record fields.
+    EXPECT_FALSE(contains(out, "change_count")) << out;
+    EXPECT_FALSE(contains(out, "update_time_ns")) << out;
+    out.clear();
+    render_watch_json(out, WatchEvent::NOW, good_row());
+    EXPECT_TRUE(contains(out, R"("change_count":)")) << out;
+    EXPECT_TRUE(contains(out, R"("update_time_ns":)")) << out;
     EXPECT_TRUE(out.ends_with("}\n")) << out;
     EXPECT_EQ(std::ranges::count(out, '\n'), 1);
 }
@@ -312,13 +348,15 @@ TEST(Watch, GapAndGenerationLines) {
     out.clear();
     render_gap_json(out, "io", SCADA_GAP_OVERRUN);
     EXPECT_EQ(out,
-              "{\"event\":\"gap\",\"owner\":\"io\",\"reason\":\"overrun\"}\n");
+              "{\"schema\":1,\"event\":\"gap\",\"owner\":\"io\","
+              "\"reason\":\"overrun\"}\n");
     out.clear();
     render_generation_text(out, 3);
     EXPECT_EQ(out, "! generation changed: now 3; every tag is read again\n");
     out.clear();
     render_generation_json(out, 3);
-    EXPECT_EQ(out, "{\"event\":\"generation\",\"generation\":3}\n");
+    EXPECT_EQ(out,
+              "{\"schema\":1,\"event\":\"generation\",\"generation\":3}\n");
 }
 
 TEST(Names, OfGapsStatesAndReasons) {
