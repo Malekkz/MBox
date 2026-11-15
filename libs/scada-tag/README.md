@@ -321,8 +321,9 @@ number; it tries 64 times. A string slot is written and copied inside the
 same window as its record (contract 7). Every field is accessed through
 `std::atomic_ref`, so no access is a data race and ThreadSanitizer needs no
 suppression. ThreadSanitizer does not check the order of the accesses; the
-tests with derived values do, and the model check of conformance test 4
-will.
+tests with derived values sample it, and the model check of conformance
+test 4 checks it for the Armv8 memory model, together with a check that the
+ARM64 library compiles to that order (`tests/model/README.md`).
 
 What a read returns:
 
@@ -665,8 +666,8 @@ ctest --preset perf -R scada-tag-wake-perf-test
   one-thread check of contract 13.2 with a real process.
 - `scada-tag-test-writer` (in `tests/writer/`) is the writing side of the
   load tests: one process with one thread for each owner.
-- Conformance test 4, the model check of the sequence lock, is not
-  automated yet.
+- Conformance test 4, the model check of the sequence lock and the change
+  ring, is in `tests/model/`.
 - `header_region_fuzz` (in `fuzz/`) feeds the reader of the `header` region
   with arbitrary bytes and then does with the contents what attach, resolve
   and info do.
