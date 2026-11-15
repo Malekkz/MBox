@@ -842,7 +842,10 @@ int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub);
 
 /*
  * Adds the consumer's side of the queue `queue` to the wait set `set`:
- * scada_waitset_wait returns when `queue` has a record to deliver.
+ * scada_waitset_wait returns when `queue` has a record to deliver. A wait
+ * set never reports a stopped queue (section 9.2) as ready, so a consumer
+ * that calls scada_queue_next only after a wake learns of the stop from
+ * scada_queue_stats or from a timed call of scada_queue_next.
  *
  * SCADA_E_INVALID: an argument is NULL; `queue` is the producer's side,
  * belongs to another context or is in a wait set already; the wait set

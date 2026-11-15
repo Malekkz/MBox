@@ -648,6 +648,10 @@ producer gets `SCADA_E_PEER_DOWN` (section 16). The all-ones cursor
 (2^64 - 1) is reserved: no `write_seq` reaches it (a post that would make
 `write_seq` equal to it is refused with `SCADA_E_FULL`), so by the range rule
 every reader of a cursor finds it out of range and consumes nothing.
+On a stopped queue `scada_queue_next` waits out its timeout before it
+reports it, and a wait set never reports a stopped queue as ready, so
+neither spins; a consumer that calls `scada_queue_next` only after a wake
+learns of the stop from `scada_queue_stats` or from a timed call.
 
 EVENTS and RESULT: until the ack, `scada_queue_next` returns the same record
 again. CMD: the cursor advances after the copy and before `scada_queue_next`
