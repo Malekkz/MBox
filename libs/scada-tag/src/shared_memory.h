@@ -123,6 +123,19 @@ SCADA_RT Field fetch_add_shared(Field& field, std::type_identity_t<Field> value,
     return std::atomic_ref<Field>(field).fetch_add(value, order);
 }
 
+// Replaces `expected` by `desired` in a field that other processes may be
+// reading, if the field still holds `expected`; otherwise loads the field
+// into `expected`. True if it replaced. The field must lie in a writable
+// mapping.
+template <typename Field>
+    requires IS_SHARED_ATOMIC<Field>
+SCADA_RT [[nodiscard]] bool compare_exchange_shared(
+    Field& field, Field& expected, std::type_identity_t<Field> desired,
+    std::memory_order success, std::memory_order failure) noexcept {
+    return std::atomic_ref<Field>(field).compare_exchange_weak(
+        expected, desired, success, failure);
+}
+
 // Returns a copy of the value of type `Value` stored at `offset` in `bytes`,
 // which are private to the caller (an image or a snapshot, not a mapping
 // another process writes). A value that does not fit is a defect of this

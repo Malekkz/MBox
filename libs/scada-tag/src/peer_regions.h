@@ -63,6 +63,12 @@ public:
     // Calling it again for the same slot does nothing. Not real-time.
     void want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns);
 
+    // True once `want` was called for `slot`, whether or not the region is
+    // there. Tells a tag that was never resolved in this context from one
+    // whose owner is down (contract, section 6.2). False for a slot that is
+    // none.
+    SCADA_RT [[nodiscard]] bool asked(std::size_t slot) const noexcept;
+
     // The mapped bytes of the region of `slot`, read-only and brought into
     // memory, or an empty span while the region is missing. The span stays
     // valid until this object is destroyed, also when the region is mapped
@@ -89,6 +95,8 @@ private:
         // Points into `mappings_`, or null while the region is missing.
         // Written under `mutex_`, read without it.
         std::atomic<const OpenedRegion*> current{nullptr};
+        // Set by `want` under `mutex_`, read without it; never cleared.
+        std::atomic<bool> asked{false};
     };
 
     [[nodiscard]] std::size_t checked(std::size_t slot) const;

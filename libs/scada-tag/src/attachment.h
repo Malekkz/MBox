@@ -183,7 +183,9 @@ public:
         std::span<const scada_value> values) noexcept;
 
     // Section 7. The text goes to the start of `buffer` and its length to
-    // `length`; `meta` may be null. Not real-time.
+    // `length`; `meta` may be null. A `buffer` with a null address asks for
+    // the length and `meta` alone, and gets them as a large enough buffer
+    // would. Not real-time.
     [[nodiscard]] int read_string(std::uint32_t handle, std::span<char> buffer,
                                   std::size_t& length,
                                   scada_value* meta) noexcept;
@@ -340,6 +342,11 @@ private:
     // heartbeat is older than its timeout.
     SCADA_RT [[nodiscard]] bool owner_down(
         const OwnerAccess& owner, std::int64_t now_mono_ns) const noexcept;
+
+    // True if a tag of `owner` may be read in this context: the owner is
+    // one of this process, or a tag of it was resolved here (section 6.2).
+    SCADA_RT [[nodiscard]] bool resolved(
+        const OwnerAccess& owner) const noexcept;
 
     // The mapped `tags` and `strings` regions of `owner`; empty while a
     // region of another process is missing.

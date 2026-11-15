@@ -15,10 +15,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -96,14 +98,81 @@ Result<OwnProcRegion> OwnProcRegion::attach(
     return region;
 }
 
+void OwnProcRegion::count_late_after(
+    std::uint32_t heartbeat_timeout_ms) noexcept {
+    late_after_ns_ =
+        std::uint64_t{heartbeat_timeout_ms} * NANOSECONDS_PER_MILLISECOND;
+}
+
+void OwnProcRegion::first_heartbeat(std::int64_t mono_ns) noexcept {
+    ProcHeader& proc = header();
+    // Relaxed: the release store of the time below publishes it.
+    fetch_add_shared(proc.heartbeat, std::uint64_t{1},
+                     std::memory_order_relaxed);
+    // Release: a reader that sees this time also sees the counter. Stored
+    // whatever the region held: a time left by a previous life, even one
+    // ahead of the clock, must not hold back this life's heartbeats.
+    store_shared(proc.heartbeat_mono_ns, mono_ns, std::memory_order_release);
+}
+
 void OwnProcRegion::heartbeat(std::int64_t mono_ns) noexcept {
     ProcHeader& proc = header();
-    // Relaxed: this thread is the only writer of the counter.
-    const std::uint64_t count =
-        load_shared(proc.heartbeat, std::memory_order_relaxed);
-    store_shared(proc.heartbeat, count + 1, std::memory_order_relaxed);
-    // Release: a reader that sees this time also sees the counter.
-    store_shared(proc.heartbeat_mono_ns, mono_ns, std::memory_order_release);
+    // Relaxed: the counter orders nothing; the release below publishes it.
+    fetch_add_shared(proc.heartbeat, std::uint64_t{1},
+                     std::memory_order_relaxed);
+    // Advance the published time to `mono_ns` unless another thread has
+    // published one as new or newer. Release on success: a reader that
+    // sees this time also sees the counter. Relaxed on failure: `previous`
+    // is only compared.
+    std::int64_t previous =
+        load_shared(proc.heartbeat_mono_ns, std::memory_order_relaxed);
+    for (;;) {
+        if (mono_ns <= previous) {
+            return;  // not newer: nothing is published or counted
+        }
+        if (compare_exchange_shared(proc.heartbeat_mono_ns, previous, mono_ns,
+                                    std::memory_order_release,
+                                    std::memory_order_relaxed)) {
+            break;
+        }
+    }
+
+    // This thread published `mono_ns` over `previous`, so the gap between
+    // them is its own. The difference of two values with previous <
+    // mono_ns fits 64 bits unsigned; it is capped to the signed field.
+    const std::uint64_t gap = static_cast<std::uint64_t>(mono_ns) -
+                              static_cast<std::uint64_t>(previous);
+    constexpr auto LIMIT =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    // In range after the comparison.
+    const auto gap_ns = static_cast<std::int64_t>(std::min(gap, LIMIT));
+    // Relaxed: diagnosis only; late_beats below publishes it.
+    std::int64_t longest =
+        load_shared(proc.longest_gap_ns, std::memory_order_relaxed);
+    while (gap_ns > longest &&
+           !compare_exchange_shared(proc.longest_gap_ns, longest, gap_ns,
+                                    std::memory_order_relaxed,
+                                    std::memory_order_relaxed)) {
+    }
+    // Strictly longer: a heartbeat exactly as old as the timeout is not yet
+    // stale (proc_liveness). The gap is between two clock readings, so it
+    // is a lower bound of what readers saw (contract 10.1).
+    if (late_after_ns_ != 0 && gap > late_after_ns_) {
+        // A maximum, so that two late threads cannot move it back.
+        // Relaxed: late_beats below publishes it.
+        std::int64_t last =
+            load_shared(proc.last_late_mono_ns, std::memory_order_relaxed);
+        while (mono_ns > last &&
+               !compare_exchange_shared(proc.last_late_mono_ns, last, mono_ns,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+        }
+        // Release: a reader that sees the new count also sees the gap
+        // fields stored before it; acquire orders this thread after the
+        // late heartbeats of other threads it counts on top of. Wraps
+        // modulo 2^32; readers compare.
+        fetch_add_shared(proc.late_beats, 1U, std::memory_order_acq_rel);
+    }
 }
 
 void OwnProcRegion::set_state(ProcessState state) noexcept {
@@ -154,6 +223,7 @@ DownReason ProcProbe::observe(int dir_fd,
             return DownReason::REGION_MISSING;
         }
         region_ = std::move(opened).value();
+        ++mappings_;
     }
 
     return proc_liveness(region_->memory.bytes(), heartbeat_timeout_ms,
@@ -188,6 +258,29 @@ DownReason proc_liveness(std::span<std::byte> region,
                             : static_cast<std::uint64_t>(now_mono_ns) -
                                   static_cast<std::uint64_t>(beat);
     return distance > timeout ? DownReason::HEARTBEAT_STALE : DownReason::NONE;
+}
+
+std::optional<LateBeats> late_beats_of(std::span<std::byte> region) noexcept {
+    if (!fits(region.size(), sizeof(RegionHeader), sizeof(ProcHeader))) {
+        return std::nullopt;
+    }
+    auto& proc = shared_at<ProcHeader>(region, sizeof(RegionHeader));
+    LateBeats beats;
+    // Acquire: pairs with the release increment of the owner, so the gap
+    // fields are at least as new as the count.
+    beats.count = load_shared(proc.late_beats, std::memory_order_acquire);
+    beats.longest_gap_ns =
+        load_shared(proc.longest_gap_ns, std::memory_order_relaxed);
+    beats.last_late_mono_ns =
+        load_shared(proc.last_late_mono_ns, std::memory_order_relaxed);
+    return beats;
+}
+
+std::optional<LateBeats> ProcProbe::late_beats() const noexcept {
+    if (!region_.has_value()) {
+        return std::nullopt;
+    }
+    return late_beats_of(region_->memory.bytes());
 }
 
 }  // namespace scada::tag
