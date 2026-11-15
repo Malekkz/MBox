@@ -136,7 +136,7 @@
       "inherits": "base",
       "filter": {
         "exclude": {
-          "label": "^(perf|model)$"
+          "label": "^(perf|model|root)$"
         }
       }
     },
@@ -162,6 +162,17 @@
       "filter": {
         "include": {
           "label": "integration"
+        }
+      }
+    },
+    {
+      "name": "root",
+      "displayName": "Tests that must run as root (dev build): sudo ctest --preset root",
+      "inherits": "base",
+      "configurePreset": "dev",
+      "filter": {
+        "include": {
+          "label": "root"
         }
       }
     },

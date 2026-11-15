@@ -188,6 +188,25 @@ const std::uint32_t* OwnProcRegion::advance_cycle() noexcept {
     return &cycle;
 }
 
+std::optional<ProcFields> read_proc_fields(
+    std::span<std::byte> region) noexcept {
+    if (!fits(region.size(), sizeof(RegionHeader), sizeof(ProcHeader))) {
+        return std::nullopt;
+    }
+    auto& proc = shared_at<ProcHeader>(region, sizeof(RegionHeader));
+    ProcFields fields;
+    // Acquire, as in proc_liveness. `pid` is not marked A in the contract,
+    // but a restarting process writes it while others may read it, so it
+    // is read atomically too; relaxed, as it is for diagnosis only.
+    fields.state = load_shared(proc.state, std::memory_order_acquire);
+    fields.heartbeat_mono_ns =
+        load_shared(proc.heartbeat_mono_ns, std::memory_order_acquire);
+    fields.heartbeat = load_shared(proc.heartbeat, std::memory_order_acquire);
+    fields.cycle_seq = load_shared(proc.cycle_seq, std::memory_order_acquire);
+    fields.pid = load_shared(proc.pid, std::memory_order_relaxed);
+    return fields;
+}
+
 std::uint32_t* cycle_field(std::span<std::byte> region) noexcept {
     if (!fits(region.size(), sizeof(RegionHeader), sizeof(ProcHeader))) {
         return nullptr;

@@ -9,6 +9,7 @@ scada_add_test(scada-tag-unit-test KIND unit
     header_view_test.cpp
     layout_test.cpp
     name_hash_test.cpp
+    observer_test.cpp
     own_region_test.cpp
     peer_regions_test.cpp
     proc_region_test.cpp
