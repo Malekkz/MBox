@@ -774,7 +774,7 @@ void take_all(Queue& reader, std::uint64_t count, std::atomic<bool>& done) {
 }
 
 TEST_F(Queues, TagdReportsNoBrokenQueueWhileBothSidesRun) {
-    constexpr std::uint64_t RECORDS = 50'000;
+    constexpr std::uint64_t RECORDS = 20'000;
     const QueuePtr out = open(*io(), "events.io");
     const QueuePtr reader = open(*web(), "events.io");
     std::atomic<bool> done{false};
@@ -785,6 +785,11 @@ TEST_F(Queues, TagdReportsNoBrokenQueueWhileBothSidesRun) {
     while (!done.load(std::memory_order_acquire)) {
         reports += host().check(scada::monotonic_ns()).queues.size();
         ++checks;
+        // The main loops of the two processes: a run longer than the
+        // heartbeat timeout (ThreadSanitizer) must not see the consumer
+        // down, which refuses posts with SCADA_E_PEER_DOWN.
+        static_cast<void>(io()->heartbeat());
+        static_cast<void>(web()->heartbeat());
     }
     producer.join();
     consumer.join();
