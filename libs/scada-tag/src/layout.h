@@ -447,16 +447,28 @@ struct alignas(REGION_ALIGNMENT) QueueHeader {
     std::uint32_t capacity = 0;  // power of two
     std::uint32_t record_size = 0;
     std::uint64_t write_seq = 0;  // A
+    // Position of the first record of this file, set by the producer that
+    // created it; never changes (issue #53). Meaningful only with
+    // QUEUE_BASE_SET in `flags`; a file made by an older build holds 0.
+    std::uint64_t base_seq = 0;
+    std::uint32_t flags = 0;  // QUEUE_BASE_SET
+    std::uint32_t reserved0 = 0;
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): size of a reserved field, fixed by the contract
-    std::array<std::uint8_t, 48> reserved{};
+    std::array<std::uint8_t, 32> reserved{};
 };
+
+// QueueHeader.flags: the creator set `base_seq`.
+inline constexpr std::uint32_t QUEUE_BASE_SET = 1U << 0U;
 inline constexpr std::array QUEUE_HEADER_CHECKS{
     LayoutCheck{sizeof(QueueHeader), 64},
     LayoutCheck{alignof(QueueHeader), 64},
     LayoutCheck{offsetof(QueueHeader, capacity), 0},
     LayoutCheck{offsetof(QueueHeader, record_size), 4},
     LayoutCheck{offsetof(QueueHeader, write_seq), 8},
-    LayoutCheck{offsetof(QueueHeader, reserved), 16},
+    LayoutCheck{offsetof(QueueHeader, base_seq), 16},
+    LayoutCheck{offsetof(QueueHeader, flags), 24},
+    LayoutCheck{offsetof(QueueHeader, reserved0), 28},
+    LayoutCheck{offsetof(QueueHeader, reserved), 32},
 };
 static_assert(IS_SHARED_STRUCT<QueueHeader>);
 static_assert(all_hold(QUEUE_HEADER_CHECKS));

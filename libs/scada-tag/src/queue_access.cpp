@@ -10,6 +10,7 @@
 #include "peer_regions.h"
 #include "proc_region.h"
 #include "queue_region.h"
+#include "region_file.h"
 #include "shared_memory.h"
 #include "thread_mark.h"
 
@@ -72,7 +73,8 @@ void Attachment::prepare_queues() {
     queue_woken_seq_ = std::vector<std::atomic<std::uint64_t>>(count);
     queue_open_ = std::vector<std::uint8_t>(count, 0);
     queue_counters_ = std::vector<QueueCounters>(count);
-    queue_mappings_ = std::vector<std::atomic<const std::byte*>>(count);
+    queue_in_use_ = std::vector<std::atomic<std::byte*>>(count);
+    queue_resized_seen_ = std::vector<std::atomic<std::uint32_t>>(count);
     queue_dead_ = std::vector<std::atomic<bool>>(count);
     queue_access_.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -105,10 +107,6 @@ void Attachment::prepare_queues() {
         if (access.produced || access.consumed) {
             want_queue(access.id);
         }
-        if (access.consumed && !access.produced) {
-            // The mapping the queue starts with in this context.
-            static_cast<void>(queue_dead(access.id, queue_bytes(access.id)));
-        }
     }
     // A queue region created while its consumer's cursor is not 0 was
     // created anew inside the generation (decision D-40): the consumer will
@@ -134,29 +132,159 @@ bool Attachment::queue_is_dead(std::size_t queue_id) const noexcept {
     return queue_dead_[queue_id].load(std::memory_order_relaxed);
 }
 
-bool Attachment::queue_dead(std::size_t queue_id,
-                            std::span<std::byte> bytes) noexcept {
-    static_cast<void>(queue(queue_id));
+void Attachment::kill_queue(std::size_t queue_id) noexcept {
     // Relaxed: one thread uses the consumer's side; attach is before it.
-    if (queue_dead_[queue_id].load(std::memory_order_relaxed)) {
-        return true;
+    if (queue_dead_[queue_id].exchange(true, std::memory_order_relaxed)) {
+        return;
     }
-    std::atomic<const std::byte*>& first = queue_mappings_[queue_id];
-    const std::byte* seen = first.load(std::memory_order_relaxed);
-    if (seen == nullptr) {
-        if (!bytes.empty()) {
-            first.store(bytes.data(), std::memory_order_relaxed);
-        }
-        return false;
-    }
-    if (bytes.data() == seen) {
-        return false;
-    }
-    queue_dead_[queue_id].store(true, std::memory_order_relaxed);
     count_one(counters(queue_id).replaced);
     // Release: the producer loads the cursor with acquire.
     store_shared(own_cursor(queue_id), DEAD_CURSOR, std::memory_order_release);
+}
+
+void Attachment::use_queue_file(std::size_t queue_id,
+                                std::span<std::byte> bytes) noexcept {
+    // Relaxed: see `queue_in_use_`.
+    queue_in_use_[queue_id].store(bytes.data(), std::memory_order_relaxed);
+    queue_resized_seen_[queue_id].store(
+        peers_.resized(queue(queue_id).queue_slot), std::memory_order_relaxed);
+}
+
+void Attachment::jump_cursor(std::size_t queue_id, std::uint64_t read,
+                             std::uint64_t base) noexcept {
+    if (base <= read) {
+        return;  // never back (issue #53, condition C1)
+    }
+    count_one(counters(queue_id).skipped, base - read);
+    // Release: the producer loads the cursor with acquire and may then use
+    // the slots before `base`, which this consumer will never read.
+    store_shared(own_cursor(queue_id), base, std::memory_order_release);
+}
+
+bool Attachment::follow_queue(std::size_t queue_id) noexcept {
+    const QueueAccess& access = queue(queue_id);
+    if (queue_is_dead(queue_id)) {
+        return false;
+    }
+    if (peers_.at_mapping_limit(access.queue_slot)) {
+        kill_queue(queue_id);  // decision D-49, Q2
+        return false;
+    }
+    // Relaxed: see `queue_in_use_`.
+    std::byte* const used =
+        queue_in_use_[queue_id].load(std::memory_order_relaxed);
+    if (used != nullptr &&
+        peers_.resized(access.queue_slot) !=
+            queue_resized_seen_[queue_id].load(std::memory_order_relaxed)) {
+        // The file in use changed size in place: its mapping must not be
+        // read again (section 3.3).
+        kill_queue(queue_id);
+        return false;
+    }
+    const std::span<std::byte> current = peers_.bytes(access.queue_slot);
+    std::uint64_t& cursor = own_cursor(queue_id);
+    // Relaxed: this thread is the only writer of the cursor.
+    const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
+    if (used == nullptr) {
+        if (current.empty()) {
+            return true;  // not created yet
+        }
+        use_queue_file(queue_id, current);
+        if (const std::optional<std::uint64_t> base = queue_base(current)) {
+            // Positions below the base are in no file this consumer can
+            // reach: a cursor below it always jumps (condition C3).
+            jump_cursor(queue_id, read, *base);
+        }
+        return true;
+    }
+    if (current.empty() || current.data() == used) {
+        return true;  // the name is missing, or the same file: keep it
+    }
+    // Another file under the name (issue #53).
+    const std::optional<std::uint64_t> base = queue_base(current);
+    if (!base.has_value()) {
+        kill_queue(queue_id);  // made by an older build (decision D-40)
+        return false;
+    }
+    // Read again now that the new file is ready (condition C2): only the
+    // producer writes `write_seq`, and it created the new file at attach,
+    // so the file in use is final unless two instances of it live
+    // (contract 3.3).
+    const std::span<std::byte> old_file = queue_bytes(queue_id);
+    if (!peers_.still_whole(access.queue_slot, old_file.data())) {
+        // Shrunk in place and then replaced: its mapping must not be read
+        // again (section 3.3, decision D-49, Q2).
+        kill_queue(queue_id);
+        return false;
+    }
+    const std::uint64_t old_written = queue_write_seq(old_file);
+    if (*base < old_written) {
+        kill_queue(queue_id);  // ids of the new file would repeat
+        return false;
+    }
+    if (read < old_written &&
+        !out_of_range(read, old_written, access.capacity)) {
+        return true;  // deliver what the file in use holds first
+    }
+    jump_cursor(queue_id, read, *base);
+    use_queue_file(queue_id, current);
+    count_one(counters(queue_id).replaced);
     return true;
+}
+
+std::optional<std::uint64_t> Attachment::base_for_new_queue(
+    std::size_t queue_id) noexcept {
+    const HeaderContents& contents = header_.contents();
+    const QueueInfo& info = contents.queues.at(queue_id);
+    const std::uint64_t capacity = info.capacity;
+    // R': every id ever given in this generation is below the consumer's
+    // cursor at that post plus the capacity (9.1), and the cursor only
+    // grows. A cursor of 0 is left out: in a new generation the consumer
+    // may attach first, and the queue then starts at 0 (issue #17).
+    std::uint64_t from_cursor = 0;
+    const std::size_t slot = peers_.proc_slot(info.consumer_process);
+    peers_.want(directory_.get(), slot, monotonic_ns());
+    if (const std::uint64_t* cursor =
+            cursor_field(peers_.bytes(slot), queue_id);
+        cursor != nullptr) {
+        const std::uint64_t read =
+            load_shared(*cursor, std::memory_order_acquire);
+        if (read != 0 && read != DEAD_CURSOR &&
+            read <= DEAD_CURSOR - capacity) {
+            from_cursor = read + capacity;
+        }
+    }
+    // H': the next position this process would have given, if its `proc`
+    // region is the one it posted with. It is input: one above R' cannot
+    // be (every id is below R'), so it is taken only when R' is unknown or
+    // not below it.
+    std::uint64_t from_mark = 0;
+    if (proc_.reused()) {
+        if (const std::uint64_t* mark = cursor_field(proc_.bytes(), queue_id);
+            mark != nullptr) {
+            from_mark = load_shared(*mark, std::memory_order_relaxed);
+        }
+        if (from_cursor != 0 && from_mark > from_cursor) {
+            from_mark = 0;
+        }
+    }
+    const std::uint64_t base = std::max(from_mark, from_cursor);
+    // Room for a capacity of ids: below the reserved all-ones cursor, and
+    // for CMD below 2^48 (section 9.4).
+    const std::uint64_t limit =
+        info.kind == QueueKind::CMD ? MAX_REQUEST_SEQ : DEAD_CURSOR - 1;
+    if (base > limit - capacity) {
+        return std::nullopt;
+    }
+    return base;
+}
+
+void Attachment::follow_queues() {
+    for (const QueueAccess& access : queue_access_) {
+        if (access.consumed && !access.produced) {
+            static_cast<void>(follow_queue(access.id));
+        }
+    }
 }
 
 void Attachment::start_cursors() {
@@ -164,10 +292,18 @@ void Attachment::start_cursors() {
         if (!access.consumed) {
             continue;
         }
-        const std::span<std::byte> bytes = queue_bytes(access.id);
-        const std::uint64_t written =
-            bytes.empty() ? 0 : queue_write_seq(bytes);
-        count_one(counters(access.id).skipped, written);
+        // A new `proc` region has lost its cursors: each starts at the
+        // queue's `write_seq`, and the records before it, from the file's
+        // base on, are skipped (section 9.2).
+        const std::span<std::byte> bytes = peers_.bytes(access.queue_slot);
+        std::uint64_t written = 0;
+        std::uint64_t first = 0;
+        if (!bytes.empty()) {
+            use_queue_file(access.id, bytes);
+            written = queue_write_seq(bytes);
+            first = std::min(queue_base(bytes).value_or(0), written);
+        }
+        count_one(counters(access.id).skipped, written - first);
         // Release: the producer loads the cursor with acquire.
         store_shared(own_cursor(access.id), written, std::memory_order_release);
     }
@@ -191,8 +327,11 @@ void Attachment::drain_requests() {
 }
 
 bool Attachment::drain_queue(const QueueAccess& access) noexcept {
+    if (!follow_queue(access.id)) {
+        return false;  // dead
+    }
     const std::span<std::byte> bytes = queue_bytes(access.id);
-    if (bytes.empty() || queue_dead(access.id, bytes)) {
+    if (bytes.empty()) {
         return false;  // no region, no request
     }
     QueueCounters& counts = counters(access.id);
@@ -301,8 +440,17 @@ void Attachment::want_queue(std::size_t queue_id) {
 std::span<std::byte> Attachment::queue_bytes(
     std::size_t queue_id) const noexcept {
     const QueueAccess& access = queue(queue_id);
-    return access.produced ? access.own_region
-                           : peers_.bytes(access.queue_slot);
+    if (access.produced) {
+        return access.own_region;
+    }
+    // The file in use (`follow_queue`), which stays mapped as long as the
+    // context. Relaxed: see `queue_in_use_`.
+    std::byte* const used =
+        queue_in_use_[queue_id].load(std::memory_order_relaxed);
+    if (used == nullptr) {
+        return {};
+    }
+    return {used, queue_region_size(access.capacity, access.record_size)};
 }
 
 std::uint64_t& Attachment::own_cursor(std::size_t queue_id) const noexcept {
@@ -345,11 +493,16 @@ int Attachment::post_record(std::size_t queue_id,
             break;
     }
 
+    // The tag-set builder refuses a queue with one process at both ends,
+    // and `scada_queue_open` refuses one from a header (decision D-40):
+    // the cursor slot of a queue this process produces holds its
+    // high-water mark below, which must not be a cursor (condition C5).
+    if (access.consumer == process_index_) {
+        panic("attachment: a queue with one process at both ends");
+    }
     // Section 9.1, judged by this process (section 10.1).
     const std::span<std::byte> consumer =
-        access.consumer == process_index_
-            ? proc_.bytes()
-            : peers_.bytes(access.consumer_proc_slot);
+        peers_.bytes(access.consumer_proc_slot);
     if (proc_liveness(consumer, access.consumer_timeout_ms, now) !=
         DownReason::NONE) {
         return SCADA_E_PEER_DOWN;
@@ -393,6 +546,12 @@ int Attachment::post_record(std::size_t queue_id,
         case QueueKind::RESULT:
             break;
     }
+    // The high-water mark (decision D-49): after every refusal and before
+    // the record, so that a crash between this store and `write_seq` only
+    // burns the id, and a producer that creates the file anew never gives
+    // it again. Relaxed: its only reader is a later attach of this process
+    // name, after this one has gone (condition C4).
+    store_shared(own_cursor(queue_id), written + 1, std::memory_order_relaxed);
     store_record(access.own_region, access.capacity, access.record_size,
                  written, record);
     // Release: publishes the record.

@@ -67,6 +67,17 @@ std::uint64_t queue_write_seq(std::span<std::byte> region) noexcept {
                        std::memory_order_acquire);
 }
 
+std::optional<std::uint64_t> queue_base(std::span<std::byte> region) noexcept {
+    QueueHeader& header = queue_header(region);
+    // Acquire, although the fields are written before `ready` and never
+    // again: the region is input, and this costs nothing on x86-64.
+    if ((load_shared(header.flags, std::memory_order_acquire) &
+         QUEUE_BASE_SET) == 0) {
+        return std::nullopt;
+    }
+    return load_shared(header.base_seq, std::memory_order_acquire);
+}
+
 std::uint64_t* cursor_field(std::span<std::byte> region,
                             std::size_t queue_id) noexcept {
     const std::size_t first = sizeof(RegionHeader) + sizeof(ProcHeader);

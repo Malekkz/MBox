@@ -91,6 +91,12 @@ SCADA_RT [[nodiscard]] QueueHeader& queue_header(
 SCADA_RT [[nodiscard]] std::uint64_t queue_write_seq(
     std::span<std::byte> region) noexcept;
 
+// The base of the queue in `region` if its creator set one
+// (QUEUE_BASE_SET), else nothing (a file made by an older build). The
+// fields never change once the region is ready.
+SCADA_RT [[nodiscard]] std::optional<std::uint64_t> queue_base(
+    std::span<std::byte> region) noexcept;
+
 // The cursor of queue `queue_id` in the mapped `proc` region `region`, or
 // null if the region is too small to hold it (an empty span too). The
 // pointer is valid as long as the mapping is; the field is accessed with

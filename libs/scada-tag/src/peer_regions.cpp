@@ -152,12 +152,23 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
         return drop();
     }
     // The same file as before, and not shrunk (section 3.3): nothing to do.
-    if (before != nullptr && info.st_dev == before->device &&
-        info.st_ino == before->inode && info.st_size >= 0 &&
+    const bool same_file = before != nullptr && info.st_dev == before->device &&
+                           info.st_ino == before->inode;
+    if (same_file && info.st_size >= 0 &&
         static_cast<std::uint64_t>(info.st_size) == slot.identity.size_bytes) {
         return false;
     }
+    if (same_file) {
+        // The mapped file itself changed size (issue #53). Relaxed: only
+        // this function writes it, under the mutex, and readers judge it on
+        // its own.
+        slot.resized.store(slot.resized.load(std::memory_order_relaxed) + 1,
+                           std::memory_order_relaxed);
+        return drop();
+    }
     if (slot.mappings >= MAX_MAPPINGS_PER_REGION) {
+        // Relaxed: as `resized`.
+        slot.at_limit.store(true, std::memory_order_relaxed);
         return drop();
     }
     std::string ignored;
@@ -169,8 +180,14 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
     if (!opened.ok() || !opened.value().memory.prefault().ok()) {
         return drop();
     }
-    // The mapping stays without the descriptor.
-    opened.value().file.reset();
+    // The mapping stays without the descriptor, except for a queue region,
+    // whose consumer checks the size of the file it still reads before it
+    // moves to a new one (`still_whole`).
+    const RegionKind kind = slot.identity.kind;
+    if (kind != RegionKind::EVENTS && kind != RegionKind::CMD &&
+        kind != RegionKind::RESULT) {
+        opened.value().file.reset();
+    }
     mappings_.push_back(
         std::make_unique<const OpenedRegion>(std::move(opened).value()));
     ++slot.mappings;
@@ -207,6 +224,33 @@ std::span<std::byte> PeerRegions::bytes(std::size_t slot) const noexcept {
     const OpenedRegion* const region =
         slots_[slot].current.load(std::memory_order_acquire);
     return region == nullptr ? std::span<std::byte>{} : region->memory.bytes();
+}
+
+std::uint32_t PeerRegions::resized(std::size_t slot) const noexcept {
+    return slot < slots_.size()
+               ? slots_[slot].resized.load(std::memory_order_relaxed)
+               : 0;
+}
+
+bool PeerRegions::at_mapping_limit(std::size_t slot) const noexcept {
+    return slot < slots_.size() &&
+           slots_[slot].at_limit.load(std::memory_order_relaxed);
+}
+
+bool PeerRegions::still_whole(std::size_t slot, const std::byte* data) {
+    const Slot& wanted = slots_.at(checked(slot));
+    const std::scoped_lock lock(mutex_);
+    for (const std::unique_ptr<const OpenedRegion>& mapping : mappings_) {
+        if (mapping->memory.bytes().data() != data) {
+            continue;
+        }
+        struct stat info {};
+        return mapping->file.valid() &&
+               ::fstat(mapping->file.get(), &info) == 0 && info.st_size >= 0 &&
+               static_cast<std::uint64_t>(info.st_size) ==
+                   wanted.identity.size_bytes;
+    }
+    return false;
 }
 
 std::size_t PeerRegions::refresh(int dir_fd, std::int64_t now_mono_ns) {

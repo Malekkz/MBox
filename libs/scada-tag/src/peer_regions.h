@@ -76,6 +76,29 @@ public:
     SCADA_RT [[nodiscard]] std::span<std::byte> bytes(
         std::size_t slot) const noexcept;
 
+    // How many times a look found the file `bytes` maps under the name of
+    // `slot` with another size: shrunk or grown in place. Reading the old
+    // mapping of such a file can end the process with SIGBUS (section 3.3),
+    // so a reader that keeps an old mapping must stop using it. 0 for a slot
+    // that is none.
+    SCADA_RT [[nodiscard]] std::uint32_t resized(
+        std::size_t slot) const noexcept;
+
+    // True once `slot` reached MAX_MAPPINGS_PER_REGION and a further file
+    // under its name was not mapped. Never cleared. False for a slot that is
+    // none.
+    SCADA_RT [[nodiscard]] bool at_mapping_limit(
+        std::size_t slot) const noexcept;
+
+    // For a queue region: true if the file of the mapping of `slot` that
+    // starts at `data` still has its size, by `fstat` on the descriptor
+    // kept for it, so that its mapping can be read without SIGBUS (section
+    // 3.3). A file can be shrunk in place and then replaced under its
+    // name, which no look by name sees. False if no such mapping is known
+    // or the check fails. Takes the mutex and makes a system call; not
+    // real-time.
+    [[nodiscard]] bool still_whole(std::size_t slot, const std::byte* data);
+
     // Looks again at every region that was asked for and not looked at for
     // PEER_RETRY_INTERVAL_NS: a missing one is mapped if it is there now, a
     // mapped one whose file is gone or was replaced is dropped or mapped
@@ -97,6 +120,9 @@ private:
         std::atomic<const OpenedRegion*> current{nullptr};
         // Set by `want` under `mutex_`, read without it; never cleared.
         std::atomic<bool> asked{false};
+        // Written by `look` under `mutex_`, read without it.
+        std::atomic<std::uint32_t> resized{0};
+        std::atomic<bool> at_limit{false};
     };
 
     [[nodiscard]] std::size_t checked(std::size_t slot) const;
