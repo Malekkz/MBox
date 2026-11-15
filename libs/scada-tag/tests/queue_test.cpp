@@ -542,7 +542,7 @@ TEST_F(Queues, TagdReportsAQueueWhoseCursorIsOutOfRange) {
     const CheckReport broken = host().check(scada::monotonic_ns());
     ASSERT_EQ(broken.queues.size(), 1U);
     EXPECT_EQ(broken.queues[0].queue, "events.io");
-    EXPECT_TRUE(broken.queues[0].broken);
+    EXPECT_EQ(broken.queues[0].event, QueueEvent::BROKEN);
     EXPECT_FALSE(broken.queues[0].replaced);
     EXPECT_EQ(broken.queues[0].cursor, 2U);
     EXPECT_EQ(broken.queues[0].write_seq, 1U);
@@ -553,7 +553,7 @@ TEST_F(Queues, TagdReportsAQueueWhoseCursorIsOutOfRange) {
     set_cursor("web", EVENTS_IO, 0);
     const CheckReport repaired = host().check(scada::monotonic_ns());
     ASSERT_EQ(repaired.queues.size(), 1U);
-    EXPECT_FALSE(repaired.queues[0].broken);
+    EXPECT_EQ(repaired.queues[0].event, QueueEvent::NO_LONGER_BROKEN);
     EXPECT_EQ(repaired.queues[0].cursor, 0U);
     EXPECT_EQ(repaired.queues[0].write_seq, 1U);
 }
@@ -568,7 +568,7 @@ TEST_F(Queues, TagdReportsAWriteSeqTooFarAhead) {
     const CheckReport report = host().check(scada::monotonic_ns());
     ASSERT_EQ(report.queues.size(), 1U);
     EXPECT_EQ(report.queues[0].queue, "events.io");
-    EXPECT_TRUE(report.queues[0].broken);
+    EXPECT_EQ(report.queues[0].event, QueueEvent::BROKEN);
     EXPECT_EQ(report.queues[0].cursor, 0U);
     EXPECT_EQ(report.queues[0].write_seq, std::uint64_t{CAPACITY} + 1);
 }
@@ -589,9 +589,43 @@ TEST_F(Queues, TagdReportsAReplacedQueueAsBroken) {
     restart(io(), "io");  // creates the queue file anew
     const CheckReport report = host().check(scada::monotonic_ns());
     ASSERT_EQ(report.queues.size(), 1U);
-    EXPECT_TRUE(report.queues[0].broken);
+    EXPECT_EQ(report.queues[0].event, QueueEvent::BROKEN);
     EXPECT_TRUE(report.queues[0].replaced);
     EXPECT_EQ(report.queues[0].cursor, DEAD_CURSOR);
+}
+
+// Issue #53, review of the design: an events or command queue whose file
+// is missing at two checks in a row while its producer is up is reported,
+// once, and again when it is there again. One miss is not: a check may
+// fall into a recreation.
+TEST_F(Queues, TagdReportsAQueueFileMissingForMoreThanOneCheck) {
+    std::filesystem::remove(generation_dir() / "events.io");
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    const CheckReport missing = host().check(scada::monotonic_ns());
+    ASSERT_EQ(missing.queues.size(), 1U);
+    EXPECT_EQ(missing.queues[0].queue, "events.io");
+    EXPECT_EQ(missing.queues[0].event, QueueEvent::MISSING);
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+
+    restart(io(), "io");  // creates the queue file anew
+    const CheckReport found = host().check(scada::monotonic_ns());
+    ASSERT_EQ(found.queues.size(), 1U);
+    EXPECT_EQ(found.queues[0].queue, "events.io");
+    EXPECT_EQ(found.queues[0].event, QueueEvent::FOUND);
+}
+
+// A producer that is down may not have created its queue files yet, and a
+// result queue is not reported missing.
+TEST_F(Queues, TagdReportsNoMissingFileOfAProducerThatIsDownOrOfAResultQueue) {
+    std::filesystem::remove(generation_dir() / "result.io.web");
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    }
+    stop_heartbeat("io");
+    std::filesystem::remove(generation_dir() / "events.io");
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    }
 }
 
 // A queue whose files or consumer are missing is not judged, so it is never

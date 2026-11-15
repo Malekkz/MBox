@@ -121,6 +121,38 @@ line.
 
 ## 7. Start the tag database daemon
 
+### Disable system sleep first
+
+The unit must never suspend, hibernate or hybrid-sleep (contract 3.4,
+decision D-44): the monotonic clock stops meanwhile, so a write request
+could be executed after a resume, later than its requester allowed. These
+lines are for the test machine, run as root; they use only systemd, which
+this guide requires, and a package will ship the same settings later. Mask
+the sleep targets, and tell systemd's sleep configuration to refuse every
+form of sleep:
+
+```
+systemctl mask sleep.target suspend.target hibernate.target \
+    hybrid-sleep.target suspend-then-hibernate.target
+mkdir -p /etc/systemd/sleep.conf.d
+cat > /etc/systemd/sleep.conf.d/scada.conf <<END
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
+END
+```
+
+`scada-tagd` cannot see this setting. It logs a WARNING at start when the
+kernel offers sleep states (`/sys/power/state` is not empty, which is
+normal on most kernels even with the targets masked), and a WARNING
+`the system was suspended` with `SUSPENDED_MS` when it finds that the
+system slept. A virtual machine that is paused is not seen: its clocks stop
+too. Do not pause a virtual machine that runs the unit.
+
+### Start it
+
 `scada-tagd` creates the shared-memory tag database from a tag-set file. In
 phase 1 that file is written by hand and names users by number
 (`libs/scada-tag/README.md`). The smallest one holds only `scada-tagd`

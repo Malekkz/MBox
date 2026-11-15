@@ -40,6 +40,10 @@ the standard error stream.
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
 | `queue broken` | WARNING, once when a queue's cursor and `write_seq` become a pair out of range (contract 9.2). The queue refuses posts and delivers nothing until the next generation | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY`, `REASON`: `replaced` (the consumer found the queue file replaced) or `out of range` |
 | `queue no longer broken` | NOTICE, once | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY` |
+| `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
+| `queue file found again` | NOTICE, once | `QUEUE` |
+| `the kernel offers sleep states; the unit must not suspend` | WARNING, at start, when `/sys/power/state` is not empty (contract 3.4) | `STATES` |
+| `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
@@ -53,7 +57,7 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 ## Interfaces
 
 - Contract: `docs/contracts/tag-database.md`, version 0.11, sections 3,
-  9.2, 10 and 11.1; decisions D-27 and D-43 in `docs/decisions.md`.
+  9.2, 10 and 11.1; decisions D-27 and D-44 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),

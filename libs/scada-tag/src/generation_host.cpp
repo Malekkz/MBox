@@ -72,6 +72,8 @@ struct Peer {
     // it was seen in; nothing before the first sample of a mapping.
     std::optional<std::uint32_t> late_seen;
     std::uint64_t late_mapping = 0;
+    // Down at the latest check.
+    bool down = true;
 };
 
 // One reliable queue, as the liveness check sees it (issue #53).
@@ -81,12 +83,22 @@ struct WatchedQueue {
     std::uint32_t capacity = 0;
     std::size_t queue_id = 0;
     std::uint16_t consumer_process = 0;
+    std::uint16_t producer_process = 0;
+    // EVENTS and CMD: a missing file is reported (issue #53).
+    bool report_missing = false;
     // The queue region, mapped read-only, without its descriptor: a
     // generation may have 4,096 queues.
     std::optional<OpenedRegion> region;
     // Broken at the last check that could judge it.
     bool broken = false;
+    // Checks in a row without a usable file while the producer was not
+    // down, and whether that was reported.
+    std::uint32_t missing_checks = 0;
+    bool missing_reported = false;
 };
+
+// Checks in a row without a queue file after which it is reported.
+constexpr std::uint32_t MISSING_CHECKS_REPORTED = 2;
 
 // Keeps `region` mapped to the file `name` of the directory open as
 // `dir_fd`, as ProcProbe does for `proc` regions: drops the mapping when the
@@ -695,6 +707,9 @@ void GenerationHost::Impl::describe(const TagSet& tag_set,
         watched.capacity = definition.capacity;
         watched.queue_id = i;
         watched.consumer_process = queue.consumer_process;
+        watched.producer_process = queue.producer_process;
+        watched.report_missing =
+            queue.kind == QueueKind::EVENTS || queue.kind == QueueKind::CMD;
         watched.identity.kind = queue_region_kind(queue.kind);
         watched.identity.generation = open_.generation;
         watched.identity.size_bytes = queue_region_size(
@@ -906,6 +921,7 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
                 : peer.probe.observe(open_.directory.get(), peer.region,
                                      peer.heartbeat_timeout_ms, now_mono_ns);
         const bool down = reason != DownReason::NONE;
+        peer.down = down;
         std::uint32_t& flag = down_flag(peer);
         // Relaxed load: this process is the only writer of the flag.
         if ((load_shared(flag, std::memory_order_relaxed) != 0U) != down) {
@@ -926,7 +942,24 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
                                        CheckReport& report) {
     if (!follow_region(open_.directory.get(), queue.name, queue.identity,
                        queue.region)) {
-        return;  // no queue yet, or one being replaced: nothing to judge
+        // A producer that is down may not have created it yet. One that is
+        // up created it at attach; a check may fall into a recreation, so
+        // a single miss is not reported.
+        if (!queue.report_missing || peers_.at(queue.producer_process).down) {
+            queue.missing_checks = 0;
+        } else if (++queue.missing_checks == MISSING_CHECKS_REPORTED &&
+                   !queue.missing_reported) {
+            queue.missing_reported = true;
+            report.queues.push_back(
+                QueueChange{.queue = queue.name, .event = QueueEvent::MISSING});
+        }
+        return;  // nothing to judge
+    }
+    queue.missing_checks = 0;
+    if (queue.missing_reported) {
+        queue.missing_reported = false;
+        report.queues.push_back(
+            QueueChange{.queue = queue.name, .event = QueueEvent::FOUND});
     }
     const Peer& consumer = peers_.at(queue.consumer_process);
     const std::span<std::byte> proc =
@@ -950,7 +983,7 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
     queue.broken = broken;
     report.queues.push_back(QueueChange{
         .queue = queue.name,
-        .broken = broken,
+        .event = broken ? QueueEvent::BROKEN : QueueEvent::NO_LONGER_BROKEN,
         .cursor = read,
         .write_seq = written_after,
         .capacity = queue.capacity,
