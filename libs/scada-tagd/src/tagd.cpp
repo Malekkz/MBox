@@ -221,7 +221,8 @@ void log_report(Logger& logger, const CheckReport& report, bool quiet) {
         // A late heartbeat is a moment in which readers saw the process
         // down (BAD with OWNER_DOWN, a gap on its rings), also when no
         // check fell into it. WARNING also when a change of the same
-        // process was logged above: the gap length is only here.
+        // process was logged above: the gap length is only here. Never
+        // INFO: the first check of a mapping, the quiet one, is a baseline.
         // The texts live until the end of the iteration: a field borrows.
         const std::string added = std::to_string(late.added);
         const std::string total = std::to_string(late.total);
@@ -240,8 +241,7 @@ void log_report(Logger& logger, const CheckReport& report, bool quiet) {
             logger.log(LogLevel::INFO, "heartbeat late before this check",
                        fields);
         } else {
-            logger.log(quiet ? LogLevel::INFO : LogLevel::WARNING,
-                       "heartbeat late", fields);
+            logger.log(LogLevel::WARNING, "heartbeat late", fields);
         }
     }
     for (const SweptEntry& entry : report.swept) {

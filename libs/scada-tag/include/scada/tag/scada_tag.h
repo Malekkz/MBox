@@ -123,7 +123,8 @@ void scada_tag_detach(scada_ctx* ctx);
  *
  * A heartbeat that comes more than the heartbeat timeout after the one
  * before is counted as late in the `proc` region, with the longest gap, and
- * scada-tagd logs it: readers saw the process down meanwhile. Safe from
+ * scada-tagd logs it: readers saw the process down meanwhile. The figures
+ * are a lower bound: the gap is measured between clock readings. Safe from
  * several threads: the published time never goes back.
  *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring: the heartbeat
@@ -493,7 +494,9 @@ typedef struct {
  * subscription in `*out`. The subscription starts at the end of the ring:
  * it delivers the changes written from now on. To know the state before,
  * read the tags of the owner after this call; drop a change whose
- * update_mono_ns is older than what a read gave for the same tag. If the
+ * update_mono_ns is older than what a read gave for the same tag. This is
+ * not a resolve: resolve a tag of the owner before reading its tags, or a
+ * read gives SCADA_E_INVALID (section 6.2). If the
  * ring is missing (the owner has not attached yet), the call succeeds and
  * the first look at the ring once it is there gives SCADA_E_GAP.
  *

@@ -155,13 +155,23 @@ void OwnProcRegion::heartbeat(std::int64_t mono_ns) noexcept {
                                     std::memory_order_relaxed)) {
     }
     // Strictly longer: a heartbeat exactly as old as the timeout is not yet
-    // stale (proc_liveness), so no reader saw this process down.
+    // stale (proc_liveness). The gap is between two clock readings, so it
+    // is a lower bound of what readers saw (contract 10.1).
     if (late_after_ns_ != 0 && gap > late_after_ns_) {
-        store_shared(proc.last_late_mono_ns, mono_ns,
-                     std::memory_order_relaxed);
+        // A maximum, so that two late threads cannot move it back.
+        // Relaxed: late_beats below publishes it.
+        std::int64_t last =
+            load_shared(proc.last_late_mono_ns, std::memory_order_relaxed);
+        while (mono_ns > last &&
+               !compare_exchange_shared(proc.last_late_mono_ns, last, mono_ns,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+        }
         // Release: a reader that sees the new count also sees the gap
-        // fields stored before it. Wraps modulo 2^32; readers compare.
-        fetch_add_shared(proc.late_beats, 1U, std::memory_order_release);
+        // fields stored before it; acquire orders this thread after the
+        // late heartbeats of other threads it counts on top of. Wraps
+        // modulo 2^32; readers compare.
+        fetch_add_shared(proc.late_beats, 1U, std::memory_order_acq_rel);
     }
 }
 

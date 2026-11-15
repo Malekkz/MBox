@@ -380,7 +380,9 @@ An owner cannot store OWNER_DOWN: a write with that flag is refused with
 
 A tag of another process must be resolved in the context that reads it:
 resolve is where its regions are mapped (section 11.2). Resolving one tag of an
-owner maps the regions of all its tags. Until a tag of the owner is resolved,
+owner maps the regions of all its tags. `scada_sub_open` is not a resolve: a
+ring consumer that reads the tag of a `scada_change.handle` resolves a tag of
+that owner first, or the read is `SCADA_E_INVALID`. Until a tag of the owner is resolved,
 a read of its tags is `SCADA_E_INVALID`, so that a forgotten resolve does not
 look like a dead owner to operators and alarm logic. The library tells the two
 apart by one atomic load in the read path, without a lock.
@@ -753,16 +755,23 @@ The process records such gaps itself, so that they can be traced:
   is later than the published one; with several threads the published time
   never goes back and no `heartbeat` count is lost. The thread that publishes
   a time owns the gap since the time before it.
-- A gap strictly longer than `heartbeat_timeout_ms` is late: some reader could
-  have seen the process down. The process then stores `last_late_mono_ns`
-  (relaxed) and increments `late_beats` (release). `longest_gap_ns` holds the
-  longest gap of any heartbeat. The first heartbeat after attach is not
-  measured: the gap since a previous life is a restart. A reused region keeps
-  its figures; a new region starts at 0.
+- A gap strictly longer than `heartbeat_timeout_ms` is late: readers saw the
+  process down. The process then raises `last_late_mono_ns` to the time of
+  that heartbeat (a maximum, relaxed) and increments `late_beats` (acq_rel).
+  `longest_gap_ns` is the longest gap of any heartbeat since the region was
+  created, not the gap of the latest late one. The first heartbeat after
+  attach is not measured: the gap since a previous life is a restart. A reused
+  region keeps its figures; a new region starts at 0.
+- The figures are reported by the process itself and are a lower bound. A gap
+  is measured between the clock readings of two heartbeats, not between the
+  moments they were published: a heartbeat that reads its clock and is then
+  preempted before it publishes is seen late by readers for longer than it
+  records, and may record nothing. A process that hangs for good records
+  nothing; `scada-tagd` reports it down.
 - `scada-tagd` reads `late_beats` (acquire) and the gap fields at every check
-  and logs `heartbeat late` (WARNING) when the count grew, at most once per
-  process and check. A count found at its first look at a region is logged
-  once at INFO.
+  and logs `heartbeat late` at WARNING when the count grew, at most once per
+  process and check. A count that is not 0 at its first look at a region is
+  logged once at INFO as `heartbeat late before this check`.
 - The three fields are for diagnosis only and are never used to judge
   whether a process is down. They are input to their readers.
 
