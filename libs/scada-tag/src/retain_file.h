@@ -54,7 +54,8 @@ inline constexpr std::size_t RETAIN_CRC_BYTES = 4;
 // The largest retain file read or written: about 440,000 records with names
 // of 127 bytes. An owner with more retained tags cannot be persisted, which
 // scada-tagd reports.
-inline constexpr std::size_t MAX_RETAIN_FILE_BYTES = std::size_t{64} * 1024 * 1024;
+inline constexpr std::size_t MAX_RETAIN_FILE_BYTES =
+    std::size_t{64} * 1024 * 1024;
 
 // The suffix of a retain file name.
 inline constexpr std::string_view RETAIN_FILE_SUFFIX = ".bin";
@@ -70,7 +71,7 @@ struct GenerationIdentity {
 
 // One retained value.
 struct RetainedValue {
-    std::string name;  // a tag name
+    std::string name;              // a tag name
     TagType type = TagType::BOOL;  // never STRING
     std::uint64_t value = 0;       // bit pattern; a BOOL is 0 or 1
     std::int64_t source_time_ns = 0;
@@ -139,7 +140,7 @@ public:
 };
 
 // The file system calls of `write_retain_file`, so that a test can put a
-// model of a power loss in their place (decision D-43). Each call returns
+// model of a power loss in their place (decision D-44). Each call returns
 // 0 or an error number. `dir_fd` is the retain directory.
 class RetainFileOps {
 public:
@@ -177,10 +178,9 @@ public:
 // descriptor. A crash at any point leaves the old file or the new one
 // under the real name, never a part of one, provided the storage keeps
 // what fsync reported as written.
-[[nodiscard]] Status write_retain_file(int dir_fd, std::string_view owner,
-                                       const RetainFile& file,
-                                       std::string& detail,
-                                       RetainFileOps& ops = system_retain_file_ops());
+[[nodiscard]] Status write_retain_file(
+    int dir_fd, std::string_view owner, const RetainFile& file,
+    std::string& detail, RetainFileOps& ops = system_retain_file_ops());
 
 // Removes the temporary files of `write_retain_file` that the calling user
 // owns from the directory open as `dir_fd` (section 12: stale temporary
@@ -213,7 +213,7 @@ struct LoadedValues {
 // The retained values of the tags `wanted` of `owner`, from the directory
 // open as `dir_fd`: each from the owner's own file if it has the name with
 // that type; otherwise from another owner's file that has it (a tag that
-// moved to another owner, decision D-43), the most recently written file
+// moved to another owner, decision D-44), the most recently written file
 // first. A record whose type differs is skipped. A file that fails its
 // checks is ignored and listed in `rejected`.
 [[nodiscard]] LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
@@ -221,8 +221,8 @@ struct LoadedValues {
                                          std::span<const WantedValue> wanted);
 
 // The value of `name` in `file`, or null. `file.values` is sorted.
-[[nodiscard]] const RetainedValue* find_retained(const RetainFile& file,
-                                                 std::string_view name) noexcept;
+[[nodiscard]] const RetainedValue* find_retained(
+    const RetainFile& file, std::string_view name) noexcept;
 
 }  // namespace scada::tag
 

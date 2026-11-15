@@ -1,5 +1,5 @@
 // Retained values and the generation change with real processes (tag
-// database contract, sections 11.3 and 12; decision D-43): scada-tagd and
+// database contract, sections 11.3 and 12; decision D-44): scada-tagd and
 // scada-tag-test-retainer, which writes a retained counter and follows a
 // generation change.
 //
@@ -109,23 +109,23 @@ protected:
              << R"("type": "int64", "retain": true)"
              << (now ? R"(, "retain_now": true)" : "") << "}";
         if (more) {
-            file << R"(, {"name": "plant.more", "owner": "io", "type": "bool"})";
+            file
+                << R"(, {"name": "plant.more", "owner": "io", "type": "bool"})";
         }
         file << "]}\n";
     }
 
     [[nodiscard]] std::optional<RunningTagd> tagd() const {
-        return ready_tagd((root_ / "tag-set.json").string(), base_.string(),
-                          QUIET_WATCHDOG,
-                          {"--retain-interval-ms",
-                           std::to_string(RETAIN_INTERVAL_MS)});
+        return ready_tagd(
+            (root_ / "tag-set.json").string(), base_.string(), QUIET_WATCHDOG,
+            {"--retain-interval-ms", std::to_string(RETAIN_INTERVAL_MS)});
     }
 
     [[nodiscard]] std::optional<ChildProcess> retainer(int period_ms) const {
-        const std::vector<std::string> command = command_from(
-            "SCADA_TAG_RETAINER_COMMAND",
-            {base_.string(), retain_, "io", "plant.count",
-             std::to_string(period_ms)});
+        const std::vector<std::string> command =
+            command_from("SCADA_TAG_RETAINER_COMMAND",
+                         {base_.string(), retain_, "io", "plant.count",
+                          std::to_string(period_ms)});
         std::optional<ChildProcess> child = ChildProcess::start(command);
         EXPECT_TRUE(child.has_value());
         return child;
@@ -205,8 +205,10 @@ TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
         WAIT_LIMIT))
         << io->out() << second->child.err();
     EXPECT_LT(std::chrono::steady_clock::now() - ready, CHANGE_LIMIT);
-    const std::optional<std::int64_t> last = last_number(io->out(), "leaving last=");
-    const std::optional<std::int64_t> restored = last_number(io->out(), "attached value=");
+    const std::optional<std::int64_t> last =
+        last_number(io->out(), "leaving last=");
+    const std::optional<std::int64_t> restored =
+        last_number(io->out(), "attached value=");
     ASSERT_TRUE(last.has_value());
     EXPECT_GT(*last, 1);
     EXPECT_EQ(restored, last) << io->out();
@@ -220,7 +222,8 @@ TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
     stop(*second);
 }
 
-TEST_F(Retained, Conformance25ADamagedFileIsIgnoredAndReportedAndAttachSucceeds) {
+TEST_F(Retained,
+       Conformance25ADamagedFileIsIgnoredAndReportedAndAttachSucceeds) {
     {
         std::ofstream damaged(std::filesystem::path(retain()) / "io.bin",
                               std::ios::binary);
@@ -252,7 +255,8 @@ TEST_F(Retained, Conformance25ARetainNowTagIsOnDiskWithinOneSecond) {
     // The last write of the retainer comes at most one period before this.
     ASSERT_TRUE(stops_cleanly(*io));
     const auto stopped = std::chrono::steady_clock::now();
-    const std::optional<std::int64_t> last = last_number(io->out(), "stopped last=");
+    const std::optional<std::int64_t> last =
+        last_number(io->out(), "stopped last=");
     ASSERT_TRUE(last.has_value());
     EXPECT_TRUE(file_reaches(*last, RETAIN_NOW_LIMIT));
     EXPECT_LT(std::chrono::steady_clock::now() - stopped, RETAIN_NOW_LIMIT);
@@ -260,17 +264,20 @@ TEST_F(Retained, Conformance25ARetainNowTagIsOnDiskWithinOneSecond) {
     stop(*service);
 }
 
-TEST_F(Retained, SigkillOfEveryProcessAtRandomPointsNeverLeavesAnUnreadableFile) {
+TEST_F(Retained,
+       SigkillOfEveryProcessAtRandomPointsNeverLeavesAnUnreadableFile) {
     write_tag_set(true, false);
     std::mt19937 random(KILL_SEED);
-    std::uniform_int_distribution<int> after(KILL_AFTER_MIN_MS, KILL_AFTER_MAX_MS);
+    std::uniform_int_distribution<int> after(KILL_AFTER_MIN_MS,
+                                             KILL_AFTER_MAX_MS);
     std::bernoulli_distribution tagd_first(0.5);
     std::int64_t previous = -1;
     for (int round = 0; round < KILL_ROUNDS; ++round) {
         std::optional<RunningTagd> service = tagd();
         ASSERT_TRUE(service.has_value());
         // A temporary file a killed scada-tagd left is gone at its start.
-        for (const auto& entry : std::filesystem::directory_iterator(retain())) {
+        for (const auto& entry :
+             std::filesystem::directory_iterator(retain())) {
             EXPECT_FALSE(entry.path().filename().string().starts_with(".tmp."))
                 << "round " << round;
         }
@@ -279,7 +286,8 @@ TEST_F(Retained, SigkillOfEveryProcessAtRandomPointsNeverLeavesAnUnreadableFile)
         ASSERT_TRUE(io->wait_for_output(
             [](std::string_view out) { return has(out, "attached"); },
             WAIT_LIMIT));
-        std::this_thread::sleep_for(std::chrono::milliseconds(after(random)));  // NOLINT(readability-magic-numbers): a random point to kill at, not a wait for a condition
+        std::this_thread::sleep_for(std::chrono::milliseconds(after(
+            random)));  // NOLINT(readability-magic-numbers): a random point to kill at, not a wait for a condition
         if (tagd_first(random)) {
             kill(service->child);
             kill(*io);

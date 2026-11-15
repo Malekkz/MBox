@@ -643,7 +643,7 @@ TEST_F(Observer, ObservesAgainAfterAGenerationChange) {
     start_second_generation();
     // The old mappings go with the old context. The host, which is
     // scada-tagd, keeps the header of the generation it retired mapped
-    // until it removes it (decision D-43), and nothing else of it here: the
+    // until it removes it (decision D-44), and nothing else of it here: the
     // tag set has no retained tag.
     observer.detach();
     const std::vector<std::string> left = mappings_under(generation_dir(1));

@@ -1,8 +1,8 @@
-// Unit tests for the retain file (contract, section 12; decision D-43): the
+// Unit tests for the retain file (contract, section 12; decision D-44): the
 // format, its checks, the atomic write and the lookup of one owner's values.
 
-#include "crc32.h"
 #include "retain_file.h"
+#include "crc32.h"
 #include "temp_database.h"
 
 #include "scada/common/fd.h"
@@ -59,7 +59,8 @@ RetainFile sample() {
     file.config_hash.fill(HASH_BYTE);
     file.values = {
         {"a.flag", TagType::BOOL, 1, SOURCE_TIME},
-        {"plant.mode", TagType::INT64, std::bit_cast<std::uint64_t>(std::int64_t{-3}), SOURCE_TIME + 1},
+        {"plant.mode", TagType::INT64,
+         std::bit_cast<std::uint64_t>(std::int64_t{-3}), SOURCE_TIME + 1},
         {"plant.setpoint", TagType::FLOAT64, PI_BITS, SOURCE_TIME + 2},
         {"z", TagType::UINT64, ~std::uint64_t{0}, 0},
     };
@@ -161,8 +162,8 @@ TEST(RetainFile, EveryFlippedBitIsRejected) {
 TEST(RetainFile, EveryTruncationIsRejected) {
     const std::vector<std::byte> bytes = encoded(sample());
     for (std::size_t size = 0; size < bytes.size(); ++size) {
-        const std::vector<std::byte> cut(bytes.begin(),
-                                         bytes.begin() + static_cast<std::ptrdiff_t>(size));
+        const std::vector<std::byte> cut(
+            bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(size));
         ASSERT_EQ(decode_code(cut), StatusCode::DATA_CORRUPT) << size;
     }
     std::vector<std::byte> longer = bytes;
@@ -179,19 +180,23 @@ TEST(RetainFile, FieldChecksHoldBehindAValidCheckSum) {
         reseal(copy);
         return decode_code(copy);
     };
-    EXPECT_EQ(damaged(8, std::byte{2}), StatusCode::DATA_CORRUPT);    // version
-    EXPECT_EQ(damaged(12, std::byte{5}), StatusCode::DATA_CORRUPT);   // count
-    EXPECT_EQ(damaged(12, std::byte{3}), StatusCode::DATA_CORRUPT);   // count
-    EXPECT_EQ(damaged(40, std::byte{2}), StatusCode::DATA_CORRUPT);   // flag
-    EXPECT_EQ(damaged(44, std::byte{1}), StatusCode::DATA_CORRUPT);   // reserved
+    EXPECT_EQ(damaged(8, std::byte{2}), StatusCode::DATA_CORRUPT);   // version
+    EXPECT_EQ(damaged(12, std::byte{5}), StatusCode::DATA_CORRUPT);  // count
+    EXPECT_EQ(damaged(12, std::byte{3}), StatusCode::DATA_CORRUPT);  // count
+    EXPECT_EQ(damaged(40, std::byte{2}), StatusCode::DATA_CORRUPT);  // flag
+    EXPECT_EQ(damaged(44, std::byte{1}), StatusCode::DATA_CORRUPT);  // reserved
     const std::size_t first = RETAIN_HEADER_BYTES;
-    EXPECT_EQ(damaged(first, std::byte{5}), StatusCode::DATA_CORRUPT);  // STRING
-    EXPECT_EQ(damaged(first, std::byte{0}), StatusCode::DATA_CORRUPT);  // no type
+    EXPECT_EQ(damaged(first, std::byte{5}),
+              StatusCode::DATA_CORRUPT);  // STRING
+    EXPECT_EQ(damaged(first, std::byte{0}),
+              StatusCode::DATA_CORRUPT);  // no type
     EXPECT_EQ(damaged(first + 2, std::byte{1}), StatusCode::DATA_CORRUPT);
-    EXPECT_EQ(damaged(first + 8, std::byte{2}), StatusCode::DATA_CORRUPT);  // BOOL 2
+    EXPECT_EQ(damaged(first + 8, std::byte{2}),
+              StatusCode::DATA_CORRUPT);  // BOOL 2
     EXPECT_EQ(damaged(first + 24, std::byte{'A'}), StatusCode::DATA_CORRUPT);
     EXPECT_EQ(damaged(first + 24 + 6, std::byte{1}), StatusCode::DATA_CORRUPT);
-    EXPECT_EQ(damaged(first + 1, std::byte{0}), StatusCode::DATA_CORRUPT);  // no name
+    EXPECT_EQ(damaged(first + 1, std::byte{0}),
+              StatusCode::DATA_CORRUPT);  // no name
     // The first name made to sort after the second.
     EXPECT_EQ(damaged(first + 24, std::byte{'q'}), StatusCode::DATA_CORRUPT);
 }
@@ -203,7 +208,8 @@ TEST(RetainFile, FileNames) {
     EXPECT_FALSE(owner_of_retain_file("Control.bin").has_value());
     EXPECT_FALSE(owner_of_retain_file("control").has_value());
     EXPECT_FALSE(owner_of_retain_file(".tmp.a.bin.12").has_value());
-    EXPECT_FALSE(owner_of_retain_file(std::string(32, 'a') + ".bin").has_value());
+    EXPECT_FALSE(
+        owner_of_retain_file(std::string(32, 'a') + ".bin").has_value());
 }
 
 class RetainDirectory : public TempDatabase {
@@ -217,7 +223,8 @@ protected:
 
     void write(std::string_view owner, const RetainFile& file) {
         std::string detail;
-        ASSERT_TRUE(write_retain_file(dir(), owner, file, detail).ok()) << detail;
+        ASSERT_TRUE(write_retain_file(dir(), owner, file, detail).ok())
+            << detail;
     }
 
 private:
@@ -232,7 +239,8 @@ TEST_F(RetainDirectory, WritesAtomicallyWithMode0640UnderUmask077) {
               std::vector<std::string>{"ctl.bin"});
     EXPECT_EQ(scada::tag::testing::mode_of(base() / "ctl.bin"), 0640U);
     std::string detail;
-    const Result<RetainFile> read = read_retain_file(dir(), "ctl.bin", uid(), detail);
+    const Result<RetainFile> read =
+        read_retain_file(dir(), "ctl.bin", uid(), detail);
     ASSERT_TRUE(read.ok()) << detail;
     EXPECT_EQ(read.value().values.size(), 4U);
 
@@ -241,21 +249,26 @@ TEST_F(RetainDirectory, WritesAtomicallyWithMode0640UnderUmask077) {
     smaller.values.resize(1);
     write("ctl", smaller);
     ASSERT_TRUE(read_retain_file(dir(), "ctl.bin", uid(), detail).ok());
-    EXPECT_EQ(read_retain_file(dir(), "ctl.bin", uid(), detail).value().values.size(), 1U);
+    EXPECT_EQ(
+        read_retain_file(dir(), "ctl.bin", uid(), detail).value().values.size(),
+        1U);
     EXPECT_EQ(scada::tag::testing::names_in(base()),
               std::vector<std::string>{"ctl.bin"});
 }
 
 TEST_F(RetainDirectory, ReadChecksOwnerTypeAndPresence) {
     std::string detail;
-    EXPECT_EQ(read_retain_file(dir(), "none.bin", uid(), detail).status().code(),
-              StatusCode::NOT_FOUND);
+    EXPECT_EQ(
+        read_retain_file(dir(), "none.bin", uid(), detail).status().code(),
+        StatusCode::NOT_FOUND);
     write("ctl", sample());
-    EXPECT_EQ(read_retain_file(dir(), "ctl.bin", other_uid(), detail).status().code(),
-              StatusCode::PERMISSION_DENIED);
+    EXPECT_EQ(
+        read_retain_file(dir(), "ctl.bin", other_uid(), detail).status().code(),
+        StatusCode::PERMISSION_DENIED);
     std::filesystem::create_symlink("ctl.bin", base() / "link.bin");
-    EXPECT_EQ(read_retain_file(dir(), "link.bin", uid(), detail).status().code(),
-              StatusCode::DATA_CORRUPT);
+    EXPECT_EQ(
+        read_retain_file(dir(), "link.bin", uid(), detail).status().code(),
+        StatusCode::DATA_CORRUPT);
     std::filesystem::create_directory(base() / "dir.bin");
     EXPECT_EQ(read_retain_file(dir(), "dir.bin", uid(), detail).status().code(),
               StatusCode::DATA_CORRUPT);
@@ -273,8 +286,9 @@ TEST_F(RetainDirectory, StaleTemporariesAreRemovedAndNothingElse) {
     scada::tag::testing::touch(base() / ".tmp.ctl.bin.x");
     scada::tag::testing::touch(base() / "notes.txt");
     EXPECT_EQ(remove_retain_temporaries(dir()), 1U);
-    EXPECT_EQ(scada::tag::testing::names_in(base()),
-              (std::vector<std::string>{".tmp.ctl.bin.x", "ctl.bin", "notes.txt"}));
+    EXPECT_EQ(
+        scada::tag::testing::names_in(base()),
+        (std::vector<std::string>{".tmp.ctl.bin.x", "ctl.bin", "notes.txt"}));
 }
 
 TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
@@ -284,11 +298,13 @@ TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
     write("ctl", own);
     RetainFile older;
     older.written_time_ns = 20;
-    older.values = {{"t.a", TagType::INT64, 100, 0}, {"t.c", TagType::INT64, 300, 0}};
+    older.values = {{"t.a", TagType::INT64, 100, 0},
+                    {"t.c", TagType::INT64, 300, 0}};
     write("old", older);
     RetainFile newer;
     newer.written_time_ns = 30;
-    newer.values = {{"t.c", TagType::INT64, 333, 0}, {"t.d", TagType::BOOL, 1, 0}};
+    newer.values = {{"t.c", TagType::INT64, 333, 0},
+                    {"t.d", TagType::BOOL, 1, 0}};
     write("new", newer);
     scada::tag::testing::touch(base() / "broken.bin");
 
@@ -300,10 +316,10 @@ TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
     const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
     ASSERT_EQ(loaded.values.size(), wanted.size());
     ASSERT_TRUE(loaded.values[0].has_value());
-    EXPECT_EQ(loaded.values[0]->value, 1U);   // own file, not the other
+    EXPECT_EQ(loaded.values[0]->value, 1U);      // own file, not the other
     EXPECT_FALSE(loaded.values[1].has_value());  // another type
     ASSERT_TRUE(loaded.values[2].has_value());
-    EXPECT_EQ(loaded.values[2]->value, 333U);  // the newest other file
+    EXPECT_EQ(loaded.values[2]->value, 333U);    // the newest other file
     EXPECT_FALSE(loaded.values[3].has_value());  // another type
     EXPECT_FALSE(loaded.values[4].has_value());
     ASSERT_TRUE(loaded.own.has_value());

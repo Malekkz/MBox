@@ -191,7 +191,8 @@ public:
 
     // The region `observe` mapped last, or an empty span.
     [[nodiscard]] std::span<std::byte> bytes() const noexcept {
-        return region_.has_value() ? region_->memory.bytes() : std::span<std::byte>{};
+        return region_.has_value() ? region_->memory.bytes()
+                                   : std::span<std::byte>{};
     }
 
 private:

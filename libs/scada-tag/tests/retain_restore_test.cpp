@@ -1,5 +1,5 @@
 // Unit tests for the restore of retained values at attach (contract,
-// section 12; decision D-43): a new `tags` region gets the values of its
+// section 12; decision D-44): a new `tags` region gets the values of its
 // owner's RETAIN tags, a reused one keeps its own, a damaged file is
 // ignored, and an attach after a generation change waits, with a bound,
 // for the FINAL file of the generation the owner left.
@@ -26,9 +26,9 @@
 #include <sys/stat.h>
 
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -54,7 +54,8 @@ protected:
     void SetUp() override {
         AttachFixture::SetUp();
         retain_ = root() / "retain";
-        ASSERT_EQ(::mkdir(retain_.c_str(), scada::tag::testing::PRIVATE_DIR_MODE), 0);
+        ASSERT_EQ(
+            ::mkdir(retain_.c_str(), scada::tag::testing::PRIVATE_DIR_MODE), 0);
         ASSERT_EQ(::chmod(retain_.c_str(), RETAIN_DIR_MODE), 0);
     }
 
@@ -63,18 +64,27 @@ protected:
     [[nodiscard]] static TagSet retained_set() {
         TagSet set = tag_set();
         set.tags = {
-            {.name = "plant.level", .owner = "io", .type = TagType::FLOAT64, .retain = true},
-            {.name = "plant.mode", .owner = "io", .type = TagType::INT64, .retain = true, .retain_now = true},
+            {.name = "plant.level",
+             .owner = "io",
+             .type = TagType::FLOAT64,
+             .retain = true},
+            {.name = "plant.mode",
+             .owner = "io",
+             .type = TagType::INT64,
+             .retain = true,
+             .retain_now = true},
             {.name = "plant.count", .owner = "io", .type = TagType::UINT64}};
         return set;
     }
 
     [[nodiscard]] Attached attached(std::string_view process) {
         std::string detail;
-        Result<Attached> result = Attachment::attach(
-            process,
-            {.base_dir = base().string(), .retain_dir = retain_.string(), .tagd_uid = uid()},
-            detail);
+        Result<Attached> result =
+            Attachment::attach(process,
+                               {.base_dir = base().string(),
+                                .retain_dir = retain_.string(),
+                                .tagd_uid = uid()},
+                               detail);
         EXPECT_TRUE(result.ok()) << result.status().message() << ": " << detail;
         return result.ok() ? std::move(result).value() : nullptr;
     }
@@ -82,7 +92,9 @@ protected:
     void write_file(std::string_view owner, const RetainFile& file) const {
         const Fd directory = scada::tag::testing::open_directory(retain_);
         std::string detail;
-        ASSERT_TRUE(write_retain_file(directory.get(), owner, file, detail).ok()) << detail;
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), owner, file, detail).ok())
+            << detail;
     }
 
     [[nodiscard]] static RetainFile values_file() {
@@ -96,7 +108,8 @@ protected:
     }
 
     // The value of `name` read through the attachment.
-    [[nodiscard]] static scada_value read(Attachment& attachment, std::string_view name) {
+    [[nodiscard]] static scada_value read(Attachment& attachment,
+                                          std::string_view name) {
         std::uint32_t handle = SCADA_INVALID_HANDLE;
         EXPECT_EQ(attachment.resolve(name, handle), SCADA_OK);
         scada_value value{};
@@ -104,7 +117,9 @@ protected:
         return value;
     }
 
-    [[nodiscard]] const std::filesystem::path& retain() const { return retain_; }
+    [[nodiscard]] const std::filesystem::path& retain() const {
+        return retain_;
+    }
 
 private:
     std::filesystem::path retain_;
@@ -167,14 +182,18 @@ TEST_F(Restore, AReusedRegionKeepsItsValues) {
     EXPECT_EQ(read(*again, "plant.level").quality_flags, SCADA_FLAG_NOT_INIT);
 }
 
-TEST_F(Restore, Conformance25ACorruptOrTruncatedFileIsIgnoredAndAttachSucceeds) {
+TEST_F(Restore,
+       Conformance25ACorruptOrTruncatedFileIsIgnoredAndAttachSucceeds) {
     const Fd directory = scada::tag::testing::open_directory(retain());
     std::string detail;
-    Result<std::vector<std::byte>> bytes = encode_retain_file(values_file(), detail);
+    Result<std::vector<std::byte>> bytes =
+        encode_retain_file(values_file(), detail);
     ASSERT_TRUE(bytes.ok());
-    for (const std::size_t cut : {std::size_t{0}, std::size_t{10}, bytes.value().size() - 1}) {
+    for (const std::size_t cut :
+         {std::size_t{0}, std::size_t{10}, bytes.value().size() - 1}) {
         {
-            std::ofstream out(retain() / "io.bin", std::ios::binary | std::ios::trunc);
+            std::ofstream out(retain() / "io.bin",
+                              std::ios::binary | std::ios::trunc);
             out.write(std::bit_cast<const char*>(bytes.value().data()),
                       static_cast<std::streamsize>(cut));
         }
@@ -195,14 +214,16 @@ TEST_F(Restore, AFileNotOwnedByTagdIsNotTrusted) {
     // another user, it is refused (section 12).
     const Fd directory = scada::tag::testing::open_directory(retain());
     const std::vector<WantedValue> wanted = {{"plant.level", TagType::FLOAT64}};
-    const LoadedValues loaded = load_retained(directory.get(), other_uid(), "io", wanted);
+    const LoadedValues loaded =
+        load_retained(directory.get(), other_uid(), "io", wanted);
     EXPECT_FALSE(loaded.values[0].has_value());
     EXPECT_EQ(loaded.rejected.size(), 1U);
 }
 
 TEST_F(Restore, AMovedTagIsFoundInTheFileOfItsFormerOwner) {
     RetainFile former;
-    former.values = {{"plant.level", TagType::FLOAT64, LEVEL_BITS, SOURCE_TIME}};
+    former.values = {
+        {"plant.level", TagType::FLOAT64, LEVEL_BITS, SOURCE_TIME}};
     write_file("io.old", former);
     start_host(retained_set());
     const Attached io = attached("io");
@@ -220,12 +241,15 @@ protected:
         start_host(retained_set());
         drop_host();
         TagSet changed = retained_set();
-        changed.tags.push_back({.name = "plant.extra", .owner = "io", .type = TagType::BOOL});
+        changed.tags.push_back(
+            {.name = "plant.extra", .owner = "io", .type = TagType::BOOL});
         start_host(changed);
         ASSERT_EQ(host().generation(), 2U);
-        const Fd directory = scada::tag::testing::open_directory(generation_dir(1));
+        const Fd directory =
+            scada::tag::testing::open_directory(generation_dir(1));
         std::string detail;
-        Result<HeaderView> old = HeaderView::open(directory.get(), 1, uid(), detail);
+        Result<HeaderView> old =
+            HeaderView::open(directory.get(), 1, uid(), detail);
         ASSERT_TRUE(old.ok()) << detail;
         ASSERT_EQ(old.value().state(), GenerationState::RETIRING);
         old_ = {1, old.value().contents().created_time_ns};
@@ -259,10 +283,12 @@ TEST_F(RestoreAfterChange, AttachWaitsForTheFinalFileAndTakesIt) {
     // `tags` region exists under its temporary name, which is while its
     // records are initialised and the retained values loaded.
     std::jthread writer([this] {
-        const std::int64_t deadline = scada::monotonic_ns() + RETAIN_FINAL_WAIT_NS;
+        const std::int64_t deadline =
+            scada::monotonic_ns() + RETAIN_FINAL_WAIT_NS;
         bool seen = false;
         while (!seen && scada::monotonic_ns() < deadline) {
-            for (const std::string& name : scada::tag::testing::names_in(generation_dir(2))) {
+            for (const std::string& name :
+                 scada::tag::testing::names_in(generation_dir(2))) {
                 seen = seen || name.starts_with(".tmp.tags.io.");
             }
             std::this_thread::yield();

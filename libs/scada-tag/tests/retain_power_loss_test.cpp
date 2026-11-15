@@ -1,5 +1,5 @@
 // The atomic write of a retain file against a model of a power loss
-// (contract, section 12; decision D-43). SIGKILL cannot show durability:
+// (contract, section 12; decision D-44). SIGKILL cannot show durability:
 // the page cache survives the kill. Here the file system calls of
 // write_retain_file go to a model that keeps, for every file, what was
 // synced apart from what was written, and for the directory, the entries
@@ -86,9 +86,13 @@ public:
 
     class File final : public RetainWriteFile {
     public:
-        File(PowerLossModel& model, std::size_t inode) : model_(model), inode_(inode) {}
-        int set_mode(mode_t /*mode*/) noexcept override { return model_.step("set_mode"); }
-        int write(std::span<const std::byte> bytes, std::size_t& written) noexcept override {
+        File(PowerLossModel& model, std::size_t inode)
+            : model_(model), inode_(inode) {}
+        int set_mode(mode_t /*mode*/) noexcept override {
+            return model_.step("set_mode");
+        }
+        int write(std::span<const std::byte> bytes,
+                  std::size_t& written) noexcept override {
             written = 0;
             if (const int error = model_.step("write"); error != 0) {
                 return error;
@@ -97,7 +101,8 @@ public:
             constexpr std::size_t MOST = 37;
             written = std::min(bytes.size(), MOST);
             Bytes& data = model_.inodes[inode_].written;
-            data.insert(data.end(), bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(written));
+            data.insert(data.end(), bytes.begin(),
+                        bytes.begin() + static_cast<std::ptrdiff_t>(written));
             return 0;
         }
         int sync() noexcept override {
@@ -128,7 +133,8 @@ public:
         out = std::make_unique<File>(*this, inodes.size() - 1);
         return 0;
     }
-    int rename(int /*dir_fd*/, const std::string& from, const std::string& to) noexcept override {
+    int rename(int /*dir_fd*/, const std::string& from,
+               const std::string& to) noexcept override {
         if (const int error = step("rename"); error != 0) {
             return error;
         }
@@ -162,7 +168,8 @@ private:
 
 // What a file whose written data was not all synced holds after the loss.
 enum class Loss : std::uint8_t { NOTHING, PREFIX, DAMAGED, ALL };
-constexpr std::array<Loss, 4> LOSSES = {Loss::NOTHING, Loss::PREFIX, Loss::DAMAGED, Loss::ALL};
+constexpr std::array<Loss, 4> LOSSES = {Loss::NOTHING, Loss::PREFIX,
+                                        Loss::DAMAGED, Loss::ALL};
 
 Bytes after_loss(const PowerLossModel::Inode& inode, Loss loss) {
     if (inode.synced == inode.written) {
@@ -173,7 +180,8 @@ Bytes after_loss(const PowerLossModel::Inode& inode, Loss loss) {
             return inode.synced;
         case Loss::PREFIX:
             return Bytes(inode.written.begin(),
-                         inode.written.begin() + static_cast<std::ptrdiff_t>(inode.written.size() / 2));
+                         inode.written.begin() + static_cast<std::ptrdiff_t>(
+                                                     inode.written.size() / 2));
         case Loss::DAMAGED: {
             Bytes bytes = inode.written;
             for (std::size_t i = 0; i < bytes.size(); i += 3) {
@@ -212,7 +220,8 @@ protected:
     // Writes `bytes` as "io.bin" in the real directory, or removes it, and
     // reads it as attach would. The level read, or nothing if absent or
     // refused.
-    [[nodiscard]] std::optional<std::uint64_t> load(const std::optional<Bytes>& bytes) {
+    [[nodiscard]] std::optional<std::uint64_t> load(
+        const std::optional<Bytes>& bytes) {
         std::filesystem::remove(base() / "io.bin");
         if (bytes.has_value()) {
             std::ofstream out(base() / "io.bin", std::ios::binary);
@@ -229,7 +238,8 @@ protected:
     }
 
     // Every state a power loss can leave of `model` for "io.bin".
-    [[nodiscard]] std::vector<std::optional<Bytes>> states(const PowerLossModel& model) const {
+    [[nodiscard]] std::vector<std::optional<Bytes>> states(
+        const PowerLossModel& model) const {
         std::vector<std::optional<Bytes>> result;
         for (const auto* names : {&model.synced_entries, &model.entries}) {
             const auto found = names->find("io.bin");
@@ -237,7 +247,8 @@ protected:
                 if (found == names->end()) {
                     result.emplace_back(std::nullopt);
                 } else {
-                    result.emplace_back(after_loss(model.inodes.at(found->second), loss));
+                    result.emplace_back(
+                        after_loss(model.inodes.at(found->second), loss));
                 }
             }
         }
@@ -253,7 +264,8 @@ protected:
             model.put("io.bin", encoded(values(OLD)));
         }
         std::string detail;
-        EXPECT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok());
+        EXPECT_TRUE(
+            write_retain_file(dir(), "io", values(NEW), detail, model).ok());
         return model.calls.size();
     }
 
@@ -265,7 +277,8 @@ TEST_F(PowerLoss, TheCallsComeInTheOrderOfTheContract) {
     PowerLossModel model;
     model.put("io.bin", encoded(values(OLD)));
     std::string detail;
-    ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok()) << detail;
+    ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok())
+        << detail;
     // unlink of a stale temporary file of this process id, then the write.
     ASSERT_GE(model.calls.size(), 6U);
     EXPECT_EQ(model.calls.front(), "unlink");
@@ -288,10 +301,12 @@ TEST_F(PowerLoss, ALossAtAnyStepLeavesTheOldOrTheNewValues) {
         model.put("io.bin", encoded(values(OLD)));
         model.crash_after = crash;
         std::string detail;
-        static_cast<void>(write_retain_file(dir(), "io", values(NEW), detail, model));
+        static_cast<void>(
+            write_retain_file(dir(), "io", values(NEW), detail, model));
         for (const std::optional<Bytes>& state : states(model)) {
             const std::optional<std::uint64_t> level = load(state);
-            ASSERT_TRUE(level == OLD || level == NEW) << "crash after step " << crash;
+            ASSERT_TRUE(level == OLD || level == NEW)
+                << "crash after step " << crash;
         }
     }
 }
@@ -302,7 +317,8 @@ TEST_F(PowerLoss, WithoutAFormerFileALossLeavesNoFileOrTheNewOne) {
         PowerLossModel model;
         model.crash_after = crash;
         std::string detail;
-        static_cast<void>(write_retain_file(dir(), "io", values(NEW), detail, model));
+        static_cast<void>(
+            write_retain_file(dir(), "io", values(NEW), detail, model));
         for (const std::optional<Bytes>& state : states(model)) {
             ASSERT_TRUE(!state.has_value() || load(state) == NEW)
                 << "crash after step " << crash;
@@ -317,7 +333,8 @@ TEST_F(PowerLoss, TheModelCatchesAWriterWithoutFsync) {
     model.put("io.bin", encoded(values(OLD)));
     model.sync_does_nothing = true;
     std::string detail;
-    ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok());
+    ASSERT_TRUE(
+        write_retain_file(dir(), "io", values(NEW), detail, model).ok());
     bool unreadable = false;
     for (const std::optional<Bytes>& state : states(model)) {
         const std::optional<std::uint64_t> level = load(state);
@@ -326,8 +343,10 @@ TEST_F(PowerLoss, TheModelCatchesAWriterWithoutFsync) {
     EXPECT_TRUE(unreadable);
 }
 
-TEST_F(PowerLoss, AnErrorOnWriteFsyncOrRenameKeepsTheOldFileAndRemovesTheTemporary) {
-    for (const std::string call : {"create", "set_mode", "write", "sync", "rename"}) {
+TEST_F(PowerLoss,
+       AnErrorOnWriteFsyncOrRenameKeepsTheOldFileAndRemovesTheTemporary) {
+    for (const std::string call :
+         {"create", "set_mode", "write", "sync", "rename"}) {
         for (const int error : {ENOSPC, EIO}) {
             PowerLossModel model;
             model.put("io.bin", encoded(values(OLD)));
@@ -337,17 +356,21 @@ TEST_F(PowerLoss, AnErrorOnWriteFsyncOrRenameKeepsTheOldFileAndRemovesTheTempora
             const scada::Status status =
                 write_retain_file(dir(), "io", values(NEW), detail, model);
             ASSERT_FALSE(status.ok()) << call;
-            EXPECT_EQ(status.code(), error == ENOSPC ? StatusCode::RESOURCE_EXHAUSTED
-                                                     : StatusCode::IO_ERROR)
+            EXPECT_EQ(status.code(), error == ENOSPC
+                                         ? StatusCode::RESOURCE_EXHAUSTED
+                                         : StatusCode::IO_ERROR)
                 << call;
             // Only the old file is left, and it loads.
             ASSERT_EQ(model.entries.size(), 1U) << call;
             ASSERT_TRUE(model.entries.contains("io.bin")) << call;
-            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written), OLD);
+            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written),
+                      OLD);
             // The next write starts with a fresh file and works.
-            ASSERT_TRUE(write_retain_file(dir(), "io", values(NEW), detail, model).ok())
+            ASSERT_TRUE(
+                write_retain_file(dir(), "io", values(NEW), detail, model).ok())
                 << call << ": " << detail;
-            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written), NEW);
+            EXPECT_EQ(load(model.inodes.at(model.entries.at("io.bin")).written),
+                      NEW);
             // Each fsync of the second write was on a file of its own.
             EXPECT_EQ(model.inodes.size(), call == "create" ? 2U : 3U) << call;
         }
@@ -366,8 +389,10 @@ TEST_F(PowerLoss, AFailedDirectorySyncIsReported) {
 TEST_F(PowerLoss, EveryTruncationAndDamageOfAFileIsRefused) {
     const Bytes bytes = encoded(values(NEW));
     for (std::size_t size = 0; size < bytes.size(); ++size) {
-        ASSERT_EQ(load(Bytes(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(size))),
-                  std::nullopt)
+        ASSERT_EQ(
+            load(Bytes(bytes.begin(),
+                       bytes.begin() + static_cast<std::ptrdiff_t>(size))),
+            std::nullopt)
             << size;
     }
     ASSERT_EQ(load(Bytes(bytes.size(), std::byte{0})), std::nullopt);

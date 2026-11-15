@@ -44,7 +44,7 @@ constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 
 // True if `copy`, a record of a tag of type `type`, holds a value worth
-// keeping (decision D-43): a value an owner may store, of quality GOOD or
+// keeping (decision D-44): a value an owner may store, of quality GOOD or
 // UNCERTAIN, not NOT_INIT.
 bool holds_value(const RecordCopy& copy, TagType type) noexcept {
     const bool quality = copy.quality == to_raw(Quality::GOOD) ||
@@ -65,8 +65,8 @@ GenerationIdentity newer(const std::optional<GenerationIdentity>& kept,
 // `generation`: that generation itself, or a later one.
 bool covers(const std::optional<GenerationIdentity>& mark,
             const GenerationIdentity& generation) noexcept {
-    return mark.has_value() && (mark->generation > generation.generation ||
-                                *mark == generation);
+    return mark.has_value() &&
+           (mark->generation > generation.generation || *mark == generation);
 }
 
 }  // namespace
@@ -120,10 +120,10 @@ void RetainWriter::run(const std::stop_token& stop) {
         done.final = job.mapped().file.final;
         done.source = job.mapped().file.source;
         try {
-            done.written = write_retain_file(dir_fd_, done.owner,
-                                             job.mapped().file, done.detail,
-                                             ops_)
-                               .ok();
+            done.written =
+                write_retain_file(dir_fd_, done.owner, job.mapped().file,
+                                  done.detail, ops_)
+                    .ok();
         } catch (const std::exception& error) {
             // Nothing may leave the thread; a failed allocation is a failed
             // write, tried again later.
@@ -166,9 +166,9 @@ Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
         directory = std::move(opened).value();
         static_cast<void>(remove_retain_temporaries(directory.get()));
     }
-    return std::make_unique<RetainKeeper>(
-        Key{}, std::move(directory), tagd_uid,
-        std::int64_t{interval_ms} * NS_PER_MS, config_hash);
+    return std::make_unique<RetainKeeper>(Key{}, std::move(directory), tagd_uid,
+                                          std::int64_t{interval_ms} * NS_PER_MS,
+                                          config_hash);
 }
 
 void RetainKeeper::describe(Watched& watched, bool retired,
@@ -190,7 +190,7 @@ void RetainKeeper::describe(Watched& watched, bool retired,
             bool now = (entry->flags & to_raw(TagFlag::RETAIN_NOW)) != 0;
             // In a retired generation, a tag the current generation retains
             // counts too: an owner it moved to waits for this file
-            // (decision D-43).
+            // (decision D-44).
             if (retired && !retain && current_ != nullptr) {
                 const std::optional<TagEntry> later =
                     current_->header->find_tag(entry->name);
@@ -375,8 +375,8 @@ bool RetainKeeper::read_owner(const Watched& watched,
             continue;
         }
         state.values.insert_or_assign(
-            tag.name, RetainedValue{tag.name, tag.type, copy.value,
-                                    copy.source_time_ns});
+            tag.name,
+            RetainedValue{tag.name, tag.type, copy.value, copy.source_time_ns});
         state.dirty = true;
         state.urgent = state.urgent || tag.now;
     }
@@ -397,8 +397,8 @@ bool RetainKeeper::current_has_region(const std::string& name) {
     if (current_ == nullptr) {
         return false;
     }
-    const auto owner = std::ranges::find(current_->owners, name,
-                                         &WatchedOwner::name);
+    const auto owner =
+        std::ranges::find(current_->owners, name, &WatchedOwner::name);
     if (owner == current_->owners.end()) {
         return false;
     }
@@ -472,7 +472,7 @@ void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
         }
         OwnerState& state = states_[owner.name];
         const bool in_flight = state.done_token != state.token;
-        // Decision D-43: once the owner has a region in the current
+        // Decision D-44: once the owner has a region in the current
         // generation, which holds newer values, nothing is written for it
         // from an older one.
         if (!owner.final_submitted && current_has_region(owner.name)) {
@@ -489,15 +489,16 @@ void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
         }
         // Left: the owner stored a state other than RUNNING after its last
         // write, or holds its lock no more. A stale heartbeat alone is not
-        // enough: a hung owner can go on writing (decision D-43).
+        // enough: a hung owner can go on writing (decision D-44).
         bool left = true;
         if (owner.process_index < watched.processes.size()) {
             WatchedProcess& process = watched.processes[owner.process_index];
-            left = !proc_lock_held(watched.dir_fd,
-                                   proc_region_name(process.region.process)) ||
-                   process.probe.observe(watched.dir_fd, process.region,
-                                         process.heartbeat_timeout_ms,
-                                         now_mono_ns) == DownReason::NOT_RUNNING;
+            left =
+                !proc_lock_held(watched.dir_fd,
+                                proc_region_name(process.region.process)) ||
+                process.probe.observe(watched.dir_fd, process.region,
+                                      process.heartbeat_timeout_ms,
+                                      now_mono_ns) == DownReason::NOT_RUNNING;
         }
         if (left) {
             static_cast<void>(read_owner(watched, owner));
@@ -578,7 +579,8 @@ void RetainKeeper::remove_files_of_gone_owners(CheckReport& report) {
         return;
     }
     for (const std::string& entry : entries.value()) {
-        const std::optional<std::string_view> owner = owner_of_retain_file(entry);
+        const std::optional<std::string_view> owner =
+            owner_of_retain_file(entry);
         if (!owner.has_value() ||
             std::ranges::find(current_->owners, *owner, &WatchedOwner::name) !=
                 current_->owners.end()) {

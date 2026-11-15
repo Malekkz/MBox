@@ -69,7 +69,7 @@ struct HeaderContents {
     std::uint32_t heartbeat_check_ms = 0;
     ConfigHash config_hash{};
     // CLOCK_REALTIME at creation; with `generation` it names the generation
-    // across restarts of scada-tagd (decision D-43).
+    // across restarts of scada-tagd (decision D-44).
     std::int64_t created_time_ns = 0;
     std::size_t directory_offset = 0;  // `tag_count` entries fit there
     std::size_t name_pool_offset = 0;  // `name_pool_size` bytes fit there

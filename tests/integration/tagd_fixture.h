@@ -18,9 +18,9 @@
 #include <sys/stat.h>
 
 #include <chrono>
-#include <filesystem>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -193,9 +193,9 @@ inline bool attached(std::string_view out) {
     std::chrono::milliseconds watchdog = QUIET_WATCHDOG,
     const std::vector<std::string>& extra = {}) {
     scada::Result<NotifyListener> listener = NotifyListener::create();
-    std::vector<std::string> arguments{"--tag-set", tag_set_path, "--base-dir",
-                                       base_dir, "--retain-dir",
-                                       retain_dir_for(base_dir)};
+    std::vector<std::string> arguments{
+        "--tag-set", tag_set_path,   "--base-dir",
+        base_dir,    "--retain-dir", retain_dir_for(base_dir)};
     arguments.insert(arguments.end(), extra.begin(), extra.end());
     const std::vector<std::string> tagd =
         command_from("SCADA_TAGD_COMMAND", arguments);

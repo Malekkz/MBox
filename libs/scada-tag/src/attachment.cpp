@@ -22,9 +22,9 @@
 
 #include <fcntl.h>
 #include <pwd.h>
-#include <time.h>  // NOLINT(modernize-deprecated-headers): clock_nanosleep is declared here, not in <ctime>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>  // NOLINT(modernize-deprecated-headers): clock_nanosleep is declared here, not in <ctime>
 #include <unistd.h>
 
 #include <algorithm>
@@ -559,10 +559,12 @@ void Attachment::restore_retained(std::span<std::byte> tags,
     std::vector<std::uint32_t> slots;
     std::vector<WantedValue> wanted;
     for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
-        const std::optional<TagEntry> entry = header_.slot_entry(owner_index, slot);
-        // A STRING tag is never retained (decision D-43); the builder
+        const std::optional<TagEntry> entry =
+            header_.slot_entry(owner_index, slot);
+        // A STRING tag is never retained (decision D-44); the builder
         // refuses the flag, and a header from elsewhere is not trusted.
-        if (entry.has_value() && (entry->flags & to_raw(TagFlag::RETAIN)) != 0 &&
+        if (entry.has_value() &&
+            (entry->flags & to_raw(TagFlag::RETAIN)) != 0 &&
             entry->type != TagType::STRING) {
             slots.push_back(slot);
             wanted.push_back({entry->name, entry->type});
@@ -571,13 +573,13 @@ void Attachment::restore_retained(std::span<std::byte> tags,
     if (wanted.empty()) {
         return;
     }
-    const Fd directory = open_at(AT_FDCWD, retain_dir_,
-                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const Fd directory =
+        open_at(AT_FDCWD, retain_dir_, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (!directory.valid()) {
         return;
     }
 
-    // Decision D-43: values written in a RETIRING generation after the last
+    // Decision D-44: values written in a RETIRING generation after the last
     // periodic write reach the files only once scada-tagd has seen their
     // owners leave it. The wait is bounded; without scada-tagd it runs out
     // and the files are taken as they are.
@@ -807,7 +809,7 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
             !attached.ok()) {
             // The lock of a `proc` region in a RETIRING generation may be
             // held for a moment by scada-tagd, which tests it to learn
-            // whether the process left (decision D-43): that is the
+            // whether the process left (decision D-44): that is the
             // generation retiring, not a second process of this name.
             if (attached.code() == StatusCode::ALREADY_EXISTS &&
                 attachment->header_.state() == GenerationState::RETIRING) {

@@ -32,7 +32,8 @@ inline constexpr std::string_view TAGD_PROCESS_NAME = "tagd";
 
 // The default retain interval and directory (section 12).
 inline constexpr std::uint32_t DEFAULT_RETAIN_INTERVAL_MS = 5000;
-inline constexpr std::string_view DEFAULT_RETAIN_DIR_PATH = "/var/lib/scada/retain";
+inline constexpr std::string_view DEFAULT_RETAIN_DIR_PATH =
+    "/var/lib/scada/retain";
 
 struct HostOptions {
     // The database directory. It must exist, created by the platform
@@ -92,7 +93,7 @@ struct RetainWrite {
     std::string owner;
     std::size_t values = 0;
     // True if the file marks that the owner left a retired generation
-    // (decision D-43).
+    // (decision D-44).
     bool final = false;
 };
 
@@ -131,7 +132,7 @@ struct CheckReport {
     std::vector<RetiredGeneration> retired;
     // Retain files of owners that are in no generation any more, removed
     // once every owner of the current generation has a file and no
-    // generation is retired (decision D-43). Names found in the
+    // generation is retired (decision D-44). Names found in the
     // directory: outside input.
     std::vector<std::string> retain_files_removed;
 };
@@ -216,7 +217,7 @@ public:
     // UNCERTAIN and it is not NOT_INIT; otherwise the value on file stays.
     //
     // Then finishes the retired generations (section 11.3, step 3;
-    // decision D-43): once the process of an owner has left one (down by
+    // decision D-44): once the process of an owner has left one (down by
     // section 10.1, or no longer holding the lock of its `proc` region),
     // reads that owner's RETAIN tags there and writes its retain file
     // marked FINAL; once every owner is done and no `proc` region is
@@ -229,7 +230,7 @@ public:
     [[nodiscard]] CheckReport flush_retained();
 
     // The retain files are written by a thread of scada-tagd's own, so that
-    // a slow fsync does not hold up the liveness checks (decision D-43); a
+    // a slow fsync does not hold up the liveness checks (decision D-44); a
     // check reports the files that thread finished since the check before.
     // This waits until it has finished every file it was given and reports
     // them, and gives it nothing new.

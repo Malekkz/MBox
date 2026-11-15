@@ -327,7 +327,7 @@ Status switch_current(int base_fd, const std::string& target,
 //
 // Before a generation without a live process is removed, `finish` is called
 // with its number, so that the retained values written there are kept
-// (decision D-43).
+// (decision D-44).
 Result<std::uint64_t> clean_base_directory(
     int base_fd, std::optional<std::uint64_t> current,
     const std::function<void(std::uint64_t)>& finish,
@@ -538,7 +538,7 @@ private:
     [[nodiscard]] Status attach_own_region(std::string& detail);
 
     // Watches the current generation and every other generation in the
-    // base directory for retained values and removal (decision D-43); sets
+    // base directory for retained values and removal (decision D-44); sets
     // a generation that is not current and not yet RETIRING to RETIRING.
     [[nodiscard]] Status watch_generations(std::string& detail);
 

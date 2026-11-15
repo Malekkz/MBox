@@ -20,7 +20,8 @@ constexpr std::array<std::uint32_t, TABLE_SIZE> make_table() noexcept {
     for (std::uint32_t i = 0; i < TABLE_SIZE; ++i) {
         std::uint32_t value = i;
         for (int bit = 0; bit < BITS_PER_BYTE; ++bit) {
-            value = (value & 1U) != 0 ? POLYNOMIAL ^ (value >> 1U) : value >> 1U;
+            value =
+                (value & 1U) != 0 ? POLYNOMIAL ^ (value >> 1U) : value >> 1U;
         }
         table.at(i) = value;
     }

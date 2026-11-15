@@ -23,6 +23,7 @@ details are in `libs/scada-tagd/README.md`.
 
 ```
 build/dev/services/scada-tagd/scada-tagd [--tag-set <file>] [--base-dir <directory>]
+    [--retain-dir <directory>] [--retain-interval-ms <ms>]
 build/dev/services/scada-tagd/scada-tagd --help
 ```
 
@@ -30,11 +31,16 @@ build/dev/services/scada-tagd/scada-tagd --help
 | --- | --- | --- |
 | `--tag-set <file>` | `/etc/scada/tag-set.json` | The tag-set file. It must hold a process named `tagd` whose `uid` is the user `scada-tagd` runs as. |
 | `--base-dir <directory>` | `/dev/shm/scada` | The directory of the tag database. It must exist, be owned by the user `scada-tagd` runs as, and have mode `2750`. |
+| `--retain-dir <directory>` | `/var/lib/scada/retain` | The directory of the retained values. It must exist, be owned by the user `scada-tagd` runs as, and have mode `2750`; `scada-tagd` does not create it. |
+| `--retain-interval-ms <ms>` | `5000` | The shortest time between two writes of the retain file of one owner, 100 to 3,600,000 ms. A change of a `retain_now` tag is written at the next liveness check. |
 
 Installed, it runs as `scada-tagd.service`: a notify service under the user
 `scada-tagd`, member of the group `scada`, with a watchdog interval of 10 s
 and no capability. `/dev/shm/scada` is created at boot from
-`usr/lib/tmpfiles.d/scada-tagd.conf`. See `docs/install.md`, step 7.
+`usr/lib/tmpfiles.d/scada-tagd.conf`, which also gives
+`/var/lib/scada/retain` its owner and mode; the drop-in
+`scada-tagd.service.d/retain.conf` lets the service write that directory.
+See `docs/install.md`, step 7.
 
 To try it without installing, as any user:
 
@@ -45,7 +51,7 @@ cat > /tmp/tag-set.json <<END
  "processes": [{"name": "tagd", "uid": $(id -u)}],
  "owners": [], "queues": [], "tags": []}
 END
-build/dev/services/scada-tagd/scada-tagd --tag-set /tmp/tag-set.json --base-dir /tmp/scada-base
+build/dev/services/scada-tagd/scada-tagd --tag-set /tmp/tag-set.json --base-dir /tmp/scada-base --retain-dir /tmp/scada-retain
 ```
 
 ## How to test it

@@ -63,7 +63,9 @@ public:
         }
     }
 
-    void put_zeros(std::size_t count) { out_.insert(out_.end(), count, std::byte{0}); }
+    void put_zeros(std::size_t count) {
+        out_.insert(out_.end(), count, std::byte{0});
+    }
 
 private:
     std::vector<std::byte>& out_;
@@ -72,7 +74,8 @@ private:
 // Reads integers little-endian; every read is checked against what is left.
 class Reader {
 public:
-    explicit Reader(std::span<const std::byte> bytes) noexcept : bytes_(bytes) {}
+    explicit Reader(std::span<const std::byte> bytes) noexcept
+        : bytes_(bytes) {}
 
     template <typename Unsigned>
     [[nodiscard]] bool get(Unsigned& value) noexcept {
@@ -96,7 +99,8 @@ public:
         }
         text.clear();
         for (const std::byte byte : bytes_.subspan(position_, length)) {
-            text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
+            text.push_back(
+                static_cast<char>(std::to_integer<unsigned char>(byte)));
         }
         position_ += length;
         return true;
@@ -109,7 +113,8 @@ public:
         }
         const auto part = bytes_.subspan(position_, count);
         position_ += count;
-        return std::ranges::all_of(part, [](std::byte b) { return b == std::byte{0}; });
+        return std::ranges::all_of(
+            part, [](std::byte b) { return b == std::byte{0}; });
     }
 
     [[nodiscard]] std::size_t position() const noexcept { return position_; }
@@ -138,8 +143,8 @@ bool is_retain_temporary(std::string_view entry) noexcept {
     if (dot == std::string_view::npos || dot < TEMPORARY_PREFIX.size()) {
         return false;
     }
-    const std::string_view file = entry.substr(
-        TEMPORARY_PREFIX.size(), dot - TEMPORARY_PREFIX.size());
+    const std::string_view file =
+        entry.substr(TEMPORARY_PREFIX.size(), dot - TEMPORARY_PREFIX.size());
     return owner_of_retain_file(file).has_value() &&
            is_temporary_name_of(entry, file);
 }
@@ -290,14 +295,16 @@ Result<RetainFile> decode_retain_file(std::span<const std::byte> bytes,
             !in.get(value.value) || !in.get(source_time) ||
             !in.get_text(length, value.name) ||
             !in.skip_zeros(padding_after(length))) {
-            return corrupt(detail, "record " + std::to_string(i) +
-                                       " is cut off or has a reserved byte set");
+            return corrupt(detail,
+                           "record " + std::to_string(i) +
+                               " is cut off or has a reserved byte set");
         }
         const std::optional<TagType> tag_type = tag_type_from_raw(type);
         if (!tag_type.has_value() || !retainable(*tag_type) ||
             (*tag_type == TagType::BOOL && value.value > 1)) {
-            return corrupt(detail, "record " + std::to_string(i) +
-                                       " has a type or value that is not valid");
+            return corrupt(detail,
+                           "record " + std::to_string(i) +
+                               " has a type or value that is not valid");
         }
         if (!is_valid_name(value.name, MAX_TAG_NAME_LENGTH)) {
             return corrupt(detail, "record " + std::to_string(i) +
@@ -341,17 +348,18 @@ Result<RetainFile> read_retain_file(int dir_fd, std::string_view name,
     }
     if (!S_ISREG(info.st_mode) || info.st_size < 0 ||
         static_cast<std::uint64_t>(info.st_size) > MAX_RETAIN_FILE_BYTES) {
-        return corrupt(detail, file_name + " is not a regular file of at most " +
-                                   std::to_string(MAX_RETAIN_FILE_BYTES) +
-                                   " bytes");
+        return corrupt(detail,
+                       file_name + " is not a regular file of at most " +
+                           std::to_string(MAX_RETAIN_FILE_BYTES) + " bytes");
     }
     // A second name is a hard link someone made; the file may then change
-    // under another name (decision D-43).
+    // under another name (decision D-44).
     if (info.st_nlink != 1) {
         return corrupt(detail, file_name + " has more than one name");
     }
     if (info.st_uid != tagd_uid) {
-        detail = file_name + " is not owned by user " + std::to_string(tagd_uid);
+        detail =
+            file_name + " is not owned by user " + std::to_string(tagd_uid);
         return Status(StatusCode::PERMISSION_DENIED,
                       "the retain file has the wrong owner");
     }
@@ -372,8 +380,8 @@ Result<RetainFile> read_retain_file(int dir_fd, std::string_view name,
             break;
         }
         // In range: read returns at most the size of the chunk.
-        const auto part =
-            std::span<const std::byte>(chunk).first(static_cast<std::size_t>(got));
+        const auto part = std::span<const std::byte>(chunk).first(
+            static_cast<std::size_t>(got));
         bytes.insert(bytes.end(), part.begin(), part.end());
         // The file may have grown since fstat.
         if (bytes.size() > MAX_RETAIN_FILE_BYTES) {
@@ -433,8 +441,9 @@ public:
 
     int rename(int dir_fd, const std::string& from,
                const std::string& to) noexcept override {
-        return ::renameat(dir_fd, from.c_str(), dir_fd, to.c_str()) == 0 ? 0
-                                                                         : errno;
+        return ::renameat(dir_fd, from.c_str(), dir_fd, to.c_str()) == 0
+                   ? 0
+                   : errno;
     }
 
     int sync_directory(int dir_fd) noexcept override {
@@ -450,7 +459,8 @@ public:
 
 RetainFileOps& system_retain_file_ops() noexcept {
     // One stateless object for the process; it holds nothing that changes.
-    static SystemFileOps ops;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): stateless; the interface needs a non-const object
+    static SystemFileOps
+        ops;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): stateless; the interface needs a non-const object
     return ops;
 }
 
@@ -537,8 +547,11 @@ const RetainedValue* find_retained(const RetainFile& file,
                                    std::string_view name) noexcept {
     const auto found = std::ranges::lower_bound(
         file.values, name, std::less<>{},
-        [](const RetainedValue& value) -> std::string_view { return value.name; });
-    return found != file.values.end() && found->name == name ? &*found : nullptr;
+        [](const RetainedValue& value) -> std::string_view {
+            return value.name;
+        });
+    return found != file.values.end() && found->name == name ? &*found
+                                                             : nullptr;
 }
 
 LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
@@ -559,7 +572,8 @@ LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
 
     const std::string own_name = retain_file_name(owner);
     std::string detail;
-    Result<RetainFile> own = read_retain_file(dir_fd, own_name, tagd_uid, detail);
+    Result<RetainFile> own =
+        read_retain_file(dir_fd, own_name, tagd_uid, detail);
     if (own.ok()) {
         take_from(own.value());
         loaded.own = std::move(own).value();
@@ -600,7 +614,8 @@ LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
             if (loaded.values[i].has_value()) {
                 continue;  // from the owner's own file
             }
-            const RetainedValue* value = find_retained(other.value(), wanted[i].name);
+            const RetainedValue* value =
+                find_retained(other.value(), wanted[i].name);
             if (value != nullptr && value->type == wanted[i].type &&
                 (!others[i].has_value() ||
                  other.value().written_time_ns > found_written[i])) {

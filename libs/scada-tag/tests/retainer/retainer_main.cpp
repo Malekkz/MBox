@@ -14,8 +14,8 @@
 // it wrote, detaches, attaches again to `current` (section 11.3, step 2),
 // resolves the tag again and prints the "attached" line anew.
 //
-// On SIGTERM it detaches, prints "stopped last=<v>" and exits with code 0. Exit code 1: an error;
-// 2: wrong arguments.
+// On SIGTERM it detaches, prints "stopped last=<v>" and exits with code 0. Exit
+// code 1: an error; 2: wrong arguments.
 
 #include "scada/tag/scada_tag.h"
 
@@ -45,8 +45,9 @@ constexpr long MILLISECONDS_PER_SECOND = 1000;
 bool parse_period(std::string_view text, std::uint64_t& value) {
     const std::from_chars_result parsed =
         std::from_chars(text.data(), text.data() + text.size(), value);
-    return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() &&
-           value > 0 && value <= MAX_PERIOD_MS;
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == text.data() + text.size() && value > 0 &&
+           value <= MAX_PERIOD_MS;
 }
 
 // Attaches, resolves the tag and prints what it holds. False on an error.

@@ -61,7 +61,7 @@ inline constexpr std::int64_t CURRENT_RECHECK_INTERVAL_NS = 1'000'000'000;
 
 // The longest an attach waits for scada-tagd to write the FINAL retain files
 // of the owners that held its retained tags in a RETIRING generation
-// (decision D-43), and the pause between two looks, in ns. scada-tagd
+// (decision D-44), and the pause between two looks, in ns. scada-tagd
 // writes such a file at its next liveness check after the owner's process
 // left, 250 ms by default.
 inline constexpr std::int64_t RETAIN_FINAL_WAIT_NS = 2'000'000'000;
@@ -91,7 +91,7 @@ struct AttachmentStatus {
     // (section 6.3).
     std::uint32_t records_repaired = 0;
     // Retained values loaded into new `tags` regions (section 12), and the
-    // waits for a FINAL retain file that ran out (decision D-43). Not in
+    // waits for a FINAL retain file that ran out (decision D-44). Not in
     // scada_status, which keeps its size.
     std::uint32_t values_restored = 0;
     std::uint32_t final_waits_expired = 0;
@@ -617,7 +617,7 @@ private:
                                       std::string& detail);
     void count(const OwnRegion& region) noexcept;
 
-    // Section 12 and decision D-43: loads the retained values of the RETAIN
+    // Section 12 and decision D-44: loads the retained values of the RETAIN
     // tags of `owner_index` into `tags`, a new `tags` region whose records
     // are in their initial state and which nobody else sees yet. First
     // waits, at most RETAIN_FINAL_WAIT_NS, until every owner that held one
