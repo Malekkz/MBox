@@ -28,6 +28,7 @@ namespace {
 using scada::MappedRegion;
 using scada::tag::GenerationState;
 using scada::tag::testing::PROCESS_IO;
+using scada::tag::testing::QUEUE_CMD;
 
 constexpr std::uint32_t OTHER_LAYOUT_VERSION = 2;
 // The bit patterns of two FLOAT64 values, 42.5 and -7.25.
@@ -35,6 +36,9 @@ constexpr std::uint64_t LEVEL_BITS = 0x4045'4000'0000'0000U;
 constexpr std::uint64_t OTHER_LEVEL_BITS = 0xC01D'0000'0000'0000U;
 // A value beyond every uid.
 constexpr std::int64_t NO_UID = 0x1'0000'0000;
+// A wait that should end long before this has failed.
+constexpr int WAIT_LIMIT_MS = 10'000;
+constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
 
 // A context, detached when the test ends.
 class Context {
@@ -113,6 +117,10 @@ TEST_F(CApi, AttachHeartbeatStatusDetach) {
 
 TEST_F(CApi, TheStatusStructureHasItsDocumentedSize) {
     EXPECT_EQ(sizeof(scada_status), 32U);
+    EXPECT_EQ(sizeof(scada_queue_stats_t), 80U);
+    EXPECT_EQ(sizeof(scada_event_record), 256U);
+    EXPECT_EQ(sizeof(scada_write_request), 64U);
+    EXPECT_EQ(sizeof(scada_write_result), 32U);
     EXPECT_EQ(SCADA_E_BUSY, 14);
     EXPECT_EQ(SCADA_E_IO, 13);
     EXPECT_EQ(SCADA_E_PERMISSION, 12);
@@ -475,6 +483,110 @@ TEST_F(CApi, NullArgumentsOfTheChangeFunctionsAreInvalid) {
     scada_waitset_destroy(nullptr);
     scada_waitset_destroy(set);
     scada_sub_close(sub);
+}
+
+TEST_F(CApi, AnEventIsPostedAndTakenThroughTheCInterface) {
+    start_host();
+    Context web;
+    Context feeder;
+    // The consumer first, so that the producer finds its region at once.
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    ASSERT_EQ(attach("io", feeder), SCADA_OK);
+    scada_queue* out = nullptr;
+    scada_queue* reader = nullptr;
+    ASSERT_EQ(scada_queue_open(feeder.get(), "events.io", &out), SCADA_OK);
+    ASSERT_EQ(scada_queue_open(web.get(), "events.io", &reader), SCADA_OK);
+
+    scada_event_record record{};
+    record.kind = SCADA_EVENT_ALARM;
+    record.payload_len = 1;
+    record.payload[0] = 1;
+    record.source_handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(scada_queue_post(out, &record, sizeof(record)), SCADA_OK);
+    ASSERT_EQ(scada_tag_notify(feeder.get()), SCADA_OK);
+    scada_event_record got{};
+    // The queue region of `io` did not exist when `web` attached: the wait
+    // looks for it again (at most once a second).
+    ASSERT_EQ(scada_queue_next(reader, &got, sizeof(got), WAIT_LIMIT_MS),
+              SCADA_OK);
+    EXPECT_EQ(got.seq, 0U);
+    EXPECT_EQ(got.kind, SCADA_EVENT_ALARM);
+    EXPECT_EQ(scada_queue_ack(reader), SCADA_OK);
+
+    scada_waitset* set = nullptr;
+    ASSERT_EQ(scada_waitset_create(web.get(), &set), SCADA_OK);
+    ASSERT_EQ(scada_waitset_add_queue(set, reader), SCADA_OK);
+    EXPECT_EQ(scada_waitset_wait(set, 0), SCADA_E_TIMEOUT);
+    ASSERT_EQ(scada_queue_post(out, &record, sizeof(record)), SCADA_OK);
+    EXPECT_EQ(scada_waitset_wait(set, 0), SCADA_OK);
+    ASSERT_EQ(scada_queue_next(reader, &got, sizeof(got), 0), SCADA_OK);
+    EXPECT_EQ(got.seq, 1U);
+    scada_waitset_destroy(set);
+    scada_queue_close(reader);
+    scada_queue_close(out);
+}
+
+TEST_F(CApi, ARequestIsPostedThroughTheCInterface) {
+    start_host();
+    Context web;
+    Context driver;
+    ASSERT_EQ(attach("io", driver), SCADA_OK);
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    scada_queue* out = nullptr;
+    scada_queue* reader = nullptr;
+    ASSERT_EQ(scada_queue_open(web.get(), "cmd.io.web", &out), SCADA_OK);
+    ASSERT_EQ(scada_queue_open(driver.get(), "cmd.io.web", &reader), SCADA_OK);
+    scada_write_request request{};
+    request.target_handle = 1;
+    request.operation = SCADA_OP_READ_NOW;
+    request.source = SCADA_SOURCE_AUTO;
+    request.expiry_mono_ns =
+        scada::monotonic_ns() + (std::int64_t{SCADA_REQUEST_LIFETIME_MAX_MS} *
+                                 NANOSECONDS_PER_MILLISECOND);
+    ASSERT_EQ(scada_queue_post(out, &request, sizeof(request)), SCADA_OK);
+    scada_write_request got{};
+    ASSERT_EQ(scada_queue_next(reader, &got, sizeof(got), WAIT_LIMIT_MS),
+              SCADA_OK);
+    EXPECT_EQ(got.request_id, std::uint64_t{QUEUE_CMD} << 48U);
+    EXPECT_EQ(got.operation, SCADA_OP_READ_NOW);
+    EXPECT_EQ(scada_queue_ack(reader), SCADA_E_INVALID);
+    scada_queue_close(reader);
+    scada_queue_close(out);
+}
+
+TEST_F(CApi, NullArgumentsOfTheQueueFunctionsAreInvalid) {
+    start_host();
+    Context web;
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    scada_ctx* const ctx = web.get();
+    scada_queue* queue = nullptr;
+    EXPECT_EQ(scada_queue_open(nullptr, "events.io", &queue), SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_open(ctx, nullptr, &queue), SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_open(ctx, "events.io", nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_open(ctx, "events.none", &queue), SCADA_E_NOT_FOUND);
+    EXPECT_EQ(queue, nullptr);
+    ASSERT_EQ(scada_queue_open(ctx, "events.io", &queue), SCADA_OK);
+    scada_event_record record{};
+    EXPECT_EQ(scada_queue_post(nullptr, &record, sizeof(record)),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_post(queue, nullptr, sizeof(record)),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_next(nullptr, &record, sizeof(record), 0),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_next(queue, nullptr, sizeof(record), 0),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_next(queue, &record, sizeof(record), -1),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_next(queue, &record, sizeof(record) - 1, 0),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_queue_ack(nullptr), SCADA_E_INVALID);
+    scada_waitset* set = nullptr;
+    ASSERT_EQ(scada_waitset_create(ctx, &set), SCADA_OK);
+    EXPECT_EQ(scada_waitset_add_queue(nullptr, queue), SCADA_E_INVALID);
+    EXPECT_EQ(scada_waitset_add_queue(set, nullptr), SCADA_E_INVALID);
+    scada_waitset_destroy(set);
+    scada_queue_close(nullptr);
+    scada_queue_close(queue);
 }
 
 }  // namespace

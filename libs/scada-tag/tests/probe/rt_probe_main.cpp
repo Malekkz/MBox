@@ -8,8 +8,11 @@
 // Usage: scada-tag-rt-probe <base directory> <process> <own tag>
 //            <tag of another process> [syscall|allocation]
 //
-// `own tag` is a FLOAT64 tag the process owns. The uid of scada-tagd is
-// taken to be the user of the caller, as in the tests. With `syscall` or
+// `own tag` is a FLOAT64 tag the process owns. The process produces the
+// event queue `events.<process>`, whose consumer is attached, and consumes
+// the empty request queue `cmd.<process>.io`, which it looks at without
+// waiting. The uid of scada-tagd is taken to be the user of the caller, as
+// in the tests. With `syscall` or
 // `allocation` it makes one system call or one allocation between the
 // markers on purpose, to show that the test finds it.
 //
@@ -166,14 +169,18 @@ struct Prepared {
     std::vector<int> status;
     std::vector<std::uint32_t> own_handles;
     std::vector<scada_value> own_values;
+    scada_queue* queue = nullptr;
+    scada_event_record event{};
+    scada_queue* requests = nullptr;
+    scada_write_request request{};
     // What the fault `allocation` allocates. Kept, so that the compiler
     // cannot remove the allocation.
     std::unique_ptr<int> wasted;
 };
 
-void count(Outcome& outcome, int code) noexcept {
+void count(Outcome& outcome, int code, int expected = SCADA_OK) noexcept {
     ++outcome.calls;
-    if (code != SCADA_OK) {
+    if (code != expected) {
         ++outcome.failed;
     }
 }
@@ -201,6 +208,14 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
                               prepared.handles.size(), prepared.values.data(),
                               prepared.status.data()));
     count(outcome, scada_tag_read(prepared.ctx, prepared.own, &value));
+    count(outcome, scada_queue_post(prepared.queue, &prepared.event,
+                                    sizeof(prepared.event)));
+    // Not marked real-time safe, but with timeout 0 it makes no system call
+    // (decision D-38).
+    count(outcome,
+          scada_queue_next(prepared.requests, &prepared.request,
+                           sizeof(prepared.request), 0),
+          SCADA_E_TIMEOUT);
     if (fault == "syscall") {
         static_cast<void>(::getppid());
     }
@@ -259,6 +274,24 @@ int run(std::span<const std::string_view> args) {
     written.value = WRITTEN_BITS;
     prepared.own_handles.assign(BATCH, prepared.own);
     prepared.own_values.assign(BATCH, written);
+    const std::string queue_name = "events." + process;
+    if (scada_queue_open(prepared.ctx, queue_name.c_str(), &prepared.queue) !=
+        SCADA_OK) {
+        std::cerr << "scada-tag-rt-probe: cannot open " << queue_name << "\n";
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    const std::string requests_name = "cmd." + process + ".io";
+    if (scada_queue_open(prepared.ctx, requests_name.c_str(),
+                         &prepared.requests) != SCADA_OK) {
+        std::cerr << "scada-tag-rt-probe: cannot open " << requests_name
+                  << "\n";
+        scada_queue_close(prepared.queue);
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    prepared.event.kind = SCADA_EVENT_SYSTEM;
+    prepared.event.source_handle = SCADA_INVALID_HANDLE;
     scada_status status{};
     static_cast<void>(scada_tag_status(prepared.ctx, &status));
 
@@ -283,6 +316,8 @@ int run(std::span<const std::string_view> args) {
               << " page_faults=" << outcome.page_faults
               << " clock_syscall=" << int{status.clock_syscall} << "\n"
               << std::flush;
+    scada_queue_close(prepared.requests);
+    scada_queue_close(prepared.queue);
     scada_tag_detach(prepared.ctx);
     return 0;
 }

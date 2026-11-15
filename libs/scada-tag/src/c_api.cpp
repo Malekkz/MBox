@@ -5,6 +5,8 @@
 
 #include "attachment.h"
 #include "layout.h"
+#include "queue.h"
+#include "queue_region.h"
 #include "region_file.h"
 #include "subscription.h"
 #include "wait_set.h"
@@ -44,9 +46,79 @@ struct
     std::unique_ptr<scada::tag::WaitSet> wait_set;
 };
 
+// A queue side of the C interface.
+struct
+    scada_queue {  // NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13
+    std::unique_ptr<scada::tag::Queue> queue;
+};
+
 namespace {
 
 using scada::StatusCode;
+
+// The C records are the structures of the contract (section 9.4), byte for
+// byte: the library copies them as bytes.
+template <typename C, typename Layout>
+constexpr bool SAME_SIZE =
+    sizeof(C) == sizeof(Layout) && alignof(C) == alignof(Layout);
+static_assert(SAME_SIZE<scada_event_record, scada::tag::EventRecord> &&
+              sizeof(scada_event_record) == SCADA_EVENT_RECORD_SIZE &&
+              offsetof(scada_event_record, seq) ==
+                  offsetof(scada::tag::EventRecord, seq) &&
+              offsetof(scada_event_record, time_ns) ==
+                  offsetof(scada::tag::EventRecord, time_ns) &&
+              offsetof(scada_event_record, kind) ==
+                  offsetof(scada::tag::EventRecord, kind) &&
+              offsetof(scada_event_record, payload_len) ==
+                  offsetof(scada::tag::EventRecord, payload_len) &&
+              offsetof(scada_event_record, source_handle) ==
+                  offsetof(scada::tag::EventRecord, source_handle) &&
+              offsetof(scada_event_record, payload) ==
+                  offsetof(scada::tag::EventRecord, payload) &&
+              SCADA_EVENT_PAYLOAD_MAX == scada::tag::EVENT_PAYLOAD_SIZE);
+static_assert(SAME_SIZE<scada_write_request, scada::tag::WriteRequest> &&
+              sizeof(scada_write_request) == SCADA_WRITE_REQUEST_SIZE &&
+              offsetof(scada_write_request, request_id) ==
+                  offsetof(scada::tag::WriteRequest, request_id) &&
+              offsetof(scada_write_request, target_handle) ==
+                  offsetof(scada::tag::WriteRequest, target_handle) &&
+              offsetof(scada_write_request, operation) ==
+                  offsetof(scada::tag::WriteRequest, operation) &&
+              offsetof(scada_write_request, source) ==
+                  offsetof(scada::tag::WriteRequest, source) &&
+              offsetof(scada_write_request, value_type) ==
+                  offsetof(scada::tag::WriteRequest, value_type) &&
+              offsetof(scada_write_request, value) ==
+                  offsetof(scada::tag::WriteRequest, value) &&
+              offsetof(scada_write_request, user_id) ==
+                  offsetof(scada::tag::WriteRequest, user_id) &&
+              offsetof(scada_write_request, expiry_mono_ns) ==
+                  offsetof(scada::tag::WriteRequest, expiry_mono_ns) &&
+              offsetof(scada_write_request, posted_mono_ns) ==
+                  offsetof(scada::tag::WriteRequest, posted_mono_ns) &&
+              offsetof(scada_write_request, select_request_id) ==
+                  offsetof(scada::tag::WriteRequest, select_request_id) &&
+              offsetof(scada_write_request, reserved) ==
+                  offsetof(scada::tag::WriteRequest, reserved));
+static_assert(SAME_SIZE<scada_write_result, scada::tag::WriteResult> &&
+              sizeof(scada_write_result) == SCADA_WRITE_RESULT_SIZE &&
+              offsetof(scada_write_result, request_id) ==
+                  offsetof(scada::tag::WriteResult, request_id) &&
+              offsetof(scada_write_result, status) ==
+                  offsetof(scada::tag::WriteResult, status) &&
+              offsetof(scada_write_result, protocol_error) ==
+                  offsetof(scada::tag::WriteResult, protocol_error) &&
+              offsetof(scada_write_result, completed_time_ns) ==
+                  offsetof(scada::tag::WriteResult, completed_time_ns) &&
+              offsetof(scada_write_result, reserved) ==
+                  offsetof(scada::tag::WriteResult, reserved));
+constexpr std::size_t STATUS_BYTES = 32;       // decisions D-28 and D-38
+constexpr std::size_t QUEUE_STATS_BYTES = 80;  // decision D-38
+static_assert(sizeof(scada_queue_stats_t) == QUEUE_STATS_BYTES);
+static_assert(sizeof(scada_status) == STATUS_BYTES);
+constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
+static_assert(SCADA_REQUEST_LIFETIME_MAX_MS * NANOSECONDS_PER_MILLISECOND ==
+              scada::tag::MAX_REQUEST_LIFETIME_NS);
 
 // The return code for `status`, which is not OK. Sets errno for SCADA_E_IO
 // (section 13.3).
@@ -316,6 +388,71 @@ void scada_sub_close(scada_sub* sub) {
     const std::unique_ptr<scada_sub> owned(sub);
 }
 
+int scada_queue_open(scada_ctx* ctx, const char* queue_name,
+                     scada_queue** out) {
+    if (out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = nullptr;
+    if (ctx == nullptr || queue_name == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] {
+        auto queue = std::make_unique<scada_queue>();
+        const int code =
+            scada::tag::Queue::open(*ctx->attachment, queue_name, queue->queue);
+        if (code == SCADA_OK) {
+            // The caller owns it from here and gives it back to
+            // scada_queue_close.
+            *out = queue.release();
+        }
+        return code;
+    });
+}
+
+SCADA_RT int scada_queue_post(scada_queue* queue, const void* record,
+                              size_t size) {
+    if (queue == nullptr || record == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    // The caller passes `size` bytes at `record`; the queue checks the size
+    // before it reads them.
+    return queue->queue->post(std::span<const std::byte>(
+        static_cast<const std::byte*>(record), size));
+}
+
+int scada_queue_next(scada_queue* queue, void* record, size_t size,
+                     int timeout_ms) {
+    if (queue == nullptr || record == nullptr || timeout_ms < 0) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] {
+        return queue->queue->next(
+            std::span<std::byte>(static_cast<std::byte*>(record), size),
+            timeout_ms);
+    });
+}
+
+int scada_queue_ack(scada_queue* queue) {
+    if (queue == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return queue->queue->ack();
+}
+
+int scada_queue_stats(scada_queue* queue, scada_queue_stats_t* out) {
+    if (queue == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = queue->queue->stats();
+    return SCADA_OK;
+}
+
+void scada_queue_close(scada_queue* queue) {
+    // Takes back the ownership scada_queue_open handed to the caller.
+    const std::unique_ptr<scada_queue> owned(queue);
+}
+
 int scada_waitset_create(scada_ctx* ctx, scada_waitset** out) {
     if (out == nullptr) {
         return SCADA_E_INVALID;
@@ -339,6 +476,13 @@ int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub) {
         return SCADA_E_INVALID;
     }
     return guarded([&] { return set->wait_set->add_sub(*sub->subscription); });
+}
+
+int scada_waitset_add_queue(scada_waitset* set, scada_queue* queue) {
+    if (set == nullptr || queue == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded([&] { return set->wait_set->add_queue(*queue->queue); });
 }
 
 int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index) {

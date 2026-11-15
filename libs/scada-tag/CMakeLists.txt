@@ -12,6 +12,9 @@ scada_add_library(scada-tag
     src/own_region.cpp
     src/peer_regions.cpp
     src/proc_region.cpp
+    src/queue.cpp
+    src/queue_access.cpp
+    src/queue_region.cpp
     src/region_file.cpp
     src/ring_access.cpp
     src/sha256.cpp

@@ -579,6 +579,14 @@ Status Attachment::attach_regions(std::string& detail) {
         access.own_changes = owned.changes.memory.bytes();
     }
 
+    // Section 9.2 and section 11.2, step 5: before the process is RUNNING,
+    // so that no producer sees its cursors before they are set.
+    prepare_queues();
+    if (!proc_.reused()) {
+        start_cursors();
+    }
+    drain_requests();
+
     // Section 11.2, step 6. From here the caller writes the heartbeat.
     const std::int64_t now = monotonic_ns();
     check_clock(now);

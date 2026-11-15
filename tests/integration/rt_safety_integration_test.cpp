@@ -3,7 +3,8 @@
 // allocation and take no page fault, the first read of a tag after its
 // resolve included.
 //
-// The helper scada-tag-rt-probe calls those functions between two markers.
+// The helper scada-tag-rt-probe calls those functions, scada_queue_post
+// among them, and scada_queue_next without waiting, between two markers.
 // This test runs it under the tracer of scada/test/syscall_trace.h, which
 // records every system call between the markers; the helper counts its own
 // allocations there. The test is not registered in the sanitizer builds,
@@ -35,7 +36,7 @@ using scada::test::TraceResult;
 
 constexpr std::chrono::seconds PROBE_LIMIT{60};
 // The real-time safe calls the probe makes between its markers.
-constexpr std::string_view ALL_CALLS_PASSED = "calls=7 failed=0 ";
+constexpr std::string_view ALL_CALLS_PASSED = "calls=9 failed=0 ";
 
 class RealTimeSafety : public TagProcesses {
 protected:

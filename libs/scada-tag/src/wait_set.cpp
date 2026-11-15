@@ -4,6 +4,8 @@
 #include "change_ring.h"
 #include "futex.h"
 #include "proc_region.h"
+#include "queue.h"
+#include "queue_region.h"
 #include "shared_memory.h"
 #include "subscription.h"
 
@@ -40,11 +42,22 @@ std::uint32_t cycle_count(std::uint32_t& cycle) noexcept {
     return load_shared(cycle, std::memory_order_acquire);
 }
 
-// What a source shows now: the ring of owner `index` if `ring`, otherwise
-// the cycle counter of process `index`.
-Seen look_at(Attachment& attachment, bool ring, std::size_t index) noexcept {
+using WatchKind = WaitSetWatch::Kind;
+
+// What a source shows now: the ring of owner `index`, the cycle counter of
+// process `index` or the queue `index`.
+Seen look_at(Attachment& attachment, WatchKind kind,
+             std::size_t index) noexcept {
     Seen seen;
-    if (ring) {
+    if (kind == WatchKind::QUEUE) {
+        const std::span<std::byte> bytes = attachment.queue_bytes(index);
+        seen.mapping = bytes.data();
+        if (!bytes.empty()) {
+            seen.word = futex_word_of(queue_write_seq(bytes));
+        }
+        return seen;
+    }
+    if (kind == WatchKind::RING) {
         const std::span<std::byte> bytes = attachment.changes_of(index);
         seen.mapping = bytes.data();
         if (!bytes.empty()) {
@@ -69,16 +82,29 @@ Seen look_at(Attachment& attachment, bool ring, std::size_t index) noexcept {
 // mapping `seen` belongs to; null otherwise.
 const void* watched_word(Attachment& attachment, const WaitSetWatch& watch,
                          const Seen& seen) noexcept {
-    const std::span<std::byte> bytes =
-        watch.ring
-            ? attachment.changes_of(watch.index)
+    std::span<std::byte> bytes;
+    switch (watch.kind) {
+        case WatchKind::RING:
+            bytes = attachment.changes_of(watch.index);
+            break;
+        case WatchKind::QUEUE:
+            bytes = attachment.queue_bytes(watch.index);
+            break;
+        case WatchKind::CYCLE:
             // In range: the index was checked by `add_cycle`.
-            : attachment.proc_of(static_cast<std::uint16_t>(watch.index));
+            bytes = attachment.proc_of(static_cast<std::uint16_t>(watch.index));
+            break;
+    }
     if (bytes.empty() || bytes.data() != seen.mapping) {
         return nullptr;
     }
-    if (watch.ring) {
-        return &ring_header(bytes).write_seq;
+    switch (watch.kind) {
+        case WatchKind::RING:
+            return &ring_header(bytes).write_seq;
+        case WatchKind::QUEUE:
+            return &queue_header(bytes).write_seq;
+        case WatchKind::CYCLE:
+            break;
     }
     return cycle_field(bytes);
 }
@@ -89,7 +115,7 @@ bool look_again(Attachment& attachment, std::span<const WaitSetWatch> watches,
                 std::span<Seen> seen) noexcept {
     bool changed = false;
     for (std::size_t i = 0; i < watches.size(); ++i) {
-        const Seen now = look_at(attachment, watches[i].ring, watches[i].index);
+        const Seen now = look_at(attachment, watches[i].kind, watches[i].index);
         if (now != seen[i]) {
             seen[i] = now;
             changed = true;
@@ -119,6 +145,9 @@ WaitSet::~WaitSet() {
     for (Subscription* subscription : subscriptions_) {
         subscription->set_wait_set(nullptr);
     }
+    for (Queue* queue : queues_) {
+        queue->set_wait_set(nullptr);
+    }
 }
 
 int WaitSet::add_sub(Subscription& subscription) {
@@ -128,6 +157,16 @@ int WaitSet::add_sub(Subscription& subscription) {
     }
     subscriptions_.push_back(&subscription);
     subscription.set_wait_set(this);
+    return SCADA_OK;
+}
+
+int WaitSet::add_queue(Queue& queue) {
+    if (&queue.attachment() != &attachment_ || queue.producer() ||
+        queue.wait_set() != nullptr || full() || event_.valid()) {
+        return SCADA_E_INVALID;
+    }
+    queues_.push_back(&queue);
+    queue.set_wait_set(this);
     return SCADA_OK;
 }
 
@@ -151,10 +190,17 @@ void WaitSet::remove(const Subscription& subscription) noexcept {
     std::erase(subscriptions_, &subscription);
 }
 
+void WaitSet::remove(const Queue& queue) noexcept {
+    std::erase(queues_, &queue);
+}
+
 bool WaitSet::take_ready() noexcept {
     bool ready = std::ranges::any_of(
         subscriptions_,
         [](const Subscription* subscription) { return subscription->ready(); });
+    ready = ready || std::ranges::any_of(queues_, [](const Queue* queue) {
+                return queue->ready();
+            });
     for (Cycle& cycle : cycles_) {
         std::uint32_t* field =
             cycle_field(attachment_.proc_of(cycle.process_index));
@@ -215,6 +261,13 @@ std::size_t WaitSet::collect_waiters(std::span<FutexWaiter> waiters,
             missing = true;
         }
     }
+    for (const Queue* queue : queues_) {
+        if (const std::optional<FutexWaiter> word = queue->waiter()) {
+            waiters[count++] = *word;
+        } else {
+            missing = true;
+        }
+    }
     for (const Cycle& cycle : cycles_) {
         if (const std::uint32_t* field =
                 cycle_field(attachment_.proc_of(cycle.process_index))) {
@@ -235,13 +288,18 @@ int WaitSet::fd(int& out) {
             return SCADA_E_IO;
         }
         std::vector<Watch> watches;
-        watches.reserve(subscriptions_.size() + cycles_.size());
+        watches.reserve(subscriptions_.size() + queues_.size() +
+                        cycles_.size());
         for (const Subscription* subscription : subscriptions_) {
-            watches.push_back(
-                {.ring = true, .index = subscription->owner_index()});
+            watches.push_back({.kind = WatchKind::RING,
+                               .index = subscription->owner_index()});
+        }
+        for (const Queue* queue : queues_) {
+            watches.push_back({.kind = WatchKind::QUEUE, .index = queue->id()});
         }
         for (const Cycle& cycle : cycles_) {
-            watches.push_back({.ring = false, .index = cycle.process_index});
+            watches.push_back(
+                {.kind = WatchKind::CYCLE, .index = cycle.process_index});
         }
         // What the thread compares against, taken before the look at what
         // is ready already: a change after the look is then a change for
@@ -249,12 +307,15 @@ int WaitSet::fd(int& out) {
         std::vector<Seen> seen;
         seen.reserve(watches.size());
         for (const Watch& watch : watches) {
-            seen.push_back(look_at(attachment_, watch.ring, watch.index));
+            seen.push_back(look_at(attachment_, watch.kind, watch.index));
         }
-        const bool ready_now = std::ranges::any_of(
-            subscriptions_, [](const Subscription* subscription) {
-                return subscription->ready();
-            });
+        const bool ready_now =
+            std::ranges::any_of(subscriptions_,
+                                [](const Subscription* subscription) {
+                                    return subscription->ready();
+                                }) ||
+            std::ranges::any_of(
+                queues_, [](const Queue* queue) { return queue->ready(); });
         try {
             // The thread is joined by the destructor, before `event_` and
             // `stop_` go; the references stay valid for its whole life.

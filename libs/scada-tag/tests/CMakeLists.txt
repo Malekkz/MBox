@@ -12,6 +12,7 @@ scada_add_test(scada-tag-unit-test KIND unit
     own_region_test.cpp
     peer_regions_test.cpp
     proc_region_test.cpp
+    queue_test.cpp
     region_file_test.cpp
     sha256_test.cpp
     subscription_test.cpp
@@ -66,3 +67,9 @@ add_test(NAME scada-tag-seqlock-bench-load
     $<TARGET_FILE:scada-tag-seqlock-bench> load string 16 0 2 1)
 set_tests_properties(scada-tag-seqlock-bench-timings
   scada-tag-seqlock-bench-load PROPERTIES LABELS perf TIMEOUT 60)
+
+# One end of a reliable queue in the integration tests: posts, consumes,
+# holds a record, or drives a cmd queue. Not installed.
+add_executable(scada-tag-test-queue queue_peer/queue_peer_main.cpp)
+target_link_libraries(scada-tag-test-queue PRIVATE scada::tag)
+scada_target_defaults(scada-tag-test-queue)

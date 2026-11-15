@@ -9,6 +9,7 @@
 #include "layout.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "shared_memory.h"
 #include "thread_mark.h"
 
@@ -44,6 +45,24 @@ int Attachment::notify() {
             continue;  // nothing written since the last wake
         }
         if (!futex_wake_all(&ring.write_seq)) {
+            error = errno;
+        }
+    }
+    for (const OwnedQueue& owned : queues_) {
+        const std::size_t index = owned.queue_id;
+        // Relaxed: as for the rings above.
+        if (queue_threads_[index].load(std::memory_order_relaxed) != self) {
+            continue;
+        }
+        QueueHeader& queue = queue_header(owned.region.memory.bytes());
+        // Relaxed: this thread is the one that posts to the queue.
+        const std::uint64_t written =
+            load_shared(queue.write_seq, std::memory_order_relaxed);
+        if (queue_woken_seq_[index].exchange(
+                written, std::memory_order_relaxed) == written) {
+            continue;
+        }
+        if (!futex_wake_all(&queue.write_seq)) {
             error = errno;
         }
     }

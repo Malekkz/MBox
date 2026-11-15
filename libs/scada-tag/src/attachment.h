@@ -11,6 +11,7 @@
 #include "own_region.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "tag_record.h"
 
 #include "scada/common/fd.h"
@@ -83,6 +84,55 @@ struct OwnedQueue {
     OwnRegion region;
 };
 
+// What the queue functions need to know about one queue of the generation.
+// Filled once by `attach`, then only read.
+struct QueueAccess {
+    std::size_t id = 0;
+    QueueKind kind = QueueKind::EVENTS;
+    std::uint32_t capacity = 0;     // from the queue table
+    std::uint32_t record_size = 0;  // from the queue table
+    std::uint16_t producer = 0;     // process index
+    std::uint16_t consumer = 0;     // process index
+    std::uint32_t consumer_timeout_ms = 0;
+    // Whether the attached process is the producer or the consumer.
+    bool produced = false;
+    bool consumed = false;
+    // The region, mapped read-write, if `produced`. Refers to a mapping
+    // `Attachment::queues()` holds, which lives as long as the attachment.
+    std::span<std::byte> own_region;
+    // The slots in the regions of other processes: the queue region and the
+    // `proc` region of the consumer.
+    std::size_t queue_slot = 0;
+    std::size_t consumer_proc_slot = 0;
+    // For a CMD queue: the RESULT queue its answers go to, the one of the
+    // same name after the prefix whose producer and consumer are the
+    // consumer and producer of this one. Nothing if there is none.
+    std::optional<std::size_t> answer_queue;
+};
+
+// The counts of one queue in one context, as scada_queue_stats reports
+// them. Each is changed by the one thread of its side of the queue, or by
+// attach before any; relaxed atomics, because scada_queue_stats may be
+// called from another thread.
+struct QueueCounters {
+    std::atomic<std::uint64_t> posted{0};
+    std::atomic<std::uint64_t> delivered{0};
+    std::atomic<std::uint64_t> expired{0};
+    std::atomic<std::uint64_t> aborted{0};
+    std::atomic<std::uint64_t> skipped{0};
+    std::atomic<std::uint64_t> answers_dropped{0};
+    std::atomic<std::uint64_t> invalid{0};
+    std::atomic<std::uint64_t> out_of_range{0};
+    std::atomic<std::uint64_t> replaced{0};
+};
+
+// Adds one to `counter`. Real-time safe: one atomic addition.
+SCADA_RT inline void count_one(std::atomic<std::uint64_t>& counter,
+                               std::uint64_t amount = 1) noexcept {
+    // Relaxed: a count on its own.
+    counter.fetch_add(amount, std::memory_order_relaxed);
+}
+
 class Attachment {
 public:
     // Attaches the calling process as `process` (section 11.2):
@@ -97,9 +147,13 @@ public:
     //    reused `tags` region is repaired and the `epoch` of a reused ring
     //    is incremented (section 6.3); an unusable region of the caller is
     //    removed; an absent one is created (section 3.2).
-    // 4. Brings the regions into memory, sets the state RUNNING and writes
+    // 4. Section 9.2: maps the regions of other processes its queues
+    //    need; if `proc.<process>` was created, starts every cursor at the
+    //    end of its queue; answers every request still in a `cmd` queue of
+    //    the process ABORTED and passes over it.
+    // 5. Brings the regions into memory, sets the state RUNNING and writes
     //    the first heartbeat.
-    // 5. Starts again from step 1, a limited number of times, if the
+    // 6. Starts again from step 1, a limited number of times, if the
     //    generation is RETIRING.
     //
     // The lock is taken before the other regions are touched, not after as
@@ -107,12 +161,10 @@ public:
     // fails before it changes anything.
     //
     // Before step 3 the tag directory is read through every slot table
-    // (`read_directory`), and after step 4 the clocks are checked (section
+    // (`read_directory`), and after step 5 the clocks are checked (section
     // 13.1).
     //
-    // Not done yet, each with the issue that adds it: retained values
-    // (P1-09), draining the `cmd` queues and setting the cursors of a new
-    // `proc` region (P1-08).
+    // Not done yet: retained values (P1-09).
     //
     // INVALID_ARGUMENT for a name that is no process name; NOT_FOUND if the
     // process is not in the process table; PERMISSION_DENIED for a wrong
@@ -248,6 +300,91 @@ public:
     // real-time.
     void refresh_peers();
 
+    // What the reliable queues need (section 9). Each queue id must be
+    // below the count of the header; another one ends the process.
+
+    // The id of the queue `name`, or nothing.
+    [[nodiscard]] std::optional<std::size_t> find_queue(
+        std::string_view name) const noexcept;
+
+    // What is known of the queue `queue_id`.
+    [[nodiscard]] const QueueAccess& queue(std::size_t queue_id) const noexcept;
+
+    // Marks the producing (`producer`) or consuming side of `queue_id` as
+    // open in this context. False if it is open already: one handle for each
+    // side (section 13.2: one thread). Safe from any thread.
+    [[nodiscard]] bool claim_queue(std::size_t queue_id,
+                                   bool producer) noexcept;
+    // Undoes `claim_queue`.
+    void release_queue(std::size_t queue_id, bool producer) noexcept;
+
+    // True if that side of `queue_id` is open in this context.
+    [[nodiscard]] bool queue_open(std::size_t queue_id,
+                                  bool producer) const noexcept;
+
+    // Asks for the regions of other processes that the open side of
+    // `queue_id` needs: the consumer's `proc` region for the producer, the
+    // queue region for the consumer. Not real-time.
+    void want_queue(std::size_t queue_id);
+
+    // The mapped region of `queue_id`: the own mapping if this process
+    // produces it, otherwise the read-only one, or an empty span while it
+    // is missing, with the guarantees of `changes_of`.
+    [[nodiscard]] std::span<std::byte> queue_bytes(
+        std::size_t queue_id) const noexcept;
+
+    // The cursor of `queue_id` in this process's own `proc` region.
+    SCADA_RT [[nodiscard]] std::uint64_t& own_cursor(
+        std::size_t queue_id) const noexcept;
+
+    // Section 9.1: posts `record` to `queue_id`, which this process
+    // produces, after the checks of `queue_region.h`; sets its id from
+    // `write_seq` (EventRecord.seq, WriteRequest.request_id) and, for a
+    // request, `posted_mono_ns` to now. A return code as scada_queue_post
+    // states. Real-time safe. One thread posts to a queue.
+    SCADA_RT [[nodiscard]] int post_record(std::size_t queue_id,
+                                           RecordWords& record) noexcept;
+
+    // Records the calling thread as the one that posts to `queue_id` if no
+    // thread is recorded, so that `notify` wakes the consumer. True if the
+    // calling thread is the recorded one. Otherwise a build without NDEBUG
+    // stops the process (section 13.2) and another build returns false: two
+    // threads that post to one queue can lose a record or tear one, so the
+    // rule holds in every build (decision D-38).
+    SCADA_RT [[nodiscard]] bool check_queue_thread(
+        std::size_t queue_id) noexcept;
+
+    // Forgets the thread recorded for `queue_id`: its side was closed.
+    void release_queue_thread(std::size_t queue_id) noexcept;
+
+    // The counts of `queue_id` in this context.
+    [[nodiscard]] QueueCounters& counters(std::size_t queue_id) noexcept;
+
+    // For a queue this process consumes and does not produce: true if the
+    // queue is dead because its region was replaced inside the generation
+    // (decision D-38). `bytes` is what `queue_bytes` gives now. The first
+    // mapping this context sees is the queue's; another one later, or none,
+    // means the file was removed, shrunk or created anew, and the records
+    // and ids of the two files cannot be told apart. The first time, the
+    // own cursor is set out of range, so that the producer gets
+    // SCADA_E_PEER_DOWN by the rule of section 9.1, also after a restart of
+    // either process, and `replaced` is counted. Sticky until detach.
+    [[nodiscard]] bool queue_dead(std::size_t queue_id,
+                                  std::span<std::byte> bytes) noexcept;
+
+    // True if `queue_dead` found the queue dead. Changes nothing.
+    [[nodiscard]] bool queue_is_dead(std::size_t queue_id) const noexcept;
+
+    // Answers the request `request_id` of the CMD queue `queue_id`, which
+    // this process consumes, with `status` in its answer queue. A return
+    // code of `post_record`; SCADA_E_NOT_FOUND if the queue has no answer
+    // queue. The answer is dropped on any error (section 9.2) and counted
+    // in `answers_dropped` of `queue_id`. The caller has made sure that the
+    // calling thread may post to the answer queue.
+    SCADA_RT [[nodiscard]] int answer(std::size_t queue_id,
+                                      std::uint64_t request_id,
+                                      WriteStatus status) noexcept;
+
     // The number of processes of the generation.
     [[nodiscard]] std::size_t process_count() const noexcept {
         return header_.contents().processes.size();
@@ -378,6 +515,18 @@ private:
                                       std::string& detail);
     void count(const OwnRegion& region) noexcept;
 
+    // Fills `queue_access_` once the own queues are attached, and asks for
+    // the regions of other processes the queues of this process need.
+    void prepare_queues();
+    // Section 9.2: the cursors of a new `proc` region start at the end of
+    // their queues; every request still in a `cmd` queue of the process is
+    // answered ABORTED and passed over.
+    void start_cursors();
+    void drain_requests();
+    // The drain of one `cmd` queue the process consumes. True if an answer
+    // was posted.
+    [[nodiscard]] bool drain_queue(const QueueAccess& access) noexcept;
+
     Fd directory_;  // the generation directory
     HeaderView header_;
     std::uint16_t process_index_ = 0;
@@ -406,6 +555,20 @@ private:
     // relaxed, because only the exchange itself matters: a thread that
     // loses it leaves the wake to the one that wins. Sized at `attach`.
     std::vector<std::atomic<std::uint64_t>> woken_seq_;
+
+    // For every queue of the generation: what `queue` returns, the thread
+    // that posts to it (as `writer_threads_`), its `write_seq` at the last
+    // wake (as `woken_seq_`), and which sides are open (`claim_queue`: bit
+    // 0 producer, bit 1 consumer). Sized at `attach`, never resized.
+    std::vector<QueueAccess> queue_access_;
+    std::vector<std::atomic<const void*>> queue_threads_;
+    std::vector<std::atomic<std::uint64_t>> queue_woken_seq_;
+    std::vector<std::atomic<std::uint8_t>> queue_open_;
+    std::vector<QueueCounters> queue_counters_;
+    // The first mapping seen of each queue, and whether it died (see
+    // `queue_dead`).
+    std::vector<std::atomic<const std::byte*>> queue_mappings_;
+    std::vector<std::atomic<bool>> queue_dead_;
 
     // The result of the last clock check and when the next one is due.
     // Atomic because `status` may run in several threads; relaxed, because

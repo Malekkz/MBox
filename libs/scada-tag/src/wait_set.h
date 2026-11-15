@@ -1,7 +1,7 @@
 #ifndef SCADA_TAG_WAIT_SET_H
 #define SCADA_TAG_WAIT_SET_H
 
-// Waiting on several change rings and cycle counters at once
+// Waiting on several change rings, queues and cycle counters at once
 // (docs/contracts/tag-database.md, section 8.4): one `futex_waitv` for all
 // of them, and on request a thread of the library that turns their wakes
 // into a process-local eventfd for poll and epoll. The C interface
@@ -10,6 +10,7 @@
 
 #include "attachment.h"
 #include "futex.h"
+#include "queue.h"
 #include "subscription.h"
 
 #include "scada/common/fd.h"
@@ -41,8 +42,13 @@ struct WaitSetSeen {
 // What the thread of `WaitSet::fd` watches: copied when it starts, so that
 // it shares nothing with the thread that uses the set.
 struct WaitSetWatch {
-    bool ring = false;      // a ring of an owner, or a cycle counter
-    std::size_t index = 0;  // owner index or process index
+    enum class Kind : std::uint8_t {
+        RING,   // the change ring of an owner
+        CYCLE,  // the cycle counter of a process
+        QUEUE,  // a queue this process consumes
+    };
+    Kind kind = Kind::RING;
+    std::size_t index = 0;  // owner index, process index or queue id
 };
 
 // One thread uses a wait set and its subscriptions (section 13.2). The
@@ -63,6 +69,10 @@ public:
     // set when it is destroyed (`remove`).
     [[nodiscard]] int add_sub(Subscription& subscription);
 
+    // As scada_waitset_add_queue. The queue is borrowed: it leaves the set
+    // when it is destroyed (`remove`).
+    [[nodiscard]] int add_queue(Queue& queue);
+
     // As scada_waitset_add_cycle.
     [[nodiscard]] int add_cycle(std::uint16_t process_index);
 
@@ -72,8 +82,10 @@ public:
     // As scada_waitset_fd.
     [[nodiscard]] int fd(int& out);
 
-    // Takes `subscription` out of the set. Called by its destructor.
+    // Takes `subscription` or `queue` out of the set. Called by their
+    // destructors.
     void remove(const Subscription& subscription) noexcept;
+    void remove(const Queue& queue) noexcept;
 
 private:
     // A cycle counter of the set: the process, and the count the last
@@ -102,11 +114,13 @@ private:
                       const std::atomic<std::uint32_t>& stop);
 
     [[nodiscard]] bool full() const noexcept {
-        return subscriptions_.size() + cycles_.size() >= MAX_WAIT_SET_SOURCES;
+        return subscriptions_.size() + queues_.size() + cycles_.size() >=
+               MAX_WAIT_SET_SOURCES;
     }
 
     Attachment& attachment_;
     std::vector<Subscription*> subscriptions_;  // borrowed
+    std::vector<Queue*> queues_;                // borrowed
     std::vector<Cycle> cycles_;
 
     // The eventfd of `fd`, and the word that stops its thread: 1 tells it

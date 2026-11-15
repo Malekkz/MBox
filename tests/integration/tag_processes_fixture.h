@@ -105,8 +105,10 @@ protected:
     }
 
     // The small tag set: scada-tagd; `io` with the tag `plant.level`;
-    // `probe` with the tag `probe.out`; and `reader` without tags. All run
-    // as the user of the test.
+    // `probe` with the tag `probe.out`, the event queue `events.probe` to
+    // `io` and the requests of `io` in `cmd.probe.io`, answered in
+    // `result.probe.io`; and `reader` without tags. All run as the user of the
+    // test.
     void write_small_tag_set() const {
         const std::string uid = std::to_string(::geteuid());
         std::ofstream file(tag_set_path());
@@ -119,7 +121,13 @@ protected:
              << R"(}], "owners": [)" << R"({"name": "io", "process": "io", )"
              << R"("change_ring_capacity": 1024}, )"
              << R"({"name": "probe", "process": "probe", )"
-             << R"("change_ring_capacity": 1024}], "queues": [], "tags": [)"
+             << R"("change_ring_capacity": 1024}], "queues": [)"
+             << R"({"name": "events.probe", "producer": "probe", )"
+             << R"("consumer": "io"}, )"
+             << R"({"name": "cmd.probe.io", "producer": "io", )"
+             << R"("consumer": "probe"}, )"
+             << R"({"name": "result.probe.io", "producer": "probe", )"
+             << R"("consumer": "io"}], "tags": [)"
              << R"({"name": "plant.level", "owner": "io", "type": "float64"}, )"
              << R"({"name": "probe.out", "owner": "probe", )"
              << R"("type": "float64"}]})" << "\n";

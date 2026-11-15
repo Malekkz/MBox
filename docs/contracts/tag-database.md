@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.6 (draft) |
+| Contract version | 0.9 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -561,7 +561,9 @@ was kept in reserve, one eventfd per ring passed to consumers by
 ## 9. Reliable queues (`events.*`, `cmd.*`, `result.*`)
 
 A reliable queue has exactly one producing thread and one consuming thread,
-in the processes fixed in the queue table. Nothing is ever overwritten.
+in the processes fixed in the queue table. They are two different
+processes; the tag-set builder refuses a queue with one process at both
+ends. Nothing is ever overwritten.
 
 ```cpp
 struct QueueHeader {             // 64 bytes, alignas(64), follows RegionHeader
@@ -616,13 +618,42 @@ A command is never executed twice and never executed late:
   do not survive a driver restart.
 - A request whose `expiry_mono_ns` has passed, or whose lifetime
   (`expiry_mono_ns - posted_mono_ns`) is longer than the limit in section 14,
-  is answered EXPIRED and not executed.
-- If the answer cannot be posted (result queue full or requester down) it is
-  dropped; the requester sees the request expire.
+  is answered EXPIRED and not executed. The library does this:
+  `scada_queue_next` never returns such a request; it answers it in the
+  answer queue and takes the next one. The consumer judges its copy of the
+  request on its own clock, read after `write_seq`: the request must not be
+  executed when its expiry is not after now, it was posted after now, it
+  expires before it was posted, its lifetime is longer than the limit, or
+  its expiry lies more than the limit ahead of now. The cursor moves on
+  before the answer is posted, so a crash loses at most the answer. The
+  answer queue of `cmd.<x>` is `result.<x>` with producer and consumer
+  swapped. One thread posts to a queue, in every build; for the answer
+  queue that is the thread that takes the requests of the `cmd` queue. A
+  driver answers what it received, the library what it did not deliver,
+  and the driver checks `expiry_mono_ns` again right before it acts on the
+  device.
+- If the answer cannot be posted (result queue full, requester down, or no
+  answer queue) it is dropped and counted; the requester sees the request
+  expire. `scada_queue_next` never blocks or fails on the answer queue.
+
+A record is outside input to the consumer. One that fails the checks of
+section 9.4 is passed over with `SCADA_E_LAYOUT`. A cursor and `write_seq`
+out of range are reported with `SCADA_E_LAYOUT` and nothing is consumed;
+the producer gets `SCADA_E_PEER_DOWN` (section 9.1). The queue then stays
+stopped until the next generation; each look is counted. A consumer that
+finds the queue's file replaced, removed or shrunk inside the generation
+(another mapping than the first it saw) treats the queue as dead whatever
+cursor and `write_seq` say, and stores an all-ones cursor so that the
+producer gets `SCADA_E_PEER_DOWN` (section 16).
+
+EVENTS and RESULT: until the ack, `scada_queue_next` returns the same record
+again. CMD: the cursor advances after the copy and before `scada_queue_next`
+returns.
 
 A consumer that creates a new `proc` region inside an existing generation has
 lost its cursors. It sets each cursor to the queue's current `write_seq` and
-reports how many records were skipped.
+reports how many records were skipped (`scada_queue_stats`, `skipped`; the
+drained requests are counted in `aborted`).
 
 ### 9.3 No audit, no action
 
@@ -683,6 +714,28 @@ struct WriteResult {             // 32 bytes, queues of kind RESULT
 ```
 
 String values cannot be commanded through `WriteRequest` in layout version 1.
+
+`EventRecord.kind`: 1 ALARM, 2 COMMAND, 3 AUDIT, 4 SYSTEM. The library sets
+`EventRecord.seq`, `WriteRequest.request_id` and `WriteRequest.posted_mono_ns`
+(the time of the post) at post; the poster sets the rest. That
+`posted_mono_ns` is set by the library guards against a caller's bug, not
+against a producer that writes its region directly; the consumer's own
+clock bounds the lifetime (section 9.2).
+
+Checks of a record, made at post (`SCADA_E_INVALID`) and when it is taken:
+
+- Every reserved field is 0.
+- Event: a kind above, `payload_len` at most 232.
+- Request: `operation` and `source` of their enumerations; `value_type` BOOL,
+  INT64, UINT64 or FLOAT64, or 0 with `value` 0 for CANCEL and READ_NOW; a
+  BOOL value 0 or 1; `user_id` 0 for AUTO and REMOTE; `select_request_id`
+  not 0 exactly for OPERATE and CANCEL; at post, not expired and a lifetime
+  within the limit, by the rule of section 9.2. The target handle is the
+  driver's to judge.
+- Result: `status` 1 to 7.
+- When taken, the id of an event or request equals its position
+  (`seq`, or `request_id = (queue_id << 48) | position`). A `cmd` queue
+  whose `write_seq` reaches 2^48 refuses further posts with `SCADA_E_FULL`.
 
 Record ids come from the queue's `write_seq`, which lives in the region and
 survives a producer restart, so an id is never reused within a generation. Ids
@@ -900,6 +953,7 @@ int  scada_queue_open(scada_ctx *ctx, const char *queue_name, scada_queue **out)
 int  scada_queue_post(scada_queue *q, const void *record, size_t size);   /* RT-safe */
 int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);
 int  scada_queue_ack(scada_queue *q);                  /* EVENTS and RESULT only */
+int  scada_queue_stats(scada_queue *q, scada_queue_stats_t *out);   /* counts of one side */
 void scada_queue_close(scada_queue *q);
 
 /* Waiting on several sources */
@@ -949,6 +1003,25 @@ typedef struct {
                                     5 owner back */
   uint8_t  reserved[2];
 } scada_sub_stats_t;             /* 48 bytes */
+```
+
+```c
+typedef struct {                 /* one side of a queue in one context, since attach */
+  uint64_t posted;               /* producer: records accepted */
+  uint64_t delivered;            /* consumer: records returned, redeliveries included */
+  uint64_t expired;              /* cmd consumer: requests answered EXPIRED, not returned */
+  uint64_t aborted;              /* cmd consumer: requests drained at attach */
+  uint64_t skipped;              /* consumer: records passed over at attach; for events, lost audit records */
+  uint64_t answers_dropped;      /* cmd consumer: answers that could not be posted */
+  uint64_t invalid;              /* consumer: records passed over as not valid */
+  uint64_t out_of_range;         /* consumer: looks that found cursor and write_seq out of range */
+  uint64_t replaced;             /* consumer: queue file replaced inside the generation (dead);
+                                    producer: file created anew while the consumer's cursor was not 0 */
+  uint16_t queue_id;
+  uint16_t kind;                 /* 6 EVENTS, 7 CMD, 8 RESULT */
+  uint8_t  producer;             /* 1 producer's side, 0 consumer's */
+  uint8_t  reserved[3];
+} scada_queue_stats_t;           /* 80 bytes */
 ```
 
 Every GAP asks for the same action, a read of the tags. The reason is for
@@ -1120,6 +1193,8 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Heartbeat timeout defaults | 3,000 ms general, 500 ms for real-time processes | P1-04, confirmed in P1-12 | Conformance tests 5 and 26 |
 | Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 21, with a value changed immediately before the change |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
+| Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-38) | P1-13 | Decided before 1.0 |
+| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-38, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
 
 ## 17. Differences from the reference document
 
@@ -1169,6 +1244,10 @@ Smaller points where this contract adds to or narrows the reference:
     is configurable.
 17. The base directory is created by the platform at boot. Minimum kernel
     Linux 5.16.
+18. Expired and over-long write requests are refused by `libscada-tag`
+    (section 9.2), while reference 6.1 puts command queue handling in
+    `libscada-driver`. A driver never sees an expired OPERATE or CANCEL, so
+    drivers time out selections themselves.
 
 ## 18. Change log
 
@@ -1182,6 +1261,12 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 | 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
+| 0.9 | 2026-11-15 | Reliable queues (P1-08, D-38). Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 18. |
+
+Migration, 0.6 to 0.9: none for data; the layout version stays 1 and no
+structure in shared memory changed. The queue functions are new; nothing
+used them before. A tag set with a queue whose producer and consumer are
+one process is now refused.
 
 Migration, 0.5 to 0.6: none for data; the layout version stays 1 and no
 structure changed. A process whose heartbeat time lies more than its timeout

@@ -6,8 +6,7 @@ layout, the tag-set definition, the builder of the `header` region, the side
 of `scada-tagd` (generations, the `proc` region and liveness) and attach: a
 process joins the current generation, creates or reuses and repairs its own
 regions, and maps the regions of other processes read-only; and tag read
-and write with the sequence lock. Rings and queues follow in later phase 1
-issues.
+and write with the sequence lock; change rings; and reliable queues.
 
 ## What it does
 
@@ -41,11 +40,13 @@ issues.
   `scada_tag_write_string`. See "Tag read and write" below.
 - Change rings and waking, in the same header: `scada_tag_notify`,
   `scada_sub_open`, `scada_sub_next`, `scada_sub_stats`, `scada_sub_close`
-  and the wait sets `scada_waitset_*` (without queues, which come with issue
-  P1-08). See "Change rings and waking" below.
-
-The values of `EventRecord.kind` are not defined: the contract names them
-without numbers.
+  and the wait sets `scada_waitset_*`. See "Change rings and waking" below.
+- Reliable queues, in the same header: `scada_queue_open`,
+  `scada_queue_post`, `scada_queue_next`, `scada_queue_ack`,
+  `scada_queue_stats`, `scada_queue_close`, `scada_waitset_add_queue`, and
+  the records
+  `scada_event_record`, `scada_write_request` and `scada_write_result`. See
+  "Reliable queues" below.
 
 ## Interfaces
 
@@ -250,7 +251,11 @@ here, not a signal later.
    odd `seq` gets quality BAD and flag NOT_INIT, its string slot gets length
    0, then `seq + 1` is stored. Other records keep their value. The `epoch`
    of a reused change ring is incremented.
-6. The regions are brought into memory, the state becomes RUNNING and the
+6. The queues (contract 9.2): if `proc.<process>` was created, the cursor
+   of every queue the process consumes is set to the end of the queue, and
+   the records passed over are counted. Every request still in a `cmd`
+   queue of the process is answered ABORTED and passed over, unexecuted.
+7. The regions are brought into memory, the state becomes RUNNING and the
    first heartbeat is written. If the generation is RETIRING, attach starts
    again from step 1, at most 5 times, then returns `SCADA_E_RETIRING`.
 
@@ -271,12 +276,15 @@ failed: `ENOENT` if there is no base directory or no current generation,
 `ENOSPC` if the file system has no room for a region.
 
 Regions of other processes are mapped read-only when they are asked for
-(`PeerRegions`; the callers are tag resolve, subscriptions, wait sets, the
-queues of issue P1-08, and the liveness of `scada-tagd` in
+(`PeerRegions`; the callers are tag resolve, subscriptions, wait sets,
+attach and queue open for the queues, and the liveness of `scada-tagd` in
 `scada_tag_status`). A region that is missing, not ready or fails a check
 of contract 3.1 is not an error: it reads as missing and is looked for
 again at most once a second, from `scada_tag_notify`, `scada_tag_status`,
-and a subscription or wait set that waits on it. A
+and a subscription, queue or wait set that waits on it. Two processes that
+start together therefore find each other within about a second: a post
+gets `SCADA_E_PEER_DOWN` until the producer has looked again for the
+`proc` region of a consumer that attached after it. A
 mapping is never removed while the process is attached, so a reader that
 holds it keeps a valid view; a region whose file is replaced more than 16
 times reads as missing until the reader attaches again.
@@ -286,8 +294,7 @@ and keeps the type of every tag, 1 byte each; a slot without a valid entry
 fails attach with `SCADA_E_LAYOUT`. And it checks the clocks, see "Tag read
 and write".
 
-Not part of attach yet: retained values (issue P1-09), draining the `cmd`
-queues and the cursors of a new `proc` region (issue P1-08).
+Not part of attach yet: retained values (issue P1-09).
 
 ## Tag read and write
 
@@ -432,6 +439,84 @@ timeout plus 100 ms, at once after a clean stop. While the owner is down, a
 change that still arrives comes as BAD with OWNER_DOWN, as a read would
 give it. `scada_sub_stats` counts these owner changes.
 
+## Reliable queues
+
+Contract section 9; decision D-38.
+
+A queue has one producing process and one consuming process, fixed in the
+queue table (the tag-set builder refuses one process at both ends), and in
+each one thread. `scada_queue_open` opens the side the calling process has;
+a second open of the same side in one context gets `SCADA_E_BUSY`.
+
+| Function | What it does |
+| --- | --- |
+| `scada_queue_post` | Producer. Copies one record into the queue; real-time safe |
+| `scada_queue_next` | Consumer. The next record, waiting up to a timeout |
+| `scada_queue_ack` | Consumer of EVENTS and RESULT: the record is processed |
+| `scada_queue_stats` | The counts of one side in its context since attach: posted, delivered, expired, aborted, skipped, answers dropped, invalid, out of range, replaced |
+| `scada_queue_close` | Closes the side, and takes it out of its wait set |
+| `scada_waitset_add_queue` | The consumer's side as a source of a wait set |
+
+A post (contract 9.1) is refused with `SCADA_E_PEER_DOWN` when the
+consumer's process is down by the three rules of contract 10.1, judged by
+the producer, or its cursor is out of range; with `SCADA_E_FULL` when
+`capacity` records are not yet finished with; and with `SCADA_E_INVALID`
+when the record fails its checks. The library sets the id: `seq` of an
+event and `request_id` of a request are taken from `write_seq`, which
+survives a producer restart, so no id is reused in a generation; it also
+sets `posted_mono_ns` of a request to the time of the post (a guard against
+a caller's bug, not a security boundary: the consumer bounds the lifetime on
+its own clock). One thread posts to a queue, in every build: a second one
+is refused with `SCADA_E_INVALID` (a debug build stops). A post wakes
+nobody; `scada_tag_notify` wakes the consumers of the queues the calling
+thread posted to.
+
+The checks of a record, at post and again when it is taken, since the
+consumer reads it from another process:
+
+| Record | Checks |
+| --- | --- |
+| Event | `kind` 1 ALARM, 2 COMMAND, 3 AUDIT or 4 SYSTEM; `payload_len` at most 232 |
+| Write request | `operation` and `source` of their enumerations; `value_type` BOOL, INT64, UINT64 or FLOAT64, or 0 with value 0 for CANCEL and READ_NOW; a BOOL value 0 or 1; `user_id` 0 for AUTO and REMOTE; `select_request_id` set for OPERATE and CANCEL only; reserved fields 0; not expired (below) |
+| Write result | `status` 1 to 7; reserved fields 0 |
+
+When a record is taken its id must also be its position. A record that
+fails is passed over with `SCADA_E_LAYOUT`. A cursor out of range is not
+followed: `scada_queue_next` gives `SCADA_E_LAYOUT` and the producer
+`SCADA_E_PEER_DOWN` until the next generation; each look is counted in
+`out_of_range`. The library does not log it: the process logs once when it
+starts and ends, and does not spin on `SCADA_E_LAYOUT`.
+
+Delivery (contract 9.2):
+
+- EVENTS and RESULT, at least once: the cursor in the consumer's `proc`
+  region moves on at `scada_queue_ack`. Until then `scada_queue_next` gives
+  the same record again, also after a crash and restart.
+- CMD, at most once: the cursor moves on before `scada_queue_next` returns,
+  so a request is never delivered twice. A request is not returned, but
+  answered EXPIRED in the result queue of the same `<driver>.<source>`,
+  when, on the consumer's clock read after `write_seq`, its expiry is not
+  after now, it was posted after now, it expires before it was posted, it
+  lives longer than 60 s, or its expiry is more than 60 s ahead. The
+  cursor moves on first. The thread that takes the requests of a `cmd`
+  queue is the one that posts to its result queue (bound at the first
+  `scada_queue_next`). At attach, every request still queued is answered
+  ABORTED (step 6 of "Attach"). An answer that cannot be posted (result
+  queue full, requester down, no result queue, another thread bound) is
+  dropped and counted; the requester sees the request expire. One call
+  passes over at most a queue's capacity of expired requests before it
+  looks at its deadline; with timeout 0 it makes no system call. A driver
+  checks the expiry again right before it acts on the device.
+
+A consumer that creates its `proc` region in an existing generation starts
+every cursor at the end of its queue and reports the records it skipped in
+`skipped` of `scada_queue_stats` (for an events queue: lost audit records).
+A queue whose file is replaced, removed or shrunk inside the generation is
+dead: the consumer remembers the first mapping it saw, gets `SCADA_E_LAYOUT`
+when it finds another or none, counts `replaced`, and stores an all-ones
+cursor so that the producer gets `SCADA_E_PEER_DOWN`. It stays so until a
+tag-set change or a reboot (decision D-38, issue #53).
+
 ## How to use it
 
 Link the CMake target `scada::tag`:
@@ -493,8 +578,10 @@ ctest --preset dev -R scada-tagd-integration-test
 ctest --preset dev -R scada-tag-access-integration-test
 ctest --preset dev -R scada-tag-rt-integration-test
 ctest --preset dev -R scada-tag-change-ring-integration-test
+ctest --preset dev -R scada-tag-queue-integration-test
 ctest --preset dev -R 'tag_set_json_fuzz-corpus|region_name_fuzz-corpus'
 ctest --preset dev -R 'header_region_fuzz-corpus|utf8_fuzz-corpus'
+ctest --preset dev -R queue_record_fuzz-corpus
 cmake --preset perf && cmake --build --preset perf
 ctest --preset perf -R scada-tag-header-perf-test
 ctest --preset perf -R scada-tag-wake-perf-test
@@ -591,6 +678,22 @@ ctest --preset perf -R scada-tag-wake-perf-test
   contract); `Conformance03*` does the same at the maximum rate;
   `Conformance05*` kills an owner in the middle of a write, with and
   without `scada-tagd`; `Conformance06*` stops one cleanly.
+- `Queues.*` covers the reliable queues in one process: order, ids, FULL,
+  PEER_DOWN, redelivery before the ack and after a restart, the drain of
+  the `cmd` queues at attach, expiry, the record checks at post and when a
+  record is taken, cursors and `write_seq` out of range, a new `proc`
+  region, a queue file replaced or removed inside the generation
+  (`ReplacedQueue.*` too), the answers EXPIRED and ABORTED and their drops,
+  the thread of a queue, the counts, and wait sets. `QueueRecords.*`
+  covers the record checks alone.
+  Together they are the part of conformance tests 16 to 19 that needs one
+  process.
+- `scada-tag-queue-integration-test` (in `tests/integration/`) runs
+  conformance tests 16, 17 and 19 with real processes, and one million
+  records through one queue of 1,024 places without loss, duplication or
+  reordering. The other end is `scada-tag-test-queue` (in
+  `tests/queue_peer/`), which posts, consumes, holds a record without its
+  ack, or drives a `cmd` queue.
 - `scada-tag-rt-integration-test` is conformance test 22: it traces the
   helper `scada-tag-rt-probe` (in `tests/probe/`) and fails if a real-time
   safe function makes a system call, calls a C++ allocation function or
@@ -614,6 +717,11 @@ ctest --preset perf -R scada-tag-wake-perf-test
 - `region_name_fuzz` (in `fuzz/`) feeds the parsers of directory entry
   names with arbitrary bytes and checks that they accept only the names this
   library writes. Its seed corpus runs as `region_name_fuzz-corpus`.
+- `queue_record_fuzz` (in `fuzz/`) takes arbitrary bytes as an event, a
+  write request and a write result, compares the checks with the rules
+  written another way, checks the round trip through each structure, and
+  the expiry check on any pair of times. Its seed corpus runs as
+  `queue_record_fuzz-corpus`.
 - `tag_set_json_fuzz` (in `fuzz/`) feeds the parser, and the builder behind
   it, with arbitrary bytes. Its seed corpus runs as the unit test
   `tag_set_json_fuzz-corpus` in every build.

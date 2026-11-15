@@ -303,6 +303,14 @@ Status resolve_queues(const TagSet& tag_set, ResolvedTagSet& resolved,
         if (!consumer.ok()) {
             return consumer.status();
         }
+        if (producer.value() == consumer.value()) {
+            // A queue is between two processes (contract, section 9); with
+            // one at both ends its side could not be told at open.
+            detail = about(QUEUE, queue.name,
+                           "producer and consumer must be different "
+                           "processes");
+            return INVALID_VALUE;
+        }
         if (!std::has_single_bit(queue.capacity)) {
             detail = about(QUEUE, queue.name,
                            "capacity " + std::to_string(queue.capacity) +
