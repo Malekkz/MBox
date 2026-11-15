@@ -24,6 +24,7 @@ expect_directory("var/lib/scada/journal")
 expect_directory("var/lib/scada/retain")
 expect_directory("usr/lib/scada")
 expect_directory("usr/bin")
+expect_file("usr/bin/scadactl")
 expect_directory("usr/share/scada/web")
 
 # Licence report and bill of materials (reference 13.6, 16.3).
