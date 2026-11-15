@@ -352,6 +352,11 @@ int Attachment::post_record(std::size_t queue_id,
     if (written - read == access.capacity) {
         return SCADA_E_FULL;
     }
+    if (written + 1 == DEAD_CURSOR) {
+        // DEAD_CURSOR is reserved (decision D-38): no `write_seq` reaches
+        // it, so that it is never a valid cursor.
+        return SCADA_E_FULL;
+    }
 
     // Section 9.4: the id comes from `write_seq`.
     switch (access.kind) {

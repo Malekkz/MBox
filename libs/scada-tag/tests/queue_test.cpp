@@ -961,8 +961,12 @@ TEST_F(Queues, AReplacedQueueFileIsDeadAlsoWithTheCursorAtZero) {
     ASSERT_TRUE(posts_events(*out, 1));    // the window: accepted
     look_again(*web());
     EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_LAYOUT));
-    EXPECT_EQ(reader->stats().delivered, 0U);  // no old and no new record
     EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
+    // THE LOSS this test shows, until issue #53 (a base sequence) closes
+    // the window: one record was accepted with SCADA_OK and is never
+    // delivered. The fix turns these two around.
+    EXPECT_EQ(out->stats().posted, 1U);
+    EXPECT_EQ(reader->stats().delivered, 0U);
 }
 
 TEST_F(Queues, ResultsReachTheRequester) {

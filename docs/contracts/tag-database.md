@@ -644,7 +644,10 @@ stopped until the next generation; each look is counted. A consumer that
 finds the queue's file replaced, removed or shrunk inside the generation
 (another mapping than the first it saw) treats the queue as dead whatever
 cursor and `write_seq` say, and stores an all-ones cursor so that the
-producer gets `SCADA_E_PEER_DOWN` (section 16).
+producer gets `SCADA_E_PEER_DOWN` (section 16). The all-ones cursor
+(2^64 - 1) is reserved: no `write_seq` reaches it (a post that would make
+`write_seq` equal to it is refused with `SCADA_E_FULL`), so by the range rule
+every reader of a cursor finds it out of range and consumes nothing.
 
 EVENTS and RESULT: until the ack, `scada_queue_next` returns the same record
 again. CMD: the cursor advances after the copy and before `scada_queue_next`

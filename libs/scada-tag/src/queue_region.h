@@ -34,9 +34,12 @@ inline constexpr unsigned REQUEST_ID_SEQ_BITS = 48;
 inline constexpr std::uint64_t MAX_REQUEST_SEQ =
     (std::uint64_t{1} << REQUEST_ID_SEQ_BITS) - 1;
 
-// The cursor a consumer stores when its queue died (decision D-38): beyond
-// every `write_seq`, so that the producer refuses posts with
-// SCADA_E_PEER_DOWN.
+// The cursor a consumer stores when its queue died (decision D-38): a
+// reserved value that no `write_seq` reaches (a post that would make
+// `write_seq` equal to it is refused), so every reader of a cursor, by the
+// range rule of section 9.1, finds it out of range: the producer refuses
+// posts with SCADA_E_PEER_DOWN, the consumer and the drain at attach
+// consume nothing.
 inline constexpr std::uint64_t DEAD_CURSOR = ~std::uint64_t{0};
 
 // The longest lifetime of a write request, expiry_mono_ns - posted_mono_ns,
