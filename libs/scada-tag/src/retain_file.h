@@ -140,7 +140,7 @@ public:
 };
 
 // The file system calls of `write_retain_file`, so that a test can put a
-// model of a power loss in their place (decision D-44). Each call returns
+// model of a power loss in their place (decision D-45). Each call returns
 // 0 or an error number. `dir_fd` is the retain directory.
 class RetainFileOps {
 public:
@@ -213,7 +213,7 @@ struct LoadedValues {
 // The retained values of the tags `wanted` of `owner`, from the directory
 // open as `dir_fd`: each from the owner's own file if it has the name with
 // that type; otherwise from another owner's file that has it (a tag that
-// moved to another owner, decision D-44), the most recently written file
+// moved to another owner, decision D-45), the most recently written file
 // first. A record whose type differs is skipped. A file that fails its
 // checks is ignored and listed in `rejected`.
 [[nodiscard]] LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,

@@ -337,7 +337,7 @@ Result<std::uint8_t> tag_flags(const TagDefinition& tag, std::string& detail) {
         return INVALID_VALUE;
     }
     if (tag.retain && tag.type == TagType::STRING) {
-        // A retain file holds 64-bit values only (decision D-44).
+        // A retain file holds 64-bit values only (decision D-45).
         detail = about(TAG, tag.name, "a string tag cannot be retained");
         return INVALID_VALUE;
     }

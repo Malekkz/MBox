@@ -44,7 +44,7 @@ constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 
 // True if `copy`, a record of a tag of type `type`, holds a value worth
-// keeping (decision D-44): a value an owner may store, of quality GOOD or
+// keeping (decision D-45): a value an owner may store, of quality GOOD or
 // UNCERTAIN, not NOT_INIT.
 bool holds_value(const RecordCopy& copy, TagType type) noexcept {
     const bool quality = copy.quality == to_raw(Quality::GOOD) ||
@@ -190,7 +190,7 @@ void RetainKeeper::describe(Watched& watched, bool retired,
             bool now = (entry->flags & to_raw(TagFlag::RETAIN_NOW)) != 0;
             // In a retired generation, a tag the current generation retains
             // counts too: an owner it moved to waits for this file
-            // (decision D-44).
+            // (decision D-45).
             if (retired && !retain && current_ != nullptr) {
                 const std::optional<TagEntry> later =
                     current_->header->find_tag(entry->name);
@@ -472,7 +472,7 @@ void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
         }
         OwnerState& state = states_[owner.name];
         const bool in_flight = state.done_token != state.token;
-        // Decision D-44: once the owner has a region in the current
+        // Decision D-45: once the owner has a region in the current
         // generation, which holds newer values, nothing is written for it
         // from an older one.
         if (!owner.final_submitted && current_has_region(owner.name)) {
@@ -489,7 +489,7 @@ void RetainKeeper::finish(Watched& watched, std::int64_t now_mono_ns) {
         }
         // Left: the owner stored a state other than RUNNING after its last
         // write, or holds its lock no more. A stale heartbeat alone is not
-        // enough: a hung owner can go on writing (decision D-44).
+        // enough: a hung owner can go on writing (decision D-45).
         bool left = true;
         if (owner.process_index < watched.processes.size()) {
             WatchedProcess& process = watched.processes[owner.process_index];

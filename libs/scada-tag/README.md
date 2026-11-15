@@ -300,7 +300,7 @@ and keeps the type of every tag, 1 byte each; a slot without a valid entry
 fails attach with `SCADA_E_LAYOUT`. And it checks the clocks, see "Tag read
 and write".
 
-Retained values (contract, section 12; decision D-44): a `tags` region that
+Retained values (contract, section 12; decision D-45): a `tags` region that
 attach creates gets the values of its owner's `retain` tags before it is
 published, with quality UNCERTAIN, flag RESTORED, the stored source time and
 the time of the restore as update time. A value is taken from
@@ -540,7 +540,7 @@ consumer reads it from another process:
 | Record | Checks |
 | --- | --- |
 | Event | `kind` 1 ALARM, 2 COMMAND, 3 AUDIT or 4 SYSTEM; `payload_len` at most 232 |
-| Write request | `operation` and `source` of their enumerations; `value_type` BOOL, INT64, UINT64 or FLOAT64, or 0 with value 0 for CANCEL and READ_NOW; a BOOL value 0 or 1; `user_id` 0 for AUTO and REMOTE; `select_request_id` set for OPERATE and CANCEL only; reserved fields 0; not expired (below) |
+| Write request | `operation` and `source` of their enumerations; `value_type` BOOL, INT64, UINT64 or FLOAT64, or 0 with value 0 for CANCEL and READ_NOW; a BOOL value 0 or 1; `user_id` not 0 for OPERATOR (the commanding user) and 0 for AUTO and REMOTE; `select_request_id` set for OPERATE and CANCEL only; reserved fields 0; not expired (below) |
 | Write result | `status` 1 to 7; reserved fields 0 |
 
 When a record is taken its id must also be its position. A record that

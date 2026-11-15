@@ -1,5 +1,5 @@
 // Unit tests for the restore of retained values at attach (contract,
-// section 12; decision D-44): a new `tags` region gets the values of its
+// section 12; decision D-45): a new `tags` region gets the values of its
 // owner's RETAIN tags, a reused one keeps its own, a damaged file is
 // ignored, and an attach after a generation change waits, with a bound,
 // for the FINAL file of the generation the owner left.

@@ -67,7 +67,7 @@ constexpr std::size_t OWNER_INFO = 48;
 constexpr std::size_t PROC_STATUS = 88;
 constexpr std::size_t PROC_STATUS_RESERVED = 82;
 constexpr std::size_t QUEUE_STATS = 80;    // decision D-40
-constexpr std::size_t RETAIN_STATUS = 16;  // decision D-44
+constexpr std::size_t RETAIN_STATUS = 16;  // decision D-45
 }  // namespace sizes
 static_assert(sizeof(scada_status) == sizes::STATUS);
 static_assert(sizeof(scada_retain_status_t) == sizes::RETAIN_STATUS);

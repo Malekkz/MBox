@@ -2,7 +2,7 @@
 #define SCADA_TAG_RETAIN_KEEPER_H
 
 // The side of scada-tagd in retained values and retired generations
-// (docs/contracts/tag-database.md, sections 11.3 and 12; decision D-44). It
+// (docs/contracts/tag-database.md, sections 11.3 and 12; decision D-45). It
 // reads the RETAIN tags of the current generation with the read of section
 // 6.2, without the owner-down overlay, has the retain files written by a
 // thread of its own, and finishes the generations that were retired: a
@@ -44,7 +44,7 @@ namespace scada::tag {
 inline constexpr std::int64_t RETAIN_RETRY_INTERVAL_NS = 1'000'000'000;
 
 // Writes retain files on a thread of its own, so that a slow fsync never
-// holds up the liveness loop of scada-tagd (decision D-44). Of several
+// holds up the liveness loop of scada-tagd (decision D-45). Of several
 // files of one owner waiting, only the newest is written.
 class RetainWriter {
 public:
@@ -217,7 +217,7 @@ private:
         std::optional<std::int64_t> last_write_mono_ns;
         std::int64_t next_retry_mono_ns = 0;
         // The newest retired generation this owner was seen to leave, whose
-        // values the file therefore holds; sticky (decision D-44).
+        // values the file therefore holds; sticky (decision D-45).
         std::optional<GenerationIdentity> final_source;
         // The FINAL mark of the last file on disk.
         std::optional<GenerationIdentity> final_on_disk;
@@ -242,7 +242,7 @@ private:
     void read_current();
 
     // True if the current generation has a ready `tags` region of the
-    // owner `name` (decision D-44: then no file is written for it from an
+    // owner `name` (decision D-45: then no file is written for it from an
     // older generation).
     [[nodiscard]] bool current_has_region(const std::string& name);
 

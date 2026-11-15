@@ -1,5 +1,5 @@
 // Unit tests for the side of scada-tagd in retained values and retired
-// generations (contract, sections 11.3 and 12; decision D-44), through
+// generations (contract, sections 11.3 and 12; decision D-45), through
 // GenerationHost: when a retain file is written and with what, the FINAL
 // file of an owner that left a retired generation, and the removal of
 // that generation, also with an observer still in it.

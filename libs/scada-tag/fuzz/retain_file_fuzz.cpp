@@ -1,5 +1,5 @@
 // Fuzz target for the retain file parser (contract, section 12; decision
-// D-44). A retain file is outside input to every process that loads it. A
+// D-45). A retain file is outside input to every process that loads it. A
 // file that parses must encode back to the same bytes, so that what the
 // parser accepts is exactly what the format allows.
 

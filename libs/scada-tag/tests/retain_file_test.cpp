@@ -1,4 +1,4 @@
-// Unit tests for the retain file (contract, section 12; decision D-44): the
+// Unit tests for the retain file (contract, section 12; decision D-45): the
 // format, its checks, the atomic write and the lookup of one owner's values.
 
 #include "retain_file.h"

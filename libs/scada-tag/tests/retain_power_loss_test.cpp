@@ -1,5 +1,5 @@
 // The atomic write of a retain file against a model of a power loss
-// (contract, section 12; decision D-44). SIGKILL cannot show durability:
+// (contract, section 12; decision D-45). SIGKILL cannot show durability:
 // the page cache survives the kill. Here the file system calls of
 // write_retain_file go to a model that keeps, for every file, what was
 // synced apart from what was written, and for the directory, the entries

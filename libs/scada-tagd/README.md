@@ -19,7 +19,7 @@ process. The executable in `services/scada-tagd` only calls it.
   interval. A hung loop therefore stops the heartbeat and the watchdog
   together.
 - From the same loop, retained values (contract, section 12; decision
-  D-44): the tags marked `retain` are read with the sequence-lock read, and
+  D-45): the tags marked `retain` are read with the sequence-lock read, and
   the file `<owner>.bin` in the retain directory is written when a value
   changed, at most every `--retain-interval-ms`, at the next check for a
   `retain_now` tag. The files are written by a thread of their own, so that

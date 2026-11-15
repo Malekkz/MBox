@@ -841,7 +841,7 @@ typedef struct {
                                    and READ_NOW, which carry no value */
     uint8_t reserved0;          /* 0 */
     uint64_t value;             /* bit pattern; 0 without a value type */
-    uint32_t user_id;           /* 0 for AUTO and REMOTE */
+    uint32_t user_id;           /* not 0 for OPERATOR, 0 for AUTO and REMOTE */
     uint32_t reserved1;         /* 0 */
     int64_t expiry_mono_ns;     /* CLOCK_MONOTONIC; the driver must not
                                    execute the request after it */
@@ -910,7 +910,8 @@ int scada_queue_open(scada_ctx* ctx, const char* queue_name, scada_queue** out);
  * size of the queue, or the record is not valid: a kind, operation,
  * source, value type or status that is none, a payload longer than
  * SCADA_EVENT_PAYLOAD_MAX, a reserved field that is not 0, a BOOL value
- * other than 0 or 1, a user id for AUTO or REMOTE, a select_request_id
+ * other than 0 or 1, a user id for AUTO or REMOTE or none (0) for
+ * OPERATOR, a select_request_id
  * where it does not belong or missing where it does, or a request that
  * has expired or would live longer than SCADA_REQUEST_LIFETIME_MAX_MS.
  *

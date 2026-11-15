@@ -353,7 +353,7 @@ Result<RetainFile> read_retain_file(int dir_fd, std::string_view name,
                            std::to_string(MAX_RETAIN_FILE_BYTES) + " bytes");
     }
     // A second name is a hard link someone made; the file may then change
-    // under another name (decision D-44).
+    // under another name (decision D-45).
     if (info.st_nlink != 1) {
         return corrupt(detail, file_name + " has more than one name");
     }

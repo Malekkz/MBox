@@ -117,9 +117,9 @@ SCADA_RT [[nodiscard]] bool event_valid(const EventRecord& record) noexcept;
 // A write request: an operation and a source of their enumerations; a
 // value type of BOOL, INT64, UINT64 or FLOAT64 (STRING cannot be commanded),
 // or 0 for CANCEL and READ_NOW, which carry no value, and then value 0; a
-// BOOL value of 0 or 1; user id 0 for AUTO and REMOTE; select_request_id
-// not 0 for OPERATE and CANCEL and 0 otherwise. The times are not checked
-// here.
+// BOOL value of 0 or 1; a user id not 0 for OPERATOR and 0 for AUTO and
+// REMOTE; select_request_id not 0 for OPERATE and CANCEL and 0 otherwise.
+// The times are not checked here.
 SCADA_RT [[nodiscard]] bool request_valid(const WriteRequest& record) noexcept;
 
 // A write result: a status of WriteStatus.

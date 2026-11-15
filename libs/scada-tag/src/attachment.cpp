@@ -561,7 +561,7 @@ void Attachment::restore_retained(std::span<std::byte> tags,
     for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
         const std::optional<TagEntry> entry =
             header_.slot_entry(owner_index, slot);
-        // A STRING tag is never retained (decision D-44); the builder
+        // A STRING tag is never retained (decision D-45); the builder
         // refuses the flag, and a header from elsewhere is not trusted.
         if (entry.has_value() &&
             (entry->flags & to_raw(TagFlag::RETAIN)) != 0 &&
@@ -579,7 +579,7 @@ void Attachment::restore_retained(std::span<std::byte> tags,
         return;
     }
 
-    // Decision D-44: values written in a RETIRING generation after the last
+    // Decision D-45: values written in a RETIRING generation after the last
     // periodic write reach the files only once scada-tagd has seen their
     // owners leave it. The wait is bounded; without scada-tagd it runs out
     // and the files are taken as they are.
@@ -809,7 +809,7 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
             !attached.ok()) {
             // The lock of a `proc` region in a RETIRING generation may be
             // held for a moment by scada-tagd, which tests it to learn
-            // whether the process left (decision D-44): that is the
+            // whether the process left (decision D-45): that is the
             // generation retiring, not a second process of this name.
             if (attached.code() == StatusCode::ALREADY_EXISTS &&
                 attachment->header_.state() == GenerationState::RETIRING) {

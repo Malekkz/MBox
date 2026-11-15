@@ -1,5 +1,5 @@
 // Retained values and the generation change with real processes (tag
-// database contract, sections 11.3 and 12; decision D-44): scada-tagd and
+// database contract, sections 11.3 and 12; decision D-45): scada-tagd and
 // scada-tag-test-retainer, which writes a retained counter and follows a
 // generation change.
 //

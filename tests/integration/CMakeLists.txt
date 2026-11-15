@@ -139,7 +139,7 @@ endif()
 
 # Retained values and the generation change with real processes: the
 # retained-value part of conformance test 21, test 25, and SIGKILL at random
-# points (issue #17; decision D-44).
+# points (issue #17; decision D-45).
 scada_test_command(retainer_command scada-tag-test-retainer)
 scada_add_test(scada-tag-retain-integration-test KIND integration
   SOURCES retain_integration_test.cpp
