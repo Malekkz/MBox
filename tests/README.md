@@ -38,7 +38,7 @@ Do not sleep. Pass the command to start through `ENVIRONMENT`, as
 does, so that a cross build can run it through the emulator. Start processes
 from the main thread of the test: a child of `ChildProcess` is killed when
 the thread that started it ends, which is how it dies with a killed test
-binary (decision D-45). Make temporary directories with
+binary (decision D-48). Make temporary directories with
 `scada::test::TempDirectory` (`support/include/scada/test/temp_directory.h`),
 whose cleaner removes the directory if the test binary is killed.
 

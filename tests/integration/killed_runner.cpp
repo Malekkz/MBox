@@ -1,5 +1,5 @@
 // scada-test-killed-runner: a test binary that the cleanup test kills
-// (issue #64, decision D-45). Its one test starts scada-tagd and two
+// (issue #64, decision D-48). Its one test starts scada-tagd and two
 // simulator processes in the temporary directory of the fixture, prints
 // their process ids, the directory and its cleaner, and then waits to be
 // killed. Not a CTest test itself: on its own it would only wait.

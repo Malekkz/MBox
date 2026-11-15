@@ -889,7 +889,7 @@ Consequences:
 - Tests: `Queues.ARequestThatIsNotValidIsRefusedAtPost` (OPERATOR without a user; AUTO and REMOTE with one), `Queues.AnOperatorRequestWithoutAUserIsPassedOverWhenTaken`, `Queues.AnOperatorRequestWithoutAUserIsCountedInvalidByTheDrain`, `QueueRecords.ARequestCarriesAUserExactlyWhenItIsAnOperators`; each fails without the fix. The fuzz target `queue_record_fuzz` follows the rule, with two new corpus inputs.
 - No new suppressions.
 
-## D-45: Test processes die with the test binary; a cleaner process removes the temporary directory of a killed test
+## D-48: Test processes die with the test binary; a cleaner process removes the temporary directory of a killed test
 Date: 2026-11-15
 Phase / issue: 1, #64
 Status: proposed

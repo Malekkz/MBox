@@ -63,7 +63,7 @@ bool set_non_blocking(const UniqueFd& descriptor) {
 [[noreturn]] void become_command(const char* program, char* const* argv,
                                  pid_t parent, int out, int err, int status) {
     // The child gets SIGKILL when the test process ends, however it ends
-    // (decision D-45). The setting outlives exec. If the test process ended
+    // (decision D-48). The setting outlives exec. If the test process ended
     // before it was set, the child has another parent by now and must not
     // run at all.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,misc-include-cleaner): prctl has no other form; PR_SET_PDEATHSIG and SIGKILL are from <sys/prctl.h> and <csignal>, which the check does not map

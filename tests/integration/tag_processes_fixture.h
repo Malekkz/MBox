@@ -140,7 +140,7 @@ class TagProcesses : public ::testing::Test {
 protected:
     void SetUp() override {
         // Removed by a cleaner process even if the test binary is killed
-        // (decision D-45).
+        // (decision D-48).
         std::optional<TempDirectory> temp =
             TempDirectory::create("scada-tag-it-");
         if (!temp.has_value()) {

@@ -1,5 +1,5 @@
 // A killed test binary leaves no process and no directory behind (issue
-// #64, decision D-45): the children of ChildProcess die with the test
+// #64, decision D-48): the children of ChildProcess die with the test
 // process, and the cleaner of TempDirectory removes its directory.
 
 #include "tagd_fixture.h"

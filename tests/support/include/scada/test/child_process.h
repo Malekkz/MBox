@@ -50,7 +50,7 @@ struct ChildEnding {
 // nothing behind. It is also killed with SIGKILL when the thread that
 // started it ends, which is when the test process ends however it ends,
 // SIGKILL included, as long as tests start processes from the main thread
-// (decision D-45). Processes the child starts itself are not covered.
+// (decision D-48). Processes the child starts itself are not covered.
 class ChildProcess {
 public:
     // Starts `command`: the program followed by its arguments. A program

@@ -16,7 +16,7 @@ namespace scada::test {
 // everything in it when the object is destroyed. A small cleaner process
 // (`scada-test-cleaner`) waits beside the test: if the test process ends
 // without destroying the object (SIGKILL, a CTest timeout, a crash), the
-// cleaner removes the directory (decision D-45). The cleaner has left its
+// cleaner removes the directory (decision D-48). The cleaner has left its
 // parent's process tree and session, so a CTest timeout or a signal to the
 // process group does not reach it.
 class TempDirectory {

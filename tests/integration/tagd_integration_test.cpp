@@ -85,7 +85,7 @@ class TagdService : public ::testing::Test {
 protected:
     void SetUp() override {
         // Removed by a cleaner process even if the test binary is killed
-        // (decision D-45).
+        // (decision D-48).
         std::optional<scada::test::TempDirectory> temp =
             scada::test::TempDirectory::create("scada-tagd-it-");
         if (!temp.has_value()) {
