@@ -431,8 +431,14 @@ Result<Fd> create_generation_directory(int base_fd, const std::string& name,
 
 // Builds the generation `generation` and switches `current` to it (section
 // 11.1, step 3). On an error nothing of it stays.
+//
+// Every process but scada-tagd starts down: none has attached to a new
+// generation (section 10.1, region missing). A process that attaches before
+// the first liveness check, which it can as soon as `current` is switched,
+// is then a change and is reported as up (decision D-38).
 Result<OpenGeneration> create_generation(int base_fd, std::uint64_t generation,
                                          const TagSet& tag_set,
+                                         const ResolvedTagSet& resolved,
                                          std::uint32_t tagd_uid,
                                          std::string& detail) {
     Result<HeaderImage> image = build_header(
@@ -461,6 +467,15 @@ Result<OpenGeneration> create_generation(int base_fd, std::uint64_t generation,
         // The image starts with the same RegionHeader the builder wrote,
         // `ready` 0, and has state BUILDING.
         std::ranges::copy(image.value().bytes, builder.value().bytes().begin());
+        for (std::size_t i = 0; i < resolved.processes.size(); ++i) {
+            if (tag_set.processes.at(resolved.processes[i]).name !=
+                TAGD_PROCESS_NAME) {
+                copy_to(builder.value().bytes(),
+                        process_entry_offset(image.value().bytes, i) +
+                            offsetof(ProcessEntry, down),
+                        std::uint32_t{1});
+            }
+        }
         Result<RegionBuilder::Published> published =
             builder.value().publish(detail);
         if (!published.ok()) {
@@ -719,7 +734,7 @@ Status GenerationHost::Impl::open_generation(
         return room;
     }
     Result<OpenGeneration> created = create_generation(
-        base_.get(), highest.value() + 1, tag_set, tagd_uid_, detail);
+        base_.get(), highest.value() + 1, tag_set, resolved, tagd_uid_, detail);
     if (!created.ok()) {
         return created.status();
     }
