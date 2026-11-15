@@ -25,10 +25,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -144,6 +146,64 @@ TEST_F(WakeLatency, ABlockedConsumerWakesWithinOneMillisecond) {
     scada_sub_close(sub);
     ASSERT_EQ(latencies.size(), SAMPLES);
     EXPECT_TRUE(meets_target(report(latencies)));
+    EXPECT_TRUE(stops_cleanly(*writer));
+    stop(*tagd);
+}
+
+// Eight observers wait on the same ring (contract, section 11.4): one
+// notify of the writer wakes them all with one system call, and each must
+// still be woken within the target.
+TEST_F(WakeLatency, EightWaitingObserversEachWakeWithinOneMillisecond) {
+    constexpr std::size_t OBSERVERS = 8;
+    write_load_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::vector<std::unique_ptr<Observed>> observers;
+    std::vector<scada_sub*> subs;
+    for (std::size_t i = 0; i < OBSERVERS; ++i) {
+        observers.push_back(std::make_unique<Observed>(base()));
+        scada_sub* sub = nullptr;
+        ASSERT_EQ(scada_sub_open(observers.back()->ctx(), "load.w0", &sub),
+                  SCADA_OK);
+        subs.push_back(sub);
+    }
+    std::optional<ChildProcess> writer =
+        start_helper("SCADA_TAG_WRITER_COMMAND",
+                     {base(), "load", "1", "1", std::to_string(WRITE_RATE),
+                      std::to_string(WRITES), "notify"});
+    if (!writer.has_value()) {
+        return;
+    }
+    ASSERT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT)) << writer->err();
+    // The ring appearing is a gap for a subscription opened before it.
+    for (scada_sub* sub : subs) {
+        scada_change change{};
+        ASSERT_EQ(scada_sub_next(sub, &change, WAIT_MS), SCADA_E_GAP);
+    }
+    std::vector<std::vector<std::int64_t>> each(OBSERVERS);
+    {
+        std::vector<std::jthread> threads;
+        for (std::size_t i = 0; i < OBSERVERS; ++i) {
+            // By value: a thread captures nothing by reference (coding
+            // standard, section 3). `each` is not resized while they run.
+            threads.emplace_back([out = &each[i], sub = subs[i]] {
+                *out = measure(sub);
+            });
+        }
+    }
+    std::vector<std::int64_t> all;
+    for (const std::vector<std::int64_t>& latencies : each) {
+        ASSERT_EQ(latencies.size(), SAMPLES);
+        all.insert(all.end(), latencies.begin(), latencies.end());
+    }
+    std::ranges::sort(all);
+    std::cout << "with " << OBSERVERS << " observers, all samples: ";
+    EXPECT_TRUE(meets_target(report(all)));
+    for (scada_sub* sub : subs) {
+        scada_sub_close(sub);
+    }
     EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }
