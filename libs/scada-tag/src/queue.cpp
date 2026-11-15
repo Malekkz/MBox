@@ -80,19 +80,18 @@ Queue::~Queue() {
     if (wait_set_ != nullptr) {
         wait_set_->remove(*this);
     }
-    // The thread of a side is bound for as long as the side is open, and
-    // only that thread lets go of it. The answer queue of a `cmd` queue
-    // stays bound while the side that consumes the `cmd` queue, or its own
-    // producer side, is open.
+    // A queue stays bound to its thread while any side that posts to it is
+    // open: its producer side, and for an answer queue the side that
+    // consumes its `cmd` queue. When the last of them closes, the binding
+    // is cleared, whichever thread closes: with no such side open nobody
+    // can post (review of PR #56).
     attachment_.release_queue(id_, producer_);
-    if (producer_) {
-        if (!attachment_.answer_queue_in_use(id_)) {
-            attachment_.release_queue_thread(id_);
-        }
-    } else if (const std::optional<std::size_t> answer =
-                   attachment_.queue(id_).answer_queue;
-               answer.has_value() && !attachment_.queue_open(*answer, true)) {
-        attachment_.release_queue_thread(*answer);
+    const std::optional<std::size_t> posted =
+        producer_ ? std::optional<std::size_t>(id_)
+                  : attachment_.queue(id_).answer_queue;
+    if (posted.has_value() && !attachment_.queue_open(*posted, true) &&
+        !attachment_.answer_queue_in_use(*posted)) {
+        attachment_.release_queue_thread(*posted);
     }
 }
 

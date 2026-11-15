@@ -360,10 +360,11 @@ public:
     SCADA_RT [[nodiscard]] bool bind_queue_thread(
         std::size_t queue_id) noexcept;
 
-    // Forgets the thread recorded for `queue_id` if it is the calling
-    // thread: its side was closed. Another thread's record stays, so that
-    // closing a handle in a thread that was refused cannot unbind the
-    // thread that posts (review of PR #56).
+    // Forgets the thread recorded for `queue_id`. The caller has made sure
+    // that no side that posts to the queue is open in this context: its
+    // producer side, and for an answer queue the side that consumes its
+    // `cmd` queue (`answer_queue_in_use`). While one of them is open the
+    // binding stays, whichever thread closes a handle (review of PR #56).
     void release_queue_thread(std::size_t queue_id) noexcept;
 
     // True if the side that consumes a `cmd` queue whose answer queue is

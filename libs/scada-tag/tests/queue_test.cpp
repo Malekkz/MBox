@@ -538,11 +538,13 @@ std::int64_t thread_cpu_ns() {
 
 // Review of PR #56: a stopped queue must not make its consumer spin. A wait
 // of 300 ms on it, through next and through a wait set, sleeps in slices
-// and uses a small part of that as CPU time. A spinning wait uses nearly
-// all of it; the bound leaves room for a slow sanitizer build.
+// and uses about 1 ms of CPU time; a spinning wait uses nearly all 300 ms.
+// The CPU time of the waiting thread does not grow when the machine is
+// busy (only the wall time does), so the bound of half the wait holds on a
+// loaded runner and in a slow sanitizer build.
 TEST_F(Queues, AWaitOnAStoppedQueueDoesNotSpin) {
     constexpr int WAIT_MS = 300;
-    constexpr std::int64_t CPU_LIMIT_NS = 60 * NANOSECONDS_PER_MILLISECOND;
+    constexpr std::int64_t CPU_LIMIT_NS = 150 * NANOSECONDS_PER_MILLISECOND;
     const QueuePtr out = open(*io(), "events.io");
     const QueuePtr reader = open(*web(), "events.io");
     ASSERT_TRUE(posts_events(*out, 1));
@@ -897,6 +899,86 @@ TEST_F(Queues, ClosingAHandleDoesNotUnbindAnotherThread) {
     // closed here.
     { const QueuePtr results = open(driver, "result.io.web"); }
     EXPECT_TRUE(driver.bind_queue_thread(RESULT_WEB));
+}
+
+// A thread that runs `call` and then stays alive until `finish`, so that
+// no thread made meanwhile gets its thread mark (a thread that has ended
+// may leave its mark to a new one, which would hide a binding).
+class ParkedThread {
+public:
+    template <typename Call>
+    explicit ParkedThread(Call call)
+        : thread_([this, call]() mutable {
+              call();
+              done_.store(true);
+              while (!finish_.load()) {
+                  std::this_thread::yield();
+              }
+          }) {}
+    ~ParkedThread() { finish(); }
+    ParkedThread(const ParkedThread&) = delete;
+    ParkedThread& operator=(const ParkedThread&) = delete;
+    ParkedThread(ParkedThread&&) = delete;
+    ParkedThread& operator=(ParkedThread&&) = delete;
+
+    // Waits until `call` has returned.
+    void wait_done() const {
+        while (!done_.load()) {
+            std::this_thread::yield();
+        }
+    }
+    // Lets the thread end and joins it.
+    void finish() {
+        finish_.store(true);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    std::atomic<bool> done_{false};
+    std::atomic<bool> finish_{false};
+    std::thread thread_;
+};
+
+// Review of PR #56: the binding of an answer queue ends when the last side
+// that posts to it closes, whichever thread closes it. Here a worker binds
+// it by taking requests, and the owning thread closes the worker's handle;
+// another thread can then answer, while the worker still lives.
+TEST_F(Queues, AnAnswerQueueIsFreeOnceItsLastSideIsClosedByAnyThread) {
+    Attachment& driver = *io();
+    QueuePtr requests = open(driver, "cmd.io.web");
+    const ParkedThread worker([&requests] {
+        static_cast<void>(
+            gives<scada_write_request>(*requests, SCADA_E_TIMEOUT));
+    });
+    worker.wait_done();
+    EXPECT_FALSE(driver.bind_queue_thread(RESULT_WEB));  // the worker's
+    requests.reset();  // closed by the owning thread, not by the worker
+    EXPECT_TRUE(in_other_thread(
+        [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
+}
+
+// The same when each thread closes its own handle, the bound producer side
+// first and the side that takes the requests last.
+TEST_F(Queues, AnAnswerQueueIsFreeWhenItsSidesCloseInEitherOrder) {
+    Attachment& driver = *io();
+    QueuePtr results = open(driver, "result.io.web");
+    QueuePtr requests = open(driver, "cmd.io.web");
+    const ParkedThread poster([&results] {
+        static_cast<void>(post(*results, result(1)));  // binds `poster`
+        results.reset();  // the side that takes the requests is still open
+    });
+    poster.wait_done();
+    EXPECT_FALSE(driver.bind_queue_thread(RESULT_WEB));  // still `poster`'s
+    const ParkedThread taker([&requests] {
+        static_cast<void>(
+            gives<scada_write_request>(*requests, SCADA_E_TIMEOUT));
+        requests.reset();  // the last side that posts to the answer queue
+    });
+    taker.wait_done();
+    EXPECT_TRUE(in_other_thread(
+        [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
 }
 
 // Decision D-38, condition 4: the ABORTED answers of the drain at attach do

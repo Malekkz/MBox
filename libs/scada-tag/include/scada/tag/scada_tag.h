@@ -813,7 +813,11 @@ int scada_queue_stats(scada_queue* queue, scada_queue_stats_t* out);
 /*
  * Closes the side of the queue; NULL does nothing. It also leaves the wait
  * set it was added to. A record delivered and not acknowledged is
- * delivered again by the next open.
+ * delivered again by the next open. Any thread may close it. A queue stays
+ * bound to the thread that posts to it while a side that posts to it is
+ * open in this context: its producer side and, for a result queue, the
+ * consumer side of its cmd queue. Once the last of them is closed, another
+ * thread may post to it.
  */
 void scada_queue_close(scada_queue* queue);
 

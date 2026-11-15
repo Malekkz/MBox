@@ -408,11 +408,8 @@ bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
 
 void Attachment::release_queue_thread(std::size_t queue_id) noexcept {
     static_cast<void>(queue(queue_id));
-    const void* self = thread_mark();
-    // Relaxed: as in `check_writer_thread`. Only the recorded thread lets
-    // go of its record.
-    static_cast<void>(queue_threads_[queue_id].compare_exchange_strong(
-        self, nullptr, std::memory_order_relaxed));
+    // Relaxed: as in `check_writer_thread`.
+    queue_threads_[queue_id].store(nullptr, std::memory_order_relaxed);
 }
 
 bool Attachment::answer_queue_in_use(std::size_t queue_id) const noexcept {
