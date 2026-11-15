@@ -136,7 +136,7 @@
       "inherits": "base",
       "filter": {
         "exclude": {
-          "label": "perf"
+          "label": "^(perf|model)$"
         }
       }
     },

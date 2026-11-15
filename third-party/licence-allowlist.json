@@ -11,5 +11,11 @@
     "MIT",
     "Zlib",
     "blessing"
-  ]
+  ],
+  "licence_scopes": {
+    "CECILL-B": [
+      "build",
+      "test"
+    ]
+  }
 }
