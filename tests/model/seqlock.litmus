@@ -1,0 +1,53 @@
+AArch64 seqlock
+"Sequence lock of a tag record, contract 0.6 sections 6.1, 6.2 and 7"
+(*
+ * P0 is the owner thread: two calls of write_string_record
+ * (libs/scada-tag/src/tag_record.cpp), each `begin_write`, the string slot,
+ * the record fields, `end_write`. P1 is one attempt of read_string_record:
+ * the acquire load of seq, the copy of the fields and of the slot,
+ * `fence_acquire`, the second load of seq.
+ *
+ * Two locations stand for every field: q for the fields of the record and
+ * s for the string slot. A mixed copy of more fields needs a mixed pair, so
+ * two are enough. The first write stores 1 in each, the second 2.
+ * write_record is the same without s.
+ *
+ * The owner is the only writer of seq, so its relaxed load of seq gives the
+ * number it stored last; the test writes those numbers as constants (0 + 1,
+ * 0 + 2, 2 + 1, 2 + 2). This keeps the number of candidate executions herd7
+ * looks at small.
+ *
+ * fence_release compiles to DMB ISH, fence_acquire to DMB ISHLD, the
+ * release store of end_write to STLR, the acquire load of a read to LDAR
+ * (GCC and Clang, -O2). tests/model/code_shape.py checks that the library
+ * still compiles to this order.
+ *
+ * The condition is a read that the library accepts (two equal, even loads
+ * of seq) and whose copy is not the one write that the number names:
+ * seq 0 has both locations 0, seq 2 both 1, seq 4 both 2.
+ *)
+{
+0:X0=seq; 0:X1=q; 0:X3=s;
+1:X0=seq; 1:X1=q; 1:X3=s;
+}
+ P0             | P1             ;
+ MOV W4,#1      | LDAR W4,[X0]   ;
+ STR W4,[X0]    | LDR W5,[X1]    ;
+ DMB ISH        | LDR W7,[X3]    ;
+ MOV W5,#1      | DMB ISHLD      ;
+ STR W5,[X3]    | LDR W8,[X0]    ;
+ STR W5,[X1]    |                ;
+ MOV W6,#2      |                ;
+ STLR W6,[X0]   |                ;
+ MOV W7,#3      |                ;
+ STR W7,[X0]    |                ;
+ DMB ISH        |                ;
+ MOV W8,#2      |                ;
+ STR W8,[X3]    |                ;
+ STR W8,[X1]    |                ;
+ MOV W9,#4      |                ;
+ STLR W9,[X0]   |                ;
+exists
+( (1:X4=0 /\ 1:X8=0 /\ ~(1:X5=0 /\ 1:X7=0))
+\/ (1:X4=2 /\ 1:X8=2 /\ ~(1:X5=1 /\ 1:X7=1))
+\/ (1:X4=4 /\ 1:X8=4 /\ ~(1:X5=2 /\ 1:X7=2)) )

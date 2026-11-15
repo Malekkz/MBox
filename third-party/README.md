@@ -76,6 +76,11 @@ MPL and EPL are not on it until the licensing decision of reference section 16
 is made. A change to `licence-allowlist.json` needs review by a person and an
 entry in `docs/decisions.md`.
 
+`CECILL-B` is on the list for dependencies of scope `build` and `test` only,
+not for anything linked or shipped (proposed in D-37; herdtools7). The check
+does not look at the scope yet: it compares the licence alone, so review must
+keep a `product` entry with that licence out.
+
 ## How to test it
 
 ```
