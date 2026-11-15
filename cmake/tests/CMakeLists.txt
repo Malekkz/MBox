@@ -89,8 +89,12 @@ scada_add_dependency_case(limited-licence-test LIST limited-licence-test
 scada_add_dependency_case(bad-licence-scopes LIST empty
   ALLOWLIST bad-licence-scopes
   EXPECT_ERROR "\"licence_scopes\" of 'MIT': scope 'runtime' must be product, build or test.*\"licence_scopes\" of 'Unlisted-1.0': the licence is not allowed")
+scada_add_dependency_case(limited-licence-build LIST limited-licence-build
+  CHECK_SCRIPT check_limited.cmake)
 scada_add_dependency_case(bad-commit LIST bad-commit
-  EXPECT_ERROR "dependency 'alpha': the commit must be a hexadecimal hash in lower case")
+  EXPECT_ERROR "dependency 'alpha': the commit must be 40 hexadecimal characters in lower case")
+scada_add_dependency_case(short-commit LIST short-commit
+  EXPECT_ERROR "dependency 'alpha': the commit must be 40 hexadecimal characters in lower case")
 add_test(NAME dependency-check-allowlist-has-no-gpl
   COMMAND "${CMAKE_COMMAND}" "-DALLOWLIST=${scada_real_allowlist}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/check_allowlist.cmake")

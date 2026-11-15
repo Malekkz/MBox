@@ -67,7 +67,7 @@ Reviewers must check these.
 | `url` | yes | Project home page or repository. |
 | `purl` | no | Package URL, used by vulnerability scanners. |
 | `link_names` | no | Names as written in `target_link_libraries`: CMake targets or library names. |
-| `commit` | no | The commit hash of the source used, lower-case hexadecimal, for a dependency built from a source repository. |
+| `commit` | no | The commit hash of the source used, 40 hexadecimal characters in lower case, for a dependency built from a source repository. |
 
 Unknown keys are errors. The compiler, its runtime libraries and the C library
 are part of the toolchain and are not listed (D-21).

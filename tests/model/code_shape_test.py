@@ -242,6 +242,31 @@ class CodeShapeTest(unittest.TestCase):
         self.assert_caught("read_change", insert_after(
             "204:", "     206:      \tldr\tx9, [x0, #0x40]"))
 
+    def test_a_reader_that_accepts_after_part_of_the_copy_fails(self):
+        # Review of PR #54: a branch to the stores of the result after 4 of
+        # the 8 copy loads, so without the fence and the second load.
+        self.assert_caught("read_record", insert_after(
+            "3c:", "      3e:      \tcbz\tw18, 0x60 <read_record+0x60>"))
+
+    def test_read_change_may_load_the_cursor_before_the_second_load(self):
+        # Review of PR #54: a compiler may load the private cursor first.
+        def swap(lines):
+            first = next(i for i, l in enumerate(lines)
+                         if l.strip().startswith("204:"))
+            second = next(i for i, l in enumerate(lines)
+                          if l.strip().startswith("208:"))
+            lines[first], lines[second] = lines[second], lines[first]
+            return lines
+        text = edit(self.text, "read_change", swap)
+        self.assertEqual(code_shape.check(text), [])
+
+    def test_a_missing_function_is_not_a_finding(self):
+        findings = []
+        code_shape.check(edit(self.text, "read_change", lambda lines: []),
+                         findings=findings)
+        self.assertEqual(findings,
+                         [("read_change", "found 0 definitions", False)])
+
     def test_read_change_may_load_the_cursor_after_the_second_load(self):
         # The cursor is the caller's, not shared memory.
         text = edit(self.text, "read_change", insert_after(

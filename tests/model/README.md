@@ -36,7 +36,9 @@ the order of the accesses in two parts:
      no store after it; an append the same without the first store;
    - a read attempt: the acquire load, the copy, `DMB ISHLD`, then a first
      load of the address of the acquire load (the second load), and no
-     load of shared memory after that;
+     load of shared memory after that; an attempt that loads any shared
+     memory without reaching the fence fails, and loads of the caller's
+     own memory (the cursor) may come anywhere;
    - the repair: at least two stores (quality and flags) before each
      release store, no store after the last, no fence.
 
@@ -63,8 +65,9 @@ the order of the accesses in two parts:
    compiler and flags, and expects the check to reject each: each fence
    dropped or moved, each acquire or release access made relaxed, a second
    load of another field, a load after the second load, a store after the
-   end of a write or of the repair, a fence in the repair. It also
-   compiles the sources unchanged and expects them to pass.
+   end of a write or of the repair, a fence in the repair. Only a finding
+   about the order counts, not a function the check cannot find or walk.
+   It also compiles each source unchanged and expects it to pass.
 
 Known limits (D-37, D-39):
 

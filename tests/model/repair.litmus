@@ -3,17 +3,19 @@ AArch64 repair
 (*
  * P0 is the owner of a record: first a write that does not finish, then,
  * after a restart, repair_tag_records (libs/scada-tag/src/attachment.cpp).
- * The write makes seq odd (begin_write: the store, DMB ISH) and stores the
- * value, then the owner stops before the quality and before end_write.
+ * The write makes seq odd (begin_write: the store, DMB ISH) and stores
+ * some of the fields (store_fields stores the quality first, then the
+ * flags, the value and the times), then the owner stops before end_write.
  * The repair finds seq odd, stores quality BAD (and the flag NOT_INIT, and
  * len 0 of a string slot: more locations of the same kind as q) and stores
  * seq + 1 with release. P1 is one attempt of read_record, as in
  * seqlock.litmus.
  *
- * v stands for the fields the write stored (the value), q for those the
- * repair stores (the quality): 1 is the write's value, 9 is BAD. The repair
- * keeps the value the write left, so a copy with seq 2 may have v 0 or 1;
- * what it must have is q 9.
+ * v stands for the fields the write stored and the repair does not (the
+ * value, the times), q for those the repair stores (the quality, also
+ * stored by the write if it got that far: the repair overwrites it): 1 is
+ * the write's value, 9 is BAD. The repair keeps the value the write left,
+ * so a copy with seq 2 may have v 0 or 1; what it must have is q 9.
  *
  * The owner that repairs is another process than the one that stopped. It
  * runs after the first one died: the kernel releases the `flock` the first

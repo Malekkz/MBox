@@ -8,8 +8,9 @@ store outside the window. The edited file is compiled with the command the
 build used for it (compile_commands.json), so with the compiler and the
 flags of this build, and the disassembly of the edited object with the
 other objects of the tag library must fail the check of the function the
-edit concerns. The sources as they are, compiled the same way, must pass:
-that shows the recompilation matches the build. See README.md and issue
+edit concerns with a finding about the order, not because the function is
+missing or cannot be walked. Each source as it is, compiled the same way,
+must pass: that shows the recompilation matches the build. See README.md and issue
 #50.
 """
 
@@ -206,12 +207,19 @@ def run(commands, objdump, name, text, expected):
         obj = build(commands, name, text, work)
         objects = [str(obj) if file == name else str(commands[file][3])
                    for file in FILES]
-        failures = code_shape.check(code_shape.disassemble(objdump, objects))
-    failed = {f.split("(")[0].removeprefix("scada::tag::")
-              for f in failures}
+        findings = []
+        failures = code_shape.check(code_shape.disassemble(objdump, objects),
+                                    findings=findings)
     if not expected:
         return None if not failures else "\n".join(failures)
-    missing = [f for f in expected if f not in failed]
+    # Only a finding about the order counts: a function the check could
+    # not find or walk is not a rejection of the edit.
+    structural = [f"{name}: {problem}" for name, problem, order in findings
+                  if not order]
+    if structural:
+        return f"the check could not judge the edit: {structural}"
+    rejected = {name for name, _, order in findings if order}
+    missing = [f for f in expected if f not in rejected]
     if missing:
         return (f"not rejected: {', '.join(missing)}; the check reported: "
                 f"{failures or 'nothing'}")
@@ -232,8 +240,8 @@ def main():
     sources = {name: commands[name][2].read_text(encoding="utf-8")
                for name in FILES}
 
-    jobs = [("the sources as they are", "tag_record.cpp",
-             sources["tag_record.cpp"], ())]
+    # Each source unchanged, compiled the same way, must pass.
+    jobs = [(f"{name} as it is", name, sources[name], ()) for name in FILES]
     for name, file, old, new, occurrence, expected in MUTANTS:
         text = replace_occurrence(sources[file], old, new, occurrence)
         if text is None:

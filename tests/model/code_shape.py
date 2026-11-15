@@ -171,6 +171,10 @@ def parse(disassembly):
 # Events of a path. A path is a tuple of instructions as executed, with two
 # markers: CALL_NOT_FOUND (a call of a function not in the input) and
 # CLOBBER (the registers a call may change are unknown afterwards).
+class StructuralError(RuntimeError):
+    """The disassembly cannot be walked: not a finding about the order."""
+
+
 class Marker:
     def __init__(self, kind, text):
         self.kind = kind
@@ -222,14 +226,14 @@ class Program:
         if key in self.cache:
             return self.cache[key]
         if depth > MAX_DEPTH:
-            raise RuntimeError(f"calls nested too deep in {function.name}")
+            raise StructuralError(f"calls nested too deep in {function.name}")
         found = []
         # (index, events, times each branch was taken)
         stack = [(start, (), {})]
         while stack:
             index, events, taken = stack.pop()
             if index is None or index >= len(function.code):
-                raise RuntimeError(
+                raise StructuralError(
                     f"{function.name}: a path leaves the function")
             instruction = function.code[index]
             mnemonic = instruction.mnemonic
@@ -274,7 +278,7 @@ class Program:
                         found.append(events + inner)
                     continue
                 if target is None:
-                    raise RuntimeError(
+                    raise StructuralError(
                         f"{function.name}: branch to an unknown address: "
                         f"{instruction.text()}")
                 edge = (index, target)
@@ -291,7 +295,7 @@ class Program:
             else:
                 stack.append((index + 1, events, taken))
             if len(found) > MAX_PATHS:
-                raise RuntimeError(f"{function.name}: too many paths")
+                raise StructuralError(f"{function.name}: too many paths")
         self.cache[key] = found
         return found
 
@@ -552,10 +556,10 @@ def check_reader(events, min_loads):
     whether an attempt had the fence).
 
     Each attempt starts with the acquire load of shared memory. An attempt
-    that loads at least `min_loads` times from shared memory (a copy;
-    compilers do not merge atomic loads) must then reach DMB ISHLD, and
-    the first load after it must load the address of the acquire load: the
-    second load. After the second load the attempt loads no more shared
+    that loads shared memory at all must reach DMB ISHLD after at least
+    `min_loads` such loads (a copy; compilers do not merge atomic loads),
+    and the first load of other than the caller's own memory after it must
+    load the address of the acquire load: the second load. After the second load the attempt loads no more shared
     memory, nor anything this script cannot place: that would be a load
     outside the window."""
     letters = letters_of(events)
@@ -568,9 +572,11 @@ def check_reader(events, min_loads):
     def finish(state):
         if state is None:
             return None
-        if not state["fenced"] and state["loads"] >= min_loads:
+        # Any copy load without the fence fails, not only a whole copy: a
+        # branch to the result after part of the copy is a mixed copy.
+        if not state["fenced"] and state["loads"] > 0:
             return (f"an attempt makes {state['loads']} loads of shared "
-                    "memory and uses them without DMB ISHLD")
+                    "memory and ends without DMB ISHLD")
         if state["fenced"] and state["second"] is None:
             return "no load after the fence (the second load)"
         return None
@@ -600,6 +606,10 @@ def check_reader(events, min_loads):
                 if where == "shared":
                     attempt["loads"] += 1
             elif attempt["second"] is None:
+                if where == "private":
+                    # The caller's own memory (the cursor) may be loaded
+                    # before the second load; it is not part of the copy.
+                    continue
                 if address != attempt["acquire"]:
                     return ("the first load after the fence does not load "
                             "the address of the acquire load (the second "
@@ -691,26 +701,37 @@ CHECKS = (
 )
 
 
-def check(disassembly, report=None, checks=CHECKS):
+def check(disassembly, report=None, checks=CHECKS, findings=None):
     """Returns the list of failures; empty if the code has the shape. With
     `report`, the disassembly of each function that fails, and of the
-    functions it calls, is appended to that list."""
+    functions it calls, is appended to that list. With `findings`, a tuple
+    (short function name, problem, whether it is a finding about the
+    order) is appended for each failure: not one when the function is
+    missing or cannot be walked."""
     program = Program(disassembly)
     failures = []
     for prefix, rule, shared, argument in checks:
+        short = prefix.removeprefix("scada::tag::").rstrip("(")
         functions = [f for f in program.find(prefix)
                      if "[clone" not in f.name]
         if len(functions) != 1:
-            failures.append(f"{prefix}...): found {len(functions)} "
-                            "definitions")
+            problem = f"found {len(functions)} definitions"
+            failures.append(f"{prefix}...): {problem}")
+            if findings is not None:
+                findings.append((short, problem, False))
             continue
+        order = True
         try:
             problem = check_function(program, functions[0], rule, shared,
                                      argument)
-        except RuntimeError as error:
-            problem = str(error)
+        except StructuralError as error:
+            problem, order = str(error), False
+        if problem == "no path returns":
+            order = False
         if problem:
             failures.append(f"{functions[0].name}: {problem}")
+            if findings is not None:
+                findings.append((short, problem, order))
             if report is not None:
                 report.extend(related(program, functions[0]))
     return failures

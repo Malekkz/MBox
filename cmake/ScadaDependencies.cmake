@@ -252,9 +252,13 @@ function(scada_dependencies)
         list(APPEND problems
           "${where}: licence '${field_licence}' is allowed for scope ${scopes_text} only, not '${field_scope}'")
       endif()
-      if(DEFINED field_commit AND NOT field_commit MATCHES "^[0-9a-f]+$")
-        list(APPEND problems
-          "${where}: the commit must be a hexadecimal hash in lower case")
+      if(DEFINED field_commit)
+        # CMake regular expressions have no {n}: the length is checked apart.
+        string(LENGTH "${field_commit}" commit_length)
+        if(NOT field_commit MATCHES "^[0-9a-f]+$" OR NOT commit_length EQUAL 40)
+          list(APPEND problems
+            "${where}: the commit must be 40 hexadecimal characters in lower case")
+        endif()
       endif()
       list(APPEND names "${field_name}")
       set_property(GLOBAL PROPERTY
