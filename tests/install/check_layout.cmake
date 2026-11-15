@@ -41,6 +41,13 @@ foreach(unit IN LISTS UNITS)
   expect_file("${SYSUSERSDIR}/${service}.conf")
 endforeach()
 
+# Test tools are not part of the product image (decision D-41).
+foreach(tool IN ITEMS scada-sim)
+  if(EXISTS "${STAGE}/${BINDIR}/${tool}")
+    message(SEND_ERROR "test tool in the staged tree: ${BINDIR}/${tool}")
+  endif()
+endforeach()
+
 # The base directory of the tag database is created at boot with the owner
 # and mode of the tag database contract, section 3.1.
 expect_file("${TMPFILESDIR}/scada-tagd.conf")

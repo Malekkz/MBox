@@ -32,7 +32,16 @@ add_test(NAME install-units-verify
 set_tests_properties(install-units-verify PROPERTIES
   FIXTURES_REQUIRED staged-tree)
 
+# The component `test-tools` installs the simulator writer on its own.
+add_test(NAME install-test-tools
+  COMMAND "${CMAKE_COMMAND}"
+    -DBUILD_DIR=${CMAKE_BINARY_DIR}
+    -DSTAGE=${CMAKE_CURRENT_BINARY_DIR}/test-tools
+    -DBINDIR=${SCADA_INSTALL_BINDIR}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/install_test_tools.cmake")
+
 set_tests_properties(install-stage install-layout install-units-verify
+  install-test-tools
   PROPERTIES
     LABELS integration
     TIMEOUT 300

@@ -4,11 +4,18 @@
 // boundary by a futex on those mappings (decision D-32). Conformance tests
 // 7 (the ring), 13 and 24.
 //
+// The writer is scada-sim, which always calls notify; the part of
+// conformance test 24 for a process that never notifies (delivery within
+// the 100 ms cap) is covered in one process by the unit tests of the
+// library, not here.
+//
 // Every wait is on a condition with a limit.
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/test/child_process.h"
 
@@ -35,21 +42,24 @@ using namespace scada::test::tagd;
 using scada::test::ChildProcess;
 using Clock = std::chrono::steady_clock;
 
-// The writer: WRITER_OWNERS owners of the large tag set, WRITER_TAGS tags
-// each, ROUNDS writes of every tag at WRITER_RATE updates per second of
-// all owners together, with scada_tag_notify after each write.
+// The writer, scada-sim: WRITER_OWNERS owners of the process `load`,
+// WRITER_TAGS tags each, ROUNDS writes of every tag at WRITER_RATE updates
+// per second of all owners together, with scada_tag_notify after each
+// write.
 constexpr std::size_t WRITER_OWNERS = 2;
 constexpr std::size_t WRITER_TAGS = 100;
 constexpr std::uint64_t ROUNDS = 100;
 constexpr std::uint64_t WRITER_RATE = 20'000;
-constexpr std::uint64_t UPDATES = ROUNDS * WRITER_OWNERS * WRITER_TAGS;
 constexpr int WAIT_MS = 10'000;
 
-// The fields the writer derives from the write count of a tag; see
-// writer_main.cpp.
-constexpr std::int64_t BASE_SOURCE_TIME = 1'700'000'000'000'000'000;
-constexpr std::uint64_t FLAGS_MASK = 0x0FDF;
-constexpr std::uint64_t QUALITIES = 3;
+// The simulation of the writer.
+scada::sim::Layout writer_layout() {
+    return scada::sim::Layout{.prefix = "load",
+                              .processes = 1,
+                              .owners = WRITER_OWNERS,
+                              .tags = WRITER_OWNERS * WRITER_TAGS,
+                              .patterns = {scada::sim::Pattern::CHECK}};
+}
 
 std::string owner_name(std::size_t owner) {
     return "load.w" + std::to_string(owner);
@@ -57,12 +67,7 @@ std::string owner_name(std::size_t owner) {
 
 // True if `change` is whole: its fields belong to one write of the writer.
 bool is_one_write(const scada_change& change) {
-    const std::uint64_t count = change.value;
-    return change.type == SCADA_TYPE_UINT64 &&
-           change.quality == count % QUALITIES &&
-           change.quality_flags == (count & FLAGS_MASK) &&
-           change.source_time_ns ==
-               BASE_SOURCE_TIME + static_cast<std::int64_t>(count);
+    return scada::sim::is_check_change(change);
 }
 
 // A subscription, closed when it goes out of scope.
@@ -101,21 +106,20 @@ private:
 
 class ChangeRingProcesses : public TagProcesses {
 protected:
-    // Starts the writer on the large tag set with `mode` as its last
-    // argument and waits until it has attached.
+    // Writes the tag set of the writer, starts scada-tagd and returns it.
+    [[nodiscard]] std::optional<RunningTagd> ready_writer_tagd() const {
+        write_sim_tag_set(writer_layout());
+        return ready_tagd();
+    }
+
+    // Starts the writer with `bound` (`--rounds <n>` or `--seconds <n>`) at
+    // `rate`, notifying after each write, and waits until it has attached.
     [[nodiscard]] std::optional<ChildProcess> start_writer(
-        std::uint64_t updates, std::uint64_t rate, const char* mode) const {
-        std::optional<ChildProcess> writer =
-            start_helper("SCADA_TAG_WRITER_COMMAND",
-                         {base(), "load", std::to_string(WRITER_OWNERS),
-                          std::to_string(WRITER_TAGS), std::to_string(rate),
-                          std::to_string(updates), mode});
-        if (writer.has_value() &&
-            !writer->wait_for_output(attached, WAIT_LIMIT)) {
-            ADD_FAILURE() << "the writer did not attach: " << writer->err();
-            return std::nullopt;
-        }
-        return writer;
+        const std::vector<std::string>& bound, std::uint64_t rate) const {
+        std::vector<std::string> extra{"--rate", std::to_string(rate),
+                                       "--notify", "each"};
+        extra.insert(extra.end(), bound.begin(), bound.end());
+        return start_sim(writer_layout(), extra);
     }
 };
 
@@ -236,13 +240,12 @@ private:
 // has attached, so it may miss the first writes; from the first change of
 // a tag on it must see every one.
 TEST_F(ChangeRingProcesses, Conformance13AFastConsumerSeesEveryEntryInOrder) {
-    write_load_tag_set();
-    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<RunningTagd> tagd = ready_writer_tagd();
     if (!tagd.has_value()) {
         return;
     }
     std::optional<ChildProcess> writer =
-        start_writer(UPDATES, WRITER_RATE, "notify");
+        start_writer({"--rounds", std::to_string(ROUNDS)}, WRITER_RATE);
     if (!writer.has_value()) {
         return;
     }
@@ -319,18 +322,15 @@ std::uint16_t process_of(const Attached& reader, const std::string& name) {
 // becomes readable for a change written by another process, and a waiter
 // on that process's cycle counter wakes with every notify.
 TEST_F(ChangeRingProcesses, Conformance24TheDescriptorAndTheCycleWorkAcross) {
-    write_load_tag_set();
-    std::optional<RunningTagd> tagd = ready_tagd();
+    std::optional<RunningTagd> tagd = ready_writer_tagd();
     if (!tagd.has_value()) {
         return;
     }
-    // A slow writer: one update every 10 ms, for 3 s. It stops only once it
-    // has written them all.
+    // A slow writer: one update every 10 ms, for 3 s.
     constexpr std::uint64_t SLOW_RATE = 100;
-    constexpr std::uint64_t SLOW_UPDATES = 300;
     constexpr int CHANGES = 5;
     std::optional<ChildProcess> writer =
-        start_writer(SLOW_UPDATES, SLOW_RATE, "notify");
+        start_writer({"--seconds", "3"}, SLOW_RATE);
     if (!writer.has_value()) {
         return;
     }

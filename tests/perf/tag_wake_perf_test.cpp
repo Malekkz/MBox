@@ -1,5 +1,5 @@
 // Performance test of the wake-up of a change ring consumer (issue P1-07,
-// contract section 8.4): a writer process writes one tag every 2 ms and
+// contract section 8.4): scada-sim writes one tag every 2 ms and
 // calls scada_tag_notify; this process is blocked in scada_sub_next and
 // measures, for each change, the time from the write (`update_mono_ns`,
 // CLOCK_MONOTONIC of the same machine) to its return. Acceptance: the
@@ -12,6 +12,8 @@
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/test/child_process.h"
 
@@ -20,7 +22,6 @@
 #include <time.h>  // NOLINT(modernize-deprecated-headers): clock_gettime and CLOCK_MONOTONIC are POSIX, declared here
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -123,25 +124,33 @@ std::int64_t report(std::span<const std::int64_t> latencies) {
            << "99th percentile " << p99 << " ns, limit " << P99_LIMIT_NS;
 }
 
+// scada-sim with one owner `load` and one tag.
+scada::sim::Layout one_tag() {
+    return scada::sim::Layout{.prefix = "load",
+                              .processes = 1,
+                              .owners = 1,
+                              .tags = 1,
+                              .patterns = {scada::sim::Pattern::CHECK}};
+}
+
 class WakeLatency : public TagProcesses {};
 
 TEST_F(WakeLatency, ABlockedConsumerWakesWithinOneMillisecond) {
-    write_load_tag_set();
+    const scada::sim::Layout layout = one_tag();
+    write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
         return;
     }
     std::optional<ChildProcess> writer =
-        start_helper("SCADA_TAG_WRITER_COMMAND",
-                     {base(), "load", "1", "1", std::to_string(WRITE_RATE),
-                      std::to_string(WRITES), "notify"});
+        start_sim(layout, {"--rate", std::to_string(WRITE_RATE), "--rounds",
+                           std::to_string(WRITES), "--notify", "each"});
     if (!writer.has_value()) {
         return;
     }
-    ASSERT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT)) << writer->err();
     const Attached reader(base(), "reader");
     scada_sub* sub = nullptr;
-    ASSERT_EQ(scada_sub_open(reader.ctx(), "load.w0", &sub), SCADA_OK);
+    ASSERT_EQ(scada_sub_open(reader.ctx(), "load", &sub), SCADA_OK);
     const std::vector<std::int64_t> latencies = measure(sub);
     scada_sub_close(sub);
     ASSERT_EQ(latencies.size(), SAMPLES);
@@ -184,7 +193,7 @@ public:
         for (std::size_t i = 0; i < count; ++i) {
             observers_.push_back(std::make_unique<Observed>(base));
             scada_sub* sub = nullptr;
-            EXPECT_EQ(scada_sub_open(observers_.back()->ctx(), "load.w0", &sub),
+            EXPECT_EQ(scada_sub_open(observers_.back()->ctx(), "load", &sub),
                       SCADA_OK);
             subs_.push_back(sub);
         }
@@ -215,19 +224,18 @@ private:
 // fail for the machine, not for the library.
 TEST_F(WakeLatency, EightWaitingObserversEachWakeWithinOneMillisecond) {
     constexpr std::size_t OBSERVERS = 8;
-    write_load_tag_set();
+    const scada::sim::Layout layout = one_tag();
+    write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
         return;
     }
     std::optional<ChildProcess> writer =
-        start_helper("SCADA_TAG_WRITER_COMMAND",
-                     {base(), "load", "1", "1", std::to_string(WRITE_RATE),
-                      std::to_string(WRITES), "notify"});
+        start_sim(layout, {"--rate", std::to_string(WRITE_RATE), "--rounds",
+                           std::to_string(WRITES), "--notify", "each"});
     if (!writer.has_value()) {
         return;
     }
-    ASSERT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT)) << writer->err();
     {
         // Subscribed once the writer has its ring, as in the case above, so
         // that no subscription waits for the ring to be looked for again.

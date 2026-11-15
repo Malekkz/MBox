@@ -9,6 +9,8 @@
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/test/child_process.h"
 
@@ -38,9 +40,21 @@ using Clock = std::chrono::steady_clock;
 
 constexpr int WAIT_MS = 10'000;
 constexpr int POLL_MS = 10;
-// The writer: two owners of the large tag set, 10 tags each.
+// The writer, scada-sim: the process `load` with two owners of 10 tags
+// each, every tag written WRITER_ROUNDS times at WRITER_RATE updates per
+// second of both owners together (4,000 updates in 2 s).
 constexpr std::uint64_t WRITER_RATE = 2'000;
-constexpr std::uint64_t WRITER_UPDATES = 4'000;
+constexpr std::uint64_t WRITER_ROUNDS = 200;
+constexpr std::uint32_t WRITER_OWNERS = 2;
+constexpr std::uint64_t WRITER_TAGS = 20;
+
+scada::sim::Layout writer_layout() {
+    return scada::sim::Layout{.prefix = "load",
+                              .processes = 1,
+                              .owners = WRITER_OWNERS,
+                              .tags = WRITER_TAGS,
+                              .patterns = {scada::sim::Pattern::CHECK}};
+}
 constexpr std::size_t OBSERVERS = 3;
 // A subscription may first report the ring appearing.
 constexpr int NEXT_ATTEMPTS = 3;
@@ -159,17 +173,12 @@ private:
 
 class ObserverProcesses : public TagProcesses {
 protected:
-    // Starts the writer on the large tag set and waits until it attached.
+    // Starts the writer, scada-sim on writer_layout(), and waits until it
+    // attached.
     [[nodiscard]] std::optional<ChildProcess> attached_writer() const {
-        std::optional<ChildProcess> writer = start_helper(
-            "SCADA_TAG_WRITER_COMMAND",
-            {base(), "load", "2", "10", std::to_string(WRITER_RATE),
-             std::to_string(WRITER_UPDATES), "notify"});
-        if (writer.has_value()) {
-            EXPECT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT))
-                << writer->err();
-        }
-        return writer;
+        return start_sim(writer_layout(),
+                         {"--rate", std::to_string(WRITER_RATE), "--rounds",
+                          std::to_string(WRITER_ROUNDS), "--notify", "each"});
     }
 
     // Adds a tag to the small tag set file, so that scada-tagd started on
@@ -192,7 +201,7 @@ protected:
 };
 
 TEST_F(ObserverProcesses, SeveralObserveALiveWriterBesideAnAttach) {
-    write_load_tag_set();
+    write_sim_tag_set(writer_layout());
     std::optional<RunningTagd> tagd = ready_tagd();
     std::optional<ChildProcess> writer = attached_writer();
     if (!tagd.has_value() || !writer.has_value()) {
