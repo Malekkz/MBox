@@ -725,12 +725,17 @@ bool Attachment::current_moved(std::int64_t now_mono_ns) {
     if (moved_.load(std::memory_order_relaxed)) {
         return true;
     }
-    if (now_mono_ns <
-        next_current_check_mono_ns_.load(std::memory_order_relaxed)) {
+    // One look per interval, also when several threads call status at the
+    // same instant: only the thread that moves the time on looks, so that
+    // one unreadable `current` is not counted twice.
+    std::int64_t due =
+        next_current_check_mono_ns_.load(std::memory_order_relaxed);
+    if (now_mono_ns < due ||
+        !next_current_check_mono_ns_.compare_exchange_strong(
+            due, now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
+            std::memory_order_relaxed)) {
         return false;
     }
-    next_current_check_mono_ns_.store(now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
-                                      std::memory_order_relaxed);
     if (current_names_another_generation()) {
         moved_.store(true, std::memory_order_relaxed);
         return true;
