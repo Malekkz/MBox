@@ -435,7 +435,7 @@ Result<Fd> create_generation_directory(int base_fd, const std::string& name,
 // Every process but scada-tagd starts down: none has attached to a new
 // generation (section 10.1, region missing). A process that attaches before
 // the first liveness check, which it can as soon as `current` is switched,
-// is then a change and is reported as up (decision D-35).
+// is then a change and is reported as up (decision D-38).
 Result<OpenGeneration> create_generation(int base_fd, std::uint64_t generation,
                                          const TagSet& tag_set,
                                          const ResolvedTagSet& resolved,

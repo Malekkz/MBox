@@ -143,6 +143,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # Conformance test 4 (issue #39, decision D-37): herd7 checks the
+  # sequence lock and the change ring against the Armv8 memory model, as
+  # written and with each ordering taken away. The check that the ARM64
+  # library compiles to what the model describes is a test of the release
+  # build, so it runs in `build and test (ARM64)`.
+  model-check:
+    name: model check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+        with:
+          herd7: "true"
+      - name: Model check (conformance test 4)
+        run: |
+          cmake --preset dev -DSCADA_REQUIRE_HERD7=ON
+          ctest --preset model --verbose
+
   check:
     name: check
     runs-on: ubuntu-24.04

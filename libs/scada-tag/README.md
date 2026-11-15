@@ -208,7 +208,7 @@ D-27 records the choices the contract left open.
 - The `down` flag in the process table is set or cleared to match, and each
   change is returned to the caller. `scada-tagd` itself is never marked.
   A new generation starts with the flag set for every other process, so a
-  process that attached before the first check is returned as up (D-35).
+  process that attached before the first check is returned as up (D-38).
 - Every entry of the generation directory that the header does not list, or
   whose owner is not the user of that region, is removed and returned to the
   caller. A file `.tmp.<region>.<pid>` of a listed region with the right
@@ -319,8 +319,9 @@ number; it tries 64 times. A string slot is written and copied inside the
 same window as its record (contract 7). Every field is accessed through
 `std::atomic_ref`, so no access is a data race and ThreadSanitizer needs no
 suppression. ThreadSanitizer does not check the order of the accesses; the
-tests with derived values do, and the model check of conformance test 4
-will.
+tests with derived values sample it, and the model check of conformance
+test 4 checks it for the Armv8 memory model, together with a check that the
+ARM64 library compiles to that order (`tests/model/README.md`).
 
 What a read returns:
 
@@ -604,8 +605,8 @@ ctest --preset perf -R scada-tag-wake-perf-test
   one-thread check of contract 13.2 with a real process.
 - `scada-tag-test-writer` (in `tests/writer/`) is the writing side of the
   load tests: one process with one thread for each owner.
-- Conformance test 4, the model check of the sequence lock, is not
-  automated yet.
+- Conformance test 4, the model check of the sequence lock and the change
+  ring, is in `tests/model/`.
 - `header_region_fuzz` (in `fuzz/`) feeds the reader of the `header` region
   with arbitrary bytes and then does with the contents what attach, resolve
   and info do.
