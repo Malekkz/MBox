@@ -34,7 +34,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -887,7 +886,7 @@ TEST_F(Queues, ClosingAHandleDoesNotUnbindAnotherThread) {
     // The test's thread takes the requests, so it posts their answers.
     ASSERT_TRUE(gives<scada_write_request>(*requests, SCADA_E_TIMEOUT));
     Attachment& driver = *io();
-    EXPECT_FALSE(in_other_thread([this, &driver] {
+    EXPECT_FALSE(in_other_thread([&driver] {
         {
             const QueuePtr results = open(driver, "result.io.web");
         }  // closed without posting: no stop, also in a debug build

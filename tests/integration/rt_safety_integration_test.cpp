@@ -67,16 +67,27 @@ protected:
         }
         const TraceResult result = scada::test::trace_marked_syscalls(
             command_from("SCADA_TAG_RT_PROBE_COMMAND", arguments), PROBE_LIMIT);
-        EXPECT_TRUE(result.traced) << "the probe could not be traced";
-        EXPECT_EQ(result.exit_code, 0) << result.out;
-        EXPECT_EQ(result.marked_parts, 1);
-        EXPECT_TRUE(result.out.starts_with(ALL_CALLS_PASSED)) << result.out;
-        EXPECT_NE(result.out.find(EXPIRED_ANSWERED), std::string::npos)
-            << result.out;
+        EXPECT_TRUE(ran_every_call(result));
         EXPECT_TRUE(stops_cleanly(*feeder));
         EXPECT_TRUE(stops_cleanly(*owner));
         stop(*tagd);
         return result;
+    }
+
+    // The probe was traced, ended well, had one marked part in which every
+    // call returned what it should, and answered the expired request.
+    static ::testing::AssertionResult ran_every_call(
+        const TraceResult& result) {
+        if (!result.traced || result.exit_code != 0 ||
+            result.marked_parts != 1) {
+            return ::testing::AssertionFailure()
+                   << "the probe was not traced, or failed: " << result.out;
+        }
+        if (!result.out.starts_with(ALL_CALLS_PASSED) ||
+            result.out.find(EXPIRED_ANSWERED) == std::string::npos) {
+            return ::testing::AssertionFailure() << result.out;
+        }
+        return ::testing::AssertionSuccess();
     }
 
     // The probe took no page fault and made no allocation between its

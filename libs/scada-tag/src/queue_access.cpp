@@ -19,6 +19,7 @@
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/types.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -415,12 +416,10 @@ void Attachment::release_queue_thread(std::size_t queue_id) noexcept {
 }
 
 bool Attachment::answer_queue_in_use(std::size_t queue_id) const noexcept {
-    for (const QueueAccess& access : queue_access_) {
-        if (access.answer_queue == queue_id && queue_open(access.id, false)) {
-            return true;
-        }
-    }
-    return false;
+    return std::ranges::any_of(queue_access_, [this, queue_id](
+                                                  const QueueAccess& access) {
+        return access.answer_queue == queue_id && queue_open(access.id, false);
+    });
 }
 
 QueueCounters& Attachment::counters(std::size_t queue_id) noexcept {

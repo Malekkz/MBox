@@ -480,6 +480,25 @@ bool stops_on_a_second_thread() {
     return checked != nullptr && std::string_view(checked) == "1";
 }
 
+// `feed` was stopped at its second posting thread (a debug build), or that
+// post was refused and it stops cleanly (any other build).
+::testing::AssertionResult stopped_or_refused(ChildProcess& feed) {
+    if (stops_on_a_second_thread()) {
+        if (feed.wait_for_signal_exit(WAIT_LIMIT) != SIGABRT ||
+            feed.err().find("posted from two threads") == std::string::npos) {
+            return ::testing::AssertionFailure()
+                   << "not stopped: " << feed.out() << feed.err();
+        }
+        return ::testing::AssertionSuccess();
+    }
+    if (const ::testing::AssertionResult refused =
+            prints(feed, "second=" + std::to_string(SCADA_E_INVALID) + "\n");
+        !refused) {
+        return refused;
+    }
+    return stops_cleanly(feed);
+}
+
 // Decision D-38, condition 4: a second thread that posts to a queue stops a
 // debug build and is refused with SCADA_E_INVALID by any other build.
 TEST_F(QueueProcesses, ASecondPostingThreadIsStoppedOrRefused) {
@@ -495,17 +514,7 @@ TEST_F(QueueProcesses, ASecondPostingThreadIsStoppedOrRefused) {
     if (!feed.has_value()) {
         return;
     }
-    if (stops_on_a_second_thread()) {
-        EXPECT_EQ(feed->wait_for_signal_exit(WAIT_LIMIT), SIGABRT)
-            << feed->out() << feed->err();
-        EXPECT_NE(feed->err().find("posted from two threads"),
-                  std::string::npos)
-            << feed->err();
-    } else {
-        EXPECT_TRUE(
-            prints(*feed, "second=" + std::to_string(SCADA_E_INVALID) + "\n"));
-        EXPECT_TRUE(stops_cleanly(*feed));
-    }
+    EXPECT_TRUE(stopped_or_refused(*feed));
     stop(*tagd);
 }
 
