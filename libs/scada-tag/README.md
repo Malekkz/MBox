@@ -211,6 +211,8 @@ D-27 records the choices the contract left open.
   is not down.
 - The `down` flag in the process table is set or cleared to match, and each
   change is returned to the caller. `scada-tagd` itself is never marked.
+  A new generation starts with the flag set for every other process, so a
+  process that attached before the first check is returned as up (D-38).
 - Every entry of the generation directory that the header does not list, or
   whose owner is not the user of that region, is removed and returned to the
   caller. A file `.tmp.<region>.<pid>` of a listed region with the right
@@ -305,7 +307,7 @@ Contract sections 6, 7 and 13; decision D-29.
 | `scada_tag_read_many` | yes | Several tags with one reading of the clock, and a status for each |
 | `scada_tag_write` | yes | One tag; owner thread only |
 | `scada_tag_write_many` | yes | Several tags with one pair of clock readings; all or nothing |
-| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write |
+| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write; `buf` NULL with `cap` 0 gives the length alone |
 | `scada_tag_write_string` | no | Text of at most 250 bytes of well-formed UTF-8; owner thread only |
 
 A `scada_value` is 48 bytes: type, quality, quality flags, change count,
@@ -333,10 +335,10 @@ What a read returns:
 | Never written | `SCADA_OK` | Quality BAD, flag NOT_INIT, times 0 |
 | Owner down, record between writes | `SCADA_OK` | The last value, quality BAD, OWNER_DOWN added |
 | Owner down, record left in the middle of a write | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
-| Region of the owner missing, or the tag was not resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
+| Region of the owner missing, after a tag of the owner was resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
 | Owner running and mid-write at all 64 attempts | `SCADA_E_BUSY` | Output unchanged; keep the previous value |
 | Record does not hold a value of the type of the tag, or holds OWNER_DOWN | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
-| No such handle in this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+| No such handle in this generation, or no tag of its owner (another process) was resolved in this context | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
 
 Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
 0 there is no value: a consumer must not plot, compare or act on them.
@@ -389,7 +391,7 @@ measure it again on another machine.
 
 ## Observe
 
-Contract section 11.4; decision D-38.
+Contract section 11.4; decision D-42.
 
 `scada_tag_observe(&ctx)` gives a context that reads the database without
 being a process of the tag set, for tools such as `scadactl`. It makes the

@@ -172,6 +172,12 @@ void scada_tag_detach(scada_ctx* ctx);
  * Writes the heartbeat of the process (section 10.1). Call it from the main
  * loop or cycle of the process, never from a helper thread.
  *
+ * A heartbeat that comes more than the heartbeat timeout after the one
+ * before is counted as late in the `proc` region, with the longest gap, and
+ * scada-tagd logs it: readers saw the process down meanwhile. The figures
+ * are a lower bound: the gap is measured between clock readings. Safe from
+ * several threads: the published time never goes back.
+ *
  * SCADA_OK; SCADA_E_RETIRING if the generation is retiring: the heartbeat
  * was written, and the caller detaches and attaches again (section 11.3);
  * SCADA_E_INVALID if `ctx` is NULL or an observer, which has no heartbeat.
@@ -468,8 +474,9 @@ int scada_tag_info(scada_ctx* ctx, uint32_t handle, scada_tag_info_t* out);
  *
  * RESOLVE THE TAG IN THIS CONTEXT FIRST. A handle is a number that is the
  * same in every process, but the regions of its owner are mapped by
- * scada_tag_resolve. A tag of another process that was never resolved in
- * this context reads as BAD with OWNER_DOWN, as if its owner were down.
+ * scada_tag_resolve. A tag of another process none of whose tags was
+ * resolved in this context gives SCADA_E_INVALID, so that a forgotten
+ * resolve does not look like a dead owner.
  *
  * The quality is BAD with SCADA_FLAG_OWNER_DOWN added when the process of
  * the owner is down or its region is missing. The library judges that
@@ -482,13 +489,14 @@ int scada_tag_info(scada_ctx* ctx, uint32_t handle, scada_tag_info_t* out);
  *
  * SCADA_E_BUSY: the owner was in the middle of a write at each of 64
  * attempts and is not down; keep the previous value for this cycle.
- * SCADA_E_INVALID: an argument is NULL or `handle` is not a handle of this
- * generation. SCADA_E_LAYOUT: the record does not hold a value of the type
- * of the tag; this does not go away by itself.
+ * SCADA_E_INVALID: an argument is NULL, `handle` is not a handle of this
+ * generation, or its owner is another process of which no tag was
+ * resolved in this context. SCADA_E_LAYOUT: the record does not hold a
+ * value of the type of the tag; this does not go away by itself.
  *
  * Only SCADA_E_BUSY leaves `*out` unchanged. With every other error `*out`
- * gets value 0, times 0 and quality BAD (and the type of the tag, or 0 if
- * the handle is none), so that a caller that keeps its output does not
+ * gets value 0, times 0 and quality BAD (and the type of the tag, or 0
+ * with SCADA_E_INVALID), so that a caller that keeps its output does not
  * hold on to a good value.
  *
  * Real-time safe: no allocation, no lock, no system call. Safe from any
@@ -551,8 +559,13 @@ int scada_tag_write_many(scada_ctx* ctx, const uint32_t* handles, size_t n,
  * tag whose owner is down. The text is what the owner stored; a reader
  * that needs valid UTF-8 checks it.
  *
- * SCADA_E_TYPE: the tag is not a STRING. SCADA_E_INVALID: `ctx`, `buf` or
- * `len` is NULL, `handle` is not a handle of this generation, or `cap` is
+ * `buf` NULL with `cap` 0 asks for the length alone: `*len` and `*meta`
+ * are filled as with a buffer that is large enough, and nothing else is
+ * written.
+ *
+ * SCADA_E_TYPE: the tag is not a STRING. SCADA_E_INVALID: `ctx` or `len`
+ * is NULL, `buf` is NULL with `cap` above 0, `handle` is not a handle of
+ * this generation or was not resolved as for scada_tag_read, or `cap` is
  * less than the length of the text, which is then in `*len`; a buffer of
  * SCADA_STRING_MAX bytes is always enough. SCADA_E_BUSY and SCADA_E_LAYOUT
  * as for scada_tag_read; SCADA_E_LAYOUT also if the stored length is more
@@ -660,7 +673,9 @@ typedef struct {
  * subscription in `*out`. The subscription starts at the end of the ring:
  * it delivers the changes written from now on. To know the state before,
  * read the tags of the owner after this call; drop a change whose
- * update_mono_ns is older than what a read gave for the same tag. If the
+ * update_mono_ns is older than what a read gave for the same tag. This is
+ * not a resolve: resolve a tag of the owner before reading its tags, or a
+ * read gives SCADA_E_INVALID (section 6.2). If the
  * ring is missing (the owner has not attached yet), the call succeeds and
  * the first look at the ring once it is there gives SCADA_E_GAP.
  *

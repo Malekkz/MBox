@@ -587,22 +587,55 @@ TEST_F(TagAccess, TheDownFlagOfScadaTagdDoesNotChangeARead) {
     EXPECT_FALSE(has_flag(value.quality_flags, QualityFlag::OWNER_DOWN));
 }
 
-TEST_F(TagAccess, ATagThatWasNotResolvedHereReadsAsOwnerDown) {
-    // `web` takes the handle from elsewhere: nothing of `io` is mapped.
+// Contract 6.2: a forgotten resolve must not look like a dead owner to
+// operators and alarm logic (issue #42, point 3).
+TEST_F(TagAccess, ATagThatWasNotResolvedHereIsInvalid) {
+    // `web` takes the handles from elsewhere: nothing of `io` is mapped.
     const std::uint32_t level = handle_of(*io(), "plant.level");
+    const std::uint32_t note = handle_of(*io(), "plant.note");
     ASSERT_EQ(io()->write(level, level_value(LEVEL)), SCADA_OK);
     scada_value value{};
-    ASSERT_EQ(web()->read(level, value), SCADA_OK);
-    EXPECT_EQ(value.type, SCADA_TYPE_FLOAT64);
+    value.value = UNTOUCHED;
+    EXPECT_EQ(web()->read(level, value), SCADA_E_INVALID);
+    EXPECT_EQ(value.type, 0U);
     EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
-    EXPECT_EQ(value.quality_flags, SCADA_FLAG_OWNER_DOWN);
+    EXPECT_EQ(value.quality_flags, 0U);
     EXPECT_EQ(value.value, 0U);
     EXPECT_EQ(value.update_mono_ns, 0);
 
+    const std::array<std::uint32_t, 1> handles{level};
+    std::array<scada_value, 1> values{};
+    std::array<int, 1> status{};
+    EXPECT_EQ(web()->read_many(handles, values, status), SCADA_E_INVALID);
+    EXPECT_EQ(status[0], SCADA_E_INVALID);
+    EXPECT_EQ(values[0].quality, SCADA_QUALITY_BAD);
+
+    std::array<char, SCADA_STRING_MAX> buffer{};
+    std::size_t length = UNTOUCHED_LENGTH;
+    scada_value meta{};
+    EXPECT_EQ(web()->read_string(note, buffer, length, &meta), SCADA_E_INVALID);
+    EXPECT_EQ(length, 0U);
+    EXPECT_EQ(meta.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(meta.quality_flags, 0U);
+
+    // Resolving one tag of the owner maps its regions for all its tags.
     ASSERT_EQ(handle_of(*web(), "plant.level"), level);
     ASSERT_EQ(web()->read(level, value), SCADA_OK);
     EXPECT_EQ(value.quality, SCADA_QUALITY_GOOD);
     EXPECT_EQ(std::bit_cast<double>(value.value), LEVEL);
+    EXPECT_EQ(web()->read_string(note, buffer, length, &meta), SCADA_OK);
+}
+
+// A tag that was resolved while its owner's regions were missing is not
+// the forgotten resolve above: it reads as OWNER_DOWN.
+TEST_F(TagAccess, ATagResolvedBeforeItsOwnerStartedReadsAsOwnerDown) {
+    io().reset();
+    remove_regions_of_io();
+    const std::uint32_t level = handle_of(*web(), "plant.level");
+    scada_value value{};
+    ASSERT_EQ(web()->read(level, value), SCADA_OK);
+    EXPECT_EQ(value.type, SCADA_TYPE_FLOAT64);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_OWNER_DOWN);
 }
 
 TEST_F(TagAccess, ATagWhoseRegionsAreMissingReadsAsOwnerDown) {

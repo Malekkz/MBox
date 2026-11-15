@@ -67,6 +67,10 @@ struct Peer {
     std::size_t entry_offset = 0;  // of its ProcessEntry in `header`
     bool self = false;             // scada-tagd itself
     ProcProbe probe;
+    // The late-heartbeat count seen at the previous check, and the mapping
+    // it was seen in; nothing before the first sample of a mapping.
+    std::optional<std::uint32_t> late_seen;
+    std::uint64_t late_mapping = 0;
 };
 
 // Region file names of the generation, each with the user that writes it.
@@ -431,8 +435,14 @@ Result<Fd> create_generation_directory(int base_fd, const std::string& name,
 
 // Builds the generation `generation` and switches `current` to it (section
 // 11.1, step 3). On an error nothing of it stays.
+//
+// Every process but scada-tagd starts down: none has attached to a new
+// generation (section 10.1, region missing). A process that attaches before
+// the first liveness check, which it can as soon as `current` is switched,
+// is then a change and is reported as up (decision D-38).
 Result<OpenGeneration> create_generation(int base_fd, std::uint64_t generation,
                                          const TagSet& tag_set,
+                                         const ResolvedTagSet& resolved,
                                          std::uint32_t tagd_uid,
                                          std::string& detail) {
     Result<HeaderImage> image = build_header(
@@ -461,6 +471,15 @@ Result<OpenGeneration> create_generation(int base_fd, std::uint64_t generation,
         // The image starts with the same RegionHeader the builder wrote,
         // `ready` 0, and has state BUILDING.
         std::ranges::copy(image.value().bytes, builder.value().bytes().begin());
+        for (std::size_t i = 0; i < resolved.processes.size(); ++i) {
+            if (tag_set.processes.at(resolved.processes[i]).name !=
+                TAGD_PROCESS_NAME) {
+                copy_to(builder.value().bytes(),
+                        process_entry_offset(image.value().bytes, i) +
+                            offsetof(ProcessEntry, down),
+                        std::uint32_t{1});
+            }
+        }
         Result<RegionBuilder::Published> published =
             builder.value().publish(detail);
         if (!published.ok()) {
@@ -557,6 +576,11 @@ private:
 
     // Removes what does not belong in the generation directory.
     void sweep(CheckReport& report);
+
+    // Adds to `report` the late heartbeats `peer` counted since the
+    // previous check (section 10.1). The first sample of a mapping is a
+    // baseline: reported only if it is not 0, and marked as such.
+    void note_late_beats(Peer& peer, CheckReport& report) const;
 
     [[nodiscard]] std::uint32_t& down_flag(const Peer& peer) const noexcept {
         return shared_at<ProcessEntry>(open_.header.bytes(), peer.entry_offset)
@@ -719,7 +743,7 @@ Status GenerationHost::Impl::open_generation(
         return room;
     }
     Result<OpenGeneration> created = create_generation(
-        base_.get(), highest.value() + 1, tag_set, tagd_uid_, detail);
+        base_.get(), highest.value() + 1, tag_set, resolved, tagd_uid_, detail);
     if (!created.ok()) {
         return created.status();
     }
@@ -743,8 +767,9 @@ Status GenerationHost::Impl::attach_own_region(std::string& detail) {
         return proc.status();
     }
     proc_ = std::move(proc).value();
+    proc_.count_late_after(own->heartbeat_timeout_ms);
     proc_.set_state(ProcessState::RUNNING);
-    proc_.heartbeat(monotonic_ns());
+    proc_.first_heartbeat(monotonic_ns());
     return {};
 }
 
@@ -816,9 +841,41 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
             report.changes.push_back(
                 ProcessChange{peer.region.process, reason});
         }
+        note_late_beats(peer, report);
     }
     sweep(report);
     return report;
+}
+
+void GenerationHost::Impl::note_late_beats(Peer& peer,
+                                           CheckReport& report) const {
+    // scada-tagd reads its own region too: while its heartbeat was late,
+    // readers saw SCADA_E_TAGD_DOWN. That mapping is never replaced.
+    const std::optional<LateBeats> beats =
+        peer.self ? late_beats_of(proc_.bytes()) : peer.probe.late_beats();
+    const std::uint64_t mapping = peer.self ? 0 : peer.probe.mappings();
+    if (!beats.has_value()) {
+        peer.late_seen.reset();
+        return;
+    }
+    const bool baseline =
+        !peer.late_seen.has_value() || peer.late_mapping != mapping;
+    // Modulo 2^32: the count wraps.
+    const std::uint32_t added =
+        baseline ? beats->count : beats->count - *peer.late_seen;
+    peer.late_seen = beats->count;
+    peer.late_mapping = mapping;
+    if (added == 0) {
+        return;
+    }
+    report.late.push_back(LateHeartbeats{
+        .process = peer.region.process,
+        .added = added,
+        .total = beats->count,
+        .longest_gap_ns = beats->longest_gap_ns,
+        .last_late_mono_ns = beats->last_late_mono_ns,
+        .baseline = baseline,
+    });
 }
 
 std::optional<bool> GenerationHost::Impl::is_down(

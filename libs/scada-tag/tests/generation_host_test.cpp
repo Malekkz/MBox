@@ -318,9 +318,12 @@ TEST_F(Host, OwnProcRegionIsRunningWithAHeartbeat) {
     EXPECT_EQ(proc.heartbeat, 1U);
     EXPECT_GT(proc.heartbeat_mono_ns, 0);
 
-    host->heartbeat(START_NS);
+    // A time after the first heartbeat, which took the clock: an older one
+    // would not be published (contract 10.1).
+    const std::int64_t later = proc.heartbeat_mono_ns + 1;
+    host->heartbeat(later);
     EXPECT_EQ(proc.heartbeat, 2U);
-    EXPECT_EQ(proc.heartbeat_mono_ns, START_NS);
+    EXPECT_EQ(proc.heartbeat_mono_ns, later);
 
     host->stop();
     EXPECT_EQ(proc.state, to_raw(ProcessState::STOPPING));
@@ -366,7 +369,7 @@ TEST_F(Host, Conformance20RunningProcessStaysUpAcrossTheRestart) {
         peer = running_io(1, START_NS);
         ASSERT_TRUE(peer.valid());
         EXPECT_EQ(changes_of(first->check(START_NS)),
-                  (Changes{{"web", DownReason::REGION_MISSING}}));
+                  (Changes{{"io", DownReason::NONE}}));
     }
     const std::unique_ptr<GenerationHost> host = started();
     ASSERT_NE(host, nullptr);
@@ -376,6 +379,61 @@ TEST_F(Host, Conformance20RunningProcessStaysUpAcrossTheRestart) {
     EXPECT_TRUE(host->check(START_NS).changes.empty());
     peer.heartbeat(START_NS + 1);
     EXPECT_TRUE(host->check(START_NS + IO_TIMEOUT_NS).changes.empty());
+}
+
+// Issue #42, point 4 (D-36): a heartbeat gap longer than the timeout that
+// lies between two checks is never seen as down by scada-tagd, but readers
+// saw the process down. The process counts it, and the check reports it.
+TEST_F(Host, AHeartbeatGapBetweenTwoChecksIsReportedAsLate) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    OwnProcRegion peer = attach_io(1);
+    ASSERT_TRUE(peer.valid());
+    peer.count_late_after(IO_TIMEOUT_MS);
+    peer.first_heartbeat(START_NS);
+    peer.set_state(ProcessState::RUNNING);
+    EXPECT_TRUE(host->check(START_NS).late.empty());
+
+    // The gap ends before the next check: the check finds a fresh heartbeat.
+    const std::int64_t late = START_NS + IO_TIMEOUT_NS + 1;
+    peer.heartbeat(late);
+    const CheckReport report = host->check(late);
+    EXPECT_TRUE(changes_of(report).empty());
+    ASSERT_EQ(report.late.size(), 1U);
+    EXPECT_EQ(report.late[0].process, "io");
+    EXPECT_EQ(report.late[0].added, 1U);
+    EXPECT_EQ(report.late[0].total, 1U);
+    EXPECT_EQ(report.late[0].longest_gap_ns, IO_TIMEOUT_NS + 1);
+    EXPECT_EQ(report.late[0].last_late_mono_ns, late);
+    EXPECT_FALSE(report.late[0].baseline);
+
+    // Reported once.
+    peer.heartbeat(late + 1);
+    EXPECT_TRUE(host->check(late + 1).late.empty());
+}
+
+// A scada-tagd that starts finds the count of earlier late heartbeats: it is
+// reported once as a baseline, not as new.
+TEST_F(Host, LateHeartbeatsFoundAtStartAreABaseline) {
+    OwnProcRegion peer;
+    const std::int64_t late = START_NS + IO_TIMEOUT_NS + 1;
+    {
+        const std::unique_ptr<GenerationHost> first = started();
+        ASSERT_NE(first, nullptr);
+        peer = attach_io(1);
+        ASSERT_TRUE(peer.valid());
+        peer.count_late_after(IO_TIMEOUT_MS);
+        peer.first_heartbeat(START_NS);
+        peer.set_state(ProcessState::RUNNING);
+        peer.heartbeat(late);
+    }
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    const CheckReport report = host->check(late);
+    ASSERT_EQ(report.late.size(), 1U);
+    EXPECT_TRUE(report.late[0].baseline);
+    EXPECT_EQ(report.late[0].added, 1U);
+    EXPECT_TRUE(host->check(late).late.empty());
 }
 
 TEST_F(Host, ChangedTagSetCreatesTheNextGenerationAndRetiresTheOld) {
@@ -643,17 +701,17 @@ TEST_F(Host, StartAfterAFailedStartBeginsAtGenerationOne) {
 TEST_F(Host, Conformance05EveryProcessIsDownUntilItAttaches) {
     const std::unique_ptr<GenerationHost> host = started();
     ASSERT_NE(host, nullptr);
-    EXPECT_EQ(host->is_down("io"), false);
+    // A new generation starts with every process down but scada-tagd,
+    // which is never down.
+    EXPECT_EQ(host->is_down("io"), true);
+    EXPECT_EQ(host->is_down("web"), true);
+    EXPECT_EQ(host->is_down("tagd"), false);
     EXPECT_EQ(host->is_down("nobody"), std::nullopt);
 
-    // Nobody has attached yet. scada-tagd itself is never down.
-    EXPECT_EQ(changes_of(host->check(START_NS)),
-              (Changes{{"io", DownReason::REGION_MISSING},
-                       {"web", DownReason::REGION_MISSING}}));
+    // Nobody has attached yet: that is no change.
+    EXPECT_TRUE(host->check(START_NS).changes.empty());
     EXPECT_EQ(host->is_down("io"), true);
     EXPECT_EQ(host->is_down("tagd"), false);
-    // A state that does not change is not reported again.
-    EXPECT_TRUE(host->check(START_NS).changes.empty());
 
     // Attached but still STARTING: down until it is RUNNING and beats.
     OwnProcRegion peer = attach_io(1);
@@ -664,6 +722,19 @@ TEST_F(Host, Conformance05EveryProcessIsDownUntilItAttaches) {
     EXPECT_EQ(changes_of(host->check(START_NS)),
               (Changes{{"io", DownReason::NONE}}));
     EXPECT_EQ(host->is_down("io"), false);
+}
+
+// Issue #44: a process can attach as soon as `current` is switched, before
+// the first liveness check of scada-tagd. It is reported up at that check.
+TEST_F(Host, AProcessThatAttachesBeforeTheFirstCheckIsReportedUp) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    const OwnProcRegion peer = running_io(1, START_NS);
+    ASSERT_TRUE(peer.valid());
+    EXPECT_EQ(changes_of(host->check(START_NS)),
+              (Changes{{"io", DownReason::NONE}}));
+    EXPECT_EQ(host->is_down("io"), false);
+    EXPECT_EQ(host->is_down("web"), true);
 }
 
 TEST_F(Host, Conformance05ProcessIsDownOnceItsHeartbeatIsOlderThanItsTimeout) {
@@ -722,7 +793,7 @@ TEST_F(Host, DownFlagIsWhatOtherProcessesSeeInTheHeader) {
     const MappedRegion header = map_header(1);
     ASSERT_TRUE(header.valid());
     // In process index order: io, tagd, web.
-    EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{0, 0, 0}));
+    EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{1, 0, 1}));
     static_cast<void>(host->check(START_NS));
     EXPECT_EQ(down_flags(header), (std::vector<std::uint32_t>{1, 0, 1}));
 
