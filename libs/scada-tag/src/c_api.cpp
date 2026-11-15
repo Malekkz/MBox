@@ -4,6 +4,7 @@
 #include "scada/tag/scada_tag.h"
 
 #include "attachment.h"
+#include "header_view.h"
 #include "layout.h"
 #include "region_file.h"
 #include "subscription.h"
@@ -49,13 +50,25 @@ struct
 // The sizes the header states, which the contract fixes (section 13). Only
 // the former `reserved1` of scada_status was split, so it keeps its size
 // and the offsets of the fields before it.
-static_assert(sizeof(scada_status) == 32);
-static_assert(offsetof(scada_status, records_repaired) == 24);
-static_assert(offsetof(scada_status, owner_count) == 28);
-static_assert(offsetof(scada_status, process_count) == 30);
-static_assert(sizeof(scada_owner_info_t) == 48);
-static_assert(sizeof(scada_proc_status_t) == 88);
-static_assert(offsetof(scada_proc_status_t, reserved) == 82);
+namespace sizes {
+constexpr std::size_t STATUS = 32;
+constexpr std::size_t STATUS_RECORDS_REPAIRED = 24;
+constexpr std::size_t STATUS_OWNER_COUNT = 28;
+constexpr std::size_t STATUS_PROCESS_COUNT = 30;
+constexpr std::size_t OWNER_INFO = 48;
+constexpr std::size_t PROC_STATUS = 88;
+constexpr std::size_t PROC_STATUS_RESERVED = 82;
+}  // namespace sizes
+static_assert(sizeof(scada_status) == sizes::STATUS);
+static_assert(offsetof(scada_status, records_repaired) ==
+              sizes::STATUS_RECORDS_REPAIRED);
+static_assert(offsetof(scada_status, owner_count) == sizes::STATUS_OWNER_COUNT);
+static_assert(offsetof(scada_status, process_count) ==
+              sizes::STATUS_PROCESS_COUNT);
+static_assert(sizeof(scada_owner_info_t) == sizes::OWNER_INFO);
+static_assert(sizeof(scada_proc_status_t) == sizes::PROC_STATUS);
+static_assert(offsetof(scada_proc_status_t, reserved) ==
+              sizes::PROC_STATUS_RESERVED);
 
 namespace {
 
@@ -118,9 +131,8 @@ bool options_of(const scada_attach_opts* opts,
 
 // Hands the attachment `attached` to the caller as a new context in
 // `*out`, or returns the code of its error.
-int hand_over(
-    scada::Result<std::unique_ptr<scada::tag::Attachment>> attached,
-    scada_ctx** out) {
+int hand_over(scada::Result<std::unique_ptr<scada::tag::Attachment>> attached,
+              scada_ctx** out) {
     if (!attached.ok()) {
         return code_of(attached.status());
     }
@@ -189,8 +201,7 @@ int report_status(scada_ctx& ctx, scada_status& out) {
     report.process_count =
         static_cast<std::uint16_t>(contents.processes.size());
     out = report;
-    if (status.state == scada::tag::GenerationState::RETIRING ||
-        status.moved) {
+    if (status.state == scada::tag::GenerationState::RETIRING || status.moved) {
         return SCADA_E_RETIRING;
     }
     return report.tagd_down != 0 ? SCADA_E_TAGD_DOWN : SCADA_OK;

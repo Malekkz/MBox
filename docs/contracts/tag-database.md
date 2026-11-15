@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.6 (draft) |
+| Contract version | 0.9 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -99,6 +99,12 @@ parallel and without the service users.
 - Modes are set with an explicit `fchmod` (or `chmod` for directories) after
   creation, because the creation mode is reduced by the umask.
 - A process maps its own regions read-write and all others read-only.
+- Read access to the database is membership of group `scada` (or root).
+  Any member may open an observer context (section 11.4) without an entry
+  in the process table, and read every tag, process and ring. Such reads
+  are not audited by the library. Membership also allows creating files in
+  `gen-<generation>/` and taking the lock of a `proc` region, which can keep
+  a process from attaching (section 3.3); the observer does neither.
 - Every file is opened relative to the generation directory with `openat` and
   `O_NOFOLLOW | O_CLOEXEC`, and checked with `fstat` on the descriptor, never
   by path: it must be a regular file, its owner uid must equal the uid recorded
@@ -817,6 +823,42 @@ on disk identifies tags by name and tag sets by `config_hash`.
 The order in which services reattach, and what outputs do meanwhile, is decided
 by `scada-conf` and the output configuration, not by this contract.
 
+### 11.4 Observe (`scada_tag_observe`)
+
+An observer context reads the database without being a process of the
+tag set. It is for tools such as `scadactl` (reference 11.5, 11.6).
+
+1. It makes the checks of 11.2 step 1 (base directory, `current`, the
+   generation directory, `header`, magic, layout version) and reads the tag
+   directory, as attach does. A caller that may not open the base or
+   generation directory gets `SCADA_E_PERMISSION`.
+2. It needs no entry in the process table, checks no uid against it, and
+   has the process index `SCADA_NO_PROCESS` (0xFFFF).
+3. It creates no file, takes no lock and writes nothing to shared memory.
+   Every region it reads is mapped read-only through the same checks as the
+   regions of other processes (section 3.1), on demand, as in 11.2. It keeps
+   no descriptor of a region.
+4. Write functions return `SCADA_E_NOT_OWNER` (`SCADA_E_INVALID` for a
+   handle that is none); `scada_tag_heartbeat` and `scada_tag_notify`
+   return `SCADA_E_INVALID`; each before it touches shared memory. When the
+   reliable queues are built, `scada_queue_open` returns
+   `SCADA_E_NOT_OWNER` in an observer context, so no queue can be posted
+   to, acknowledged or added to a wait set from one.
+5. `scada_tag_status` does for an observer what `scada_tag_notify` does
+   for a process: it looks again for missing regions (at most once a second
+   each) and repeats the clock check. It also detects a generation change,
+   which an observer cannot see through a heartbeat: it returns
+   `SCADA_E_RETIRING` when the generation is RETIRING, or when `current`,
+   read again at most once a second, names another generation (retiring is
+   best effort, 11.3). An observer calls it about once a second and before
+   it reports what it read.
+6. On `SCADA_E_RETIRING` the observer detaches, which unmaps everything,
+   observes again (step 1 retries a RETIRING generation a bounded number
+   of times) and resolves its handles again.
+
+There is no registry of observers: `scada-tagd` and the processes do not
+know they are there, and any number may run.
+
 ## 12. Retained values
 
 - A tag with the RETAIN flag is persisted by `scada-tagd`, which reads it like
@@ -868,12 +910,16 @@ typedef struct {
 /* Attach and status */
 int  scada_tag_attach(const char *process_name, scada_ctx **out);
 int  scada_tag_attach_opts(const char *process_name, const scada_attach_opts *opts, scada_ctx **out);
+int  scada_tag_observe(scada_ctx **out);                                                 /* section 11.4 */
+int  scada_tag_observe_opts(const scada_attach_opts *opts, scada_ctx **out);            /* retain_dir unused */
 void scada_tag_detach(scada_ctx *ctx);
 int  scada_tag_heartbeat(scada_ctx *ctx);              /* RT-safe */
 int  scada_tag_notify(scada_ctx *ctx);                 /* wake consumers; bounded, not RT-safe */
 int  scada_tag_status(scada_ctx *ctx, scada_status *out);
 int  scada_proc_resolve(scada_ctx *ctx, const char *process_name, uint16_t *index);
 int  scada_proc_status(scada_ctx *ctx, uint16_t index, scada_proc_status_t *out);        /* RT-safe */
+int  scada_owner_info(scada_ctx *ctx, uint16_t owner_index, scada_owner_info_t *out);
+uint32_t scada_tag_handle(uint16_t owner_index, uint32_t slot);                          /* RT-safe; no context */
 
 /* Tags */
 int  scada_tag_resolve(scada_ctx *ctx, const char *name, uint32_t *handle);
@@ -950,6 +996,61 @@ typedef struct {
   uint8_t  reserved[2];
 } scada_sub_stats_t;             /* 48 bytes */
 ```
+
+```c
+#define SCADA_NO_PROCESS 0xFFFF  /* process_index of an observer (11.4) */
+
+typedef struct {                 /* what scada_tag_status reports */
+  uint64_t generation;
+  uint32_t generation_state;     /* 1 BUILDING, 2 RUNNING, 3 RETIRING; 0 if not valid */
+  uint16_t process_index;        /* SCADA_NO_PROCESS for an observer */
+  uint8_t  tagd_down;
+  uint8_t  clock_syscall;        /* section 13.1 */
+  uint32_t regions_created;
+  uint32_t regions_reused;
+  uint32_t records_repaired;
+  uint16_t owner_count;          /* owner indexes 0 .. owner_count - 1 */
+  uint16_t process_count;        /* process indexes 0 .. process_count - 1 */
+} scada_status;                  /* 32 bytes */
+
+typedef struct {
+  char     name[32];             /* NUL-terminated */
+  uint32_t tag_count;            /* slots 0 .. tag_count - 1 */
+  uint32_t change_ring_capacity;
+  uint16_t process_index;
+  uint8_t  owned;                /* 1 if the caller is that process */
+  uint8_t  reserved0;
+  uint32_t reserved1;
+} scada_owner_info_t;            /* 48 bytes */
+
+typedef struct {
+  char     name[32];             /* NUL-terminated */
+  uint64_t heartbeat;            /* 0 if the region is missing */
+  int64_t  heartbeat_mono_ns;
+  int64_t  heartbeat_age_ns;     /* never negative */
+  uint32_t heartbeat_timeout_ms;
+  uint32_t state;                /* ProcHeader.state as stored; 0 if missing */
+  uint32_t cycle_seq;
+  uint32_t pid;                  /* diagnosis only */
+  uint32_t uid;                  /* from the process table */
+  uint16_t process_index;
+  uint8_t  down;                 /* section 10.1, judged by the library now */
+  uint8_t  down_reason;          /* 0 none, 1 region missing, 2 not running,
+                                    3 heartbeat stale */
+  uint8_t  marked_down;          /* the `down` flag of scada-tagd */
+  uint8_t  realtime;
+  uint8_t  reserved[6];
+} scada_proc_status_t;           /* 88 bytes */
+```
+
+`scada_tag_handle` packs a handle as section 5.1 says, so that callers do
+not depend on the bit split; it returns `SCADA_INVALID_HANDLE` for an owner
+index or slot beyond it. `scada_owner_info` with `scada_tag_handle` and
+`scada_tag_info` lists every tag of a generation. `scada_proc_resolve`
+maps the `proc` region of the process; `scada_proc_status` of a process that
+was not resolved in the context, and is not the caller, reports the region
+as missing. The fields of `scada_proc_status_t` are read one by one and need
+not belong to one heartbeat.
 
 Every GAP asks for the same action, a read of the tags. The reason is for
 reporting: a consumer that raises a communication alarm raises it on 4 and
@@ -1169,6 +1270,10 @@ Smaller points where this contract adds to or narrows the reference:
     is configurable.
 17. The base directory is created by the platform at boot. Minimum kernel
     Linux 5.16.
+18. Observer contexts (section 11.4): reference 5.7 names only attach. A
+    read-only tool reads the database without an entry in the process
+    table, as reference 11.6 and 18.2 (phase 1, `scadactl`) need; read
+    access is membership of group `scada` (reference 4.2, 5.1).
 
 ## 18. Change log
 
@@ -1182,6 +1287,15 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 | 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
+| 0.9 | 2026-11-15 | Issue #49 (D-38). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. Section 17, item 18. |
+
+Migration, 0.8 to 0.9: none for data; the layout version stays 1 and no
+structure in shared memory changed. `scada_status` keeps its size and the
+offsets of every other field; the former `reserved1`, which was always 0,
+now holds the owner and process counts, so a caller that checked it for 0
+must stop doing so. A caller that may not open the base directory got
+`SCADA_E_IO` with `EACCES` and now gets `SCADA_E_PERMISSION`. The new
+functions and structures are additions.
 
 Migration, 0.5 to 0.6: none for data; the layout version stays 1 and no
 structure changed. A process whose heartbeat time lies more than its timeout

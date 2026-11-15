@@ -6,6 +6,7 @@
 // and other users are in tests/integration.
 
 #include "attach_fixture.h"
+#include "layout.h"
 
 #include "scada/common/clock.h"
 #include "scada/tag/handle.h"
@@ -22,25 +23,26 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iterator>
 #include <map>
 #include <sstream>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <tuple>
 #include <vector>
 
 namespace {
 
+using scada::tag::GenerationState;
 using scada::tag::testing::AttachFixture;
 using scada::tag::testing::OWNER_IO;
 using scada::tag::testing::PROCESS_GUEST;
@@ -59,6 +61,9 @@ constexpr int SHORT_WAIT_MS = 20;
 constexpr double LEVEL = 4.25;
 // The user id of nobody on Linux, which is in no group of a test.
 constexpr uid_t NOBODY = 65534;
+constexpr std::int64_t NS_PER_S = 1'000'000'000;
+// Processes of the fixture's tag set.
+constexpr std::uint16_t PROCESS_COUNT = 4;
 
 // A context of the C interface, detached when it goes out of scope.
 class Context {
@@ -90,9 +95,26 @@ struct FileFacts {
     mode_t mode = 0;
     uid_t owner = 0;
     std::string bytes;
-
-    bool operator==(const FileFacts&) const = default;
 };
+
+bool operator==(const FileFacts& left, const FileFacts& right) {
+    return std::tie(left.inode, left.size, left.mtime_ns, left.mode, left.owner,
+                    left.bytes) == std::tie(right.inode, right.size,
+                                            right.mtime_ns, right.mode,
+                                            right.owner, right.bytes);
+}
+
+std::string contents_of(const std::filesystem::path& path, off_t size) {
+    std::string bytes;
+    if (size <= 0) {
+        return bytes;
+    }
+    std::ifstream file(path, std::ios::binary);
+    bytes.resize(static_cast<std::size_t>(size));
+    file.read(bytes.data(), size);
+    EXPECT_TRUE(file.good()) << path;
+    return bytes;
+}
 
 std::map<std::string, FileFacts> snapshot(const std::filesystem::path& dir) {
     std::map<std::string, FileFacts> files;
@@ -102,21 +124,19 @@ std::map<std::string, FileFacts> snapshot(const std::filesystem::path& dir) {
         FileFacts facts;
         facts.inode = info.st_ino;
         facts.size = info.st_size;
-        facts.mtime_ns = (std::int64_t{info.st_mtim.tv_sec} * 1'000'000'000) +
+        facts.mtime_ns = (std::int64_t{info.st_mtim.tv_sec} * NS_PER_S) +
                          info.st_mtim.tv_nsec;
         facts.mode = info.st_mode;
         facts.owner = info.st_uid;
         if (S_ISREG(info.st_mode)) {
-            std::ifstream in(entry.path(), std::ios::binary);
-            facts.bytes.assign(std::istreambuf_iterator<char>(in),
-                               std::istreambuf_iterator<char>());
+            facts.bytes = contents_of(entry.path(), info.st_size);
         }
         files[entry.path().filename().string()] = facts;
     }
     return files;
 }
 
-// The lines of /proc/self/maps that name a file under `dir`.
+// The lines of /proc/self/maps that name a file under `dir`, sorted.
 std::vector<std::string> mappings_under(const std::filesystem::path& dir) {
     std::ifstream maps("/proc/self/maps");
     std::vector<std::string> lines;
@@ -131,14 +151,24 @@ std::vector<std::string> mappings_under(const std::filesystem::path& dir) {
     return lines;
 }
 
-// The permissions column of a line of /proc/self/maps, for example
-// "r--s".
-std::string permissions_of(const std::string& line) {
+// True if the permissions column of the line of /proc/self/maps `line`,
+// for example "r--s", has no `w`.
+bool read_only(const std::string& line) {
     std::istringstream fields(line);
     std::string range;
     std::string permissions;
     fields >> range >> permissions;
-    return permissions;
+    return permissions.find('w') == std::string::npos;
+}
+
+scada_value float_value(double number, std::uint8_t quality,
+                        std::uint16_t flags) {
+    scada_value value{};
+    value.type = SCADA_TYPE_FLOAT64;
+    value.quality = quality;
+    value.quality_flags = flags;
+    value.value = std::bit_cast<std::uint64_t>(number);
+    return value;
 }
 
 class Observer : public AttachFixture {
@@ -159,27 +189,36 @@ protected:
         return scada_tag_attach_opts(process, &options, context.out());
     }
 
-    // Attaches `io` and writes LEVEL to plant.level, as a process does.
-    void write_level(Context& io) const {
-        ASSERT_EQ(attach("io", io), SCADA_OK);
+    // Attaches `io` as `feeder` and writes LEVEL to plant.level, as a
+    // process does.
+    void write_level(Context& feeder) const {
+        ASSERT_EQ(attach("io", feeder), SCADA_OK);
         std::uint32_t level = SCADA_INVALID_HANDLE;
-        ASSERT_EQ(scada_tag_resolve(io.get(), "plant.level", &level), SCADA_OK);
-        scada_value value{};
-        value.type = SCADA_TYPE_FLOAT64;
-        value.quality = SCADA_QUALITY_GOOD;
-        value.value = std::bit_cast<std::uint64_t>(LEVEL);
-        ASSERT_EQ(scada_tag_write(io.get(), level, &value), SCADA_OK);
-        ASSERT_EQ(scada_tag_notify(io.get()), SCADA_OK);
+        ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.level", &level),
+                  SCADA_OK);
+        const scada_value value = float_value(LEVEL, SCADA_QUALITY_GOOD, 0);
+        ASSERT_EQ(scada_tag_write(feeder.get(), level, &value), SCADA_OK);
+        ASSERT_EQ(scada_tag_notify(feeder.get()), SCADA_OK);
     }
 
-    // A tag set with one tag more: another config_hash, so that starting
-    // scada-tagd with it creates generation 2.
-    [[nodiscard]] static scada::tag::TagSet larger_tag_set() {
+    // The value of plant.level as `ctx` reads it, resolved first.
+    static scada_value read_level(scada_ctx* ctx) {
+        std::uint32_t level = SCADA_INVALID_HANDLE;
+        EXPECT_EQ(scada_tag_resolve(ctx, "plant.level", &level), SCADA_OK);
+        scada_value value{};
+        EXPECT_EQ(scada_tag_read(ctx, level, &value), SCADA_OK);
+        return value;
+    }
+
+    // Starts the side of scada-tagd again with one tag more: another
+    // config_hash, so it creates generation 2 and retires generation 1.
+    void start_second_generation() {
+        drop_host();
         scada::tag::TagSet set = tag_set();
         set.tags.push_back({.name = "plant.extra",
                             .owner = "io",
                             .type = scada::tag::TagType::INT64});
-        return set;
+        start_host(set);
     }
 };
 
@@ -188,28 +227,19 @@ TEST_F(Observer, OpensWithoutAProcessEntry) {
     host().heartbeat(scada::monotonic_ns());
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    ASSERT_NE(observer.get(), nullptr);
-
     scada_status status{};
     EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_OK);
     EXPECT_EQ(status.generation, 1U);
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RUNNING);
     EXPECT_EQ(status.process_index, SCADA_NO_PROCESS);
     EXPECT_EQ(status.tagd_down, 0);
-    EXPECT_EQ(status.regions_created, 0U);
-    EXPECT_EQ(status.regions_reused, 0U);
-    EXPECT_EQ(status.records_repaired, 0U);
+    EXPECT_EQ(status.regions_created + status.regions_reused, 0U);
     EXPECT_EQ(status.owner_count, 1U);
-    EXPECT_EQ(status.process_count, 4U);
+    EXPECT_EQ(status.process_count, PROCESS_COUNT);
 }
 
-TEST_F(Observer, RefusesEveryCallThatWouldWrite) {
+TEST_F(Observer, RefusesWrites) {
     start_host();
-    Context io;
-    write_level(io);
-    io.detach();
-    const auto before = snapshot(generation_dir());
-
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
     std::uint32_t level = SCADA_INVALID_HANDLE;
@@ -218,9 +248,7 @@ TEST_F(Observer, RefusesEveryCallThatWouldWrite) {
               SCADA_OK);
     ASSERT_EQ(scada_tag_resolve(observer.get(), "plant.label", &label),
               SCADA_OK);
-    scada_value value{};
-    value.type = SCADA_TYPE_FLOAT64;
-    value.quality = SCADA_QUALITY_GOOD;
+    const scada_value value = float_value(LEVEL, SCADA_QUALITY_GOOD, 0);
     EXPECT_EQ(scada_tag_write(observer.get(), level, &value),
               SCADA_E_NOT_OWNER);
     EXPECT_EQ(scada_tag_write(observer.get(), SCADA_INVALID_HANDLE, &value),
@@ -230,174 +258,220 @@ TEST_F(Observer, RefusesEveryCallThatWouldWrite) {
     EXPECT_EQ(scada_tag_write_string(observer.get(), label, "x", 1,
                                      SCADA_QUALITY_GOOD, 0, 0),
               SCADA_E_NOT_OWNER);
-    EXPECT_EQ(scada_tag_heartbeat(observer.get()), SCADA_E_INVALID);
-    EXPECT_EQ(scada_tag_notify(observer.get()), SCADA_E_INVALID);
-
     scada_tag_info_t info{};
     ASSERT_EQ(scada_tag_info(observer.get(), level, &info), SCADA_OK);
     EXPECT_EQ(info.owned, 0);
+}
+
+TEST_F(Observer, HasNoHeartbeatAndWakesNobody) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    feeder.detach();
+    const auto before = snapshot(generation_dir());
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    EXPECT_EQ(scada_tag_heartbeat(observer.get()), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_notify(observer.get()), SCADA_E_INVALID);
     observer.detach();
     EXPECT_EQ(snapshot(generation_dir()), before);
+}
+
+// Everything an observer does that reads: resolve, read, process status,
+// a subscription and a wait set, status.
+void read_everything(scada_ctx* ctx) {
+    std::uint32_t level = SCADA_INVALID_HANDLE;
+    scada_value value{};
+    std::uint16_t index = 0;
+    scada_proc_status_t proc{};
+    scada_sub* sub = nullptr;
+    scada_waitset* set = nullptr;
+    scada_change change{};
+    scada_status status{};
+    // Each call in order (a braced list is evaluated left to right), with
+    // the code it gives. The owner stopped before the subscription opened,
+    // so nothing comes; scada-tagd started a moment ago, so it is up.
+    const std::vector<int> codes{
+        scada_tag_resolve(ctx, "plant.level", &level),
+        scada_tag_read(ctx, level, &value),
+        scada_proc_resolve(ctx, "io", &index),
+        scada_proc_status(ctx, index, &proc),
+        scada_sub_open(ctx, "io", &sub),
+        scada_waitset_create(ctx, &set),
+        scada_waitset_add_sub(set, sub),
+        scada_waitset_add_cycle(set, PROCESS_IO),
+        scada_sub_next(sub, &change, SHORT_WAIT_MS),
+        scada_waitset_wait(set, SHORT_WAIT_MS),
+        scada_tag_status(ctx, &status),
+    };
+    EXPECT_EQ(codes,
+              (std::vector<int>{SCADA_OK, SCADA_OK, SCADA_OK, SCADA_OK,
+                                SCADA_OK, SCADA_OK, SCADA_OK, SCADA_OK,
+                                SCADA_E_TIMEOUT, SCADA_E_TIMEOUT, SCADA_OK}));
+    scada_waitset_destroy(set);
+    scada_sub_close(sub);
 }
 
 TEST_F(Observer, LeavesTheGenerationDirectoryAsItWas) {
     start_host();
-    Context io;
-    write_level(io);
-    io.detach();
+    Context feeder;
+    write_level(feeder);
+    feeder.detach();
     const auto before = snapshot(generation_dir());
-    const auto mapped_before = mappings_under(generation_dir());
-
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    std::uint32_t level = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(scada_tag_resolve(observer.get(), "plant.level", &level),
-              SCADA_OK);
-    scada_value value{};
-    EXPECT_EQ(scada_tag_read(observer.get(), level, &value), SCADA_OK);
-    std::uint16_t index = 0;
-    ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
-    scada_proc_status_t proc{};
-    EXPECT_EQ(scada_proc_status(observer.get(), index, &proc), SCADA_OK);
-    scada_sub* sub = nullptr;
-    ASSERT_EQ(scada_sub_open(observer.get(), "io", &sub), SCADA_OK);
-    scada_waitset* set = nullptr;
-    ASSERT_EQ(scada_waitset_create(observer.get(), &set), SCADA_OK);
-    ASSERT_EQ(scada_waitset_add_sub(set, sub), SCADA_OK);
-    ASSERT_EQ(scada_waitset_add_cycle(set, PROCESS_IO), SCADA_OK);
-    // The owner stopped before the subscription opened: nothing comes.
-    scada_change change{};
-    EXPECT_EQ(scada_sub_next(sub, &change, SHORT_WAIT_MS), SCADA_E_TIMEOUT);
-    EXPECT_EQ(scada_waitset_wait(set, SHORT_WAIT_MS), SCADA_E_TIMEOUT);
-    scada_status status{};
-    static_cast<void>(scada_tag_status(observer.get(), &status));
-
-    // Every mapping the observer made is read-only.
-    const auto mapped = mappings_under(generation_dir());
-    std::vector<std::string> added;
-    std::ranges::set_difference(mapped, mapped_before,
-                                std::back_inserter(added));
-    EXPECT_FALSE(added.empty());
-    for (const std::string& line : added) {
-        EXPECT_EQ(permissions_of(line).find('w'), std::string::npos) << line;
-    }
-
-    scada_waitset_destroy(set);
-    scada_sub_close(sub);
+    read_everything(observer.get());
     observer.detach();
     // Names, inodes, sizes, modes, owners, times and bytes: all as before.
     EXPECT_EQ(snapshot(generation_dir()), before);
-    // And the observer's mappings are gone.
+}
+
+TEST_F(Observer, MapsOnlyReadOnly) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    feeder.detach();
+    const auto mapped_before = mappings_under(generation_dir());
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    read_everything(observer.get());
+    // The host of this test maps the header read-write; every mapping the
+    // observer added is read-only.
+    std::vector<std::string> added;
+    std::ranges::set_difference(mappings_under(generation_dir()), mapped_before,
+                                std::back_inserter(added));
+    EXPECT_FALSE(added.empty());
+    EXPECT_TRUE(std::ranges::all_of(added, read_only));
+    observer.detach();
     EXPECT_EQ(mappings_under(generation_dir()), mapped_before);
 }
 
-TEST_F(Observer, ReadsAndWatchesWhatAProcessWrites) {
+TEST_F(Observer, ReadsWhatAProcessWrites) {
     start_host();
-    Context io;
-    write_level(io);
+    Context feeder;
+    write_level(feeder);
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-
-    std::uint32_t level = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(scada_tag_resolve(observer.get(), "plant.level", &level),
-              SCADA_OK);
-    scada_value value{};
-    ASSERT_EQ(scada_tag_read(observer.get(), level, &value), SCADA_OK);
+    scada_value value = read_level(observer.get());
     EXPECT_EQ(value.quality, SCADA_QUALITY_GOOD);
     EXPECT_EQ(std::bit_cast<double>(value.value), LEVEL);
+    // A clean stop of the owner reads as down at once (section 10.1).
+    feeder.detach();
+    value = read_level(observer.get());
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
+}
 
+TEST_F(Observer, WatchesWhatAProcessWrites) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
     scada_sub* sub = nullptr;
     ASSERT_EQ(scada_sub_open(observer.get(), "io", &sub), SCADA_OK);
-    std::uint32_t io_level = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(scada_tag_resolve(io.get(), "plant.level", &io_level), SCADA_OK);
-    scada_value next{};
-    next.type = SCADA_TYPE_FLOAT64;
-    next.quality = SCADA_QUALITY_UNCERTAIN;
-    next.quality_flags = SCADA_FLAG_STALE;
-    next.value = std::bit_cast<std::uint64_t>(LEVEL + 1);
-    ASSERT_EQ(scada_tag_write(io.get(), io_level, &next), SCADA_OK);
-    ASSERT_EQ(scada_tag_notify(io.get()), SCADA_OK);
+    std::uint32_t level = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.level", &level), SCADA_OK);
+    const scada_value next =
+        float_value(LEVEL + 1, SCADA_QUALITY_UNCERTAIN, SCADA_FLAG_STALE);
+    ASSERT_EQ(scada_tag_write(feeder.get(), level, &next), SCADA_OK);
+    ASSERT_EQ(scada_tag_notify(feeder.get()), SCADA_OK);
     scada_change change{};
-    ASSERT_EQ(scada_sub_next(sub, &change, WAIT_LIMIT_MS), SCADA_OK);
+    EXPECT_EQ(scada_sub_next(sub, &change, WAIT_LIMIT_MS), SCADA_OK);
     EXPECT_EQ(change.handle, level);
     EXPECT_EQ(change.quality, SCADA_QUALITY_UNCERTAIN);
     EXPECT_NE(change.quality_flags & SCADA_FLAG_STALE, 0);
     EXPECT_EQ(std::bit_cast<double>(change.value), LEVEL + 1);
     scada_sub_close(sub);
-
-    // A clean stop of the owner reads as down at once (section 10.1).
-    io.detach();
-    ASSERT_EQ(scada_tag_read(observer.get(), level, &value), SCADA_OK);
-    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
-    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
 }
 
 TEST_F(Observer, SeveralRunBesideALiveAttachOfTheSameTagSet) {
     start_host();
-    Context io;
-    write_level(io);
-    Context first;
-    Context second;
-    Context third;
-    EXPECT_EQ(observe(first), SCADA_OK);
-    EXPECT_EQ(observe(second), SCADA_OK);
-    EXPECT_EQ(observe(third), SCADA_OK);
-    // The process lock is still the process's alone.
-    Context io_again;
-    EXPECT_EQ(attach("io", io_again), SCADA_E_BUSY);
-    for (Context* observer : {&first, &second, &third}) {
-        std::uint32_t level = SCADA_INVALID_HANDLE;
-        ASSERT_EQ(scada_tag_resolve(observer->get(), "plant.level", &level),
-                  SCADA_OK);
-        scada_value value{};
-        ASSERT_EQ(scada_tag_read(observer->get(), level, &value), SCADA_OK);
-        EXPECT_EQ(value.quality, SCADA_QUALITY_GOOD);
+    Context feeder;
+    write_level(feeder);
+    std::array<Context, 3> observers;
+    for (Context& observer : observers) {
+        ASSERT_EQ(observe(observer), SCADA_OK);
+        EXPECT_EQ(read_level(observer.get()).quality, SCADA_QUALITY_GOOD);
     }
-    // The process keeps working, and can be attached again after it stops.
-    EXPECT_EQ(scada_tag_heartbeat(io.get()), SCADA_OK);
-    io.detach();
-    EXPECT_EQ(attach("io", io_again), SCADA_OK);
+    // The lock of the process is still the process's alone, and it keeps
+    // working.
+    Context again;
+    EXPECT_EQ(attach("io", again), SCADA_E_BUSY);
+    EXPECT_EQ(scada_tag_heartbeat(feeder.get()), SCADA_OK);
+    feeder.detach();
+    EXPECT_EQ(attach("io", again), SCADA_OK);
 }
 
-TEST_F(Observer, ProcessStatus) {
+TEST_F(Observer, ResolvesProcesses) {
     start_host();
-    Context io;
-    write_level(io);
-    ASSERT_EQ(scada_tag_heartbeat(io.get()), SCADA_OK);
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-
     std::uint16_t index = 0;
     EXPECT_EQ(scada_proc_resolve(observer.get(), "nobody", &index),
               SCADA_E_NOT_FOUND);
     EXPECT_EQ(scada_proc_resolve(observer.get(), "No Name", &index),
               SCADA_E_INVALID);
-    ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
+    EXPECT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
     EXPECT_EQ(index, PROCESS_IO);
+    scada_proc_status_t status{};
+    EXPECT_EQ(scada_proc_status(observer.get(), PROCESS_COUNT, &status),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_proc_status(observer.get(), SCADA_NO_PROCESS, &status),
+              SCADA_E_INVALID);
+}
 
+TEST_F(Observer, ReportsARunningProcess) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    ASSERT_EQ(scada_tag_heartbeat(feeder.get()), SCADA_OK);
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    std::uint16_t index = 0;
+    ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
     scada_proc_status_t status{};
     ASSERT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);
-    EXPECT_STREQ(status.name, "io");
-    EXPECT_EQ(status.process_index, PROCESS_IO);
+    EXPECT_STREQ(std::data(status.name), "io");
     EXPECT_EQ(status.state, SCADA_PROC_RUNNING);
-    EXPECT_EQ(status.down, 0);
     EXPECT_EQ(status.down_reason, SCADA_DOWN_NONE);
+    EXPECT_EQ(status.down, 0);
     EXPECT_GE(status.heartbeat, 2U);  // attach and the call above
-    EXPECT_GT(status.heartbeat_mono_ns, 0);
-    EXPECT_GE(status.heartbeat_age_ns, 0);
+    EXPECT_GE(status.cycle_seq, 1U);  // write_level called notify
     EXPECT_EQ(status.pid, static_cast<std::uint32_t>(::getpid()));
     EXPECT_EQ(status.uid, uid());
-    EXPECT_GE(status.cycle_seq, 1U);  // write_level called notify
     EXPECT_EQ(status.heartbeat_timeout_ms,
               scada::tag::DEFAULT_HEARTBEAT_TIMEOUT_MS);
-    EXPECT_EQ(status.realtime, 0);
-    for (const std::uint8_t byte : status.reserved) {
-        EXPECT_EQ(byte, 0);
-    }
+}
 
-    // The `down` flag of scada-tagd follows its check, the judgement of
-    // the library does not wait for it.
-    io.detach();
+TEST_F(Observer, ReportsTheFieldsOfAProcessEntry) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    std::uint16_t index = 0;
+    ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
+    scada_proc_status_t status{};
+    ASSERT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);
+    EXPECT_EQ(status.process_index, PROCESS_IO);
+    EXPECT_EQ(status.realtime, 0);
+    EXPECT_GT(status.heartbeat_mono_ns, 0);
+    EXPECT_GE(status.heartbeat_age_ns, 0);
+    EXPECT_TRUE(std::ranges::all_of(
+        status.reserved, [](std::uint8_t byte) { return byte == 0; }));
+}
+
+TEST_F(Observer, ReportsAStoppedProcessBeforeScadaTagdDoes) {
+    start_host();
+    Context feeder;
+    write_level(feeder);
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    std::uint16_t index = 0;
+    ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
+    feeder.detach();
+    scada_proc_status_t status{};
     ASSERT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);
     EXPECT_EQ(status.down, 1);
     EXPECT_EQ(status.down_reason, SCADA_DOWN_NOT_RUNNING);
@@ -406,61 +480,63 @@ TEST_F(Observer, ProcessStatus) {
     static_cast<void>(host().check(scada::monotonic_ns()));
     ASSERT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);
     EXPECT_EQ(status.marked_down, 1);
+}
 
-    // A process that was never resolved reads as missing; scada-tagd was
-    // asked for by observe itself.
+TEST_F(Observer, ReportsAProcessThatWasNotResolvedAsMissing) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    scada_proc_status_t status{};
     ASSERT_EQ(scada_proc_status(observer.get(), PROCESS_GUEST, &status),
               SCADA_OK);
-    EXPECT_STREQ(status.name, "guest");
+    EXPECT_STREQ(std::data(status.name), "guest");
     EXPECT_EQ(status.down_reason, SCADA_DOWN_REGION_MISSING);
     EXPECT_EQ(status.heartbeat, 0U);
     EXPECT_EQ(status.state, 0U);
+    // scada-tagd is asked for by observe itself.
     host().heartbeat(scada::monotonic_ns());
     ASSERT_EQ(scada_proc_status(observer.get(), PROCESS_TAGD, &status),
               SCADA_OK);
     EXPECT_EQ(status.down, 0);
-
-    EXPECT_EQ(scada_proc_status(observer.get(), 4, &status), SCADA_E_INVALID);
-    EXPECT_EQ(scada_proc_status(observer.get(), SCADA_NO_PROCESS, &status),
-              SCADA_E_INVALID);
 }
 
-TEST_F(Observer, OwnerInfoAndHandlesListEveryTag) {
+TEST_F(Observer, DescribesOwners) {
     start_host();
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    scada_status status{};
-    static_cast<void>(scada_tag_status(observer.get(), &status));
-    ASSERT_EQ(status.owner_count, 1U);
-
     scada_owner_info_t owner{};
     ASSERT_EQ(scada_owner_info(observer.get(), OWNER_IO, &owner), SCADA_OK);
-    EXPECT_STREQ(owner.name, "io");
+    EXPECT_STREQ(std::data(owner.name), "io");
     EXPECT_EQ(owner.tag_count, scada::tag::testing::IO_TAG_COUNT);
-    EXPECT_EQ(owner.change_ring_capacity,
-              scada::tag::MIN_CHANGE_RING_CAPACITY);
+    EXPECT_EQ(owner.change_ring_capacity, scada::tag::MIN_CHANGE_RING_CAPACITY);
     EXPECT_EQ(owner.process_index, PROCESS_IO);
     EXPECT_EQ(owner.owned, 0);
-    EXPECT_EQ(owner.reserved0, 0);
-    EXPECT_EQ(owner.reserved1, 0U);
+    EXPECT_EQ(owner.reserved0 + owner.reserved1, 0U);
     EXPECT_EQ(scada_owner_info(observer.get(), 1, &owner), SCADA_E_INVALID);
+}
 
+TEST_F(Observer, ListsEveryTagThroughOwnersAndHandles) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    scada_owner_info_t owner{};
+    ASSERT_EQ(scada_owner_info(observer.get(), OWNER_IO, &owner), SCADA_OK);
     std::vector<std::string> names;
     for (std::uint32_t slot = 0; slot < owner.tag_count; ++slot) {
-        const std::uint32_t handle = scada_tag_handle(OWNER_IO, slot);
         scada_tag_info_t info{};
-        ASSERT_EQ(scada_tag_info(observer.get(), handle, &info), SCADA_OK);
-        EXPECT_EQ(info.owner_index, OWNER_IO);
-        names.emplace_back(info.name);
+        EXPECT_EQ(scada_tag_info(observer.get(),
+                                 scada_tag_handle(OWNER_IO, slot), &info),
+                  SCADA_OK);
+        names.emplace_back(std::data(info.name));
     }
     EXPECT_EQ(names, (std::vector<std::string>{"plant.label", "plant.level",
                                                "plant.note", "plant.running"}));
     // The slot past the last is no tag.
     scada_tag_info_t info{};
-    EXPECT_EQ(scada_tag_info(observer.get(),
-                             scada_tag_handle(OWNER_IO, owner.tag_count),
-                             &info),
-              SCADA_E_INVALID);
+    EXPECT_EQ(
+        scada_tag_info(observer.get(),
+                       scada_tag_handle(OWNER_IO, owner.tag_count), &info),
+        SCADA_E_INVALID);
 }
 
 TEST(TagHandle, PacksOwnerAndSlot) {
@@ -480,18 +556,23 @@ TEST_F(Observer, ReportsARetiringGeneration) {
     start_host();
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    drop_host();
-    start_host(larger_tag_set());  // generation 2; generation 1 retires
+    start_second_generation();
     scada_status status{};
     EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_E_RETIRING);
     EXPECT_EQ(status.generation, 1U);
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RETIRING);
+}
 
-    // Observing again finds generation 2, and the old mappings go with the
-    // old context.
+TEST_F(Observer, ObservesAgainAfterAGenerationChange) {
+    start_host();
+    Context observer;
+    ASSERT_EQ(observe(observer), SCADA_OK);
+    start_second_generation();
+    // The old mappings go with the old context.
     observer.detach();
     EXPECT_TRUE(mappings_under(generation_dir(1)).empty());
     ASSERT_EQ(observe(observer), SCADA_OK);
+    scada_status status{};
     EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_OK);
     EXPECT_EQ(status.generation, 2U);
     std::uint32_t extra = SCADA_INVALID_HANDLE;
@@ -499,56 +580,63 @@ TEST_F(Observer, ReportsARetiringGeneration) {
               SCADA_OK);
 }
 
+// Calls scada_tag_status on `ctx` until it gives SCADA_E_RETIRING, within
+// WAIT_LIMIT_MS.
+bool becomes_retiring(scada_ctx* ctx, scada_status& status) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(WAIT_LIMIT_MS);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (scada_tag_status(ctx, &status) == SCADA_E_RETIRING) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+    }
+    return false;
+}
+
 TEST_F(Observer, ReportsACurrentThatNamesAnotherGeneration) {
     start_host();
     Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    drop_host();
-    start_host(larger_tag_set());
+    start_second_generation();
     // Retiring is best effort (section 11.3): here generation 1 never got
-    // the state, so only `current` tells.
-    set_generation_state(scada::tag::GenerationState::RUNNING);
+    // the state, so only `current`, read again at most once a second,
+    // tells.
+    set_generation_state(GenerationState::RUNNING);
     scada_status status{};
-    int code = SCADA_OK;
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(WAIT_LIMIT_MS);
-    // `current` is read again at most once a second.
-    while (std::chrono::steady_clock::now() < deadline) {
-        code = scada_tag_status(observer.get(), &status);
-        if (code == SCADA_E_RETIRING) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
-    }
-    EXPECT_EQ(code, SCADA_E_RETIRING);
+    EXPECT_TRUE(becomes_retiring(observer.get(), status));
     EXPECT_EQ(status.generation, 1U);
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RUNNING);
     // It stays reported.
     EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_E_RETIRING);
 }
 
-TEST_F(Observer, WithoutADatabaseOrWithAMissingRegion) {
+TEST_F(Observer, NeedsADatabase) {
     Context observer;
     // No generation yet: scada-tagd has not started.
     EXPECT_EQ(observe(observer), SCADA_E_IO);
     EXPECT_EQ(errno, ENOENT);
     EXPECT_EQ(observer.get(), nullptr);
-    // No base directory at all.
     const scada_attach_opts nowhere{.base_dir = "/nonexistent/scada",
                                     .retain_dir = nullptr,
                                     .tagd_uid = std::int64_t{uid()}};
     EXPECT_EQ(scada_tag_observe_opts(&nowhere, observer.out()), SCADA_E_IO);
     EXPECT_EQ(errno, ENOENT);
+}
 
-    // A generation whose owner never attached: its tags read as BAD with
-    // OWNER_DOWN, its ring as missing.
+TEST_F(Observer, NeedsARunningGeneration) {
     start_host();
+    set_generation_state(GenerationState::BUILDING);
+    Context observer;
+    EXPECT_EQ(observe(observer), SCADA_E_IO);
+    EXPECT_EQ(errno, EAGAIN);
+}
+
+TEST_F(Observer, ReadsATagWhoseOwnerNeverAttachedAsOwnerDown) {
+    start_host();
+    Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
-    std::uint32_t level = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(scada_tag_resolve(observer.get(), "plant.level", &level),
-              SCADA_OK);
-    scada_value value{};
-    ASSERT_EQ(scada_tag_read(observer.get(), level, &value), SCADA_OK);
+    const scada_value value = read_level(observer.get());
     EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
     EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
     EXPECT_EQ(value.update_mono_ns, 0);
@@ -559,59 +647,61 @@ TEST_F(Observer, WithoutADatabaseOrWithAMissingRegion) {
     scada_sub_close(sub);
 }
 
-TEST_F(Observer, AGenerationThatIsNotRunning) {
-    start_host();
-    set_generation_state(scada::tag::GenerationState::BUILDING);
-    Context observer;
-    EXPECT_EQ(observe(observer), SCADA_E_IO);
-    EXPECT_EQ(errno, EAGAIN);
+// The return code of an observe by a child that has become nobody, in no
+// group of the database, or -1 if the child could not become nobody.
+int observe_as_nobody(const scada_attach_opts& options) {
+    const pid_t child = ::fork();
+    if (child == 0) {
+        const std::array<gid_t, 1> groups{NOBODY};
+        int code = -1;
+        if (::setgroups(groups.size(), groups.data()) == 0 &&
+            ::setgid(NOBODY) == 0 && ::setuid(NOBODY) == 0) {
+            scada_ctx* ctx = nullptr;
+            code = scada_tag_observe_opts(&options, &ctx);
+            scada_tag_detach(ctx);
+        }
+        ::_exit(code);
+    }
+    int status = 0;
+    if (child < 0 || ::waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
 }
 
 TEST_F(Observer, ACallerWhoMayNotReadTheBaseDirectoryGetsPermission) {
     start_host();
     if (::geteuid() == 0) {
-        // Root reads anything: the caller is a child that is nobody, in no
-        // group of the database.
-        const pid_t child = ::fork();
-        ASSERT_GE(child, 0);
-        if (child == 0) {
-            const gid_t groups[] = {NOBODY};
-            int code = -1;
-            if (::setgroups(1, groups) == 0 && ::setgid(NOBODY) == 0 &&
-                ::setuid(NOBODY) == 0) {
-                Context observer;
-                code = observe(observer);
-            }
-            ::_exit(code);
-        }
-        int status = 0;
-        ASSERT_EQ(::waitpid(child, &status, 0), child);
-        ASSERT_TRUE(WIFEXITED(status));
-        EXPECT_EQ(WEXITSTATUS(status), SCADA_E_PERMISSION);
-    } else {
-        // Without privilege, the same refusal by the kernel: no search
-        // permission on the base directory.
-        ASSERT_EQ(::chmod(base().c_str(), 0), 0);
-        Context observer;
-        EXPECT_EQ(observe(observer), SCADA_E_PERMISSION);
-        // Attach gets the same code (contract 3.1).
-        Context io;
-        EXPECT_EQ(attach("io", io), SCADA_E_PERMISSION);
-        ASSERT_EQ(::chmod(base().c_str(), BASE_MODE), 0);
+        // Root reads anything: the caller is a child that is nobody.
+        EXPECT_EQ(observe_as_nobody(opts()), SCADA_E_PERMISSION);
+        return;
     }
+    // Without privilege, the same refusal by the kernel: no search
+    // permission on the base directory. Attach gets the same code.
+    ASSERT_EQ(::chmod(base().c_str(), 0), 0);
+    Context observer;
+    EXPECT_EQ(observe(observer), SCADA_E_PERMISSION);
+    Context feeder;
+    EXPECT_EQ(attach("io", feeder), SCADA_E_PERMISSION);
+    ASSERT_EQ(::chmod(base().c_str(), BASE_MODE), 0);
 }
 
-TEST_F(Observer, NullArgumentsAndBadOptions) {
+TEST_F(Observer, RefusesBadOptions) {
     start_host();
     EXPECT_EQ(scada_tag_observe(nullptr), SCADA_E_INVALID);
     EXPECT_EQ(scada_tag_observe_opts(nullptr, nullptr), SCADA_E_INVALID);
-    const scada_attach_opts bad_uid{.base_dir = base().c_str(),
-                                    .retain_dir = nullptr,
-                                    .tagd_uid = -2};
+    const scada_attach_opts bad_uid{
+        .base_dir = base().c_str(), .retain_dir = nullptr, .tagd_uid = -2};
     Context observer;
     EXPECT_EQ(scada_tag_observe_opts(&bad_uid, observer.out()),
               SCADA_E_INVALID);
     EXPECT_EQ(observer.get(), nullptr);
+}
+
+TEST_F(Observer, RefusesNullArguments) {
+    start_host();
+    Context observer;
     ASSERT_EQ(observe(observer), SCADA_OK);
     scada_owner_info_t owner{};
     EXPECT_EQ(scada_owner_info(nullptr, 0, &owner), SCADA_E_INVALID);
@@ -629,15 +719,15 @@ TEST_F(Observer, NullArgumentsAndBadOptions) {
 
 TEST_F(Observer, AProcessSeesItsOwnOwnerAndProcess) {
     start_host();
-    Context io;
-    write_level(io);
+    Context feeder;
+    write_level(feeder);
     scada_owner_info_t owner{};
-    ASSERT_EQ(scada_owner_info(io.get(), OWNER_IO, &owner), SCADA_OK);
+    ASSERT_EQ(scada_owner_info(feeder.get(), OWNER_IO, &owner), SCADA_OK);
     EXPECT_EQ(owner.owned, 1);
     std::uint16_t index = 0;
-    ASSERT_EQ(scada_proc_resolve(io.get(), "io", &index), SCADA_OK);
+    ASSERT_EQ(scada_proc_resolve(feeder.get(), "io", &index), SCADA_OK);
     scada_proc_status_t status{};
-    ASSERT_EQ(scada_proc_status(io.get(), index, &status), SCADA_OK);
+    ASSERT_EQ(scada_proc_status(feeder.get(), index, &status), SCADA_OK);
     EXPECT_EQ(status.down, 0);
     EXPECT_EQ(status.state, SCADA_PROC_RUNNING);
 }

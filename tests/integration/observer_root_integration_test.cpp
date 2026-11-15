@@ -26,10 +26,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -41,16 +44,17 @@
 namespace {
 
 // The users of the test. None needs to exist in the user database.
-constexpr uid_t DB_UID = 65534;       // scada-tagd and io
-constexpr gid_t DB_GID = 65534;       // the group of the database
-constexpr uid_t OUTSIDER_UID = 65533; // in no group of the database
-constexpr uid_t MEMBER_UID = 65532;   // in DB_GID, not in the process table
+constexpr uid_t DB_UID = 65534;        // scada-tagd and io
+constexpr gid_t DB_GID = 65534;        // the group of the database
+constexpr uid_t OUTSIDER_UID = 65533;  // in no group of the database
+constexpr uid_t MEMBER_UID = 65532;    // in DB_GID, not in the process table
 
 constexpr mode_t BASE_DIR_MODE = 02750;
 constexpr mode_t TRAVERSABLE = 0755;
 constexpr double LEVEL = 7.5;
 constexpr int PERIOD_MS = 100;
 constexpr int WAIT_MS = 30'000;
+constexpr std::int64_t NS_PER_S = 1'000'000'000;
 
 // Exit codes of the children.
 constexpr int CHILD_OK = 0;
@@ -118,8 +122,8 @@ int observe_and_read(const std::string& base) {
 // Runs `body` in a child that has become `uid`, `gid`, `groups`, and
 // returns its exit code, or nothing if it did not exit.
 template <typename Body>
-std::optional<int> run_as(uid_t uid, gid_t gid, const std::vector<gid_t>& groups,
-                          Body body) {
+std::optional<int> run_as(uid_t uid, gid_t gid,
+                          const std::vector<gid_t>& groups, Body body) {
     const pid_t child = ::fork();
     if (child < 0) {
         return std::nullopt;
@@ -138,9 +142,10 @@ scada::tag::TagSet tag_set() {
     scada::tag::TagSet set;
     set.processes = {{.name = "tagd", .uid = DB_UID},
                      {.name = "io", .uid = DB_UID}};
-    set.owners = {{.name = "io",
-                   .process = "io",
-                   .change_ring_capacity = scada::tag::MIN_CHANGE_RING_CAPACITY}};
+    set.owners = {
+        {.name = "io",
+         .process = "io",
+         .change_ring_capacity = scada::tag::MIN_CHANGE_RING_CAPACITY}};
     set.tags = {{.name = "plant.level",
                  .owner = "io",
                  .type = scada::tag::TagType::FLOAT64}};
@@ -159,32 +164,33 @@ int database_owner(const std::string& base, int ready, int stop) {
         return CHILD_FAILED;
     }
     const scada_attach_opts options = options_for(base);
-    scada_ctx* io = nullptr;
+    scada_ctx* feeder = nullptr;
     std::uint32_t level = SCADA_INVALID_HANDLE;
-    if (scada_tag_attach_opts("io", &options, &io) != SCADA_OK ||
-        scada_tag_resolve(io, "plant.level", &level) != SCADA_OK) {
+    if (scada_tag_attach_opts("io", &options, &feeder) != SCADA_OK ||
+        scada_tag_resolve(feeder, "plant.level", &level) != SCADA_OK) {
         return CHILD_FAILED;
     }
     scada_value value{};
     value.type = SCADA_TYPE_FLOAT64;
     value.quality = SCADA_QUALITY_GOOD;
     value.value = std::bit_cast<std::uint64_t>(LEVEL);
-    if (scada_tag_write(io, level, &value) != SCADA_OK ||
+    if (scada_tag_write(feeder, level, &value) != SCADA_OK ||
         ::write(ready, "r", 1) != 1) {
         return CHILD_FAILED;
     }
     pollfd wait{.fd = stop, .events = POLLIN, .revents = 0};
     while (::poll(&wait, 1, PERIOD_MS) == 0) {
-        static_cast<void>(scada_tag_heartbeat(io));
+        static_cast<void>(scada_tag_heartbeat(feeder));
         timespec now{};
         ::clock_gettime(CLOCK_MONOTONIC, &now);
-        host.value().heartbeat((std::int64_t{now.tv_sec} * 1'000'000'000) +
+        host.value().heartbeat((std::int64_t{now.tv_sec} * NS_PER_S) +
                                now.tv_nsec);
     }
-    scada_tag_detach(io);
+    scada_tag_detach(feeder);
     return CHILD_OK;
 }
 
+// The database, hosted by a child that is DB_UID, for each test.
 class ObserverUsers : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -201,62 +207,82 @@ protected:
         ASSERT_EQ(::mkdir(base_.c_str(), TRAVERSABLE), 0);
         ASSERT_EQ(::chown(base_.c_str(), DB_UID, DB_GID), 0);
         ASSERT_EQ(::chmod(base_.c_str(), BASE_DIR_MODE), 0);
+        start_owner();
     }
 
     void TearDown() override {
+        stop_owner();
         std::error_code ignored;
         std::filesystem::remove_all(root_, ignored);
     }
 
+    [[nodiscard]] const std::string& base() const { return base_; }
+
+private:
+    void start_owner() {
+        ASSERT_EQ(::pipe(ready_.data()), 0);
+        ASSERT_EQ(::pipe(stop_.data()), 0);
+        owner_ = ::fork();
+        ASSERT_GE(owner_, 0);
+        if (owner_ == 0) {
+            ::_exit(become(DB_UID, DB_GID, {DB_GID})
+                        ? database_owner(base_, ready_[1], stop_[0])
+                        : CHILD_NO_USER);
+        }
+        pollfd wait{.fd = ready_[0], .events = POLLIN, .revents = 0};
+        ASSERT_EQ(::poll(&wait, 1, WAIT_MS), 1) << "the database did not start";
+    }
+
+    void stop_owner() {
+        if (owner_ > 0) {
+            EXPECT_EQ(::write(stop_[1], "s", 1), 1);
+            int status = 0;
+            EXPECT_EQ(::waitpid(owner_, &status, 0), owner_);
+            EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == CHILD_OK)
+                << "the database owner failed";
+        }
+        for (const int descriptor :
+             {ready_[0], ready_[1], stop_[0], stop_[1]}) {
+            if (descriptor >= 0) {
+                ::close(descriptor);
+            }
+        }
+    }
+
     std::filesystem::path root_;
     std::string base_;
+    pid_t owner_ = -1;
+    std::array<int, 2> ready_{-1, -1};
+    std::array<int, 2> stop_{-1, -1};
 };
 
-TEST_F(ObserverUsers, RootAndGroupMembersObserveOutsidersAreRefused) {
-    std::array<int, 2> ready{-1, -1};
-    std::array<int, 2> stop{-1, -1};
-    ASSERT_EQ(::pipe(ready.data()), 0);
-    ASSERT_EQ(::pipe(stop.data()), 0);
-    const pid_t owner = ::fork();
-    ASSERT_GE(owner, 0);
-    if (owner == 0) {
-        ::_exit(become(DB_UID, DB_GID, {DB_GID})
-                    ? database_owner(base_, ready[1], stop[0])
-                    : CHILD_NO_USER);
-    }
-    pollfd wait{.fd = ready[0], .events = POLLIN, .revents = 0};
-    ASSERT_EQ(::poll(&wait, 1, WAIT_MS), 1) << "the database did not start";
-
-    // Root is in no group of the database and needs none.
-    std::vector<gid_t> groups(static_cast<std::size_t>(::getgroups(0, nullptr)));
+TEST_F(ObserverUsers, RootObservesWithoutBeingInTheGroup) {
+    std::vector<gid_t> groups(
+        static_cast<std::size_t>(::getgroups(0, nullptr)));
     ASSERT_GE(::getgroups(static_cast<int>(groups.size()), groups.data()), 0);
     EXPECT_EQ(std::ranges::find(groups, DB_GID), groups.end());
-    EXPECT_EQ(::getegid() == DB_GID, false);
-    EXPECT_EQ(observe_and_read(base_), CHILD_OK);
+    EXPECT_NE(::getegid(), DB_GID);
+    EXPECT_EQ(observe_and_read(base()), CHILD_OK);
+}
 
+TEST_F(ObserverUsers, AUserOutsideTheGroupIsRefused) {
     EXPECT_EQ(run_as(OUTSIDER_UID, OUTSIDER_UID, {},
-                     [this] { return observe_and_read(base_); }),
+                     [base = base()] { return observe_and_read(base); }),
               SCADA_E_PERMISSION);
-    // Attach is refused to an outsider in the same way.
+    // Attach is refused in the same way.
     EXPECT_EQ(run_as(OUTSIDER_UID, OUTSIDER_UID, {},
-                     [this] {
-                         const scada_attach_opts options = options_for(base_);
+                     [base = base()] {
+                         const scada_attach_opts options = options_for(base);
                          scada_ctx* ctx = nullptr;
                          return scada_tag_attach_opts("io", &options, &ctx);
                      }),
               SCADA_E_PERMISSION);
-    EXPECT_EQ(run_as(MEMBER_UID, MEMBER_UID, {DB_GID},
-                     [this] { return observe_and_read(base_); }),
-              CHILD_OK);
+}
 
-    ASSERT_EQ(::write(stop[1], "s", 1), 1);
-    int status = 0;
-    ASSERT_EQ(::waitpid(owner, &status, 0), owner);
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(WEXITSTATUS(status), CHILD_OK);
-    for (const int descriptor : {ready[0], ready[1], stop[0], stop[1]}) {
-        ::close(descriptor);
-    }
+TEST_F(ObserverUsers, AGroupMemberOutsideTheProcessTableObserves) {
+    EXPECT_EQ(run_as(MEMBER_UID, MEMBER_UID, {DB_GID},
+                     [base = base()] { return observe_and_read(base); }),
+              CHILD_OK);
 }
 
 }  // namespace

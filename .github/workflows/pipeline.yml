@@ -49,7 +49,7 @@ jobs:
       - name: Test (dev)
         run: ctest --preset dev
       # Tests that become other users (label `root`): who may observe the
-      # tag database (decision D-35). The runner user has sudo without a
+      # tag database (decision D-38). The runner user has sudo without a
       # password.
       - name: Test as root (dev)
         run: sudo "$(command -v ctest)" --preset root

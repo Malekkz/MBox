@@ -4,19 +4,16 @@
 
 #include "attachment.h"
 #include "header_view.h"
-#include "peer_regions.h"
 #include "proc_region.h"
 
 #include "scada/common/clock.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
-#include "scada/tag/types.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <limits>
 #include <optional>
 #include <span>

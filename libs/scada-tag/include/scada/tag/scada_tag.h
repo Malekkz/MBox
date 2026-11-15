@@ -371,28 +371,29 @@ enum {
 /* NOLINTNEXTLINE(modernize-use-using): C interface */
 typedef struct {
     char name[SCADA_OWNER_NAME_SIZE]; /* the process name, NUL-terminated */
-    uint64_t heartbeat;             /* heartbeat counter; 0 if no region */
-    int64_t heartbeat_mono_ns;      /* CLOCK_MONOTONIC of the last
-                                       heartbeat; 0 if no region */
-    int64_t heartbeat_age_ns;       /* time since then, never negative; 0
-                                       if no region */
-    uint32_t heartbeat_timeout_ms;  /* from the process table */
-    uint32_t state;                 /* SCADA_PROC_* as stored; 0 if no
-                                       region */
-    uint32_t cycle_seq;             /* advanced by scada_tag_notify */
-    uint32_t pid;                   /* as the process stored it; for
-                                       diagnosis only */
-    uint32_t uid;                   /* from the process table */
-    uint16_t process_index;         /* in the process table */
-    uint8_t down;                   /* 1 if down by the rules of section
-                                       10.1, as the library judges it now */
-    uint8_t down_reason;            /* SCADA_DOWN_* */
-    uint8_t marked_down;            /* 1 if scada-tagd has set the `down`
-                                       flag of the process table; lags up
-                                       to one check interval */
-    uint8_t realtime;               /* 1 if the process table marks it
-                                       REALTIME */
-    uint8_t reserved[6];            /* 0 */
+    uint64_t heartbeat;               /* heartbeat counter; 0 if no region */
+    int64_t heartbeat_mono_ns;        /* CLOCK_MONOTONIC of the last
+                                         heartbeat; 0 if no region */
+    int64_t heartbeat_age_ns;         /* time since then, never negative; 0
+                                         if no region */
+    uint32_t heartbeat_timeout_ms;    /* from the process table */
+    uint32_t state;                   /* SCADA_PROC_* as stored; 0 if no
+                                         region */
+    uint32_t cycle_seq;               /* advanced by scada_tag_notify */
+    uint32_t pid;                     /* as the process stored it; for
+                                         diagnosis only */
+    uint32_t uid;                     /* from the process table */
+    uint16_t process_index;           /* in the process table */
+    uint8_t down;                     /* 1 if down by the rules of section
+                                         10.1, as the library judges it now */
+    uint8_t down_reason;              /* SCADA_DOWN_* */
+    uint8_t marked_down;              /* 1 if scada-tagd has set the `down`
+                                         flag of the process table; lags up
+                                         to one check interval */
+    uint8_t realtime;                 /* 1 if the process table marks it
+                                         REALTIME */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): size of a reserved field, fixed by the contract */
+    uint8_t reserved[6]; /* 0 */
 } scada_proc_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*
@@ -424,8 +425,7 @@ int scada_proc_resolve(scada_ctx* ctx, const char* process_name,
  * Real-time safe: no allocation, no lock, no system call. Safe from any
  * thread.
  */
-int scada_proc_status(scada_ctx* ctx, uint16_t index,
-                      scada_proc_status_t* out);
+int scada_proc_status(scada_ctx* ctx, uint16_t index, scada_proc_status_t* out);
 
 /*
  * Stores in `*handle` the handle of the tag `name` (section 5.1). The

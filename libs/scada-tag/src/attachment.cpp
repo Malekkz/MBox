@@ -702,11 +702,10 @@ Result<std::unique_ptr<Attachment>> Attachment::observe(
         observer->check_clock(now);
         observer->next_current_check_mono_ns_.store(
             now + CURRENT_RECHECK_INTERVAL_NS, std::memory_order_relaxed);
-        if (observer->tagd_index_.has_value()) {
+        if (const std::optional<std::uint16_t> tagd = observer->tagd_index_;
+            tagd.has_value()) {
             observer->peers_.want(observer->directory_.get(),
-                                  observer->peers_.proc_slot(
-                                      *observer->tagd_index_),
-                                  now);
+                                  observer->peers_.proc_slot(*tagd), now);
         }
         if (observer->header_.state() == GenerationState::RETIRING) {
             continue;
@@ -727,8 +726,8 @@ bool Attachment::current_moved(std::int64_t now_mono_ns) {
         next_current_check_mono_ns_.load(std::memory_order_relaxed)) {
         return false;
     }
-    next_current_check_mono_ns_.store(
-        now_mono_ns + CURRENT_RECHECK_INTERVAL_NS, std::memory_order_relaxed);
+    next_current_check_mono_ns_.store(now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
+                                      std::memory_order_relaxed);
     std::string ignored;
     const Result<std::uint64_t> generation = read_current(base_.get(), ignored);
     // A `current` that cannot be read now (scada-tagd is switching it, or

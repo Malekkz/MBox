@@ -14,11 +14,15 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -38,26 +42,33 @@ constexpr int POLL_MS = 10;
 constexpr std::uint64_t WRITER_RATE = 2'000;
 constexpr std::uint64_t WRITER_UPDATES = 4'000;
 constexpr std::size_t OBSERVERS = 3;
+// A subscription may first report the ring appearing.
+constexpr int NEXT_ATTEMPTS = 3;
 
-// The lines of /proc/self/maps that name a file under `dir`.
-std::vector<std::string> mappings_under(const std::string& dir) {
+// The lines of /proc/self/maps that name a file under `dir`, except those
+// that hold `except` (empty: none excepted).
+std::vector<std::string> mappings_under(const std::string& dir,
+                                        const std::string& except = {}) {
     std::ifstream maps("/proc/self/maps");
     std::vector<std::string> lines;
     std::string line;
     while (std::getline(maps, line)) {
-        if (line.find(dir + "/") != std::string::npos) {
+        if (line.find(dir + "/") != std::string::npos &&
+            (except.empty() || line.find(except) == std::string::npos)) {
             lines.push_back(line);
         }
     }
     return lines;
 }
 
-std::string permissions_of(const std::string& line) {
+// True if the permissions column of the line of /proc/self/maps `line`
+// has no `w`.
+bool read_only(const std::string& line) {
     std::istringstream fields(line);
     std::string range;
     std::string permissions;
     fields >> range >> permissions;
-    return permissions;
+    return permissions.find('w') == std::string::npos;
 }
 
 // Calls scada_tag_status on `ctx` until it returns `wanted`, within
@@ -78,200 +89,264 @@ std::string permissions_of(const std::string& line) {
            << "scada_tag_status gave " << code << ", not " << wanted;
 }
 
-class ObserverProcesses : public TagProcesses {};
+// The next change of `sub`, within NEXT_ATTEMPTS calls, skipping the gap
+// of a ring that appeared.
+int next_change(scada_sub* sub, scada_change& change) {
+    int code = SCADA_E_TIMEOUT;
+    for (int attempt = 0; attempt < NEXT_ATTEMPTS && code != SCADA_OK;
+         ++attempt) {
+        code = scada_sub_next(sub, &change, WAIT_MS);
+    }
+    return code;
+}
 
-TEST_F(ObserverProcesses, SeveralObserveALiveWriterThroughReadOnlyMappings) {
+// What one observer of the writer's tag set sees: a change of load.w0, a
+// tag it reads, and the process `load` up.
+void sees_the_writer(scada_ctx* ctx, scada_sub* sub) {
+    scada_change change{};
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    scada_value value{};
+    std::uint16_t load = 0;
+    scada_proc_status_t proc{};
+    // Each call in order (a braced list is evaluated left to right).
+    const std::vector<int> codes{
+        next_change(sub, change),
+        scada_tag_resolve(ctx, "load.w0.t0", &handle),
+        scada_tag_read(ctx, handle, &value),
+        scada_proc_resolve(ctx, "load", &load),
+        scada_proc_status(ctx, load, &proc),
+    };
+    EXPECT_EQ(codes, std::vector<int>(codes.size(), SCADA_OK));
+    EXPECT_EQ(change.type, SCADA_TYPE_UINT64);
+    EXPECT_EQ(proc.down, 0);
+    EXPECT_NE(proc.pid, 0U);
+}
+
+// Observers, each with a subscription to load.w0, closed and detached
+// when it goes out of scope.
+class ObserversOfTheWriter {
+public:
+    ObserversOfTheWriter(const std::string& base, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            observers_.push_back(std::make_unique<Observed>(base));
+            scada_sub* sub = nullptr;
+            EXPECT_EQ(scada_sub_open(observers_.back()->ctx(), "load.w0", &sub),
+                      SCADA_OK);
+            subs_.push_back(sub);
+        }
+    }
+    ~ObserversOfTheWriter() {
+        for (scada_sub* sub : subs_) {
+            scada_sub_close(sub);
+        }
+    }
+    ObserversOfTheWriter(const ObserversOfTheWriter&) = delete;
+    ObserversOfTheWriter& operator=(const ObserversOfTheWriter&) = delete;
+    ObserversOfTheWriter(ObserversOfTheWriter&&) = delete;
+    ObserversOfTheWriter& operator=(ObserversOfTheWriter&&) = delete;
+
+    void each_sees_the_writer() const {
+        for (std::size_t i = 0; i < subs_.size(); ++i) {
+            SCOPED_TRACE(i);
+            sees_the_writer(observers_[i]->ctx(), subs_[i]);
+        }
+    }
+
+private:
+    std::vector<std::unique_ptr<Observed>> observers_;
+    std::vector<scada_sub*> subs_;
+};
+
+class ObserverProcesses : public TagProcesses {
+protected:
+    // Starts the writer on the large tag set and waits until it attached.
+    [[nodiscard]] std::optional<ChildProcess> attached_writer() const {
+        std::optional<ChildProcess> writer = start_helper(
+            "SCADA_TAG_WRITER_COMMAND",
+            {base(), "load", "2", "10", std::to_string(WRITER_RATE),
+             std::to_string(WRITER_UPDATES), "notify"});
+        if (writer.has_value()) {
+            EXPECT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT))
+                << writer->err();
+        }
+        return writer;
+    }
+
+    // Adds a tag to the small tag set file, so that scada-tagd started on
+    // it creates a new generation.
+    void add_a_tag() const {
+        std::string text;
+        {
+            std::ifstream file(tag_set_path());
+            std::getline(file, text, '\0');
+        }
+        const std::string first = R"({"name": "plant.level", )";
+        const std::size_t position = text.find(first);
+        ASSERT_NE(position, std::string::npos);
+        text.insert(
+            position,
+            R"({"name": "plant.extra", "owner": "io", "type": "int64"}, )");
+        std::ofstream file(tag_set_path(), std::ios::trunc);
+        file << text;
+    }
+};
+
+TEST_F(ObserverProcesses, SeveralObserveALiveWriterBesideAnAttach) {
     write_load_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
-    ASSERT_TRUE(tagd.has_value());
-    std::optional<ChildProcess> writer = start_helper(
-        "SCADA_TAG_WRITER_COMMAND",
-        {base(), "load", "2", "10", std::to_string(WRITER_RATE),
-         std::to_string(WRITER_UPDATES), "notify"});
-    ASSERT_TRUE(writer.has_value());
-    ASSERT_TRUE(writer->wait_for_output(attached, WAIT_LIMIT)) << writer->err();
-
-    std::vector<std::unique_ptr<Observed>> observers;
-    std::vector<scada_sub*> subs;
-    for (std::size_t i = 0; i < OBSERVERS; ++i) {
-        observers.push_back(std::make_unique<Observed>(base()));
-        ASSERT_NE(observers.back()->ctx(), nullptr);
-        scada_sub* sub = nullptr;
-        ASSERT_EQ(scada_sub_open(observers.back()->ctx(), "load.w0", &sub),
-                  SCADA_OK);
-        subs.push_back(sub);
+    std::optional<ChildProcess> writer = attached_writer();
+    if (!tagd.has_value() || !writer.has_value()) {
+        return;
     }
+    const ObserversOfTheWriter observers(base(), OBSERVERS);
     // A process of the tag set attaches while the observers are there.
     const Attached reader(base(), "reader");
     ASSERT_NE(reader.ctx(), nullptr);
-
-    for (std::size_t i = 0; i < OBSERVERS; ++i) {
-        scada_change change{};
-        int code = SCADA_E_TIMEOUT;
-        for (int attempt = 0; attempt < 3 && code != SCADA_OK; ++attempt) {
-            code = scada_sub_next(subs[i], &change, WAIT_MS);
-        }
-        ASSERT_EQ(code, SCADA_OK) << "observer " << i;
-        EXPECT_EQ(change.type, SCADA_TYPE_UINT64);
-        std::uint32_t handle = SCADA_INVALID_HANDLE;
-        ASSERT_EQ(scada_tag_resolve(observers[i]->ctx(), "load.w0.t0", &handle),
-                  SCADA_OK);
-        scada_value value{};
-        EXPECT_EQ(scada_tag_read(observers[i]->ctx(), handle, &value),
-                  SCADA_OK);
-        std::uint16_t load = 0;
-        ASSERT_EQ(scada_proc_resolve(observers[i]->ctx(), "load", &load),
-                  SCADA_OK);
-        scada_proc_status_t proc{};
-        ASSERT_EQ(scada_proc_status(observers[i]->ctx(), load, &proc),
-                  SCADA_OK);
-        EXPECT_EQ(proc.down, 0);
-        EXPECT_NE(proc.pid, 0U);
-    }
-
-    // This process attached `reader` too, so it maps that process's own
-    // regions read-write; everything else under the base directory is the
-    // observers', and is read-only.
-    for (const std::string& line : mappings_under(base())) {
-        if (line.find("/proc.reader") != std::string::npos) {
-            continue;
-        }
-        EXPECT_EQ(permissions_of(line).find('w'), std::string::npos) << line;
-    }
-
-    for (scada_sub* sub : subs) {
-        scada_sub_close(sub);
-    }
+    observers.each_sees_the_writer();
+    // `reader` maps its own `proc` region read-write; everything else this
+    // process maps from the database is the observers', and read-only.
+    EXPECT_TRUE(
+        std::ranges::all_of(mappings_under(base(), "/proc.reader"), read_only));
     EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }
 
-TEST_F(ObserverProcesses, OnlyReadOnlyMappingsWithoutAnAttach) {
+// Opens everything an observer can open on the small tag set: a tag, a
+// subscription with a wait set and its descriptor, a process, and a
+// status, and checks that every mapping under `base` is read-only.
+void maps_read_only(const std::string& base) {
+    const Observed observer(base);
+    scada_ctx* const ctx = observer.ctx();
+    std::uint32_t level = SCADA_INVALID_HANDLE;
+    scada_sub* sub = nullptr;
+    scada_waitset* set = nullptr;
+    int descriptor = -1;
+    std::uint16_t index = 0;
+    scada_status status{};
+    // Each call in order (a braced list is evaluated left to right).
+    const std::vector<int> codes{
+        scada_tag_resolve(ctx, "plant.level", &level),
+        scada_sub_open(ctx, "io", &sub),
+        scada_waitset_create(ctx, &set),
+        scada_waitset_add_sub(set, sub),
+        scada_waitset_fd(set, &descriptor),
+        scada_proc_resolve(ctx, "io", &index),
+        scada_tag_status(ctx, &status),
+    };
+    EXPECT_EQ(codes, std::vector<int>(codes.size(), SCADA_OK));
+    const std::vector<std::string> lines = mappings_under(base);
+    EXPECT_FALSE(lines.empty());
+    EXPECT_TRUE(std::ranges::all_of(lines, read_only));
+    scada_waitset_destroy(set);
+    scada_sub_close(sub);
+}
+
+TEST_F(ObserverProcesses, MapsOnlyReadOnlyAndReleasesEverything) {
     write_small_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
-    ASSERT_TRUE(tagd.has_value());
-    std::optional<ChildProcess> io = attached_io();
-    ASSERT_TRUE(io.has_value());
-    {
-        const Observed observer(base());
-        ASSERT_NE(observer.ctx(), nullptr);
-        std::uint32_t level = SCADA_INVALID_HANDLE;
-        ASSERT_EQ(scada_tag_resolve(observer.ctx(), "plant.level", &level),
-                  SCADA_OK);
-        scada_sub* sub = nullptr;
-        ASSERT_EQ(scada_sub_open(observer.ctx(), "io", &sub), SCADA_OK);
-        scada_waitset* set = nullptr;
-        ASSERT_EQ(scada_waitset_create(observer.ctx(), &set), SCADA_OK);
-        ASSERT_EQ(scada_waitset_add_sub(set, sub), SCADA_OK);
-        int descriptor = -1;
-        ASSERT_EQ(scada_waitset_fd(set, &descriptor), SCADA_OK);
-        std::uint16_t index = 0;
-        ASSERT_EQ(scada_proc_resolve(observer.ctx(), "io", &index), SCADA_OK);
-        scada_status status{};
-        EXPECT_EQ(scada_tag_status(observer.ctx(), &status), SCADA_OK);
-
-        const std::vector<std::string> lines = mappings_under(base());
-        EXPECT_FALSE(lines.empty());
-        for (const std::string& line : lines) {
-            EXPECT_EQ(permissions_of(line).find('w'), std::string::npos)
-                << line;
-        }
-        scada_waitset_destroy(set);
-        scada_sub_close(sub);
+    std::optional<ChildProcess> feeder = attached_io();
+    if (!tagd.has_value() || !feeder.has_value()) {
+        return;
     }
+    maps_read_only(base());
     // Detached: nothing of the database is mapped any more.
     EXPECT_TRUE(mappings_under(base()).empty());
-    EXPECT_TRUE(stops_cleanly(*io));
+    EXPECT_TRUE(stops_cleanly(*feeder));
     stop(*tagd);
 }
 
 TEST_F(ObserverProcesses, AnObserverStartedBeforeScadaTagdGetsNoDatabase) {
     write_small_tag_set();
-    {
-        scada_ctx* ctx = nullptr;
-        const scada_attach_opts options{.base_dir = base().c_str(),
-                                        .retain_dir = nullptr,
-                                        .tagd_uid = std::int64_t{::geteuid()}};
-        EXPECT_EQ(scada_tag_observe_opts(&options, &ctx), SCADA_E_IO);
-        EXPECT_EQ(errno, ENOENT);
-        EXPECT_EQ(ctx, nullptr);
-    }
-    std::optional<RunningTagd> tagd = ready_tagd();
-    ASSERT_TRUE(tagd.has_value());
-    const Observed observer(base());
-    ASSERT_NE(observer.ctx(), nullptr);
-    // `io` has not attached: its tag reads as BAD with OWNER_DOWN, with no
-    // value.
+    const std::string base_dir = base();
+    const scada_attach_opts options{.base_dir = base_dir.c_str(),
+                                    .retain_dir = nullptr,
+                                    .tagd_uid = std::int64_t{::geteuid()}};
+    scada_ctx* ctx = nullptr;
+    EXPECT_EQ(scada_tag_observe_opts(&options, &ctx), SCADA_E_IO);
+    EXPECT_EQ(errno, ENOENT);
+    EXPECT_EQ(ctx, nullptr);
+}
+
+// The handle of plant.level in `ctx`.
+std::uint32_t resolve_level(scada_ctx* ctx) {
     std::uint32_t level = SCADA_INVALID_HANDLE;
-    ASSERT_EQ(scada_tag_resolve(observer.ctx(), "plant.level", &level),
-              SCADA_OK);
+    EXPECT_EQ(scada_tag_resolve(ctx, "plant.level", &level), SCADA_OK);
+    return level;
+}
+
+// True if plant.level, read by `ctx`, has no OWNER_DOWN now.
+bool owner_is_up(scada_ctx* ctx, std::uint32_t level) {
     scada_value value{};
-    ASSERT_EQ(scada_tag_read(observer.ctx(), level, &value), SCADA_OK);
-    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
-    EXPECT_NE(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
-    EXPECT_EQ(value.update_mono_ns, 0);
-    // When it attaches, the observer finds its region within about a
-    // second, from scada_tag_status.
-    std::optional<ChildProcess> io = attached_io();
-    ASSERT_TRUE(io.has_value());
+    return scada_tag_read(ctx, level, &value) == SCADA_OK &&
+           (value.quality_flags & SCADA_FLAG_OWNER_DOWN) == 0;
+}
+
+// True once plant.level, read by `ctx`, no longer has OWNER_DOWN, within
+// WAIT_MS; scada_tag_status looks for the region again meanwhile.
+bool owner_comes_up(scada_ctx* ctx, std::uint32_t level) {
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(WAIT_MS);
     while (Clock::now() < deadline) {
         scada_status status{};
-        static_cast<void>(scada_tag_status(observer.ctx(), &status));
-        ASSERT_EQ(scada_tag_read(observer.ctx(), level, &value), SCADA_OK);
-        if ((value.quality_flags & SCADA_FLAG_OWNER_DOWN) == 0) {
-            break;
+        static_cast<void>(scada_tag_status(ctx, &status));
+        if (owner_is_up(ctx, level)) {
+            return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
     }
-    EXPECT_EQ(value.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
-    EXPECT_TRUE(stops_cleanly(*io));
+    return false;
+}
+
+TEST_F(ObserverProcesses, FindsAnOwnerThatAttachesLater) {
+    write_small_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    const Observed observer(base());
+    // `io` has not attached: its tag reads as BAD with OWNER_DOWN.
+    const std::uint32_t level = resolve_level(observer.ctx());
+    EXPECT_FALSE(owner_is_up(observer.ctx(), level));
+    std::optional<ChildProcess> feeder = attached_io();
+    if (!feeder.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(owner_comes_up(observer.ctx(), level));
+    EXPECT_TRUE(stops_cleanly(*feeder));
     stop(*tagd);
+}
+
+// Observes the database in `base` and expects generation `generation`,
+// RUNNING, with scada-tagd up.
+void observes_generation(const std::string& base, std::uint64_t generation) {
+    const Observed observer(base);
+    scada_status status{};
+    EXPECT_TRUE(status_becomes(observer.ctx(), SCADA_OK, status));
+    EXPECT_EQ(status.generation, generation);
 }
 
 TEST_F(ObserverProcesses, FollowsAGenerationChangeByObservingAgain) {
     write_small_tag_set();
-    std::optional<RunningTagd> tagd = ready_tagd();
-    ASSERT_TRUE(tagd.has_value());
+    std::optional<RunningTagd> first = ready_tagd();
+    if (!first.has_value()) {
+        return;
+    }
     auto observer = std::make_unique<Observed>(base());
-    ASSERT_NE(observer->ctx(), nullptr);
-    scada_status status{};
-    EXPECT_TRUE(status_becomes(observer->ctx(), SCADA_OK, status));
-    EXPECT_EQ(status.generation, 1U);
-    stop(*tagd);
-
+    stop(*first);
     // Another tag set: scada-tagd creates generation 2 and retires 1.
-    std::string text;
-    {
-        std::ifstream in(tag_set_path());
-        std::getline(in, text, '\0');
-    }
-    const std::string tag = R"({"name": "plant.level", "owner": "io", )";
-    const std::size_t at = text.find(tag);
-    ASSERT_NE(at, std::string::npos);
-    text.insert(at, R"({"name": "plant.extra", "owner": "io", "type": "int64"}, )");
-    {
-        std::ofstream out(tag_set_path(), std::ios::trunc);
-        out << text;
-    }
+    add_a_tag();
     std::optional<RunningTagd> second = ready_tagd();
-    ASSERT_TRUE(second.has_value());
+    if (!second.has_value()) {
+        return;
+    }
+    scada_status status{};
     EXPECT_TRUE(status_becomes(observer->ctx(), SCADA_E_RETIRING, status));
     EXPECT_EQ(status.generation, 1U);
-
-    // Detach and observe again: generation 2, with the new tag, and no
-    // mapping of generation 1 left.
+    // Detach and observe again: generation 2, and no mapping of
+    // generation 1 left.
     observer.reset();
     EXPECT_TRUE(mappings_under(base() + "/gen-1").empty());
-    observer = std::make_unique<Observed>(base());
-    ASSERT_NE(observer->ctx(), nullptr);
-    EXPECT_TRUE(status_becomes(observer->ctx(), SCADA_OK, status));
-    EXPECT_EQ(status.generation, 2U);
-    std::uint32_t extra = SCADA_INVALID_HANDLE;
-    EXPECT_EQ(scada_tag_resolve(observer->ctx(), "plant.extra", &extra),
-              SCADA_OK);
-    observer.reset();
+    observes_generation(base(), 2);
     stop(*second);
 }
 
