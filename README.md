@@ -82,11 +82,11 @@ or `fuzz`. `ctest` prints the time per label at the end of a run.
 
 | Command | Runs |
 | --- | --- |
-| `ctest --preset dev` | Unit and integration tests |
+| `ctest --preset dev` | Unit and integration tests (not `perf` or `model`) |
 | `ctest --preset unit` | Unit tests only (uses the `dev` build) |
 | `ctest --preset integration` | Integration tests only (uses the `dev` build) |
 | `ctest --preset perf` | Performance tests, in the `perf` build |
-| `ctest --preset model` | Model check of the sequence lock and the change ring (conformance test 4); needs herd7, see `tests/model/README.md` |
+| `ctest --preset model` | Model check of the sequence lock, the change ring and the repair after an owner restart (conformance test 4); needs herd7, see `tests/model/README.md`. Only this preset runs it. |
 | `ctest --preset asan-ubsan` | Unit and integration tests under AddressSanitizer with leak detection and UndefinedBehaviorSanitizer |
 | `ctest --preset tsan` | Unit and integration tests under ThreadSanitizer |
 | `ctest --preset fuzz` | Every fuzz target for 60 s each; needs Clang |
@@ -142,7 +142,9 @@ runner is the only ARM64 machine of the project (D-32).
   `fuzz-findings`.
 - The tools are LLVM 18 and the GCC and CMake of the runner image; each job
   prints their versions in its step "Tool versions". `model check` also
-  builds herd7 7.58 from source.
+  builds herd7 from source, at the version and commit listed in
+  `third-party/dependencies.json`, and keeps the build in the Actions cache
+  under that commit and the runner image.
 - The job `measurements` runs only when started by hand (`workflow_dispatch`)
   and is not a check: on ARM64 with `isb` and with `yield`, and on x86-64, it
   runs `scripts/measure-seqlock.sh` in the `perf` build for about 20 minutes
@@ -150,7 +152,8 @@ runner is the only ARM64 machine of the project (D-32).
   (decision D-31).
 - `build and test (ARM64)` also checks, in `ctest --preset release`, that the
   ARM64 tag library compiles to the order of accesses the model check
-  describes (`tests/model/README.md`).
+  describes, and that edited copies of the sources, compiled with the
+  runner's GCC, fail that check (`tests/model/README.md`).
 - All seven checks must be marked as required in the protection rule of `main`.
   GitHub cannot read this from the repository; it is a repository setting.
 

@@ -47,31 +47,78 @@ runs:
         echo "CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)" >> "${GITHUB_ENV}"
 
     # herd7 is not packaged by the distribution. It is built from the tag of
-    # the version in third-party/dependencies.json, checked against its
-    # commit, with the OCaml tools of the distribution, and installed with
-    # the layout `make install` of herdtools7 gives (bin/, share/herdtools7/),
-    # which is where the binary looks for its models.
-    - name: Build herd7
+    # the version in third-party/dependencies.json, checked against the
+    # commit listed there, with the OCaml tools of the distribution, and
+    # installed with the layout `make install` of herdtools7 gives (bin/,
+    # share/herdtools7/), which is where the binary looks for its models.
+    # The build is cached under the commit and the runner image, so it runs
+    # again only when one of the two changes (issue #50).
+    - name: Find the herdtools7 version
+      id: herdtools
       if: inputs.herd7 == 'true'
       shell: bash
+      run: |
+        python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+        import json
+        with open("third-party/dependencies.json", encoding="utf-8") as f:
+            entries = json.load(f)["dependencies"]
+        (entry,) = [e for e in entries if e["name"] == "herdtools7"]
+        print(f"version={entry['version']}")
+        print(f"commit={entry['commit']}")
+        PY
+        echo "prefix=${RUNNER_TEMP}/herdtools7" >> "${GITHUB_OUTPUT}"
+        # ImageOS and ImageVersion name the runner image: a new image can
+        # bring other OCaml libraries, so it builds herd7 again.
+        echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}-$(uname -m)" \
+          >> "${GITHUB_OUTPUT}"
+
+    - name: Restore herd7 from the cache
+      id: herd7-cache
+      if: inputs.herd7 == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.herdtools.outputs.prefix }}
+        key: herd7-${{ steps.herdtools.outputs.commit }}-${{ steps.herdtools.outputs.image }}
+
+    - name: Build herd7
+      if: inputs.herd7 == 'true' && steps.herd7-cache.outputs.cache-hit != 'true'
+      shell: bash
       env:
-        HERDTOOLS_VERSION: "7.58"
-        HERDTOOLS_COMMIT: 1ca343e16a2038e406d1ac674e7e3a1b722b36c7
+        HERDTOOLS_VERSION: ${{ steps.herdtools.outputs.version }}
+        HERDTOOLS_COMMIT: ${{ steps.herdtools.outputs.commit }}
+        PREFIX: ${{ steps.herdtools.outputs.prefix }}
       run: |
         sudo apt-get install --yes --quiet --no-install-recommends \
           ocaml-nox ocaml-dune menhir libmenhir-ocaml-dev libzarith-ocaml-dev
         src="${RUNNER_TEMP}/herdtools7-src"
-        prefix="${RUNNER_TEMP}/herdtools7"
-        git clone --quiet --depth 1 --branch "${HERDTOOLS_VERSION}" \
-          https://github.com/herd/herdtools7 "${src}"
+        # The fetch is retried: a failed fetch of a third-party host must
+        # not fail the model check on its first try.
+        for attempt in 1 2 3 4; do
+          rm -rf "${src}"
+          if git clone --quiet --depth 1 --branch "${HERDTOOLS_VERSION}" \
+              https://github.com/herd/herdtools7 "${src}"; then
+            break
+          fi
+          if [ "${attempt}" = 4 ]; then
+            echo "cannot fetch herdtools7 ${HERDTOOLS_VERSION}" >&2
+            exit 1
+          fi
+          sleep $((attempt * 10))
+        done
         test "$(git -C "${src}" rev-parse HEAD)" = "${HERDTOOLS_COMMIT}"
         cd "${src}"
-        sh ./version-gen.sh "${prefix}"
+        sh ./version-gen.sh "${PREFIX}"
         dune build --profile release herd/herd.exe
-        mkdir -p "${prefix}/bin" "${prefix}/share/herdtools7"
-        cp _build/default/herd/herd.exe "${prefix}/bin/herd7"
-        cp -R herd/libdir "${prefix}/share/herdtools7/herd"
-        echo "${prefix}/bin" >> "${GITHUB_PATH}"
+        mkdir -p "${PREFIX}/bin" "${PREFIX}/share/herdtools7"
+        cp _build/default/herd/herd.exe "${PREFIX}/bin/herd7"
+        cp -R herd/libdir "${PREFIX}/share/herdtools7/herd"
+
+    - name: Put herd7 on PATH
+      if: inputs.herd7 == 'true'
+      shell: bash
+      env:
+        PREFIX: ${{ steps.herdtools.outputs.prefix }}
+      run: echo "${PREFIX}/bin" >> "${GITHUB_PATH}"
 
     - name: Tool versions
       shell: bash
