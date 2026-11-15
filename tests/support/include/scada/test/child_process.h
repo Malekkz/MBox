@@ -37,6 +37,13 @@ private:
     int fd_ = -1;
 };
 
+// How a process ended: by itself with an exit code, or by a signal.
+struct ChildEnding {
+    bool by_signal = false;
+    // The exit code, or the number of the signal if `by_signal`.
+    int number = 0;
+};
+
 // A child process whose standard output and standard error are captured.
 // Its standard input is empty. If the process is still running when the
 // object is destroyed, it is killed and reaped, so a failed test leaves
@@ -85,6 +92,12 @@ public:
     // is captured. Returns that signal's number, or nothing if `timeout`
     // passes first or the process exited by itself.
     [[nodiscard]] std::optional<int> wait_for_signal_exit(
+        std::chrono::milliseconds timeout);
+
+    // Blocks until the process has ended, however it ended, and all its
+    // output is captured. Returns how it ended, or nothing if `timeout`
+    // passes first.
+    [[nodiscard]] std::optional<ChildEnding> wait_for_ending(
         std::chrono::milliseconds timeout);
 
     // Sends the signal `signal_number` to the process. Returns false if the

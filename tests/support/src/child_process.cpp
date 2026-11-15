@@ -328,6 +328,22 @@ std::optional<int> ChildProcess::wait_for_signal_exit(
     return WTERMSIG(status);
 }
 
+std::optional<ChildEnding> ChildProcess::wait_for_ending(
+    std::chrono::milliseconds timeout) {
+    const std::optional<int> ended = wait_for_end(timeout);
+    if (!ended.has_value()) {
+        return std::nullopt;
+    }
+    const int status = *ended;
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    if (WIFEXITED(status)) {
+        // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+        return ChildEnding{.by_signal = false, .number = WEXITSTATUS(status)};
+    }
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    return ChildEnding{.by_signal = true, .number = WTERMSIG(status)};
+}
+
 bool ChildProcess::send_signal(int signal_number) noexcept {
     check_exit();
     // Not after the process is reaped: its id may belong to another by then.

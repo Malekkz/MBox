@@ -372,6 +372,24 @@ std::string_view after_generation_change(std::string_view out) {
     return ::testing::AssertionSuccess();
 }
 
+// True if the simulator `writer` of a generation that has retired ends by
+// itself as D-41 says: code 1 and the reason on its standard error.
+::testing::AssertionResult stops_by_itself(ChildProcess& writer) {
+    const std::optional<ChildEnding> ending =
+        writer.wait_for_ending(WAIT_LIMIT);
+    if (!ending.has_value()) {
+        return ::testing::AssertionFailure() << "scada-sim did not stop";
+    }
+    const bool reason =
+        writer.err().find("the generation is retiring") != std::string::npos ||
+        writer.err().find("has been down for") != std::string::npos;
+    if (ending->by_signal || ending->number != 1 || !reason) {
+        return ::testing::AssertionFailure()
+               << "scada-sim " << describe(*ending) << ": " << writer.err();
+    }
+    return ::testing::AssertionSuccess();
+}
+
 TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     // Generation 1: the simulation's tag set, with scada-sim writing.
     write_watch_tag_set();
@@ -384,7 +402,9 @@ TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     EXPECT_TRUE(prints(*watch, " change sim.t0"));
     // Generation 2: another tag set, without the simulation's tags.
     // scada-sim may go on writing generation 1 for a while; it stops by
-    // itself once it sees the generation retire.
+    // itself, with code 1, once it sees the generation retire (or
+    // scada-tagd down for 5 s), decision D-41. That is why it is not
+    // killed: a kill raced with that exit (issue #64).
     stop(*first);
     write_small_tag_set();
     std::optional<RunningTagd> second = ready_tagd();
@@ -393,7 +413,7 @@ TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     }
     EXPECT_TRUE(moves_to_generation_two_and_stops(*watch));
     EXPECT_TRUE(nothing_of_the_old_generation(watch->out()));
-    kill(*writer);
+    EXPECT_TRUE(stops_by_itself(*writer));
     stop(*second);
 }
 
