@@ -59,8 +59,8 @@ int Queue::open(Attachment& attachment, std::string_view name,
     if (!access.produced && !access.consumed) {
         return SCADA_E_NOT_OWNER;
     }
-    auto queue = std::make_unique<Queue>(attachment, *queue_id,
-                                         access.produced);
+    auto queue =
+        std::make_unique<Queue>(attachment, *queue_id, access.produced);
     if (!attachment.claim_queue(*queue_id, access.produced)) {
         return SCADA_E_BUSY;
     }

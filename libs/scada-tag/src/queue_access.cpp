@@ -431,11 +431,11 @@ bool Attachment::check_queue_thread(std::size_t queue_id) noexcept {
 }
 
 bool Attachment::answer_queue_in_use(std::size_t queue_id) const noexcept {
-    return std::ranges::any_of(queue_access_, [this, queue_id](
-                                                  const QueueAccess& access) {
-        return access.answer_queue == queue_id &&
-               queue_side_open(access.id, false);
-    });
+    return std::ranges::any_of(queue_access_,
+                               [this, queue_id](const QueueAccess& access) {
+                                   return access.answer_queue == queue_id &&
+                                          queue_side_open(access.id, false);
+                               });
 }
 
 QueueCounters& Attachment::counters(std::size_t queue_id) noexcept {
