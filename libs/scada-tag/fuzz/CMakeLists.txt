@@ -22,3 +22,10 @@ scada_add_fuzz_target(utf8_fuzz
 # utf8.h is private to the library.
 target_include_directories(utf8_fuzz
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
+scada_add_fuzz_target(queue_record_fuzz
+  SOURCES queue_record_fuzz.cpp
+  DEPENDS scada::tag)
+# queue_region.h is private to the library.
+target_include_directories(queue_record_fuzz
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")

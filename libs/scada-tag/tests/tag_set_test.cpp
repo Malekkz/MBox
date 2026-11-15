@@ -247,9 +247,10 @@ TEST(TagSetValidate, RejectsQueuesWithoutAKindPrefixOrPowerOfTwoCapacity) {
     constexpr std::uint32_t NOT_A_POWER_OF_TWO = 1000;
     const auto with_queue = [](std::string name, std::uint32_t capacity) {
         TagSet tag_set = samples::one_owner();
+        tag_set.processes.push_back({.name = "c", .uid = samples::UID_OTHER});
         tag_set.queues.push_back({.name = std::move(name),
                                   .producer = "p",
-                                  .consumer = "p",
+                                  .consumer = "c",
                                   .capacity = capacity});
         return tag_set;
     };
@@ -268,6 +269,11 @@ TEST(TagSetValidate, RejectsQueuesWithoutAKindPrefixOrPowerOfTwoCapacity) {
                     "queue 'events.p': capacity 0 must be a power of two");
     expect_rejected(with_queue("events.p", NOT_A_POWER_OF_TWO),
                     StatusCode::INVALID_ARGUMENT, "capacity 1000");
+    TagSet one_process = with_queue("events.p", CAPACITY);
+    one_process.queues.front().consumer = "p";
+    expect_rejected(one_process, StatusCode::INVALID_ARGUMENT,
+                    "queue 'events.p': producer and consumer must be "
+                    "different processes");
 }
 
 TEST(TagSetValidate, RejectsInvalidValuesAndFlagCombinations) {
@@ -375,14 +381,15 @@ TEST(TagSetValidate, AppliesTheCountLimits) {
     }
     {
         TagSet tag_set = samples::one_owner();
+        tag_set.processes.push_back({.name = "c", .uid = samples::UID_OTHER});
         for (std::size_t i = 0; i < MAX_QUEUES; ++i) {
             tag_set.queues.push_back({.name = "events.q" + std::to_string(i),
                                       .producer = "p",
-                                      .consumer = "p"});
+                                      .consumer = "c"});
         }
         expect_valid(tag_set);
         tag_set.queues.push_back(
-            {.name = "events.one-too-many", .producer = "p", .consumer = "p"});
+            {.name = "events.one-too-many", .producer = "p", .consumer = "c"});
         expect_rejected(tag_set, StatusCode::OUT_OF_RANGE,
                         "the tag set has 4097 queue entries; the limit is "
                         "4096");

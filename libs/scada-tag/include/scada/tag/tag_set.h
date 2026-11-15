@@ -111,7 +111,8 @@ using ConfigHash = std::array<std::uint8_t, CONFIG_HASH_BYTES>;
 
 // Checks `tag_set` against the contract: name grammar and lengths, no
 // duplicate name within processes, owners, queues or tags, every reference
-// to a process or owner resolves, owner naming, queue name prefixes, flag
+// to a process or owner resolves, owner naming, queue name prefixes, a
+// producer and a consumer that are two processes for every queue, flag
 // combinations, and the limits of section 14. Returns OK or the first
 // problem found. On an error `detail` is replaced by a sentence that names
 // the offending entry, for a log line or a message to the user; otherwise it
