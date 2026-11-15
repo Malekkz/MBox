@@ -669,41 +669,66 @@ TEST(QueuePairBroken, APairThatDoesNotMoveIsJudgedByTheRangeRule) {
 // a wrong read order: tried against a single read of `write_seq`, it still
 // passed, since the window between two loads is too short to hit. The
 // explicit interleavings of QueuePairBroken above catch that.
+// The end of a wait of WAIT_LIMIT_MS from now.
+std::int64_t wait_deadline() {
+    return scada::monotonic_ns() +
+           (std::int64_t{WAIT_LIMIT_MS} * NANOSECONDS_PER_MILLISECOND);
+}
+
+// Posts `count` events to `out`, retrying while it is full, for at most
+// WAIT_LIMIT_MS. Adds a failure and stops at any other refusal.
+void post_all(Queue& out, std::uint64_t count) {
+    const std::int64_t deadline = wait_deadline();
+    std::uint64_t posted = 0;
+    while (posted < count) {
+        if (scada::monotonic_ns() > deadline) {
+            ADD_FAILURE() << "posted " << posted << " in the time";
+            return;
+        }
+        const int code = post(out, event());
+        if (code == SCADA_OK) {
+            ++posted;
+        } else if (code != SCADA_E_FULL) {
+            ADD_FAILURE() << "post returned " << code;
+            return;
+        }
+    }
+}
+
+// Takes and acknowledges the events 0 to `count - 1` from `reader`, in
+// order, for at most WAIT_LIMIT_MS, then sets `done`. Adds a failure and
+// stops at anything else.
+void take_all(Queue& reader, std::uint64_t count, std::atomic<bool>& done) {
+    const std::int64_t deadline = wait_deadline();
+    std::uint64_t taken = 0;
+    while (taken < count) {
+        if (scada::monotonic_ns() > deadline) {
+            ADD_FAILURE() << "took " << taken << " in the time";
+            break;
+        }
+        scada_event_record record{};
+        const int code = next(reader, record, 0);
+        if (code == SCADA_OK &&
+            (record.seq != taken || reader.ack() != SCADA_OK)) {
+            ADD_FAILURE() << "record " << record.seq;
+            break;
+        }
+        if (code != SCADA_OK && code != SCADA_E_TIMEOUT) {
+            ADD_FAILURE() << "next returned " << code;
+            break;
+        }
+        taken += code == SCADA_OK ? 1 : 0;
+    }
+    done.store(true, std::memory_order_release);
+}
+
 TEST_F(Queues, TagdReportsNoBrokenQueueWhileBothSidesRun) {
     constexpr std::uint64_t RECORDS = 50'000;
     const QueuePtr out = open(*io(), "events.io");
     const QueuePtr reader = open(*web(), "events.io");
     std::atomic<bool> done{false};
-    std::thread producer([&] {
-        std::uint64_t posted = 0;
-        while (posted < RECORDS) {
-            const int code = post(*out, event());
-            if (code == SCADA_OK) {
-                ++posted;
-            } else if (code != SCADA_E_FULL) {
-                ADD_FAILURE() << "post returned " << code;
-                break;
-            }
-        }
-    });
-    std::thread consumer([&] {
-        std::uint64_t taken = 0;
-        while (taken < RECORDS) {
-            scada_event_record record{};
-            const int code = next(*reader, record, 0);
-            if (code == SCADA_OK) {
-                if (record.seq != taken || reader->ack() != SCADA_OK) {
-                    ADD_FAILURE() << "record " << record.seq;
-                    break;
-                }
-                ++taken;
-            } else if (code != SCADA_E_TIMEOUT) {
-                ADD_FAILURE() << "next returned " << code;
-                break;
-            }
-        }
-        done.store(true, std::memory_order_release);
-    });
+    std::thread producer([&] { post_all(*out, RECORDS); });
+    std::thread consumer([&] { take_all(*reader, RECORDS, done); });
     std::uint64_t checks = 0;
     std::uint64_t reports = 0;
     while (!done.load(std::memory_order_acquire)) {

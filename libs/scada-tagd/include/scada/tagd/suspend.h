@@ -39,6 +39,9 @@ struct SuspendFinding {
     // Time spent suspended that the sample proves: since boot at the first
     // sample, since the previous sample otherwise. A lower bound, in ns.
     std::int64_t suspended_ns = 0;
+
+    friend bool operator==(const SuspendFinding&,
+                           const SuspendFinding&) = default;
 };
 
 // Follows the difference CLOCK_BOOTTIME minus CLOCK_MONOTONIC, which is the

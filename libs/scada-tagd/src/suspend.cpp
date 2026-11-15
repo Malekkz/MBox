@@ -3,6 +3,7 @@
 #include "scada/common/fd.h"
 
 #include <fcntl.h>
+#include <sys/types.h>
 #include <time.h>  // NOLINT(modernize-deprecated-headers): clock_gettime and CLOCK_BOOTTIME are POSIX and Linux, declared here
 #include <unistd.h>
 
@@ -32,8 +33,9 @@ std::int64_t read_clock(clockid_t clock) noexcept {
     return (std::int64_t{now.tv_sec} * NANOSECONDS_PER_SECOND) + now.tv_nsec;
 }
 
-bool is_space(char c) noexcept {
-    return c == ' ' || c == '\n' || c == '\t' || c == '\r';
+bool is_space(char character) noexcept {
+    return character == ' ' || character == '\n' || character == '\t' ||
+           character == '\r';
 }
 
 }  // namespace
@@ -72,23 +74,28 @@ std::optional<SuspendFinding> SuspendWatch::observe(
 }
 
 std::string read_sleep_states(const std::string& path) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
     const Fd file(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     if (!file.valid()) {
         return {};
     }
     std::array<char, MAX_SLEEP_STATES_BYTES> buffer{};
-    ssize_t got = 0;
-    do {
+    ssize_t got = -1;
+    for (;;) {
         got = ::read(file.get(), buffer.data(), buffer.size());
-    } while (got < 0 && errno == EINTR);
+        if (got >= 0 || errno != EINTR) {
+            break;
+        }
+    }
     if (got <= 0) {
         return {};
     }
     // In range: read returns at most the size of the buffer.
     std::string text(buffer.data(), static_cast<std::size_t>(got));
-    for (char& c : text) {
-        if (!is_space(c) && (c < FIRST_PRINTABLE || c > LAST_PRINTABLE)) {
-            c = '?';
+    for (char& character : text) {
+        if (!is_space(character) &&
+            (character < FIRST_PRINTABLE || character > LAST_PRINTABLE)) {
+            character = '?';
         }
     }
     const std::size_t first = text.find_first_not_of(" \n\t\r");

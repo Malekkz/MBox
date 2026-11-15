@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,7 @@ constexpr std::int64_t BOOT_NS = 5'000'000'000;
 constexpr std::int64_t READ_NS = 2'000;  // between the two reads
 constexpr std::int64_t SUSPEND_NS = 7'000'000'000;
 constexpr std::int64_t STEP_NS = 250'000'000;  // one check
+constexpr std::int64_t SAMPLES = 100;
 
 // A sample at monotonic time `mono_ns` with `suspended_ns` spent suspended
 // since boot, read with CLOCK_BOOTTIME in the middle of a read of
@@ -36,30 +38,27 @@ ClockSample at(std::int64_t mono_ns, std::int64_t suspended_ns) {
 
 TEST(SuspendWatch, NoSuspendIsNotReportedWhateverTheReadTime) {
     SuspendWatch watch;
-    for (std::int64_t i = 0; i < 100; ++i) {
+    for (std::int64_t i = 0; i < SAMPLES; ++i) {
         EXPECT_FALSE(watch.observe(at(BOOT_NS + (i * STEP_NS), 0)).has_value());
     }
 }
 
 TEST(SuspendWatch, ASuspendBeforeTheStartIsReportedOnceAtTheStart) {
     SuspendWatch watch;
-    const std::optional<SuspendFinding> first =
-        watch.observe(at(BOOT_NS, SUSPEND_NS));
-    ASSERT_TRUE(first.has_value());
-    EXPECT_TRUE(first->at_start);
     // A lower bound: the read time does not count.
-    EXPECT_EQ(first->suspended_ns, SUSPEND_NS - (READ_NS / 2));
+    EXPECT_EQ(
+        watch.observe(at(BOOT_NS, SUSPEND_NS)),
+        std::optional(SuspendFinding{
+            .at_start = true, .suspended_ns = SUSPEND_NS - (READ_NS / 2)}));
     EXPECT_FALSE(watch.observe(at(BOOT_NS + STEP_NS, SUSPEND_NS)).has_value());
 }
 
 TEST(SuspendWatch, ASuspendWhileRunningIsReportedWithItsLength) {
     SuspendWatch watch;
     EXPECT_FALSE(watch.observe(at(BOOT_NS, 0)).has_value());
-    const std::optional<SuspendFinding> later =
-        watch.observe(at(BOOT_NS + STEP_NS, SUSPEND_NS));
-    ASSERT_TRUE(later.has_value());
-    EXPECT_FALSE(later->at_start);
-    EXPECT_EQ(later->suspended_ns, SUSPEND_NS - READ_NS);
+    EXPECT_EQ(watch.observe(at(BOOT_NS + STEP_NS, SUSPEND_NS)),
+              std::optional(SuspendFinding{
+                  .at_start = false, .suspended_ns = SUSPEND_NS - READ_NS}));
     EXPECT_FALSE(
         watch.observe(at(BOOT_NS + (2 * STEP_NS), SUSPEND_NS)).has_value());
     // A second suspend is reported again.
@@ -90,12 +89,15 @@ protected:
     }
     void TearDown() override { std::filesystem::remove_all(dir_); }
 
+    [[nodiscard]] const std::filesystem::path& dir() const { return dir_; }
+
     [[nodiscard]] std::string file_with(const std::string& text) const {
         const std::filesystem::path path = dir_ / "state";
         std::ofstream(path, std::ios::binary) << text;
         return path.string();
     }
 
+private:
     std::filesystem::path dir_;
 };
 
@@ -106,7 +108,7 @@ TEST_F(SleepStates, AreReadTrimmed) {
 
 TEST_F(SleepStates, AnEmptyOrMissingFileOffersNone) {
     EXPECT_EQ(read_sleep_states(file_with("\n")), "");
-    EXPECT_EQ(read_sleep_states((dir_ / "none").string()), "");
+    EXPECT_EQ(read_sleep_states((dir() / "none").string()), "");
 }
 
 TEST_F(SleepStates, AreOutsideInput) {

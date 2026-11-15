@@ -16,6 +16,8 @@
 
 #include <unistd.h>
 
+#include <array>
+#include <bit>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -24,6 +26,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -345,11 +348,10 @@ TEST_F(QueueProcesses, TagdLogsABrokenAndAMissingQueue) {
             std::ios::in | std::ios::out | std::ios::binary);
         proc.seekp(static_cast<std::streamoff>(
             CURSORS_OFFSET + (EVENTS_FEED_ID * sizeof(std::uint64_t))));
-        const std::uint64_t value = BEYOND;  // little-endian targets only
-        proc.write(
-            reinterpret_cast<const char*>(
-                &value),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): bytes of an integer for a file
-            sizeof(value));
+        // The bytes of the cursor; the targets are little-endian (contract 1).
+        const auto bytes =
+            std::bit_cast<std::array<char, sizeof(std::uint64_t)>>(BEYOND);
+        proc.write(bytes.data(), bytes.size());
         ASSERT_TRUE(proc.good());
     }
     EXPECT_TRUE(logs(*tagd, R"(queue broken QUEUE="events.feed" CURSOR="7" )"

@@ -941,7 +941,8 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
 void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
                                        CheckReport& report) {
     if (!follow_region(open_.directory.get(), queue.name, queue.identity,
-                       queue.region)) {
+                       queue.region) ||
+        !queue.region.has_value()) {
         // A producer that is down may not have created it yet. One that is
         // up created it at attach; a check may fall into a recreation, so
         // a single miss is not reported.
