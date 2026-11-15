@@ -47,10 +47,12 @@ struct ChildEnding {
 // A child process whose standard output and standard error are captured.
 // Its standard input is empty. If the process is still running when the
 // object is destroyed, it is killed and reaped, so a failed test leaves
-// nothing behind. It is also killed with SIGKILL when the thread that
-// started it ends, which is when the test process ends however it ends,
-// SIGKILL included, as long as tests start processes from the main thread
-// (decision D-48). Processes the child starts itself are not covered.
+// nothing behind. It is also killed with SIGKILL when the test process
+// ends however it ends, SIGKILL included (decision D-48). The kernel ties
+// that signal to the thread that started the child, not to the process:
+// start a child only from a thread that outlives it, in practice the main
+// thread of the test. A child started from a worker thread is killed when
+// that thread ends. Processes the child starts itself are not covered.
 class ChildProcess {
 public:
     // Starts `command`: the program followed by its arguments. A program
