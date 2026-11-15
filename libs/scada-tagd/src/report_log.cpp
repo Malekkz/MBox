@@ -19,6 +19,8 @@ using scada::LogField;
 using scada::LogLevel;
 using scada::tag::DownReason;
 using scada::tag::ProcessChange;
+using scada::tag::QueueChange;
+using scada::tag::QueueEvent;
 using scada::tag::Restarts;
 using scada::tag::SweptEntry;
 
@@ -102,6 +104,38 @@ void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
     }
     log_restarts(logger, report.restarts);
     log_late(logger, late_log.admit(report.late, now_mono_ns));
+    for (const QueueChange& queue : report.queues) {
+        // A broken queue refuses every post and delivers nothing until the
+        // next generation (contract 9.2): actions that need it are refused.
+        // Each is logged once per change, not at every check.
+        const std::string cursor = std::to_string(queue.cursor);
+        const std::string written = std::to_string(queue.write_seq);
+        const std::string capacity = std::to_string(queue.capacity);
+        const std::array<LogField, 5> fields{{
+            {"QUEUE", queue.queue},
+            {"CURSOR", cursor},
+            {"WRITE_SEQ", written},
+            {"CAPACITY", capacity},
+            {"REASON", queue.replaced ? "replaced" : "out of range"},
+        }};
+        switch (queue.event) {
+            case QueueEvent::BROKEN:
+                logger.log(LogLevel::WARNING, "queue broken", fields);
+                break;
+            case QueueEvent::NO_LONGER_BROKEN:
+                logger.log(LogLevel::NOTICE, "queue no longer broken",
+                           std::span(fields).first(4));
+                break;
+            case QueueEvent::MISSING:
+                logger.log(LogLevel::WARNING, "queue file missing",
+                           std::span(fields).first(1));
+                break;
+            case QueueEvent::FOUND:
+                logger.log(LogLevel::NOTICE, "queue file found again",
+                           std::span(fields).first(1));
+                break;
+        }
+    }
     for (const SweptEntry& entry : report.swept) {
         // The name is outside input; the sinks escape it and cut it.
         if (entry.removed) {

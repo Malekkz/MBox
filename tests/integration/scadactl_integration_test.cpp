@@ -16,7 +16,6 @@
 
 #include "scada/sim/layout.h"
 #include "scada/sim/pattern.h"
-#include "scada/sim/sim.h"
 #include "scada/test/child_process.h"
 
 #include <gtest/gtest.h>
@@ -394,9 +393,11 @@ TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     }
     EXPECT_TRUE(moves_to_generation_two_and_stops(*watch));
     EXPECT_TRUE(nothing_of_the_old_generation(watch->out()));
-    // scada-sim stops by itself with code 1 once it sees generation 1
-    // retire (D-41); a kill could find it gone already.
-    EXPECT_EQ(writer->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_ERROR)
+    // scada-sim stops by itself, with code 1, once its generation retires
+    // (D-41); a kill raced with that exit and failed when it came first
+    // (pipeline of PR #68, ThreadSanitizer build).
+    constexpr int SIM_EXIT_RETIRED = 1;
+    EXPECT_EQ(writer->wait_for_exit(WAIT_LIMIT), SIM_EXIT_RETIRED)
         << writer->err();
     stop(*second);
 }

@@ -16,13 +16,17 @@
 
 #include <unistd.h>
 
+#include <array>
+#include <bit>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -312,6 +316,49 @@ TEST_F(QueueProcesses, OneMillionRecordsWithoutLossDuplicationOrReordering) {
     EXPECT_EQ(scada_queue_next(reader.get(), &extra, sizeof(extra), 0),
               SCADA_E_TIMEOUT)
         << "a record too many";
+    EXPECT_TRUE(stops_cleanly(*feed));
+    stop(*tagd);
+}
+
+// Issue #53 (D-46), with the real scada-tagd: a queue whose consumer's
+// cursor is out of range is logged as broken, and an events queue file
+// removed under a running producer as missing. The cursor is changed in
+// the file, as damage would: `proc.web` holds it after the RegionHeader and
+// the ProcHeader (64 bytes each), at the queue id `events.feed` has in name
+// order (contract 9, 10).
+TEST_F(QueueProcesses, TagdLogsABrokenAndAMissingQueue) {
+    constexpr std::size_t EVENTS_FEED_ID = 1;
+    constexpr std::size_t CURSORS_OFFSET = 128;
+    constexpr std::uint64_t BEYOND = 7;
+    write_queue_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    const Attached web(base(), "web");
+    std::optional<ChildProcess> feed =
+        start_queue_helper("feed", "post", "events.feed", "2");
+    if (!feed.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*feed, "posted 2\n"));
+    {
+        std::fstream proc(
+            std::filesystem::path(base()) / "current" / "proc.web",
+            std::ios::in | std::ios::out | std::ios::binary);
+        proc.seekp(static_cast<std::streamoff>(
+            CURSORS_OFFSET + (EVENTS_FEED_ID * sizeof(std::uint64_t))));
+        // The bytes of the cursor; the targets are little-endian (contract 1).
+        const auto bytes =
+            std::bit_cast<std::array<char, sizeof(std::uint64_t)>>(BEYOND);
+        proc.write(bytes.data(), bytes.size());
+        ASSERT_TRUE(proc.good());
+    }
+    EXPECT_TRUE(logs(*tagd, R"(queue broken QUEUE="events.feed" CURSOR="7" )"
+                            R"(WRITE_SEQ="2" CAPACITY=")"));
+    std::filesystem::remove(std::filesystem::path(base()) / "current" /
+                            "events.feed");
+    EXPECT_TRUE(logs(*tagd, R"(queue file missing QUEUE="events.feed")"));
     EXPECT_TRUE(stops_cleanly(*feed));
     stop(*tagd);
 }

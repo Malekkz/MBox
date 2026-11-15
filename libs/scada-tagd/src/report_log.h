@@ -40,8 +40,8 @@ void log_late(scada::Logger& logger, std::span<const LateRecord> records);
 
 // Logs what one liveness check made at `now_mono_ns` found: every change
 // of a `down` flag, every restart, late heartbeats after the rate limit of
-// `late_log`, and every swept entry. Changes and restarts are not rate
-// limited.
+// `late_log`, every change of a queue's state, and every swept entry. Changes
+// and restarts are not rate limited.
 void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 LateLog& late_log, std::int64_t now_mono_ns);
 
