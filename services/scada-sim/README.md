@@ -2,9 +2,11 @@
 
 The simulator writer (issue P1-10): a thin executable over `libscada-sim`.
 It stands in for drivers in tests and benchmarks of the tag database, and
-gives `scadactl tag watch` something to show. It is installed to
-`/usr/bin`, without a service unit: it is started by hand or by a test,
-never at boot.
+gives `scadactl tag watch` something to show. It is a test tool, not part
+of the product image: only the install component `test-tools` holds it
+(`cmake --install <build> --component test-tools --prefix <directory>`,
+which puts it in `usr/bin` under that directory), and it has no service
+unit. It is started by hand or by a test, never at boot.
 
 ## How to run it
 

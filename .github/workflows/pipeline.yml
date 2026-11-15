@@ -67,8 +67,8 @@ jobs:
 
       # Issue P1-10: the simulator writer sustains 50,000 updates per second
       # across 10 owners, as threads of one process and as 10 processes
-      # (decision D-38). Checked, not only reported: the figure is a count
-      # of updates over 10 s with a tolerance of 5 percent, not a latency.
+      # (decision D-38). The test gates on x86-64, the machine the
+      # acceptance names, and only reports the figures on ARM64.
       - name: Simulator rate (release)
         run: ctest --test-dir build/release -R '^scada-sim-rate-perf-test$' -V
 

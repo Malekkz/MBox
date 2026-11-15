@@ -18,15 +18,19 @@ namespace scada::sim::detail {
 using Clock = std::chrono::steady_clock;
 
 // What one owner thread writes. Its tags are written in turn: update j,
-// from 0, is write number j / tags + 1 of tag j % tags.
+// from 0, is write number first_counts[t] + j / tags + 1 of tag
+// t = j % tags.
 struct OwnerPlan {
     std::vector<std::uint32_t> handles;  // the owner's tags, in slot order
     std::vector<Pattern> patterns;       // of each tag
+    // Of each tag: the write count it had before this run (CHECK only).
+    std::vector<std::uint64_t> first_counts;
     Waveform waveform;
     // Updates per second of this owner; 0: as fast as it can.
     double per_second = 0.0;
     std::optional<std::uint64_t> updates;    // stop after this many
-    std::optional<Clock::duration> run_for;  // stop after this long
+    std::optional<Clock::duration> run_for;  // stop after this long; only
+                                             // when writing as fast as it can
     Notify notify = Notify::BATCH;
 };
 

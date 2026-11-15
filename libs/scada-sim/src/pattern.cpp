@@ -100,10 +100,14 @@ scada_value check_value(std::uint64_t count) noexcept {
 bool is_check_value(const scada_value& value) noexcept {
     const std::uint64_t count = value.value;
     if (count == 0) {
-        // Never written: as attach left the record.
+        // Never written: as attach left the record, every field 0 but type,
+        // quality and flag. A read across the first write that took a field
+        // of that write is not whole.
         return value.type == SCADA_TYPE_UINT64 &&
                value.quality == SCADA_QUALITY_BAD &&
-               value.quality_flags == SCADA_FLAG_NOT_INIT;
+               value.quality_flags == SCADA_FLAG_NOT_INIT &&
+               value.source_time_ns == 0 && value.update_time_ns == 0 &&
+               value.update_mono_ns == 0 && value.change_count == 0;
     }
     if (count > MAX_CHECK_COUNT) {
         return false;

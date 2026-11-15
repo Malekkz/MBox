@@ -71,7 +71,8 @@ private:
         const std::size_t tags = plan_->handles.size();
         // In range: below `tags`.
         const auto tag = static_cast<std::size_t>(written_ % tags);
-        const std::uint64_t count = (written_ / tags) + 1;
+        const std::uint64_t count =
+            plan_->first_counts[tag] + (written_ / tags) + 1;
         const Pattern pattern = plan_->patterns[tag];
         scada_value value{};
         if (pattern == Pattern::CHECK) {
@@ -118,7 +119,10 @@ Outcome write_unpaced(Owner& owner, const OwnerPlan& plan,
     return Outcome::STOPPED;
 }
 
-// At `plan.per_second`: at each tick, what is due by then.
+// At `plan.per_second`: at each tick, what is due by then, at most
+// NOTIFY_BATCH updates at a time. An owner that is behind writes on without
+// waiting, but looks at `stop` after every batch, so that an owner asked for
+// more than the machine can write still stops at once.
 Outcome write_paced(Owner& owner, const OwnerPlan& plan,
                     Clock::time_point start, const std::atomic<bool>& stop,
                     OwnerProgress& progress) {
@@ -126,29 +130,29 @@ Outcome write_paced(Owner& owner, const OwnerPlan& plan,
     std::int64_t behind_max = 0;
     // Relaxed: as in write_unpaced.
     while (!stop.load(std::memory_order_relaxed)) {
-        const std::int64_t elapsed = since(start);
-        if (owner.complete() ||
-            (plan.run_for.has_value() &&
-             elapsed >= nanoseconds(*plan.run_for).count())) {
+        if (owner.complete()) {
             return Outcome::FINISHED;
         }
+        const std::int64_t elapsed = since(start);
         // In range: elapsed time of a run of at most MAX_SECONDS, at most
         // MAX_RATE updates per second.
         const auto due = static_cast<std::uint64_t>(
             static_cast<double>(elapsed) / ns_per_update);
-        if (due > owner.written()) {
-            // When the oldest update not yet written was due.
-            const auto due_at = static_cast<std::int64_t>(
-                static_cast<double>(owner.written() + 1) * ns_per_update);
-            behind_max = std::max(behind_max, elapsed - due_at);
-            // Relaxed: a figure for reports.
-            progress.behind_max_ns.store(behind_max, std::memory_order_relaxed);
-            if (!owner.write(due - owner.written())) {
-                return Outcome::FAILED;
-            }
+        if (due <= owner.written()) {
+            const std::int64_t ticks =
+                (elapsed / nanoseconds(TICK).count()) + 1;
+            std::this_thread::sleep_until(start + (TICK * ticks));
+            continue;
         }
-        const std::int64_t ticks = (elapsed / nanoseconds(TICK).count()) + 1;
-        std::this_thread::sleep_until(start + (TICK * ticks));
+        // When the oldest update not yet written was due.
+        const auto due_at = static_cast<std::int64_t>(
+            static_cast<double>(owner.written() + 1) * ns_per_update);
+        behind_max = std::max(behind_max, elapsed - due_at);
+        // Relaxed: a figure for reports.
+        progress.behind_max_ns.store(behind_max, std::memory_order_relaxed);
+        if (!owner.write(std::min(due - owner.written(), NOTIFY_BATCH))) {
+            return Outcome::FAILED;
+        }
     }
     return Outcome::STOPPED;
 }

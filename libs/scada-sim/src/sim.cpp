@@ -412,17 +412,8 @@ Status check_combination(const Options& options, std::string& detail) {
 // Writes the tag-set file. Returns the exit code.
 int write_tag_set(const Options& options, std::ostream& out,
                   std::ostream& err) {
-    TagSetOptions tag_set_options;
-    tag_set_options.layout = options.layout;
-    tag_set_options.uid = options.uid.value_or(::geteuid());
-    tag_set_options.tagd_uid = options.tagd_uid.value_or(tag_set_options.uid);
-    tag_set_options.readers = options.readers;
-    tag_set_options.heartbeat_check_ms = options.heartbeat_check_ms.value_or(
-        scada::tag::DEFAULT_HEARTBEAT_CHECK_MS);
-    tag_set_options.heartbeat_timeout_ms =
-        options.heartbeat_timeout_ms.value_or(
-            scada::tag::DEFAULT_HEARTBEAT_TIMEOUT_MS);
-    tag_set_options.ring_capacity = options.ring_capacity;
+    const TagSetOptions tag_set_options =
+        to_tag_set_options(options, ::geteuid());
     std::string detail;
     const Result<scada::tag::TagSet> tag_set =
         make_tag_set(tag_set_options, detail);
@@ -446,66 +437,109 @@ int write_tag_set(const Options& options, std::ostream& out,
     return EXIT_OK;
 }
 
-// Resolves the tags of the owners of `options.instance`, checks that each
-// has the type of its pattern and belongs to this process, and shares the
-// rate and the run out among the owners. Errors go to `err`.
+// The tags owners before `owner` have together.
+std::uint64_t tags_before(const Layout& layout, std::uint32_t owner) {
+    const std::uint64_t share = layout.tags / layout.owners;
+    const std::uint64_t remainder = layout.tags % layout.owners;
+    return (owner * share) + std::min<std::uint64_t>(owner, remainder);
+}
+
+// floor(total * tags_before(owner) / tags), without an intermediate product
+// that could overflow: total is at most MAX_RATE * MAX_SECONDS and the tags
+// at most MAX_TAGS.
+std::uint64_t share_up_to(std::uint64_t total, const Layout& layout,
+                          std::uint32_t owner) {
+    const std::uint64_t before = tags_before(layout, owner);
+    return ((total / layout.tags) * before) +
+           (((total % layout.tags) * before) / layout.tags);
+}
+
+// Sets the rate and the end of the run of owner `owner`.
+void plan_run(const Options& options, std::uint32_t owner, OwnerPlan& plan) {
+    const Layout& layout = options.layout;
+    const std::uint64_t rate = effective_rate(options);
+    const std::uint64_t tags = tags_of_owner(layout, owner);
+    // In range: rate and tags are bounded by MAX_RATE and MAX_TAGS.
+    plan.per_second = static_cast<double>(rate) * static_cast<double>(tags) /
+                      static_cast<double>(layout.tags);
+    if (options.rounds.has_value()) {
+        plan.updates = *options.rounds * tags;
+    } else if (options.seconds.has_value() && rate != 0) {
+        // The updates due in that time, shared out by tags so that all
+        // owners together write rate * seconds, none lost to rounding. The
+        // owner writes its share evenly over the time.
+        const std::uint64_t total = rate * *options.seconds;
+        const std::uint64_t updates = share_up_to(total, layout, owner + 1) -
+                                      share_up_to(total, layout, owner);
+        plan.updates = updates;
+        plan.per_second = static_cast<double>(updates) /
+                          static_cast<double>(*options.seconds);
+    } else if (options.seconds.has_value()) {
+        plan.run_for = std::chrono::seconds(*options.seconds);
+    }
+}
+
+// Resolves the tags of owner `owner` into `plan`, checks that each belongs
+// to this process and has the type of its pattern, and takes the write
+// count of each CHECK tag from its record. Errors go to `err`.
+bool resolve_tags(scada_ctx* ctx, const Layout& layout, std::uint32_t owner,
+                  OwnerPlan& plan, std::ostream& err) {
+    const std::uint64_t tags = tags_of_owner(layout, owner);
+    plan.handles.reserve(tags);
+    plan.patterns.reserve(tags);
+    plan.first_counts.reserve(tags);
+    for (std::uint64_t tag = 0; tag < tags; ++tag) {
+        // Resolving many tags can take longer than the heartbeat timeout
+        // on a slow machine; the process must not read as down meanwhile.
+        // A heartbeat makes no system call; a retiring generation is
+        // reported by the heartbeat of the main loop.
+        if (tag % HEARTBEAT_EVERY_TAGS == 0) {
+            static_cast<void>(scada_tag_heartbeat(ctx));
+        }
+        const std::string name = tag_name(layout, owner, tag);
+        const Pattern pattern = pattern_of(layout, tag);
+        std::uint32_t handle = SCADA_INVALID_HANDLE;
+        scada_tag_info_t info{};
+        scada_value value{};
+        if (scada_tag_resolve(ctx, name.c_str(), &handle) != SCADA_OK ||
+            scada_tag_info(ctx, handle, &info) != SCADA_OK ||
+            scada_tag_read(ctx, handle, &value) != SCADA_OK) {
+            err << "scada-sim: the tag set has no tag " << name << "\n";
+            return false;
+        }
+        if (info.owned == 0 ||
+            info.type != static_cast<std::uint8_t>(tag_type(pattern))) {
+            err << "scada-sim: tag " << name
+                << " is not of this process or not of the type of the "
+                   "pattern "
+                << to_string(pattern) << "\n";
+            return false;
+        }
+        plan.handles.push_back(handle);
+        plan.patterns.push_back(pattern);
+        // A region reused from an earlier run keeps its change count; CHECK
+        // goes on from it, so that the change count still equals the value
+        // (pattern.h).
+        plan.first_counts.push_back(
+            pattern == Pattern::CHECK ? std::uint64_t{value.change_count} : 0);
+    }
+    return true;
+}
+
+// The plans of the owners of `options.instance`. Errors go to `err`.
 std::optional<std::vector<OwnerPlan>> make_plans(scada_ctx* ctx,
                                                  const Options& options,
                                                  std::ostream& err) {
-    const Layout& layout = options.layout;
-    const std::uint32_t per_process = owners_per_process(layout);
-    const std::uint64_t rate = effective_rate(options);
+    const std::uint32_t per_process = owners_per_process(options.layout);
     std::vector<OwnerPlan> plans(per_process);
     for (std::uint32_t local = 0; local < per_process; ++local) {
         const std::uint32_t owner = (options.instance * per_process) + local;
-        const std::uint64_t tags = tags_of_owner(layout, owner);
         OwnerPlan& plan = plans[local];
         plan.waveform = options.waveform;
         plan.notify = options.notify;
-        // In range: rate and tags are bounded by MAX_RATE and MAX_TAGS.
-        plan.per_second = static_cast<double>(rate) *
-                          static_cast<double>(tags) /
-                          static_cast<double>(layout.tags);
-        if (options.rounds.has_value()) {
-            plan.updates = *options.rounds * tags;
-        } else if (options.seconds.has_value() && rate != 0) {
-            // The updates of the time, so that the run ends with the count
-            // due, not with whatever was written by then. In range: at most
-            // MAX_RATE times MAX_SECONDS.
-            plan.updates = static_cast<std::uint64_t>(std::floor(
-                plan.per_second * static_cast<double>(*options.seconds)));
-        } else if (options.seconds.has_value()) {
-            plan.run_for = std::chrono::seconds(*options.seconds);
-        }
-        plan.handles.reserve(tags);
-        plan.patterns.reserve(tags);
-        for (std::uint64_t tag = 0; tag < tags; ++tag) {
-            // Resolving many tags can take longer than the heartbeat
-            // timeout on a slow machine; the process must not read as down
-            // meanwhile. A heartbeat makes no system call; a retiring
-            // generation is reported by the heartbeat of the main loop.
-            if (tag % HEARTBEAT_EVERY_TAGS == 0) {
-                static_cast<void>(scada_tag_heartbeat(ctx));
-            }
-            const std::string name = tag_name(layout, owner, tag);
-            const Pattern pattern = pattern_of(layout, tag);
-            std::uint32_t handle = SCADA_INVALID_HANDLE;
-            scada_tag_info_t info{};
-            if (scada_tag_resolve(ctx, name.c_str(), &handle) != SCADA_OK ||
-                scada_tag_info(ctx, handle, &info) != SCADA_OK) {
-                err << "scada-sim: the tag set has no tag " << name << "\n";
-                return std::nullopt;
-            }
-            if (info.owned == 0 ||
-                info.type != static_cast<std::uint8_t>(tag_type(pattern))) {
-                err << "scada-sim: tag " << name
-                    << " is not of this process or not of the type of the "
-                       "pattern "
-                    << to_string(pattern) << "\n";
-                return std::nullopt;
-            }
-            plan.handles.push_back(handle);
-            plan.patterns.push_back(pattern);
+        plan_run(options, owner, plan);
+        if (!resolve_tags(ctx, options.layout, owner, plan, err)) {
+            return std::nullopt;
         }
     }
     return plans;
@@ -600,10 +634,12 @@ int run_simulator(const Options& options, std::ostream& out,
     const int attached =
         scada_tag_attach_opts(process.c_str(), &attach_options, &ctx);
     if (attached != SCADA_OK) {
+        // Taken before any output, which may change errno.
+        const int error = errno;
         err << "scada-sim: attach as " << process << " failed with code "
             << attached;
         if (attached == SCADA_E_IO) {
-            err << ": " << std::generic_category().message(errno);
+            err << ": " << std::generic_category().message(error);
         }
         err << "\n";
         return EXIT_ERROR;
@@ -623,16 +659,28 @@ int run_simulator(const Options& options, std::ostream& out,
         out << "writing\n" << std::flush;
         std::vector<std::jthread> owners;
         owners.reserve(plans->size());
-        for (std::size_t i = 0; i < plans->size(); ++i) {
-            // The plan and progress of one owner, the context and the stop
-            // flag outlive the thread: it is joined at the end of this
-            // block.
-            owners.emplace_back([ctx, &plan = (*plans)[i], start, &stop,
-                                 &owner_progress = progress[i]] {
-                detail::write_as_owner(ctx, plan, start, stop, owner_progress);
-            });
+        bool started = true;
+        try {
+            for (std::size_t i = 0; i < plans->size(); ++i) {
+                // The plan and progress of one owner, the context and the
+                // stop flag outlive the thread: it is joined at the end of
+                // this block.
+                owners.emplace_back([ctx, &plan = (*plans)[i], start, &stop,
+                                     &owner_progress = progress[i]] {
+                    detail::write_as_owner(ctx, plan, start, stop,
+                                           owner_progress);
+                });
+            }
+        } catch (const std::system_error& error) {
+            // No exception leaves the library: the threads started so far
+            // are stopped and joined, and the run fails.
+            err << "scada-sim: cannot start an owner thread: "
+                << error.code().message() << "\n";
+            started = false;
         }
-        ending = beat_until_stopped(ctx, signals, progress, out, err);
+        if (started) {
+            ending = beat_until_stopped(ctx, signals, progress, out, err);
+        }
         // Relaxed: the owners are joined before anything they wrote is
         // read.
         stop.store(true, std::memory_order_relaxed);
@@ -682,6 +730,21 @@ Result<Options> parse_options(std::span<const std::string_view> args,
         return combined;
     }
     return options;
+}
+
+TagSetOptions to_tag_set_options(const Options& options, std::uint32_t user) {
+    TagSetOptions tag_set_options;
+    tag_set_options.layout = options.layout;
+    tag_set_options.uid = options.uid.value_or(user);
+    tag_set_options.tagd_uid = options.tagd_uid.value_or(tag_set_options.uid);
+    tag_set_options.readers = options.readers;
+    tag_set_options.heartbeat_check_ms = options.heartbeat_check_ms.value_or(
+        scada::tag::DEFAULT_HEARTBEAT_CHECK_MS);
+    tag_set_options.heartbeat_timeout_ms =
+        options.heartbeat_timeout_ms.value_or(
+            scada::tag::DEFAULT_HEARTBEAT_TIMEOUT_MS);
+    tag_set_options.ring_capacity = options.ring_capacity;
+    return tag_set_options;
 }
 
 std::uint64_t effective_rate(const Options& options) noexcept {

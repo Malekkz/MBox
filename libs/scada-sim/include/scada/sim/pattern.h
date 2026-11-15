@@ -69,7 +69,18 @@ inline constexpr std::uint64_t MAX_CHECK_COUNT = 1'000'000'000'000'000;
 
 // True if `value`, read from a CHECK tag of a running owner, is whole: its
 // fields belong to one write, or it was never written (quality BAD, flag
-// NOT_INIT, value 0). False for anything else, including OWNER_DOWN.
+// NOT_INIT, value, change count and times 0). False for anything else,
+// including OWNER_DOWN.
+//
+// The change count must equal the write count, mod 2^32. A simulator that
+// attaches again to a region it wrote before goes on counting from each
+// record's change count, so this holds across restarts. One case breaks it:
+// after a kill in the middle of a write, the repair of contract 6.3 leaves
+// quality BAD and flag NOT_INIT; if the next write count n then has quality
+// n % 3 == BAD, flags n & CHECK_FLAGS == NOT_INIT and the value the record
+// kept, that write changes nothing and the change count stays one behind.
+// A test that kills the simulator and checks change counts afterwards uses
+// a new generation.
 [[nodiscard]] bool is_check_value(const scada_value& value) noexcept;
 
 // The same for an entry of the change ring of a CHECK tag. An entry is

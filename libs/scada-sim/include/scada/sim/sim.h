@@ -10,6 +10,7 @@
 #include "scada/common/result.h"
 #include "scada/sim/layout.h"
 #include "scada/sim/pattern.h"
+#include "scada/sim/tag_set.h"
 
 #include <cstdint>
 #include <iosfwd>
@@ -80,6 +81,11 @@ struct Options {
 // unchanged.
 [[nodiscard]] Result<Options> parse_options(
     std::span<const std::string_view> args, std::string& detail);
+
+// What `tag-set` makes the tag set from: the layout and tag-set options of
+// `options`, with `user` as the uid where `--uid` was not given.
+[[nodiscard]] TagSetOptions to_tag_set_options(const Options& options,
+                                               std::uint32_t user);
 
 // The rate a simulation runs at: `options.rate`, or its default.
 [[nodiscard]] std::uint64_t effective_rate(const Options& options) noexcept;

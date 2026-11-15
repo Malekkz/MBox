@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 #include <unistd.h>
 
 #include <bit>
@@ -43,11 +44,21 @@ constexpr std::uint64_t SEED = 11;
 // Not a multiple of the owners or patterns, so that the shares differ.
 constexpr std::uint64_t ALL_PATTERN_TAGS = 23;
 constexpr std::uint64_t SMALL_TAGS = 10;
+constexpr std::uint64_t FIRST_RUN_ROUNDS = 5;
+constexpr std::uint64_t SECOND_RUN_ROUNDS = 2;
+constexpr std::uint32_t TEN_OWNERS = 10;
 // Tags that take far longer than SHORT_TIMEOUT_MS to resolve: about 0.5 s
 // in a dev build.
 constexpr std::uint64_t MANY_TAGS = 100'000;
 constexpr const char* SHORT_TIMEOUT_MS = "100";
 constexpr const char* SHORT_CHECK_MS = "20";
+// An overloaded run: 2 owners of 1,000 tags at the largest rate, stopped
+// once every tag of the first owner has been written OVERLOAD_ROUNDS times
+// (about 0.3 s in a dev build, several seconds under ThreadSanitizer).
+constexpr std::uint64_t OVERLOAD_TAGS = 2000;
+constexpr std::uint64_t OVERLOAD_ROUNDS = 500;
+// How long after SIGTERM an overloaded simulator may take to exit.
+constexpr std::chrono::milliseconds STOP_LIMIT{1000};
 
 // Every pattern, on two owner threads.
 Layout all_patterns() {
@@ -152,8 +163,40 @@ scada_value read_once_written(const Attached& reader, std::uint32_t handle) {
     return value;
 }
 
+// Reads `handle` until its value is at least `count`, for at most
+// WAIT_LIMIT.
+::testing::AssertionResult reads_at_least(const Attached& reader,
+                                          std::uint32_t handle,
+                                          std::uint64_t count) {
+    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
+    scada_value value{};
+    while (Clock::now() < deadline) {
+        if (scada_tag_read(reader.ctx(), handle, &value) == SCADA_OK &&
+            value.value >= count) {
+            return ::testing::AssertionSuccess();
+        }
+        std::this_thread::yield();
+    }
+    return ::testing::AssertionFailure() << "reached only " << value.value;
+}
+
 class SimProcesses : public TagProcesses {
 protected:
+    // Runs the simulator of `layout` for `rounds` rounds as fast as it can
+    // and stops it.
+    [[nodiscard]] ::testing::AssertionResult runs_to_the_end(
+        const Layout& layout, std::uint64_t rounds) const {
+        std::optional<ChildProcess> sim = start_sim(
+            layout, {"--rate", "0", "--rounds", std::to_string(rounds)});
+        if (!sim.has_value()) {
+            return ::testing::AssertionFailure() << "not started";
+        }
+        if (!sim->wait_for_output(done, WAIT_LIMIT)) {
+            return ::testing::AssertionFailure() << sim->err();
+        }
+        return stops_cleanly(*sim);
+    }
+
     // Runs `scada-sim <arguments>` to its end and returns its exit code.
     [[nodiscard]] static std::optional<int> sim_exit(
         const std::vector<std::string>& arguments, std::string* err = nullptr) {
@@ -256,6 +299,60 @@ TEST_F(SimProcesses, ARunOfOneSecondWritesTheRateOnce) {
     stop(*tagd);
 }
 
+// A simulator that attaches again to the regions it wrote goes on from the
+// write count of each tag: after runs of 5, 2 and 1 rounds, every CHECK tag
+// is a whole value of write 8, change count included.
+TEST_F(SimProcesses, ARestartedSimulatorGoesOnCounting) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 2,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(runs_to_the_end(layout, FIRST_RUN_ROUNDS));
+    EXPECT_TRUE(runs_to_the_end(layout, SECOND_RUN_ROUNDS));
+    std::optional<ChildProcess> last =
+        start_sim(layout, {"--rate", "0", "--rounds", "1"});
+    if (!last.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(last->wait_for_output(done, WAIT_LIMIT)) << last->err();
+    const Attached reader(base(), "reader");
+    EXPECT_TRUE(
+        holds_rounds(reader, layout, FIRST_RUN_ROUNDS + SECOND_RUN_ROUNDS + 1));
+    EXPECT_TRUE(stops_cleanly(*last));
+    stop(*tagd);
+}
+
+// A run bounded by time shares the updates of the whole simulation among
+// the owners without losing any to rounding: 1 update across 10 owners.
+TEST_F(SimProcesses, ARunBoundedByTimeLosesNoUpdateToRounding) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = TEN_OWNERS,
+                        .tags = TEN_OWNERS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim =
+        start_sim(layout, {"--rate", "1", "--seconds", "1"});
+    if (!sim.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(sim->wait_for_output(done, WAIT_LIMIT)) << sim->err();
+    EXPECT_NE(sim->out().find("done updates=1 "), std::string::npos)
+        << sim->out();
+    EXPECT_TRUE(stops_cleanly(*sim));
+    stop(*tagd);
+}
+
 // A run without a bound writes until SIGTERM, reports what it wrote and
 // stops cleanly; its tags then read as down at once.
 TEST_F(SimProcesses, AnUnboundedRunStopsOnASignal) {
@@ -289,6 +386,46 @@ TEST_F(SimProcesses, AnUnboundedRunStopsOnASignal) {
     stop(*tagd);
 }
 
+// Asked for more than the machine can write, a paced simulator falls
+// further behind with every tick. It still stops within STOP_LIMIT of
+// SIGTERM, keeps its heartbeat, and is never seen down while it runs.
+TEST_F(SimProcesses, AnOverloadedRunStopsPromptly) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 2,
+                        .tags = OVERLOAD_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim =
+        start_sim(layout, {"--rate", std::to_string(scada::sim::MAX_RATE)});
+    if (!sim.has_value()) {
+        return;
+    }
+    // Waits until the backlog is large: every tag written OVERLOAD_ROUNDS
+    // times.
+    const Attached reader(base(), "reader");
+    const std::uint32_t handle =
+        reader.resolve(scada::sim::tag_name(layout, 0, 0));
+    EXPECT_TRUE(reads_at_least(reader, handle, OVERLOAD_ROUNDS));
+    const Clock::time_point signalled = Clock::now();
+    ASSERT_TRUE(sim->send_signal(SIGTERM));
+    EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_OK)
+        << sim->err();
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - signalled);
+    EXPECT_LE(took, STOP_LIMIT) << took.count() << " ms";
+    RecordProperty("stop_ms", std::to_string(took.count()));
+    stop(*tagd);
+    EXPECT_EQ(
+        tagd->child.err().find(R"(PROCESS="sim" REASON="heartbeat stale")"),
+        std::string::npos)
+        << tagd->child.err();
+}
+
 // Resolving many tags takes longer than a short heartbeat timeout; the
 // simulator writes its heartbeat meanwhile, so scada-tagd never sees it
 // down while it starts.
@@ -316,7 +453,9 @@ TEST_F(SimProcesses, ALargeLayoutDoesNotReadAsDownWhileItStarts) {
     EXPECT_TRUE(logs(*tagd, R"(process up PROCESS="sim")"));
     EXPECT_TRUE(stops_cleanly(*sim));
     stop(*tagd);
-    EXPECT_EQ(tagd->child.err().find("heartbeat stale"), std::string::npos)
+    EXPECT_EQ(
+        tagd->child.err().find(R"(PROCESS="sim" REASON="heartbeat stale")"),
+        std::string::npos)
         << tagd->child.err();
 }
 

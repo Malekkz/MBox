@@ -89,6 +89,28 @@ TEST(Pattern, ANeverWrittenRecordIsWhole) {
     EXPECT_FALSE(is_check_value(value));
 }
 
+// A read across the first write: value 0 and the flags of the record before
+// it, with a field of the write.
+TEST(Pattern, ANeverWrittenRecordWithAFieldOfTheFirstWriteIsTorn) {
+    scada_value never{};
+    never.type = SCADA_TYPE_UINT64;
+    never.quality = SCADA_QUALITY_BAD;
+    never.quality_flags = SCADA_FLAG_NOT_INIT;
+    const scada_value first = as_read(1);
+    scada_value torn = never;
+    torn.source_time_ns = first.source_time_ns;
+    EXPECT_FALSE(is_check_value(torn));
+    torn = never;
+    torn.change_count = first.change_count;
+    EXPECT_FALSE(is_check_value(torn));
+    torn = never;
+    torn.update_time_ns = first.source_time_ns;
+    EXPECT_FALSE(is_check_value(torn));
+    torn = never;
+    torn.update_mono_ns = 1;
+    EXPECT_FALSE(is_check_value(torn));
+}
+
 TEST(Pattern, EveryFieldOfAnotherWriteIsTorn) {
     const scada_value whole = as_read(SOME_COUNT);
     const scada_value other = as_read(SOME_COUNT + 1);

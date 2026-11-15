@@ -62,19 +62,27 @@ changes the value, a whole `check` value also has change count n (mod
 `--rate` is the rate of the whole simulation, all processes together. Each
 owner gets the share of its tags, so every tag is written equally often.
 An owner thread writes its tags in turn. Every 1 ms it writes what is due
-by then and calls `scada_tag_notify` once (`--notify batch`), or after each
-write (`--notify each`). If it fell behind it writes the backlog at once;
-`behind_max_ms` in the report is the worst lateness of an update against
-its due time. `--rate 0` writes as fast as it can, with a notify after each
+by then, at most 1,024 updates at a time, and calls `scada_tag_notify` after
+each batch (`--notify batch`), or after each write (`--notify each`). If it
+fell behind it writes on without waiting, but looks at the stop request
+after every batch, so that a run asked for more than the machine can write
+still stops at once. `behind_max_ms` in the report is the worst lateness of
+an update against its due time. `--rate 0` writes as fast as it can, with a notify after each
 1,024 writes. Without `--rate` the rate is a tenth of the tags per second,
 the change rate of the load model of reference 15.3.
 
 A run ends after `--rounds n` (every tag written n times) or `--seconds n`
-(with a rate: the updates due in that time; at `--rate 0`: whatever was
-written by then). Without either it writes until stopped. The process stays
+(with a rate: rate × n updates, shared out among all owners by their tags
+without loss to rounding, each owner writing its share evenly over the
+time; at `--rate 0`: whatever was written by then). Without either it writes until stopped. The process stays
 attached after the end and writes its heartbeat until SIGTERM or SIGINT, so
 the last values read as good. See `services/scada-sim/README.md` for the
 output.
+
+A simulator that attaches again to regions it wrote before goes on with
+each `check` tag from the change count of its record, so that change count
+and write count stay equal across restarts; `pattern.h` states the one case
+after a kill in the middle of a write where they do not.
 
 While `run` resolves and checks its tags, before the owner threads start,
 it writes its heartbeat every 256 tags, so that a large layout does not read
@@ -90,7 +98,7 @@ scheduler and sleep between ticks.
 | `scada/sim/pattern.h` | `Pattern`, `Waveform`, `check_value`, `is_check_value`, `is_check_change`, `wave_value` |
 | `scada/sim/layout.h` | `Layout`, `check_layout` and the names |
 | `scada/sim/tag_set.h` | `TagSetOptions`, `make_tag_set`, `tag_set_json` |
-| `scada/sim/sim.h` | `Options`, `parse_options`, `run` (the command) |
+| `scada/sim/sim.h` | `Options`, `parse_options`, `to_tag_set_options`, `run` (the command) |
 
 `src/writer.h` (the owner threads) is private.
 
@@ -106,18 +114,36 @@ ctest --preset perf -R scada-sim-rate-perf-test
   another write; the tag set, its limits, and that its file reads back with
   the same `config_hash`; every option, its limits and combinations.
 - `sim_options_fuzz` (in `fuzz/`) feeds the command-line parser with
-  arbitrary arguments. Its seed corpus runs as `sim_options_fuzz-corpus`.
+  arbitrary arguments; a `tag-set` command line of up to 4,096 tags that
+  parses is made into a tag set and its file, which must read back with the
+  same `config_hash`. Its seed corpus runs as `sim_options_fuzz-corpus`.
 - `scada-sim-integration-test` (in `tests/integration/`): the file of
   `scada-sim tag-set` is the one `scada-tagd` runs on; after a run every tag
   of every pattern holds exactly the value, quality, flags and change count
   its definition gives; two processes share one simulation; a run of one
-  second writes the rate once; an unbounded run stops on SIGTERM; 100,000
-  tags with a heartbeat timeout of 100 ms never read as down while the
-  simulator starts; a tag set that does not fit the run is refused.
+  second writes the rate once, and 1 update across 10 owners is not lost to
+  rounding; a restarted simulator goes on counting; an unbounded run stops
+  on SIGTERM; a run asked for 100,000,000 updates per second stops within
+  1 s of SIGTERM and keeps its heartbeat; 100,000 tags with a heartbeat
+  timeout of 100 ms never read as down while the simulator starts; a tag
+  set that does not fit the run is refused.
 - `scada-sim-rate-perf-test` (in `tests/perf/`): 50,000 updates per second
   across 10 owners on 50,000 tags, as one process with 10 owner threads and
-  as 10 processes, for 10 s each; it fails below 95 percent of the rate. It
-  also reports the maximum rate of one process.
-- The conformance tests 2, 3, 7, 13 and 24 of the tag database and the
+  as 10 processes, for 10 s each. On x86-64 it fails if an update is
+  missing, a run takes more than 10.1 s, or an update is more than 250 ms
+  late, and if one process writing as fast as it can stays below 50,000
+  updates per second; on ARM64 it reports the figures only.
+- The conformance tests 2, 3, 13 and 24 of the tag database and the
   wake-up perf test use `scada-sim` as their writer
-  (`tests/integration/tag_processes_fixture.h`).
+  (`tests/integration/tag_processes_fixture.h`). `scada-sim` always calls
+  notify, so the part of test 24 for a process that never notifies (the
+  100 ms cap) is not driven by it.
+
+## Installing it
+
+`scada-sim` is not part of the product image. It is in the CMake install
+component `test-tools`, which a plain `cmake --install` leaves out:
+
+```
+cmake --install build/dev --component test-tools --prefix <directory>
+```

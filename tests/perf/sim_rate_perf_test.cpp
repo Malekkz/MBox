@@ -4,11 +4,15 @@
 // threads of one process and as 10 processes of one owner each. It also
 // reports the rate of one process writing as fast as it can.
 //
-// The simulator is paced: if it keeps up, a run of ROUNDS writes of every
-// tag takes ROUNDS seconds. It passes if it took at most 1/0.95 of that
-// (the tolerance of conformance test 2). The worst lag of an update behind
-// its due time is reported. With SCADA_PERF_REPORT_ONLY=1 in the
-// environment the figures are only printed.
+// The simulator is paced and never writes ahead: if it keeps up, a run of
+// ROUNDS writes of every tag takes ROUNDS seconds, plus the 1 ms tick of
+// its last write. On x86-64, the machine of the acceptance of issue #18, a
+// run passes if every update was written, it took at most ROUNDS seconds
+// plus ELAPSED_MARGIN, and no update was more than BEHIND_LIMIT late; and
+// one process writing as fast as it can must reach the reference rate. On
+// ARM64, and with SCADA_PERF_REPORT_ONLY=1 in the environment, the figures
+// are only printed; the count of updates is checked everywhere
+// (decision D-38).
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
@@ -43,16 +47,24 @@ constexpr std::uint64_t TAGS = 50'000;
 // Every tag once a second: a run of ROUNDS seconds.
 constexpr std::uint64_t ROUNDS = 10;
 constexpr std::uint64_t MILLISECONDS_PER_SECOND = 1000;
-constexpr std::uint64_t RATE_PERCENT = 95;
-constexpr std::uint64_t PERCENT = 100;
+// The limits of a paced run on x86-64.
+constexpr std::uint64_t ELAPSED_MARGIN_MS = 100;
+constexpr std::uint64_t BEHIND_LIMIT_MS = 250;
 // Writes of every tag at the maximum rate.
 constexpr std::uint64_t FAST_ROUNDS = 40;
 
-// True if SCADA_PERF_REPORT_ONLY is 1.
+#if defined(__x86_64__)
+constexpr bool IS_X86_64 = true;
+#else
+constexpr bool IS_X86_64 = false;
+#endif
+
+// True if the figures are only reported: not on x86-64, or
+// SCADA_PERF_REPORT_ONLY is 1.
 bool report_only() {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
     const char* const text = std::getenv("SCADA_PERF_REPORT_ONLY");
-    return text != nullptr && std::string_view(text) == "1";
+    return !IS_X86_64 || (text != nullptr && std::string_view(text) == "1");
 }
 
 // The number after `key` in `text`, or nothing.
@@ -161,9 +173,10 @@ protected:
         RecordProperty("behind_max_ms", std::to_string(figures->behind_max_ms));
         EXPECT_EQ(figures->updates, ROUNDS * TAGS);
         if (!report_only()) {
-            EXPECT_GE(per_second * PERCENT, REFERENCE_RATE * RATE_PERCENT)
-                << figures->updates << " updates in " << figures->elapsed_ms
-                << " ms";
+            EXPECT_LE(figures->elapsed_ms,
+                      (ROUNDS * MILLISECONDS_PER_SECOND) + ELAPSED_MARGIN_MS)
+                << figures->updates << " updates";
+            EXPECT_LE(figures->behind_max_ms, BEHIND_LIMIT_MS);
         }
     }
 };
@@ -176,8 +189,8 @@ TEST_F(SimRate, TenProcessesSustainTheReferenceRate) {
     expect_reference_rate(OWNERS);
 }
 
-// The maximum rate of one process with 10 owner threads: reported, not
-// checked.
+// The maximum rate of one process with 10 owner threads: at least the
+// reference rate on x86-64.
 TEST_F(SimRate, MaximumRateOfOneProcess) {
     const Layout layout = reference(1);
     write_sim_tag_set(layout);
@@ -198,6 +211,9 @@ TEST_F(SimRate, MaximumRateOfOneProcess) {
               << " updates_per_second=" << per_second << "\n";
     RecordProperty("updates_per_second", std::to_string(per_second));
     EXPECT_EQ(figures->updates, FAST_ROUNDS * TAGS);
+    if (!report_only()) {
+        EXPECT_GE(per_second, REFERENCE_RATE);
+    }
 }
 
 }  // namespace

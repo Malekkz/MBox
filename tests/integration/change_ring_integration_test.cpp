@@ -4,6 +4,11 @@
 // boundary by a futex on those mappings (decision D-32). Conformance tests
 // 7 (the ring), 13 and 24.
 //
+// The writer is scada-sim, which always calls notify; the part of
+// conformance test 24 for a process that never notifies (delivery within
+// the 100 ms cap) is covered in one process by the unit tests of the
+// library, not here.
+//
 // Every wait is on a condition with a limit.
 
 #include "tag_processes_fixture.h"
