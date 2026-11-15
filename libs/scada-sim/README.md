@@ -74,9 +74,13 @@ the change rate of the load model of reference 15.3.
 A run ends after `--rounds n` (every tag written n times) or `--seconds n`
 (with a rate: rate × n updates, shared out among all owners by their tags
 without loss to rounding, each owner writing its share evenly over the
-time; at `--rate 0`: whatever was written by then). Without either it writes until stopped. The process stays
-attached after the end and writes its heartbeat until SIGTERM or SIGINT, so
-the last values read as good. See `services/scada-sim/README.md` for the
+time; at `--rate 0`: whatever was written by then). Without either it
+writes until stopped. The process stays attached after the end and writes
+its heartbeat until SIGTERM, SIGINT or SIGHUP, so the last values read as
+good. It stops with an error once `scada-tagd` has been down for 5 s, so
+that a simulator left behind by a test does not write on until it is
+killed; a shorter outage, such as a restart of `scada-tagd`, which every
+process must tolerate (reference 3.3), does not stop it. See `services/scada-sim/README.md` for the
 output.
 
 A simulator that attaches again to regions it wrote before goes on with
@@ -123,10 +127,12 @@ ctest --preset perf -R scada-sim-rate-perf-test
   its definition gives; two processes share one simulation; a run of one
   second writes the rate once, and 1 update across 10 owners is not lost to
   rounding; a restarted simulator goes on counting; an unbounded run stops
-  on SIGTERM; a run asked for 100,000,000 updates per second stops within
-  1 s of SIGTERM and keeps its heartbeat; 100,000 tags with a heartbeat
-  timeout of 100 ms never read as down while the simulator starts; a tag
-  set that does not fit the run is refused.
+  on SIGTERM, and SIGHUP stops it the same way; a run asked for
+  100,000,000 updates per second stops within 1 s of SIGTERM and keeps its
+  heartbeat; a simulator whose output reader is gone survives (no SIGPIPE)
+  and exits with code 1 once `scada-tagd` has been down for 5 s; 40,000
+  tags with a heartbeat timeout of 100 ms never read as down while the
+  simulator starts; a tag set that does not fit the run is refused.
 - `scada-sim-rate-perf-test` (in `tests/perf/`): 50,000 updates per second
   across 10 owners on 50,000 tags, as one process with 10 owner threads and
   as 10 processes, for 10 s each. On x86-64 it fails if an update is

@@ -112,8 +112,11 @@ constexpr std::string_view USAGE =
     "--rounds\n"
     "or --seconds has ended, \"done updates=<n> elapsed_ms=<n>\n"
     "behind_max_ms=<n>\". It stays attached and writes its heartbeat until\n"
-    "SIGTERM or SIGINT; stopped earlier, it prints \"stopped updates=<n>\n"
-    "elapsed_ms=<n>\".\n"
+    "SIGTERM, SIGINT or SIGHUP; stopped earlier, it prints \"stopped\n"
+    "updates=<n> elapsed_ms=<n>\". It exits with code 1 if scada-tagd has\n"
+    "been down for 5 s or the generation retires. A closed standard output\n"
+    "does not stop it. It starts no processes: run one instance for each\n"
+    "simulator process of the layout.\n"
     "\n"
     "Exit codes: 0 done or stopped on request, 1 error, 2 wrong arguments.\n";
 
@@ -577,6 +580,52 @@ Totals add_up(std::span<const OwnerProgress> progress) {
 
 enum class Ending : std::uint8_t { SIGNALLED, FAILED };
 
+// Watches scada-tagd from the main loop. A process must tolerate a restart
+// of scada-tagd (reference 3.3), so a simulator goes on while scada-tagd is
+// down for a short time; one left behind by a test that stopped scada-tagd
+// stops by itself instead of writing until it is killed.
+class TagdWatch {
+public:
+    // Looks again if the last look was CHECK_PERIOD ago. False once
+    // scada-tagd has been down for DOWN_LIMIT or the generation retires;
+    // the reason is written to `err`.
+    bool still_running(scada_ctx* ctx, std::ostream& err) {
+        const Clock::time_point now = Clock::now();
+        if (now - last_look_ < CHECK_PERIOD) {
+            return true;
+        }
+        last_look_ = now;
+        scada_status status{};
+        const int code = scada_tag_status(ctx, &status);
+        if (code == SCADA_E_RETIRING) {
+            err << "scada-sim: the generation is retiring\n";
+            return false;
+        }
+        if (code != SCADA_E_TAGD_DOWN) {
+            down_since_.reset();
+            return true;
+        }
+        if (!down_since_.has_value()) {
+            down_since_ = now;
+        }
+        if (now - *down_since_ >= DOWN_LIMIT) {
+            err << "scada-sim: scada-tagd has been down for "
+                << std::chrono::duration_cast<std::chrono::seconds>(DOWN_LIMIT)
+                       .count()
+                << " s\n";
+            return false;
+        }
+        return true;
+    }
+
+    static constexpr std::chrono::seconds CHECK_PERIOD{1};
+    static constexpr std::chrono::seconds DOWN_LIMIT{5};
+
+private:
+    Clock::time_point last_look_ = Clock::now();
+    std::optional<Clock::time_point> down_since_;
+};
+
 // The main thread while the owners write: the heartbeat every
 // HEARTBEAT_PERIOD_NS until a signal in `signals` arrives or something
 // fails. Prints "done" once every owner has finished.
@@ -585,6 +634,7 @@ Ending beat_until_stopped(scada_ctx* ctx, const sigset_t& signals,
                           std::ostream& out, std::ostream& err) {
     const timespec wait{.tv_sec = 0, .tv_nsec = HEARTBEAT_PERIOD_NS};
     bool reported = false;
+    TagdWatch tagd;
     for (;;) {
         if (::sigtimedwait(&signals, nullptr, &wait) >= 0) {
             return Ending::SIGNALLED;
@@ -595,6 +645,9 @@ Ending beat_until_stopped(scada_ctx* ctx, const sigset_t& signals,
         }
         if (scada_tag_heartbeat(ctx) == SCADA_E_RETIRING) {
             err << "scada-sim: the generation is retiring\n";
+            return Ending::FAILED;
+        }
+        if (!tagd.still_running(ctx, err)) {
             return Ending::FAILED;
         }
         const Totals totals = add_up(progress);
@@ -616,10 +669,20 @@ Ending beat_until_stopped(scada_ctx* ctx, const sigset_t& signals,
 // Attaches, writes and detaches. Returns the exit code.
 int run_simulator(const Options& options, std::ostream& out,
                   std::ostream& err) {
+    // SIGTERM, SIGINT and SIGHUP are stop requests, taken by sigtimedwait.
+    // SIGPIPE is blocked too, but never taken: a write to a standard output
+    // whose reader is gone then fails with EPIPE instead of killing the
+    // process, and the simulator goes on.
     sigset_t signals{};
+    sigset_t blocked{};
     if (::sigemptyset(&signals) != 0 || ::sigaddset(&signals, SIGTERM) != 0 ||
         ::sigaddset(&signals, SIGINT) != 0 ||
-        ::pthread_sigmask(SIG_BLOCK, &signals, nullptr) != 0) {
+        ::sigaddset(&signals, SIGHUP) != 0 || ::sigemptyset(&blocked) != 0 ||
+        ::sigaddset(&blocked, SIGTERM) != 0 ||
+        ::sigaddset(&blocked, SIGINT) != 0 ||
+        ::sigaddset(&blocked, SIGHUP) != 0 ||
+        ::sigaddset(&blocked, SIGPIPE) != 0 ||
+        ::pthread_sigmask(SIG_BLOCK, &blocked, nullptr) != 0) {
         err << "scada-sim: cannot block signals\n";
         return EXIT_ERROR;
     }

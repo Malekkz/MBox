@@ -56,13 +56,22 @@ Give both commands the same `<layout>`; the processes, owners and tags of
 - `done updates=<n> elapsed_ms=<n> behind_max_ms=<n>` when a run bounded
   by `--rounds` or `--seconds` has ended. `elapsed_ms` is the time of the
   slowest owner; `behind_max_ms` the worst lateness of an update.
-- `stopped updates=<n> elapsed_ms=<n>` if SIGTERM or SIGINT came before.
+- `stopped updates=<n> elapsed_ms=<n>` if SIGTERM, SIGINT or SIGHUP came
+  before.
 
-It stays attached and writes its heartbeat until SIGTERM or SIGINT.
+It stays attached and writes its heartbeat until SIGTERM, SIGINT or SIGHUP.
+It stops by itself once `scada-tagd` has been down for 5 s (a shorter
+outage, such as a restart of `scada-tagd`, does not stop it) or the
+generation retires. A standard output whose reader is gone does not stop
+it: the writes to it fail and are ignored.
+
+`scada-sim run` starts no processes. A layout with `--processes n` needs n
+instances, `--instance 0` to `--instance n-1`, started by the caller.
 
 Exit codes: 0 done or stopped on request, 1 error (tag set not valid, file
 not written, attach failed, a tag of the wrong type or another process, a
-write failed, the generation is retiring), 2 wrong arguments.
+write failed, the generation is retiring, `scada-tagd` down for 5 s), 2
+wrong arguments.
 
 To try it without installing, as any user, with 50,000 tags across 10
 owners at 50,000 updates per second for 10 s:

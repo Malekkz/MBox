@@ -47,9 +47,11 @@ constexpr std::uint64_t SMALL_TAGS = 10;
 constexpr std::uint64_t FIRST_RUN_ROUNDS = 5;
 constexpr std::uint64_t SECOND_RUN_ROUNDS = 2;
 constexpr std::uint32_t TEN_OWNERS = 10;
-// Tags that take far longer than SHORT_TIMEOUT_MS to resolve: about 0.5 s
-// in a dev build.
-constexpr std::uint64_t MANY_TAGS = 100'000;
+// Tags that take far longer than SHORT_TIMEOUT_MS to resolve: about 0.2 s
+// in a dev build, so that the test fails every time without the heartbeat
+// while resolving (20,000 failed in one of three runs); scada-tagd builds
+// their header well within its readiness limit under ThreadSanitizer.
+constexpr std::uint64_t MANY_TAGS = 40'000;
 constexpr const char* SHORT_TIMEOUT_MS = "100";
 constexpr const char* SHORT_CHECK_MS = "20";
 // An overloaded run: 2 owners of 1,000 tags at the largest rate, stopped
@@ -151,13 +153,17 @@ scada_value expected_value(const Layout& layout, std::uint64_t tag,
 }
 
 // Reads `handle` until it has been written once, or WAIT_LIMIT passed, and
-// returns what it read last.
+// returns what it read last. The status call lets the library look again
+// for the owner's regions if they were not there yet when it resolved.
 scada_value read_once_written(const Attached& reader, std::uint32_t handle) {
     const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
     scada_value value{};
     while (Clock::now() < deadline &&
            (scada_tag_read(reader.ctx(), handle, &value) != SCADA_OK ||
             value.value == 0)) {
+        scada_status status{};
+        // Only the side effect is wanted; scada-tagd may be down.
+        static_cast<void>(scada_tag_status(reader.ctx(), &status));
         std::this_thread::yield();
     }
     return value;
@@ -424,6 +430,77 @@ TEST_F(SimProcesses, AnOverloadedRunStopsPromptly) {
         tagd->child.err().find(R"(PROCESS="sim" REASON="heartbeat stale")"),
         std::string::npos)
         << tagd->child.err();
+}
+
+// SIGHUP, as when the terminal of a run by hand closes, stops a simulator
+// as SIGTERM does.
+TEST_F(SimProcesses, SighupStopsCleanly) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 1,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim = start_sim(layout, {"--rate", "1000"});
+    if (!sim.has_value()) {
+        return;
+    }
+    ASSERT_TRUE(sim->send_signal(SIGHUP));
+    EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_OK)
+        << sim->err();
+    EXPECT_NE(sim->out().find("stopped updates="), std::string::npos)
+        << sim->out();
+    stop(*tagd);
+}
+
+// A simulator left behind, its reader gone and scada-tagd stopped, does not
+// write on until it is killed: writing to the closed standard output does
+// not kill it (no SIGPIPE), and it exits with an error once scada-tagd has
+// been down for 5 s.
+TEST_F(SimProcesses, ALeftBehindSimulatorStopsWhenTagdStaysDown) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 1,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    std::vector<std::string> arguments = sim_arguments("tag-set", layout);
+    arguments.insert(arguments.end(),
+                     {"--heartbeat-timeout-ms", SHORT_TIMEOUT_MS, "--reader",
+                      "reader", "--output", tag_set_path()});
+    EXPECT_EQ(sim_exit(arguments), scada::sim::EXIT_OK);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    // The shell runs the simulator with its standard output into a reader
+    // that exits at once, and reports the simulator's exit code on the
+    // standard error stream.
+    std::vector<std::string> run = sim_arguments("run", layout);
+    run.insert(run.end(), {"--rate", "1000", "--base-dir", base(), "--tagd-uid",
+                           std::to_string(::geteuid())});
+    std::vector<std::string> command{
+        "sh", "-c", R"(( "$@"; echo "sim exit $?" >&2 ) | true)", "sh"};
+    const std::vector<std::string> sim = command_from("SCADA_SIM_COMMAND", run);
+    command.insert(command.end(), sim.begin(), sim.end());
+    std::optional<ChildProcess> shell = ChildProcess::start(command);
+    if (!shell.has_value()) {
+        FAIL() << "could not start sh";
+    }
+    // Once the simulator writes, its output reader is long gone.
+    const Attached reader(base(), "reader");
+    const scada_value value = read_once_written(
+        reader, reader.resolve(scada::sim::tag_name(layout, 0, 0)));
+    EXPECT_GT(value.value, 0U);
+    stop(*tagd);
+    EXPECT_EQ(shell->wait_for_exit(WAIT_LIMIT), 0) << shell->err();
+    EXPECT_NE(shell->err().find("sim exit 1"), std::string::npos)
+        << shell->err();
+    EXPECT_NE(shell->err().find("scada-tagd has been down"), std::string::npos)
+        << shell->err();
 }
 
 // Resolving many tags takes longer than a short heartbeat timeout; the

@@ -102,17 +102,22 @@ struct Options {
 //   "attached" once attached, "writing" when the owner threads start, and,
 //   when every owner has finished a run bounded by `--rounds` or
 //   `--seconds`, "done updates=<n> elapsed_ms=<n> behind_max_ms=<n>". It
-//   writes the heartbeat from the calling thread until SIGTERM or SIGINT,
-//   also after "done", so that the last values stay good for readers. On
-//   the signal it stops the owners, prints "stopped updates=<n>
-//   elapsed_ms=<n>" if they had not finished, detaches and returns EXIT_OK.
+//   writes the heartbeat from the calling thread until SIGTERM, SIGINT or
+//   SIGHUP, also after "done", so that the last values stay good for
+//   readers. On the signal it stops the owners, prints "stopped
+//   updates=<n> elapsed_ms=<n>" if they had not finished, detaches and
+//   returns EXIT_OK. It stops with EXIT_ERROR once scada-tagd has been down
+//   for 5 s or the generation retires. A standard output whose reader is
+//   gone does not stop it. It starts no other process: each simulator
+//   process of a layout is one call, as one process.
 //
 // Wrong arguments give EXIT_USAGE; a tag set that cannot be made, a file
 // that cannot be written, a failed attach, a tag of the wrong type or a
 // failed write give EXIT_ERROR.
 //
-// `run` blocks SIGTERM and SIGINT for the calling thread and leaves them
-// blocked. Call it from the main thread before starting any other.
+// `run` blocks SIGTERM, SIGINT, SIGHUP and SIGPIPE for the calling thread
+// and leaves them blocked. Call it from the main thread before starting
+// any other.
 [[nodiscard]] int run(std::span<const std::string_view> args, std::ostream& out,
                       std::ostream& err);
 
