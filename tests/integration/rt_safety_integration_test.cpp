@@ -35,7 +35,7 @@ using scada::test::TraceResult;
 
 constexpr std::chrono::seconds PROBE_LIMIT{60};
 // The real-time safe calls the probe makes between its markers.
-constexpr std::string_view ALL_CALLS_PASSED = "calls=7 failed=0 ";
+constexpr std::string_view ALL_CALLS_PASSED = "calls=9 failed=0 ";
 
 class RealTimeSafety : public TagProcesses {
 protected:

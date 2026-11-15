@@ -4,6 +4,7 @@
 #include "scada/tag/scada_tag.h"
 
 #include "attachment.h"
+#include "header_view.h"
 #include "layout.h"
 #include "region_file.h"
 #include "subscription.h"
@@ -11,6 +12,7 @@
 
 #include "scada/common/result.h"
 #include "scada/common/status.h"
+#include "scada/tag/handle.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
@@ -20,6 +22,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -43,6 +46,29 @@ struct
     scada_waitset {  // NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13
     std::unique_ptr<scada::tag::WaitSet> wait_set;
 };
+
+// The sizes the header states, which the contract fixes (section 13). Only
+// the former `reserved1` of scada_status was split, so it keeps its size
+// and the offsets of the fields before it.
+namespace sizes {
+constexpr std::size_t STATUS = 32;
+constexpr std::size_t STATUS_RECORDS_REPAIRED = 24;
+constexpr std::size_t STATUS_OWNER_COUNT = 28;
+constexpr std::size_t STATUS_PROCESS_COUNT = 30;
+constexpr std::size_t OWNER_INFO = 48;
+constexpr std::size_t PROC_STATUS = 88;
+constexpr std::size_t PROC_STATUS_RESERVED = 82;
+}  // namespace sizes
+static_assert(sizeof(scada_status) == sizes::STATUS);
+static_assert(offsetof(scada_status, records_repaired) ==
+              sizes::STATUS_RECORDS_REPAIRED);
+static_assert(offsetof(scada_status, owner_count) == sizes::STATUS_OWNER_COUNT);
+static_assert(offsetof(scada_status, process_count) ==
+              sizes::STATUS_PROCESS_COUNT);
+static_assert(sizeof(scada_owner_info_t) == sizes::OWNER_INFO);
+static_assert(sizeof(scada_proc_status_t) == sizes::PROC_STATUS);
+static_assert(offsetof(scada_proc_status_t, reserved) ==
+              sizes::PROC_STATUS_RESERVED);
 
 namespace {
 
@@ -80,16 +106,10 @@ int code_of(const scada::Status& status) noexcept {
     return SCADA_E_IO;
 }
 
-int attach(const char* process_name, const scada_attach_opts* opts,
-           scada_ctx** out) {
-    if (out == nullptr) {
-        return SCADA_E_INVALID;
-    }
-    *out = nullptr;
-    if (process_name == nullptr) {
-        return SCADA_E_INVALID;
-    }
-    scada::tag::AttachOptions options;
+// The options `opts` (NULL: the defaults) as the library takes them.
+// False if tagd_uid is neither -1 nor a uid.
+bool options_of(const scada_attach_opts* opts,
+                scada::tag::AttachOptions& options) {
     if (opts != nullptr) {
         if (opts->base_dir != nullptr) {
             options.base_dir = opts->base_dir;
@@ -100,19 +120,19 @@ int attach(const char* process_name, const scada_attach_opts* opts,
         if (opts->tagd_uid != -1) {
             if (opts->tagd_uid < 0 ||
                 opts->tagd_uid > std::int64_t{scada::tag::MAX_UID}) {
-                return SCADA_E_INVALID;
+                return false;
             }
             // In range: checked above.
             options.tagd_uid = static_cast<std::uint32_t>(opts->tagd_uid);
         }
     }
-    // A name longer than a process name is refused before it is copied.
-    const std::string_view name(process_name);
+    return true;
+}
 
-    scada::tag::clear_os_error();
-    std::string detail;
-    scada::Result<std::unique_ptr<scada::tag::Attachment>> attached =
-        scada::tag::Attachment::attach(name, options, detail);
+// Hands the attachment `attached` to the caller as a new context in
+// `*out`, or returns the code of its error.
+int hand_over(scada::Result<std::unique_ptr<scada::tag::Attachment>> attached,
+              scada_ctx** out) {
     if (!attached.ok()) {
         return code_of(attached.status());
     }
@@ -122,6 +142,44 @@ int attach(const char* process_name, const scada_attach_opts* opts,
     // scada_tag_detach.
     *out = context.release();
     return SCADA_OK;
+}
+
+int attach(const char* process_name, const scada_attach_opts* opts,
+           scada_ctx** out) {
+    if (out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = nullptr;
+    if (process_name == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    scada::tag::AttachOptions options;
+    if (!options_of(opts, options)) {
+        return SCADA_E_INVALID;
+    }
+    // A name longer than a process name is refused before it is copied.
+    const std::string_view name(process_name);
+
+    scada::tag::clear_os_error();
+    std::string detail;
+    return hand_over(scada::tag::Attachment::attach(name, options, detail),
+                     out);
+}
+
+int observe(const scada_attach_opts* opts, scada_ctx** out) {
+    if (out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    *out = nullptr;
+    scada::tag::AttachOptions options;
+    if (!options_of(opts, options)) {
+        return SCADA_E_INVALID;
+    }
+    // Not used by an observer (section 11.4).
+    options.retain_dir.clear();
+    scada::tag::clear_os_error();
+    std::string detail;
+    return hand_over(scada::tag::Attachment::observe(options, detail), out);
 }
 
 int report_status(scada_ctx& ctx, scada_status& out) {
@@ -136,8 +194,14 @@ int report_status(scada_ctx& ctx, scada_status& out) {
     report.regions_created = status.regions_created;
     report.regions_reused = status.regions_reused;
     report.records_repaired = status.records_repaired;
+    // Within the limits of section 14, which fit 16 bits.
+    const scada::tag::HeaderContents& contents =
+        ctx.attachment->header().contents();
+    report.owner_count = static_cast<std::uint16_t>(contents.owners.size());
+    report.process_count =
+        static_cast<std::uint16_t>(contents.processes.size());
     out = report;
-    if (status.state == scada::tag::GenerationState::RETIRING) {
+    if (status.state == scada::tag::GenerationState::RETIRING || status.moved) {
         return SCADA_E_RETIRING;
     }
     return report.tagd_down != 0 ? SCADA_E_TAGD_DOWN : SCADA_OK;
@@ -169,6 +233,14 @@ int scada_tag_attach_opts(const char* process_name,
     return guarded([&] { return attach(process_name, opts, out); });
 }
 
+int scada_tag_observe(scada_ctx** out) {
+    return guarded([&] { return observe(nullptr, out); });
+}
+
+int scada_tag_observe_opts(const scada_attach_opts* opts, scada_ctx** out) {
+    return guarded([&] { return observe(opts, out); });
+}
+
 void scada_tag_detach(scada_ctx* ctx) {
     // Takes back the ownership scada_tag_attach handed to the caller.
     const std::unique_ptr<scada_ctx> owned(ctx);
@@ -178,7 +250,7 @@ SCADA_RT int scada_tag_heartbeat(scada_ctx* ctx) {
     if (ctx == nullptr) {
         return SCADA_E_INVALID;
     }
-    return ctx->attachment->heartbeat() ? SCADA_OK : SCADA_E_RETIRING;
+    return ctx->attachment->heartbeat();
 }
 
 int scada_tag_notify(scada_ctx* ctx) {
@@ -211,6 +283,38 @@ int scada_tag_info(scada_ctx* ctx, uint32_t handle, scada_tag_info_t* out) {
         return SCADA_E_INVALID;
     }
     return guarded([&] { return ctx->attachment->info(handle, *out); });
+}
+
+int scada_owner_info(scada_ctx* ctx, uint16_t owner_index,
+                     scada_owner_info_t* out) {
+    if (ctx == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded(
+        [&] { return ctx->attachment->owner_info(owner_index, *out); });
+}
+
+SCADA_RT uint32_t scada_tag_handle(uint16_t owner_index, uint32_t slot) {
+    const std::optional<std::uint32_t> handle =
+        scada::tag::pack_handle(owner_index, slot);
+    return handle.value_or(SCADA_INVALID_HANDLE);
+}
+
+int scada_proc_resolve(scada_ctx* ctx, const char* process_name,
+                       uint16_t* index) {
+    if (ctx == nullptr || process_name == nullptr || index == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return guarded(
+        [&] { return ctx->attachment->proc_resolve(process_name, *index); });
+}
+
+SCADA_RT int scada_proc_status(scada_ctx* ctx, uint16_t index,
+                               scada_proc_status_t* out) {
+    if (ctx == nullptr || out == nullptr) {
+        return SCADA_E_INVALID;
+    }
+    return ctx->attachment->proc_status(index, *out);
 }
 
 SCADA_RT int scada_tag_read(scada_ctx* ctx, uint32_t handle, scada_value* out) {

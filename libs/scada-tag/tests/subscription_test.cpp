@@ -645,7 +645,7 @@ TEST_F(Changes, AChangeOfAnOwnerThatIsDownComesAsBad) {
               SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_LOCAL_TIME);
     EXPECT_EQ(level_of(down), LEVEL);
 
-    EXPECT_TRUE(io()->heartbeat());
+    EXPECT_EQ(io()->heartbeat(), SCADA_OK);
     EXPECT_EQ(next_code(*sub), SCADA_E_GAP);
     write_level(level_value(-LEVEL));
     EXPECT_EQ(take(*sub).quality, SCADA_QUALITY_GOOD);

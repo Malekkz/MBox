@@ -39,6 +39,10 @@ issues.
   `scada_tag_read`, `scada_tag_read_many`, `scada_tag_write`,
   `scada_tag_write_many`, `scada_tag_read_string` and
   `scada_tag_write_string`. See "Tag read and write" below.
+- Observer contexts, in the same header: `scada_tag_observe` and
+  `scada_tag_observe_opts`, for read-only tools; and the listing functions
+  `scada_owner_info`, `scada_tag_handle`, `scada_proc_resolve` and
+  `scada_proc_status`. See "Observe" below.
 - Change rings and waking, in the same header: `scada_tag_notify`,
   `scada_sub_open`, `scada_sub_next`, `scada_sub_stats`, `scada_sub_close`
   and the wait sets `scada_waitset_*` (without queues, which come with issue
@@ -49,7 +53,7 @@ without numbers.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.8, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.9, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -385,6 +389,45 @@ x86-64, longer than a write of a running owner takes. The rate of
 (decision D-31). `scada-tag-seqlock-bench` and `scripts/measure-seqlock.sh`
 measure it again on another machine.
 
+## Observe
+
+Contract section 11.4; decision D-42.
+
+`scada_tag_observe(&ctx)` gives a context that reads the database without
+being a process of the tag set, for tools such as `scadactl`. It makes the
+checks of step 1 of attach and reads the tag directory, and nothing else:
+
+- no entry in the process table and no uid check; process index
+  `SCADA_NO_PROCESS`;
+- no file created, no lock, nothing written to shared memory; every region
+  mapped read-only when it is asked for, through `PeerRegions`;
+- writes give `SCADA_E_NOT_OWNER`; `scada_tag_heartbeat` and
+  `scada_tag_notify` give `SCADA_E_INVALID`;
+- any number of observers beside the processes of the generation.
+
+Who may observe is the file permissions: a member of group `scada`, or
+root. A caller that may not open the base or generation directory gets
+`SCADA_E_PERMISSION` (attach too).
+
+An observer calls `scada_tag_status` about once a second. It looks again
+for missing regions and repeats the clock check, and it returns
+`SCADA_E_RETIRING` when the generation is RETIRING or, at a look at most
+once a second, `current` names another generation, the base directory
+under its path is another directory (the database was set up again), or
+neither could be read at two looks in a row. The observer then
+detaches, observes again and resolves its handles again.
+
+| Function | Real-time safe | What it does |
+| --- | --- | --- |
+| `scada_owner_info` | no | Name, tag count, ring capacity and process of an owner index |
+| `scada_tag_handle` | yes | The handle of `(owner index, slot)`; no context |
+| `scada_proc_resolve` | no | Process name to index; maps its `proc` region |
+| `scada_proc_status` | yes | State, liveness and its reason, the `down` flag of `scada-tagd`, heartbeat counter and age, `cycle_seq`, pid, uid. `SCADA_E_INVALID` with reason `SCADA_DOWN_NOT_RESOLVED` for a process not resolved in the context, with the fields of the process table filled |
+
+`scada_status.owner_count` and `process_count` give the ranges of the
+indexes. Every tag: for each owner, `scada_tag_info` of
+`scada_tag_handle(owner, slot)` for each slot below its `tag_count`.
+
 ## Change rings and waking
 
 Contract section 8; decision D-32.
@@ -496,6 +539,8 @@ ctest --preset dev -R scada-tagd-integration-test
 ctest --preset dev -R scada-tag-access-integration-test
 ctest --preset dev -R scada-tag-rt-integration-test
 ctest --preset dev -R scada-tag-change-ring-integration-test
+ctest --preset dev -R scada-tag-observer-integration-test
+sudo ctest --preset root
 ctest --preset dev -R 'tag_set_json_fuzz-corpus|region_name_fuzz-corpus'
 ctest --preset dev -R 'header_region_fuzz-corpus|utf8_fuzz-corpus'
 cmake --preset perf && cmake --build --preset perf
@@ -582,11 +627,31 @@ ctest --preset perf -R scada-tag-wake-perf-test
 - `scada-tag-change-ring-integration-test` (in `tests/integration/`) runs
   conformance tests 7 (the ring), 13 and 24 with a writer process, which
   `scada-tag-test-writer` plays with the argument `notify`.
+- `Observer.*` and `TagHandle.*` cover observer contexts in one process:
+  no process entry, every refused call, the generation directory
+  unchanged (names, inodes, sizes, modes, owners, times and bytes) after
+  observe, resolve, read, subscribe, wait and status, read-only mappings
+  only, several observers beside a live attach, process status, listing
+  every tag, both kinds of generation change, no database, a missing
+  region, a generation that is not running, and a caller who may not read
+  the base directory.
+- `scada-tag-observer-integration-test` (in `tests/integration/`) runs
+  observers against real processes: three observers and an attach beside a
+  live writer, `/proc/self/maps` with only read-only mappings, an observer
+  started before `scada-tagd`, and a generation change by a restart of
+  `scada-tagd` with another tag set.
+- `scada-tag-observer-users-test` (in `tests/integration/`, label `root`)
+  must run as root (`sudo ctest --preset root`): a child that is user
+  65534 hosts the database and a live `io`; root observes; a user in no
+  group of the database gets `SCADA_E_PERMISSION` from observe and attach;
+  a user in the group but in no entry of the process table observes
+  through read-only mappings.
 - `scada-tag-wake-perf-test` (in `tests/perf/`) measures the time from a
   write in another process to the return of a blocked `scada_sub_next`. It
   fails on x86-64 if the 99th percentile is 1 ms or more, and prints the
   figures on every target. With `SCADA_PERF_REPORT_ONLY=1` it only prints
-  them, as the pipeline runs it.
+  them, as the pipeline runs it. A second case measures the same with 8
+  observers waiting on one ring, all woken by one notify.
 - `scada-tag-access-integration-test` (in `tests/integration/`) uses real
   processes: `Conformance02*` writes 50,000 tags of 10 owner threads at
   50,000 updates per second against 4 readers, for 3 s, or for
