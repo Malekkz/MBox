@@ -162,7 +162,30 @@ still points to `gen-1`. After a change to the tag-set file, a restart shows
 The service needs no capability: `systemctl show -p CapabilityBoundingSet
 scada-tagd.service` prints an empty value.
 
-## 8. Remove it again
+## 8. Look at the tag database with scadactl
+
+`scadactl` reads the tag database directly and only reads
+(`tools/scadactl/README.md`). It runs as root, or as a user in the group
+`scada`:
+
+```
+scadactl status
+scadactl tag list
+scadactl tag watch 'plant.*'      # Ctrl-C stops it
+```
+
+`status` shows generation 1, `scada-tagd up`, and the process `tagd`
+RUNNING. A user outside the group gets `no permission to read the tag
+database`.
+
+Membership of the group `scada` means unaudited read access to every tag:
+`scadactl` records nothing, and neither does the library. It also allows
+creating files in the generation directory and locking the `proc` region
+of a process, which can keep that process from attaching. That is a power
+the group already has for the services; `scadactl` uses neither. Add only
+accounts to `scada` that are trusted that far (decision D-42).
+
+## 9. Remove it again
 
 ```
 systemctl stop scada-hello.service scada-tagd.service
