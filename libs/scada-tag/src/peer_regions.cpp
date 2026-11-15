@@ -201,6 +201,14 @@ void PeerRegions::want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns) {
     wanted_.push_back(slot);
     static_cast<void>(look(dir_fd, wanted));
     wanted.next_look_mono_ns = now_mono_ns + PEER_RETRY_INTERVAL_NS;
+    // Release, after the first look: a reader that sees the flag with
+    // acquire also sees the mapping that look published.
+    wanted.asked.store(true, std::memory_order_release);
+}
+
+bool PeerRegions::asked(std::size_t slot) const noexcept {
+    return slot < slots_.size() &&
+           slots_[slot].asked.load(std::memory_order_acquire);
 }
 
 std::span<std::byte> PeerRegions::bytes(std::size_t slot) const noexcept {

@@ -57,10 +57,26 @@ struct SweptEntry {
     bool removed = false;
 };
 
+// Late heartbeats a process recorded itself (section 10.1): heartbeats
+// that came strictly more than its timeout after the one before, so that
+// readers saw it down, possibly between two liveness checks. For diagnosis
+// only. The figures are input: the process writes them.
+struct LateHeartbeats {
+    std::string process;
+    // Late heartbeats since the previous check, or, with `baseline`, the
+    // whole count found at the first look at this region.
+    std::uint32_t added = 0;
+    std::uint32_t total = 0;             // since the region was created; wraps
+    std::int64_t longest_gap_ns = 0;     // between any two heartbeats
+    std::int64_t last_late_mono_ns = 0;  // CLOCK_MONOTONIC; end of the gap
+    bool baseline = false;
+};
+
 // What one liveness check changed.
 struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
+    std::vector<LateHeartbeats> late;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -127,9 +143,10 @@ public:
 
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
-    // clears it for every process that is not, then removes every entry of
-    // the generation directory that the header does not list or whose owner
-    // is wrong (section 3.1). Returns what changed.
+    // clears it for every process that is not, reads the late heartbeats
+    // every process recorded, then removes every entry of the generation
+    // directory that the header does not list or whose owner is wrong
+    // (section 3.1). Returns what changed.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.
