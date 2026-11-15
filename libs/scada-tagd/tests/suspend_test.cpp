@@ -1,5 +1,5 @@
 // Unit tests of the suspend detection of scada-tagd (contract 3.4,
-// decision D-44), with the clocks given as samples.
+// decision D-45), with the clocks given as samples.
 
 #include "scada/tagd/suspend.h"
 

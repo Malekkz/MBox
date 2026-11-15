@@ -70,7 +70,7 @@ bool request_rules(const WriteRequest& record) {
     return reserved_zero && record.operation >= 1 &&
            record.operation <= LAST_OPERATION && record.source >= 1 &&
            record.source <= LAST_SOURCE && value_ok &&
-           (record.source == SOURCE_OPERATOR || record.user_id == 0) &&
+           (record.source == SOURCE_OPERATOR) == (record.user_id != 0) &&
            select == (record.select_request_id != 0);
 }
 

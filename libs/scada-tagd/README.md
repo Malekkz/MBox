@@ -56,8 +56,8 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.11, sections 3,
-  9.2, 10 and 11.1; decisions D-27 and D-44 in `docs/decisions.md`.
+- Contract: `docs/contracts/tag-database.md`, version 0.12, sections 3,
+  9.2, 10 and 11.1; decisions D-27 and D-45 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),

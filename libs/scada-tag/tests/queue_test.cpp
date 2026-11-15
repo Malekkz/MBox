@@ -875,8 +875,11 @@ TEST_F(Queues, ARequestThatIsNotValidIsRefusedAtPost) {
             req.value_type = SCADA_TYPE_BOOL;
             req.value = BOOL_TWO;
         },
-        // AUTO with a user id.
+        // AUTO and REMOTE with a user id.
         [](scada_write_request& req) { req.source = SCADA_SOURCE_AUTO; },
+        [](scada_write_request& req) { req.source = SCADA_SOURCE_REMOTE; },
+        // OPERATOR without a user (issue #58).
+        [](scada_write_request& req) { req.user_id = 0; },
         [](scada_write_request& req) { req.select_request_id = 1; },
         [](scada_write_request& req) { req.reserved0 = 1; },
         [](scada_write_request& req) { req.reserved1 = 1; },
@@ -897,6 +900,40 @@ TEST_F(Queues, ARequestThatIsNotValidIsRefusedAtPost) {
     operate.select_request_id = 0;
     EXPECT_TRUE(posts(*cmd, operate, SCADA_E_INVALID));
     EXPECT_TRUE(posts(*cmd, request(SCADA_OP_READ_NOW)));
+}
+
+// Issue #58: an operator request without a user, written into the region
+// past the check at post, is passed over when taken and counted; the next
+// request is delivered.
+TEST_F(Queues, AnOperatorRequestWithoutAUserIsPassedOverWhenTaken) {
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    const QueuePtr reader = open(*io(), "cmd.io.web");
+    ASSERT_TRUE(posts(*out, request()));
+    ASSERT_TRUE(posts(*out, request()));
+    change_record<WriteRequest>(
+        "cmd.io.web", 0, [](WriteRequest& record) { record.user_id = 0; });
+    EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_LAYOUT));
+    EXPECT_EQ(reader->stats().invalid, 1U);
+    EXPECT_TRUE(takes_request(*reader, request_id_of(CMD_WEB, 1)));
+    // The requester gets no answer for it and sees it expire.
+    const QueuePtr results = open(*web(), "result.io.web");
+    EXPECT_TRUE(gives<scada_write_result>(*results, SCADA_E_TIMEOUT));
+}
+
+// The same request found by the drain at attach is counted invalid, not
+// aborted, and gets no answer; the others are answered ABORTED.
+TEST_F(Queues, AnOperatorRequestWithoutAUserIsCountedInvalidByTheDrain) {
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    ASSERT_TRUE(posts(*out, request()));
+    ASSERT_TRUE(posts(*out, request()));
+    change_record<WriteRequest>(
+        "cmd.io.web", 0, [](WriteRequest& record) { record.user_id = 0; });
+    restart(io(), "io");
+    const QueuePtr reader = open(*io(), "cmd.io.web");
+    EXPECT_EQ(reader->stats().invalid, 1U);
+    EXPECT_EQ(reader->stats().aborted, 1U);
+    const QueuePtr results = open(*web(), "result.io.web");
+    EXPECT_TRUE(takes_answers(*results, SCADA_RESULT_ABORTED, {1}));
 }
 
 TEST_F(Queues, AResultThatIsNotValidIsRefusedAtPost) {
@@ -1600,6 +1637,39 @@ TEST(QueueRecords, ARequestIsExpiredForEachOfFiveReasons) {
         record.posted_mono_ns = cases[i].posted;
         record.expiry_mono_ns = cases[i].expiry;
         if (request_expired(record, NOW) != cases[i].expired) {
+            wrong = i;
+            break;
+        }
+    }
+    EXPECT_EQ(wrong, cases.size()) << "the first case judged wrongly";
+}
+
+// Issue #58: a request carries a user exactly when its source is OPERATOR.
+TEST(QueueRecords, ARequestCarriesAUserExactlyWhenItIsAnOperators) {
+    constexpr std::uint32_t SOME_USER = 7;
+    constexpr std::uint32_t HIGHEST_USER =
+        std::numeric_limits<std::uint32_t>::max();
+    struct Case {
+        WriteSource source;
+        std::uint32_t user;
+        bool valid;
+    };
+    const std::vector<Case> cases{
+        {.source = WriteSource::OPERATOR, .user = SOME_USER, .valid = true},
+        {.source = WriteSource::OPERATOR, .user = HIGHEST_USER, .valid = true},
+        {.source = WriteSource::OPERATOR, .user = 0, .valid = false},
+        {.source = WriteSource::AUTO, .user = 0, .valid = true},
+        {.source = WriteSource::AUTO, .user = SOME_USER, .valid = false},
+        {.source = WriteSource::REMOTE, .user = 0, .valid = true},
+        {.source = WriteSource::REMOTE, .user = SOME_USER, .valid = false},
+    };
+    std::size_t wrong = cases.size();
+    for (std::size_t i = 0; i < cases.size(); ++i) {
+        WriteRequest record;
+        record.operation = to_raw(WriteOperation::READ_NOW);
+        record.source = to_raw(cases[i].source);
+        record.user_id = cases[i].user;
+        if (request_valid(record) != cases[i].valid) {
             wrong = i;
             break;
         }
