@@ -335,7 +335,7 @@ TEST_F(QueueProcesses, OneMillionRecordsWithoutLossDuplicationOrReordering) {
 // each, and that attach skipped none.
 ::testing::AssertionResult hist_gets_every_event(ChildProcess& hist,
                                                  std::uint64_t count) {
-    if (::testing::AssertionResult printed =
+    if (const ::testing::AssertionResult printed =
             prints(hist, "got " + std::to_string(count - 1) + "\n");
         !printed) {
         return printed;
@@ -394,7 +394,8 @@ TEST_F(QueueProcesses, Conformance16RedeliveryAfterAConsumerIsKilled) {
                                            direct_request()) != SCADA_OK) {
         return ::testing::AssertionFailure() << "the first post failed";
     }
-    if (::testing::AssertionResult took = prints(holder, "took 0\n"); !took) {
+    if (const ::testing::AssertionResult took = prints(holder, "took 0\n");
+        !took) {
         return took;
     }
     kill(holder);
@@ -402,6 +403,37 @@ TEST_F(QueueProcesses, Conformance16RedeliveryAfterAConsumerIsKilled) {
     const scada_write_request queued = direct_request();
     if (scada_queue_post(requests, &queued, sizeof(queued)) != SCADA_OK) {
         return ::testing::AssertionFailure() << "the second post failed";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// The restarted `driver` reports one request drained; `web` gets ABORTED
+// for the request queued while it was dead, then OK for a new one, and no
+// answer for the request the killed driver took.
+::testing::AssertionResult restarted_driver_answers(const Attached& web,
+                                                    scada_queue* requests,
+                                                    scada_queue* results,
+                                                    ChildProcess& driver) {
+    if (driver.out().find("attached aborted=1 ") == std::string::npos) {
+        return ::testing::AssertionFailure() << driver.out();
+    }
+    if (const ::testing::AssertionResult aborted =
+            answers(results, 1, SCADA_RESULT_ABORTED);
+        !aborted) {
+        return aborted;
+    }
+    if (QueueProcesses::post_when_accepted(web.ctx(), requests,
+                                           direct_request()) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "the third post failed";
+    }
+    if (const ::testing::AssertionResult done =
+            answers(results, 2, SCADA_RESULT_OK);
+        !done) {
+        return done;
+    }
+    scada_write_result none{};
+    if (scada_queue_next(results, &none, sizeof(none), 0) != SCADA_E_TIMEOUT) {
+        return ::testing::AssertionFailure() << "an answer too many";
     }
     return ::testing::AssertionSuccess();
 }
@@ -426,16 +458,8 @@ TEST_F(QueueProcesses, Conformance17ARequestIsNeverExecutedTwice) {
     if (!driver.has_value()) {
         return;
     }
-    EXPECT_NE(driver->out().find("attached aborted=1 "), std::string::npos)
-        << driver->out();
-    EXPECT_TRUE(answers(results.get(), 1, SCADA_RESULT_ABORTED));
-    ASSERT_EQ(post_when_accepted(web.ctx(), requests.get(), direct_request()),
-              SCADA_OK);
-    EXPECT_TRUE(answers(results.get(), 2, SCADA_RESULT_OK));
-    // The taken request got no answer, and nothing else came.
-    scada_write_result none{};
-    EXPECT_EQ(scada_queue_next(results.get(), &none, sizeof(none), 0),
-              SCADA_E_TIMEOUT);
+    EXPECT_TRUE(
+        restarted_driver_answers(web, requests.get(), results.get(), *driver));
     EXPECT_TRUE(stops_cleanly(*driver));
     EXPECT_EQ(numbers_after(driver->out(), "took "),
               std::vector<std::uint64_t>{2});

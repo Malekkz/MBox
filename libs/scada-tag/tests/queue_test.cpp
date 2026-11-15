@@ -897,12 +897,12 @@ protected:
             return ::testing::AssertionFailure() << "the producer counted no "
                                                     "file created anew";
         }
-        if (::testing::AssertionResult refused =
+        if (const ::testing::AssertionResult refused =
                 gives<scada_event_record>(*reader, SCADA_E_LAYOUT);
             !refused) {
             return refused;
         }
-        if (::testing::AssertionResult refused =
+        if (const ::testing::AssertionResult refused =
                 posts(*out, event(), SCADA_E_PEER_DOWN);
             !refused) {
             return refused;
