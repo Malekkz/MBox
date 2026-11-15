@@ -1,0 +1,49 @@
+AArch64 repair
+"Repair of a record after an owner restart, contract 0.6 sections 6.1, 6.2 and 6.3"
+(*
+ * P0 is the owner of a record: first a write that does not finish, then,
+ * after a restart, repair_tag_records (libs/scada-tag/src/attachment.cpp).
+ * The write makes seq odd (begin_write: the store, DMB ISH) and stores
+ * some of the fields (store_fields stores the quality first, then the
+ * flags, the value and the times), then the owner stops before end_write.
+ * The repair finds seq odd, stores quality BAD (and the flag NOT_INIT, and
+ * len 0 of a string slot: more locations of the same kind as q) and stores
+ * seq + 1 with release. P1 is one attempt of read_record, as in
+ * seqlock.litmus.
+ *
+ * v stands for the fields the write stored and the repair does not (the
+ * value, the times), q for those the repair stores (the quality, also
+ * stored by the write if it got that far: the repair overwrites it): 1 is
+ * the write's value, 9 is BAD. The repair keeps the value the write left,
+ * so a copy with seq 2 may have v 0 or 1; what it must have is q 9.
+ *
+ * The owner that repairs is another process than the one that stopped. It
+ * runs after the first one died: the kernel releases the `flock` the first
+ * held on `proc.<process>` when it dies, and the second takes it before it
+ * looks at its own regions (D-28); both steps order memory. The test
+ * writes both parts in one thread with no fence between them, which orders
+ * the stores of the two parts less than that: a result for the test holds
+ * for the processes. The repair's relaxed load of seq gives 1, the number
+ * the write stored, and is written as that constant (seqlock.litmus).
+ *
+ * The condition is a read that the library accepts (two equal, even loads
+ * of seq) with a copy that is not what the number names: seq 0 has v and q
+ * 0, seq 2 has q 9 (BAD).
+ *)
+{
+0:X0=seq; 0:X1=q; 0:X3=v;
+1:X0=seq; 1:X1=q; 1:X3=v;
+}
+ P0             | P1             ;
+ MOV W4,#1      | LDAR W4,[X0]   ;
+ STR W4,[X0]    | LDR W5,[X1]    ;
+ DMB ISH        | LDR W7,[X3]    ;
+ MOV W5,#1      | DMB ISHLD      ;
+ STR W5,[X3]    | LDR W8,[X0]    ;
+ MOV W6,#9      |                ;
+ STR W6,[X1]    |                ;
+ MOV W7,#2      |                ;
+ STLR W7,[X0]   |                ;
+exists
+( (1:X4=0 /\ 1:X8=0 /\ ~(1:X5=0 /\ 1:X7=0))
+\/ (1:X4=2 /\ 1:X8=2 /\ ~(1:X5=9)) )

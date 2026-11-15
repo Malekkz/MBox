@@ -339,3 +339,59 @@
      264:      	bl	0x264 <scada::tag::read_change(std::span<std::byte, 18446744073709551615ul>, unsigned int, unsigned long&, scada::tag::ChangeEntry&, unsigned long&)+0xf0>
 		0000000000000264:  R_AARCH64_CALL26	scada::panic(scada::StaticString)
 
+0000000000000098 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)>:
+      98:      	paciasp
+      9c:      	stp	x29, x30, [sp, #-0x10]!
+      a0:      	mov	x29, sp
+      a4:      	cbz	x5, 0x144 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0xac>
+      a8:      	mov	x8, x0
+      ac:      	mov	x9, xzr
+      b0:      	mov	w0, wzr
+      b4:      	mov	x10, xzr
+      b8:      	sub	x11, x1, #0x40
+      bc:      	mov	w12, #0x2               // =2
+      c0:      	mov	w13, #0x10              // =16
+      c4:      	mov	w14, #0x40              // =64
+      c8:      	b	0xf4 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x5c>
+      cc:      	add	w17, w17, #0x1
+      d0:      	add	x16, x16, #0x40
+      d4:      	add	w0, w0, #0x1
+      d8:      	stlr	w17, [x16]
+      dc:      	cmp	w15, #0x5
+      e0:      	sub	x5, x5, #0x1
+      e4:      	add	x9, x9, #0x40
+      e8:      	cinc	x10, x10, eq
+      ec:      	sub	x11, x11, #0x40
+      f0:      	cbz	x5, 0x148 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0xb0>
+      f4:      	add	x15, x9, #0x40
+      f8:      	cmp	x1, x15
+      fc:      	b.lo	0x154 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0xbc>
+     100:      	cmp	x11, #0x3f
+     104:      	b.ls	0x154 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0xbc>
+     108:      	add	x16, x8, x9
+     10c:      	ldrb	w15, [x4], #0x1
+     110:      	ldr	w17, [x16, #0x40]
+     114:      	tbz	w17, #0x0, 0xdc <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x44>
+     118:      	cmp	w15, #0x5
+     11c:      	strb	w12, [x16, #0x45]
+     120:      	strh	w13, [x16, #0x46]
+     124:      	b.ne	0xcc <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x34>
+     128:      	orr	x18, x14, x10, lsl #8
+     12c:      	subs	x6, x3, x18
+     130:      	b.lo	0xcc <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x34>
+     134:      	cmp	x6, #0x100
+     138:      	b.lo	0xcc <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x34>
+     13c:      	strh	wzr, [x2, x18]
+     140:      	b	0xcc <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0x34>
+     144:      	mov	w0, wzr
+     148:      	ldp	x29, x30, [sp], #0x10
+     14c:      	autiasp
+     150:      	ret
+     154:      	adrp	x1, 0x0 <scada::tag::initialise_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)>
+		0000000000000154:  R_AARCH64_ADR_PREL_PG_HI21	.rodata.str1.1+0x6d9
+     158:      	add	x1, x1, #0x0
+		0000000000000158:  R_AARCH64_ADD_ABS_LO12_NC	.rodata.str1.1+0x6d9
+     15c:      	mov	w0, #0x36               // =54
+     160:      	bl	0x160 <scada::tag::repair_tag_records(std::span<std::byte, 18446744073709551615ul>, std::span<std::byte, 18446744073709551615ul>, std::span<scada::tag::TagType const, 18446744073709551615ul>)+0xc8>
+		0000000000000160:  R_AARCH64_CALL26	scada::panic(scada::StaticString)
+

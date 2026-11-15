@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "allowed_licences": ["MIT"],
+  "licence_scopes": {
+    "Unlisted-1.0": ["test"],
+    "MIT": ["runtime"]
+  }
+}

@@ -2,28 +2,34 @@
 # one dependency list from cases/ and checks that the configuration fails
 # with the right message, or succeeds and writes the right files.
 #
-# The allow-list is the real one, so these tests also prove what it rejects.
+# The allow-list is the real one, so these tests also prove what it rejects,
+# unless a case names its own with ALLOWLIST.
 
 set(scada_real_allowlist
   "${PROJECT_SOURCE_DIR}/third-party/licence-allowlist.json")
 
 # scada_add_dependency_case(<name> LIST <case> [LINKS <names...>]
 #   [USES_VERSION_OF <dependency>] [EXPECT_ERROR <regex>]
-#   [CHECK_SCRIPT <file>])
+#   [CHECK_SCRIPT <file>] [ALLOWLIST <case>])
 #
 # In LINKS, write a generator expression as "@<...>": add_test would evaluate
 # "$<...>" itself. run_case.cmake turns it back.
 function(scada_add_dependency_case name)
   cmake_parse_arguments(PARSE_ARGV 1 arg ""
-    "LIST;EXPECT_ERROR;CHECK_SCRIPT;USES_VERSION_OF" "LINKS")
+    "LIST;EXPECT_ERROR;CHECK_SCRIPT;USES_VERSION_OF;ALLOWLIST" "LINKS")
   list(JOIN arg_LINKS "|" links)
+  set(allowlist "${scada_real_allowlist}")
+  if(DEFINED arg_ALLOWLIST)
+    set(allowlist
+      "${CMAKE_CURRENT_SOURCE_DIR}/cases/${arg_ALLOWLIST}/licence-allowlist.json")
+  endif()
   set(arguments
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixture"
     "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/${name}"
     "-DGENERATOR=${CMAKE_GENERATOR}"
     "-DMODULE_DIR=${PROJECT_SOURCE_DIR}/cmake"
     "-DLIST=${CMAKE_CURRENT_SOURCE_DIR}/cases/${arg_LIST}/dependencies.json"
-    "-DALLOWLIST=${scada_real_allowlist}"
+    "-DALLOWLIST=${allowlist}"
     "-DLINKS=${links}"
     "-DUSES_VERSION_OF=${arg_USES_VERSION_OF}")
   if(DEFINED arg_EXPECT_ERROR)
@@ -74,6 +80,21 @@ scada_add_dependency_case(gpl-licence LIST gpl
   EXPECT_ERROR "dependency 'alpha': licence 'GPL-3.0-only' is not on the allow-list")
 scada_add_dependency_case(licence-expression LIST licence-expression
   EXPECT_ERROR "licence 'MIT OR GPL-3.0-only' is not on the allow-list")
+
+# A licence allowed for some scopes only (CECILL-B: build and test, D-37).
+scada_add_dependency_case(limited-licence-product LIST limited-licence-product
+  EXPECT_ERROR "dependency 'alpha': licence 'CECILL-B' is allowed for scope build, test only, not 'product'")
+scada_add_dependency_case(limited-licence-test LIST limited-licence-test
+  CHECK_SCRIPT check_limited.cmake)
+scada_add_dependency_case(bad-licence-scopes LIST empty
+  ALLOWLIST bad-licence-scopes
+  EXPECT_ERROR "\"licence_scopes\" of 'MIT': scope 'runtime' must be product, build or test.*\"licence_scopes\" of 'Unlisted-1.0': the licence is not allowed")
+scada_add_dependency_case(limited-licence-build LIST limited-licence-build
+  CHECK_SCRIPT check_limited.cmake)
+scada_add_dependency_case(bad-commit LIST bad-commit
+  EXPECT_ERROR "dependency 'alpha': the commit must be 40 hexadecimal characters in lower case")
+scada_add_dependency_case(short-commit LIST short-commit
+  EXPECT_ERROR "dependency 'alpha': the commit must be 40 hexadecimal characters in lower case")
 add_test(NAME dependency-check-allowlist-has-no-gpl
   COMMAND "${CMAKE_COMMAND}" "-DALLOWLIST=${scada_real_allowlist}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/check_allowlist.cmake")

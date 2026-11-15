@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Conformance test 4: model check of the sequence lock and the change ring.
+"""Conformance test 4: model check of the sequence lock, the change ring and
+the repair after an owner restart.
 
 Runs herd7 with the Armv8 memory model (aarch64.cat) on each litmus test of
 this directory, and on four copies of each that lack one ordering of the
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import time
 
-TESTS = ("seqlock.litmus", "change-ring.litmus")
+TESTS = ("seqlock.litmus", "change-ring.litmus", "repair.litmus")
 
 # (name, what is taken away, pattern, replacement). The patterns match the
 # instructions the protocol compiles to; tests/model/code_shape.py checks
