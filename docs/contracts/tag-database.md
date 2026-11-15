@@ -880,9 +880,13 @@ for readers and never down for a check. `starts` counts it:
   it RUNNING, so that a RUNNING of a new life implies its count. The first
   sample of a mapping is a baseline and is not logged. When the count grew
   by n since the previous sample (modulo 2^32), it logs `process restarted`
-  with n lives. If the same check found the process up after it was down
-  at a check, the latest of the n lives is the one seen as down and up, and
-  n - 1 of them came and went unseen; otherwise all n did. The record is a
+  with n lives. Each check since the previous sample that found the
+  process up after it was down accounts for one of them, a life seen as
+  down and up; the others, n minus those checks and at least 0, came and
+  went unseen. A check that finds the process up but no longer RUNNING when
+  it reads `starts` keeps its credit for the next sample. The unseen count
+  is a lower bound: a heartbeat that comes back without a restart also
+  makes such a check. The record is a
   WARNING when an unseen life is in it, else a NOTICE. It is not rate
   limited: the service manager's restart limit bounds it.
 - `starts` is for diagnosis only and is a lower bound: a life of a library

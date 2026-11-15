@@ -62,10 +62,12 @@ std::vector<LateRecord> LateLog::admit(
     for (const scada::tag::LateHeartbeats& beats : late) {
         Entry& entry = entry_of(beats.process);
         if (beats.baseline) {
-            // What was held belongs to the region looked at before.
+            // What was held belongs to the region looked at before. Logged
+            // now, it starts a new interval like any other record.
             if (entry.held) {
                 out.push_back(std::move(entry.pending));
                 entry.held = false;
+                entry.next_mono_ns = later_by(now_mono_ns, interval_ns_);
             }
             out.push_back(record_of(beats));
             continue;

@@ -275,6 +275,7 @@ int serve(GenerationHost& host, Notifier& notifier,
                 logger.log(LogLevel::NOTICE, "stopped on request");
                 return EXIT_OK;
             case Wake::ERROR:
+                log_late(logger, late_log.drain());
                 logger.log(LogLevel::CRITICAL, "waiting for signals failed");
                 return EXIT_ERROR;
         }

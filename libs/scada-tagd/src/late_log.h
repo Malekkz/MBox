@@ -54,7 +54,7 @@ public:
     // - A baseline is returned at once and does not start an interval: a
     //   region is looked at for the first time at most once per life of the
     //   process. Growth held before it, which belongs to the previous
-    //   region, is returned first.
+    //   region, is returned first and starts a new interval.
     [[nodiscard]] std::vector<LateRecord> admit(
         std::span<const scada::tag::LateHeartbeats> late,
         std::int64_t now_mono_ns);

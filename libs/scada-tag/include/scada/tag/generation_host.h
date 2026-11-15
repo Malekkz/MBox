@@ -83,8 +83,9 @@ struct Restarts {
     // Lives started since the previous sample, at least 1.
     std::uint32_t added = 0;
     // Of those, the lives no check saw as down and up again: `added` minus
-    // 1 if this check found the process up after it was down, else
-    // `added`.
+    // the checks since the previous sample that found the process up after
+    // it was down, at least 0. A lower bound: a heartbeat that came back
+    // without a restart is such a check too.
     std::uint32_t unseen = 0;
     std::uint32_t total = 0;  // since the region was created; wraps
 };

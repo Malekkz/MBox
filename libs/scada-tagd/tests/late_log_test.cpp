@@ -119,6 +119,19 @@ TEST(LateLog, ABaselineIsLoggedAtOnceAfterWhatWasHeld) {
     EXPECT_TRUE(log.admit(std::vector{late("io", 1, 6)}, START_NS + 3).empty());
 }
 
+// Review of PR #70: held growth logged ahead of a baseline starts a new
+// interval, so the next growth after it is held, not logged within 10 s.
+TEST(LateLog, HeldGrowthLoggedAtABaselineStartsAnInterval) {
+    LateLog log(INTERVAL_NS);
+    ASSERT_EQ(log.admit(std::vector{late("io", 1, 1)}, START_NS).size(), 1U);
+    const std::int64_t flush = START_NS + INTERVAL_NS - 1;
+    EXPECT_TRUE(log.admit(std::vector{late("io", 1, 2)}, flush).empty());
+    EXPECT_EQ(log.admit(std::vector{late("io", 3, 3, true)}, flush).size(), 2U);
+    EXPECT_TRUE(log.admit(std::vector{late("io", 1, 4)}, START_NS + INTERVAL_NS)
+                    .empty());
+    EXPECT_EQ(log.admit({}, flush + INTERVAL_NS).size(), 1U);
+}
+
 TEST(LateLog, TheSumDoesNotWrapAt32Bits) {
     constexpr std::uint32_t MAX = std::numeric_limits<std::uint32_t>::max();
     LateLog log(INTERVAL_NS);

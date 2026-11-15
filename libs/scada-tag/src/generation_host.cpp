@@ -75,6 +75,10 @@ struct Peer {
     // process is up.
     std::optional<std::uint32_t> starts_seen;
     std::uint64_t starts_mapping = 0;
+    // Checks that found the process up after it was down since the last
+    // sample of `starts`: each is a life seen as down and up. Kept when a
+    // check finds it up but cannot sample (it left RUNNING in between).
+    std::uint32_t ups_since_sample = 0;
 };
 
 // Region file names of the generation, each with the user that writes it.
@@ -899,6 +903,10 @@ void GenerationHost::Impl::note_late_beats(Peer& peer,
 
 void GenerationHost::Impl::note_starts(Peer& peer, bool is_up, bool came_up,
                                        CheckReport& report) {
+    if (came_up &&
+        peer.ups_since_sample < std::numeric_limits<std::uint32_t>::max()) {
+        ++peer.ups_since_sample;
+    }
     if (!is_up) {
         // Sampled only while up: a life counts itself just before RUNNING,
         // so a sample while starting would be taken before the "up" it
@@ -915,15 +923,18 @@ void GenerationHost::Impl::note_starts(Peer& peer, bool is_up, bool came_up,
         !peer.starts_seen.has_value() || peer.starts_mapping != mapping;
     // Modulo 2^32: the count wraps.
     const std::uint32_t added = baseline ? 0U : *starts - *peer.starts_seen;
+    const std::uint32_t seen = std::exchange(peer.ups_since_sample, 0U);
     peer.starts_seen = starts;
     peer.starts_mapping = mapping;
     if (added == 0) {
         return;
     }
-    // A process found up after it was down at a check: the latest of the
-    // lives is one scada-tagd saw as down and up; the others came and went
-    // between two checks.
-    const std::uint32_t unseen = came_up ? added - 1U : added;
+    // Each check that found the process up after it was down accounts for
+    // one of the lives, which scada-tagd saw as down and up; the others
+    // came and went between two checks. A down and up without a restart
+    // (a heartbeat that came back) also counts, so `unseen` is a lower
+    // bound.
+    const std::uint32_t unseen = added - std::min(added, seen);
     report.restarts.push_back(Restarts{
         .process = peer.region.process,
         .added = added,
