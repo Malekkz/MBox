@@ -134,6 +134,8 @@ constexpr std::uint64_t RATE_DIVISOR = 10;  // the default rate: tags / 10
 // tag set can give it (at least 1 ms, but tests use 500 ms and more).
 constexpr long HEARTBEAT_PERIOD_NS = 20'000'000;
 constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
+// While the tags are resolved, a heartbeat after this many tags.
+constexpr std::uint64_t HEARTBEAT_EVERY_TAGS = 256;
 
 // The whole of `text` as a decimal number of at most `limit`.
 std::optional<std::uint64_t> parse_number(std::string_view text,
@@ -478,6 +480,13 @@ std::optional<std::vector<OwnerPlan>> make_plans(scada_ctx* ctx,
         plan.handles.reserve(tags);
         plan.patterns.reserve(tags);
         for (std::uint64_t tag = 0; tag < tags; ++tag) {
+            // Resolving many tags can take longer than the heartbeat
+            // timeout on a slow machine; the process must not read as down
+            // meanwhile. A heartbeat makes no system call; a retiring
+            // generation is reported by the heartbeat of the main loop.
+            if (tag % HEARTBEAT_EVERY_TAGS == 0) {
+                static_cast<void>(scada_tag_heartbeat(ctx));
+            }
             const std::string name = tag_name(layout, owner, tag);
             const Pattern pattern = pattern_of(layout, tag);
             std::uint32_t handle = SCADA_INVALID_HANDLE;

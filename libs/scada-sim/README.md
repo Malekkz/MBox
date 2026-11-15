@@ -76,6 +76,10 @@ attached after the end and writes its heartbeat until SIGTERM or SIGINT, so
 the last values read as good. See `services/scada-sim/README.md` for the
 output.
 
+While `run` resolves and checks its tags, before the owner threads start,
+it writes its heartbeat every 256 tags, so that a large layout does not read
+as down on a slow machine.
+
 The writes are not real-time: the owner threads run under the normal
 scheduler and sleep between ticks.
 
@@ -107,8 +111,9 @@ ctest --preset perf -R scada-sim-rate-perf-test
   `scada-sim tag-set` is the one `scada-tagd` runs on; after a run every tag
   of every pattern holds exactly the value, quality, flags and change count
   its definition gives; two processes share one simulation; a run of one
-  second writes the rate once; an unbounded run stops on SIGTERM; a tag set
-  that does not fit the run is refused.
+  second writes the rate once; an unbounded run stops on SIGTERM; 100,000
+  tags with a heartbeat timeout of 100 ms never read as down while the
+  simulator starts; a tag set that does not fit the run is refused.
 - `scada-sim-rate-perf-test` (in `tests/perf/`): 50,000 updates per second
   across 10 owners on 50,000 tags, as one process with 10 owner threads and
   as 10 processes, for 10 s each; it fails below 95 percent of the rate. It

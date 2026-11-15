@@ -43,6 +43,11 @@ constexpr std::uint64_t SEED = 11;
 // Not a multiple of the owners or patterns, so that the shares differ.
 constexpr std::uint64_t ALL_PATTERN_TAGS = 23;
 constexpr std::uint64_t SMALL_TAGS = 10;
+// Tags that take far longer than SHORT_TIMEOUT_MS to resolve: about 0.5 s
+// in a dev build.
+constexpr std::uint64_t MANY_TAGS = 100'000;
+constexpr const char* SHORT_TIMEOUT_MS = "100";
+constexpr const char* SHORT_CHECK_MS = "20";
 
 // Every pattern, on two owner threads.
 Layout all_patterns() {
@@ -282,6 +287,37 @@ TEST_F(SimProcesses, AnUnboundedRunStopsOnASignal) {
     EXPECT_EQ(scada_tag_read(reader.ctx(), handle, &after), SCADA_OK);
     EXPECT_NE(after.quality_flags & SCADA_FLAG_OWNER_DOWN, 0);
     stop(*tagd);
+}
+
+// Resolving many tags takes longer than a short heartbeat timeout; the
+// simulator writes its heartbeat meanwhile, so scada-tagd never sees it
+// down while it starts.
+TEST_F(SimProcesses, ALargeLayoutDoesNotReadAsDownWhileItStarts) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 1,
+                        .tags = MANY_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    std::vector<std::string> arguments = sim_arguments("tag-set", layout);
+    arguments.insert(
+        arguments.end(),
+        {"--heartbeat-timeout-ms", SHORT_TIMEOUT_MS, "--heartbeat-check-ms",
+         SHORT_CHECK_MS, "--reader", "reader", "--output", tag_set_path()});
+    EXPECT_EQ(sim_exit(arguments), scada::sim::EXIT_OK);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim = start_sim(layout, {"--rate", "1000"});
+    if (!sim.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*sim, "writing\n"));
+    EXPECT_TRUE(logs(*tagd, R"(process up PROCESS="sim")"));
+    EXPECT_TRUE(stops_cleanly(*sim));
+    stop(*tagd);
+    EXPECT_EQ(tagd->child.err().find("heartbeat stale"), std::string::npos)
+        << tagd->child.err();
 }
 
 // A run whose patterns do not give the types of the tag set is refused
