@@ -7,7 +7,12 @@
 
 #include "tagd_fixture.h"
 
+#include "scada/common/result.h"
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
+#include "scada/sim/tag_set.h"
 #include "scada/tag/scada_tag.h"
+#include "scada/tag/tag_set.h"
 #include "scada/test/child_process.h"
 
 #include <gtest/gtest.h>
@@ -34,13 +39,40 @@ inline constexpr int CHECK_MS = 50;
 inline constexpr int IO_TIMEOUT_MS = 1000;
 inline constexpr int IO_PERIOD_MS = 50;
 
-// The owners of the process `load` of the large tag set and the tags of
-// each: 50,000 tags across 10 owners, the reference load of the contract
-// (section 15, test 2).
+// The large tag set: the process `load` with 10 owner threads `load.w<k>`
+// and 50,000 CHECK tags `load.w<k>.t<i>` of type UINT64, the reference load
+// of the contract (section 15, test 2).
 inline constexpr std::size_t LOAD_OWNERS = 10;
 inline constexpr std::size_t LOAD_TAGS_PER_OWNER = 5000;
-// At least twice the tags of an owner (contract, section 14).
-inline constexpr int LOAD_RING_CAPACITY = 16384;
+
+inline scada::sim::Layout load_layout() {
+    return scada::sim::Layout{.prefix = "load",
+                              .processes = 1,
+                              .owners = LOAD_OWNERS,
+                              .tags = LOAD_OWNERS * LOAD_TAGS_PER_OWNER,
+                              .patterns = {scada::sim::Pattern::CHECK}};
+}
+
+// The arguments of `scada-sim <command>` that give `layout`.
+inline std::vector<std::string> sim_arguments(
+    const std::string& command, const scada::sim::Layout& layout) {
+    std::string patterns;
+    for (const scada::sim::Pattern pattern : layout.patterns) {
+        patterns += (patterns.empty() ? "" : ",");
+        patterns += scada::sim::to_string(pattern);
+    }
+    return {command,
+            "--prefix",
+            layout.prefix,
+            "--processes",
+            std::to_string(layout.processes),
+            "--owners",
+            std::to_string(layout.owners),
+            "--tags",
+            std::to_string(layout.tags),
+            "--pattern",
+            patterns};
+}
 
 // Mode of the base directory (contract, section 3.1).
 inline constexpr mode_t BASE_DIR_MODE = 02750;
@@ -125,30 +157,47 @@ protected:
              << R"("type": "float64"}]})" << "\n";
     }
 
-    // The large tag set: scada-tagd; `load` with LOAD_OWNERS owner threads
-    // `load.w<k>`, each with LOAD_TAGS_PER_OWNER tags `load.w<k>.t<i>` of
-    // type UINT64; and `reader` without tags.
-    void write_load_tag_set() const {
-        const std::string uid = std::to_string(::geteuid());
+    // The tag set of the simulation `layout` (scada-sim, issue P1-10):
+    // scada-tagd, the simulator processes of the layout and `reader`
+    // without tags, all running as the user of the test.
+    void write_sim_tag_set(const scada::sim::Layout& layout) const {
+        scada::sim::TagSetOptions options;
+        options.layout = layout;
+        options.uid = ::geteuid();
+        options.tagd_uid = ::geteuid();
+        options.readers = {"reader"};
+        std::string detail;
+        const Result<scada::tag::TagSet> tag_set =
+            scada::sim::make_tag_set(options, detail);
+        if (!tag_set.ok()) {
+            ADD_FAILURE() << "no tag set: " << detail;
+            return;
+        }
         std::ofstream file(tag_set_path());
-        file << R"({"format": 1, "processes": [{"name": "tagd", "uid": )" << uid
-             << R"(}, {"name": "load", "uid": )" << uid
-             << R"(}, {"name": "reader", "uid": )" << uid
-             << R"(}], "queues": [], "owners": [)";
-        for (std::size_t owner = 0; owner < LOAD_OWNERS; ++owner) {
-            file << (owner == 0 ? "" : ", ") << R"({"name": "load.w)" << owner
-                 << R"(", "process": "load", "change_ring_capacity": )"
-                 << LOAD_RING_CAPACITY << "}";
+        file << scada::sim::tag_set_json(tag_set.value());
+    }
+
+    // The large tag set: the simulation `load_layout()`.
+    void write_load_tag_set() const { write_sim_tag_set(load_layout()); }
+
+    // Starts the simulator process `instance` of `layout` with the options
+    // `extra` of `scada-sim run`, and waits until it has attached. Nothing,
+    // with a failed expectation, if it did not attach.
+    [[nodiscard]] std::optional<ChildProcess> start_sim(
+        const scada::sim::Layout& layout, const std::vector<std::string>& extra,
+        std::uint32_t instance = 0) const {
+        std::vector<std::string> arguments = sim_arguments("run", layout);
+        arguments.insert(arguments.end(),
+                         {"--instance", std::to_string(instance), "--base-dir",
+                          base(), "--tagd-uid", std::to_string(::geteuid())});
+        arguments.insert(arguments.end(), extra.begin(), extra.end());
+        std::optional<ChildProcess> sim =
+            start_helper("SCADA_SIM_COMMAND", arguments);
+        if (sim.has_value() && !sim->wait_for_output(attached, WAIT_LIMIT)) {
+            ADD_FAILURE() << "scada-sim did not attach: " << sim->err();
+            return std::nullopt;
         }
-        file << R"(], "tags": [)";
-        for (std::size_t owner = 0; owner < LOAD_OWNERS; ++owner) {
-            for (std::size_t tag = 0; tag < LOAD_TAGS_PER_OWNER; ++tag) {
-                file << (owner + tag == 0 ? "" : ",\n") << R"({"name": "load.w)"
-                     << owner << ".t" << tag << R"(", "owner": "load.w)"
-                     << owner << R"(", "type": "uint64"})";
-            }
-        }
-        file << "]}\n";
+        return sim;
     }
 
     // Starts scada-tagd on the tag set written before and waits until it

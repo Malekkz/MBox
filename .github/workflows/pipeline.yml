@@ -65,6 +65,13 @@ jobs:
           SCADA_PERF_REPORT_ONLY: "1"
         run: ctest --test-dir build/release -R '^scada-tag-wake-perf-test$' -V
 
+      # Issue P1-10: the simulator writer sustains 50,000 updates per second
+      # across 10 owners, as threads of one process and as 10 processes
+      # (decision D-38). Checked, not only reported: the figure is a count
+      # of updates over 10 s with a tolerance of 5 percent, not a latency.
+      - name: Simulator rate (release)
+        run: ctest --test-dir build/release -R '^scada-sim-rate-perf-test$' -V
+
       - name: Staged install tree
         run: cmake --install build/release --prefix stage
       - uses: actions/upload-artifact@v6

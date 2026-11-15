@@ -578,7 +578,7 @@ ctest --preset perf -R scada-tag-wake-perf-test
   process.
 - `scada-tag-change-ring-integration-test` (in `tests/integration/`) runs
   conformance tests 7 (the ring), 13 and 24 with a writer process, which
-  `scada-tag-test-writer` plays with the argument `notify`.
+  `scada-sim` (`libs/scada-sim`) plays with `--notify each`.
 - `scada-tag-wake-perf-test` (in `tests/perf/`) measures the time from a
   write in another process to the return of a blocked `scada_sub_next`. It
   fails on x86-64 if the 99th percentile is 1 ms or more, and prints the
@@ -600,8 +600,10 @@ ctest --preset perf -R scada-tag-wake-perf-test
   library. It exists only in a native build without a sanitizer.
 - `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
   one-thread check of contract 13.2 with a real process.
-- `scada-tag-test-writer` (in `tests/writer/`) is the writing side of the
-  load tests: one process with one thread for each owner.
+- The writing side of the load tests is `scada-sim` (`libs/scada-sim`):
+  one process with one thread for each owner, writing CHECK values.
+  `scada-tag-test-writer` (in `tests/writer/`) only writes a tag from two
+  threads, for the test of the one-thread check.
 - Conformance test 4, the model check of the sequence lock, is not
   automated yet.
 - `header_region_fuzz` (in `fuzz/`) feeds the reader of the `header` region
