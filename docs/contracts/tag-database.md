@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.11 (draft) |
+| Contract version | 0.14 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -649,8 +649,9 @@ A command is never executed twice and never executed late:
   expire. `scada_queue_next` never blocks or fails on the answer queue.
 
 A record is outside input to the consumer. One that fails the checks of
-section 9.4 is passed over with `SCADA_E_LAYOUT`. A cursor and `write_seq`
-out of range are reported with `SCADA_E_LAYOUT` and nothing is consumed;
+section 9.4 is passed over with `SCADA_E_LAYOUT`; a request passed over,
+when taken or by the drain at attach, is not answered, and its requester sees
+it expire. A cursor and `write_seq` out of range are reported with `SCADA_E_LAYOUT` and nothing is consumed;
 the producer gets `SCADA_E_PEER_DOWN` (section 9.1). The queue then stays
 stopped until the next generation; each look is counted. A consumer that
 finds the queue's file replaced, removed or shrunk inside the generation
@@ -720,7 +721,7 @@ struct WriteRequest {            // 64 bytes, queues of kind CMD
   uint8_t  value_type;           // TagType
   uint8_t  reserved0;
   uint64_t value;
-  uint32_t user_id;              // 0 for AUTO and REMOTE
+  uint32_t user_id;              // the user for OPERATOR, not 0; 0 for AUTO and REMOTE
   uint32_t reserved1;
   int64_t  expiry_mono_ns;       // the driver must not execute after this
   int64_t  posted_mono_ns;
@@ -741,6 +742,19 @@ struct WriteResult {             // 32 bytes, queues of kind RESULT
 
 String values cannot be commanded through `WriteRequest` in layout version 1.
 
+`WriteRequest.user_id` 0 means "no user". An OPERATOR request carries the
+user whose command it is (reference 8.2, step 1, and 13.4), so it is never 0;
+AUTO and REMOTE requests come from control logic and carry none. A non-zero
+`user_id` is opaque to the library and to drivers; which ids exist is
+defined with authentication, and how a master's user is named on a slave
+with the link (D-44). The audit identity (user, and on a slave the master
+node and the master's user) is in the payload of the event record that
+`scada-cmd` writes before it posts the request (reference 8.2, step 8); "no
+audit, no action" (section 9.3) rests on that record, not on this field. The
+check on `user_id` guards against a poster's bug and is not authentication:
+a producer maps its region read-write, so only the check when the request
+is taken binds a poster that writes its region directly.
+
 `EventRecord.kind`: 1 ALARM, 2 COMMAND, 3 AUDIT, 4 SYSTEM. The library sets
 `EventRecord.seq`, `WriteRequest.request_id` and `WriteRequest.posted_mono_ns`
 (the time of the post) at post; the poster sets the rest. That
@@ -754,10 +768,10 @@ Checks of a record, made at post (`SCADA_E_INVALID`) and when it is taken:
 - Event: a kind above, `payload_len` at most 232.
 - Request: `operation` and `source` of their enumerations; `value_type` BOOL,
   INT64, UINT64 or FLOAT64, or 0 with `value` 0 for CANCEL and READ_NOW; a
-  BOOL value 0 or 1; `user_id` 0 for AUTO and REMOTE; `select_request_id`
-  not 0 exactly for OPERATE and CANCEL; at post, not expired and a lifetime
-  within the limit, by the rule of section 9.2. The target handle is the
-  driver's to judge.
+  BOOL value 0 or 1; `user_id` not 0 for OPERATOR and 0 for AUTO and
+  REMOTE; `select_request_id` not 0 exactly for OPERATE and CANCEL; at
+  post, not expired and a lifetime within the limit, by the rule of section
+  9.2. The target handle is the driver's to judge.
 - Result: `status` 1 to 7.
 - When taken, the id of an event or request equals its position
   (`seq`, or `request_id = (queue_id << 48) | position`). A `cmd` queue
@@ -872,7 +886,7 @@ for readers and never down for a check. `starts` counts it:
   WARNING when an unseen life is in it, else a NOTICE. It is not rate
   limited: the service manager's restart limit bounds it.
 - `starts` is for diagnosis only and is a lower bound: a life of a library
-  before 0.11 does not count itself. It is never used to judge liveness
+  before 0.14 does not count itself. It is never used to judge liveness
   and never limits restarts; the service manager's restart limit stays the
   only one.
 
@@ -1463,15 +1477,22 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
-| 0.11 | 2026-11-15 | Issue #61 (D-44). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
+| 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
+| 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 
-Migration, 0.10 to 0.11: none for data. The layout version stays 1: `starts`
+Migration, 0.13 to 0.14: none for data. The layout version stays 1: `starts`
 takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay
-reserved, and the size stays 64. A region written by a 0.10 library holds 0
-there and a life of a 0.10 library leaves the count unchanged, which reads as
-"no restart recorded"; a 0.10 `scada-tagd` ignores it. The log record
+reserved, and the size stays 64. A region written by a library before 0.14 holds 0
+there and a life of such a library leaves the count unchanged, which reads as
+"no restart recorded"; a `scada-tagd` before 0.14 ignores it. The log record
 `heartbeat late` gives the time as `LAST_LATE_MONO_US` (µs) in place of
 `LAST_LATE_MONO_NS`; the shared-memory field `last_late_mono_ns` stays in ns.
+
+Migration, 0.10 to 0.11: none for data; the layout version stays 1 and no
+structure in shared memory changed. A poster of OPERATOR requests must set
+`user_id` to the commanding user: an OPERATOR request with `user_id` 0, which
+0.10 accepted, is refused at post with `SCADA_E_INVALID` and passed over
+with `SCADA_E_LAYOUT` when taken.
 
 Migration, 0.9 to 0.10: none for data; the layout version stays 1 and no
 structure in shared memory changed. The queue functions are new; nothing

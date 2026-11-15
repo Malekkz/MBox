@@ -1,4 +1,4 @@
-// Unit tests for the log records of the liveness check (issue #61, D-44):
+// Unit tests for the log records of the liveness check (issue #61, D-47):
 // each record kind reaches the journal's native protocol with its fixed
 // MESSAGE_ID and its fields. A datagram socket stands in for the journal.
 

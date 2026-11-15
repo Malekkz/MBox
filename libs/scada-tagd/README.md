@@ -47,7 +47,7 @@ the standard error stream.
 ### Message IDs
 
 The liveness records carry a fixed journald `MESSAGE_ID` as their last field
-(decision D-44), so that they can be found without matching the text:
+(decision D-47), so that they can be found without matching the text:
 
 | Message | `MESSAGE_ID` |
 | --- | --- |
@@ -80,8 +80,8 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.11, sections 3, 10
-  and 11.1; decisions D-27, D-36 and D-44 in `docs/decisions.md`.
+- Contract: `docs/contracts/tag-database.md`, version 0.14, sections 3, 10
+  and 11.1; decisions D-27, D-36 and D-47 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),

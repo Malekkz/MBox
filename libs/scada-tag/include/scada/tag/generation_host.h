@@ -76,7 +76,7 @@ struct LateHeartbeats {
 // the `starts` count of its `proc` region (section 10.1). A process that
 // restarts into its reused region between two checks is otherwise not seen
 // by them. For diagnosis only. The figures are input: the process writes
-// them, and a life of a library before contract 0.11 counts nothing, so
+// them, and a life of a library before contract 0.14 counts nothing, so
 // they are a lower bound.
 struct Restarts {
     std::string process;

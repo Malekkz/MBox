@@ -465,7 +465,7 @@ OwnProcRegion start_life(OwnProcRegion region, std::int64_t now) {
     return region;
 }
 
-// Issue #61 (D-44): a process that restarts into its reused region between
+// Issue #61 (D-47): a process that restarts into its reused region between
 // two checks is never seen down by them. The count of lives reports it.
 TEST_F(Host, ARestartBetweenTwoChecksIsReported) {
     const std::unique_ptr<GenerationHost> host = started();
@@ -555,7 +555,7 @@ TEST_F(Host, LivesFoundAtStartAreABaseline) {
     EXPECT_TRUE(host->check(START_NS).restarts.empty());
 }
 
-// A life of a library before contract 0.11 does not count itself; the
+// A life of a library before contract 0.14 does not count itself; the
 // count is a lower bound, and an unchanged count reports nothing.
 TEST_F(Host, ALifeThatDoesNotCountItselfIsNotReported) {
     const std::unique_ptr<GenerationHost> host = started();

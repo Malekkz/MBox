@@ -501,7 +501,7 @@ TEST_F(LateHeartbeat, AFirstHeartbeatReplacesATimeAheadOfIt) {
 // which shows a live process down to readers.
 //
 // This test needs at least two CPUs to fail with the old writer: on one
-// CPU the threads rarely interleave inside a heartbeat (issue #61, D-44).
+// CPU the threads rarely interleave inside a heartbeat (issue #61, D-47).
 // That a time not newer is never published is tested on one thread by
 // ATimeThatIsNotNewerIsNeitherPublishedNorCounted, whatever the CPUs; that
 // no count is lost rests on the read-modify-write `fetch_add`, which only
@@ -531,7 +531,7 @@ TEST_F(LateHeartbeat, HeartbeatsFromSeveralThreadsLoseNoCountAndNeverGoBack) {
     EXPECT_EQ(proc.late_beats, 0U);
 }
 
-// Issue #61 (D-44): `starts` counts the lives that reached RUNNING, is kept
+// Issue #61 (D-47): `starts` counts the lives that reached RUNNING, is kept
 // on a reused region, and is read only while the state is RUNNING.
 TEST_F(LateHeartbeat, StartsCountsLivesAndIsReadOnlyWhileRunning) {
     {

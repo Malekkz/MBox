@@ -494,7 +494,7 @@ struct WriteRequest {
     std::uint8_t value_type = 0;  // TagType
     std::uint8_t reserved0 = 0;
     std::uint64_t value = 0;
-    std::uint32_t user_id = 0;  // 0 for AUTO and REMOTE
+    std::uint32_t user_id = 0;  // the user for OPERATOR, 0 for AUTO and REMOTE
     std::uint32_t reserved1 = 0;
     std::int64_t expiry_mono_ns = 0;  // the driver must not execute after this
     std::int64_t posted_mono_ns = 0;

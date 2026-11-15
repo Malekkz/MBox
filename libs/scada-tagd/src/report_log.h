@@ -2,7 +2,7 @@
 #define SCADA_TAGD_REPORT_LOG_H
 
 // The log records of the liveness check of scada-tagd, each with a fixed
-// journald MESSAGE_ID (decision D-44, issue #61). Private to libscada-tagd;
+// journald MESSAGE_ID (decision D-47, issue #61). Private to libscada-tagd;
 // the IDs and fields are documented in its README.
 //
 // The IDs and fields are a provisional diagnostic input for the alarm
