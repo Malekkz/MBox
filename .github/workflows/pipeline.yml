@@ -143,7 +143,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Conformance test 4 (issue #39, decision D-34): herd7 checks the
+  # Conformance test 4 (issue #39, decision D-37): herd7 checks the
   # sequence lock and the change ring against the Armv8 memory model, as
   # written and with each ordering taken away. The check that the ARM64
   # library compiles to what the model describes is a test of the release

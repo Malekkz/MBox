@@ -640,7 +640,24 @@ Consequences:
 - `scada_sub_next` reads the owner's `proc` region and the monotonic clock at every look: two loads and one clock read from the vDSO.
 - Tests: `Changes.AnOwnerThatStopsGivesAGapAndAnotherWhenItIsBack`, `AChangeOfAnOwnerThatIsDownComesAsBad`, `AnOwnerDownAtOpenGivesNoGapUntilItComesUp`, `ABlockedConsumerLearnsThatTheOwnerStopped`, `AWaitSetWakesWhenTheOwnerStops`; across processes `ChangeRingProcesses.AKilledOwnerGivesAGapWithinItsHeartbeatTimeout`.
 
-## D-34: Conformance test 4: herd7 litmus tests of the sequence lock and the change ring, and a check that the ARM64 code matches them
+## D-34: The clock check compares with a raw system call; a heartbeat time in the future is bounded by the timeout
+Date: 2026-11-14
+Phase / issue: 1, #41
+Status: accepted for the code; the run on the target ARM64 board is still open
+
+Context: D-29 judged whether clock reads are system calls by the name of the clock source and a fixed limit of 200 ns for one read. The review of P1-06 (D-30) found that an ARM timer erratum workaround makes the vDSO fall back to the system call while the name stays `arch_sys_counter`, and that such a call can take under 200 ns on a fast core, while a slow core can take more than 200 ns in the vDSO. `proc_liveness` counted any heartbeat time ahead of the reader's clock as alive. The issue leaves open how much faster than the system call a read must be, and how far ahead a heartbeat time may lie.
+Options, the time signal: a fixed limit, as before; a ratio to the time of a raw `clock_gettime` system call, timed on the same machine at the same moment. Options, the ratio: 1 (any speedup); 2; a larger factor. Options, the bound for a time in the future: a new constant; the heartbeat timeout of the process; a fraction of it.
+Decision:
+- `clock_syscall` is 1 when the clock source name is not one the vDSO reads, or when one library read of `CLOCK_MONOTONIC` takes more than half the time of one raw `syscall(SYS_clock_gettime, CLOCK_MONOTONIC)` (`CLOCK_READ_SPEEDUP` = 2). Both are the mean of the fastest of 4 batches; 256 reads per batch for the library, 64 for the system call. The fixed limit of 200 ns is gone. An empty name decides nothing, as before; a refused system call (a seccomp filter) leaves only the name to decide.
+- A heartbeat time more than `heartbeat_timeout_ms` ahead of the reader's clock is down (`heartbeat stale`), in the library and in `scada-tagd` alike; exactly the timeout ahead is not. Contract 0.6 says so in section 10.1, and section 3.4 forbids a private time namespace.
+Reason: a vDSO that falls back to the system call does the call and more, so it is never faster than the raw call, while a real vDSO read is several times faster on every core: the ratio holds on slow and fast cores where a fixed limit does not. A factor of 2 leaves room for noise in either direction. Measured on x86-64 here (virtual machine, `tsc`, 4 processors): library read 36 ns to 44 ns, raw system call 163 ns to 170 ns, a factor of about 4.5. A heartbeat can lie ahead of a reader's clock only by the time the reader spends between reading its clock and the heartbeat, which is microseconds; the timeout is the bound that needs no new setting, and a reader delayed longer than it sees the process down for a moment, which is the safe direction.
+Consequences:
+- The check takes about 0.1 ms, under 1 ms on the supported targets, at attach and once a minute, from `scada_tag_status` and `scada_tag_notify`. A real-time task that calls `scada_tag_notify` at the end of a cycle therefore spends about 0.1 ms in it once a minute, against a few tens of microseconds before.
+- Not done in this pull request, so issue #41 stays open: running the check and conformance test 22 on the target ARM64 board, and on a machine booted with the vDSO clock disabled, and recording the figures here. The pipeline's ARM64 runner is a virtual machine. The unit test `ClockCheck.ASystemCallTimedAgainstItselfIsOne` stands in for the second: it times the raw system call against itself, which is what such a machine measures.
+- In the ThreadSanitizer build the C library clock read is intercepted and takes about 100 ns against about 195 ns for the raw system call, at the limit, so the check can give 1 there and differ between two attachments. The unit test `TagAccess.TheStatusReportsTheClockCheck` therefore checks that one attachment reports the same result twice, not that two attachments agree. Conformance test 22, which expects 0, runs only in a native build without a sanitizer (D-29).
+- New suppression: `cppcoreguidelines-pro-type-vararg` once in `clock_check.cpp`, for `syscall`.
+
+## D-37: Conformance test 4: herd7 litmus tests of the sequence lock and the change ring, and a check that the ARM64 code matches them
 Date: 2026-11-14
 Phase / issue: 1, #39
 Status: proposed (the allow-list change needs review by a person, D-21)

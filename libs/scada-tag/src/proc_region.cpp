@@ -174,16 +174,20 @@ DownReason proc_liveness(std::span<std::byte> region,
     }
     const std::int64_t beat =
         load_shared(proc.heartbeat_mono_ns, std::memory_order_acquire);
-    if (beat >= now_mono_ns) {
-        return DownReason::NONE;  // written after `now` was read
-    }
-    // Unsigned, so that a nonsense value cannot overflow: the difference of
-    // two 64-bit values with beat < now fits 64 bits.
-    const std::uint64_t age = static_cast<std::uint64_t>(now_mono_ns) -
-                              static_cast<std::uint64_t>(beat);
     const std::uint64_t timeout =
         std::uint64_t{heartbeat_timeout_ms} * NANOSECONDS_PER_MILLISECOND;
-    return age > timeout ? DownReason::HEARTBEAT_STALE : DownReason::NONE;
+    // A heartbeat newer than `now` was written after `now` was read, which
+    // is fresh, but only by as much as the reader can be delayed between
+    // reading its clock and the heartbeat. One further ahead than the
+    // timeout comes from a corrupt region or another clock, and must not
+    // keep a dead process alive. Unsigned, so that a nonsense value cannot
+    // overflow: the difference of two 64-bit values fits 64 bits.
+    const std::uint64_t distance =
+        beat >= now_mono_ns ? static_cast<std::uint64_t>(beat) -
+                                  static_cast<std::uint64_t>(now_mono_ns)
+                            : static_cast<std::uint64_t>(now_mono_ns) -
+                                  static_cast<std::uint64_t>(beat);
+    return distance > timeout ? DownReason::HEARTBEAT_STALE : DownReason::NONE;
 }
 
 }  // namespace scada::tag

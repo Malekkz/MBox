@@ -13,7 +13,7 @@ inputs:
   herd7:
     description: >
       "true" also builds herd7 of herdtools7 from source, for the model check
-      (tests/model/README.md, decision D-34).
+      (tests/model/README.md, decision D-37).
     default: "false"
 
 runs:

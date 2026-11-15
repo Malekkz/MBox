@@ -2,7 +2,7 @@
 
 Conformance test 4 of the tag database contract: the sequence lock
 (sections 6.1, 6.2 and 7) and the change ring (sections 8.1 and 8.2) checked
-against the Armv8 memory model. Decision: `docs/decisions.md`, D-34.
+against the Armv8 memory model. Decision: `docs/decisions.md`, D-37.
 
 x86-64 hides ordering mistakes, the ThreadSanitizer build leaves the fences
 out, and the tests with derived values only sample. This directory checks

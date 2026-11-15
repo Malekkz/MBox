@@ -277,8 +277,12 @@ TEST_F(ProcRegion, ProbeAppliesTheLivenessRulesInOrder) {
     EXPECT_EQ(observe(probe, START_NS + TIMEOUT_NS), DownReason::NONE);
     EXPECT_EQ(observe(probe, START_NS + TIMEOUT_NS + 1),
               DownReason::HEARTBEAT_STALE);
-    // A heartbeat written after the checker read its clock is fresh.
+    // A heartbeat written after the checker read its clock is fresh, up to
+    // the timeout ahead of the checker's clock.
     EXPECT_EQ(observe(probe, START_NS - 1), DownReason::NONE);
+    EXPECT_EQ(observe(probe, START_NS - TIMEOUT_NS), DownReason::NONE);
+    EXPECT_EQ(observe(probe, START_NS - TIMEOUT_NS - 1),
+              DownReason::HEARTBEAT_STALE);
 
     region.value().heartbeat(START_NS + TIMEOUT_NS + 1);
     EXPECT_EQ(observe(probe, START_NS + TIMEOUT_NS + 1), DownReason::NONE);
@@ -299,8 +303,12 @@ TEST_F(ProcRegion, ProbeToleratesNonsenseInTheHeartbeatTime) {
     region.value().heartbeat(std::numeric_limits<std::int64_t>::min());
     EXPECT_EQ(observe(probe, std::numeric_limits<std::int64_t>::max()),
               DownReason::HEARTBEAT_STALE);
+    // A heartbeat time far in the future, from a corrupt region or another
+    // clock, does not keep the process alive.
     region.value().heartbeat(std::numeric_limits<std::int64_t>::max());
-    EXPECT_EQ(observe(probe, START_NS), DownReason::NONE);
+    EXPECT_EQ(observe(probe, START_NS), DownReason::HEARTBEAT_STALE);
+    EXPECT_EQ(observe(probe, std::numeric_limits<std::int64_t>::min()),
+              DownReason::HEARTBEAT_STALE);
 
     // A state that is no enumerator is not RUNNING.
     const OpenedRegion seen = open();

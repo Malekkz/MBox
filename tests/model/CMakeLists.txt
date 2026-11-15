@@ -1,7 +1,7 @@
 # Conformance test 4: the model check of the sequence lock and the change
 # ring for the Armv8 memory model, and the check that the ARM64 library
 # still compiles to what the model describes. See README.md in this
-# directory and docs/decisions.md, D-34.
+# directory and docs/decisions.md, D-37.
 #
 # The interpreter is named by its path, not by its imported target: these
 # are tools of the build machine, and CTest would run an imported target
