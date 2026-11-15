@@ -32,6 +32,14 @@ struct ProcRegionParameters {
     std::uint32_t uid = 0;        // user the process runs as
 };
 
+// What the owner of a `proc` region recorded about its late heartbeats
+// (section 10.1).
+struct LateBeats {
+    std::uint32_t count = 0;  // wraps modulo 2^32
+    std::int64_t longest_gap_ns = 0;
+    std::int64_t last_late_mono_ns = 0;
+};
+
 // The RegionIdentity of that region.
 [[nodiscard]] RegionIdentity proc_region_identity(
     const ProcRegionParameters& parameters) noexcept;
@@ -69,9 +77,26 @@ public:
     // True if `attach` found the region and reused it.
     [[nodiscard]] bool reused() const noexcept { return reused_; }
 
-    // Writes one heartbeat taken at `mono_ns` (CLOCK_MONOTONIC). Called
-    // from one thread: the process's own main loop or cycle (section 10.1).
+    // Sets the timeout a heartbeat gap is compared with to count a late
+    // heartbeat (section 10.1); 0, the start value, counts none. Call it
+    // before the first heartbeat, from the thread that attached.
+    void count_late_after(std::uint32_t heartbeat_timeout_ms) noexcept;
+
+    // Writes the first heartbeat of this life of the process, taken at
+    // `mono_ns` (CLOCK_MONOTONIC), whatever time the region held: the gap
+    // since a previous life is a restart, not a late heartbeat, and is not
+    // counted. Called once by attach, before the state is RUNNING.
     // Precondition: `valid()`.
+    void first_heartbeat(std::int64_t mono_ns) noexcept;
+
+    // Writes one heartbeat taken at `mono_ns` (CLOCK_MONOTONIC). Safe from
+    // several threads (contract 13.2): no count is lost, and the published
+    // time never goes back; a time not newer than the published one is not
+    // published. The thread that publishes a time owns the gap since the
+    // time before it: it updates the longest gap and, for a gap strictly
+    // longer than the timeout of `count_late_after`, counts a late
+    // heartbeat. Lock-free; a retry happens only when another thread of
+    // this process published meanwhile. Precondition: `valid()`.
     SCADA_RT void heartbeat(std::int64_t mono_ns) noexcept;
 
     // Brings the region into memory (see MappedRegion::prefault).
@@ -101,6 +126,8 @@ private:
     Fd file_;  // holds the lock
     MappedRegion memory_;
     bool reused_ = false;
+    // Written before the first heartbeat, read by heartbeats after it.
+    std::uint64_t late_after_ns_ = 0;
 };
 
 // Evaluates the second and third rule of section 10.1 on `region`, the
@@ -154,9 +181,24 @@ public:
                                      std::uint32_t heartbeat_timeout_ms,
                                      std::int64_t now_mono_ns);
 
+    // The late-heartbeat fields of the region `observe` mapped last, or
+    // nothing while it maps none.
+    [[nodiscard]] std::optional<LateBeats> late_beats() const noexcept;
+
+    // How many times `observe` has mapped a region: a new value means a
+    // new file, whose counts do not continue the old ones.
+    [[nodiscard]] std::uint64_t mappings() const noexcept { return mappings_; }
+
 private:
     std::optional<OpenedRegion> region_;
+    std::uint64_t mappings_ = 0;
 };
+
+// The late-heartbeat fields of `region`, the mapped `proc` region of a
+// process, or nothing if it is too small to be one. For diagnosis only
+// (section 10.1). The values are input: the owner writes them.
+[[nodiscard]] std::optional<LateBeats> late_beats_of(
+    std::span<std::byte> region) noexcept;
 
 }  // namespace scada::tag
 

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    { "name": "alpha", "version": "1.4.0", "licence": "CECILL-B", "scope": "build", "purpose": "x", "url": "https://example.invalid/alpha", "commit": "1ca343e16a2038e406d1ac674e7e3a1b722b36c7" }
+  ]
+}

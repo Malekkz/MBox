@@ -42,6 +42,7 @@ using scada::service::NotifySettings;
 using scada::tag::CheckReport;
 using scada::tag::DownReason;
 using scada::tag::GenerationHost;
+using scada::tag::LateHeartbeats;
 using scada::tag::ProcessChange;
 using scada::tag::SweptEntry;
 using scada::tag::TagSet;
@@ -202,18 +203,43 @@ Wake wait_for_signal(const sigset_t& signals,
     return Wake::STOP;
 }
 
-// Writes what one liveness check changed to the log. `quiet` is for the
-// first check of a new generation, when no process has attached yet.
-void log_report(Logger& logger, const CheckReport& report, bool quiet) {
+// Writes what one liveness check changed to the log.
+void log_report(Logger& logger, const CheckReport& report) {
     for (const ProcessChange& change : report.changes) {
         if (change.reason == DownReason::NONE) {
             logger.log(LogLevel::NOTICE, "process up",
                        {{"PROCESS", change.process}});
         } else {
-            logger.log(quiet ? LogLevel::INFO : LogLevel::WARNING,
-                       "process down",
+            logger.log(LogLevel::WARNING, "process down",
                        {{"PROCESS", change.process},
                         {"REASON", scada::tag::to_string(change.reason)}});
+        }
+    }
+    for (const LateHeartbeats& late : report.late) {
+        // A late heartbeat is a moment in which readers saw the process
+        // down (BAD with OWNER_DOWN, a gap on its rings), also when no
+        // check fell into it. WARNING also when a change of the same
+        // process was logged above: the gap length is only here. What the
+        // first look at a region finds is a baseline, logged at INFO.
+        // The texts live until the end of the iteration: a field borrows.
+        const std::string added = std::to_string(late.added);
+        const std::string total = std::to_string(late.total);
+        const std::string longest =
+            std::to_string(late.longest_gap_ns / NANOSECONDS_PER_MILLISECOND);
+        const std::string last = std::to_string(late.last_late_mono_ns);
+        const std::array<LogField, 5> fields{{
+            {"PROCESS", late.process},
+            {"LATE_BEATS", added},
+            {"LATE_BEATS_TOTAL", total},
+            {"LONGEST_GAP_MS", longest},
+            {"LAST_LATE_MONO_NS", last},
+        }};
+        if (late.baseline) {
+            // Counted before this scada-tagd looked; not new.
+            logger.log(LogLevel::INFO, "heartbeat late before this check",
+                       fields);
+        } else {
+            logger.log(LogLevel::WARNING, "heartbeat late", fields);
         }
     }
     for (const SweptEntry& entry : report.swept) {
@@ -266,7 +292,6 @@ int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
           Logger& logger) {
     const std::int64_t period = loop_period_ns(host, settings);
-    bool quiet = !host.reused();
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
     bool feeding = true;  // the last watchdog message was sent
     std::int64_t next_feed = monotonic_ns();
@@ -276,8 +301,7 @@ int serve(GenerationHost& host, Notifier& notifier,
         // The heartbeat, the check and the watchdog share this loop, so
         // that a hung loop stops all three (contract, sections 3.4, 10.1).
         host.heartbeat(now);
-        log_report(logger, host.check(now), quiet);
-        quiet = false;
+        log_report(logger, host.check(now));
         if (feed_period.has_value() && now >= next_feed) {
             const bool fed = notifier.watchdog().ok();
             if (!fed && feeding) {

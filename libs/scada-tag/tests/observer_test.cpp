@@ -471,6 +471,9 @@ TEST_F(Observer, ReportsAStoppedProcessBeforeScadaTagdDoes) {
     ASSERT_EQ(observe(observer), SCADA_OK);
     std::uint16_t index = 0;
     ASSERT_EQ(scada_proc_resolve(observer.get(), "io", &index), SCADA_OK);
+    // A new generation marks every process down until the first check
+    // (D-38); one check with `io` up clears the flag.
+    static_cast<void>(host().check(scada::monotonic_ns()));
     feeder.detach();
     scada_proc_status_t status{};
     ASSERT_EQ(scada_proc_status(observer.get(), index, &status), SCADA_OK);

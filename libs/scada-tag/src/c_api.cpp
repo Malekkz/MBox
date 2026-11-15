@@ -358,10 +358,11 @@ SCADA_RT int scada_tag_write_many(scada_ctx* ctx, const uint32_t* handles,
 
 int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
                           size_t cap, size_t* len, scada_value* meta) {
-    if (ctx == nullptr || buf == nullptr || len == nullptr) {
+    if (ctx == nullptr || (buf == nullptr && cap != 0) || len == nullptr) {
         return SCADA_E_INVALID;
     }
-    // The caller states that `buf` holds `cap` bytes.
+    // The caller states that `buf` holds `cap` bytes. A null `buf` with
+    // `cap` 0 asks for the length alone and stays a null span.
     return ctx->attachment->read_string(handle, std::span<char>(buf, cap), *len,
                                         meta);
 }

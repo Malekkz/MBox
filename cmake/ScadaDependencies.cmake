@@ -12,7 +12,7 @@ include_guard(GLOBAL)
 set(SCADA_PLATFORM_LINK_NAMES Threads::Threads pthread m dl rt atomic)
 
 set(_SCADA_DEPENDENCY_KEYS
-  name version licence scope purpose url link_names purl)
+  name version licence scope purpose url link_names purl commit)
 set(_SCADA_DEPENDENCY_REQUIRED_KEYS name version licence scope purpose url)
 set(_SCADA_DEPENDENCY_SCOPES product build test)
 
@@ -92,6 +92,8 @@ endfunction()
 # Call once, from the top-level CMakeLists.txt, before any target is created.
 # Stops the configuration if
 #   - an entry of LIST is malformed or its licence is not in ALLOWLIST,
+#   - an entry's licence is limited to some scopes in ALLOWLIST
+#     ("licence_scopes") and the entry has another scope,
 #   - a directory next to LIST (vendored code) is not named after an entry,
 #   - at the end of the configuration, a target of this project links
 #     something that is neither a target of this project, nor a link name of
@@ -123,6 +125,45 @@ function(scada_dependencies)
   _scada_read_json_file(allowlist_json "${arg_ALLOWLIST}")
   _scada_json_string_array(allowed_licences "${allowlist_json}"
     allowed_licences "allow-list" problems)
+
+  # Optional "licence_scopes": a licence allowed for some scopes only, as
+  # {"<licence>": ["build", "test"]}. A licence not named there is allowed
+  # for every scope.
+  set(limited_licences "")
+  string(JSON type ERROR_VARIABLE error TYPE "${allowlist_json}"
+    licence_scopes)
+  if(NOT error)
+    if(NOT type STREQUAL "OBJECT")
+      list(APPEND problems "allow-list: \"licence_scopes\" must be an object")
+    else()
+      string(JSON limit_count LENGTH "${allowlist_json}" licence_scopes)
+      if(limit_count GREATER 0)
+        math(EXPR limit_last "${limit_count} - 1")
+        foreach(limit_index RANGE ${limit_last})
+          string(JSON limited MEMBER "${allowlist_json}" licence_scopes
+            ${limit_index})
+          string(JSON limit_json GET "${allowlist_json}" licence_scopes)
+          set(where "allow-list: \"licence_scopes\" of '${limited}'")
+          _scada_json_string_array(scopes "${limit_json}" "${limited}"
+            "${where}" problems)
+          if(NOT limited IN_LIST allowed_licences)
+            list(APPEND problems "${where}: the licence is not allowed")
+          endif()
+          if(NOT scopes)
+            list(APPEND problems "${where}: names no scope")
+          endif()
+          foreach(scope IN LISTS scopes)
+            if(NOT scope IN_LIST _SCADA_DEPENDENCY_SCOPES)
+              list(APPEND problems
+                "${where}: scope '${scope}' must be product, build or test")
+            endif()
+          endforeach()
+          list(APPEND limited_licences "${limited}")
+          set(scopes_of_${limited} "${scopes}")
+        endforeach()
+      endif()
+    endif()
+  endif()
 
   _scada_read_json_file(list_json "${arg_LIST}")
   string(JSON type ERROR_VARIABLE error TYPE "${list_json}" dependencies)
@@ -205,6 +246,19 @@ function(scada_dependencies)
       if(NOT field_licence IN_LIST allowed_licences)
         list(APPEND problems
           "${where}: licence '${field_licence}' is not on the allow-list")
+      elseif(field_licence IN_LIST limited_licences
+             AND NOT field_scope IN_LIST scopes_of_${field_licence})
+        list(JOIN scopes_of_${field_licence} ", " scopes_text)
+        list(APPEND problems
+          "${where}: licence '${field_licence}' is allowed for scope ${scopes_text} only, not '${field_scope}'")
+      endif()
+      if(DEFINED field_commit)
+        # CMake regular expressions have no {n}: the length is checked apart.
+        string(LENGTH "${field_commit}" commit_length)
+        if(NOT field_commit MATCHES "^[0-9a-f]+$" OR NOT commit_length EQUAL 40)
+          list(APPEND problems
+            "${where}: the commit must be 40 hexadecimal characters in lower case")
+        endif()
       endif()
       list(APPEND names "${field_name}")
       set_property(GLOBAL PROPERTY
@@ -264,7 +318,16 @@ function(scada_dependencies)
   endif()
 
   # Licence report.
-  list(JOIN allowed_licences ", " allowed_text)
+  set(allowed_text_items "")
+  foreach(licence IN LISTS allowed_licences)
+    if(licence IN_LIST limited_licences)
+      list(JOIN scopes_of_${licence} " and " scopes_text)
+      list(APPEND allowed_text_items "${licence} (scope ${scopes_text} only)")
+    else()
+      list(APPEND allowed_text_items "${licence}")
+    endif()
+  endforeach()
+  list(JOIN allowed_text_items ", " allowed_text)
   set(report "# Licence report\n\n")
   string(APPEND report
     "Project: ${PROJECT_NAME} ${PROJECT_VERSION}\n\n"

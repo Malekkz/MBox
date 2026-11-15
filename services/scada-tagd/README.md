@@ -68,6 +68,8 @@ writes its heartbeat. The
   `SIGKILL` is logged as down (`heartbeat stale`) and, restarted, as up;
 - conformance test 6, the part of `scada-tagd`: a process that stops cleanly
   is logged as down (`not running`);
+- a heartbeat that comes later than the timeout is logged as
+  `heartbeat late` (issue #42, D-36);
 - conformance test 20: after a restart with the same tag set the generation
   is reused, no file is replaced, and the helper is never logged as down;
 - attach with real processes: a process creates its regions with mode
