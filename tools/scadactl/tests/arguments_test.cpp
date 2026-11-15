@@ -150,7 +150,8 @@ TEST(Arguments, DetailDoesNotEchoControlCharacters) {
 TEST(Arguments, UsageNamesEveryCommandAndOption) {
     for (const std::string_view word :
          {"status", "tag list", "tag get", "tag watch", "--json", "--count",
-          "--base-dir", "--tagd-uid", "--help", "Exit codes"}) {
+          "--base-dir", "--tagd-uid", "--help", "Exit codes", "unaudited",
+          "group scada"}) {
         EXPECT_NE(USAGE.find(word), std::string_view::npos) << word;
     }
 }
