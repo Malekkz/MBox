@@ -9,6 +9,8 @@
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/test/child_process.h"
 
@@ -50,7 +52,7 @@ constexpr std::uint64_t REFERENCE_RATE = 50'000;
 // otherwise, and the longest it may be asked to run.
 constexpr std::uint64_t DEFAULT_LOAD_SECONDS = 3;
 constexpr std::uint64_t MAX_LOAD_SECONDS = 3600;
-// The rate the writer must reach, in percent of the rate asked for.
+// The rate the simulator must reach, in percent of the rate asked for.
 constexpr std::uint64_t RATE_PERCENT = 95;
 constexpr std::uint64_t PERCENT = 100;
 constexpr std::uint64_t MILLISECONDS_PER_SECOND = 1000;
@@ -59,12 +61,6 @@ constexpr std::uint64_t MAX_RATE_ROUNDS = 40;
 constexpr std::size_t READER_THREADS = 4;
 // Tags one reader reads with one call (section 15, test 27).
 constexpr std::size_t READ_BATCH = 500;
-
-// The fields the writer derives from the write count of a tag; see
-// writer_main.cpp.
-constexpr std::int64_t BASE_SOURCE_TIME = 1'700'000'000'000'000'000;
-constexpr std::uint64_t FLAGS_MASK = 0x0FDF;
-constexpr std::uint64_t QUALITIES = 3;
 
 // Reads the tag `handle` until it reads as BAD with OWNER_DOWN, and
 // returns that value; nothing if `limit` passes first.
@@ -124,20 +120,10 @@ struct ReaderCounts {
     std::uint64_t passes = 0;     // times it read every tag
 };
 
-// True if the fields of `value` belong to one write of the writer.
+// True if the fields of `value` belong to one write of the simulator, or
+// the tag was never written.
 bool is_one_write(const scada_value& value) {
-    const std::uint64_t count = value.value;
-    if (count == 0) {
-        // Not written yet: as attach left it.
-        return value.quality == SCADA_QUALITY_BAD &&
-               value.quality_flags == SCADA_FLAG_NOT_INIT;
-    }
-    return value.type == SCADA_TYPE_UINT64 &&
-           value.quality == count % QUALITIES &&
-           value.quality_flags == (count & FLAGS_MASK) &&
-           value.source_time_ns ==
-               BASE_SOURCE_TIME + static_cast<std::int64_t>(count) &&
-           value.change_count == count;
+    return scada::sim::is_check_value(value);
 }
 
 // Judges one read of a tag whose value was `last` at the read before, and
@@ -264,21 +250,22 @@ protected:
         const Attached& reader) {
         std::vector<std::uint32_t> handles;
         handles.reserve(LOAD_OWNERS * LOAD_TAGS_PER_OWNER);
-        for (std::size_t owner = 0; owner < LOAD_OWNERS; ++owner) {
-            for (std::size_t tag = 0; tag < LOAD_TAGS_PER_OWNER; ++tag) {
-                handles.push_back(reader.resolve("load.w" +
-                                                 std::to_string(owner) + ".t" +
-                                                 std::to_string(tag)));
+        const scada::sim::Layout layout = load_layout();
+        for (std::uint32_t owner = 0; owner < layout.owners; ++owner) {
+            for (std::uint64_t tag = 0;
+                 tag < scada::sim::tags_of_owner(layout, owner); ++tag) {
+                handles.push_back(
+                    reader.resolve(scada::sim::tag_name(layout, owner, tag)));
             }
         }
         return handles;
     }
 
-    // Runs the writer with `per_second` updates per second (0: as fast as
-    // it can) until it has written `rounds` updates of every tag, with
-    // READER_THREADS readers in this process, and checks that no reader
-    // saw a torn record. Returns the time the writer took in ms; nothing
-    // if something failed before the end.
+    // Runs scada-sim on the large tag set with `per_second` updates per
+    // second (0: as fast as it can) until it has written every tag `rounds`
+    // times, with READER_THREADS readers in this process, and checks that
+    // no reader saw a torn record. Returns the time the simulator took in
+    // ms; nothing if something failed before the end.
     [[nodiscard]] std::optional<std::uint64_t> run_load(
         std::uint64_t per_second, std::uint64_t rounds,
         std::chrono::seconds limit) {
@@ -287,19 +274,13 @@ protected:
         if (!tagd.has_value()) {
             return std::nullopt;
         }
-        const std::uint64_t updates =
-            rounds * LOAD_OWNERS * LOAD_TAGS_PER_OWNER;
         std::optional<ChildProcess> writer =
-            start_helper("SCADA_TAG_WRITER_COMMAND",
-                         {base(), "load", std::to_string(LOAD_OWNERS),
-                          std::to_string(LOAD_TAGS_PER_OWNER),
-                          std::to_string(per_second), std::to_string(updates)});
-        if (!writer.has_value() ||
-            !writer->wait_for_output(attached, WAIT_LIMIT)) {
-            ADD_FAILURE() << "the writer did not attach";
+            start_sim(load_layout(), {"--rate", std::to_string(per_second),
+                                      "--rounds", std::to_string(rounds)});
+        if (!writer.has_value()) {
             return std::nullopt;
         }
-        // After the writer attached: its regions are there to be mapped.
+        // After the simulator attached: its regions are there to be mapped.
         const Attached reader(base(), "reader");
         const std::vector<std::uint32_t> handles = load_handles(reader);
 
@@ -441,7 +422,7 @@ TEST_F(TagAccessProcesses, Conformance02ReferenceLoadWithFourReaders) {
     const std::optional<std::uint64_t> elapsed_ms =
         run_load(REFERENCE_RATE, seconds, limit);
     if (!elapsed_ms.has_value() || *elapsed_ms == 0) {
-        FAIL() << "the writer did not report its time";
+        FAIL() << "the simulator did not report its time";
     }
     const std::uint64_t updates = seconds * REFERENCE_RATE;
     const std::uint64_t per_second =
@@ -452,7 +433,7 @@ TEST_F(TagAccessProcesses, Conformance02ReferenceLoadWithFourReaders) {
         << updates << " updates in " << *elapsed_ms << " ms";
 }
 
-// Conformance test 3 with real processes: the writer at its maximum rate.
+// Conformance test 3 with real processes: the simulator at its maximum rate.
 TEST_F(TagAccessProcesses, Conformance03MaximumWriteRateWithFourReaders) {
     const std::optional<std::uint64_t> elapsed_ms =
         run_load(0, MAX_RATE_ROUNDS, WAIT_LIMIT * 4);
@@ -489,9 +470,7 @@ TEST_F(TagAccessProcesses, ASecondWritingThreadStopsADebugBuild) {
         return;
     }
     std::optional<ChildProcess> writer = start_helper(
-        "SCADA_TAG_WRITER_COMMAND",
-        {base(), "load", std::to_string(LOAD_OWNERS),
-         std::to_string(LOAD_TAGS_PER_OWNER), "0", "0", "second-thread"});
+        "SCADA_TAG_WRITER_COMMAND", {base(), "load", "load.w0.t0"});
     if (!writer.has_value()) {
         return;
     }

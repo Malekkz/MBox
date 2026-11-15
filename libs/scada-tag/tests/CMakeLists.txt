@@ -35,8 +35,9 @@ target_include_directories(scada-tag-test-peer
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 scada_target_defaults(scada-tag-test-peer)
 
-# The writing side of conformance tests 2 and 3: one process with several
-# owner threads that write derived values at a given rate. Not installed.
+# Writes a tag from two threads, which contract 13.2 forbids, for the test
+# of the check in a debug build. Writing at a rate is scada-sim's job
+# (libs/scada-sim). Not installed.
 add_executable(scada-tag-test-writer writer/writer_main.cpp)
 target_link_libraries(scada-tag-test-writer PRIVATE scada::tag)
 scada_target_defaults(scada-tag-test-writer)

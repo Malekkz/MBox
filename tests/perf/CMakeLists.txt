@@ -13,13 +13,25 @@ scada_add_test(scada-tag-header-perf-test KIND perf
 # process and this one. It uses the fixture of the integration tests, and
 # scada_test_command from their CMakeLists.txt.
 scada_test_command(tagd_command scada-tagd)
-scada_test_command(writer_command scada-tag-test-writer)
+scada_test_command(sim_command scada-sim)
 scada_add_test(scada-tag-wake-perf-test KIND perf
   SOURCES tag_wake_perf_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
-    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+    "SCADA_SIM_COMMAND=${sim_command}")
 target_include_directories(scada-tag-wake-perf-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
-add_dependencies(scada-tag-wake-perf-test scada-tagd scada-tag-test-writer)
+add_dependencies(scada-tag-wake-perf-test scada-tagd scada-sim)
+
+# The rate of the simulator writer (issue P1-10): 50,000 updates per second
+# across 10 owners, as threads of one process and as 10 processes.
+scada_add_test(scada-sim-rate-perf-test KIND perf
+  SOURCES sim_rate_perf_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}")
+target_include_directories(scada-sim-rate-perf-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
+add_dependencies(scada-sim-rate-perf-test scada-tagd scada-sim)
