@@ -15,7 +15,7 @@ number of `scadactl` may run beside the services.
 
 | Command | Shows |
 | --- | --- |
-| `status` | Generation and state, whether `scada-tagd` is up, whether reading the clocks is a system call, every process (state, liveness and its reason, heartbeat age, timeout, the `down` flag of `scada-tagd`, pid), every owner (process, tag count, `OWNER_DOWN`) |
+| `status` | Generation and state, whether `scada-tagd` is up, whether reading the clocks is a system call, every process (state, liveness and its reason, heartbeat age, timeout, the `down` flag of `scada-tagd`), every owner (process, tag count, `OWNER_DOWN`). No uid and no pid: they identify accounts and processes, and the output may reach readers who should not see them |
 | `tag list [<pattern>]` | Every matching tag in name order: type, value, quality, flags, age, owner |
 | `tag get <name>` | One tag, one field per line, with source and update times and change count |
 | `tag watch <pattern>` | The current value of every matching tag, then each change as its owner writes it, until SIGINT or SIGTERM (or `--count <n>` changes) |
@@ -34,6 +34,18 @@ Bad and stale values are marked in both forms:
 
 In `status`, a process or owner that is down starts with `!`.
 
+When `scada-tagd` is down its liveness check has stopped, so a value may be
+stale without a mark: `tag list` and `tag get` then start with `! scada-tagd
+down: values may be stale` and carry `"tagd_down": true` in JSON, and `tag
+watch` writes such a line (or `{"event":"tagd","down":...}`) when it goes
+down or comes back.
+
+Nothing read from a generation that was retired meanwhile is shown.
+`scadactl` calls `scada_tag_status` after it reads and before it shows
+anything (contract 11.4): `tag list` and `tag get` read again from the new
+generation, and `tag watch` drops what it held, observes again, prints a
+`generation` line and starts over.
+
 Text from shared memory is input: names and string values are escaped so
 that a terminal shows them and does nothing else (control characters,
 C1 controls and direction overrides become `\xNN` or `\uNNNN`), and so
@@ -42,10 +54,10 @@ that JSON stays valid (bytes that are not UTF-8 become U+FFFD).
 `tag watch` subscribes to the change ring of every owner of a matching tag
 before it reads the tags, so that nothing between the two is lost. After a
 gap it prints a `gap` line with the reason, reads that owner's tags again
-and drops any later change older than what it read (contract 8.3). It calls
-`scada_tag_status` about once a second and after every gap; when that
-reports a generation change it observes again, prints a `generation` line
-and starts over with the tags of the new generation.
+and drops any later change older than what it read (contract 8.3). It
+waits at most a second at a time and calls `scada_tag_status` before it
+shows what it took from the rings; on a generation change it closes its
+subscriptions, detaches, observes again and starts over.
 
 ## Who may run it
 

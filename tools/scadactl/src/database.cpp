@@ -204,14 +204,20 @@ StatusView Database::status_view() {
     view.status_code = scada_tag_status(ctx_, &view.status);
     for (std::uint16_t index = 0; index < view.status.process_count; ++index) {
         ProcessRow row;
-        // The first call gives the name, which maps the region.
-        if (scada_proc_status(ctx_, index, &row.status) != SCADA_OK) {
+        // A process not resolved yet gives SCADA_E_INVALID with its name
+        // from the process table; resolved by that name, which maps its
+        // region, it gives its state.
+        const int first = scada_proc_status(ctx_, index, &row.status);
+        if (first == SCADA_E_INVALID &&
+            row.status.down_reason == SCADA_DOWN_NOT_RESOLVED) {
+            std::uint16_t resolved = 0;
+            if (scada_proc_resolve(ctx_, std::data(row.status.name),
+                                   &resolved) == SCADA_OK) {
+                static_cast<void>(
+                    scada_proc_status(ctx_, resolved, &row.status));
+            }
+        } else if (first != SCADA_OK) {
             continue;
-        }
-        std::uint16_t resolved = 0;
-        if (scada_proc_resolve(ctx_, std::data(row.status.name), &resolved) ==
-            SCADA_OK) {
-            static_cast<void>(scada_proc_status(ctx_, resolved, &row.status));
         }
         view.processes.push_back(row);
     }

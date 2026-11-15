@@ -267,6 +267,8 @@ std::string_view down_reason_name(std::uint8_t reason) {
             return "not running";
         case SCADA_DOWN_HEARTBEAT_STALE:
             return "heartbeat stale";
+        case SCADA_DOWN_NOT_RESOLVED:
+            return "not resolved";
         default:
             return "unknown";
     }
@@ -298,10 +300,16 @@ void render_tag_json(std::string& out, const TagRow& row) {
     out.push_back('}');
 }
 
+void render_tagd_warning(std::string& out) {
+    out.append("! scada-tagd down: values may be stale\n");
+}
+
 void render_tag_list_json(std::string& out, std::uint64_t generation,
-                          std::span<const TagRow> rows) {
+                          bool tagd_down, std::span<const TagRow> rows) {
     out.push_back('{');
     append_json_number(out, "generation", generation);
+    out.push_back(',');
+    append_json_bool(out, "tagd_down", tagd_down);
     out.append(",\"tags\":[");
     bool first = true;
     for (const TagRow& row : rows) {
@@ -312,6 +320,14 @@ void render_tag_list_json(std::string& out, std::uint64_t generation,
         render_tag_json(out, row);
     }
     out.append("]}\n");
+}
+
+void render_tag_get_json(std::string& out, const TagRow& row, bool tagd_down) {
+    out.push_back('{');
+    append_tag_fields(out, row);
+    out.push_back(',');
+    append_json_bool(out, "tagd_down", tagd_down);
+    out.append("}\n");
 }
 
 void render_tag_detail(std::string& out, const TagRow& row) {
@@ -360,9 +376,9 @@ void render_status_text(std::string& out, const StatusView& view) {
             "functions are not real-time safe\n");
     }
     out.push_back('\n');
-    constexpr std::array<std::string_view, 7> PROCESS_HEADERS{
-        "PROCESS", "STATE",     "LIVENESS", "HEARTBEAT AGE",
-        "TIMEOUT", "TAGD FLAG", "PID"};
+    constexpr std::array<std::string_view, 6> PROCESS_HEADERS{
+        "PROCESS",       "STATE",   "LIVENESS",
+        "HEARTBEAT AGE", "TIMEOUT", "TAGD FLAG"};
     std::vector<std::vector<std::string>> cells;
     std::vector<char> marks;
     for (const ProcessRow& row : view.processes) {
@@ -373,13 +389,11 @@ void render_status_text(std::string& out, const StatusView& view) {
         } else {
             age.append(NONE);
         }
-        cells.push_back(
-            {safe_text(std::data(proc.name)),
-             std::string(process_state_name(proc.state)),
-             std::string(down_reason_name(proc.down_reason)), age,
-             std::to_string(proc.heartbeat_timeout_ms) + " ms",
-             proc.marked_down != 0 ? "down" : "up",
-             proc.pid != 0 ? std::to_string(proc.pid) : std::string(NONE)});
+        cells.push_back({safe_text(std::data(proc.name)),
+                         std::string(process_state_name(proc.state)),
+                         std::string(down_reason_name(proc.down_reason)), age,
+                         std::to_string(proc.heartbeat_timeout_ms) + " ms",
+                         proc.marked_down != 0 ? "down" : "up"});
         marks.push_back(proc.down != 0 ? '!' : ' ');
     }
     append_table(out, PROCESS_HEADERS, cells, marks);
@@ -443,11 +457,6 @@ void render_status_json(std::string& out, const StatusView& view) {
                            proc.heartbeat_timeout_ms);
         out.push_back(',');
         append_json_bool(out, "realtime", proc.realtime != 0);
-        out.push_back(',');
-        append_json_number(out, "uid", proc.uid);
-        out.push_back(',');
-        append_json_key(out, "pid");
-        out.append(proc.pid != 0 ? std::to_string(proc.pid) : "null");
         out.push_back('}');
     }
     out.append("],\"owners\":[");
@@ -511,6 +520,19 @@ void render_gap_json(std::string& out, std::string_view owner,
     append_json_text(out, "owner", owner);
     out.push_back(',');
     append_json_text(out, "reason", gap_reason_name(reason, true));
+    out.append("}\n");
+}
+
+void render_tagd_text(std::string& out, bool down) {
+    out.append(down ? "! scada-tagd down: values may be stale\n"
+                    : "  scada-tagd up\n");
+}
+
+void render_tagd_json(std::string& out, bool down) {
+    out.push_back('{');
+    append_json_text(out, "event", "tagd");
+    out.push_back(',');
+    append_json_bool(out, "down", down);
     out.append("}\n");
 }
 

@@ -322,6 +322,79 @@ TEST_F(Scadactl, TagWatchFollowsAGenerationChange) {
     stop(*second);
 }
 
+// What a watch printed after the line that says the generation changed.
+std::string_view after_generation_change(std::string_view out) {
+    const std::size_t position = out.find("generation changed");
+    return position == std::string_view::npos ? std::string_view{}
+                                              : out.substr(position);
+}
+
+// True if the output of a watch, stopped after a generation change, has
+// lines after the change and none about a tag of the old generation.
+::testing::AssertionResult nothing_of_the_old_generation(std::string_view out) {
+    const std::string_view later = after_generation_change(out);
+    if (!later.empty() && later.find("load.") == std::string_view::npos) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure() << out;
+}
+
+// Waits until the watch `watch` shows generation 2 with its tag
+// probe.out, then stops it with SIGTERM.
+::testing::AssertionResult moves_to_generation_two_and_stops(
+    ChildProcess& watch) {
+    if (!prints(watch, "generation changed: now 2") ||
+        !prints(watch, " now    probe.out")) {
+        return ::testing::AssertionFailure() << watch.out() << watch.err();
+    }
+    if (!watch.send_signal(SIGTERM) ||
+        watch.wait_for_exit(WAIT_LIMIT) != EXIT_OK) {
+        return ::testing::AssertionFailure()
+               << "no clean stop: " << watch.err();
+    }
+    return ::testing::AssertionSuccess();
+}
+
+TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
+    // Generation 1: the writer's tag set, with the writer writing.
+    write_load_tag_set();
+    std::optional<RunningTagd> first = ready_tagd();
+    std::optional<ChildProcess> writer = writing();
+    std::optional<ChildProcess> watch = start_scadactl({"tag", "watch", "*"});
+    if (!first.has_value() || !writer.has_value() || !watch.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*watch, " change load.w0.t0"));
+    // Generation 2: another tag set, without the writer's tags. The writer
+    // may go on writing generation 1 for a while.
+    stop(*first);
+    write_small_tag_set();
+    std::optional<RunningTagd> second = ready_tagd();
+    if (!second.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(moves_to_generation_two_and_stops(*watch));
+    EXPECT_TRUE(nothing_of_the_old_generation(watch->out()));
+    kill(*writer);
+    stop(*second);
+}
+
+TEST_F(Scadactl, TagListSaysWhenScadaTagdIsDown) {
+    write_small_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    // The generation stays when scada-tagd stops; its liveness check does
+    // not run any more.
+    stop(*tagd);
+    EXPECT_EQ(scadactl({"tag", "list"}), EXIT_OK) << err();
+    EXPECT_TRUE(out().starts_with("! scada-tagd down: values may be stale\n"))
+        << out();
+    EXPECT_EQ(scadactl({"tag", "get", "plant.level", "--json"}), EXIT_OK);
+    EXPECT_NE(out().find(R"("tagd_down":true)"), std::string::npos) << out();
+}
+
 TEST_F(Scadactl, TagWatchOfNothingIsAnError) {
     write_small_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();

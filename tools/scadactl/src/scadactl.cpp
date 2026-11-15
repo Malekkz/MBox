@@ -6,6 +6,7 @@
 #include "scada/ctl/watch.h"
 #include "scada/tag/scada_tag.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -18,23 +19,56 @@ namespace scada::ctl {
 
 namespace {
 
-// Looks at the generation before reading: observes again if it changed
-// since the context was opened.
-bool fresh_generation(Database& database, std::ostream& err) {
-    scada_status status{};
-    if (database.status(status) != SCADA_E_RETIRING) {
-        return true;
+// Reads with a generation change no more often than this before giving up.
+constexpr int READ_ATTEMPTS = 3;
+
+// The result of reading under a check of the generation.
+struct Checked {
+    bool ok = false;
+    bool tagd_down = false;
+    std::uint64_t generation = 0;
+};
+
+// Runs `read`, then asks scada_tag_status whether the generation it read
+// from is still the current one (contract 11.4): if it was retired, observes
+// again and runs `read` again, so that nothing of a retired generation is
+// shown. `read` returns false when there is nothing to show.
+template <typename Read>
+Checked read_checked(Database& database, std::ostream& err, Read read) {
+    Checked checked;
+    for (int attempt = 0; attempt < READ_ATTEMPTS; ++attempt) {
+        if (!read()) {
+            return checked;
+        }
+        scada_status status{};
+        const int code = database.status(status);
+        if (code != SCADA_E_RETIRING) {
+            checked.ok = true;
+            checked.tagd_down = code == SCADA_E_TAGD_DOWN;
+            checked.generation = status.generation;
+            return checked;
+        }
+        std::string detail;
+        if (!database.reopen(detail)) {
+            err << "scadactl: " << detail << "\n";
+            return checked;
+        }
     }
-    std::string detail;
-    if (!database.reopen(detail)) {
-        err << "scadactl: " << detail << "\n";
-        return false;
-    }
-    return true;
+    err << "scadactl: the generation kept changing while it was read; try "
+           "again\n";
+    return checked;
 }
 
-int show_status(Database& database, const Arguments& args, std::ostream& out) {
-    const StatusView view = database.status_view();
+int show_status(Database& database, const Arguments& args, std::ostream& out,
+                std::ostream& err) {
+    StatusView view;
+    const Checked checked = read_checked(database, err, [&] {
+        view = database.status_view();
+        return true;
+    });
+    if (!checked.ok) {
+        return EXIT_ERROR;
+    }
     std::string text;
     if (args.json) {
         render_status_json(text, view);
@@ -45,22 +79,31 @@ int show_status(Database& database, const Arguments& args, std::ostream& out) {
     return EXIT_OK;
 }
 
-int list_tags(Database& database, const Arguments& args, std::ostream& out) {
-    const std::vector<TagRef> tags = database.find(args.pattern);
+int list_tags(Database& database, const Arguments& args, std::ostream& out,
+              std::ostream& err) {
     std::vector<TagRow> rows;
-    rows.reserve(tags.size());
-    for (const TagRef& tag : tags) {
-        rows.push_back(database.read(tag));
+    const Checked checked = read_checked(database, err, [&] {
+        rows.clear();
+        for (const TagRef& tag : database.find(args.pattern)) {
+            rows.push_back(database.read(tag));
+        }
+        return true;
+    });
+    if (!checked.ok) {
+        return EXIT_ERROR;
     }
     std::string text;
     if (args.json) {
-        scada_status status{};
-        static_cast<void>(database.status(status));
-        render_tag_list_json(text, status.generation, rows);
-    } else if (rows.empty()) {
-        text = "no tag matches\n";
+        render_tag_list_json(text, checked.generation, checked.tagd_down, rows);
     } else {
-        render_tag_table(text, rows);
+        if (checked.tagd_down) {
+            render_tagd_warning(text);
+        }
+        if (rows.empty()) {
+            text.append("no tag matches\n");
+        } else {
+            render_tag_table(text, rows);
+        }
     }
     out << text << std::flush;
     return EXIT_OK;
@@ -68,18 +111,31 @@ int list_tags(Database& database, const Arguments& args, std::ostream& out) {
 
 int get_tag(Database& database, const Arguments& args, std::ostream& out,
             std::ostream& err) {
-    const std::optional<TagRef> tag = database.find_one(args.name);
-    if (!tag.has_value()) {
+    TagRow row;
+    bool found = false;
+    const Checked checked = read_checked(database, err, [&] {
+        const std::optional<TagRef> tag = database.find_one(args.name);
+        found = tag.has_value();
+        if (found) {
+            row = database.read(*tag);
+        }
+        return found;
+    });
+    if (!found) {
         // The name was checked against the grammar: safe to print.
         err << "scadactl: there is no tag " << args.name << "\n";
         return EXIT_ERROR;
     }
-    const TagRow row = database.read(*tag);
+    if (!checked.ok) {
+        return EXIT_ERROR;
+    }
     std::string text;
     if (args.json) {
-        render_tag_json(text, row);
-        text.push_back('\n');
+        render_tag_get_json(text, row, checked.tagd_down);
     } else {
+        if (checked.tagd_down) {
+            render_tagd_warning(text);
+        }
         render_tag_detail(text, row);
     }
     out << text << std::flush;
@@ -105,14 +161,11 @@ int run(std::span<const std::string_view> args, std::ostream& out,
         err << "scadactl: " << detail << "\n";
         return EXIT_ERROR;
     }
-    if (!fresh_generation(*database, err)) {
-        return EXIT_ERROR;
-    }
     switch (parsed->command) {
         case Command::STATUS:
-            return show_status(*database, *parsed, out);
+            return show_status(*database, *parsed, out, err);
         case Command::TAG_LIST:
-            return list_tags(*database, *parsed, out);
+            return list_tags(*database, *parsed, out, err);
         case Command::TAG_GET:
             return get_tag(*database, *parsed, out, err);
         case Command::TAG_WATCH:

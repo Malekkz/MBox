@@ -26,6 +26,7 @@ constexpr std::int64_t AGE_12_MS = 12'000'000;
 constexpr std::int64_t SOURCE_NS = 1'794'738'030'123'000'000;
 constexpr double LEVEL = 4.25;
 constexpr std::uint32_t PID = 4321;
+constexpr std::uint32_t UID = 991;
 constexpr std::uint32_t TIMEOUT_MS = 3000;
 constexpr std::uint64_t GENERATION = 7;
 constexpr std::uint64_t HEARTBEATS = 9;
@@ -152,14 +153,33 @@ TEST(TagJson, EscapesStringValues) {
 TEST(TagList, JsonHoldsTheGenerationAndEveryRow) {
     const std::vector<TagRow> rows{good_row(), bad_row()};
     std::string out;
-    render_tag_list_json(out, GENERATION, rows);
-    EXPECT_TRUE(
-        out.starts_with(R"({"generation":7,"tags":[{"name":"plant.level")"))
+    render_tag_list_json(out, GENERATION, false, rows);
+    EXPECT_TRUE(out.starts_with(
+        R"({"generation":7,"tagd_down":false,"tags":[{"name":"plant.level")"))
         << out;
     EXPECT_TRUE(out.ends_with("}]}\n")) << out;
     out.clear();
-    render_tag_list_json(out, 1, {});
-    EXPECT_EQ(out, "{\"generation\":1,\"tags\":[]}\n");
+    render_tag_list_json(out, 1, true, {});
+    EXPECT_EQ(out, "{\"generation\":1,\"tagd_down\":true,\"tags\":[]}\n");
+}
+
+TEST(TagdDown, IsSaidInBothFormsOfTagGetAndWatch) {
+    std::string out;
+    render_tagd_warning(out);
+    EXPECT_EQ(out, "! scada-tagd down: values may be stale\n");
+    out.clear();
+    render_tag_get_json(out, good_row(), true);
+    EXPECT_TRUE(out.starts_with(R"({"name":"plant.level",)")) << out;
+    EXPECT_TRUE(out.ends_with(R"("tagd_down":true})"
+                              "\n"))
+        << out;
+    out.clear();
+    render_tagd_text(out, true);
+    render_tagd_text(out, false);
+    EXPECT_EQ(out, "! scada-tagd down: values may be stale\n  scada-tagd up\n");
+    out.clear();
+    render_tagd_json(out, true);
+    EXPECT_EQ(out, "{\"event\":\"tagd\",\"down\":true}\n");
 }
 
 TEST(TagDetail, OneFieldPerLineWithTheMark) {
@@ -189,6 +209,7 @@ StatusView sample_status() {
     feeder.status.heartbeat_age_ns = AGE_12_MS;
     feeder.status.heartbeat_timeout_ms = TIMEOUT_MS;
     feeder.status.pid = PID;
+    feeder.status.uid = UID;
     ProcessRow probe;
     std::ranges::copy(std::string_view("probe"), std::begin(probe.status.name));
     probe.status.process_index = 1;
@@ -220,7 +241,9 @@ TEST(Status, TextMarksWhatIsDown) {
     EXPECT_EQ(lines[1], "  scada-tagd up");
     EXPECT_TRUE(lines[4].starts_with("  io ")) << out;
     EXPECT_TRUE(contains(lines[4], "RUNNING")) << out;
-    EXPECT_TRUE(contains(lines[4], "4321")) << out;
+    // Neither a pid nor a uid is shown.
+    EXPECT_FALSE(contains(out, "4321")) << out;
+    EXPECT_FALSE(contains(out, "991")) << out;
     EXPECT_TRUE(lines[5].starts_with("! probe ")) << out;
     EXPECT_TRUE(contains(lines[5], "region missing")) << out;
     EXPECT_TRUE(lines[8].starts_with("  io ")) << out;
@@ -251,7 +274,9 @@ TEST(Status, Json) {
                               R"("down":true,"down_reason":"region missing")"))
         << out;
     EXPECT_TRUE(contains(out, R"("heartbeat_age_ns":null)")) << out;
-    EXPECT_TRUE(contains(out, R"("pid":4321})")) << out;
+    EXPECT_FALSE(contains(out, "pid")) << out;
+    EXPECT_FALSE(contains(out, "uid")) << out;
+    EXPECT_FALSE(contains(out, "4321")) << out;
     EXPECT_TRUE(contains(out, R"({"name":"probe","process":"probe","tags":2,)"
                               R"("owner_down":true})"))
         << out;
@@ -308,7 +333,8 @@ TEST(Names, OfGapsStatesAndReasons) {
     EXPECT_EQ(process_state_name(4), "UNKNOWN");
     EXPECT_EQ(down_reason_name(SCADA_DOWN_HEARTBEAT_STALE), "heartbeat stale");
     EXPECT_EQ(down_reason_name(SCADA_DOWN_NOT_RUNNING), "not running");
-    EXPECT_EQ(down_reason_name(4), "unknown");
+    EXPECT_EQ(down_reason_name(SCADA_DOWN_NOT_RESOLVED), "not resolved");
+    EXPECT_EQ(down_reason_name(5), "unknown");
 }
 
 TEST(ObserveErrors, SayWhatToDo) {

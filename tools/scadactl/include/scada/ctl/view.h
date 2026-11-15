@@ -39,7 +39,9 @@ struct OwnerRow {
     bool owner_down = false;
 };
 
-// What `scadactl status` shows.
+// What `scadactl status` shows. Neither form shows a uid or a pid: they
+// identify accounts and processes of the unit and are not for every
+// reader of the output.
 struct StatusView {
     scada_status status{};
     int status_code = SCADA_OK;  // of scada_tag_status
@@ -73,12 +75,20 @@ void render_tag_table(std::string& out, std::span<const TagRow> rows);
 // The fields of `row` as one JSON object.
 void render_tag_json(std::string& out, const TagRow& row);
 
-// `tag list --json`: {"generation": ..., "tags": [...]}.
+// The line that `tag list` and `tag get` put first when scada-tagd is down:
+// its liveness check has stopped, so a value may be stale without a mark
+// (contract 10.1).
+void render_tagd_warning(std::string& out);
+
+// `tag list --json`: {"generation": ..., "tagd_down": ..., "tags": [...]}.
 void render_tag_list_json(std::string& out, std::uint64_t generation,
-                          std::span<const TagRow> rows);
+                          bool tagd_down, std::span<const TagRow> rows);
 
 // `tag get`: one field per line.
 void render_tag_detail(std::string& out, const TagRow& row);
+
+// `tag get --json`: the fields of render_tag_json and "tagd_down".
+void render_tag_get_json(std::string& out, const TagRow& row, bool tagd_down);
 
 // `status`, for a person.
 void render_status_text(std::string& out, const StatusView& view);
@@ -96,6 +106,11 @@ void render_gap_text(std::string& out, std::string_view owner,
                      std::uint8_t reason);
 void render_gap_json(std::string& out, std::string_view owner,
                      std::uint8_t reason);
+
+// One line of `tag watch` when scada-tagd goes down or comes back, ending
+// in a newline.
+void render_tagd_text(std::string& out, bool down);
+void render_tagd_json(std::string& out, bool down);
 
 // One line of `tag watch` for a change of generation, ending in a newline.
 void render_generation_text(std::string& out, std::uint64_t generation);

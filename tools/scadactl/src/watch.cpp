@@ -29,9 +29,9 @@ namespace scada::ctl {
 namespace {
 
 // The longest wait between two looks at the generation, in ms: the
-// observer calls scada_tag_status about once a second (contract 11.4).
+// observer calls scada_tag_status at least once a second (contract 11.4),
+// and before every line it shows.
 constexpr int STATUS_INTERVAL_MS = 1000;
-constexpr std::int64_t STATUS_INTERVAL_NS = 1'000'000'000;
 // The most sources of one wait set (contract 8.4).
 constexpr std::size_t SOURCES_PER_WAIT_SET = 127;
 
@@ -92,7 +92,8 @@ struct OwnerWatch {
 };
 
 // What a step of the watch leads to. RESTARTED: a generation change was
-// handled; every owner, subscription and tag of before is gone.
+// handled; every owner, subscription and tag of before is gone, and the
+// lines of the new start are pending.
 enum class Step : std::uint8_t { GO_ON, RESTARTED, DONE, FAILED };
 
 class Watch {
@@ -118,11 +119,19 @@ private:
 
     void show_now(std::size_t tag);
     [[nodiscard]] Step show_change(const scada_change& change);
-    // Shows what every subscription has; GO_ON also after a restart.
+    // Takes what every subscription has into the pending lines. DONE when
+    // the pending changes reach --count.
     [[nodiscard]] Step drain_all();
-    // Shows what `owner` has. RESTARTED: `owner` no longer exists.
     [[nodiscard]] Step drain(OwnerWatch& owner);
-    [[nodiscard]] Step check_generation(bool now);
+    // Writes the pending lines, but only after scada_tag_status says that
+    // the generation they were read from is still the current one: a line
+    // is never shown for a retired generation (contract 11.4). If it was
+    // retired, the lines are dropped and the watch starts over in the new
+    // generation (RESTARTED: the lines of the new start are pending). A
+    // change of the state of scada-tagd is shown first.
+    [[nodiscard]] Step publish();
+    // Observes again and opens the watch on the new generation.
+    [[nodiscard]] Step restart();
     [[nodiscard]] Step wait(const StopSignals& stop);
     void emit(const std::string& line);
 
@@ -139,12 +148,16 @@ private:
     std::vector<OwnerWatch> owners_;
     std::vector<scada_waitset*> wait_sets_;
     std::vector<int> descriptors_;
+    // Lines read but not yet shown, and how many changes they hold.
+    std::string pending_;
+    std::uint64_t pending_changes_ = 0;
     std::uint64_t changes_shown_ = 0;
-    std::int64_t next_status_mono_ns_ = 0;
+    // Whether the last line about scada-tagd said it is down.
+    bool tagd_down_shown_ = false;
 };
 
 void Watch::emit(const std::string& line) {
-    out_ << line << std::flush;
+    pending_.append(line);
 }
 
 bool Watch::open(std::string& detail) {
@@ -273,8 +286,9 @@ Step Watch::show_change(const scada_change& change) {
         render_watch_text(line, WatchEvent::CHANGE, row);
     }
     emit(line);
-    ++changes_shown_;
-    return args_.count.has_value() && changes_shown_ >= *args_.count
+    ++pending_changes_;
+    return args_.count.has_value() &&
+                   changes_shown_ + pending_changes_ >= *args_.count
                ? Step::DONE
                : Step::GO_ON;
 }
@@ -302,11 +316,8 @@ Step Watch::drain(OwnerWatch& owner) {
                 render_gap_text(line, owner.name, stats.last_gap);
             }
             emit(line);
-            // A gap may come with a generation change; look before the
-            // tags are read again. After a restart `owner` is gone.
-            if (const Step step = check_generation(true); step != Step::GO_ON) {
-                return step;
-            }
+            // A gap may come with a generation change: `publish` looks
+            // before these lines are shown.
             for (const std::size_t tag : owner.tags) {
                 show_now(tag);
             }
@@ -321,22 +332,42 @@ Step Watch::drain(OwnerWatch& owner) {
     }
 }
 
-Step Watch::check_generation(bool now) {
-    const std::int64_t mono = monotonic_ns();
-    if (!now && mono < next_status_mono_ns_) {
-        return Step::GO_ON;
-    }
-    next_status_mono_ns_ = mono + STATUS_INTERVAL_NS;
+Step Watch::publish() {
     scada_status status{};
-    if (db_.status(status) != SCADA_E_RETIRING) {
-        return Step::GO_ON;
+    const int code = db_.status(status);
+    if (code == SCADA_E_RETIRING) {
+        pending_.clear();
+        pending_changes_ = 0;
+        return restart();
     }
+    const bool tagd_down = code == SCADA_E_TAGD_DOWN;
+    std::string lines;
+    if (tagd_down != tagd_down_shown_) {
+        if (args_.json) {
+            render_tagd_json(lines, tagd_down);
+        } else {
+            render_tagd_text(lines, tagd_down);
+        }
+        tagd_down_shown_ = tagd_down;
+    }
+    lines.append(pending_);
+    if (!lines.empty()) {
+        out_ << lines << std::flush;
+    }
+    changes_shown_ += pending_changes_;
+    pending_.clear();
+    pending_changes_ = 0;
+    return Step::GO_ON;
+}
+
+Step Watch::restart() {
     close();
     std::string detail;
     if (!db_.reopen(detail)) {
         err_ << "scadactl: " << detail << "\n";
         return Step::FAILED;
     }
+    scada_status status{};
     static_cast<void>(db_.status(status));
     std::string line;
     if (args_.json) {
@@ -393,33 +424,33 @@ int Watch::run() {
         err_ << "scadactl: " << detail << "\n";
         return EXIT_ERROR;
     }
-    next_status_mono_ns_ = monotonic_ns() + STATUS_INTERVAL_NS;
     for (;;) {
-        // Changes that came while the current values were read are shown
+        // Changes that came while the current values were read are taken
         // before the first wait.
-        if (const Step step = drain_all(); step != Step::GO_ON) {
-            return step == Step::DONE ? EXIT_OK : EXIT_ERROR;
+        const Step drained = drain_all();
+        if (drained == Step::FAILED) {
+            return EXIT_ERROR;
+        }
+        const Step published = publish();
+        if (published == Step::FAILED) {
+            return EXIT_ERROR;
+        }
+        if (published == Step::RESTARTED) {
+            continue;  // the new start is pending: publish it first
+        }
+        if (drained == Step::DONE) {
+            return EXIT_OK;
         }
         const Step waited = wait(stop);
         if (waited != Step::GO_ON) {
             return waited == Step::DONE ? EXIT_OK : EXIT_ERROR;
         }
-        if (check_generation(false) == Step::FAILED) {
-            return EXIT_ERROR;
-        }
     }
 }
 
 Step Watch::drain_all() {
-    // By index, not by iterator: a generation change found in `drain`
-    // replaces `owners_`, and then the loop must end at once.
-    // NOLINTNEXTLINE(modernize-loop-convert): a range loop would go on over a replaced vector
-    for (std::size_t index = 0; index < owners_.size(); ++index) {
-        const Step step = drain(owners_[index]);
-        if (step == Step::RESTARTED) {
-            return Step::GO_ON;
-        }
-        if (step != Step::GO_ON) {
+    for (OwnerWatch& owner : owners_) {
+        if (const Step step = drain(owner); step != Step::GO_ON) {
             return step;
         }
     }

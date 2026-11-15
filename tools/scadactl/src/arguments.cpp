@@ -78,6 +78,13 @@ const std::string_view USAGE =
     "and \"value\" null when there is none. Age is the time since the owner\n"
     "last wrote the tag, on CLOCK_MONOTONIC.\n"
     "\n"
+    "When scada-tagd is down, its liveness check has stopped and a value may\n"
+    "be stale without a mark: tag list and tag get then start with the line\n"
+    "\"! scada-tagd down: values may be stale\" and carry \"tagd_down\": true\n"
+    "in JSON; tag watch writes such a line, or {\"event\":\"tagd\"}, when it\n"
+    "goes down or comes back. Nothing read from a generation that was retired\n"
+    "meanwhile is shown: it is read again from the new one.\n"
+    "\n"
     "Exit codes: 0 success, 1 error (no database, no such tag, no access),\n"
     "2 wrong arguments.\n";
 
