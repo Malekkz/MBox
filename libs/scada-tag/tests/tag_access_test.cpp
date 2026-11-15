@@ -567,7 +567,7 @@ TEST_F(TagAccess, AnOwnerWhoseHeartbeatStoppedReadsAsDown) {
     EXPECT_TRUE(has_flag(value.quality_flags, QualityFlag::OWNER_DOWN));
 
     // The next heartbeat brings it back.
-    EXPECT_TRUE(io()->heartbeat());
+    EXPECT_EQ(io()->heartbeat(), SCADA_OK);
     ASSERT_EQ(web()->read(level, value), SCADA_OK);
     EXPECT_EQ(value.quality, SCADA_QUALITY_GOOD);
     EXPECT_FALSE(has_flag(value.quality_flags, QualityFlag::OWNER_DOWN));

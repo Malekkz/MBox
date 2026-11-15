@@ -247,10 +247,10 @@ void scada_tag_detach(scada_ctx* ctx) {
 }
 
 SCADA_RT int scada_tag_heartbeat(scada_ctx* ctx) {
-    if (ctx == nullptr || ctx->attachment->observer()) {
+    if (ctx == nullptr) {
         return SCADA_E_INVALID;
     }
-    return ctx->attachment->heartbeat() ? SCADA_OK : SCADA_E_RETIRING;
+    return ctx->attachment->heartbeat();
 }
 
 int scada_tag_notify(scada_ctx* ctx) {

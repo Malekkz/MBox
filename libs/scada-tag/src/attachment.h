@@ -55,6 +55,10 @@ inline constexpr std::uint16_t NO_PROCESS_INDEX = 0xFFFF;
 // ns (section 11.4: at most once a second).
 inline constexpr std::int64_t CURRENT_RECHECK_INTERVAL_NS = 1'000'000'000;
 
+// Looks in a row at which an observer finds no readable `current` (or no
+// base directory) before it counts the generation as gone (section 11.4).
+inline constexpr std::uint32_t CURRENT_UNREADABLE_LOOKS = 2;
+
 // What `Attachment::status` reports.
 struct AttachmentStatus {
     std::uint64_t generation = 0;
@@ -170,11 +174,12 @@ public:
     Attachment(Attachment&&) = delete;
     Attachment& operator=(Attachment&&) = delete;
 
-    // Writes the heartbeat of the process, taken now. False if the
-    // generation is RETIRING: the caller detaches and attaches again
-    // (section 11.3). Call it from the main loop or cycle of the process.
-    // An observer has no heartbeat: it writes nothing and returns true.
-    SCADA_RT [[nodiscard]] bool heartbeat() noexcept;
+    // Writes the heartbeat of the process, taken now. SCADA_E_RETIRING if
+    // the generation is RETIRING: the caller detaches and attaches again
+    // (section 11.3). SCADA_E_INVALID for an observer, which has no
+    // heartbeat, and writes nothing. Call it from the main loop or cycle of
+    // the process.
+    SCADA_RT [[nodiscard]] int heartbeat() noexcept;
 
     // The state of the attachment now. It also looks again for the regions
     // of other processes that were asked for and are missing
@@ -262,8 +267,14 @@ public:
     void want_changes(std::size_t owner_index);
 
     // Asks for the `proc` region of `process_index`, unless it is this
-    // process's own. Not real-time.
+    // process's own, and records that it was asked for. Not real-time.
     void want_proc(std::uint16_t process_index);
+
+    // True if the `proc` region of `process_index` was asked for with
+    // `want_proc`, or is this process's own: then `proc_of` tells whether
+    // it is there. False for a process index that is none.
+    SCADA_RT [[nodiscard]] bool proc_asked(
+        std::uint16_t process_index) const noexcept;
 
     // The mapped `changes` region of `owner_index`, or an empty span while
     // it is missing. For an owner of another process the span may change
@@ -274,7 +285,7 @@ public:
 
     // The mapped `proc` region of `process_index`, or an empty span, with
     // the guarantees of `changes_of`.
-    [[nodiscard]] std::span<std::byte> proc_of(
+    SCADA_RT [[nodiscard]] std::span<std::byte> proc_of(
         std::uint16_t process_index) const noexcept;
 
     // True if the process of the owner `owner_index` is down now, by the
@@ -430,12 +441,18 @@ private:
     // For an observer: true if `current` names another generation now,
     // looked at no more than every CURRENT_RECHECK_INTERVAL_NS.
     [[nodiscard]] bool current_moved(std::int64_t now_mono_ns);
+    // One look: true if the base directory under its path is another one,
+    // `current` names another generation, or neither could be read for
+    // CURRENT_UNREADABLE_LOOKS looks in a row.
+    [[nodiscard]] bool current_names_another_generation();
 
     Fd directory_;  // the generation directory
     HeaderView header_;
-    // For an observer, the base directory, to read `current` again; no
-    // descriptor for a process.
+    // For an observer, the base directory as it was opened, its path and
+    // the uid of scada-tagd, to look at `current` again; nothing for a
+    // process.
     Fd base_;
+    std::string base_path_;
     std::uint16_t process_index_ = 0;
     std::optional<std::uint16_t> tagd_index_;
     OwnProcRegion proc_;
@@ -445,6 +462,7 @@ private:
     std::uint32_t regions_created_ = 0;
     std::uint32_t regions_reused_ = 0;
     std::uint32_t records_repaired_ = 0;
+    std::uint32_t tagd_uid_ = 0;  // for an observer, with base_path_
 
     // One entry for every owner of the generation, the type of every slot
     // of every owner, and the STRING slots of every owner in ascending
@@ -463,17 +481,26 @@ private:
     // loses it leaves the wake to the one that wins. Sized at `attach`.
     std::vector<std::atomic<std::uint64_t>> woken_seq_;
 
+    // For every process, whether its `proc` region was asked for by
+    // `want_proc` (scada_proc_resolve, a wait set, scada-tagd at attach),
+    // so that scada_proc_status can tell a process that is down from one
+    // that was never resolved. Sized at construction, never resized; set
+    // once, never cleared.
+    std::vector<std::atomic<bool>> proc_asked_;
+
     // The result of the last clock check and when the next one is due.
     // Atomic because `status` may run in several threads; relaxed, because
     // each is a value on its own.
-    std::atomic<bool> clock_syscall_{false};
     std::atomic<std::int64_t> next_clock_check_mono_ns_{0};
 
-    // For an observer: whether `current` was found to name another
-    // generation, which does not change back, and when it is read next.
-    // Atomic and relaxed for the reasons of the two above.
-    std::atomic<bool> moved_{false};
+    // For an observer: when `current` is read next, how many looks in a
+    // row found it unreadable, and whether it was found to name another
+    // generation, which does not change back. Atomic and relaxed for the
+    // reasons of the clock check above. Ordered by size, not by topic.
     std::atomic<std::int64_t> next_current_check_mono_ns_{0};
+    std::atomic<std::uint32_t> unreadable_looks_{0};
+    std::atomic<bool> clock_syscall_{false};  // the last clock check, above
+    std::atomic<bool> moved_{false};
 };
 
 // Initial state of the `tags` region `tags` of an owner whose slots have

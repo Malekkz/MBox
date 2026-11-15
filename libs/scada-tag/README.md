@@ -409,8 +409,10 @@ root. A caller that may not open the base or generation directory gets
 
 An observer calls `scada_tag_status` about once a second. It looks again
 for missing regions and repeats the clock check, and it returns
-`SCADA_E_RETIRING` when the generation is RETIRING or `current` names
-another one (read again at most once a second). The observer then
+`SCADA_E_RETIRING` when the generation is RETIRING or, at a look at most
+once a second, `current` names another generation, the base directory
+under its path is another directory (the database was set up again), or
+neither could be read at two looks in a row. The observer then
 detaches, observes again and resolves its handles again.
 
 | Function | Real-time safe | What it does |
@@ -418,7 +420,7 @@ detaches, observes again and resolves its handles again.
 | `scada_owner_info` | no | Name, tag count, ring capacity and process of an owner index |
 | `scada_tag_handle` | yes | The handle of `(owner index, slot)`; no context |
 | `scada_proc_resolve` | no | Process name to index; maps its `proc` region |
-| `scada_proc_status` | yes | State, liveness and its reason, the `down` flag of `scada-tagd`, heartbeat counter and age, `cycle_seq`, pid, uid |
+| `scada_proc_status` | yes | State, liveness and its reason, the `down` flag of `scada-tagd`, heartbeat counter and age, `cycle_seq`, pid, uid. `SCADA_E_INVALID` with reason `SCADA_DOWN_NOT_RESOLVED` for a process not resolved in the context, with the fields of the process table filled |
 
 `scada_status.owner_count` and `process_count` give the ranges of the
 indexes. Every tag: for each owner, `scada_tag_info` of

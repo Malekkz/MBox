@@ -85,7 +85,7 @@ or `fuzz`. `ctest` prints the time per label at the end of a run.
 | `ctest --preset dev` | Unit and integration tests |
 | `ctest --preset unit` | Unit tests only (uses the `dev` build) |
 | `ctest --preset integration` | Integration tests only (uses the `dev` build) |
-| `sudo ctest --preset root` | Tests that must run as root to become other users (label `root`, uses the `dev` build); the other presets leave them out |
+| `sudo ctest --preset root` | Tests that must run as root to become other users (label `root`, uses the `dev` build); the other presets leave them out. Run by hand, it leaves `build/dev/Testing` owned by root, so that a later unprivileged `ctest --preset dev` cannot write its log there: `sudo chown -R "$USER" build/dev/Testing` afterwards. The pipeline runs it on GitHub-hosted runners only, which are discarded after the job; a self-hosted runner must not run it |
 | `ctest --preset perf` | Performance tests, in the `perf` build |
 | `ctest --preset model` | Model check of the sequence lock and the change ring (conformance test 4); needs herd7, see `tests/model/README.md` |
 | `ctest --preset asan-ubsan` | Unit and integration tests under AddressSanitizer with leak detection and UndefinedBehaviorSanitizer |

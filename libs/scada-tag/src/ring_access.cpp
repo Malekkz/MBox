@@ -97,6 +97,15 @@ void Attachment::want_proc(std::uint16_t process_index) {
     }
     peers_.want(directory_.get(), peers_.proc_slot(process_index),
                 monotonic_ns());
+    // Release: a thread that sees the flag also sees the slot asked for.
+    proc_asked_.at(process_index).store(true, std::memory_order_release);
+}
+
+bool Attachment::proc_asked(std::uint16_t process_index) const noexcept {
+    // Acquire: pairs with the release store of want_proc.
+    return process_index == process_index_ ||
+           (process_index < proc_asked_.size() &&
+            proc_asked_[process_index].load(std::memory_order_acquire));
 }
 
 std::span<std::byte> Attachment::changes_of(

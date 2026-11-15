@@ -229,24 +229,49 @@ private:
                         ? database_owner(base_, ready_[1], stop_[0])
                         : CHILD_NO_USER);
         }
+        // The ends the child uses are closed here, so that a child that
+        // ends early is seen at once: the read gives 0, not a byte.
+        close_end(ready_[1]);
+        close_end(stop_[0]);
         pollfd wait{.fd = ready_[0], .events = POLLIN, .revents = 0};
         ASSERT_EQ(::poll(&wait, 1, WAIT_MS), 1) << "the database did not start";
+        char byte = 0;
+        ASSERT_EQ(::read(ready_[0], &byte, 1), 1)
+            << "the database owner ended early (can it become user " << DB_UID
+            << " and reach " << base_ << "?)";
+    }
+
+    static void close_end(int& descriptor) {
+        if (descriptor >= 0) {
+            ::close(descriptor);
+            descriptor = -1;
+        }
     }
 
     void stop_owner() {
         if (owner_ > 0) {
-            EXPECT_EQ(::write(stop_[1], "s", 1), 1);
-            int status = 0;
-            EXPECT_EQ(::waitpid(owner_, &status, 0), owner_);
-            EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == CHILD_OK)
+            EXPECT_EQ(owner_exit_code(), CHILD_OK)
                 << "the database owner failed";
         }
-        for (const int descriptor :
-             {ready_[0], ready_[1], stop_[0], stop_[1]}) {
-            if (descriptor >= 0) {
-                ::close(descriptor);
+        for (int& descriptor : ready_) {
+            close_end(descriptor);
+        }
+        for (int& descriptor : stop_) {
+            close_end(descriptor);
+        }
+    }
+
+    // Tells the owner to stop, unless it has ended already (a write would
+    // raise SIGPIPE then), and returns its exit code, or -1.
+    int owner_exit_code() {
+        int status = 0;
+        if (::waitpid(owner_, &status, WNOHANG) == 0) {
+            if (::write(stop_[1], "s", 1) != 1 ||
+                ::waitpid(owner_, &status, 0) != owner_) {
+                return -1;
             }
         }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
 
     std::filesystem::path root_;

@@ -848,10 +848,13 @@ tag set. It is for tools such as `scadactl` (reference 11.5, 11.6).
    for a process: it looks again for missing regions (at most once a second
    each) and repeats the clock check. It also detects a generation change,
    which an observer cannot see through a heartbeat: it returns
-   `SCADA_E_RETIRING` when the generation is RETIRING, or when `current`,
-   read again at most once a second, names another generation (retiring is
-   best effort, 11.3). An observer calls it about once a second and before
-   it reports what it read.
+   `SCADA_E_RETIRING` when the generation is RETIRING, or when, at a look
+   at most once a second: `current` names another generation (retiring is
+   best effort, 11.3); the base directory under its path is another
+   directory than at observe (the database was set up again); or neither
+   the base directory nor `current` could be read at two looks in a row.
+   An observer calls it about once a second and before it reports what it
+   read.
 6. On `SCADA_E_RETIRING` the observer detaches, which unmaps everything,
    observes again (step 1 retries a RETIRING generation a bounded number
    of times) and resolves its handles again.
@@ -1036,7 +1039,7 @@ typedef struct {
   uint16_t process_index;
   uint8_t  down;                 /* section 10.1, judged by the library now */
   uint8_t  down_reason;          /* 0 none, 1 region missing, 2 not running,
-                                    3 heartbeat stale */
+                                    3 heartbeat stale, 4 not resolved */
   uint8_t  marked_down;          /* the `down` flag of scada-tagd */
   uint8_t  realtime;
   uint8_t  reserved[6];
@@ -1047,9 +1050,11 @@ typedef struct {
 not depend on the bit split; it returns `SCADA_INVALID_HANDLE` for an owner
 index or slot beyond it. `scada_owner_info` with `scada_tag_handle` and
 `scada_tag_info` lists every tag of a generation. `scada_proc_resolve`
-maps the `proc` region of the process; `scada_proc_status` of a process that
-was not resolved in the context, and is not the caller, reports the region
-as missing. The fields of `scada_proc_status_t` are read one by one and need
+maps the `proc` region of the process. `scada_proc_status` of a process that
+was not resolved in the context (and is neither the caller nor `scada-tagd`)
+returns `SCADA_E_INVALID` with down 1 and down_reason 4 (not resolved), not a
+process that is down, so that a forgotten resolve is not taken for a dead
+process; the fields of the process table are filled. The fields of `scada_proc_status_t` are read one by one and need
 not belong to one heartbeat.
 
 Every GAP asks for the same action, a read of the tags. The reason is for
@@ -1205,6 +1210,14 @@ ARM64:
 27. Read latency and write latency are measured and reported: median and 99.9th
     percentile for `read`, `read_many` of 500 tags, `write`, and `write_many`
     of 500 tags.
+28. Observer (section 11.4): an observer context needs no entry in the
+    process table; after observe, resolve, read, subscribe, wait and status
+    the generation directory is unchanged (names, inodes, sizes, times and
+    bytes) and every mapping it made is read-only; every call that writes
+    is refused with its code before it touches memory; several observers
+    run beside a live attach of the same process; a generation change, by
+    RETIRING or by `current` alone, is reported as `SCADA_E_RETIRING`; a
+    caller outside the group `scada` gets `SCADA_E_PERMISSION`.
 
 ## 16. Open points to settle in phase 1
 
@@ -1287,7 +1300,7 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 | 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
-| 0.9 | 2026-11-15 | Issue #49 (D-38). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. Section 17, item 18. |
+| 0.9 | 2026-11-15 | Issue #49 (D-38). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 
 Migration, 0.8 to 0.9: none for data; the layout version stays 1 and no
 structure in shared memory changed. `scada_status` keeps its size and the
