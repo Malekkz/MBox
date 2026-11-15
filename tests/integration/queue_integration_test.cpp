@@ -499,7 +499,7 @@ bool stops_on_a_second_thread() {
     return stops_cleanly(feed);
 }
 
-// Decision D-38, condition 4: a second thread that posts to a queue stops a
+// Decision D-40, condition 4: a second thread that posts to a queue stops a
 // debug build and is refused with SCADA_E_INVALID by any other build.
 TEST_F(QueueProcesses, ASecondPostingThreadIsStoppedOrRefused) {
     write_queue_tag_set();

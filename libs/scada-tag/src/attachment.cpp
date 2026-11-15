@@ -541,6 +541,7 @@ Status Attachment::attach_regions(std::string& detail) {
         return proc.status();
     }
     proc_ = std::move(proc).value();
+    proc_.count_late_after(process.heartbeat_timeout_ms);
     if (proc_.reused()) {
         ++regions_reused_;
     } else {
@@ -590,7 +591,7 @@ Status Attachment::attach_regions(std::string& detail) {
     // Section 11.2, step 6. From here the caller writes the heartbeat.
     const std::int64_t now = monotonic_ns();
     check_clock(now);
-    proc_.heartbeat(now);
+    proc_.first_heartbeat(now);
     proc_.set_state(ProcessState::RUNNING);
     if (tagd_index_.has_value() && *tagd_index_ != process_index_) {
         peers_.want(directory_.get(), peers_.proc_slot(*tagd_index_),

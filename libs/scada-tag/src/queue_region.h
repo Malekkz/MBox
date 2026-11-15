@@ -34,7 +34,7 @@ inline constexpr unsigned REQUEST_ID_SEQ_BITS = 48;
 inline constexpr std::uint64_t MAX_REQUEST_SEQ =
     (std::uint64_t{1} << REQUEST_ID_SEQ_BITS) - 1;
 
-// The cursor a consumer stores when its queue died (decision D-38): a
+// The cursor a consumer stores when its queue died (decision D-40): a
 // reserved value that no `write_seq` reaches (a post that would make
 // `write_seq` equal to it is refused), so every reader of a cursor, by the
 // range rule of section 9.1, finds it out of range: the producer refuses
@@ -126,7 +126,7 @@ SCADA_RT [[nodiscard]] bool request_valid(const WriteRequest& record) noexcept;
 SCADA_RT [[nodiscard]] bool result_valid(const WriteResult& record) noexcept;
 
 // True if the request `record` must not be executed at `now_mono_ns`
-// (section 9.2; the conditions of decision D-38): its expiry is not after
+// (section 9.2; the conditions of decision D-40): its expiry is not after
 // now; it was posted after now; it expires before it was posted; its
 // lifetime (expiry - posted) is longer than MAX_REQUEST_LIFETIME_NS; or its
 // expiry lies further than that ahead of now. The fields are input: no

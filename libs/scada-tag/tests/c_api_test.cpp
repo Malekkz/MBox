@@ -318,6 +318,20 @@ TEST_F(CApi, ATagIsResolvedWrittenAndReadThroughTheCInterface) {
               SCADA_OK);
     EXPECT_EQ(std::string_view(buffer.data(), length), text);
     EXPECT_EQ(meta.type, SCADA_TYPE_STRING);
+    // NULL with capacity 0 asks for the length alone (issue #42, point 5).
+    std::size_t length_only = 0;
+    scada_value meta_only{};
+    ASSERT_EQ(scada_tag_read_string(web.get(), note, nullptr, 0, &length_only,
+                                    &meta_only),
+              SCADA_OK);
+    EXPECT_EQ(length_only, text.size());
+    EXPECT_EQ(meta_only.quality, SCADA_QUALITY_GOOD);
+    EXPECT_EQ(meta_only.update_mono_ns, meta.update_mono_ns);
+    // A buffer that is not NULL with capacity 0 is still too small.
+    EXPECT_EQ(scada_tag_read_string(web.get(), note, buffer.data(), 0,
+                                    &length_only, nullptr),
+              SCADA_E_INVALID);
+    EXPECT_EQ(length_only, text.size());
     // An empty text needs no pointer.
     EXPECT_EQ(scada_tag_write_string(feeder.get(), note, nullptr, 0,
                                      SCADA_QUALITY_GOOD, 0, 0),

@@ -235,7 +235,9 @@ public:
         std::span<const scada_value> values) noexcept;
 
     // Section 7. The text goes to the start of `buffer` and its length to
-    // `length`; `meta` may be null. Not real-time.
+    // `length`; `meta` may be null. A `buffer` with a null address asks for
+    // the length and `meta` alone, and gets them as a large enough buffer
+    // would. Not real-time.
     [[nodiscard]] int read_string(std::uint32_t handle, std::span<char> buffer,
                                   std::size_t& length,
                                   scada_value* meta) noexcept;
@@ -350,13 +352,13 @@ public:
     // calling thread is the recorded one. Otherwise a build without NDEBUG
     // stops the process (section 13.2) and another build returns false: two
     // threads that post to one queue can lose a record or tear one, so the
-    // rule holds in every build (decision D-38).
+    // rule holds in every build (decision D-40).
     SCADA_RT [[nodiscard]] bool check_queue_thread(
         std::size_t queue_id) noexcept;
 
     // As `check_queue_thread`, but never stops the process: for the answers
     // `scada_queue_next` posts itself, which a thread that is not the
-    // recorded one drops and counts in every build (decision D-38).
+    // recorded one drops and counts in every build (decision D-40).
     SCADA_RT [[nodiscard]] bool bind_queue_thread(
         std::size_t queue_id) noexcept;
 
@@ -376,7 +378,7 @@ public:
 
     // For a queue this process consumes and does not produce: true if the
     // queue is dead because its region was replaced inside the generation
-    // (decision D-38). `bytes` is what `queue_bytes` gives now. The first
+    // (decision D-40). `bytes` is what `queue_bytes` gives now. The first
     // mapping this context sees is the queue's; another one later, or none,
     // means the file was removed, shrunk or created anew, and the records
     // and ids of the two files cannot be told apart. The first time, the
@@ -491,6 +493,11 @@ private:
     // heartbeat is older than its timeout.
     SCADA_RT [[nodiscard]] bool owner_down(
         const OwnerAccess& owner, std::int64_t now_mono_ns) const noexcept;
+
+    // True if a tag of `owner` may be read in this context: the owner is
+    // one of this process, or a tag of it was resolved here (section 6.2).
+    SCADA_RT [[nodiscard]] bool resolved(
+        const OwnerAccess& owner) const noexcept;
 
     // The mapped `tags` and `strings` regions of `owner`; empty while a
     // region of another process is missing.

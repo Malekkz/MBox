@@ -64,7 +64,7 @@ int Queue::open(Attachment& attachment, std::string_view name,
     // Mapped and brought into memory here (section 11.2), if attach did not.
     attachment.want_queue(*queue_id);
     if (access.consumed) {
-        // The mapping the queue has from here on (decision D-38).
+        // The mapping the queue has from here on (decision D-40).
         static_cast<void>(attachment.queue_dead(
             *queue_id, attachment.queue_bytes(*queue_id)));
     }
@@ -130,7 +130,7 @@ int Queue::post(std::span<const std::byte> record) noexcept {
     std::ranges::copy(record, bytes.begin());
     RecordWords words{
         std::bit_cast<std::array<std::uint64_t, MAX_RECORD_WORDS>>(bytes)};
-    // Every build (decision D-38): a second posting thread is refused.
+    // Every build (decision D-40): a second posting thread is refused.
     if (!attachment_.check_queue_thread(id_)) {
         return SCADA_E_INVALID;
     }
@@ -143,7 +143,7 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     if (attachment_.queue_dead(id_, bytes)) {
         pending_ = false;
         count_one(attachment_.counters(id_).out_of_range);
-        return Look::BAD_RANGE;  // replaced inside the generation (D-38)
+        return Look::BAD_RANGE;  // replaced inside the generation (D-40)
     }
     if (bytes.empty()) {
         pending_ = false;
@@ -229,7 +229,7 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     const QueueAccess& access = attachment_.queue(id_);
     if (access.answer_queue.has_value()) {
         // The thread that takes the requests is the one that posts to the
-        // answer queue (decision D-38). Bound at the first call; a thread
+        // answer queue (decision D-40). Bound at the first call; a thread
         // that may not post there gets no answer posted, and the drops are
         // counted, in every build: this is the library's own post, not a
         // misuse by the caller.
@@ -247,7 +247,7 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
             case Look::INVALID:
                 return SCADA_E_LAYOUT;  // one record passed over: progress
             case Look::BAD_RANGE:
-                // A stopped queue (section 9.2, decision D-38) does not end
+                // A stopped queue (section 9.2, decision D-40) does not end
                 // the wait early: a caller that loops on next must not spin.
                 // It is reported when the timeout has passed.
                 stopped = true;

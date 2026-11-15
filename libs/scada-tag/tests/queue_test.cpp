@@ -731,7 +731,7 @@ TEST_F(Queues, AnExpiredOrOverLongRequestIsAnsweredExpired) {
     EXPECT_TRUE(takes_answers(*results, SCADA_RESULT_EXPIRED, {0, 1}));
 }
 
-// Decision D-38, condition 3: an EXPIRED answer that cannot be posted is
+// Decision D-40, condition 3: an EXPIRED answer that cannot be posted is
 // dropped and counted, and the request is still not delivered.
 TEST_F(Queues, AnExpiredRequestIsNotDeliveredWhenItsAnswerCannotBePosted) {
     const QueuePtr out = open(*web(), "cmd.io.web");
@@ -761,7 +761,7 @@ TEST_F(Queues, AnExpiredRequestWithoutAResultQueueIsDroppedAndCounted) {
     EXPECT_EQ(reader->stats().answers_dropped, 1U);
 }
 
-// Decision D-38, condition 2: a driver that dies after the cursor moved on
+// Decision D-40, condition 2: a driver that dies after the cursor moved on
 // and before the EXPIRED answer gives no answer at all, never the request
 // again nor ABORTED after it.
 TEST_F(Queues, ACrashBetweenTakingAndAnsweringGivesNoSecondAnswer) {
@@ -838,7 +838,7 @@ bool sleeps_soon(pid_t tid) {
     return false;
 }
 
-// Decision D-38, condition 3: the EXPIRED answer is posted without a wake,
+// Decision D-40, condition 3: the EXPIRED answer is posted without a wake,
 // and a requester already waiting for it still gets it. Nothing ever wakes
 // the requester here, so only the look at the end of each wait slice can
 // deliver the answer: its arrival shows that look. The length of the slice
@@ -981,7 +981,7 @@ TEST_F(Queues, AnAnswerQueueIsFreeWhenItsSidesCloseInEitherOrder) {
         [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
 }
 
-// Decision D-38, condition 4: the ABORTED answers of the drain at attach do
+// Decision D-40, condition 4: the ABORTED answers of the drain at attach do
 // not bind the attaching thread; the driver's thread can post its answers.
 TEST_F(Queues, TheDrainAtAttachBindsNoThread) {
     const QueuePtr out = open(*web(), "cmd.io.web");
@@ -992,7 +992,7 @@ TEST_F(Queues, TheDrainAtAttachBindsNoThread) {
         [&driver] { return driver.bind_queue_thread(RESULT_WEB); }));
 }
 
-// Decision D-38, condition 3: a thread that takes requests while another
+// Decision D-40, condition 3: a thread that takes requests while another
 // thread holds the answer queue gets no answer posted; the request is not
 // delivered, and the drop is counted, in every build.
 TEST_F(Queues, AnAnswerOfAnUnboundThreadIsDroppedAndCounted) {
@@ -1014,7 +1014,7 @@ TEST_F(Queues, AnAnswerOfAnUnboundThreadIsDroppedAndCounted) {
 }
 
 #ifdef NDEBUG
-// Decision D-38, condition 4, in a build without NDEBUG checks: a second
+// Decision D-40, condition 4, in a build without NDEBUG checks: a second
 // thread that posts to a queue is refused and writes nothing. A build with
 // them stops the process instead, which no unit test can show.
 TEST_F(Queues, ASecondPostingThreadIsRefusedInAReleaseBuild) {
@@ -1048,10 +1048,10 @@ TEST_F(Queues, TheCountsOfASideAreReported) {
     EXPECT_EQ(consumed.kind, to_raw(QueueKind::EVENTS));
 }
 
-// How a queue file can be lost inside a generation (decision D-38).
+// How a queue file can be lost inside a generation (decision D-40).
 enum class Damage : std::uint8_t { UNLINK, TRUNCATE, HEADER };
 
-// Decision D-38: a queue file that is removed, shrunk or damaged and then
+// Decision D-40: a queue file that is removed, shrunk or damaged and then
 // created anew by its producer inside the generation kills the queue. The
 // consumer gets SCADA_E_LAYOUT after its next look, without a signal from
 // the old mapping; the producer gets SCADA_E_PEER_DOWN; nothing is
@@ -1140,7 +1140,7 @@ TEST_F(Queues, AQueueFileRemovedUnderARunningProducerKillsTheQueue) {
     EXPECT_EQ(reader->stats().replaced, 1U);
 }
 
-// The case of the committee's question (decision D-38): the consumer's
+// The case of the committee's question (decision D-40): the consumer's
 // cursor is 0, so the range rule cannot tell. The consumer still treats the
 // new file as the end of the queue. What the producer posts between the
 // new file and the consumer's next look is accepted and lost; that window
@@ -1261,7 +1261,7 @@ TEST_F(Queues, ClosingAQueueTakesItOutOfItsWaitSet) {
     EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
 }
 
-// The record checks on their own: the five reasons of decision D-38 why a
+// The record checks on their own: the five reasons of decision D-40 why a
 // request must not be executed, at their limits.
 TEST(QueueRecords, ARequestIsExpiredForEachOfFiveReasons) {
     constexpr std::int64_t NOW = 1'000'000'000'000;

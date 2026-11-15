@@ -112,8 +112,8 @@ static_assert(SAME_SIZE<scada_write_result, scada::tag::WriteResult> &&
                   offsetof(scada::tag::WriteResult, completed_time_ns) &&
               offsetof(scada_write_result, reserved) ==
                   offsetof(scada::tag::WriteResult, reserved));
-constexpr std::size_t STATUS_BYTES = 32;       // decisions D-28 and D-38
-constexpr std::size_t QUEUE_STATS_BYTES = 80;  // decision D-38
+constexpr std::size_t STATUS_BYTES = 32;       // decisions D-28 and D-40
+constexpr std::size_t QUEUE_STATS_BYTES = 80;  // decision D-40
 static_assert(sizeof(scada_queue_stats_t) == QUEUE_STATS_BYTES);
 static_assert(sizeof(scada_status) == STATUS_BYTES);
 constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
@@ -326,10 +326,11 @@ SCADA_RT int scada_tag_write_many(scada_ctx* ctx, const uint32_t* handles,
 
 int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
                           size_t cap, size_t* len, scada_value* meta) {
-    if (ctx == nullptr || buf == nullptr || len == nullptr) {
+    if (ctx == nullptr || (buf == nullptr && cap != 0) || len == nullptr) {
         return SCADA_E_INVALID;
     }
-    // The caller states that `buf` holds `cap` bytes.
+    // The caller states that `buf` holds `cap` bytes. A null `buf` with
+    // `cap` 0 asks for the length alone and stays a null span.
     return ctx->attachment->read_string(handle, std::span<char>(buf, cap), *len,
                                         meta);
 }

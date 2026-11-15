@@ -363,11 +363,12 @@ What a read returns in the other cases:
 
 | Situation | Return code | Output |
 | --- | --- | --- |
-| The owner's region is missing or not ready | `SCADA_OK` | Type of the tag, value 0, times 0, change count 0, quality BAD, OWNER_DOWN only |
+| The owner's region is missing or not ready, and a tag of the owner was resolved in this context | `SCADA_OK` | Type of the tag, value 0, times 0, change count 0, quality BAD, OWNER_DOWN only |
 | Every attempt found the record mid-write and the owner is down | `SCADA_OK` | The same: what a dead owner left half written is not a value |
 | Every attempt found the record mid-write and the owner is not down | `SCADA_E_BUSY` | Unchanged |
 | The record does not hold a value of the type of its tag: another type, a quality or flag that is none, OWNER_DOWN stored, a BOOL that is neither 0 nor 1, a STRING record that is not the number of its slot, a string length above 250 | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
 | The handle is none of this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+| The owner is another process and no tag of it was resolved in this context | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
 
 Only `SCADA_E_BUSY` leaves the output unchanged. Every other error stores
 quality BAD, so that a caller that keeps its output never holds on to a good
@@ -378,8 +379,13 @@ An owner cannot store OWNER_DOWN: a write with that flag is refused with
 `SCADA_E_INVALID`.
 
 A tag of another process must be resolved in the context that reads it:
-resolve is where its regions are mapped (section 11.2). Until then it reads as
-if its region were missing.
+resolve is where its regions are mapped (section 11.2). Resolving one tag of an
+owner maps the regions of all its tags. `scada_sub_open` is not a resolve: a
+ring consumer that reads the tag of a `scada_change.handle` resolves a tag of
+that owner first, or the read is `SCADA_E_INVALID`. Until a tag of the owner is resolved,
+a read of its tags is `SCADA_E_INVALID`, so that a forgotten resolve does not
+look like a dead owner to operators and alarm logic. The library tells the two
+apart by one atomic load in the read path, without a lock.
 
 ### 6.3 Owner restart
 
@@ -768,7 +774,10 @@ struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint32_t pid;                  // for diagnosis only; never used for a decision
   uint32_t state;                // A; 1 STARTING, 2 RUNNING, 3 STOPPING
   uint32_t cycle_seq;            // A; incremented by scada_tag_notify
-  uint8_t  reserved[36];
+  uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
+  int64_t  longest_gap_ns;       // A; longest gap between two published heartbeats
+  int64_t  last_late_mono_ns;    // A; end of the latest late gap, CLOCK_MONOTONIC
+  uint8_t  reserved[16];
 };
 // followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
 ```
@@ -805,8 +814,33 @@ keeps the result in the `down` flag of the process table entry. The flag is
 for reporting and alarms. The library does not use it to judge a process: it
 lags by up to one check interval, and a flag left by a `scada-tagd` that has
 stopped would keep a restarted process down. A reader can therefore see a
-process down for a moment that `scada-tagd` never records, when a heartbeat
-gap is longer than the timeout and shorter than the check interval.
+process down for a moment that no check of `scada-tagd` falls into, when a
+heartbeat gap is longer than the timeout and shorter than the check interval.
+The process records such gaps itself, so that they can be traced:
+
+- `scada_tag_heartbeat()` publishes `heartbeat_mono_ns` only when the new time
+  is later than the published one; with several threads the published time
+  never goes back and no `heartbeat` count is lost. The thread that publishes
+  a time owns the gap since the time before it.
+- A gap strictly longer than `heartbeat_timeout_ms` is late: readers saw the
+  process down. The process then raises `last_late_mono_ns` to the time of
+  that heartbeat (a maximum, relaxed) and increments `late_beats` (acq_rel).
+  `longest_gap_ns` is the longest gap of any heartbeat since the region was
+  created, not the gap of the latest late one. The first heartbeat after
+  attach is not measured: the gap since a previous life is a restart. A reused
+  region keeps its figures; a new region starts at 0.
+- The figures are reported by the process itself and are a lower bound. A gap
+  is measured between the clock readings of two heartbeats, not between the
+  moments they were published: a heartbeat that reads its clock and is then
+  preempted before it publishes is seen late by readers for longer than it
+  records, and may record nothing. A process that hangs for good records
+  nothing; `scada-tagd` reports it down.
+- `scada-tagd` reads `late_beats` (acquire) and the gap fields at every check
+  and logs `heartbeat late` at WARNING when the count grew, at most once per
+  process and check. A count that is not 0 at its first look at a region is
+  logged once at INFO as `heartbeat late before this check`.
+- The three fields are for diagnosis only and are never used to judge
+  whether a process is down. They are input to their readers.
 
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
@@ -985,6 +1019,9 @@ void scada_waitset_destroy(scada_waitset *ws);
 - `read_many` and `write_many` read the clocks once for the whole call.
   `read_many` returns a status for each handle.
 - `size` in the queue calls must equal the queue's `record_size`.
+- `scada_tag_read_string` with `buf` NULL and `cap` 0 returns the length and
+  `meta` alone, as a large enough buffer would; `buf` NULL with `cap` above 0
+  is `SCADA_E_INVALID`.
 - `scada_sub_open` subscribes to one owner's ring. The per-tag filter of
   reference section 5.7 is applied by the caller on `scada_change.handle`.
 - Every timeout is in ms and at least 0; 0 does not wait. There is no wait
@@ -1073,6 +1110,8 @@ because the real-time rule no longer holds on that unit.
 
 - `scada_ctx` may be used from several threads. The read functions,
   `scada_proc_status` and `scada_tag_heartbeat` are safe from any thread.
+  Heartbeats from several threads never move the published time back
+  (section 10.1).
 - All writes to the tags of one owner come from one thread. A `scada_sub`, a
   `scada_queue` and a `scada_waitset` are each used by one thread.
 - `scada_tag_notify` acts for the calling thread: it wakes the consumers of
@@ -1207,8 +1246,8 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Heartbeat timeout defaults | 3,000 ms general, 500 ms for real-time processes | P1-04, confirmed in P1-12 | Conformance tests 5 and 26 |
 | Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 21, with a value changed immediately before the change |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
-| Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-38) | P1-13 | Decided before 1.0 |
-| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Until then a post made between the recreation and the consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is lost; on an event queue that is an action without an audit record (9.3). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-38, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
+| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Until then a post made between the recreation and the consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is lost; on an event queue that is an action without an audit record (9.3). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-40, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
 
 ## 17. Differences from the reference document
 
@@ -1275,12 +1314,27 @@ Smaller points where this contract adds to or narrows the reference:
 
 | 0.5 | 2026-11-14 | Change rings and the wake mechanism (P1-07, D-32). Section 8: when a write appends an entry and what it holds; entries are input; a ring that appears, disappears or is replaced is a GAP; so is the owner's process going down or coming back, and an entry of an owner that is down gets the overlay of 6.2 (D-33); epoch read before `write_seq`; a subscription starts at the end of the ring. Section 8.4: the futex mechanism verified and specified (shared futex, expected value, deadline, 127 sources per wait set, one waiter thread per wait set that asks for a descriptor, `cycle_seq` readiness); what `scada_tag_notify` does besides waking. Section 13: `scada_change` and `scada_sub_stats_t` defined; timeouts. Section 15, test 7: the second gap of a consumer that saw the owner down. Section 16: wake mechanism settled. |
 | 0.6 | 2026-11-14 | Issue #41 (D-34). Section 10.1: a heartbeat time more than the timeout ahead of the reader's clock is down. Section 3.4: no private time namespace. Section 13.1: the clock check compares a library read with a raw system call. |
-| 0.9 | 2026-11-15 | Reliable queues (P1-08, D-38). Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 18. |
+| 0.7 | 2026-11-14 | Smaller points of the review of P1-06 (issue #42, D-35). Section 6.2: a tag of another process none of whose tags was resolved in the context reads as `SCADA_E_INVALID`, not as OWNER_DOWN. Section 13: `scada_tag_read_string` can be asked for the length alone. |
+| 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
+| 0.9 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 18. |
 
-Migration, 0.6 to 0.9: none for data; the layout version stays 1 and no
+Migration, 0.8 to 0.9: none for data; the layout version stays 1 and no
 structure in shared memory changed. The queue functions are new; nothing
 used them before. A tag set with a queue whose producer and consumer are
 one process is now refused.
+
+Migration, 0.7 to 0.8: none for data. The layout version stays 1: the new
+fields were reserved and zero, and 0 reads as "none recorded". A region
+written by a 0.7 library holds zeros there, and a 0.7 `scada-tagd` ignores
+them. Nothing judges liveness by them.
+
+Migration, 0.6 to 0.7: none for data. The layout version stays 1 and no
+structure in shared memory changed. A caller that read a tag of another
+process without resolving it in its context got BAD with OWNER_DOWN and now
+gets `SCADA_E_INVALID` with quality BAD; it must resolve the tag first, as 0.4
+already required. A caller that passed `buf` NULL with `cap` 0 to
+`scada_tag_read_string` got `SCADA_E_INVALID` and now gets `SCADA_OK` with the
+length.
 
 Migration, 0.5 to 0.6: none for data; the layout version stays 1 and no
 structure changed. A process whose heartbeat time lies more than its timeout

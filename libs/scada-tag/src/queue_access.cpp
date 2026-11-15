@@ -110,7 +110,7 @@ void Attachment::prepare_queues() {
         }
     }
     // A queue region created while its consumer's cursor is not 0 was
-    // created anew inside the generation (decision D-38): the consumer will
+    // created anew inside the generation (decision D-40): the consumer will
     // find its cursor out of range or the file replaced. Counted, so that
     // the process can log it; the library does not log.
     for (const OwnedQueue& owned : queues_) {
@@ -202,7 +202,7 @@ bool Attachment::drain_queue(const QueueAccess& access) noexcept {
     if (out_of_range(read, written, access.capacity)) {
         // Not followed (section 9.2): the queue stays stopped. Setting the
         // cursor to `write_seq` could give ids that were given before in
-        // this generation (decision D-38).
+        // this generation (decision D-40).
         count_one(counts.out_of_range);
         return false;
     }
@@ -354,7 +354,7 @@ int Attachment::post_record(std::size_t queue_id,
         return SCADA_E_FULL;
     }
     if (written + 1 == DEAD_CURSOR) {
-        // DEAD_CURSOR is reserved (decision D-38): no `write_seq` reaches
+        // DEAD_CURSOR is reserved (decision D-40): no `write_seq` reaches
         // it, so that it is never a valid cursor.
         return SCADA_E_FULL;
     }

@@ -128,7 +128,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         std::ranges::copy(input.last(sizeof(now)), last.begin());
         now = std::bit_cast<std::int64_t>(last);
     }
-    // The five reasons of decision D-38, judged by additions that are
+    // The five reasons of decision D-40, judged by additions that are
     // guarded against overflow instead of by differences.
     const std::int64_t expiry = request.expiry_mono_ns;
     const std::int64_t posted = request.posted_mono_ns;

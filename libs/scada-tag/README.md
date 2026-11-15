@@ -50,7 +50,7 @@ and write with the sequence lock; change rings; and reliable queues.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.5, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.8, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -310,7 +310,7 @@ Contract sections 6, 7 and 13; decision D-29.
 | `scada_tag_read_many` | yes | Several tags with one reading of the clock, and a status for each |
 | `scada_tag_write` | yes | One tag; owner thread only |
 | `scada_tag_write_many` | yes | Several tags with one pair of clock readings; all or nothing |
-| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write |
+| `scada_tag_read_string` | no | The text of a STRING tag with the quality and times of the same write; `buf` NULL with `cap` 0 gives the length alone |
 | `scada_tag_write_string` | no | Text of at most 250 bytes of well-formed UTF-8; owner thread only |
 
 A `scada_value` is 48 bytes: type, quality, quality flags, change count,
@@ -338,10 +338,10 @@ What a read returns:
 | Never written | `SCADA_OK` | Quality BAD, flag NOT_INIT, times 0 |
 | Owner down, record between writes | `SCADA_OK` | The last value, quality BAD, OWNER_DOWN added |
 | Owner down, record left in the middle of a write | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
-| Region of the owner missing, or the tag was not resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
+| Region of the owner missing, after a tag of the owner was resolved in this context | `SCADA_OK` | Value 0, times 0, quality BAD, OWNER_DOWN |
 | Owner running and mid-write at all 64 attempts | `SCADA_E_BUSY` | Output unchanged; keep the previous value |
 | Record does not hold a value of the type of the tag, or holds OWNER_DOWN | `SCADA_E_LAYOUT` | Type of the tag, value 0, times 0, quality BAD |
-| No such handle in this generation | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
+| No such handle in this generation, or no tag of its owner (another process) was resolved in this context | `SCADA_E_INVALID` | Type 0, value 0, times 0, quality BAD |
 
 Only `SCADA_E_BUSY` leaves the output unchanged. Where value and times are
 0 there is no value: a consumer must not plot, compare or act on them.
@@ -444,7 +444,7 @@ give it. `scada_sub_stats` counts these owner changes.
 
 ## Reliable queues
 
-Contract section 9; decision D-38.
+Contract section 9; decision D-40.
 
 A queue has one producing process and one consuming process, fixed in the
 queue table (the tag-set builder refuses one process at both ends), and in
@@ -521,7 +521,7 @@ A queue whose file is replaced, removed or shrunk inside the generation is
 dead: the consumer remembers the first mapping it saw, gets `SCADA_E_LAYOUT`
 when it finds another or none, counts `replaced`, and stores an all-ones
 cursor so that the producer gets `SCADA_E_PEER_DOWN`. It stays so until a
-tag-set change or a reboot (decision D-38, issue #53). Two gaps remain until
+tag-set change or a reboot (decision D-40, issue #53). Two gaps remain until
 #53 adds a base sequence: a post made between the recreation and the
 consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is
 lost, which on an event queue is an action without an audit record; and a

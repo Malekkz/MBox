@@ -14,7 +14,7 @@
 // posts one request that expires 1 ms later. Before the markers it waits
 // until the request is there and has expired; between them it looks at the
 // queue without waiting, which answers the request EXPIRED in
-// `result.<process>.feeder` (decision D-38). It also posts one request to
+// `result.<process>.feeder` (decision D-40). It also posts one request to
 // `io` in `cmd.io.<process>` and one answer in `result.<process>.feeder`. The
 // uid of scada-tagd is taken to be the user of the caller, as in the tests.
 // With `syscall` or `allocation` it makes one system call or one allocation
@@ -222,7 +222,7 @@ Outcome run_marked(Prepared& prepared, std::string_view fault) {
     count(outcome, scada_queue_post(prepared.queue, &prepared.event,
                                     sizeof(prepared.event)));
     // Not marked real-time safe, but with timeout 0 it makes no system call
-    // (decision D-38).
+    // (decision D-40).
     count(outcome,
           scada_queue_next(prepared.requests, &prepared.request,
                            sizeof(prepared.request), 0),
