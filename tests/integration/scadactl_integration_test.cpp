@@ -413,6 +413,8 @@ TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
     }
     EXPECT_TRUE(moves_to_generation_two_and_stops(*watch));
     EXPECT_TRUE(nothing_of_the_old_generation(watch->out()));
+    // The race with a kill was also seen in the pipeline of PR #68
+    // (ThreadSanitizer build).
     EXPECT_TRUE(stops_by_itself(*writer));
     stop(*second);
 }
