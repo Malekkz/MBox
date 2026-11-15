@@ -74,8 +74,6 @@ ino_t inode_of(const std::filesystem::path& path) {
 
 // The log lines of scada-tagd about the process `io`.
 constexpr std::string_view IO_UP = R"(process up PROCESS="io")";
-constexpr std::string_view IO_NOT_ATTACHED =
-    R"(process down PROCESS="io" REASON="region missing")";
 constexpr std::string_view IO_HEARTBEAT_STALE =
     R"(process down PROCESS="io" REASON="heartbeat stale")";
 constexpr std::string_view IO_NOT_RUNNING =
@@ -247,8 +245,6 @@ TEST_F(TagdService, Conformance05KilledProcessIsMarkedDown) {
     if (!tagd.has_value()) {
         return;
     }
-    // Nothing has attached yet.
-    EXPECT_TRUE(logs(*tagd, IO_NOT_ATTACHED));
     std::optional<ChildProcess> helper = attached_io();
     if (!helper.has_value()) {
         return;

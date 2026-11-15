@@ -94,8 +94,10 @@ public:
     // 3. Otherwise removes every other generation directory in which no
     //    process holds the lock on its `proc` region, checks that the file
     //    system has room for all regions, creates the next generation with
-    //    its `header`, switches `current` to it, and sets the state of the
-    //    generation `current` pointed to before to RETIRING.
+    //    its `header`, in which every process but `tagd` is down, switches
+    //    `current` to it, and sets the state of the generation `current`
+    //    pointed to before to RETIRING. A reused generation keeps the
+    //    `down` flags it has.
     // 4. Attaches `proc.tagd`, sets it RUNNING and writes the first
     //    heartbeat.
     //
