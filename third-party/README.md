@@ -15,6 +15,8 @@ third-party code (reference 13.6, 16.3; decisions D-20 to D-22).
 of the two files changes. It stops the build when:
 
 - an entry is malformed, or its licence is not on the allow-list,
+- an entry's licence is allowed for some scopes only and the entry has
+  another scope,
 - a directory here is not named after an entry,
 - a target of this project links something that is not a target of this
   project, a `link_names` value of an entry, or a platform library
@@ -65,6 +67,7 @@ Reviewers must check these.
 | `url` | yes | Project home page or repository. |
 | `purl` | no | Package URL, used by vulnerability scanners. |
 | `link_names` | no | Names as written in `target_link_libraries`: CMake targets or library names. |
+| `commit` | no | The commit hash of the source used, lower-case hexadecimal, for a dependency built from a source repository. |
 
 Unknown keys are errors. The compiler, its runtime libraries and the C library
 are part of the toolchain and are not listed (D-21).
@@ -76,10 +79,16 @@ MPL and EPL are not on it until the licensing decision of reference section 16
 is made. A change to `licence-allowlist.json` needs review by a person and an
 entry in `docs/decisions.md`.
 
-`CECILL-B` is on the list for dependencies of scope `build` and `test` only,
-not for anything linked or shipped (proposed in D-37; herdtools7). The check
-does not look at the scope yet: it compares the licence alone, so review must
-keep a `product` entry with that licence out.
+A licence may be allowed for some scopes only. `licence_scopes` maps it to
+those scopes; a licence not named there is allowed for every scope:
+
+```json
+"licence_scopes": { "CECILL-B": ["build", "test"] }
+```
+
+`CECILL-B` is allowed for dependencies of scope `build` and `test` only, not
+for anything linked or shipped (D-37, D-39; herdtools7). The check rejects a
+`product` entry with it, and the licence report prints the limit.
 
 ## How to test it
 
