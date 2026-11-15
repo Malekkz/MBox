@@ -126,13 +126,16 @@ void OwnProcRegion::heartbeat(std::int64_t mono_ns) noexcept {
     // is only compared.
     std::int64_t previous =
         load_shared(proc.heartbeat_mono_ns, std::memory_order_relaxed);
-    do {
+    for (;;) {
         if (mono_ns <= previous) {
             return;  // not newer: nothing is published or counted
         }
-    } while (!compare_exchange_shared(proc.heartbeat_mono_ns, previous, mono_ns,
-                                      std::memory_order_release,
-                                      std::memory_order_relaxed));
+        if (compare_exchange_shared(proc.heartbeat_mono_ns, previous, mono_ns,
+                                    std::memory_order_release,
+                                    std::memory_order_relaxed)) {
+            break;
+        }
+    }
 
     // This thread published `mono_ns` over `previous`, so the gap between
     // them is its own. The difference of two values with previous <

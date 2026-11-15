@@ -90,30 +90,47 @@ bool leave_mid_write(const std::string& base, const std::string& owner) {
     return true;
 }
 
-// `ms` milliseconds as a time for sigtimedwait.
-timespec interval(std::int64_t ms) {
+// `millis` milliseconds as a time for sigtimedwait.
+timespec interval(std::int64_t millis) {
     timespec time{};
-    time.tv_sec = static_cast<std::time_t>(ms / MILLISECONDS_PER_SECOND);
-    time.tv_nsec = static_cast<long>((ms % MILLISECONDS_PER_SECOND) *
+    time.tv_sec = static_cast<std::time_t>(millis / MILLISECONDS_PER_SECOND);
+    time.tv_nsec = static_cast<long>((millis % MILLISECONDS_PER_SECOND) *
                                      NANOSECONDS_PER_MILLISECOND);
     return time;
+}
+
+// The optional fourth argument.
+struct Extra {
+    bool valid = true;
+    bool mid_write = false;
+    std::optional<std::uint64_t> late_ms;
+};
+
+Extra parse_extra(std::span<const std::string_view> args) {
+    Extra extra;
+    if (args.size() != MAX_ARGUMENTS) {
+        return extra;
+    }
+    constexpr std::string_view LATE_PREFIX = "late=";
+    if (args[4] == "mid-write") {
+        extra.mid_write = true;
+    } else if (args[4].starts_with(LATE_PREFIX)) {
+        extra.late_ms =
+            parse_number(args[4].substr(LATE_PREFIX.size()), MAX_PERIOD_MS);
+        extra.valid = extra.late_ms.has_value();
+    } else {
+        extra.valid = false;
+    }
+    return extra;
 }
 
 int run(std::span<const std::string_view> args) {
     const std::optional<std::uint64_t> period =
         parse_number(args[3], MAX_PERIOD_MS);
-    const bool extra = args.size() == MAX_ARGUMENTS;
-    const bool mid_write = extra && args[4] == "mid-write";
-    constexpr std::string_view LATE_PREFIX = "late=";
-    std::optional<std::uint64_t> late;
-    if (extra && args[4].starts_with(LATE_PREFIX)) {
-        late = parse_number(args[4].substr(LATE_PREFIX.size()), MAX_PERIOD_MS);
-        if (!late) {
-            std::cerr << "scada-tag-test-peer: bad argument\n";
-            return EXIT_USAGE;
-        }
-    }
-    if (!period || *period == 0 || (extra && !mid_write && !late)) {
+    const Extra extra = parse_extra(args);
+    const bool mid_write = extra.mid_write;
+    const std::optional<std::uint64_t> late = extra.late_ms;
+    if (!period || *period == 0 || !extra.valid) {
         std::cerr << "scada-tag-test-peer: bad argument\n";
         return EXIT_USAGE;
     }

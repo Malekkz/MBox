@@ -50,6 +50,9 @@ constexpr std::int64_t TIMEOUT_NS = 500'000'000;
 constexpr std::int64_t START_NS = 1'000'000'000'000;
 // A value of ProcHeader.state that is no enumerator.
 constexpr std::uint32_t NO_STATE = 77;
+// Two short steps after START_NS, in ns, for the order of heartbeats.
+constexpr std::int64_t EARLIER_NS = 5;
+constexpr std::int64_t LATER_NS = 10;
 // A file size that is not the size of the region.
 constexpr off_t OTHER_SIZE = 4096;
 
@@ -426,8 +429,9 @@ TEST_F(LateHeartbeat, AGapStrictlyLongerThanTheTimeoutIsCounted) {
     // The probe of scada-tagd reads the same figures.
     ProcProbe probe;
     EXPECT_EQ(observe(probe, late + 1), DownReason::NONE);
-    ASSERT_TRUE(probe.late_beats().has_value());
-    EXPECT_EQ(probe.late_beats()->count, 1U);
+    const std::optional<LateBeats> beats = probe.late_beats();
+    ASSERT_TRUE(beats.has_value());
+    EXPECT_EQ(beats.value_or(LateBeats{}).count, 1U);
 }
 
 TEST_F(LateHeartbeat, NoTimeoutCountsNoLateHeartbeat) {
@@ -442,14 +446,14 @@ TEST_F(LateHeartbeat, NoTimeoutCountsNoLateHeartbeat) {
 TEST_F(LateHeartbeat, ATimeThatIsNotNewerIsNeitherPublishedNorCounted) {
     Result<OwnProcRegion> region = running();
     ASSERT_TRUE(region.ok());
-    region.value().heartbeat(START_NS + 10);
-    region.value().heartbeat(START_NS + 5);
-    region.value().heartbeat(START_NS + 10);
+    region.value().heartbeat(START_NS + LATER_NS);
+    region.value().heartbeat(START_NS + EARLIER_NS);
+    region.value().heartbeat(START_NS + LATER_NS);
     const ProcHeader proc = copy();
-    EXPECT_EQ(proc.heartbeat_mono_ns, START_NS + 10);
+    EXPECT_EQ(proc.heartbeat_mono_ns, START_NS + LATER_NS);
     // Every call counts as a heartbeat, published or not.
     EXPECT_EQ(proc.heartbeat, 4U);
-    EXPECT_EQ(proc.longest_gap_ns, 10);
+    EXPECT_EQ(proc.longest_gap_ns, LATER_NS);
     EXPECT_EQ(proc.late_beats, 0U);
 }
 
@@ -479,7 +483,7 @@ TEST_F(LateHeartbeat, AFirstHeartbeatReplacesATimeAheadOfIt) {
     {
         Result<OwnProcRegion> first = running();
         ASSERT_TRUE(first.ok());
-        first.value().heartbeat(START_NS + (10 * TIMEOUT_NS));
+        first.value().heartbeat(START_NS + (LATER_NS * TIMEOUT_NS));
     }
     // A previous life left a time ahead of this one's clock: it must not
     // hold back the heartbeats of this life.
