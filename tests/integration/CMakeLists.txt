@@ -87,14 +87,14 @@ add_dependencies(scada-tag-observer-integration-test
 scada_test_command(scadactl_command scadactl)
 scada_add_test(scadactl-integration-test KIND integration
   SOURCES scadactl_integration_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}"
-    "SCADA_TAG_WRITER_COMMAND=${writer_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
     "SCADACTL_COMMAND=${scadactl_command}")
 add_dependencies(scadactl-integration-test
-  scadactl scada-tagd scada-tag-test-peer scada-tag-test-writer)
+  scadactl scada-tagd scada-tag-test-peer scada-sim)
 
 # Who may observe, with real users (contract, sections 3.1 and 11.4). It
 # must run as root to become other users, so it has the label `root`

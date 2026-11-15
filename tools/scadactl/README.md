@@ -129,18 +129,21 @@ ctest --preset dev -R scadactl-integration-test
 
 - `scadactl-unit-test`: the command line, every refusal of it and the help
   text (`Arguments.*`); patterns (`TagPattern.*`); values of every type,
-  marks, flags, ages, times, terminal-safe and JSON text, with control
-  characters, C1 controls, direction overrides, surrogates and overlong
-  forms (`Format.*`); both forms of every table, detail, watch, gap and
-  generation line, and the error messages (`TagTable.*`, `TagJson.*`,
-  `Status.*`, `Watch.*` and others in `view_test.cpp`).
+  marks (every flag), flags, ages, times, terminal-safe and JSON text, with
+  control characters, C1 controls, direction overrides, surrogates and
+  overlong forms (`Format.*`); both forms of every table, detail, watch,
+  gap and generation line, the JSON schema field and null times, and the
+  error messages (`TagTable.*`, `TagJson.*`, `Status.*`, `Watch.*` and
+  others in `view_test.cpp`); a failing output stream (`Output.*`).
 - `scadactl-integration-test` (in `tests/integration/`) starts `scadactl`
-  as a program against real `scada-tagd`, peer and writer processes:
+  as a program against real `scada-tagd`, peer and `scada-sim` processes:
   help, no database, `status` with a process up and one missing, `tag
-  list` and `tag get` of values that are BAD, `tag watch` of a live writer
+  list` and `tag get` of values that are BAD, `tag watch` of `scada-sim`
   in both forms with BAD, UNCERTAIN and STALE values and their age, a stop
-  by SIGINT, a generation change, and a pattern that matches nothing.
-- The acceptance of issue #19 names `scada-sim` as the writer for `tag
-  watch`. Until `scada-sim` (#18) is on main, the test writer of
-  `libscada-tag` plays it; its n-th write stores quality n % 3 and flags
-  n & 0x0FDF, so GOOD, UNCERTAIN, BAD and STALE all come.
+  by SIGINT, a generation change, a pattern that matches nothing, a change
+  ring whose capacity does not match (the watch ends with exit 1), and
+  output that cannot be written (a pipe whose reader is gone with SIGPIPE
+  blocked, `/dev/full`, a closed standard output: exit 1).
+- `scada-sim` is the writer for `tag watch`, as the acceptance of issue
+  #19 asks: its `check` pattern stores at the n-th write quality n % 3 and
+  flags n & 0x0FDF, so GOOD, UNCERTAIN, BAD and STALE all come.

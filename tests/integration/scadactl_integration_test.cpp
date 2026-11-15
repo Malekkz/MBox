@@ -1,20 +1,21 @@
 // Integration tests of scadactl with real processes (reference 11.5, 11.6;
-// issue #19): scada-tagd, the test peer and the test writer run as
+// issue #19): scada-tagd, the test peer and scada-sim run as
 // processes, and scadactl is started as its own program against them, as
 // an operator would start it. scadactl observes: it needs no entry in the
 // tag set.
 //
-// The acceptance of #19 names scada-sim as the writer for `tag watch`;
-// until scada-sim (#18) is on main, the test writer of libscada-tag plays
-// it. Its n-th write of a tag stores value n, quality n % 3 and flags
-// n & 0x0FDF, so a watch sees GOOD, UNCERTAIN and BAD values and the STALE
-// flag in turn.
+// scada-sim (issue P1-10) is the writer for `tag watch`, as the
+// acceptance of #19 asks: its `check` pattern stores, at the n-th write of a
+// tag, value n, quality n % 3 and flags n & 0x0FDF, so a watch sees GOOD,
+// UNCERTAIN and BAD values and the STALE flag in turn.
 //
 // Every wait is on a condition with a limit.
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/sim/layout.h"
+#include "scada/sim/pattern.h"
 #include "scada/test/child_process.h"
 
 #include <gtest/gtest.h>
@@ -49,10 +50,18 @@ constexpr int EXIT_OK = 0;
 constexpr int EXIT_ERROR = 1;
 constexpr int EXIT_USAGE = 2;
 
-// The writer: one owner of the large tag set with one tag, written at
-// WRITER_RATE per second, long enough for every watch below.
+// The simulation of the watches: the process `sim`, which is its one owner,
+// with one `check` tag `sim.t0`, written WRITER_RATE times a
+// second until it is stopped.
 constexpr std::uint64_t WRITER_RATE = 200;
-constexpr std::uint64_t WRITER_UPDATES = 20'000;
+
+scada::sim::Layout watch_layout() {
+    return scada::sim::Layout{.prefix = "sim",
+                              .processes = 1,
+                              .owners = 1,
+                              .tags = 1,
+                              .patterns = {scada::sim::Pattern::CHECK}};
+}
 constexpr int CHANGES = 9;
 
 // How often `text` holds `part`.
@@ -108,17 +117,18 @@ protected:
     [[nodiscard]] const std::string& out() const { return out_; }
     [[nodiscard]] const std::string& err() const { return err_; }
 
-    // Starts the writer on the large tag set: owner load.w0 with the tag
-    // load.w0.t0. Waits until it writes.
+    // The tag set of watch_layout().
+    void write_watch_tag_set() const { write_sim_tag_set(watch_layout()); }
+
+    // Starts scada-sim on watch_layout() and waits until it writes.
     [[nodiscard]] std::optional<ChildProcess> writing() const {
-        std::optional<ChildProcess> writer =
-            start_helper("SCADA_TAG_WRITER_COMMAND",
-                         {base(), "load", "1", "1", std::to_string(WRITER_RATE),
-                          std::to_string(WRITER_UPDATES), "notify"});
-        if (writer.has_value()) {
-            EXPECT_TRUE(prints(*writer, "writing"));
+        std::optional<ChildProcess> sim = start_sim(
+            watch_layout(),
+            {"--rate", std::to_string(WRITER_RATE), "--notify", "each"});
+        if (sim.has_value()) {
+            EXPECT_TRUE(prints(*sim, "writing"));
         }
-        return writer;
+        return sim;
     }
 
     // Adds a tag to the small tag set file, so that scada-tagd started on
@@ -235,12 +245,12 @@ TEST_F(Scadactl, TagGetMarksABadValueAndRefusesAnUnknownTag) {
     stop(*tagd);
 }
 
-// A watch of load.w0.t0 in text: one line of the value now, CHANGES
+// A watch of sim.t0 in text: one line of the value now, CHANGES
 // change lines, among them BAD ones marked '!' and UNCERTAIN or STALE ones
 // marked '~', each with its age.
 ::testing::AssertionResult watched_in_text(std::string_view text) {
-    const bool good = count_of(text, " now    load.w0.t0  ") == 1 &&
-                      count_of(text, " change load.w0.t0  ") ==
+    const bool good = count_of(text, " now    sim.t0  ") == 1 &&
+                      count_of(text, " change sim.t0  ") ==
                           static_cast<std::size_t>(CHANGES) &&
                       !lines_starting(text, "! change ").empty() &&
                       !lines_starting(text, "~ change ").empty() &&
@@ -265,42 +275,42 @@ TEST_F(Scadactl, TagGetMarksABadValueAndRefusesAnUnknownTag) {
 }
 
 TEST_F(Scadactl, TagWatchShowsChangesWithQualityFlagsAndAge) {
-    write_load_tag_set();
+    write_watch_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     std::optional<ChildProcess> writer = writing();
     if (!tagd.has_value() || !writer.has_value()) {
         return;
     }
-    EXPECT_EQ(scadactl({"tag", "watch", "load.w0.t0", "--count",
+    EXPECT_EQ(scadactl({"tag", "watch", "sim.t0", "--count",
                         std::to_string(CHANGES)}),
               EXIT_OK)
         << err();
     EXPECT_TRUE(watched_in_text(out()));
-    EXPECT_EQ(scadactl({"tag", "watch", "load.*", "--json", "--count",
+    EXPECT_EQ(scadactl({"tag", "watch", "sim.*", "--json", "--count",
                         std::to_string(CHANGES)}),
               EXIT_OK)
         << err();
     EXPECT_TRUE(watched_in_json(out()));
-    kill(*writer);  // it takes SIGTERM only once it has written everything
+    EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }
 
 TEST_F(Scadactl, TagWatchStopsOnSigint) {
-    write_load_tag_set();
+    write_watch_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     std::optional<ChildProcess> writer = writing();
     if (!tagd.has_value() || !writer.has_value()) {
         return;
     }
     std::optional<ChildProcess> watch =
-        start_scadactl({"tag", "watch", "load.w0.*"});
+        start_scadactl({"tag", "watch", "sim.*"});
     if (!watch.has_value()) {
         return;
     }
-    EXPECT_TRUE(prints(*watch, " change load.w0.t0"));
+    EXPECT_TRUE(prints(*watch, " change sim.t0"));
     EXPECT_TRUE(watch->send_signal(SIGINT));
     EXPECT_EQ(watch->wait_for_exit(WAIT_LIMIT), EXIT_OK) << watch->err();
-    kill(*writer);  // it takes SIGTERM only once it has written everything
+    EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }
 
@@ -340,7 +350,7 @@ std::string_view after_generation_change(std::string_view out) {
 // lines after the change and none about a tag of the old generation.
 ::testing::AssertionResult nothing_of_the_old_generation(std::string_view out) {
     const std::string_view later = after_generation_change(out);
-    if (!later.empty() && later.find("load.") == std::string_view::npos) {
+    if (!later.empty() && later.find("sim.") == std::string_view::npos) {
         return ::testing::AssertionSuccess();
     }
     return ::testing::AssertionFailure() << out;
@@ -363,17 +373,18 @@ std::string_view after_generation_change(std::string_view out) {
 }
 
 TEST_F(Scadactl, TagWatchNeverShowsTheTagsOfARetiredGeneration) {
-    // Generation 1: the writer's tag set, with the writer writing.
-    write_load_tag_set();
+    // Generation 1: the simulation's tag set, with scada-sim writing.
+    write_watch_tag_set();
     std::optional<RunningTagd> first = ready_tagd();
     std::optional<ChildProcess> writer = writing();
     std::optional<ChildProcess> watch = start_scadactl({"tag", "watch", "*"});
     if (!first.has_value() || !writer.has_value() || !watch.has_value()) {
         return;
     }
-    EXPECT_TRUE(prints(*watch, " change load.w0.t0"));
-    // Generation 2: another tag set, without the writer's tags. The writer
-    // may go on writing generation 1 for a while.
+    EXPECT_TRUE(prints(*watch, " change sim.t0"));
+    // Generation 2: another tag set, without the simulation's tags.
+    // scada-sim may go on writing generation 1 for a while; it stops by
+    // itself once it sees the generation retire.
     stop(*first);
     write_small_tag_set();
     std::optional<RunningTagd> second = ready_tagd();
@@ -560,16 +571,16 @@ protected:
 };
 
 TEST_F(ScadactlOutput, TagWatchEndsWhenItsOutputCannotBeWritten) {
-    write_load_tag_set();
+    write_watch_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     std::optional<ChildProcess> writer = writing();
     if (!tagd.has_value() || !writer.has_value()) {
         return;
     }
     // `tag watch | head -1`: the watch ends at its next line.
-    EXPECT_TRUE(fails_writing({"tag", "watch", "load.*"}, Output::CLOSED_PIPE));
-    EXPECT_TRUE(fails_writing({"tag", "watch", "load.*"}, Output::FULL));
-    kill(*writer);  // it takes SIGTERM only once it has written everything
+    EXPECT_TRUE(fails_writing({"tag", "watch", "sim.*"}, Output::CLOSED_PIPE));
+    EXPECT_TRUE(fails_writing({"tag", "watch", "sim.*"}, Output::FULL));
+    EXPECT_TRUE(stops_cleanly(*writer));
     stop(*tagd);
 }
 
