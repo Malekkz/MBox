@@ -8,8 +8,8 @@ built: the build skeleton, its checks and the common library
 (`libs/scada-common`: status and result types, logging, clocks). Phase 1 (data
 plane) has started: the binary layout of the tag database, the tag-set
 definition, the header builder, attach and tag read and write
-(`libs/scada-tag`), and the daemon that creates the database and watches
-liveness (`scada-tagd`).
+(`libs/scada-tag`), the daemon that creates the database and watches
+liveness (`scada-tagd`), and the simulator writer (`scada-sim`).
 
 ## Where things are
 
@@ -128,10 +128,14 @@ commands above and nothing else:
 A failing command fails its check: a compiler warning, a failing test, a
 finding of the `check` target, a sanitizer report or a fuzzing crash. Nothing
 is skipped or allowed to fail. Performance tests are not part of the pipeline
-(`docs/decisions.md`, D-13), with one exception: both `build and test` jobs
-run `scada-tag-wake-perf-test` on the `release` build and print the wake-up
+(`docs/decisions.md`, D-13), with two exceptions on the `release` build of
+both `build and test` jobs: `scada-tag-wake-perf-test` prints the wake-up
 latency of a change ring consumer, without gating on it, because the ARM64
-runner is the only ARM64 machine of the project (D-32).
+runner is the only ARM64 machine of the project (D-32); and
+`scada-sim-rate-perf-test` checks on x86-64 that the simulator writer
+sustains 50,000 updates per second across 10 owners: every update of a
+10 s run written within 10.1 s, none more than 250 ms late; on ARM64 it
+prints the figures (D-41).
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.

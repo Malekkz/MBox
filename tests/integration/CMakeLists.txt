@@ -26,8 +26,10 @@ scada_add_test(scada-tagd-integration-test KIND integration
 add_dependencies(scada-tagd-integration-test scada-tagd scada-tag-test-peer)
 
 # Tag read and write with real processes: conformance tests 2, 3, 5 and 6 of
-# the tag database contract, the part of the reader.
+# the tag database contract, the part of the reader. scada-sim writes the
+# load.
 scada_test_command(writer_command scada-tag-test-writer)
+scada_test_command(sim_command scada-sim)
 # The library checks the thread of an owner (contract 13.2) only in a build
 # without NDEBUG; CMake defines NDEBUG in every build type but Debug.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -37,33 +39,45 @@ else()
 endif()
 scada_add_test(scada-tag-access-integration-test KIND integration
   SOURCES tag_access_integration_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}"
     "SCADA_TAG_WRITER_COMMAND=${writer_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
     "SCADA_TAG_THREAD_CHECK=${thread_check}")
 add_dependencies(scada-tag-access-integration-test
-  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+  scada-tagd scada-tag-test-peer scada-tag-test-writer scada-sim)
 
 # The change rings with real processes: conformance tests 7 (the ring), 13
 # and 24.
 scada_add_test(scada-tag-change-ring-integration-test KIND integration
   SOURCES change_ring_integration_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}"
-    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+    "SCADA_SIM_COMMAND=${sim_command}")
 add_dependencies(scada-tag-change-ring-integration-test
-  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+  scada-tagd scada-tag-test-peer scada-sim)
+
+# scada-sim itself with real processes: the tag-set command, every pattern,
+# several simulator processes, the stop on a signal, and the errors.
+scada_add_test(scada-sim-integration-test KIND integration
+  SOURCES sim_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}"
+    "SCADA_SIM_COMMAND=${sim_command}")
+add_dependencies(scada-sim-integration-test scada-tagd scada-sim)
 
 # The reliable queues with real processes: conformance tests 16, 17 and
 # 19, and one million records through one queue.
 scada_test_command(queue_command scada-tag-test-queue)
 scada_add_test(scada-tag-queue-integration-test KIND integration
   SOURCES queue_integration_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_QUEUE_COMMAND=${queue_command}"
@@ -74,13 +88,13 @@ add_dependencies(scada-tag-queue-integration-test
 # Observer contexts with real processes (contract, section 11.4).
 scada_add_test(scada-tag-observer-integration-test KIND integration
   SOURCES observer_integration_test.cpp
-  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
     "SCADA_TAG_PEER_COMMAND=${peer_command}"
-    "SCADA_TAG_WRITER_COMMAND=${writer_command}")
+    "SCADA_SIM_COMMAND=${sim_command}")
 add_dependencies(scada-tag-observer-integration-test
-  scada-tagd scada-tag-test-peer scada-tag-test-writer)
+  scada-tagd scada-tag-test-peer scada-sim)
 
 # Who may observe, with real users (contract, sections 3.1 and 11.4). It
 # must run as root to become other users, so it has the label `root`
@@ -100,7 +114,7 @@ if(NOT SCADA_SANITIZER AND NOT CMAKE_CROSSCOMPILING)
   scada_test_command(probe_command scada-tag-rt-probe)
   scada_add_test(scada-tag-rt-integration-test KIND integration
     SOURCES rt_safety_integration_test.cpp
-    DEPENDS scada::tag scada::tagd scada::service scada::test-support
+    DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
     ENVIRONMENT
       "SCADA_TAGD_COMMAND=${tagd_command}"
       "SCADA_TAG_PEER_COMMAND=${peer_command}"
