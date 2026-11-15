@@ -1,5 +1,5 @@
 AArch64 change-ring
-"Change ring, contract 0.5 sections 8.1 and 8.2"
+"Change ring, contract 0.6 sections 8.1 and 8.2"
 (*
  * A ring of capacity 2. P0 is the owner thread: three calls of
  * append_change (libs/scada-tag/src/change_ring.cpp), each the load of

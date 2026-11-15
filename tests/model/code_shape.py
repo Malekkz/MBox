@@ -29,6 +29,16 @@ INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+([a-z][a-z0-9.]*)\s*(.*)$")
 RELOCATION = re.compile(
     r"^\s*[0-9a-f]+:\s+R_AARCH64_(?:CALL|JUMP)26\s+(.+?)\s*$")
 TARGET = re.compile(r"(?:0x)?([0-9a-f]+)\s+<([^>]*)>")
+REGISTER = re.compile(r"^[xw](\d+)$")
+BASE = re.compile(r"\[(x\d+|sp)\b")
+
+# Instructions whose first operand is not a register they write.
+NO_DESTINATION = ("cmp", "cmn", "tst", "ccmp", "ccmn", "fcmp", "fccmp",
+                  "prfm", "nop", "hint", "bti", "isb", "dmb", "dsb", "ret",
+                  "paciasp", "autiasp")
+
+# The registers a call may change (AAPCS64): x0 to x18.
+CALL_CLOBBERED = frozenset(range(19))
 
 # Functions that do not return. A path that calls one ends there.
 NO_RETURN = ("scada::panic(", "std::__glibcxx_assert_fail(",
@@ -71,12 +81,42 @@ def classify(mnemonic, operands):
     return None
 
 
+def register_number(text):
+    match = REGISTER.match(text.strip())
+    return int(match.group(1)) if match else None
+
+
+def registers(mnemonic, operands, letter):
+    """The base register of a memory access ("sp" or a number, None if
+    none) and the set of general registers the instruction writes."""
+    match = BASE.search(operands)
+    base = None
+    if match:
+        base = "sp" if match.group(1) == "sp" else int(match.group(1)[1:])
+    fields = [f for f in operands.split("[")[0].split(",") if f.strip()]
+    defines = set()
+    if letter in ("L", "A"):
+        count = 2 if mnemonic.startswith("ldp") else 1
+        for field in fields[:count]:
+            number = register_number(field)
+            if number is not None:
+                defines.add(number)
+    elif letter is None and fields and not mnemonic.startswith(
+            NO_DESTINATION) and mnemonic.split(".")[0] not in (
+                "b", "bl", "cbz", "cbnz", "tbz", "tbnz", "br", "blr"):
+        number = register_number(fields[0])
+        if number is not None:
+            defines.add(number)
+    return base, frozenset(defines)
+
+
 class Instruction:
     def __init__(self, address, mnemonic, operands):
         self.address = address
         self.mnemonic = mnemonic
         self.operands = operands
         self.letter = classify(mnemonic, operands)
+        self.base, self.defines = registers(mnemonic, operands, self.letter)
         self.symbol = None  # target of a call or a jump out of the function
         self.target = None  # address of a branch
         match = TARGET.search(operands)
@@ -174,8 +214,9 @@ class Program:
             instruction = function.code[index]
             mnemonic = instruction.mnemonic
             base = mnemonic.split(".")[0]
-            if instruction.letter:
-                tokens += ((instruction.letter, instruction.text()),)
+            if instruction.letter or instruction.defines:
+                tokens += ((instruction.letter, instruction.text(),
+                            instruction.base, instruction.defines),)
             if mnemonic in RETURNS:
                 found.append(tokens)
             elif mnemonic in CALLS or (base == "b" and instruction.target
@@ -185,11 +226,14 @@ class Program:
                     continue
                 callee = self.callee(function, symbol)
                 if callee is None:
-                    tokens += (("C", f"call {symbol}"),)
+                    tokens += (("C", f"call {symbol}", None, frozenset()),)
                     callee_paths = [()]
                 else:
                     callee_paths = self.paths(callee, depth + 1)
+                # After the call the caller cannot rely on x0 to x18.
+                clobber = ((None, "(call returns)", None, CALL_CLOBBERED),)
                 for inner in callee_paths:
+                    inner = inner + clobber
                     if base == "b":  # a tail call returns for this function
                         found.append(tokens + inner)
                     else:
@@ -208,7 +252,8 @@ class Program:
                 if mnemonic != "b":  # conditional: may fall through
                     stack.append((index + 1, tokens, taken))
             elif mnemonic in ("br", "blr", "braa", "brab", "blraa", "blrab"):
-                tokens += (("C", f"indirect {instruction.text()}"),)
+                tokens += (("C", f"indirect {instruction.text()}", None,
+                            CALL_CLOBBERED),)
                 stack.append((index + 1, tokens, taken))
             else:
                 stack.append((index + 1, tokens, taken))
@@ -219,7 +264,7 @@ class Program:
 
 
 def letters_of(path):
-    return "".join(letter for letter, _ in path)
+    return "".join(token[0] for token in path if token[0])
 
 
 def check_writer(path, store_before_fence, min_stores):
@@ -243,39 +288,85 @@ def check_writer(path, store_before_fence, min_stores):
                 "release store")
     if "S" in letters[release:]:
         return "a store after the release store"
-    before = letters[:fence]
-    if store_before_fence and "S" not in before:
-        return "no store before the fence (the odd sequence number)"
-    if not store_before_fence and "S" in before:
+    stores_before = letters[:fence].count("S")
+    if store_before_fence and stores_before != 1:
+        return (f"expected one store before the fence (the odd sequence "
+                f"number), found {stores_before}")
+    if not store_before_fence and stores_before:
         return "a store before the fence (an entry store not ordered)"
     return None
 
 
 def check_reader(path, min_loads):
-    """One path of the read side: sections 6.2 and 8.2. Each attempt starts
-    with the acquire load; one that uses its copy has the fence after at
-    least `min_loads` loads (compilers do not merge atomic loads) and a load
-    after the fence. Returns (problem, whether an attempt had the fence)."""
+    """One path of the read side: sections 6.2 and 8.2. Returns (problem,
+    whether an attempt had the fence).
+
+    Each attempt starts with the acquire load. An attempt that loads at
+    least `min_loads` times (a copy; compilers do not merge atomic loads)
+    must then reach DMB ISHLD, and after it make a load: the second load.
+    After the fence, at most one load may go through a register that still
+    points at what was copied: the base of the acquire load, or a base the
+    copy loaded from at least twice (the record, the slot or the entry,
+    not a private variable loaded once). A second such load reads shared
+    memory outside the window."""
     letters = letters_of(path)
     for bad in "FRXC":
         if bad in letters:
             return f"unexpected instruction ({bad})", False
-    attempts = letters.split("A")
-    if "G" in attempts[0]:
-        return "a fence before the acquire load", False
-    fenced = False
-    for attempt in attempts[1:]:
-        if attempt.count("G") > 1:
-            return "two fences in one attempt", False
-        if "G" in attempt:
-            fenced = True
-            copy, after = attempt.split("G")
-            if copy.count("L") < min_loads:
+    fenced_any = False
+    attempt = None  # the state of the current attempt
+
+    def finish(state):
+        if state is None:
+            return None
+        if not state["fenced"] and state["loads"] >= min_loads:
+            return (f"an attempt makes {state['loads']} loads and uses them "
+                    "without DMB ISHLD")
+        if state["fenced"] and not state["after"]:
+            return "no load after the fence (the second load)"
+        return None
+
+    for letter, _, base, defines in path:
+        if letter == "A":
+            problem = finish(attempt)
+            if problem:
+                return problem, False
+            attempt = {"loads": 0, "bases": {}, "acquire": base,
+                       "fenced": False, "after": 0, "tainted": 0}
+        elif letter == "G":
+            if attempt is None:
+                return "a fence before the acquire load", False
+            if attempt["fenced"]:
+                return "two fences in one attempt", False
+            if attempt["loads"] < min_loads:
                 return (f"fewer than {min_loads} loads between the acquire "
                         "load and the fence"), False
-            if "L" not in after:
-                return "no load after the fence (the second load)", False
-    return None, fenced
+            attempt["fenced"] = True
+            fenced_any = True
+        elif letter == "L" and attempt is not None:
+            if not attempt["fenced"]:
+                attempt["loads"] += 1
+                bases = attempt["bases"]
+                bases[base] = bases.get(base, 0) + 1
+            else:
+                attempt["after"] += 1
+                copied = base == attempt["acquire"] or attempt["bases"].get(
+                    base, 0) >= 2
+                if copied:
+                    attempt["tainted"] += 1
+                    if attempt["tainted"] > 1:
+                        return ("a load of what was copied after the second "
+                                "load, outside the window"), False
+        if attempt is not None and defines:
+            # A register written here no longer points at what was copied.
+            for number in defines:
+                attempt["bases"].pop(number, None)
+                if attempt["acquire"] == number:
+                    attempt["acquire"] = None
+    problem = finish(attempt)
+    if problem:
+        return problem, False
+    return None, fenced_any
 
 
 def check_function(program, function, rule, argument):
@@ -301,7 +392,7 @@ def check_function(program, function, rule, argument):
 
 
 def shape(path):
-    return " | ".join(text for _, text in path)
+    return " | ".join(token[1] for token in path if token[0])
 
 
 # Function name prefix (as objdump -C prints it), its side and the counts:
@@ -364,9 +455,14 @@ def main():
     parser.add_argument("--objdump", required=True, help="path of objdump")
     parser.add_argument("library", help="the tag library (libscada-tag.a)")
     args = parser.parse_args()
-    disassembly = subprocess.run(
+    result = subprocess.run(
         [args.objdump, "-d", "-r", "-C", "--no-show-raw-insn", args.library],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        print(f"FAIL {args.objdump} exited with {result.returncode}:\n"
+              f"{result.stderr}")
+        return 1
+    disassembly = result.stdout
     report = []
     failures = check(disassembly, report)
     for failure in failures:

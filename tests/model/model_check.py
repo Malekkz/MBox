@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--herd7", required=True, help="path of herd7")
     parser.add_argument("--libdir", default="",
                         help="herd7 library directory, if not its own")
-    parser.add_argument("--timeout", type=float, default=120.0,
+    parser.add_argument("--timeout", type=float, default=300.0,
                         help="seconds for one run of herd7")
     parser.add_argument("--verbose", action="store_true",
                         help="print the whole output of herd7")

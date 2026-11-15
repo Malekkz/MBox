@@ -28,8 +28,9 @@ the order of the accesses in two parts:
    their barriers and acquire and release accesses come in the order the
    litmus tests model: one `DMB ISH` after the odd sequence number and
    before the field stores, one release store after them and no store after
-   it; each read attempt an acquire load, the copy, `DMB ISHLD` and the
-   second load. A minimum count of loads or stores between them stands for
+   it, and exactly one store before the fence in a sequence-lock write; each
+   read attempt that copies an acquire load, the copy, `DMB ISHLD`, the
+   second load and no further load of what was copied. A minimum count of loads or stores between them stands for
    the copy, since compilers do not merge atomic accesses. Calls of helpers
    the compiler did not inline (GCC 13 at -O2 inlines few of them) are
    followed; a path that ends in `panic`, a failed library assertion or the
@@ -38,10 +39,19 @@ the order of the accesses in two parts:
    part an edit that drops a fence would leave the model passing. When it
    fails it prints the disassembly of the functions concerned.
 
-What part 2 does not see: which register holds which field. A copy load
-moved after `DMB ISHLD`, while the fence stays after enough other loads,
-passes it. Reviewers check the orders in `tag_record.cpp` and
-`change_ring.cpp` against the contract, as the comments there ask.
+Known limits (D-37):
+
+- Part 2 does not know which register holds which field. A copy load moved
+  after `DMB ISHLD`, while the fence stays after enough other loads, passes
+  it, and so does a load after the fence through a base the copy used only
+  once (the string slot). Reviewers check the orders in `tag_record.cpp`
+  and `change_ring.cpp` against the contract, as the comments there ask.
+- A stronger ordering fails part 2 too (an acquire second load, `DMB ISH`
+  in a reader): change the litmus tests and the check with it.
+- The model is bounded: two writes against one read attempt, three appends
+  against one read.
+- The repair of contract 6.3 and the store of the ring's `epoch` at
+  reattach (`src/attachment.cpp`) are in neither part.
 
 ## Tests
 

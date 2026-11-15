@@ -121,6 +121,16 @@ def check_gcc_style_writer(text):
     return code_shape.check_function(program, function, "writer", (True, 6))
 
 
+def insert_after(address, line):
+    """Inserts `line` after the instruction at `address` (as printed)."""
+    def change(lines):
+        index = next(i for i, l in enumerate(lines)
+                     if l.strip().startswith(address))
+        lines.insert(index + 1, line)
+        return lines
+    return change
+
+
 class CodeShapeTest(unittest.TestCase):
 
     def setUp(self):
@@ -170,6 +180,27 @@ class CodeShapeTest(unittest.TestCase):
         for function in READERS:
             with self.subTest(function):
                 self.assert_caught(function, rename("ldar", "ldr"))
+
+    def test_a_reader_with_a_path_around_its_fence_fails(self):
+        # A branch from the last copy load to the second load of seq.
+        self.assert_caught("read_record", insert_after(
+            "4c:", "      4e:      \tcbz\tw18, 0x54 <read_record+0x54>"))
+
+    def test_a_reader_that_accepts_without_the_check_fails(self):
+        # A branch from the last copy load straight to the stores of the
+        # result: no fence and no second load.
+        self.assert_caught("read_record", insert_after(
+            "4c:", "      4e:      \tcbz\tw18, 0x60 <read_record+0x60>"))
+
+    def test_a_reader_with_a_load_after_the_check_fails(self):
+        # A field loaded after the second load of seq, outside the window.
+        self.assert_caught("read_record", insert_after(
+            "54:", "      56:      \tldr\tx3, [x0, #0x8]"))
+
+    def test_a_writer_with_a_store_before_the_odd_sequence_fails(self):
+        # A field stored before `seq` is odd, outside the window.
+        self.assert_caught("write_record", insert_after(
+            "2b0:", "     2b2:      \tstr\tx9, [x8, #0x8]"))
 
     def test_a_call_that_is_not_panic_fails(self):
         def add_call(lines):
