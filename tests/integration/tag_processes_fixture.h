@@ -162,8 +162,11 @@ protected:
     }
 
     // The small tag set: scada-tagd; `io` with the tag `plant.level`;
-    // `probe` with the tag `probe.out`; and `reader` without tags. All run
-    // as the user of the test.
+    // `probe` with the tag `probe.out`, the event queue `events.probe` to
+    // `io`, the requests of `feeder` in `cmd.probe.feeder`, answered in
+    // `result.probe.feeder`, and its own requests to `io` in
+    // `cmd.io.probe`, answered in `result.io.probe`; `reader` and `feeder`
+    // without tags. All run as the user of the test.
     void write_small_tag_set() const {
         const std::string uid = std::to_string(::geteuid());
         std::ofstream file(tag_set_path());
@@ -173,10 +176,21 @@ protected:
              << R"(, "heartbeat_timeout_ms": )" << IO_TIMEOUT_MS
              << R"(}, {"name": "probe", "uid": )" << uid
              << R"(}, {"name": "reader", "uid": )" << uid
+             << R"(}, {"name": "feeder", "uid": )" << uid
              << R"(}], "owners": [)" << R"({"name": "io", "process": "io", )"
              << R"("change_ring_capacity": 1024}, )"
              << R"({"name": "probe", "process": "probe", )"
-             << R"("change_ring_capacity": 1024}], "queues": [], "tags": [)"
+             << R"("change_ring_capacity": 1024}], "queues": [)"
+             << R"({"name": "events.probe", "producer": "probe", )"
+             << R"("consumer": "io"}, )"
+             << R"({"name": "cmd.probe.feeder", "producer": "feeder", )"
+             << R"("consumer": "probe"}, )"
+             << R"({"name": "result.probe.feeder", "producer": "probe", )"
+             << R"("consumer": "feeder"}, )"
+             << R"({"name": "cmd.io.probe", "producer": "probe", )"
+             << R"("consumer": "io"}, )"
+             << R"({"name": "result.io.probe", "producer": "io", )"
+             << R"("consumer": "probe"}], "tags": [)"
              << R"({"name": "plant.level", "owner": "io", "type": "float64"}, )"
              << R"({"name": "probe.out", "owner": "probe", )"
              << R"("type": "float64"}]})" << "\n";

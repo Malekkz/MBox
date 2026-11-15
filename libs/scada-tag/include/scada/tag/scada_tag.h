@@ -9,9 +9,10 @@
  * Present so far: attach, observe, detach, heartbeat, notify, status, the
  * owner and process functions (scada_owner_info, scada_proc_resolve,
  * scada_proc_status), the tag functions (resolve, info, read, write and
- * their batch and string forms), the change rings (scada_sub_*) and the
- * wait sets (scada_waitset_*, without queues). The other functions of
- * section 13 are added by the issues that implement them.
+ * their batch and string forms), the change rings (scada_sub_*), the
+ * reliable queues (scada_queue_*) and the wait sets (scada_waitset_*). The
+ * other functions of section 13 are added by the issues that implement
+ * them.
  */
 
 #include <stddef.h>
@@ -187,15 +188,16 @@ void scada_tag_detach(scada_ctx* ctx);
 int scada_tag_heartbeat(scada_ctx* ctx);
 
 /*
- * Wakes the consumers of every change ring the calling thread wrote since
- * its previous call, increments the cycle counter of the process and wakes
- * the threads that wait on it (section 8.4). It also looks again, at most
- * once a second each, for regions of other processes that this context
- * asked for and that were missing, and checks the clocks again at most
- * once a minute.
+ * Wakes the consumers of every change ring the calling thread wrote and
+ * every queue it posted to since its previous call, increments the cycle
+ * counter of the process and wakes the threads that wait on it (section 8.4).
+ * It also looks again, at most once a second each, for regions of other
+ * processes that this context asked for and that were missing, and checks the
+ * clocks again at most once a minute.
  *
  * A real-time task calls it once at the end of each cycle, after its last
- * read and write; other code after each batch of writes. A process that
+ * read, write and post; other code after each batch of writes and after
+ * each post. A process that
  * reads tags of other processes and writes none still calls it about once
  * a second (or scada_tag_status), or an owner that starts after the reader
  * resolved its tags keeps reading as BAD with OWNER_DOWN.
@@ -206,8 +208,8 @@ int scada_tag_heartbeat(scada_ctx* ctx);
  * 100 ms.
  *
  * Bounded, not real-time: one system call that does not block for each
- * ring written and one for the cycle, and the looks for missing regions.
- * Safe from any thread; it acts for the calling thread.
+ * ring written and queue posted to and one for the cycle, and the looks for
+ * missing regions. Safe from any thread; it acts for the calling thread.
  */
 int scada_tag_notify(scada_ctx* ctx);
 
@@ -603,8 +605,8 @@ int scada_tag_write_string(scada_ctx* ctx, uint32_t handle, const char* text,
 /* NOLINTNEXTLINE(modernize-use-using,readability-identifier-naming): C interface; the name is fixed by the contract, section 13 */
 typedef struct scada_sub scada_sub;
 
-/* A set of change rings and cycle counters to wait on together (section
- * 8.4). */
+/* A set of change rings, queues and cycle counters to wait on together
+ * (section 8.4). */
 /* NOLINTNEXTLINE(modernize-use-using,readability-identifier-naming): C interface; the name is fixed by the contract, section 13 */
 typedef struct scada_waitset scada_waitset;
 
@@ -737,6 +739,286 @@ int scada_sub_stats(scada_sub* sub, scada_sub_stats_t* out);
  */
 void scada_sub_close(scada_sub* sub);
 
+/* One side of a reliable queue (section 9): the producer or the consumer. */
+/* NOLINTNEXTLINE(modernize-use-using,readability-identifier-naming): C interface; the name is fixed by the contract, section 13 */
+typedef struct scada_queue scada_queue;
+
+/* Values of scada_event_record.kind (section 9.4). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_EVENT_ALARM = 1,
+    SCADA_EVENT_COMMAND = 2,
+    SCADA_EVENT_AUDIT = 3,
+    SCADA_EVENT_SYSTEM = 4
+};
+
+/* Sizes of the records (section 9.4), in bytes. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_EVENT_PAYLOAD_MAX = 232,
+    SCADA_EVENT_RECORD_SIZE = 256,
+    SCADA_WRITE_REQUEST_SIZE = 64,
+    SCADA_WRITE_RESULT_SIZE = 32
+};
+
+/* Values of scada_write_request.operation (section 9.4). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_OP_DIRECT = 1,
+    SCADA_OP_SELECT = 2,
+    SCADA_OP_OPERATE = 3,
+    SCADA_OP_CANCEL = 4,
+    SCADA_OP_READ_NOW = 5
+};
+
+/* Values of scada_write_request.source (section 9.4). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_SOURCE_AUTO = 1,
+    SCADA_SOURCE_OPERATOR = 2,
+    SCADA_SOURCE_REMOTE = 3
+};
+
+/* Values of scada_write_result.status (section 9.4). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_RESULT_OK = 1,
+    SCADA_RESULT_REJECTED = 2,
+    SCADA_RESULT_TIMEOUT = 3,
+    SCADA_RESULT_DEVICE_ERROR = 4,
+    SCADA_RESULT_NOT_AUTHORISED = 5,
+    SCADA_RESULT_EXPIRED = 6,
+    SCADA_RESULT_ABORTED = 7
+};
+
+/* A record of a queue of kind EVENTS (events.*). 256 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint64_t seq;           /* set by scada_queue_post: the id of the
+                               record, unique in the queue for the life of
+                               the generation */
+    int64_t time_ns;        /* CLOCK_REALTIME */
+    uint16_t kind;          /* SCADA_EVENT_* */
+    uint16_t payload_len;   /* at most SCADA_EVENT_PAYLOAD_MAX */
+    uint32_t source_handle; /* the tag the event concerns, or
+                               SCADA_INVALID_HANDLE */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a field of a contract structure (coding standard, section 4) */
+    uint8_t payload[SCADA_EVENT_PAYLOAD_MAX]; /* serialised message */
+} scada_event_record; /* NOLINT(readability-identifier-naming): a C name of the contract's EventRecord */
+
+/* A record of a queue of kind CMD (cmd.<driver>.<source>). 64 bytes. Every
+ * reserved field is 0. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint64_t request_id;        /* set by scada_queue_post:
+                                   (queue id << 48) | position */
+    uint32_t target_handle;     /* the tag to write */
+    uint8_t operation;          /* SCADA_OP_* */
+    uint8_t source;             /* SCADA_SOURCE_* */
+    uint8_t value_type;         /* SCADA_TYPE_* but not STRING; 0 for CANCEL
+                                   and READ_NOW, which carry no value */
+    uint8_t reserved0;          /* 0 */
+    uint64_t value;             /* bit pattern; 0 without a value type */
+    uint32_t user_id;           /* 0 for AUTO and REMOTE */
+    uint32_t reserved1;         /* 0 */
+    int64_t expiry_mono_ns;     /* CLOCK_MONOTONIC; the driver must not
+                                   execute the request after it */
+    int64_t posted_mono_ns;     /* set by scada_queue_post to the time of the
+                                   post */
+    uint64_t select_request_id; /* for OPERATE and CANCEL the SELECT they
+                                   belong to; 0 otherwise */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): a field of a contract structure (coding standard, section 4), of the size the contract gives */
+    uint8_t reserved[8]; /* 0 */
+} scada_write_request; /* NOLINT(readability-identifier-naming): a C name of the contract's WriteRequest */
+
+/* A record of a queue of kind RESULT (result.<driver>.<source>). 32 bytes.
+ * Every reserved field is 0. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint64_t request_id; /* of the request answered */
+    uint8_t status;      /* SCADA_RESULT_* */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a field of a contract structure (coding standard, section 4) */
+    uint8_t reserved0[3];      /* 0 */
+    int32_t protocol_error;    /* driver-specific, 0 if none */
+    int64_t completed_time_ns; /* CLOCK_REALTIME */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): a field of a contract structure (coding standard, section 4), of the size the contract gives */
+    uint8_t reserved[8]; /* 0 */
+} scada_write_result; /* NOLINT(readability-identifier-naming): a C name of the contract's WriteResult */
+
+/* The longest lifetime of a write request, expiry_mono_ns - posted_mono_ns,
+ * in ms (section 14). */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum { SCADA_REQUEST_LIFETIME_MAX_MS = 60000 };
+
+/*
+ * Opens the side of the reliable queue `queue_name` that the calling
+ * process has in the queue table, producer or consumer, and stores it in
+ * `*out`. The regions it needs are mapped here. The queue region of a
+ * producer that has not attached yet is looked for again while
+ * scada_queue_next waits.
+ *
+ * SCADA_E_INVALID: an argument is NULL, `queue_name` is no queue name, or
+ * the queue has the calling process at both ends. SCADA_E_NOT_FOUND: no
+ * queue has this name. SCADA_E_NOT_OWNER: the calling process is neither
+ * producer nor consumer of the queue, or `ctx` is an observer context (for
+ * any `queue_name`, before anything is mapped; section 11.4), so an
+ * observer has no queue to post to, acknowledge or add to a wait set.
+ * SCADA_E_BUSY: this side of the queue
+ * is open in this context already. On an error `*out` is NULL.
+ *
+ * Not real-time. Close the queue before detaching `ctx`.
+ */
+int scada_queue_open(scada_ctx* ctx, const char* queue_name, scada_queue** out);
+
+/*
+ * Posts the record `record` of `size` bytes to the queue (section 9.1):
+ * a scada_event_record, scada_write_request or scada_write_result, as the
+ * kind of the queue says. The library sets the id (seq, request_id) and,
+ * for a request, posted_mono_ns; the caller sets the rest. The consumer is
+ * not woken: call scada_tag_notify afterwards (section 8.4).
+ *
+ * SCADA_OK: the record is in the queue and will be delivered. For an event
+ * this is what "journalled" means (section 9.3): an action that needs an
+ * event record must not be taken unless its post returned SCADA_OK.
+ * SCADA_E_PEER_DOWN: the consumer's process is down or not attached, as
+ * this process judges it (section 10.1), or its cursor is not valid;
+ * nothing is queued. SCADA_E_FULL: the queue holds `capacity` records the
+ * consumer has not finished with; nothing is queued. SCADA_E_INVALID: an
+ * argument is NULL, `queue` is the consumer's side, `size` is not the record
+ * size of the queue, or the record is not valid: a kind, operation,
+ * source, value type or status that is none, a payload longer than
+ * SCADA_EVENT_PAYLOAD_MAX, a reserved field that is not 0, a BOOL value
+ * other than 0 or 1, a user id for AUTO or REMOTE, a select_request_id
+ * where it does not belong or missing where it does, or a request that
+ * has expired or would live longer than SCADA_REQUEST_LIFETIME_MAX_MS.
+ *
+ * Real-time safe: no allocation, no lock, no system call. One thread posts
+ * to a queue; a library built without NDEBUG stops the process when a
+ * second thread posts (section 13.2).
+ */
+int scada_queue_post(scada_queue* queue, const void* record, size_t size);
+
+/*
+ * Copies the next record of the queue into `record` (`size` bytes, the
+ * record size of the queue), waiting up to `timeout_ms` (0: do not wait)
+ * for one (section 9.2). A wait looks at the queue at least every
+ * SCADA_WAIT_SLICE_MS.
+ *
+ * EVENTS and RESULT (at least once): the record stays in the queue until
+ * scada_queue_ack; until then every call returns the same record again.
+ * After a crash before the ack it is delivered again, so a consumer
+ * ignores an id (seq, request_id) it has already stored.
+ *
+ * CMD (at most once): the request is taken from the queue before this
+ * call returns, so it is never delivered again, also not after a crash.
+ * Acknowledge nothing. A request that has expired, or whose lifetime is
+ * longer than SCADA_REQUEST_LIFETIME_MAX_MS, is never returned: it is
+ * answered SCADA_RESULT_EXPIRED in the result queue of the same driver and
+ * source, and the next one is looked at. The thread that calls this
+ * function on a cmd queue is therefore the one that posts to that result
+ * queue. Time passes after the return: check expiry_mono_ns again right
+ * before acting on the device.
+ *
+ * SCADA_OK: `record` holds a record. SCADA_E_TIMEOUT: none arrived.
+ * SCADA_E_LAYOUT: the next record is not valid (its id is not its
+ * position, or a check of scada_queue_post fails); it is passed over and
+ * the next call goes on with the one after it. Also when the queue is
+ * stopped: its cursor and position are no valid pair, or its file was
+ * replaced inside the generation (section 9.2). Nothing is consumed then,
+ * the call returns only when `timeout_ms` has passed, so that a loop over
+ * this call does not spin, and the queue stays stopped until a tag-set
+ * change or a reboot; log it once. SCADA_E_INVALID: an argument is NULL,
+ * `queue` is the producer's side, `size` is not the record size, or
+ * `timeout_ms` is negative. SCADA_E_IO with errno set: the kernel refused the
+ * wait. `record` is changed only with SCADA_OK.
+ *
+ * Not real-time: it may block. One thread uses the consumer's side.
+ */
+int scada_queue_next(scada_queue* queue, void* record, size_t size,
+                     int timeout_ms);
+
+/*
+ * Acknowledges the record the last scada_queue_next returned: it is
+ * processed and is not delivered again (section 9.2). The producer may
+ * reuse its place from now on.
+ *
+ * SCADA_OK; SCADA_E_INVALID if `queue` is NULL, is the producer's side or a
+ * CMD queue, or no record is waiting for its ack.
+ *
+ * Not real-time, but makes no system call. One thread uses the consumer's
+ * side.
+ */
+int scada_queue_ack(scada_queue* queue);
+
+/* What scada_queue_stats reports: the counts of one side of a queue in one
+ * context, since attach. A count belongs to the side that makes it. 80
+ * bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    uint64_t posted;          /* producer: records accepted by post; the
+                                 consumer of a cmd queue: none (its answers
+                                 count on the result queue's producer) */
+    uint64_t delivered;       /* consumer: records next returned with
+                                 SCADA_OK, a record delivered again
+                                 included */
+    uint64_t expired;         /* consumer of a cmd queue: requests not
+                                 returned because they had expired or lived
+                                 too long, answered EXPIRED (9.2) */
+    uint64_t aborted;         /* consumer of a cmd queue: requests drained
+                                 at attach and answered ABORTED (9.2) */
+    uint64_t skipped;         /* consumer: records attach passed over
+                                 undelivered: those a new proc region
+                                 skipped (9.2) and those of a cmd queue
+                                 whose cursor was out of range. For an
+                                 events queue these are lost audit
+                                 records */
+    uint64_t answers_dropped; /* consumer of a cmd queue: EXPIRED and
+                                 ABORTED answers that could not be posted
+                                 (result queue full, requester down, no
+                                 result queue, or another thread posts
+                                 there); the requester sees them expire */
+    uint64_t invalid;         /* consumer: records passed over with
+                                 SCADA_E_LAYOUT because they were not
+                                 valid */
+    uint64_t out_of_range;    /* consumer: looks that found the cursor and
+                                 the queue's position out of range; the
+                                 queue is stopped until the next
+                                 generation */
+    uint64_t replaced;        /* consumer: 1 if the queue's file was found
+                                 replaced, removed or shrunk inside the
+                                 generation; the queue is dead from then on
+                                 and the producer gets SCADA_E_PEER_DOWN.
+                                 Producer: 1 if attach created the queue's
+                                 file while the consumer's cursor was not
+                                 0, that is anew inside the generation; log
+                                 it as a WARNING */
+    uint16_t queue_id;        /* the queue's id in the queue table */
+    uint16_t kind;            /* 6 EVENTS, 7 CMD, 8 RESULT */
+    uint8_t producer;         /* 1 for the producer's side, 0 for the
+                                 consumer's */
+    /* NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a C structure of fixed size */
+    uint8_t reserved[3]; /* 0 */
+} scada_queue_stats_t; /* NOLINT(readability-identifier-naming): named like scada_sub_stats_t of the contract, section 13 */
+
+/*
+ * Fills `*out` with the counts of the side `queue` of a queue in its
+ * context, including what attach did before the queue was opened.
+ *
+ * SCADA_OK; SCADA_E_INVALID if an argument is NULL. Safe from any thread.
+ */
+int scada_queue_stats(scada_queue* queue, scada_queue_stats_t* out);
+
+/*
+ * Closes the side of the queue; NULL does nothing. It also leaves the wait
+ * set it was added to. A record delivered and not acknowledged is
+ * delivered again by the next open. Any thread may close it. A queue stays
+ * bound to the thread that posts to it while a side that posts to it is
+ * open in this context: its producer side and, for a result queue, the
+ * consumer side of its cmd queue. Once the last of them is closed, another
+ * thread may post to it.
+ */
+void scada_queue_close(scada_queue* queue);
+
 /*
  * Creates an empty wait set of `ctx` and stores it in `*out`.
  *
@@ -757,6 +1039,19 @@ int scada_waitset_create(scada_ctx* ctx, scada_waitset** out);
 int scada_waitset_add_sub(scada_waitset* set, scada_sub* sub);
 
 /*
+ * Adds the consumer's side of the queue `queue` to the wait set `set`:
+ * scada_waitset_wait returns when `queue` has a record to deliver. A wait
+ * set never reports a stopped queue (section 9.2) as ready, so a consumer
+ * that calls scada_queue_next only after a wake learns of the stop from
+ * scada_queue_stats or from a timed call of scada_queue_next.
+ *
+ * SCADA_E_INVALID: an argument is NULL; `queue` is the producer's side,
+ * belongs to another context or is in a wait set already; the wait set
+ * holds 127 sources already; or scada_waitset_fd was called on it.
+ */
+int scada_waitset_add_queue(scada_waitset* set, scada_queue* queue);
+
+/*
  * Adds the cycle counter of the process `process_index` (section 10):
  * scada_waitset_wait returns when that process has called
  * scada_tag_notify since the previous return, whether or not it changed a
@@ -771,8 +1066,8 @@ int scada_waitset_add_cycle(scada_waitset* set, uint16_t process_index);
 /*
  * Waits up to `timeout_ms` (0: do not wait) until a source of the wait set
  * is ready, with one system call for all of them (futex_waitv, Linux
- * 5.16). Then call scada_sub_next with timeout 0 on each subscription
- * until it gives SCADA_E_TIMEOUT.
+ * 5.16). Then call scada_sub_next and scada_queue_next with timeout 0 on
+ * each subscription and queue until it gives SCADA_E_TIMEOUT.
  *
  * SCADA_OK: a source is ready. SCADA_E_TIMEOUT: none became ready.
  * SCADA_E_INVALID: `set` is NULL or `timeout_ms` is negative. SCADA_E_IO
@@ -791,9 +1086,10 @@ int scada_waitset_wait(scada_waitset* set, int timeout_ms);
  * Sources cannot be added from then on.
  *
  * When the descriptor is readable: read 8 bytes from it, then call
- * scada_sub_next with timeout 0 on each subscription until it gives
- * SCADA_E_TIMEOUT. A cycle counter that advanced makes it readable too. The
- * descriptor is non-blocking and belongs to the wait set: do not close it.
+ * scada_sub_next and scada_queue_next with timeout 0 on each subscription
+ * and queue until it gives SCADA_E_TIMEOUT. A cycle counter that advanced makes
+ * it readable too. The descriptor is non-blocking and belongs to the wait set:
+ * do not close it.
  *
  * SCADA_E_INVALID: an argument is NULL. SCADA_E_IO with errno set: the
  * eventfd or the thread could not be created.
@@ -804,7 +1100,7 @@ int scada_waitset_fd(scada_waitset* set, int* descriptor);
 
 /*
  * Destroys the wait set and stops its thread, if any; NULL does nothing.
- * The subscriptions in it stay open.
+ * The subscriptions and queues in it stay open.
  */
 void scada_waitset_destroy(scada_waitset* set);
 
