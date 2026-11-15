@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.10 (draft) |
+| Contract version | 0.11 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -783,7 +783,8 @@ struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
   int64_t  longest_gap_ns;       // A; longest gap between two published heartbeats
   int64_t  last_late_mono_ns;    // A; end of the latest late gap, CLOCK_MONOTONIC
-  uint8_t  reserved[16];
+  uint32_t starts;               // A; lives that reached RUNNING (10.1); wraps; diagnosis only
+  uint8_t  reserved[12];
 };
 // followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
 ```
@@ -843,10 +844,37 @@ The process records such gaps itself, so that they can be traced:
   nothing; `scada-tagd` reports it down.
 - `scada-tagd` reads `late_beats` (acquire) and the gap fields at every check
   and logs `heartbeat late` at WARNING when the count grew, at most once per
-  process and check. A count that is not 0 at its first look at a region is
-  logged once at INFO as `heartbeat late before this check`.
+  process in 10 s: growth within that time is summed into the next record,
+  which is logged at the first check after it, or when `scada-tagd` stops.
+  `LATE_BEATS_TOTAL` in the record lets a reader of the log see records
+  that were lost. A count that is not 0 at its first look at a region is
+  logged once at INFO as `heartbeat late before this check`. `process down`
+  and `process up` are never held back.
 - The three fields are for diagnosis only and are never used to judge
   whether a process is down. They are input to their readers.
+
+A process that restarts into its reused region between two checks is down
+for readers and never down for a check. `starts` counts it:
+
+- Attach increments `starts` (relaxed) at step 6 of 11.2, just before the
+  state is RUNNING, whose release store publishes it; a failed attach counts
+  nothing. `starts` is the number of lives that reached RUNNING in the
+  region. It is never reset within a region; a new region starts at 0.
+  `scada-tagd` counts its own lives the same way.
+- `scada-tagd` reads `starts` of every other process at every check at
+  which the process is up, after loading `state` with acquire and finding
+  it RUNNING, so that a RUNNING of a new life implies its count. The first
+  sample of a mapping is a baseline and is not logged. When the count grew
+  by n since the previous sample (modulo 2^32), it logs `process restarted`
+  with n lives. If the same check found the process up after it was down
+  at a check, the latest of the n lives is the one seen as down and up, and
+  n - 1 of them came and went unseen; otherwise all n did. The record is a
+  WARNING when an unseen life is in it, else a NOTICE. It is not rate
+  limited: the service manager's restart limit bounds it.
+- `starts` is for diagnosis only and is a lower bound: a life of a library
+  before 0.11 does not count itself. It is never used to judge liveness
+  and never limits restarts; the service manager's restart limit stays the
+  only one.
 
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
@@ -1435,6 +1463,15 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
+| 0.11 | 2026-11-15 | Issue #61 (D-44). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
+
+Migration, 0.10 to 0.11: none for data. The layout version stays 1: `starts`
+takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay
+reserved, and the size stays 64. A region written by a 0.10 library holds 0
+there and a life of a 0.10 library leaves the count unchanged, which reads as
+"no restart recorded"; a 0.10 `scada-tagd` ignores it. The log record
+`heartbeat late` gives the time as `LAST_LATE_MONO_US` (µs) in place of
+`LAST_LATE_MONO_NS`; the shared-memory field `last_late_mono_ns` stays in ns.
 
 Migration, 0.9 to 0.10: none for data; the layout version stays 1 and no
 structure in shared memory changed. The queue functions are new; nothing
