@@ -134,7 +134,7 @@ runner is the only ARM64 machine of the project (D-32); and
 `scada-sim-rate-perf-test` checks on x86-64 that the simulator writer
 sustains 50,000 updates per second across 10 owners: every update of a
 10 s run written within 10.1 s, none more than 250 ms late; on ARM64 it
-prints the figures (D-38).
+prints the figures (D-41).
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.

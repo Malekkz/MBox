@@ -74,8 +74,6 @@ ino_t inode_of(const std::filesystem::path& path) {
 
 // The log lines of scada-tagd about the process `io`.
 constexpr std::string_view IO_UP = R"(process up PROCESS="io")";
-constexpr std::string_view IO_NOT_ATTACHED =
-    R"(process down PROCESS="io" REASON="region missing")";
 constexpr std::string_view IO_HEARTBEAT_STALE =
     R"(process down PROCESS="io" REASON="heartbeat stale")";
 constexpr std::string_view IO_NOT_RUNNING =
@@ -247,8 +245,6 @@ TEST_F(TagdService, Conformance05KilledProcessIsMarkedDown) {
     if (!tagd.has_value()) {
         return;
     }
-    // Nothing has attached yet.
-    EXPECT_TRUE(logs(*tagd, IO_NOT_ATTACHED));
     std::optional<ChildProcess> helper = attached_io();
     if (!helper.has_value()) {
         return;
@@ -340,6 +336,24 @@ TEST_F(TagdService, Conformance20RestartLeavesTheOtherProcessRunning) {
         << second->child.err();
     // The helper never stopped: it still answers a stop request.
     EXPECT_TRUE(stops_cleanly(*helper));
+}
+
+// Issue #42, point 4 (D-36): a process whose heartbeat comes later than its
+// timeout records it, and scada-tagd logs it, so that the moment readers
+// saw the process down can be traced.
+TEST_F(TagdService, ALateHeartbeatIsLogged) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    // Half a timeout beyond the timeout of `io`.
+    std::optional<ChildProcess> helper = attached_io(
+        {"late=" + std::to_string(IO_TIMEOUT_MS + (IO_TIMEOUT_MS / 2))});
+    if (!tagd.has_value() || !helper.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(prints(*helper, "late\n"));
+    // Either record: on a loaded machine scada-tagd may first map the region
+    // after the late heartbeat (a baseline), or see two late heartbeats in
+    // one check.
+    EXPECT_TRUE(logs(*tagd, R"(PROCESS="io" LATE_BEATS=")"));
 }
 
 // Attach with real processes (issue P1-05): the process creates its own

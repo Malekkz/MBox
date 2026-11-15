@@ -41,7 +41,7 @@ foreach(unit IN LISTS UNITS)
   expect_file("${SYSUSERSDIR}/${service}.conf")
 endforeach()
 
-# Test tools are not part of the product image (decision D-38).
+# Test tools are not part of the product image (decision D-41).
 foreach(tool IN ITEMS scada-sim)
   if(EXISTS "${STAGE}/${BINDIR}/${tool}")
     message(SEND_ERROR "test tool in the staged tree: ${BINDIR}/${tool}")

@@ -12,7 +12,7 @@
 // one process writing as fast as it can must reach the reference rate. On
 // ARM64, and with SCADA_PERF_REPORT_ONLY=1 in the environment, the figures
 // are only printed; the count of updates is checked everywhere
-// (decision D-38).
+// (decision D-41).
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"

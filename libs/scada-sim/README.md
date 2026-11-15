@@ -2,7 +2,7 @@
 
 The simulator writer of the tag database as a library (issue P1-10;
 reference sections 15.3 and 18.2). The executable in `services/scada-sim`
-only calls it. Decision D-38 in `docs/decisions.md` records the choices.
+only calls it. Decision D-41 in `docs/decisions.md` records the choices.
 
 ## What it does
 
