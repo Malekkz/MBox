@@ -62,6 +62,8 @@ constexpr std::string_view USAGE =
     "processes are down and which reliable queues are broken (cursor and\n"
     "write_seq out of range) or missing, and logs every change. It warns\n"
     "when the system can suspend or was suspended, which a unit must not.\n"
+    "The first check of a new generation also logs each process that has\n"
+    "not attached yet.\n"
     "\n"
     "Retained values: the tags marked retain are written to <owner>.bin in\n"
     "the retain directory when they changed, at most once per retain\n"

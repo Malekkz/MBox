@@ -267,6 +267,25 @@ TEST_F(ReportLog, ARestartSeenAsDownAndUpIsANotice) {
     EXPECT_TRUE(has(records[0], "RESTARTS_UNSEEN=0"));
 }
 
+// Issue #60: each process not attached at the first check of a new
+// generation is one INFO record, before the changes of that check.
+TEST_F(ReportLog, EachProcessNotAttachedIsOneInfoRecord) {
+    CheckReport report;
+    report.not_attached = {"io", "web"};
+    report.changes.push_back(ProcessChange{"control", DownReason::NONE});
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 3U);
+    EXPECT_TRUE(has(records[0], "MESSAGE=process not attached"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=6"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=0f57ce3d6dbc4891abd0e55e240f04f9"));
+    EXPECT_TRUE(has(records[0], "PROCESS=io"));
+    EXPECT_TRUE(has(records[1], "MESSAGE=process not attached"));
+    EXPECT_TRUE(has(records[1], "PROCESS=web"));
+    EXPECT_TRUE(has(records[2], "MESSAGE=process up"));
+}
+
 // Issue #61: the rate limit holds `heartbeat late` back and the next record
 // carries the sum; `process down` and `process up` are never held.
 TEST_F(ReportLog, TheRateLimitSumsLateHeartbeatsAndNeverHoldsChanges) {

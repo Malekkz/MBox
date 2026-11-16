@@ -100,7 +100,7 @@ TEST_F(Peers, ARegionThatExistsIsMappedWhenAskedFor) {
     peers().want(directory(), peers().changes_slot(OWNER_IO), START_NS);
     peers().want(directory(), peers().queue_slot(QUEUE_EVENTS), START_NS);
     EXPECT_EQ(peers().bytes(peers().proc_slot(PROCESS_IO)).size(),
-              proc_region_size(2));
+              proc_region_size(3));
     EXPECT_EQ(peers().bytes(peers().strings_slot(OWNER_IO)).size(),
               strings_region_size(2));
     EXPECT_EQ(peers().bytes(peers().changes_slot(OWNER_IO)).size(),

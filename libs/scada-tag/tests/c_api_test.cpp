@@ -97,7 +97,7 @@ TEST_F(CApi, AttachHeartbeatStatusDetach) {
     EXPECT_EQ(status.generation_state, SCADA_GENERATION_RUNNING);
     EXPECT_EQ(status.process_index, PROCESS_IO);
     EXPECT_EQ(status.tagd_down, 0);
-    EXPECT_EQ(status.regions_created, 5U);
+    EXPECT_EQ(status.regions_created, 6U);
     EXPECT_EQ(status.regions_reused, 0U);
     EXPECT_EQ(status.records_repaired, 0U);
     EXPECT_LE(status.clock_syscall, 1);
@@ -115,7 +115,7 @@ TEST_F(CApi, AttachHeartbeatStatusDetach) {
     // The regions stayed: the next attach reuses them.
     ASSERT_EQ(attach("io", feeder), SCADA_OK);
     EXPECT_EQ(scada_tag_status(feeder.get(), &status), SCADA_OK);
-    EXPECT_EQ(status.regions_reused, 5U);
+    EXPECT_EQ(status.regions_reused, 6U);
 }
 
 TEST_F(CApi, TheStatusStructureHasItsDocumentedSize) {
