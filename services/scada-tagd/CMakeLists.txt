@@ -12,3 +12,8 @@ install(FILES "${PROJECT_SOURCE_DIR}/deploy/tmpfiles.d/scada-tagd.conf"
 # unit makes read-only otherwise.
 install(FILES "${PROJECT_SOURCE_DIR}/deploy/systemd/scada-tagd.service.d/retain.conf"
   DESTINATION "${SCADA_INSTALL_SYSTEMD_UNITDIR}/scada-tagd.service.d")
+
+# Decision D-59: the stop of scada-tagd is bounded (5 s for the retain
+# writer, then an exit at once); systemd waits 15 s for it.
+install(FILES "${PROJECT_SOURCE_DIR}/deploy/systemd/scada-tagd.service.d/stop.conf"
+  DESTINATION "${SCADA_INSTALL_SYSTEMD_UNITDIR}/scada-tagd.service.d")

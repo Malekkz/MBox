@@ -231,7 +231,7 @@ int scada_tag_notify(scada_ctx* ctx);
 int scada_tag_status(scada_ctx* ctx, scada_status* out);
 
 /* What attach did with retained values (section 12), counted since attach.
- * 16 bytes. All 0 for an observer. */
+ * 24 bytes. All 0 for an observer. */
 /* NOLINTNEXTLINE(modernize-use-using): C interface */
 typedef struct {
     uint32_t values_restored;     /* retained values loaded into new `tags`
@@ -244,6 +244,9 @@ typedef struct {
     uint32_t directory_unusable;  /* owners not restored because the retain
                                      directory was missing or had another
                                      owner, mode or group */
+    uint32_t ages_unknown;        /* values restored whose age is unknown
+                                     (scada_tag_retain_info) */
+    uint32_t reserved;            /* 0 */
 } scada_retain_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*
@@ -253,6 +256,50 @@ typedef struct {
  * Not real-time.
  */
 int scada_tag_retain_status(scada_ctx* ctx, scada_retain_status_t* out);
+
+/* `scada_tag_retain_info_t.origin`: where a restored value came from. */
+/* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
+enum {
+    SCADA_RETAIN_NONE = 0,         /* not restored at this attach */
+    SCADA_RETAIN_OWN_FINAL = 1,    /* the owner's own file, marked FINAL */
+    SCADA_RETAIN_OWN_PERIODIC = 2, /* the owner's own file, not FINAL */
+    SCADA_RETAIN_OTHER_OWNER = 3   /* another owner's file: a moved tag */
+};
+
+/* What the restore of this attach did for one tag (section 12). 24 bytes. */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    int64_t written_time_ns;    /* CLOCK_REALTIME of the write of the file the
+                                   value came from; 0 if not restored */
+    int64_t age_ns;             /* the age of the value at attach if age_known
+                                   is 1, otherwise 0 */
+    uint8_t origin;             /* SCADA_RETAIN_* */
+    uint8_t age_known;          /* 1 if age_ns holds the age */
+    uint8_t stored_quality;     /* the quality on file, GOOD or UNCERTAIN, for
+                                   diagnosis; BAD if not restored. The restored
+                                   value is UNCERTAIN whatever it holds. */
+    uint8_t final_wait_expired; /* 1 if the wait for a FINAL file this tag
+                                   needed ran out */
+    uint8_t reserved[4];        /* 0 */
+} scada_tag_retain_info_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
+/*
+ * Fills `*out` with what the restore of this attach did for the tag
+ * `handle` (section 12): where its value came from, when that file was
+ * written, the age of the value (same boot: CLOCK_BOOTTIME; another boot:
+ * CLOCK_REALTIME only if the clock was synchronised at the write and is
+ * now; otherwise unknown), the quality on file, and whether the wait for a
+ * FINAL file ran out for it. Filled at attach; process-local. A tag of the
+ * process that was not restored at this attach (no RETAIN, its region
+ * reused, nothing on file) gives origin SCADA_RETAIN_NONE.
+ * SCADA_E_INVALID if an argument is NULL or the handle is none of this
+ * generation; SCADA_E_NOT_OWNER for a tag of another process, and for
+ * every tag in an observer context. `*out` is zeroed on an error.
+ *
+ * Not real-time.
+ */
+int scada_tag_retain_info(scada_ctx* ctx, uint32_t handle,
+                          scada_tag_retain_info_t* out);
 
 /* The handle that refers to no tag (section 5.1). */
 #define SCADA_INVALID_HANDLE UINT32_C(0xFFFFFFFF)

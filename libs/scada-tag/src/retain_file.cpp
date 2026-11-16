@@ -3,6 +3,7 @@
 #include "crc32.h"
 #include "region_file.h"
 
+#include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -13,13 +14,16 @@
 #include <fcntl.h>
 #include <stdio.h>  // NOLINT(modernize-deprecated-headers): renameat is declared here, not in <cstdio>
 #include <sys/stat.h>
+#include <sys/timex.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -45,8 +49,23 @@ constexpr std::size_t padding_after(std::size_t length) noexcept {
     return (RECORD_ALIGNMENT - (length % RECORD_ALIGNMENT)) % RECORD_ALIGNMENT;
 }
 
-// The bytes after the name length of a record that are reserved.
-constexpr std::size_t RECORD_RESERVED_BYTES = 6;
+// Version 1: the bytes after the name length of a record, all reserved.
+constexpr std::size_t RECORD_RESERVED_BYTES_V1 = 6;
+// The header bytes of a version.
+constexpr std::size_t header_bytes(std::uint32_t version) noexcept {
+    return version == RETAIN_FORMAT_VERSION_1 ? RETAIN_HEADER_BYTES_V1
+                                              : RETAIN_HEADER_BYTES;
+}
+// The flags of the header a version knows.
+constexpr std::uint32_t known_file_flags(std::uint32_t version) noexcept {
+    return version == RETAIN_FORMAT_VERSION_1
+               ? RETAIN_FLAG_FINAL
+               : RETAIN_FLAG_FINAL | RETAIN_FLAG_CLOCK_SYNCED;
+}
+constexpr std::string_view BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
+constexpr std::size_t BOOT_ID_TEXT = 36;  // 32 hexadecimal digits, 4 dashes
+constexpr unsigned HEX_BASE = 16;
+constexpr unsigned HEX_LETTER = 10;
 
 // Appends `value` to `out`, little-endian.
 template <typename Unsigned>
@@ -167,19 +186,57 @@ std::optional<std::string_view> owner_of_retain_file(
     return owner;
 }
 
-Result<std::vector<std::byte>> encode_retain_file(const RetainFile& file,
-                                                  std::string& detail) {
+RetainStamp stamp_of(const RetainFile& file) noexcept {
+    return {file.written_time_ns, file.written_boottime_ns, file.boot_id,
+            file.clock_synced};
+}
+
+namespace {
+
+// True if `value` is what format `version` can hold beyond its type, value
+// and name: in version 2 a quality GOOD or UNCERTAIN and flags a retain
+// file may hold (decision D-59); in version 1 UNCERTAIN and no flag.
+bool quality_fits(const RetainedValue& value, std::uint32_t version) noexcept {
+    if (version == RETAIN_FORMAT_VERSION_1) {
+        return value.quality == Quality::UNCERTAIN &&
+               value.quality_flags == 0 && !value.adopted &&
+               !value.source_not_final;
+    }
+    return (value.quality == Quality::GOOD ||
+            value.quality == Quality::UNCERTAIN) &&
+           retainable_flags(value.quality_flags) == value.quality_flags &&
+           (value.adopted || !value.source_not_final);
+}
+
+// The record flags byte of `value`.
+std::uint8_t record_flags(const RetainedValue& value) noexcept {
+    return static_cast<std::uint8_t>(
+        (value.adopted ? RETAIN_RECORD_ADOPTED : 0U) |
+        (value.source_not_final ? RETAIN_RECORD_SOURCE_NOT_FINAL : 0U));
+}
+
+Result<std::vector<std::byte>> encode(const RetainFile& file,
+                                      std::uint32_t version,
+                                      std::string& detail) {
     if (file.values.size() > MAX_TAGS_PER_OWNER) {
         detail = "more records than an owner has tags";
         return Status(StatusCode::RESOURCE_EXHAUSTED,
                       "too many retained values");
     }
-    std::size_t total = RETAIN_HEADER_BYTES + RETAIN_CRC_BYTES;
+    const bool old_format = version == RETAIN_FORMAT_VERSION_1;
+    if (old_format && (file.written_boottime_ns != 0 || file.clock_synced ||
+                       file.boot_id != BootId{})) {
+        detail = "a stamp that format version 1 cannot hold";
+        return Status(StatusCode::INVALID_ARGUMENT,
+                      "the retain file is not valid");
+    }
+    std::size_t total = header_bytes(version) + RETAIN_CRC_BYTES;
     const RetainedValue* previous = nullptr;
     for (const RetainedValue& value : file.values) {
         if (!is_valid_name(value.name, MAX_TAG_NAME_LENGTH) ||
             !retainable(value.type) ||
-            (value.type == TagType::BOOL && value.value > 1)) {
+            (value.type == TagType::BOOL && value.value > 1) ||
+            !quality_fits(value, version)) {
             detail = "a value that a retain file cannot hold";
             return Status(StatusCode::INVALID_ARGUMENT,
                           "the retained value is not valid");
@@ -203,22 +260,36 @@ Result<std::vector<std::byte>> encode_retain_file(const RetainFile& file,
     std::vector<std::byte> bytes;
     bytes.reserve(total);
     put(bytes, RETAIN_MAGIC);
-    put(bytes, RETAIN_FORMAT_VERSION);
+    put(bytes, version);
     // In range: checked against MAX_TAGS_PER_OWNER above.
     put(bytes, static_cast<std::uint32_t>(file.values.size()));
     put(bytes, file.source.generation);
     put(bytes, static_cast<std::uint64_t>(file.source.created_time_ns));
     put(bytes, static_cast<std::uint64_t>(file.written_time_ns));
-    put(bytes, file.final ? RETAIN_FLAG_FINAL : 0U);
+    put(bytes, (file.final ? RETAIN_FLAG_FINAL : 0U) |
+                   (file.clock_synced ? RETAIN_FLAG_CLOCK_SYNCED : 0U));
     put(bytes, std::uint32_t{0});
     for (const std::uint8_t byte : file.config_hash) {
         put(bytes, byte);
+    }
+    if (!old_format) {
+        for (const std::uint8_t byte : file.boot_id) {
+            put(bytes, byte);
+        }
+        put(bytes, static_cast<std::uint64_t>(file.written_boottime_ns));
     }
     for (const RetainedValue& value : file.values) {
         put(bytes, to_raw(value.type));
         // In range: a tag name is at most 127 bytes.
         put(bytes, static_cast<std::uint8_t>(value.name.size()));
-        put_zeros(bytes, RECORD_RESERVED_BYTES);
+        if (old_format) {
+            put_zeros(bytes, RECORD_RESERVED_BYTES_V1);
+        } else {
+            put(bytes, to_raw(value.quality));
+            put(bytes, record_flags(value));
+            put(bytes, value.quality_flags);
+            put(bytes, std::uint16_t{0});
+        }
         put(bytes, value.value);
         put(bytes, static_cast<std::uint64_t>(value.source_time_ns));
         put_text(bytes, value.name);
@@ -226,6 +297,18 @@ Result<std::vector<std::byte>> encode_retain_file(const RetainFile& file,
     }
     put(bytes, crc32(bytes));
     return bytes;
+}
+
+}  // namespace
+
+Result<std::vector<std::byte>> encode_retain_file(const RetainFile& file,
+                                                  std::string& detail) {
+    return encode(file, RETAIN_FORMAT_VERSION, detail);
+}
+
+Result<std::vector<std::byte>> encode_retain_file_v1(const RetainFile& file,
+                                                     std::string& detail) {
+    return encode(file, RETAIN_FORMAT_VERSION_1, detail);
 }
 
 namespace {
@@ -242,10 +325,12 @@ Status decode_header(Reader& input, RetainFile& file, std::uint32_t& count,
     if (!input.get(magic) || magic != RETAIN_MAGIC) {
         return corrupt(detail, "the magic is not that of a retain file");
     }
-    if (!input.get(version) || version != RETAIN_FORMAT_VERSION) {
+    if (!input.get(version) || (version != RETAIN_FORMAT_VERSION &&
+                                version != RETAIN_FORMAT_VERSION_1)) {
         return corrupt(detail, "format version " + std::to_string(version) +
                                    " is not known");
     }
+    file.version = version;
     if (!input.get(count) || !input.get(file.source.generation) ||
         !input.get(created) || !input.get(written) || !input.get(flags)) {
         return corrupt(detail, "the header is cut off");
@@ -253,36 +338,92 @@ Status decode_header(Reader& input, RetainFile& file, std::uint32_t& count,
     if (!input.skip_zeros(sizeof(std::uint32_t))) {
         return corrupt(detail, "a reserved field is not 0");
     }
-    if ((flags & ~RETAIN_FLAG_FINAL) != 0) {
+    if ((flags & ~known_file_flags(version)) != 0) {
         return corrupt(detail, "an unknown flag is set");
     }
     // Bit patterns of int64_t times, written as such.
     file.source.created_time_ns = static_cast<std::int64_t>(created);
     file.written_time_ns = static_cast<std::int64_t>(written);
     file.final = (flags & RETAIN_FLAG_FINAL) != 0;
+    file.clock_synced = (flags & RETAIN_FLAG_CLOCK_SYNCED) != 0;
     for (std::uint8_t& byte : file.config_hash) {
         if (!input.get(byte)) {
             return corrupt(detail, "the file is too short");
         }
     }
+    if (version == RETAIN_FORMAT_VERSION_1) {
+        return {};
+    }
+    std::uint64_t boottime = 0;
+    for (std::uint8_t& byte : file.boot_id) {
+        if (!input.get(byte)) {
+            return corrupt(detail, "the file is too short");
+        }
+    }
+    if (!input.get(boottime)) {
+        return corrupt(detail, "the file is too short");
+    }
+    // The bit pattern of an int64_t time, written as such.
+    file.written_boottime_ns = static_cast<std::int64_t>(boottime);
     return {};
 }
 
-// Record `index`, which must sort after `previous` (null for the first).
-Status decode_record(Reader& input, std::uint32_t index,
+// The six bytes after the name length of a record of `version`: in
+// version 2 quality, record flags, quality flags and reserved; in version 1
+// reserved.
+bool decode_quality(Reader& input, std::uint32_t version, std::uint8_t& quality,
+                    std::uint8_t& record, std::uint16_t& flags) noexcept {
+    if (version == RETAIN_FORMAT_VERSION_1) {
+        quality = to_raw(Quality::UNCERTAIN);
+        record = 0;
+        flags = 0;
+        return input.skip_zeros(RECORD_RESERVED_BYTES_V1);
+    }
+    return input.get(quality) && input.get(record) && input.get(flags) &&
+           input.skip_zeros(sizeof(std::uint16_t));
+}
+
+// Record `index` of a file of `version`, which must sort after `previous`
+// (null for the first).
+Status decode_record(Reader& input, std::uint32_t version, std::uint32_t index,
                      const RetainedValue* previous, RetainedValue& value,
                      std::string& detail) {
     std::uint8_t type = 0;
     std::uint8_t length = 0;
+    std::uint8_t quality = 0;
+    std::uint8_t record = 0;
+    std::uint16_t flags = 0;
     std::uint64_t source_time = 0;
     const std::string which = "record " + std::to_string(index);
     if (!input.get(type) || !input.get(length) ||
-        !input.skip_zeros(RECORD_RESERVED_BYTES) || !input.get(value.value) ||
-        !input.get(source_time) || !input.get_text(length, value.name) ||
+        !decode_quality(input, version, quality, record, flags) ||
+        !input.get(value.value) || !input.get(source_time) ||
+        !input.get_text(length, value.name) ||
         !input.skip_zeros(padding_after(length))) {
         return corrupt(detail,
                        which + " is cut off or has a reserved byte set");
     }
+    // Decision D-59: a stored value is GOOD or UNCERTAIN, and its flags are
+    // flags that describe a value.
+    if (quality != to_raw(Quality::GOOD) &&
+        quality != to_raw(Quality::UNCERTAIN)) {
+        return corrupt(detail, which + " has a quality that is not valid");
+    }
+    if (retainable_flags(flags) != flags) {
+        return corrupt(detail, which + " has a quality flag that is not valid");
+    }
+    // SOURCE_NOT_FINAL only with ADOPTED; no other bit (review B3).
+    constexpr auto KNOWN_RECORD_FLAGS = static_cast<std::uint8_t>(
+        RETAIN_RECORD_ADOPTED | RETAIN_RECORD_SOURCE_NOT_FINAL);
+    if ((record & ~KNOWN_RECORD_FLAGS) != 0 ||
+        record == RETAIN_RECORD_SOURCE_NOT_FINAL) {
+        return corrupt(detail, which + " has record flags that are not valid");
+    }
+    value.adopted = (record & RETAIN_RECORD_ADOPTED) != 0;
+    value.source_not_final = (record & RETAIN_RECORD_SOURCE_NOT_FINAL) != 0;
+    value.quality =
+        quality == to_raw(Quality::GOOD) ? Quality::GOOD : Quality::UNCERTAIN;
+    value.quality_flags = flags;
     const std::optional<TagType> tag_type = tag_type_from_raw(type);
     if (!tag_type.has_value() || !retainable(*tag_type) ||
         (*tag_type == TagType::BOOL && value.value > 1)) {
@@ -307,7 +448,7 @@ Result<RetainFile> decode_retain_file(std::span<const std::byte> bytes,
     if (bytes.size() > MAX_RETAIN_FILE_BYTES) {
         return corrupt(detail, "the file is too large");
     }
-    if (bytes.size() < RETAIN_HEADER_BYTES + RETAIN_CRC_BYTES) {
+    if (bytes.size() < RETAIN_HEADER_BYTES_V1 + RETAIN_CRC_BYTES) {
         return corrupt(detail, "the file is too short");
     }
     const std::size_t body = bytes.size() - RETAIN_CRC_BYTES;
@@ -328,7 +469,7 @@ Result<RetainFile> decode_retain_file(std::span<const std::byte> bytes,
     // the bytes there before anything is reserved for it.
     const std::size_t smallest = RETAIN_RECORD_FIXED_BYTES + RECORD_ALIGNMENT;
     if (count > MAX_TAGS_PER_OWNER ||
-        count > (body - RETAIN_HEADER_BYTES) / smallest) {
+        count > (body - input.position()) / smallest) {
         return corrupt(detail, "the record count does not fit the file");
     }
     file.values.reserve(count);
@@ -336,7 +477,8 @@ Result<RetainFile> decode_retain_file(std::span<const std::byte> bytes,
         RetainedValue value;
         const RetainedValue* previous =
             file.values.empty() ? nullptr : &file.values.back();
-        if (Status record = decode_record(input, i, previous, value, detail);
+        if (Status record =
+                decode_record(input, file.version, i, previous, value, detail);
             !record.ok()) {
             return record;
         }
@@ -567,6 +709,133 @@ std::size_t remove_retain_temporaries(int dir_fd) noexcept {
     return removed;
 }
 
+namespace {
+
+// The value of hexadecimal digit `digit`, or nothing.
+std::optional<std::uint8_t> hex_digit(char digit) noexcept {
+    if (digit >= '0' && digit <= '9') {
+        return static_cast<std::uint8_t>(digit - '0');
+    }
+    if (digit >= 'a' && digit <= 'f') {
+        return static_cast<std::uint8_t>(static_cast<unsigned>(digit - 'a') +
+                                         HEX_LETTER);
+    }
+    return std::nullopt;
+}
+
+// The boot_id of this boot, or all zero if it cannot be read. The kernel
+// writes it as 36 characters: 32 lower-case hexadecimal digits and 4 dashes.
+BootId read_boot_id() noexcept {
+    BootId boot{};
+    const Fd file = open_at(AT_FDCWD, std::string(BOOT_ID_PATH),
+                            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (!file.valid()) {
+        return {};
+    }
+    std::array<char, BOOT_ID_TEXT + 1> text{};
+    ssize_t got = -1;
+    for (;;) {
+        got = ::read(file.get(), text.data(), text.size());
+        if (got >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (got < static_cast<ssize_t>(BOOT_ID_TEXT)) {
+        return {};
+    }
+    std::size_t nibble = 0;
+    for (std::size_t i = 0; i < BOOT_ID_TEXT; ++i) {
+        const char character = text.at(i);
+        if (character == '-') {
+            continue;
+        }
+        const std::optional<std::uint8_t> digit = hex_digit(character);
+        if (!digit.has_value() || nibble >= 2 * boot.size()) {
+            return {};
+        }
+        std::uint8_t& byte = boot.at(nibble / 2);
+        byte = static_cast<std::uint8_t>(byte * HEX_BASE + *digit);
+        ++nibble;
+    }
+    return nibble == 2 * boot.size() ? boot : BootId{};
+}
+
+// CLOCK_BOOTTIME in ns, or nothing.
+std::optional<std::int64_t> boottime_now() noexcept {
+    timespec now{};
+    // NOLINTNEXTLINE(misc-include-cleaner): POSIX name, provided by <ctime>
+    if (::clock_gettime(CLOCK_BOOTTIME, &now) != 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::int64_t>(now.tv_sec) * NANOSECONDS_PER_SECOND +
+           static_cast<std::int64_t>(now.tv_nsec);
+}
+
+// True if adjtimex(2) with modes 0 reports the clock synchronised.
+bool clock_synchronised() noexcept {
+    timex state{};
+    state.modes = 0;
+    const int result = ::adjtimex(&state);
+    return result >= 0 && result != TIME_ERROR &&
+           (static_cast<unsigned>(state.status) &
+            static_cast<unsigned>(STA_UNSYNC)) == 0;
+}
+
+}  // namespace
+
+RetainClockSample retain_clock_now() noexcept {
+    RetainClockSample sample;
+    sample.clock_synced = clock_synchronised();
+    sample.realtime_ns = realtime_ns();
+    const std::optional<std::int64_t> boottime = boottime_now();
+    if (boottime.has_value()) {
+        sample.boottime_ns = *boottime;
+        sample.boot_id = read_boot_id();
+    }
+    return sample;
+}
+
+std::optional<std::int64_t> retained_age_ns(
+    const RetainStamp& stamp, const RetainClockSample& now) noexcept {
+    const bool same_boot =
+        stamp.boot_id != BootId{} && stamp.boot_id == now.boot_id;
+    // Both clocks are read from files, which are outside input: a
+    // difference that would overflow is no age.
+    const auto difference =
+        [](std::int64_t later,
+           std::int64_t earlier) -> std::optional<std::int64_t> {
+        if (earlier < 0 || later < earlier) {
+            return std::nullopt;
+        }
+        return later - earlier;
+    };
+    if (same_boot) {
+        return difference(now.boottime_ns, stamp.written_boottime_ns);
+    }
+    if (stamp.clock_synced && now.clock_synced) {
+        return difference(now.realtime_ns, stamp.written_time_ns);
+    }
+    return std::nullopt;
+}
+
+RetainStamp oldest_stamp(std::span<const RetainStamp> stamps) noexcept {
+    RetainStamp oldest = stamps.front();
+    bool one_boot = oldest.boot_id != BootId{};
+    for (const RetainStamp& stamp : stamps.subspan(1)) {
+        one_boot = one_boot && stamp.boot_id == oldest.boot_id;
+        oldest.written_time_ns =
+            std::min(oldest.written_time_ns, stamp.written_time_ns);
+        oldest.written_boottime_ns =
+            std::min(oldest.written_boottime_ns, stamp.written_boottime_ns);
+        oldest.clock_synced = oldest.clock_synced && stamp.clock_synced;
+    }
+    if (!one_boot) {
+        oldest.boot_id = {};
+        oldest.written_boottime_ns = 0;
+    }
+    return oldest;
+}
+
 const RetainedValue* find_retained(const RetainFile& file,
                                    std::string_view name) noexcept {
     const auto found = std::ranges::lower_bound(
@@ -589,25 +858,34 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
                            std::span<const WantedValue> wanted,
                            LoadedValues& loaded) {
     std::string detail;
+    bool listed_all = true;
     const Result<std::vector<std::string>> entries =
-        list_directory(dir_fd, detail);
+        list_directory(dir_fd, detail, listed_all);
     if (!entries.ok()) {
+        loaded.complete = false;
         return;
     }
+    loaded.complete = loaded.complete && listed_all;
     std::vector<std::int64_t> found_written(wanted.size());
     std::vector<std::optional<RetainedValue>> others(wanted.size());
+    std::vector<RetainSource> other_sources(wanted.size());
     std::size_t files = 0;
     for (const std::string& entry : entries.value()) {
         if (entry == own_name || !owner_of_retain_file(entry).has_value()) {
             continue;
         }
         if (++files > MAX_OWNERS) {
+            loaded.complete = false;
             break;
         }
         const Result<RetainFile> other =
             read_retain_file(dir_fd, entry, tagd_uid, detail);
         if (!other.ok()) {
             if (other.status().code() != StatusCode::NOT_FOUND) {
+                // Review D1 of #93: a file that could not be read may hold
+                // the value (an open failing with EMFILE or EIO, a damaged
+                // file): the look did not see everything.
+                loaded.complete = false;
                 loaded.rejected.push_back({entry, detail});
             }
             continue;
@@ -621,6 +899,8 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
             if (!loaded.values[i].has_value() && value != nullptr &&
                 value->type == wanted[i].type && newer) {
                 others[i] = *value;
+                other_sources[i] = {false, other.value().final,
+                                    stamp_of(other.value())};
                 found_written[i] = written;
             }
         }
@@ -628,6 +908,7 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
     for (std::size_t i = 0; i < wanted.size(); ++i) {
         if (!loaded.values[i].has_value()) {
             loaded.values[i] = std::move(others[i]);
+            loaded.sources[i] = other_sources[i];
         }
     }
 }
@@ -639,6 +920,7 @@ LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
                            std::span<const WantedValue> wanted) {
     LoadedValues loaded;
     loaded.values.resize(wanted.size());
+    loaded.sources.resize(wanted.size());
     const std::string own_name = retain_file_name(owner);
     std::string detail;
     Result<RetainFile> own =
@@ -649,10 +931,13 @@ LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
                 find_retained(own.value(), wanted[i].name);
             if (value != nullptr && value->type == wanted[i].type) {
                 loaded.values[i] = *value;
+                loaded.sources[i] = {true, own.value().final,
+                                     stamp_of(own.value())};
             }
         }
         loaded.own = std::move(own).value();
     } else if (own.status().code() != StatusCode::NOT_FOUND) {
+        loaded.complete = false;
         loaded.rejected.push_back({own_name, detail});
     }
     // A tag that moved to this owner.

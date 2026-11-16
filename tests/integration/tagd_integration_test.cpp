@@ -516,4 +516,23 @@ TEST_F(TagdService, BaseDirectoryWithTheWrongModeIsRefused) {
     EXPECT_TRUE(std::filesystem::is_empty(base()));
 }
 
+// Decision D-59, point 3: an unusable retain directory has a record and a
+// MESSAGE_ID of its own.
+TEST_F(TagdService, ARetainDirectoryWithTheWrongModeIsRefusedWithItsRecord) {
+    constexpr mode_t WRITABLE_BY_GROUP = 02770;
+    const std::string retain = retain_dir_for(base().string());
+    ASSERT_EQ(::chmod(retain.c_str(), WRITABLE_BY_GROUP), 0);
+    std::optional<RunningTagd> tagd = start_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    EXPECT_EQ(tagd->child.wait_for_exit(WAIT_LIMIT), scada::tagd::EXIT_ERROR);
+    EXPECT_NE(tagd->child.err().find("the retain directory is not usable"),
+              std::string::npos)
+        << tagd->child.err();
+    EXPECT_NE(tagd->child.err().find("8df1e064b8464d59ad5fa42e9a3070e4"),
+              std::string::npos)
+        << tagd->child.err();
+}
+
 }  // namespace

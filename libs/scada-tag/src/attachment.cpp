@@ -15,6 +15,7 @@
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
+#include "scada/tag/handle.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
@@ -33,6 +34,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -525,21 +527,24 @@ std::vector<Attachment::FinalWanted> Attachment::finals_wanted(
         }
         const GenerationIdentity identity{
             generation, header.value().contents().created_time_ns};
-        for (const WantedValue& name : names) {
+        for (std::size_t i = 0; i < names.size(); ++i) {
             const std::optional<TagEntry> tag =
-                header.value().find_tag(name.name);
+                header.value().find_tag(names[i].name);
             if (!tag.has_value()) {
                 continue;
             }
             const std::string& owner =
                 header.value().contents().owners.at(tag->owner_index).name;
-            const auto known =
-                std::ranges::find(wanted, owner, &FinalWanted::owner);
+            auto known = std::ranges::find(wanted, owner, &FinalWanted::owner);
             if (known == wanted.end()) {
-                wanted.push_back({owner, identity, entry});
+                wanted.push_back({owner, identity, entry, {}});
+                known = std::prev(wanted.end());
             } else if (known->generation.generation < generation) {
                 known->generation = identity;
                 known->directory = entry;
+            }
+            if (std::ranges::find(known->tags, i) == known->tags.end()) {
+                known->tags.push_back(i);
             }
         }
     }
@@ -580,36 +585,53 @@ void Attachment::restore_retained(std::span<std::byte> tags,
     // periodic write reach the files only once scada-tagd has seen their
     // owners leave it. The wait is bounded; without scada-tagd it runs out
     // and the files are taken as they are.
+    const std::vector<bool> wait_expired =
+        wait_for_finals(directory.get(), wanted);
+    const LoadedValues loaded =
+        load_retained(directory.get(), tagd_uid_, owner.name, wanted);
+    // At most MAX_OWNERS + 1 files are read.
+    files_rejected_ += static_cast<std::uint32_t>(loaded.rejected.size());
+    apply_retained(tags, owner_index, slots, loaded, wait_expired);
+}
+
+std::vector<bool> Attachment::wait_for_finals(
+    int retain_fd, std::span<const WantedValue> wanted) {
     std::vector<FinalWanted> waiting = finals_wanted(wanted);
     // One deadline for the whole attach, not one per owner.
     if (!final_deadline_.has_value()) {
         final_deadline_ = monotonic_ns() + RETAIN_FINAL_WAIT_NS;
     }
     const std::int64_t deadline = *final_deadline_;
-    while (!waiting.empty()) {
-        std::erase_if(waiting, [&](const FinalWanted& final) {
-            struct stat info {};
-            // scada-tagd removes a generation only once its files are on
-            // disk, or after its timeout.
-            if (::fstatat(base_.get(), final.directory.c_str(), &info,
-                          AT_SYMLINK_NOFOLLOW) != 0 &&
-                errno == ENOENT) {
-                return true;
-            }
-            std::string ignored;
-            const Result<RetainFile> file =
-                read_retain_file(directory.get(), retain_file_name(final.owner),
-                                 tagd_uid_, ignored);
-            return file.ok() && file.value().final &&
-                   (file.value().source == final.generation ||
-                    file.value().source.generation >
-                        final.generation.generation);
-        });
+    const auto arrived = [&](const FinalWanted& final) {
+        struct stat info {};
+        // scada-tagd removes a generation only once its files are on disk,
+        // or after its timeout.
+        if (::fstatat(base_.get(), final.directory.c_str(), &info,
+                      AT_SYMLINK_NOFOLLOW) != 0 &&
+            errno == ENOENT) {
+            return true;
+        }
+        std::string ignored;
+        const Result<RetainFile> file = read_retain_file(
+            retain_fd, retain_file_name(final.owner), tagd_uid_, ignored);
+        return file.ok() && file.value().final &&
+               (file.value().source == final.generation ||
+                file.value().source.generation > final.generation.generation);
+    };
+    std::vector<bool> expired(wanted.size(), false);
+    for (;;) {
+        std::erase_if(waiting, arrived);
         if (waiting.empty()) {
             break;
         }
         if (monotonic_ns() >= deadline) {
             ++final_waits_expired_;
+            // The tags whose FINAL file had not come (decision D-59).
+            for (const FinalWanted& final : waiting) {
+                for (const std::size_t tag : final.tags) {
+                    expired.at(tag) = true;
+                }
+            }
             break;
         }
         timespec pause{};
@@ -617,28 +639,78 @@ void Attachment::restore_retained(std::span<std::byte> tags,
         static_cast<void>(
             ::clock_nanosleep(CLOCK_MONOTONIC, 0, &pause, nullptr));
     }
+    return expired;
+}
 
-    const LoadedValues loaded =
-        load_retained(directory.get(), tagd_uid_, owner.name, wanted);
-    // At most MAX_OWNERS + 1 files are read.
-    files_rejected_ += static_cast<std::uint32_t>(loaded.rejected.size());
+namespace {
+
+RetainOrigin origin_of(const RetainSource& source) noexcept {
+    if (!source.own) {
+        return RetainOrigin::OTHER_OWNER;
+    }
+    return source.final ? RetainOrigin::OWN_FINAL : RetainOrigin::OWN_PERIODIC;
+}
+
+}  // namespace
+
+void Attachment::apply_retained(std::span<std::byte> tags,
+                                std::size_t owner_index,
+                                std::span<const std::uint32_t> slots,
+                                const LoadedValues& loaded,
+                                const std::vector<bool>& wait_expired) {
     const std::int64_t now_real = realtime_ns();
     const std::int64_t now_mono = monotonic_ns();
+    const RetainClockSample clock = retain_clock_now();
+    // One entry per handle: a second restore of this owner replaces its own.
+    std::erase_if(retain_infos_, [owner_index](const RetainInfo& info) {
+        const std::optional<HandleParts> parts = unpack_handle(info.handle);
+        return parts.has_value() && parts->owner_index == owner_index;
+    });
     for (std::size_t i = 0; i < slots.size(); ++i) {
+        RetainInfo info;
+        // In range: the owner index and the slot come from the header.
+        info.handle =
+            pack_handle(static_cast<std::uint16_t>(owner_index), slots[i])
+                .value_or(INVALID_HANDLE);
+        info.final_wait_expired = wait_expired.at(i);
         const std::optional<RetainedValue>& value = loaded.values.at(i);
         if (!value.has_value()) {
+            retain_infos_.push_back(info);
             continue;
+        }
+        const RetainSource& source = loaded.sources.at(i);
+        // Review B3: a value scada-tagd took from another owner's file into
+        // this owner's file keeps that origin, and its FINAL mark.
+        info.origin =
+            value->adopted ? RetainOrigin::OTHER_OWNER : origin_of(source);
+        // Review D3 of #93: a value taken now from another owner's file that
+        // is not FINAL is as uncertain as one after a wait that ran out,
+        // whether a wait happened or not (#90).
+        info.final_wait_expired = info.final_wait_expired ||
+                                  value->source_not_final ||
+                                  (!source.own && !source.final);
+        info.written_time_ns = source.stamp.written_time_ns;
+        info.age_ns = retained_age_ns(source.stamp, clock);
+        info.stored_quality = value->quality;
+        retain_infos_.push_back(info);
+        if (!info.age_ns.has_value()) {
+            ++ages_unknown_;
         }
         // Not shared yet: the file has no name others look for.
         auto& record = shared_at<TagRecord>(tags, record_offset(slots[i]));
         record.value = value->value;
+        // Decision D-59: never GOOD; the flags that describe the value
+        // itself stay, STALE and COMM_FAIL (the live link) do not.
         record.quality = to_raw(Quality::UNCERTAIN);
-        record.quality_flags = to_raw(QualityFlag::RESTORED);
+        record.quality_flags = static_cast<std::uint16_t>(
+            to_raw(QualityFlag::RESTORED) |
+            (value->quality_flags & RETAIN_CARRIED_FLAGS));
         record.source_time_ns = value->source_time_ns;
         record.update_time_ns = now_real;
         record.update_mono_ns = now_mono;
         ++values_restored_;
     }
+    std::ranges::sort(retain_infos_, {}, &RetainInfo::handle);
 }
 
 Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
@@ -960,6 +1032,33 @@ int Attachment::heartbeat() noexcept {
                                                         : SCADA_OK;
 }
 
+int Attachment::retain_info(std::uint32_t handle,
+                            scada_tag_retain_info_t& out) const {
+    out = scada_tag_retain_info_t{};
+    const std::optional<HandleParts> parts = unpack_handle(handle);
+    if (!parts.has_value() ||
+        !header_.slot_entry(parts->owner_index, parts->slot).has_value()) {
+        return SCADA_E_INVALID;
+    }
+    if (std::ranges::find(owners_, std::size_t{parts->owner_index},
+                          &OwnedOwner::owner_index) == owners_.end()) {
+        return SCADA_E_NOT_OWNER;
+    }
+    out.stored_quality = to_raw(Quality::BAD);
+    const auto found = std::ranges::lower_bound(retain_infos_, handle, {},
+                                                &RetainInfo::handle);
+    if (found == retain_infos_.end() || found->handle != handle) {
+        return SCADA_OK;
+    }
+    out.origin = to_raw(found->origin);
+    out.written_time_ns = found->written_time_ns;
+    out.age_known = found->age_ns.has_value() ? 1 : 0;
+    out.age_ns = found->age_ns.value_or(0);
+    out.stored_quality = to_raw(found->stored_quality);
+    out.final_wait_expired = found->final_wait_expired ? 1 : 0;
+    return SCADA_OK;
+}
+
 AttachmentStatus Attachment::status() {
     const std::int64_t now = monotonic_ns();
     static_cast<void>(peers_.refresh(directory_.get(), now));
@@ -977,6 +1076,7 @@ AttachmentStatus Attachment::status() {
     status.regions_reused = regions_reused_;
     status.records_repaired = records_repaired_;
     status.values_restored = values_restored_;
+    status.ages_unknown = ages_unknown_;
     status.final_waits_expired = final_waits_expired_;
     status.files_rejected = files_rejected_;
     status.directory_unusable = directory_unusable_;

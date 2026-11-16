@@ -142,6 +142,10 @@ Release builds add:
 - On a broken invariant that makes continuing unsafe, the process logs and
   aborts. The service supervisor restarts it; that is safer than running on
   corrupted state.
+- `std::_Exit` is called only in `main`, after a bounded stop failed (a
+  thread that cannot be joined within its bound, such as a write in a hung
+  `fsync`; decision D-59): log, flush the log, then `_Exit` with a distinct
+  exit status. Nowhere else, and never in place of error handling.
 
 ## 8. Concurrency
 

@@ -14,6 +14,7 @@
 #include "peer_regions.h"
 #include "proc_region.h"
 #include "retain_file.h"
+#include "tag_record.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
@@ -66,6 +67,8 @@ public:
         // `written` false if the directory could not be synced.
         bool removal = false;
         std::vector<std::string> removed;
+        // The written_time_ns of the file written.
+        std::int64_t written_time_ns = 0;
     };
 
     // `dir_fd` and `ops` are borrowed and stay valid while this object
@@ -90,6 +93,8 @@ public:
     // Results that could not be recorded (a failed allocation), since the
     // start.
     [[nodiscard]] std::uint64_t lost() const;
+    // The owner whose file is being written now; empty if none.
+    [[nodiscard]] std::string in_flight() const;
     // Waits, at most `limit`, until nothing waits and nothing is being
     // written. False if the limit was reached.
     [[nodiscard]] bool wait_idle(std::chrono::milliseconds limit);
@@ -112,6 +117,7 @@ private:
     std::vector<std::string> removals_;                // guarded by mutex_
     std::uint64_t lost_ = 0;                           // guarded by mutex_
     bool busy_ = false;                                // guarded by mutex_
+    std::string in_flight_;                            // guarded by mutex_
     // Last: started after everything it uses, stopped and joined first.
     std::jthread thread_;
 };
@@ -126,10 +132,12 @@ public:
     // removed. `config_hash` is that of the tag set scada-tagd runs with; it
     // goes into every file written. The codes of `open_base_directory` on
     // an error.
+    // `ops`, borrowed for the life of the keeper, are the file system calls
+    // of its writer.
     [[nodiscard]] static Result<std::unique_ptr<RetainKeeper>> open(
         const std::string& retain_dir, std::uint32_t tagd_uid, int base_fd,
         std::uint32_t interval_ms, const ConfigHash& config_hash,
-        std::string& detail);
+        std::string& detail, RetainFileOps& ops = system_retain_file_ops());
 
 private:
     // Only `open` can name it, so only `open` can construct.
@@ -140,7 +148,8 @@ private:
 public:
     // For `open` alone.
     RetainKeeper(Key key, Fd directory, std::uint32_t tagd_uid,
-                 std::int64_t interval_ns, const ConfigHash& config_hash);
+                 std::int64_t interval_ns, const ConfigHash& config_hash,
+                 RetainFileOps& ops);
 
     RetainKeeper(const RetainKeeper&) = delete;
     RetainKeeper& operator=(const RetainKeeper&) = delete;
@@ -247,20 +256,44 @@ private:
         std::uint64_t token = 0;       // of the last file submitted
         std::uint64_t done_token = 0;  // of the last file the writer finished
         bool failing = false;          // the last write failed and was reported
+        // The values the owner has not written since they were loaded or
+        // restored, with the stamp of the file they came from (decision
+        // D-59); a write of the owner removes the entry.
+        std::map<std::string, RetainStamp, std::less<>> not_written;
+        // The written_time_ns of the owner's file on disk, as last read or
+        // written; nothing if it has none known (review D4 of #93).
+        std::optional<std::int64_t> written_time_on_disk;
     };
 
     // Fills `watched.owners` and `watched.processes` from its header.
     void describe(Watched& watched, bool retired,
                   std::int64_t now_mono_ns) const;
-    // Loads the values on file for the owners of `watched`. Names of the
-    // owner's own file go to `own_names`.
-    void load_watched(const Watched& watched,
-                      std::map<std::string, std::vector<std::string>,
-                               std::less<>>& own_names);
+    // Loads the values on file for the owners of `watched`; with
+    // `own_only` from each owner's own file only. Names of the owner's own
+    // file go to `own_names`.
+    void load_watched(
+        const Watched& watched,
+        std::map<std::string, std::vector<std::string>, std::less<>>& own_names,
+        bool own_only);
 
     // Reads the RETAIN tags of `owner` in `watched` into the state of its
     // name. False if its `tags` region is missing.
     bool read_owner(const Watched& watched, const WatchedOwner& owner);
+    // What `read_owner` learns from `copy`, a record of `tag` that holds a
+    // value: a change of value, quality or flags makes the owner dirty; a
+    // write of the owner, unlike the restore, ends the stamp it came with.
+    // True for a restore of a value this keeper does not have as it is on
+    // file, which `note_restores` takes.
+    [[nodiscard]] static bool note_value(OwnerState& state,
+                                         const RetainedTag& tag,
+                                         const RecordCopy& copy);
+    // Takes the restored records `copies` of `tags` of `owner` with the
+    // value, quality, flags and stamp of the file they came from, marked
+    // adopted when that file is another owner's (decision D-59, review B2,
+    // B3); a source no longer found gives an unknown age and SOURCE_NOT_FINAL.
+    void note_restores(const std::string& owner,
+                       std::span<const RetainedTag> tags,
+                       std::span<const RecordCopy> copies);
     void read_current();
 
     // True if the current generation has a ready `tags` region of the
@@ -307,7 +340,14 @@ private:
     // Removes the retired generations that are done.
     void remove_done(int base_fd, std::int64_t now_mono_ns,
                      CheckReport& report);
-    // Removes the files of owners that are in no generation any more.
+    // Takes into the state of every owner of the current generation that
+    // has no region there the values of its RETAIN tags that only other
+    // owners' files hold (a tag that moved, decision D-59); those owners are
+    // then written. False if not every file could be looked at (review B5).
+    [[nodiscard]] bool adopt_moved_values();
+    // Removes the files of owners that are in no generation any more, once
+    // `adopt_moved_values` ran and every owner of the current generation
+    // with values has its file on disk.
     void remove_files_of_gone_owners();
 
     Fd directory_;  // the retain directory; invalid if none
@@ -321,6 +361,9 @@ private:
     std::set<std::string, std::less<>> rejected_seen_;
     std::vector<RetainProblem> pending_problems_;
     bool gone_owners_removed_ = false;
+    bool moved_values_adopted_ = false;
+    bool adoption_reported_ = false;          // an incomplete look, logged once
+    std::int64_t next_adoption_mono_ns_ = 0;  // the next look, if incomplete
     std::uint64_t writer_lost_ = 0;  // RetainWriter::lost at the last look
     // Last: destroyed first, while the directory is still open.
     std::unique_ptr<RetainWriter> writer_;

@@ -24,6 +24,10 @@ SupplementaryGroups=@SCADA_GROUP@
 # service; a service that keeps state names its directories with
 # StateDirectory= or ReadWritePaths= in a drop-in. No capabilities: a service
 # that needs one adds it the same way.
+# Not ProtectClock= or SystemCallFilter=~@clock: scada-tagd reads
+# adjtimex(2) (modes 0) to tell whether the clock is synchronised for the age
+# of retained values (decision D-59); either setting would make every age
+# across a reboot unknown, or end the process with SIGSYS.
 ProtectSystem=strict
 NoNewPrivileges=yes
 PrivateTmp=yes

@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -40,6 +41,10 @@ constexpr std::int64_t SOURCE_TIME = 1'700'000'000'000'000'000;
 constexpr std::int64_t CREATED_TIME = 1'600'000'000'000'000'000;
 constexpr std::int64_t WRITTEN_TIME = 1'650'000'000'000'000'000;
 constexpr std::uint64_t GENERATION = 7;
+constexpr std::int64_t BOOT_TIME = 123'456'789'012;
+// Ages and clocks of the age tests, in ns.
+constexpr std::int64_t AN_HOUR = 3'600'000'000'000;
+constexpr std::int64_t A_SECOND = 1'000'000'000;
 constexpr std::uint8_t HASH_BYTE = 0xA5;
 constexpr std::size_t BITS_PER_BYTE = 8;
 constexpr std::uint32_t LOW_BYTE = 0xFFU;
@@ -61,37 +66,43 @@ struct Damage {
 // Offsets in the file of `sample()`: the header, then the first record
 // ("a.flag", BOOL) at RETAIN_HEADER_BYTES.
 constexpr std::size_t FIRST = RETAIN_HEADER_BYTES;
-constexpr std::array<Damage, 13> DAMAGES{{
-    {8, 2, "format version"},
+constexpr std::array<Damage, 22> DAMAGES{{
+    {8, 3, "format version"},
     {12, 5, "record count beyond the file"},
     {12, 3, "record count below the records"},
-    {40, 2, "unknown flag"},
+    {40, 4, "unknown flag"},
     {44, 1, "reserved field"},
     {FIRST, 5, "STRING type"},
     {FIRST, 0, "no type"},
-    {FIRST + 2, 1, "reserved byte of a record"},
+    {FIRST + 2, 2, "quality BAD"},
+    {FIRST + 2, 3, "a quality that is none"},
+    {FIRST + 3, 4, "an unknown record flag"},
+    {FIRST + 3, 2, "SOURCE_NOT_FINAL without ADOPTED"},
+    {FIRST + 4, 0x10, "NOT_INIT"},
+    {FIRST + 4, 0x20, "OWNER_DOWN"},
+    {FIRST + 5, 0x04, "RESTORED"},
+    {FIRST + 5, 0x10, "a flag bit that is no flag"},
+    {FIRST + 6, 1, "reserved byte after the flags"},
+    {FIRST + 7, 1, "last reserved byte of a record"},
     {FIRST + 8, 2, "BOOL of 2"},
     {FIRST + 24, 'A', "name with an upper-case letter"},
     {FIRST + 24 + 6, 1, "padding byte"},
     {FIRST + 1, 0, "empty name"},
     {FIRST + 24, 'q', "first name after the second"},
 }};
+// The same for a file of format version 1 (`sample_v1()`).
+constexpr std::size_t FIRST_V1 = RETAIN_HEADER_BYTES_V1;
+constexpr std::array<Damage, 5> DAMAGES_V1{{
+    {40, 2, "CLOCK_SYNCED, which version 1 does not have"},
+    {FIRST_V1 + 2, 1, "first reserved byte of a record"},
+    {FIRST_V1 + 4, 0x08, "flags, which version 1 does not have"},
+    {FIRST_V1 + 7, 1, "last reserved byte of a record"},
+    {FIRST_V1 + 8, 2, "BOOL of 2"},
+}};
 
 // True if `left` and `right` hold the same values.
 bool same_values(const RetainFile& left, const RetainFile& right) {
-    if (left.values.size() != right.values.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < left.values.size(); ++i) {
-        const RetainedValue& one = left.values[i];
-        const RetainedValue& other = right.values[i];
-        if (one.name != other.name || one.type != other.type ||
-            one.value != other.value ||
-            one.source_time_ns != other.source_time_ns) {
-            return false;
-        }
-    }
-    return true;
+    return left.values == right.values;
 }
 
 // The value `loaded` has for wanted tag `index`; 0 if it has none.
@@ -107,20 +118,61 @@ std::vector<std::byte> bytes_of(std::string_view text) {
     return bytes;
 }
 
+constexpr std::uint16_t flag(QualityFlag which) {
+    return to_raw(which);
+}
+
+// A file of version 2 with every field set.
 RetainFile sample() {
     RetainFile file;
     file.source = {GENERATION, CREATED_TIME};
     file.written_time_ns = WRITTEN_TIME;
     file.final = true;
     file.config_hash.fill(HASH_BYTE);
+    file.written_boottime_ns = BOOT_TIME;
+    for (std::size_t i = 0; i < file.boot_id.size(); ++i) {
+        file.boot_id.at(i) = static_cast<std::uint8_t>(i + 1);
+    }
+    file.clock_synced = true;
     file.values = {
-        {"a.flag", TagType::BOOL, 1, SOURCE_TIME},
+        {"a.flag", TagType::BOOL, 1, SOURCE_TIME, Quality::GOOD,
+         flag(QualityFlag::SUBSTITUTED)},
         {"plant.mode", TagType::INT64,
-         std::bit_cast<std::uint64_t>(std::int64_t{-3}), SOURCE_TIME + 1},
-        {"plant.setpoint", TagType::FLOAT64, PI_BITS, SOURCE_TIME + 2},
-        {"z", TagType::UINT64, ~std::uint64_t{0}, 0},
+         std::bit_cast<std::uint64_t>(std::int64_t{-3}), SOURCE_TIME + 1,
+         Quality::UNCERTAIN, 0},
+        {"plant.setpoint", TagType::FLOAT64, PI_BITS, SOURCE_TIME + 2,
+         Quality::GOOD,
+         static_cast<std::uint16_t>(flag(QualityFlag::STALE) |
+                                    flag(QualityFlag::LOCAL_TIME) |
+                                    flag(QualityFlag::OVERFLOW))},
+        {"z", TagType::UINT64, ~std::uint64_t{0}, 0, Quality::UNCERTAIN,
+         static_cast<std::uint16_t>(retainable_flags(QUALITY_FLAGS_MASK)), true,
+         true},
     };
+    file.values.at(1).adopted = true;  // plant.mode, from a FINAL file
     return file;
+}
+
+// `sample()` as version 1 can hold it: UNCERTAIN, no flags, no stamp.
+RetainFile sample_v1() {
+    RetainFile file = sample();
+    file.written_boottime_ns = 0;
+    file.boot_id = {};
+    file.clock_synced = false;
+    for (RetainedValue& value : file.values) {
+        value.quality = Quality::UNCERTAIN;
+        value.quality_flags = 0;
+        value.adopted = false;
+        value.source_not_final = false;
+    }
+    return file;
+}
+
+std::vector<std::byte> encoded_v1(const RetainFile& file) {
+    std::string detail;
+    Result<std::vector<std::byte>> bytes = encode_retain_file_v1(file, detail);
+    EXPECT_TRUE(bytes.ok()) << detail;
+    return bytes.ok() ? bytes.value() : std::vector<std::byte>{};
 }
 
 std::vector<std::byte> encoded(const RetainFile& file) {
@@ -165,7 +217,58 @@ TEST(RetainFile, RoundTripsEveryField) {
     EXPECT_EQ(decoded.value().written_time_ns, WRITTEN_TIME);
     EXPECT_TRUE(decoded.value().final);
     EXPECT_EQ(decoded.value().config_hash, file.config_hash);
+    EXPECT_EQ(decoded.value().version, RETAIN_FORMAT_VERSION);
+    EXPECT_EQ(decoded.value().written_boottime_ns, BOOT_TIME);
+    EXPECT_EQ(decoded.value().boot_id, file.boot_id);
+    EXPECT_TRUE(decoded.value().clock_synced);
     EXPECT_TRUE(same_values(decoded.value(), file));
+}
+
+TEST(RetainFile, AFileOfVersion1IsReadAsUncertainWithoutFlags) {
+    const RetainFile file = sample_v1();
+    const std::vector<std::byte> bytes = encoded_v1(file);
+    constexpr std::size_t NAMES = 8 + 16 + 16 + 8;
+    EXPECT_EQ(bytes.size(), RETAIN_HEADER_BYTES_V1 +
+                                (std::size_t{4} * RETAIN_RECORD_FIXED_BYTES) +
+                                NAMES + RETAIN_CRC_BYTES);
+    std::string detail;
+    const Result<RetainFile> decoded = decode_retain_file(bytes, detail);
+    ASSERT_TRUE(decoded.ok()) << detail;
+    EXPECT_EQ(decoded.value().version, RETAIN_FORMAT_VERSION_1);
+    EXPECT_EQ(decoded.value().source, file.source);
+    EXPECT_TRUE(decoded.value().final);
+    EXPECT_EQ(decoded.value().written_boottime_ns, 0);
+    EXPECT_EQ(decoded.value().boot_id, BootId{});
+    EXPECT_FALSE(decoded.value().clock_synced);
+    EXPECT_TRUE(same_values(decoded.value(), file));
+}
+
+TEST(RetainFile, EveryRecordOfVersion1IsUncertainWithoutFlags) {
+    std::string detail;
+    const Result<RetainFile> decoded =
+        decode_retain_file(encoded_v1(sample_v1()), detail);
+    ASSERT_TRUE(decoded.ok()) << detail;
+    ASSERT_EQ(decoded.value().values.size(), 4U);
+    EXPECT_TRUE(std::ranges::all_of(
+        decoded.value().values, [](const RetainedValue& value) {
+            return value.quality == Quality::UNCERTAIN &&
+                   value.quality_flags == 0;
+        }));
+}
+
+TEST(RetainFile, TheWriterWritesVersion2) {
+    // A file encoded for writing is version 2 whatever version it was read
+    // from.
+    std::string detail;
+    Result<RetainFile> decoded =
+        decode_retain_file(encoded_v1(sample_v1()), detail);
+    ASSERT_TRUE(decoded.ok()) << detail;
+    const std::vector<std::byte> again = encoded(decoded.value());
+    ASSERT_GE(again.size(), 12U);
+    EXPECT_EQ(std::to_integer<int>(again.at(8)), 2);
+    const Result<RetainFile> read = decode_retain_file(again, detail);
+    ASSERT_TRUE(read.ok()) << detail;
+    EXPECT_EQ(read.value().version, RETAIN_FORMAT_VERSION);
 }
 
 TEST(RetainFile, AnEmptyFileIsValid) {
@@ -199,28 +302,114 @@ TEST(RetainFile, EncodeRefusesWhatTheFormatCannotHold) {
               StatusCode::INVALID_ARGUMENT);
 }
 
-TEST(RetainFile, EveryFlippedBitIsRejected) {
-    const std::vector<std::byte> bytes = encoded(sample());
+// Decision D-59: a quality other than GOOD or UNCERTAIN, a bit that is no
+// flag, and the flags that describe a record, not a value.
+TEST(RetainFile, EncodeRefusesAQualityOrFlagAFileCannotHold) {
+    std::string detail;
+    RetainFile file = sample();
+    file.values[0].quality = Quality::BAD;
+    EXPECT_EQ(encode_retain_file(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    for (const std::uint16_t refused :
+         {flag(QualityFlag::NOT_INIT), flag(QualityFlag::OWNER_DOWN),
+          flag(QualityFlag::RESTORED), std::uint16_t{1U << 12U},
+          std::uint16_t{0x8000}}) {
+        file = sample();
+        file.values[1].quality_flags = refused;
+        EXPECT_EQ(encode_retain_file(file, detail).status().code(),
+                  StatusCode::INVALID_ARGUMENT)
+            << refused;
+    }
+}
+
+TEST(RetainFile, EncodeRefusesSourceNotFinalWithoutAdopted) {
+    std::string detail;
+    RetainFile file = sample();
+    file.values[0].source_not_final = true;  // not adopted
+    EXPECT_EQ(encode_retain_file(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.values[0].adopted = true;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(RetainFile, Version1EncodeRefusesWhatOnlyVersion2Holds) {
+    std::string detail;
+    EXPECT_TRUE(encode_retain_file_v1(sample_v1(), detail).ok()) << detail;
+    RetainFile file = sample_v1();
+    file.values[0].quality = Quality::GOOD;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.values[0].quality_flags = flag(QualityFlag::SUBSTITUTED);
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.clock_synced = true;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.written_boottime_ns = 1;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.boot_id.at(0) = 1;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+}
+
+// Every single flipped bit of `bytes` makes the file rejected.
+::testing::AssertionResult every_flip_rejected(
+    const std::vector<std::byte>& bytes) {
     for (std::size_t i = 0; i < bytes.size(); ++i) {
         for (std::size_t bit = 0; bit < BITS_PER_BYTE; ++bit) {
             std::vector<std::byte> damaged = bytes;
             damaged[i] ^= static_cast<std::byte>(1U << bit);
-            ASSERT_EQ(decode_code(damaged), StatusCode::DATA_CORRUPT)
-                << "byte " << i << " bit " << bit;
+            if (decode_code(damaged) != StatusCode::DATA_CORRUPT) {
+                return ::testing::AssertionFailure()
+                       << "byte " << i << " bit " << bit;
+            }
         }
     }
+    return ::testing::AssertionSuccess();
 }
 
-TEST(RetainFile, EveryTruncationIsRejected) {
-    const std::vector<std::byte> bytes = encoded(sample());
+// Every prefix of `bytes`, and `bytes` with a byte more, is rejected.
+::testing::AssertionResult every_cut_rejected(
+    const std::vector<std::byte>& bytes) {
     for (std::size_t size = 0; size < bytes.size(); ++size) {
         const std::vector<std::byte> cut(
             bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(size));
-        ASSERT_EQ(decode_code(cut), StatusCode::DATA_CORRUPT) << size;
+        if (decode_code(cut) != StatusCode::DATA_CORRUPT) {
+            return ::testing::AssertionFailure() << "cut to " << size;
+        }
     }
     std::vector<std::byte> longer = bytes;
     longer.push_back(std::byte{0});
-    EXPECT_EQ(decode_code(longer), StatusCode::DATA_CORRUPT);
+    if (decode_code(longer) != StatusCode::DATA_CORRUPT) {
+        return ::testing::AssertionFailure() << "a byte more";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+TEST(RetainFile, EveryFlippedBitIsRejected) {
+    EXPECT_TRUE(every_flip_rejected(encoded(sample())));
+    EXPECT_TRUE(every_flip_rejected(encoded_v1(sample_v1())));
+}
+
+TEST(RetainFile, EveryTruncationIsRejected) {
+    EXPECT_TRUE(every_cut_rejected(encoded(sample())));
+    EXPECT_TRUE(every_cut_rejected(encoded_v1(sample_v1())));
+}
+
+TEST(RetainFile, AVersion2HeaderCutToTheLengthOfVersion1IsRejected) {
+    // A version 2 header whose last 24 bytes are missing, sealed again.
+    std::vector<std::byte> bytes = encoded(RetainFile{});
+    bytes.erase(bytes.begin() + RETAIN_HEADER_BYTES_V1,
+                bytes.begin() + RETAIN_HEADER_BYTES);
+    reseal(bytes);
+    EXPECT_EQ(decode_code(bytes), StatusCode::DATA_CORRUPT);
 }
 
 // Damage that comes with a valid check sum, as a bug in a writer would make.
@@ -232,6 +421,136 @@ TEST(RetainFile, FieldChecksHoldBehindAValidCheckSum) {
         reseal(copy);
         EXPECT_EQ(decode_code(copy), StatusCode::DATA_CORRUPT) << damage.what;
     }
+    const std::vector<std::byte> old_format = encoded_v1(sample_v1());
+    for (const Damage& damage : DAMAGES_V1) {
+        std::vector<std::byte> copy = old_format;
+        copy.at(damage.offset) = static_cast<std::byte>(damage.value);
+        reseal(copy);
+        EXPECT_EQ(decode_code(copy), StatusCode::DATA_CORRUPT) << damage.what;
+    }
+}
+
+TEST(RetainFile, RestoreCarriesTheFlagsThatDescribeTheValue) {
+    // Decision D-59: STALE and COMM_FAIL describe the live link.
+    EXPECT_EQ(RETAIN_CARRIED_FLAGS,
+              flag(QualityFlag::SUBSTITUTED) | flag(QualityFlag::BLOCKED) |
+                  flag(QualityFlag::TEST) | flag(QualityFlag::OUT_OF_RANGE) |
+                  flag(QualityFlag::OVERFLOW) | flag(QualityFlag::LOCAL_TIME) |
+                  flag(QualityFlag::TIME_UNCERTAIN));
+    EXPECT_EQ(RETAIN_CARRIED_FLAGS & flag(QualityFlag::STALE), 0);
+    EXPECT_EQ(RETAIN_CARRIED_FLAGS & flag(QualityFlag::COMM_FAIL), 0);
+    EXPECT_EQ(retainable_flags(0xFFFFU),
+              QUALITY_FLAGS_MASK & ~(flag(QualityFlag::NOT_INIT) |
+                                     flag(QualityFlag::OWNER_DOWN) |
+                                     flag(QualityFlag::RESTORED)));
+}
+
+// The age rule of decision D-59.
+TEST(RetainAge, InTheSameBootTheBootClockGivesTheAge) {
+    RetainStamp stamp;
+    stamp.boot_id.fill(1);
+    stamp.written_boottime_ns = A_SECOND;
+    stamp.written_time_ns = WRITTEN_TIME;
+    RetainClockSample now;
+    now.boot_id = stamp.boot_id;
+    now.boottime_ns = A_SECOND + AN_HOUR;
+    // The wall clock is not used in the same boot, even if it went back.
+    now.realtime_ns = 0;
+    EXPECT_EQ(retained_age_ns(stamp, now), AN_HOUR);
+    now.boottime_ns = 0;  // before the write: no age
+    EXPECT_FALSE(retained_age_ns(stamp, now).has_value());
+}
+
+TEST(RetainAge, InAnotherBootOnlyASynchronisedClockGivesTheAge) {
+    RetainStamp stamp;
+    stamp.boot_id.fill(1);
+    stamp.written_boottime_ns = AN_HOUR;
+    stamp.written_time_ns = WRITTEN_TIME;
+    stamp.clock_synced = true;
+    RetainClockSample now;
+    now.boot_id.fill(2);
+    now.boottime_ns = A_SECOND;
+    now.realtime_ns = WRITTEN_TIME + AN_HOUR;
+    now.clock_synced = true;
+    EXPECT_EQ(retained_age_ns(stamp, now), AN_HOUR);
+    now.clock_synced = false;  // not synchronised now
+    EXPECT_FALSE(retained_age_ns(stamp, now).has_value());
+    now.clock_synced = true;
+    stamp.clock_synced = false;  // not synchronised at the write
+    EXPECT_FALSE(retained_age_ns(stamp, now).has_value());
+    stamp.clock_synced = true;
+    now.realtime_ns = WRITTEN_TIME - A_SECOND;  // a negative difference
+    EXPECT_FALSE(retained_age_ns(stamp, now).has_value());
+}
+
+TEST(RetainAge, AnUnknownBootIdIsNeverTheSameBoot) {
+    // A file of version 1 has no boot id and no CLOCK_SYNCED.
+    RetainStamp stamp;
+    stamp.written_time_ns = WRITTEN_TIME;
+    RetainClockSample now;
+    now.boottime_ns = AN_HOUR;
+    now.realtime_ns = WRITTEN_TIME + A_SECOND;
+    now.clock_synced = true;
+    EXPECT_FALSE(retained_age_ns(stamp, now).has_value());
+    // Neither side knows its boot: not the same boot either.
+    stamp.clock_synced = true;
+    EXPECT_EQ(retained_age_ns(stamp, now), A_SECOND);
+}
+
+// Committee review of PR #91, B2: the stamp of a file that holds values of
+// several sources.
+TEST(RetainAge, TheOldestStampOfOneBootTakesTheEarliestTimes) {
+    RetainStamp first;
+    first.boot_id.fill(1);
+    first.written_time_ns = WRITTEN_TIME;
+    first.written_boottime_ns = AN_HOUR;
+    first.clock_synced = true;
+    RetainStamp second = first;
+    second.written_time_ns = WRITTEN_TIME + A_SECOND;
+    second.written_boottime_ns = A_SECOND;
+    second.clock_synced = false;
+    const std::array stamps{first, second};
+    const RetainStamp oldest = oldest_stamp(stamps);
+    EXPECT_EQ(oldest.boot_id, first.boot_id);
+    EXPECT_EQ(oldest.written_time_ns, WRITTEN_TIME);
+    EXPECT_EQ(oldest.written_boottime_ns, A_SECOND);
+    EXPECT_FALSE(oldest.clock_synced);
+}
+
+TEST(RetainAge, TheOldestStampOfTwoBootsLeavesOnlyTheWallClock) {
+    RetainStamp first;
+    first.boot_id.fill(1);
+    first.written_time_ns = WRITTEN_TIME + A_SECOND;
+    first.clock_synced = true;
+    RetainStamp second = first;
+    second.boot_id.fill(2);
+    second.written_time_ns = WRITTEN_TIME;
+    std::array stamps{first, second};
+    RetainStamp oldest = oldest_stamp(stamps);
+    EXPECT_EQ(oldest.boot_id, BootId{});
+    EXPECT_EQ(oldest.written_boottime_ns, 0);
+    EXPECT_EQ(oldest.written_time_ns, WRITTEN_TIME);
+    EXPECT_TRUE(oldest.clock_synced);
+    // One of them not synchronised: no age at all.
+    stamps.at(1).clock_synced = false;
+    oldest = oldest_stamp(stamps);
+    RetainClockSample now;
+    now.realtime_ns = WRITTEN_TIME + AN_HOUR;
+    now.clock_synced = true;
+    EXPECT_FALSE(retained_age_ns(oldest, now).has_value());
+}
+
+TEST(RetainAge, TheClockOfThisBootIsRead) {
+    const RetainClockSample first = retain_clock_now();
+    const RetainClockSample second = retain_clock_now();
+    EXPECT_NE(first.boot_id, BootId{});  // Linux has a boot id
+    EXPECT_EQ(first.boot_id, second.boot_id);
+    EXPECT_GT(first.boottime_ns, 0);
+    EXPECT_GE(second.boottime_ns, first.boottime_ns);
+    RetainStamp stamp;
+    stamp.boot_id = first.boot_id;
+    stamp.written_boottime_ns = first.boottime_ns;
+    EXPECT_GE(retained_age_ns(stamp, second).value_or(-1), 0);
 }
 
 TEST(RetainFile, FileNames) {
@@ -358,6 +677,26 @@ TEST_F(RetainDirectory, LoadTakesTheOwnFileFirstThenTheNewestOther) {
     ASSERT_TRUE(loaded.own.has_value());
     ASSERT_EQ(loaded.rejected.size(), 1U);
     EXPECT_EQ(loaded.rejected[0].file, "broken.bin");
+    // Where each value came from (decision D-59).
+    ASSERT_EQ(loaded.sources.size(), wanted.size());
+    EXPECT_TRUE(loaded.sources[0].own);
+    EXPECT_EQ(loaded.sources[0].stamp.written_time_ns, OWN_WRITTEN);
+    EXPECT_FALSE(loaded.sources[2].own);
+    EXPECT_EQ(loaded.sources[2].stamp.written_time_ns, NEWER_WRITTEN);
+}
+
+TEST_F(RetainDirectory, LoadKeepsQualityFlagsAndTheMarkOfTheFile) {
+    write("ctl", sample());
+    const std::vector<WantedValue> wanted = {
+        {"a.flag", TagType::BOOL}, {"plant.setpoint", TagType::FLOAT64}};
+    const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
+    ASSERT_TRUE(loaded.values[0].has_value());
+    const RetainedValue first = loaded.values[0].value_or(RetainedValue{});
+    EXPECT_EQ(first.quality, Quality::GOOD);
+    EXPECT_EQ(first.quality_flags, flag(QualityFlag::SUBSTITUTED));
+    EXPECT_TRUE(loaded.sources[0].own);
+    EXPECT_TRUE(loaded.sources[0].final);
+    EXPECT_EQ(loaded.sources[1].stamp, stamp_of(sample()));
 }
 
 TEST_F(RetainDirectory, ACorruptOwnFileIsRejectedAndOthersStillServe) {
@@ -371,6 +710,24 @@ TEST_F(RetainDirectory, ACorruptOwnFileIsRejectedAndOthersStillServe) {
     ASSERT_EQ(loaded.rejected.size(), 1U);
     ASSERT_TRUE(loaded.values[0].has_value());
     EXPECT_EQ(value_at(loaded, 0), OTHER_A);
+}
+
+}  // namespace
+
+namespace {
+
+// Review D1 of #93: a file that cannot be opened makes the look incomplete.
+TEST_F(RetainDirectory, AnOtherFileThatCannotBeOpenedMakesTheLookIncomplete) {
+    RetainFile other;
+    other.values = {{"t.a", TagType::INT64, OTHER_A, 0}};
+    write("other", other);
+    const std::vector<WantedValue> wanted = {{"t.a", TagType::INT64}};
+    EXPECT_TRUE(load_retained(dir(), uid(), "ctl", wanted).complete);
+    std::filesystem::create_symlink("other.bin", base() / "link.bin");
+    const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
+    EXPECT_FALSE(loaded.complete);
+    ASSERT_EQ(loaded.rejected.size(), 1U);
+    EXPECT_EQ(loaded.rejected[0].file, "link.bin");
 }
 
 }  // namespace

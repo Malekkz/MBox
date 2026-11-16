@@ -216,19 +216,21 @@ inline bool attached(std::string_view out) {
 
 // Starts scada-tagd on the tag set file `tag_set_path` and the base
 // directory `base_dir`, with the retain directory of `retain_dir_for`, the
-// watchdog interval `watchdog` and the arguments `extra` added. Nothing,
-// with a failed expectation, if it could not be started.
+// watchdog interval `watchdog` and the arguments `extra` added, through the
+// command in the environment variable `command_variable`. Nothing, with a
+// failed expectation, if it could not be started.
 [[nodiscard]] inline std::optional<RunningTagd> start_tagd(
     const std::string& tag_set_path, const std::string& base_dir,
     std::chrono::milliseconds watchdog = QUIET_WATCHDOG,
-    const std::vector<std::string>& extra = {}) {
+    const std::vector<std::string>& extra = {},
+    const char* command_variable = "SCADA_TAGD_COMMAND") {
     scada::Result<NotifyListener> listener = NotifyListener::create();
     std::vector<std::string> arguments{
         "--tag-set", tag_set_path,   "--base-dir",
         base_dir,    "--retain-dir", retain_dir_for(base_dir)};
     arguments.insert(arguments.end(), extra.begin(), extra.end());
     const std::vector<std::string> tagd =
-        command_from("SCADA_TAGD_COMMAND", arguments);
+        command_from(command_variable, arguments);
     if (!listener.ok() || tagd.empty()) {
         ADD_FAILURE() << "no listener or no command for scada-tagd";
         return std::nullopt;
@@ -259,9 +261,10 @@ inline bool attached(std::string_view out) {
 [[nodiscard]] inline std::optional<RunningTagd> ready_tagd(
     const std::string& tag_set_path, const std::string& base_dir,
     std::chrono::milliseconds watchdog = QUIET_WATCHDOG,
-    const std::vector<std::string>& extra = {}) {
+    const std::vector<std::string>& extra = {},
+    const char* command_variable = "SCADA_TAGD_COMMAND") {
     std::optional<RunningTagd> tagd =
-        start_tagd(tag_set_path, base_dir, watchdog, extra);
+        start_tagd(tag_set_path, base_dir, watchdog, extra, command_variable);
     if (tagd.has_value()) {
         EXPECT_TRUE(receives(tagd->listener, "READY=1")) << tagd->child.err();
     }

@@ -6,24 +6,36 @@
 // write of scada-tagd and the lookup of the values of one owner. A retain
 // file is outside input to everyone who reads it. Private to libscada-tag.
 //
-// Format version 1, all integers little-endian:
+// Format version 2 (decision D-59), all integers little-endian:
 //
 //   offset  size  field
 //        0     8  magic "SCADARTN" (0x4E54524144414353)
-//        8     4  format version, 1
+//        8     4  format version, 2
 //       12     4  record count, at most MAX_TAGS_PER_OWNER
 //       16     8  source generation: the generation the values were read from
 //       24     8  created_time_ns of that generation (GlobalHeader)
 //       32     8  written_time_ns, CLOCK_REALTIME, when the file was written
-//       40     4  flags: bit 0 FINAL, the owner had left that generation
+//       40     4  flags: bit 0 FINAL, the owner had left that generation;
+//                 bit 1 CLOCK_SYNCED, the clock was synchronised at the write
 //       44     4  reserved, 0
 //       48    32  config_hash of the tag set scada-tagd ran with
-//       80     -  records, sorted by name, byte-wise, each name once
+//       80    16  boot_id of the boot that wrote the file
+//       96     8  written_boottime_ns, CLOCK_BOOTTIME, when it was written
+//      104     -  records, sorted by name, byte-wise, each name once
 //        -     4  CRC-32 of every byte before it
 //
 //   record: type (1 byte; BOOL, INT64, UINT64 or FLOAT64), name length (1
-//   byte, 1 to 127), 6 reserved bytes (0), value (8), source_time_ns (8),
-//   the name, then zero bytes to the next multiple of 8.
+//   byte, 1 to 127), quality (1 byte; GOOD or UNCERTAIN), record flags (1
+//   byte: bit 0 ADOPTED, bit 1 SOURCE_NOT_FINAL, only with ADOPTED; the
+//   other bits 0), quality_flags (2), reserved (2, 0), value (8),
+//   source_time_ns (8), the name, then zero bytes to the next multiple of 8.
+//   The quality flags have no unknown bit and none of NOT_INIT, OWNER_DOWN
+//   and RESTORED.
+//
+// Format version 1 (decision D-45) is read, never written: a header of the
+// first 80 bytes above, with no flag CLOCK_SYNCED, and records whose six
+// bytes after the name length are all 0. A version 1 record reads as
+// UNCERTAIN with flags 0, of a file with no boot_id and no boot time.
 
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
@@ -33,6 +45,7 @@
 
 #include <sys/types.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -45,9 +58,13 @@
 namespace scada::tag {
 
 inline constexpr std::uint64_t RETAIN_MAGIC = 0x4E54'5241'4441'4353ULL;
-inline constexpr std::uint32_t RETAIN_FORMAT_VERSION = 1;
+// The version written. Version 1 is still read.
+inline constexpr std::uint32_t RETAIN_FORMAT_VERSION = 2;
+inline constexpr std::uint32_t RETAIN_FORMAT_VERSION_1 = 1;
 inline constexpr std::uint32_t RETAIN_FLAG_FINAL = 1U;
-inline constexpr std::size_t RETAIN_HEADER_BYTES = 80;
+inline constexpr std::uint32_t RETAIN_FLAG_CLOCK_SYNCED = 2U;
+inline constexpr std::size_t RETAIN_HEADER_BYTES_V1 = 80;
+inline constexpr std::size_t RETAIN_HEADER_BYTES = 104;
 inline constexpr std::size_t RETAIN_RECORD_FIXED_BYTES = 24;
 inline constexpr std::size_t RETAIN_CRC_BYTES = 4;
 
@@ -70,13 +87,95 @@ struct GenerationIdentity {
                            const GenerationIdentity&) = default;
 };
 
+// The flags a value keeps when it is restored (decision D-59): those that
+// describe the value itself. STALE and COMM_FAIL describe the live link.
+inline constexpr std::uint16_t RETAIN_CARRIED_FLAGS =
+    static_cast<std::uint16_t>(
+        to_raw(QualityFlag::SUBSTITUTED) | to_raw(QualityFlag::BLOCKED) |
+        to_raw(QualityFlag::TEST) | to_raw(QualityFlag::OUT_OF_RANGE) |
+        to_raw(QualityFlag::OVERFLOW) | to_raw(QualityFlag::LOCAL_TIME) |
+        to_raw(QualityFlag::TIME_UNCERTAIN));
+
+// The flags a retain file may not hold: they describe a record, not a value.
+inline constexpr std::uint16_t RETAIN_REFUSED_FLAGS =
+    static_cast<std::uint16_t>(to_raw(QualityFlag::NOT_INIT) |
+                               to_raw(QualityFlag::OWNER_DOWN) |
+                               to_raw(QualityFlag::RESTORED));
+
+// The flags of `flags` a retain file can hold: `flags` without the refused
+// ones and the bits that are no flag.
+[[nodiscard]] constexpr std::uint16_t retainable_flags(
+    std::uint16_t flags) noexcept {
+    return static_cast<std::uint16_t>(flags & QUALITY_FLAGS_MASK &
+                                      ~RETAIN_REFUSED_FLAGS);
+}
+
+// The `boot_id` of a boot (/proc/sys/kernel/random/boot_id, 16 bytes); all
+// zero when it is not known.
+inline constexpr std::size_t BOOT_ID_BYTES = 16;
+using BootId = std::array<std::uint8_t, BOOT_ID_BYTES>;
+
 // One retained value.
 struct RetainedValue {
     std::string name;              // a tag name
     TagType type = TagType::BOOL;  // never STRING
     std::uint64_t value = 0;       // bit pattern; a BOOL is 0 or 1
     std::int64_t source_time_ns = 0;
+    // As the owner stored it (decision D-59): GOOD or UNCERTAIN, and flags
+    // without NOT_INIT, OWNER_DOWN and RESTORED.
+    Quality quality = Quality::UNCERTAIN;
+    std::uint16_t quality_flags = 0;
+    // Version 2 only (decision D-59, review B3): scada-tagd took the value
+    // for this owner from another owner's file (a tag that moved), and the
+    // owner has not written it since; with `source_not_final`, that file was
+    // not marked FINAL.
+    bool adopted = false;
+    bool source_not_final = false;
+    friend bool operator==(const RetainedValue&,
+                           const RetainedValue&) = default;
 };
+
+// Bits of the record flags byte of version 2 (offset 3 of a record).
+inline constexpr std::uint8_t RETAIN_RECORD_ADOPTED = 1U;
+inline constexpr std::uint8_t RETAIN_RECORD_SOURCE_NOT_FINAL = 2U;
+
+// When and by which boot a retain file was written (decision D-59).
+struct RetainStamp {
+    std::int64_t written_time_ns = 0;      // CLOCK_REALTIME
+    std::int64_t written_boottime_ns = 0;  // CLOCK_BOOTTIME; 0 in version 1
+    BootId boot_id{};                      // all zero in version 1
+    bool clock_synced = false;             // CLOCK_REALTIME synchronised
+    friend bool operator==(const RetainStamp&, const RetainStamp&) = default;
+};
+
+// The clocks of the reader, for the age of a retained value.
+struct RetainClockSample {
+    std::int64_t realtime_ns = 0;
+    std::int64_t boottime_ns = 0;
+    BootId boot_id{};  // all zero if not known
+    bool clock_synced = false;
+};
+
+// The clocks now: CLOCK_REALTIME, CLOCK_BOOTTIME, the boot_id, and whether
+// adjtimex(2) with modes 0 reports the clock synchronised (neither
+// TIME_ERROR nor STA_UNSYNC). Not real-time safe.
+[[nodiscard]] RetainClockSample retain_clock_now() noexcept;
+
+// The age of a value of a file stamped `stamp` (decision D-59): in the same
+// boot (equal boot ids, neither all zero), CLOCK_BOOTTIME now minus the
+// written boot time; in another boot, CLOCK_REALTIME now minus the written
+// time, only if the clock was synchronised at the write and is now. Nothing
+// (unknown) otherwise, and for a difference below 0.
+[[nodiscard]] std::optional<std::int64_t> retained_age_ns(
+    const RetainStamp& stamp, const RetainClockSample& now) noexcept;
+
+// The stamp that makes none of `stamps` look newer than it is (decision
+// D-59): in one boot (equal boot ids, none all zero) the earliest boot time
+// and the earliest wall-clock time; across boots no boot id, the earliest
+// wall-clock time, and CLOCK_SYNCED only if every stamp has it, so that the
+// age is unknown unless the wall clock can tell it. `stamps` is not empty.
+[[nodiscard]] RetainStamp oldest_stamp(
+    std::span<const RetainStamp> stamps) noexcept;
 
 // The contents of a retain file.
 struct RetainFile {
@@ -84,6 +183,12 @@ struct RetainFile {
     std::int64_t written_time_ns = 0;
     bool final = false;
     ConfigHash config_hash{};
+    // Version 2 only; zero and false in a file of version 1.
+    std::int64_t written_boottime_ns = 0;
+    BootId boot_id{};
+    bool clock_synced = false;
+    // The version the file was decoded from; `encode_retain_file` ignores it.
+    std::uint32_t version = RETAIN_FORMAT_VERSION;
     // Sorted by name, byte-wise, each name once.
     std::vector<RetainedValue> values;
 };
@@ -96,16 +201,32 @@ struct RetainFile {
 [[nodiscard]] std::optional<std::string_view> owner_of_retain_file(
     std::string_view entry) noexcept;
 
-// The bytes of `file`. INVALID_ARGUMENT if a value is not what the format
-// allows (a STRING, a BOOL that is neither 0 nor 1, a name that is no tag
-// name, names out of order or twice), RESOURCE_EXHAUSTED if the file would
-// be larger than MAX_RETAIN_FILE_BYTES.
+// The stamp of `file`.
+[[nodiscard]] RetainStamp stamp_of(const RetainFile& file) noexcept;
+
+// The bytes of `file` in format version 2. INVALID_ARGUMENT if a value is
+// not what the format allows (a STRING, a BOOL that is neither 0 nor 1, a
+// name that is no tag name, names out of order or twice, a quality other
+// than GOOD or UNCERTAIN, a flag bit that is no flag or one of NOT_INIT,
+// OWNER_DOWN and RESTORED), RESOURCE_EXHAUSTED if the file would be larger
+// than MAX_RETAIN_FILE_BYTES.
 [[nodiscard]] Result<std::vector<std::byte>> encode_retain_file(
     const RetainFile& file, std::string& detail);
 
-// Parses `bytes` with every check of the format. DATA_CORRUPT, with
-// `detail` saying what was found, for anything else: a wrong magic, version,
-// length, check sum, reserved field, flag, type, value, name or order.
+// The bytes of `file` in format version 1, which scada-tagd no longer
+// writes: for tests and the fuzz target, which check that version 1 is
+// still read. INVALID_ARGUMENT, besides the cases of `encode_retain_file`,
+// for a value that version 1 cannot hold (quality other than UNCERTAIN,
+// flags other than 0) and for a stamp of version 2 (a boot time, a
+// boot_id, CLOCK_SYNCED).
+[[nodiscard]] Result<std::vector<std::byte>> encode_retain_file_v1(
+    const RetainFile& file, std::string& detail);
+
+// Parses `bytes`, version 1 or 2, with every check of the format.
+// DATA_CORRUPT, with `detail` saying what was found, for anything else: a
+// wrong magic, version, length, check sum, reserved field, flag, type,
+// value, quality, quality flag, name or order. A record of version 1 reads
+// as UNCERTAIN with flags 0.
 [[nodiscard]] Result<RetainFile> decode_retain_file(
     std::span<const std::byte> bytes, std::string& detail);
 
@@ -201,13 +322,30 @@ struct RejectedRetainFile {
     std::string detail;
 };
 
+// The file a loaded value came from.
+struct RetainSource {
+    bool own = false;    // the owner's own file; otherwise another owner's
+    bool final = false;  // that file is marked FINAL
+    RetainStamp stamp;
+};
+
 // What `load_retained` found.
 struct LoadedValues {
     // One for each wanted tag, in the order asked; nothing if no file has it
     // with that type.
     std::vector<std::optional<RetainedValue>> values;
+    // Where each value of `values` came from; the same size, meaningful
+    // where `values` has a value.
+    std::vector<RetainSource> sources;
     // The owner's own file, if it could be read.
     std::optional<RetainFile> own;
+    // False if not every file that may hold a wanted value could be looked
+    // at: a file other than a missing one could not be read (the own file
+    // or another owner's), the directory could not be listed or held more
+    // than MAX_DIRECTORY_ENTRIES entries, or more than MAX_OWNERS other
+    // owners' files were needed (reviews B5, D1). `values` may then lack a
+    // value that is on file, or hold an older one.
+    bool complete = true;
     std::vector<RejectedRetainFile> rejected;
 };
 

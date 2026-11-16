@@ -41,6 +41,11 @@ and no capability. `/dev/shm/scada` is created at boot from
 `usr/lib/tmpfiles.d/scada-tagd.conf`, which also gives
 `/var/lib/scada/retain` its owner and mode; the drop-in
 `scada-tagd.service.d/retain.conf` lets the service write that directory.
+The drop-in `scada-tagd.service.d/stop.conf` sets `TimeoutStopSec=15s` and
+`KillMode=mixed`: at a stop `scada-tagd` waits at most 5 s for the retain
+file being written, then exits with code 3 if it is still not on disk
+(decision D-59). Exit codes: 0 stopped on request, 1 error, 2 wrong
+arguments, 3 stopped with retained values possibly unsaved.
 See `docs/install.md`, step 7.
 
 To try it without installing, as any user:

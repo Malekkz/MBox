@@ -20,15 +20,19 @@
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
 #include "scada/tag/scada_tag.h"
+#include "scada/tag/types.h"
+#include "scada/tagd/tagd.h"
 #include "scada/test/child_process.h"
 
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -124,6 +128,35 @@ protected:
                 << R"(, {"name": "plant.more", "owner": "io", "type": "bool"})";
         }
         file << "]}\n";
+    }
+
+    // Decision D-59, point 4: processes tagd, io and web; plant.count
+    // (INT64, retain) owned by io, or with `moved` by web, which then is
+    // the only owner. Another tag set each way.
+    void write_moved_tag_set(bool moved) const {
+        const std::string uid = std::to_string(::geteuid());
+        const std::string owner = moved ? "web" : "io";
+        std::ofstream file(root_ / "tag-set.json");
+        file << R"({"format": 1, "heartbeat_check_ms": )" << CHECK_MS
+             << R"(, "processes": [{"name": "tagd", "uid": )" << uid
+             << R"(}, {"name": "io", "uid": )" << uid
+             << R"(}, {"name": "web", "uid": )" << uid
+             << R"(}], "owners": [{"name": ")" << owner << R"(", "process": ")"
+             << owner << R"(", "change_ring_capacity": 1024}], "queues": [], )"
+             << R"("tags": [{"name": "plant.count", "owner": ")" << owner
+             << R"(", "type": "int64", "retain": true}]})" << "\n";
+    }
+
+    // The retainer as the process `process`.
+    [[nodiscard]] std::optional<ChildProcess> retainer_as(
+        const std::string& process, int period_ms) const {
+        const std::vector<std::string> command =
+            command_from("SCADA_TAG_RETAINER_COMMAND",
+                         {base_.string(), retain_, process, "plant.count",
+                          std::to_string(period_ms)});
+        std::optional<ChildProcess> child = ChildProcess::start(command);
+        EXPECT_TRUE(child.has_value());
+        return child;
     }
 
     [[nodiscard]] std::optional<RunningTagd> tagd() const {
@@ -238,7 +271,9 @@ bool reattached(std::string_view out) {
 
 // After a generation change that `second` made: the retainer reattached
 // within CHANGE_LIMIT, restored the last value it wrote, UNCERTAIN with
-// RESTORED (contract, section 12), and the old generation is gone.
+// RESTORED and the LOCAL_TIME the library set at its write, which a
+// restored value keeps (contract, section 12; decision D-59), and the old
+// generation is gone.
 ::testing::AssertionResult Retained::restored_after_change(
     ChildProcess& feeder, RunningTagd& second) const {
     const auto ready = std::chrono::steady_clock::now();
@@ -254,7 +289,7 @@ bool reattached(std::string_view out) {
     const std::int64_t restored =
         last_number(out, "attached value=").value_or(-1);
     if (last <= 1 || restored != last ||
-        !has(out.substr(out.rfind("attached")), "quality=1 flags=1024")) {
+        !has(out.substr(out.rfind("attached")), "quality=1 flags=3072")) {
         return ::testing::AssertionFailure() << "not restored: " << out;
     }
     if (!logs(second, "retired generation removed") ||
@@ -309,7 +344,9 @@ TEST_F(Retained,
     // BAD with NOT_INIT: nothing restored.
     EXPECT_TRUE(has(feeder->out(), "attached value=0 quality=2 flags=16"))
         << feeder->out();
-    EXPECT_TRUE(logs(*service, R"(retained values SUBJECT="io.bin")"));
+    // Its own record and MESSAGE_ID (decision D-59).
+    EXPECT_TRUE(logs(*service, R"(retain file ignored SUBJECT="io.bin")") &&
+                logs(*service, "586ec48106f748609721eef8957c56d5"));
     // The next write replaces it with a valid file.
     EXPECT_TRUE(file_reaches(1, WAIT_LIMIT));
     EXPECT_TRUE(stops_cleanly(*feeder));
@@ -441,6 +478,286 @@ TEST_F(Retained,
         EXPECT_GE(value, previous) << "round " << round;
         previous = value;
     }
+}
+
+}  // namespace
+
+namespace {
+
+constexpr std::int64_t OLD_VALUE = 41;
+constexpr std::int64_t OLD_WRITTEN_TIME = 1'234'567;
+// The worst case is 12 s (a stop during the 5-s wait of the start, the 5-s
+// bound of the stop, 2 s for the log); this test sees about 5 s. Below the
+// 15 s of TimeoutStopSec, with a margin over the worst case.
+constexpr std::chrono::seconds UNSAVED_EXIT_LIMIT{14};
+
+// Decision D-59, point 5: a retain write that hangs in fsync at the stop.
+class HungWrite : public Retained {
+protected:
+    // io.bin with plant.count = OLD_VALUE.
+    [[nodiscard]] ::testing::AssertionResult old_file() const {
+        scada::tag::RetainFile old;
+        old.values = {{"plant.count", scada::tag::TagType::INT64,
+                       static_cast<std::uint64_t>(OLD_VALUE), 0}};
+        old.written_time_ns = OLD_WRITTEN_TIME;
+        const scada::Fd directory(
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+            ::open(retain().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        std::string detail;
+        if (!scada::tag::write_retain_file(directory.get(), "io", old, detail)
+                 .ok()) {
+            return ::testing::AssertionFailure() << detail;
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    // scada-tagd whose retain writer hangs in fsync.
+    [[nodiscard]] std::optional<RunningTagd> hung_tagd() const {
+        return ready_tagd(
+            (base().parent_path() / "tag-set.json").string(), base().string(),
+            QUIET_WATCHDOG,
+            {"--retain-interval-ms", std::to_string(RETAIN_INTERVAL_MS)},
+            "SCADA_TAGD_HUNG_WRITER_COMMAND");
+    }
+
+    // Waits until the temporary file of `tagd` is there: its write reached
+    // fsync.
+    [[nodiscard]] ::testing::AssertionResult write_hangs(
+        const RunningTagd& tagd) const {
+        const std::vector<std::string> wanted{".tmp.io.bin." +
+                                              std::to_string(tagd.child.pid())};
+        const auto deadline = std::chrono::steady_clock::now() + WAIT_LIMIT;
+        while (temporaries_in(retain()) != wanted &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        if (temporaries_in(retain()) != wanted) {
+            return ::testing::AssertionFailure() << "no temporary file";
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    // Stops `tagd`, which must exit with EXIT_UNSAVED within
+    // UNSAVED_EXIT_LIMIT and log both ERROR records with their IDs.
+    [[nodiscard]] static ::testing::AssertionResult ends_unsaved(
+        RunningTagd& tagd) {
+        const auto sent = std::chrono::steady_clock::now();
+        if (!tagd.child.send_signal(SIGTERM)) {
+            return ::testing::AssertionFailure() << "no signal";
+        }
+        const std::optional<int> code = tagd.child.wait_for_exit(WAIT_LIMIT);
+        const auto took = std::chrono::steady_clock::now() - sent;
+        const std::string& err = tagd.child.err();
+        if (code != scada::tagd::EXIT_UNSAVED || took >= UNSAVED_EXIT_LIMIT) {
+            return ::testing::AssertionFailure()
+                   << "exit " << code.value_or(-1) << " after "
+                   << std::chrono::duration_cast<std::chrono::milliseconds>(
+                          took)
+                          .count()
+                   << " ms: " << err;
+        }
+        // One record of unsaved values (review N7), naming io and the file
+        // of it that stays.
+        const std::size_t unsaved = err.find("values unsaved at exit");
+        if (unsaved == std::string::npos ||
+            err.find("values unsaved at exit", unsaved + 1) !=
+                std::string::npos ||
+            !has(err, R"(SUBJECT="io")") ||
+            !has(err, R"(UNSAVED_OWNERS="io")") ||
+            !has(err, R"(UNSAVED_COUNT="1")") ||
+            // The file that stays, as scada-tagd knew it (review D4 of #93).
+            !has(err, R"(KEPT_WRITTEN_TIME_NS="1234567")") ||
+            !has(err, "7cf5c1c8535f44f6a297db538666d7a3") ||
+            !has(err, "0031dfe3391142b0b9fa995b07115e10")) {
+            return ::testing::AssertionFailure() << "records missing: " << err;
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    [[nodiscard]] ::testing::AssertionResult next_start_removes(
+        const std::string& name) const;
+
+    // io.bin still holds OLD_VALUE and `temporary` is the one temporary
+    // file: the hung write changed nothing under the real name.
+    [[nodiscard]] ::testing::AssertionResult left_as_it_was(
+        const std::string& temporary) const {
+        const std::optional<std::int64_t> value = on_file();
+        const std::vector<std::string> temporaries = temporaries_in(retain());
+        if (value != OLD_VALUE ||
+            temporaries != std::vector<std::string>{temporary}) {
+            return ::testing::AssertionFailure()
+                   << "value " << value.value_or(-1) << ", "
+                   << temporaries.size() << " temporary files";
+        }
+        return ::testing::AssertionSuccess();
+    }
+};
+
+// A later scada-tagd removes the temporary file `name` the hung write
+// left. Only that one: the new scada-tagd writes io's current values at
+// its first check, through a temporary file of its own.
+::testing::AssertionResult HungWrite::next_start_removes(
+    const std::string& name) const {
+    std::optional<RunningTagd> next = tagd();
+    if (!next.has_value()) {
+        return ::testing::AssertionFailure() << "no scada-tagd";
+    }
+    const std::vector<std::string> left = temporaries_in(retain());
+    stop(*next);
+    if (std::ranges::find(left, name) != left.end()) {
+        return ::testing::AssertionFailure() << name << " is still there";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// scada-tagd waits 5 s, logs `values unsaved at exit`, and exits at once
+// with code 3; the old file is intact, and the next start removes the
+// temporary file the hung write left.
+TEST_F(HungWrite, AtTheStopTagdEndsWithCode3AndTheOldFileStays) {
+    ASSERT_TRUE(old_file());
+    std::optional<RunningTagd> hung = hung_tagd();
+    std::optional<ChildProcess> feeder = retainer(SLOW_PERIOD_MS);
+    if (!hung.has_value() || !feeder.has_value()) {
+        return;
+    }
+    // io restores the old value; its first write after the change hangs
+    // in fsync, after the temporary file was written.
+    ASSERT_TRUE(prints(*feeder, "attached value=41") && write_hangs(*hung))
+        << feeder->out() << hung->child.err();
+    EXPECT_TRUE(ends_unsaved(*hung));
+    // The old file is intact; the temporary file is still there until the
+    // next start.
+    const std::string temporary =
+        ".tmp.io.bin." + std::to_string(hung->child.pid());
+    EXPECT_TRUE(left_as_it_was(temporary));
+    EXPECT_TRUE(stops_cleanly(*feeder) && next_start_removes(temporary));
+}
+
+// Decision D-59, point 4: plant.count moves from io to web, and web
+// attaches late. The first scada-tagd writes io's value F at its stop (the
+// first write); io goes on counting in generation 1 while no scada-tagd
+// runs. After the old generation is removed, web restores the last value io
+// wrote there, from io's FINAL file (the second write); while io hangs in
+// the old generation, web's wait runs out and it restores F.
+class MovedTag : public Retained {
+protected:
+    void SetUp() override {
+        Retained::SetUp();
+        write_moved_tag_set(false);
+    }
+
+    // Waits until io has written a value above `value` (an observer reads
+    // plant.count).
+    [[nodiscard]] bool writes_beyond(std::int64_t value) const {
+        const std::string base_dir = base().string();
+        const scada_attach_opts opts{.base_dir = base_dir.c_str(),
+                                     .retain_dir = nullptr,
+                                     .tagd_uid = ::geteuid()};
+        scada_ctx* ctx = nullptr;
+        if (scada_tag_observe_opts(&opts, &ctx) != SCADA_OK) {
+            return false;
+        }
+        std::uint32_t handle = SCADA_INVALID_HANDLE;
+        bool beyond = false;
+        if (scada_tag_resolve(ctx, "plant.count", &handle) == SCADA_OK) {
+            const auto deadline = std::chrono::steady_clock::now() + WAIT_LIMIT;
+            while (!beyond && std::chrono::steady_clock::now() < deadline) {
+                scada_value read{};
+                beyond = scada_tag_read(ctx, handle, &read) == SCADA_OK &&
+                         static_cast<std::int64_t>(read.value) > value;
+                std::this_thread::yield();
+            }
+        }
+        scada_tag_detach(ctx);
+        return beyond;
+    }
+
+    // With `feeder` (io) counting under `first`: stops `first`, which
+    // writes io's value, waits until io has counted beyond it and writes
+    // the tag set after the move. The value on file, or -1 on a failure.
+    [[nodiscard]] std::int64_t counted_past_the_stop(ChildProcess& feeder,
+                                                     RunningTagd& first) const {
+        if (!prints(feeder, "attached value=0")) {
+            return -1;
+        }
+        stop(first);
+        const std::int64_t flushed = on_file().value_or(-1);
+        if (flushed < 1 || !writes_beyond(flushed)) {
+            return -1;
+        }
+        write_moved_tag_set(true);
+        return flushed;
+    }
+
+    // The last value io wrote before it left the old generation, once that
+    // generation is removed by `second`; -1 on a failure.
+    [[nodiscard]] static std::int64_t left_value(ChildProcess& feeder,
+                                                 RunningTagd& second) {
+        if (!feeder.wait_for_output(reattached, WAIT_LIMIT) ||
+            !logs(second, "retired generation removed")) {
+            return -1;
+        }
+        return last_number(feeder.out(), "leaving last=").value_or(-1);
+    }
+
+    // Starts web, which must restore `value`, and stops it.
+    [[nodiscard]] ::testing::AssertionResult web_restores(
+        std::int64_t value) const {
+        std::optional<ChildProcess> web = retainer_as("web", SLOW_PERIOD_MS);
+        if (!web.has_value()) {
+            return ::testing::AssertionFailure() << "no web";
+        }
+        const ::testing::AssertionResult restored =
+            prints(*web, "attached value=" + std::to_string(value) + " ");
+        const ::testing::AssertionResult stopped = stops_cleanly(*web);
+        return !restored ? restored : stopped;
+    }
+};
+
+TEST_F(MovedTag, AfterTheOldGenerationIsRemovedTheLastValueIsRestored) {
+    std::optional<RunningTagd> first = tagd();
+    std::optional<ChildProcess> feeder = retainer_as("io", FAST_PERIOD_MS);
+    if (!first.has_value() || !feeder.has_value()) {
+        return;
+    }
+    const std::int64_t flushed = counted_past_the_stop(*feeder, *first);
+    ASSERT_GE(flushed, 1);
+    std::optional<RunningTagd> second = tagd();
+    if (!second.has_value()) {
+        return;
+    }
+    // io leaves generation 1 at once (it follows RETIRING); its FINAL file
+    // is written and generation 1 removed.
+    const std::int64_t last = left_value(*feeder, *second);
+    ASSERT_GT(last, flushed) << feeder->out();
+    EXPECT_TRUE(web_restores(last));
+    EXPECT_TRUE(stops_cleanly(*feeder));
+    stop(*second);
+}
+
+TEST_F(MovedTag,
+       WhileTheFormerOwnerHangsTheWaitRunsOutAndTheFirstValueIsRestored) {
+    std::optional<RunningTagd> first = tagd();
+    std::optional<ChildProcess> feeder = retainer_as("io", FAST_PERIOD_MS);
+    if (!first.has_value() || !feeder.has_value()) {
+        return;
+    }
+    const std::int64_t flushed = counted_past_the_stop(*feeder, *first);
+    ASSERT_GE(flushed, 1);
+    // io hangs: it holds its lock and stays RUNNING in generation 1, with
+    // a value newer than the file.
+    ASSERT_TRUE(feeder->send_signal(SIGSTOP));
+    std::optional<RunningTagd> second = tagd();
+    if (!second.has_value()) {
+        return;
+    }
+    // The FINAL wait of 2 s runs out; the file holds the first write.
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_TRUE(web_restores(flushed));
+    EXPECT_GE(std::chrono::steady_clock::now() - start,
+              std::chrono::seconds{2});
+    static_cast<void>(kill(*feeder));
+    stop(*second);
 }
 
 }  // namespace

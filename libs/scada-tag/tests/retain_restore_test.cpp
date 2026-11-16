@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <ios>
 #include <memory>
 #include <string>
@@ -51,6 +52,17 @@ constexpr mode_t WRITABLE_BY_OTHERS_MODE = 02752;
 constexpr std::uint64_t COUNT_ON_FILE = 9;
 // A value no field of a status holds, to see that the call clears it.
 constexpr std::uint32_t NOT_CLEARED = 7;
+constexpr std::int64_t AN_HOUR = 3'600'000'000'000;
+constexpr std::uint8_t OTHER_BOOT_BYTE = 0xEE;
+
+// The retain information of `name` through the attachment.
+scada_tag_retain_info_t info_of(Attachment& attachment, std::string_view name) {
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    EXPECT_EQ(attachment.resolve(name, handle), SCADA_OK);
+    scada_tag_retain_info_t info{};
+    EXPECT_EQ(attachment.retain_info(handle, info), SCADA_OK);
+    return info;
+}
 
 class Restore : public scada::tag::testing::AttachFixture {
 protected:
@@ -381,6 +393,34 @@ TEST_F(Restore, ARetainDirectoryThatIsASymbolicLinkIsCounted) {
     EXPECT_EQ(result.value()->status().values_restored, 0U);
 }
 
+TEST_F(RestoreAfterChange, AnExpiredWaitIsToldForEachTagThatNeededTheFile) {
+    RetainFile stale = final_file();
+    stale.source.created_time_ns += 1;  // FINAL of another generation 1
+    write_file("io", stale);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    ASSERT_EQ(feeder->status().final_waits_expired, 1U);
+    const scada_tag_retain_info_t level = info_of(*feeder, "plant.level");
+    EXPECT_EQ(level.final_wait_expired, 1);
+    EXPECT_EQ(level.origin, SCADA_RETAIN_OWN_FINAL);
+    const scada_tag_retain_info_t mode = info_of(*feeder, "plant.mode");
+    EXPECT_EQ(mode.final_wait_expired, 1);
+    EXPECT_EQ(mode.origin, SCADA_RETAIN_OWN_FINAL);
+    // plant.extra is no RETAIN tag: nothing waited for it.
+    const scada_tag_retain_info_t extra = info_of(*feeder, "plant.extra");
+    EXPECT_EQ(extra.final_wait_expired, 0);
+    EXPECT_EQ(extra.origin, SCADA_RETAIN_NONE);
+}
+
+TEST_F(RestoreAfterChange, AFinalFileThatCameInTimeIsNoExpiredWait) {
+    write_file("io", final_file());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const scada_tag_retain_info_t info = info_of(*feeder, "plant.mode");
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_FINAL);
+    EXPECT_EQ(info.final_wait_expired, 0);
+}
+
 TEST_F(RestoreAfterChange, AnOwnerTheRetiringGenerationDoesNotListDoesNotWait) {
     std::filesystem::remove_all(generation_dir(1));
     write_file("io", values_file());
@@ -428,6 +468,214 @@ TEST_F(Restore, TheCInterfaceReportsWhatAttachDidWithRetainedValues) {
     ASSERT_EQ(scada_tag_retain_status(ctx, &status), SCADA_OK);
     EXPECT_EQ(status.values_restored, 0U);
     EXPECT_EQ(status.files_rejected, 1U);
+    scada_tag_detach(ctx);
+}
+
+}  // namespace
+
+// Decision D-59: format version 2, the flags a restored value keeps, and
+// what the restore of each tag reports.
+namespace {
+
+constexpr std::uint16_t flags_of(std::initializer_list<QualityFlag> flags) {
+    std::uint16_t all = 0;
+    for (const QualityFlag flag : flags) {
+        all = static_cast<std::uint16_t>(all | to_raw(flag));
+    }
+    return all;
+}
+
+TEST_F(Restore, ARestoredValueKeepsTheFlagsThatDescribeItAndIsNeverGood) {
+    RetainFile file = values_file();
+    file.values.at(1).quality = Quality::GOOD;  // plant.level
+    file.values.at(1).quality_flags = flags_of(
+        {QualityFlag::SUBSTITUTED, QualityFlag::STALE, QualityFlag::COMM_FAIL,
+         QualityFlag::LOCAL_TIME, QualityFlag::TEST});
+    file.values.at(2).quality = Quality::GOOD;  // plant.mode
+    write_file("io", file);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const scada_value level = read(*feeder, "plant.level");
+    EXPECT_EQ(level.quality, SCADA_QUALITY_UNCERTAIN);
+    // STALE and COMM_FAIL describe the live link and are not carried.
+    EXPECT_EQ(level.quality_flags,
+              flags_of({QualityFlag::RESTORED, QualityFlag::SUBSTITUTED,
+                        QualityFlag::LOCAL_TIME, QualityFlag::TEST}));
+    const scada_value mode = read(*feeder, "plant.mode");
+    EXPECT_EQ(mode.quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(mode.quality_flags, SCADA_FLAG_RESTORED);
+    // The stored quality is there for diagnosis.
+    EXPECT_EQ(info_of(*feeder, "plant.level").stored_quality,
+              SCADA_QUALITY_GOOD);
+}
+
+TEST_F(Restore, EveryFlagThatDescribesTheValueIsCarried) {
+    RetainFile file = values_file();
+    file.values.at(1).quality_flags = retainable_flags(QUALITY_FLAGS_MASK);
+    write_file("io", file);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(read(*feeder, "plant.level").quality_flags,
+              to_raw(QualityFlag::RESTORED) | RETAIN_CARRIED_FLAGS);
+}
+
+TEST_F(Restore, AFileOfVersion1IsRestoredAsBeforeWithAnUnknownAge) {
+    const Fd directory = scada::tag::testing::open_directory(retain());
+    std::string detail;
+    const Result<std::vector<std::byte>> bytes =
+        encode_retain_file_v1(values_file(), detail);
+    ASSERT_TRUE(bytes.ok()) << detail;
+    {
+        std::ofstream out(retain() / "io.bin",
+                          std::ios::binary | std::ios::trunc);
+        out.write(std::bit_cast<const char*>(bytes.value().data()),
+                  static_cast<std::streamsize>(bytes.value().size()));
+    }
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().values_restored, 2U);
+    EXPECT_EQ(feeder->status().ages_unknown, 2U);
+    const scada_value level = read(*feeder, "plant.level");
+    EXPECT_EQ(level.value, LEVEL_BITS);
+    EXPECT_EQ(level.quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(level.quality_flags, SCADA_FLAG_RESTORED);
+    const scada_tag_retain_info_t info = info_of(*feeder, "plant.level");
+    EXPECT_EQ(info.age_known, 0);
+    EXPECT_EQ(info.age_ns, 0);
+    EXPECT_EQ(info.stored_quality, SCADA_QUALITY_UNCERTAIN);
+}
+
+TEST_F(Restore, TheInformationTellsOriginWriteTimeAndAgeInTheSameBoot) {
+    const RetainClockSample now = retain_clock_now();
+    // A write half the time since boot ago: a boot time the clock had.
+    const std::int64_t age = now.boottime_ns / 2;
+    ASSERT_GT(age, 0);
+    RetainFile file = values_file();
+    file.written_time_ns = now.realtime_ns - age;
+    file.written_boottime_ns = now.boottime_ns - age;
+    file.boot_id = now.boot_id;
+    write_file("io", file);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().ages_unknown, 0U);
+    const scada_tag_retain_info_t level = info_of(*feeder, "plant.level");
+    EXPECT_EQ(level.origin, SCADA_RETAIN_OWN_PERIODIC);
+    EXPECT_EQ(level.written_time_ns, file.written_time_ns);
+    EXPECT_EQ(level.age_known, 1);
+    EXPECT_GE(level.age_ns, age);
+    EXPECT_LT(level.age_ns, age + AN_HOUR);
+    EXPECT_EQ(level.stored_quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(level.final_wait_expired, 0);
+    // Not RETAIN: not restored.
+    const scada_tag_retain_info_t count = info_of(*feeder, "plant.count");
+    EXPECT_EQ(count.origin, SCADA_RETAIN_NONE);
+    EXPECT_EQ(count.written_time_ns, 0);
+    EXPECT_EQ(count.age_known, 0);
+    EXPECT_EQ(count.stored_quality, SCADA_QUALITY_BAD);
+}
+
+TEST_F(Restore, AnotherBootWithoutASynchronisedClockGivesAnUnknownAge) {
+    RetainFile file = values_file();
+    file.written_time_ns = scada::realtime_ns() - AN_HOUR;
+    file.written_boottime_ns = 1;
+    file.boot_id.fill(OTHER_BOOT_BYTE);  // another boot
+    file.clock_synced = false;
+    write_file("io", file);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().values_restored, 2U);
+    EXPECT_EQ(feeder->status().ages_unknown, 2U);
+    EXPECT_EQ(info_of(*feeder, "plant.mode").age_known, 0);
+    // The value is restored all the same (decision D-59: attach never
+    // refuses a value on its age).
+    EXPECT_EQ(read(*feeder, "plant.mode").value, 3U);
+}
+
+TEST_F(Restore, AMovedTagHasTheOriginOfAnotherOwner) {
+    RetainFile former;
+    former.values = {
+        {"plant.level", TagType::FLOAT64, LEVEL_BITS, SOURCE_TIME}};
+    former.final = true;
+    write_file("io.old", former);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(info_of(*feeder, "plant.level").origin, SCADA_RETAIN_OTHER_OWNER);
+    // From a FINAL file: no FINAL wait is missing.
+    EXPECT_EQ(info_of(*feeder, "plant.level").final_wait_expired, 0);
+    // Nothing on file for plant.mode.
+    EXPECT_EQ(info_of(*feeder, "plant.mode").origin, SCADA_RETAIN_NONE);
+}
+
+// Review D3 of #93: a value taken from another owner's file that is not
+// FINAL reports an expired FINAL wait, although no wait happened (#90).
+TEST_F(Restore, AMovedTagFromAFileThatIsNotFinalReportsAnExpiredWait) {
+    RetainFile former;
+    former.values = {
+        {"plant.level", TagType::FLOAT64, LEVEL_BITS, SOURCE_TIME}};
+    write_file("io.old", former);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().final_waits_expired, 0U);  // none ran out
+    const scada_tag_retain_info_t info = info_of(*feeder, "plant.level");
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
+    EXPECT_EQ(info.final_wait_expired, 1);
+}
+
+TEST_F(Restore, AReusedRegionReportsNoRestore) {
+    write_file("io", values_file());
+    start_host(retained_set());
+    { const Attached first = attached("io"); }
+    const Attached again = attached("io");
+    ASSERT_NE(again, nullptr);
+    EXPECT_GT(again->status().regions_reused, 0U);
+    EXPECT_EQ(info_of(*again, "plant.level").origin, SCADA_RETAIN_NONE);
+}
+
+TEST_F(Restore, TheCInterfaceGivesTheInformationOfOwnTagsOnly) {
+    write_file("io", values_file());
+    start_host(retained_set());
+    const std::string base_dir = base().string();
+    const std::string retain_dir = retain().string();
+    const scada_attach_opts opts{.base_dir = base_dir.c_str(),
+                                 .retain_dir = retain_dir.c_str(),
+                                 .tagd_uid = uid()};
+    scada_ctx* ctx = nullptr;
+    ASSERT_EQ(scada_tag_attach_opts("io", &opts, &ctx), SCADA_OK);
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(scada_tag_resolve(ctx, "plant.mode", &handle), SCADA_OK);
+    scada_tag_retain_info_t info{};
+    ASSERT_EQ(scada_tag_retain_info(ctx, handle, &info), SCADA_OK);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_PERIODIC);
+    scada_retain_status_t status{};
+    status.reserved = NOT_CLEARED;
+    ASSERT_EQ(scada_tag_retain_status(ctx, &status), SCADA_OK);
+    EXPECT_EQ(status.reserved, 0U);
+
+    // Errors zero the output.
+    info.origin = SCADA_RETAIN_OTHER_OWNER;
+    EXPECT_EQ(scada_tag_retain_info(ctx, SCADA_INVALID_HANDLE, &info),
+              SCADA_E_INVALID);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_NONE);
+    EXPECT_EQ(scada_tag_retain_info(ctx, scada_tag_handle(0, 1000), &info),
+              SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_retain_info(ctx, handle, nullptr), SCADA_E_INVALID);
+    EXPECT_EQ(scada_tag_retain_info(nullptr, handle, &info), SCADA_E_INVALID);
+
+    // An observer owns nothing.
+    scada_ctx* observer = nullptr;
+    ASSERT_EQ(scada_tag_observe_opts(&opts, &observer), SCADA_OK);
+    std::uint32_t observed = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(scada_tag_resolve(observer, "plant.mode", &observed), SCADA_OK);
+    EXPECT_EQ(scada_tag_retain_info(observer, observed, &info),
+              SCADA_E_NOT_OWNER);
+    scada_tag_detach(observer);
     scada_tag_detach(ctx);
 }
 
