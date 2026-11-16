@@ -573,7 +573,7 @@ reported with `SCADA_E_LAYOUT` and skipped.
 ```
 w = write_seq.load(relaxed)
 atomic_thread_fence(release)       // the entry stores must not pass the previous write_seq
-write entries[w & (capacity - 1)], word-wise, relaxed
+write entries[w & (capacity - 1)], field by field, relaxed atomic stores
 write_seq.store(w + 1, release)
 ```
 
@@ -583,7 +583,7 @@ write_seq.store(w + 1, release)
 w1 = write_seq.load(acquire)
 if cursor == w1: nothing new
 if w1 - cursor >= capacity: GAP
-copy entries[cursor & (capacity - 1)], word-wise, relaxed
+copy entries[cursor & (capacity - 1)], field by field, relaxed atomic loads
 atomic_thread_fence(acquire)
 w2 = write_seq.load(relaxed)
 if w2 - cursor >= capacity: GAP        // the slot may have been overwritten
@@ -1676,7 +1676,21 @@ void scada_waitset_destroy(scada_waitset *ws);
 - `scada_tag_write` uses `type`, `value`, `quality`, `quality_flags` and
   `source_time_ns` of its argument; the library sets the update times.
 - `read_many` and `write_many` read the clocks once for the whole call.
-  `read_many` returns a status for each handle.
+  `read_many` returns a status for each handle in `status`, which may be
+  NULL; it returns `SCADA_OK` or the code of the first tag that was not
+  read.
+- `scada_tag_write` checks in this order: `SCADA_E_INVALID` for a handle
+  that is none of this generation; `SCADA_E_NOT_OWNER` before the value is
+  looked at; `SCADA_E_TYPE` for another type, and for any value of a
+  STRING tag; `SCADA_E_INVALID` for a quality or quality flag that is none
+  or may not be stored, and a BOOL that is neither 0 nor 1.
+  `scada_tag_write_many` checks every pair this way before it writes the
+  first, and writes all or nothing.
+- `scada_tag_write_string` refuses with `SCADA_E_INVALID` text longer than
+  250 bytes or not well-formed UTF-8. `scada_tag_read_string` returns the
+  bytes the owner stored, not NUL-terminated, and does not check UTF-8;
+  with a buffer that is too small it returns `SCADA_E_INVALID` and stores
+  the length in `len`. The string functions are not RT-safe.
 - `size` in the queue calls must equal the queue's `record_size`.
 - `scada_tag_read_string` with `buf` NULL and `cap` 0 returns the length and
   `meta` alone, as a large enough buffer would; `buf` NULL with `cap` above 0
@@ -1685,6 +1699,19 @@ void scada_waitset_destroy(scada_waitset *ws);
   reference section 5.7 is applied by the caller on `scada_change.handle`.
 - Every timeout is in ms and at least 0; 0 does not wait. There is no wait
   without a timeout.
+
+```c
+typedef struct {                 /* what scada_tag_info reports */
+  uint8_t  type;                 /* TagType */
+  uint8_t  flags;                /* DirectoryEntry.flags */
+  uint8_t  owned;                /* 1 if the caller owns the tag and may write it */
+  uint8_t  reserved0;            /* 0 */
+  uint16_t owner_index;
+  uint16_t process_index;        /* of the owner's process */
+  char     name[128];            /* tag name, NUL-terminated */
+  char     owner[32];            /* owner name, NUL-terminated */
+} scada_tag_info_t;              /* 168 bytes */
+```
 
 ```c
 typedef struct {
@@ -1874,8 +1901,19 @@ the time of a raw `clock_gettime` system call. The read counts as a system
 call when the source is not one the vDSO reads, or when the read takes more
 than half the time of the system call (a vDSO that falls back to the system
 call keeps the source name, for example with an ARM timer erratum
-workaround). If the raw system call is refused, only the name decides. On
-failure attach still succeeds:
+workaround). If the raw system call is refused, only the name decides.
+
+- The name is read from
+  `/sys/devices/system/clocksource/clocksource0/current_clocksource`. The
+  sources the vDSO reads are `tsc`, `tsc-early`, `kvm-clock`,
+  `hyperv_clocksource_tsc_page` and `arch_sys_counter`. A name that cannot
+  be read (a container may hide the file) decides nothing: only the timing
+  does.
+- Each time is the mean of the fastest of 4 batches: batches of 256 library
+  reads, and of 64 raw system calls. A batch that was interrupted says
+  nothing about the clock.
+
+On failure attach still succeeds:
 `scada_tag_status()` reports it, and the process raises a system alarm,
 because the real-time rule no longer holds on that unit.
 
