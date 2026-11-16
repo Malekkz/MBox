@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.23 (draft) |
+| Contract version | 0.25 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -2221,6 +2221,9 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.20 | 2026-11-16 | Gaps in retained values (issue #72, D-59). Section 12: retain file format version 2 with quality and flags in the record and `boot_id`, `written_boottime_ns` and CLOCK_SYNCED in the header; version 1 still read; the checks of a version 2 file; a change of quality or flags is written; a restored value keeps the flags that describe it; the age rule, attach never refuses on age; per-tag restore information. Section 13: `scada_tag_retain_info`, `scada_tag_retain_info_t`, `scada_retain_status_t` grows to 24 bytes with `ages_unknown`. Section 12, second part: the stop that cannot wait for the writer exits with status 3; at the 30-s timeout no values over those of a newer generation; the values of a tag that moved go to the file of its new owner before the former owner's file is removed, and the start reads the own files only. Review: the exact restore, the stamp of a rewritten file, the ADOPTED and SOURCE_NOT_FINAL record flags, STALE and COMM_FAIL not kept, an incomplete look kept from removing files. |
 | 0.22 | 2026-11-16 | Issue #20 (P1-12, D-57). Section 16: the read retry limit (64), the heartbeat timeout defaults (3,000 ms, 500 ms) and two clock reads per `write` confirmed by measurement; the database size half of the change ring capacity confirmed, its gap half still open; huge pages still open. Each row names the run and the hardware. |
 | 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
+| 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
+
+Migration, 0.23 to 0.25 (0.24 is reserved for #96): none. No structure, default or behaviour changed; the contract now states what libscada-tag and scada-tagd already do.
 
 Migration, 0.22 to 0.23 (0.21 was not used; 0.24 is reserved for #96): none for data; the layout version stays 1 and no
 structure in shared memory changed. A consumer no longer drops, or has
