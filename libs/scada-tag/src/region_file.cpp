@@ -284,6 +284,13 @@ Result<Fd> open_retain_directory(const std::string& path,
 
 Result<std::vector<std::string>> list_directory(int dir_fd,
                                                 std::string& detail) {
+    bool ignored = true;
+    return list_directory(dir_fd, detail, ignored);
+}
+
+Result<std::vector<std::string>> list_directory(int dir_fd, std::string& detail,
+                                                bool& complete) {
+    complete = true;
     // A descriptor of its own: the stream takes it over, moves its position
     // and closes it.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): openat has no other form
@@ -318,6 +325,22 @@ Result<std::vector<std::string>> list_directory(int dir_fd,
                 ->d_name));  // NOLINT(bugprone-suspicious-stringview-data-usage,cppcoreguidelines-pro-bounds-array-to-pointer-decay): NUL-terminated by the operating system
         if (name != "." && name != "..") {
             names.emplace_back(name);
+        }
+    }
+    // At the limit: one more entry that is not "." or ".." means some were
+    // left out.
+    while (names.size() == MAX_DIRECTORY_ENTRIES) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): the stream belongs to this call alone; readdir is safe on separate streams
+        const dirent* const entry = ::readdir(stream.get());
+        if (entry == nullptr) {
+            break;
+        }
+        const std::string_view name(std::data(
+            entry
+                ->d_name));  // NOLINT(bugprone-suspicious-stringview-data-usage,cppcoreguidelines-pro-bounds-array-to-pointer-decay): NUL-terminated by the operating system
+        if (name != "." && name != "..") {
+            complete = false;
+            break;
         }
     }
     // The operating system gives no order; a fixed one makes what callers

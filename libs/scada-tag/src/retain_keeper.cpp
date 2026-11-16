@@ -46,6 +46,9 @@ namespace scada::tag {
 namespace {
 
 constexpr std::int64_t NS_PER_MS = 1'000'000;
+// The names of owners with unsaved values that `values unsaved at exit`
+// lists, in bytes: below the 96 of a log value, with room for ", ...".
+constexpr std::size_t UNSAVED_NAMES_BYTES = 88;
 constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 
@@ -60,6 +63,11 @@ bool holds_value(const RecordCopy& copy, TagType type) noexcept {
            (type != TagType::BOOL || copy.value <= 1);
 }
 
+// True if `copy` was written by a restore: RESTORED is set.
+bool is_restore(const RecordCopy& copy) noexcept {
+    return (copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0;
+}
+
 // True if `copy` says its owner marked the value bad: quality BAD, written
 // by the owner (NOT_INIT not set). Its record is removed from the file
 // (decision D-45). A NOT_INIT record says nothing about the value on file.
@@ -67,6 +75,42 @@ bool disowned(const RecordCopy& copy) noexcept {
     return copy.quality == to_raw(Quality::BAD) &&
            (copy.quality_flags & to_raw(QualityFlag::NOT_INIT)) == 0;
 }
+
+// The value an owner stored in `copy`, a record of a tag `name` of type
+// `type` that holds a value (decision D-59): quality and flags are kept.
+// NOT_INIT is not set in such a record, OWNER_DOWN is never stored and
+// RESTORED is the mark of a restore, not of the value.
+RetainedValue value_seen(const std::string& name, TagType type,
+                         const RecordCopy& copy) {
+    return {
+        name, type, copy.value, copy.source_time_ns,
+        copy.quality == to_raw(Quality::GOOD) ? Quality::GOOD
+                                              : Quality::UNCERTAIN,
+        // Review B4: STALE and COMM_FAIL describe the live link and are
+        // not restored; kept, a flapping link would rewrite the file at
+        // every interval.
+        static_cast<std::uint16_t>(copy.quality_flags & RETAIN_CARRIED_FLAGS)};
+}
+
+// True if `copy` is exactly what the restore of `on_file` wrote, and the
+// owner has not written the tag since: UNCERTAIN, RESTORED with the carried
+// flags of the file, the value and source time on file. The file keeps the
+// quality the owner stored, which the restored record no longer shows
+// (decision D-59). An owner may store RESTORED itself; a record that differs
+// in quality or flags is its write, not the restore, and is kept.
+bool restored_as_on_file(const RetainedValue& on_file,
+                         const RecordCopy& copy) noexcept {
+    const auto restored_flags = static_cast<std::uint16_t>(
+        to_raw(QualityFlag::RESTORED) |
+        (on_file.quality_flags & RETAIN_CARRIED_FLAGS));
+    return copy.quality == to_raw(Quality::UNCERTAIN) &&
+           copy.quality_flags == restored_flags &&
+           copy.type == to_raw(on_file.type) && on_file.value == copy.value &&
+           on_file.source_time_ns == copy.source_time_ns;
+}
+
+// A stamp that gives no age: no boot id, not synchronised.
+constexpr RetainStamp UNKNOWN_AGE_STAMP{};
 
 // The later of two identities, by generation number.
 GenerationIdentity newer(const std::optional<GenerationIdentity>& kept,
@@ -120,6 +164,11 @@ std::vector<RetainWriter::Done> RetainWriter::take_done() {
     return done;
 }
 
+std::string RetainWriter::in_flight() const {
+    const std::scoped_lock lock(mutex_);
+    return in_flight_;
+}
+
 std::uint64_t RetainWriter::lost() const {
     const std::scoped_lock lock(mutex_);
     return lost_;
@@ -165,6 +214,11 @@ void RetainWriter::run(const std::stop_token& stop) {
             job = waiting_.extract(waiting_.begin());
         }
         busy_ = true;
+        try {
+            in_flight_ = job.has_value() ? job->key() : std::string{};
+        } catch (const std::exception&) {
+            in_flight_.clear();  // only for the log of a stop
+        }
         lock.unlock();
 
         Done done;
@@ -175,6 +229,7 @@ void RetainWriter::run(const std::stop_token& stop) {
                 done.values = job->mapped().file.values.size();
                 done.final = job->mapped().file.final;
                 done.source = job->mapped().file.source;
+                done.written_time_ns = job->mapped().file.written_time_ns;
                 done.written =
                     write_retain_file(dir_fd_, done.owner, job->mapped().file,
                                       done.detail, ops_)
@@ -191,6 +246,7 @@ void RetainWriter::run(const std::stop_token& stop) {
 
         lock.lock();
         busy_ = false;
+        in_flight_.clear();
         try {
             done_.push_back(std::move(done));
         } catch (const std::exception&) {
@@ -204,13 +260,13 @@ void RetainWriter::run(const std::stop_token& stop) {
 
 RetainKeeper::RetainKeeper(Key /*key*/, Fd directory, std::uint32_t tagd_uid,
                            std::int64_t interval_ns,
-                           const ConfigHash& config_hash)
+                           const ConfigHash& config_hash, RetainFileOps& ops)
     : directory_(std::move(directory)),
       tagd_uid_(tagd_uid),
       interval_ns_(interval_ns),
       config_hash_(config_hash) {
     if (directory_.valid()) {
-        writer_ = std::make_unique<RetainWriter>(directory_.get());
+        writer_ = std::make_unique<RetainWriter>(directory_.get(), ops);
     }
 }
 
@@ -219,7 +275,7 @@ RetainKeeper::~RetainKeeper() = default;
 Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
     const std::string& retain_dir, std::uint32_t tagd_uid, int base_fd,
     std::uint32_t interval_ms, const ConfigHash& config_hash,
-    std::string& detail) {
+    std::string& detail, RetainFileOps& ops) {
     Fd directory;
     if (!retain_dir.empty()) {
         Result<Fd> opened =
@@ -232,7 +288,7 @@ Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
     }
     return std::make_unique<RetainKeeper>(Key{}, std::move(directory), tagd_uid,
                                           std::int64_t{interval_ms} * NS_PER_MS,
-                                          config_hash);
+                                          config_hash, ops);
 }
 
 void RetainKeeper::describe(Watched& watched, bool retired,
@@ -342,7 +398,8 @@ std::optional<GenerationState> RetainKeeper::watch_retired(
 
 void RetainKeeper::load_watched(
     const Watched& watched,
-    std::map<std::string, std::vector<std::string>, std::less<>>& own_names) {
+    std::map<std::string, std::vector<std::string>, std::less<>>& own_names,
+    bool own_only) {
     for (const WatchedOwner& owner : watched.owners) {
         std::vector<WantedValue> wanted;
         wanted.reserve(owner.tags.size());
@@ -352,13 +409,19 @@ void RetainKeeper::load_watched(
         const LoadedValues loaded =
             load_retained(directory_.get(), tagd_uid_, owner.name, wanted);
         OwnerState& state = states_[owner.name];
-        for (const std::optional<RetainedValue>& value : loaded.values) {
-            if (value.has_value()) {
-                state.values.try_emplace(value->name, *value);
+        for (std::size_t i = 0; i < loaded.values.size(); ++i) {
+            const std::optional<RetainedValue>& value = loaded.values[i];
+            if (value.has_value() && (!own_only || loaded.sources.at(i).own) &&
+                state.values.try_emplace(value->name, *value).second) {
+                // Not written by the owner in this life of scada-tagd: the
+                // file keeps the stamp it came with (decision D-59).
+                state.not_written.insert_or_assign(value->name,
+                                                   loaded.sources.at(i).stamp);
             }
         }
         if (loaded.own.has_value()) {
             state.has_file = true;
+            state.written_time_on_disk = loaded.own->written_time_ns;
             if (loaded.own->final) {
                 state.final_source =
                     newer(state.final_source, loaded.own->source);
@@ -372,8 +435,11 @@ void RetainKeeper::load_watched(
         }
         for (const RejectedRetainFile& rejected : loaded.rejected) {
             if (rejected_seen_.insert(rejected.file).second) {
-                pending_problems_.push_back(
-                    {rejected.file, "ignored: " + rejected.detail});
+                pending_problems_.push_back({rejected.file,
+                                             "ignored: " + rejected.detail,
+                                             RetainProblemKind::FILE_REJECTED,
+                                             {},
+                                             {}});
             }
         }
     }
@@ -384,11 +450,16 @@ void RetainKeeper::load() {
         return;
     }
     std::map<std::string, std::vector<std::string>, std::less<>> own_names;
+    // Decision D-59: for the current generation the own files only. A value
+    // of a tag that moved is in a file of its former owner, which a retired
+    // generation may still replace with a FINAL one; it is taken once no
+    // generation is retired (`adopt_moved_values`), or by the owner's
+    // restore at attach.
     if (current_ != nullptr) {
-        load_watched(*current_, own_names);
+        load_watched(*current_, own_names, true);
     }
     for (const std::unique_ptr<Watched>& watched : retired_) {
-        load_watched(*watched, own_names);
+        load_watched(*watched, own_names, false);
     }
     for (auto& [name, state] : states_) {
         // A value found only in another owner's file, or a name the owner
@@ -418,6 +489,9 @@ bool RetainKeeper::read_owner(const Watched& watched,
         return false;
     }
     OwnerState& state = states_[owner.name];
+    // Restored values this keeper does not have as they are on file.
+    std::vector<RetainedTag> restored_tags;
+    std::vector<RecordCopy> restored_copies;
     for (const RetainedTag& tag : owner.tags) {
         const std::size_t offset =
             sizeof(RegionHeader) + (std::size_t{tag.slot} * sizeof(TagRecord));
@@ -441,6 +515,7 @@ bool RetainKeeper::read_owner(const Watched& watched,
                 state.dirty = true;
                 state.urgent = state.urgent || tag.now;
             }
+            state.not_written.erase(tag.name);
             continue;
         }
         if (!holds_value(copy, tag.type)) {
@@ -449,19 +524,89 @@ bool RetainKeeper::read_owner(const Watched& watched,
             // record on file stays. So does anything else that is no value.
             continue;
         }
-        const auto known = state.values.find(tag.name);
-        if (known != state.values.end() && known->second.type == tag.type &&
-            known->second.value == copy.value &&
-            known->second.source_time_ns == copy.source_time_ns) {
-            continue;
+        if (note_value(state, tag, copy)) {
+            restored_tags.push_back(tag);
+            restored_copies.push_back(copy);
         }
-        state.values.insert_or_assign(
-            tag.name,
-            RetainedValue{tag.name, tag.type, copy.value, copy.source_time_ns});
-        state.dirty = true;
-        state.urgent = state.urgent || tag.now;
+    }
+    if (!restored_tags.empty()) {
+        note_restores(owner.name, restored_tags, restored_copies);
     }
     return true;
+}
+
+bool RetainKeeper::note_value(OwnerState& state, const RetainedTag& tag,
+                              const RecordCopy& copy) {
+    const RetainedValue seen = value_seen(tag.name, tag.type, copy);
+    const auto known = state.values.find(tag.name);
+    if (known != state.values.end() &&
+        restored_as_on_file(known->second, copy)) {
+        return false;  // restored, not written since: its stamp stays
+    }
+    const bool same_value = known != state.values.end() &&
+                            known->second.value == copy.value &&
+                            known->second.source_time_ns == copy.source_time_ns;
+    if (is_restore(copy) && !same_value) {
+        return true;  // a restore of a value this keeper did not have
+    }
+    // Anything else is the owner's write, also one that kept RESTORED on a
+    // value it had restored (review B1).
+    state.not_written.erase(tag.name);  // a write of the owner
+    if (known != state.values.end() && known->second == seen) {
+        return false;
+    }
+    state.values.insert_or_assign(tag.name, seen);
+    state.dirty = true;
+    state.urgent = state.urgent || tag.now;
+    return false;
+}
+
+void RetainKeeper::note_restores(const std::string& owner,
+                                 std::span<const RetainedTag> tags,
+                                 std::span<const RecordCopy> copies) {
+    // The files the restore read, looked at again: where each value came
+    // from is what decides its origin, age and FINAL mark (review B2, B3).
+    std::vector<WantedValue> wanted;
+    wanted.reserve(tags.size());
+    for (const RetainedTag& tag : tags) {
+        wanted.push_back({tag.name, tag.type});
+    }
+    const LoadedValues loaded =
+        persists() ? load_retained(directory_.get(), tagd_uid_, owner, wanted)
+                   : LoadedValues{};
+    OwnerState& state = states_[owner];
+    for (std::size_t i = 0; i < tags.size(); ++i) {
+        const RetainedTag& tag = tags[i];
+        const RecordCopy& copy = copies[i];
+        const std::optional<RetainedValue> on_file =
+            i < loaded.values.size() ? loaded.values[i] : std::nullopt;
+        RetainedValue value = value_seen(tag.name, tag.type, copy);
+        RetainStamp stamp = UNKNOWN_AGE_STAMP;
+        if (on_file.has_value() && on_file->value == copy.value &&
+            on_file->source_time_ns == copy.source_time_ns) {
+            const RetainSource& source = loaded.sources.at(i);
+            value = *on_file;
+            value.adopted = value.adopted || !source.own;
+            value.source_not_final =
+                value.source_not_final || (!source.own && !source.final);
+            stamp = source.stamp;
+        } else {
+            // No file holds the restored value: it came from a file that
+            // changed since, or from the owner itself (scada-link passing on
+            // a slave's restored value, reference 17). Marked ADOPTED and not
+            // FINAL, of unknown age: the safe side, which a restart reports
+            // as a degraded restore (#90) until the owner writes the tag.
+            value.adopted = true;
+            value.source_not_final = true;
+        }
+        state.not_written.insert_or_assign(tag.name, stamp);
+        const auto known = state.values.find(tag.name);
+        if (known == state.values.end() || !(known->second == value)) {
+            state.values.insert_or_assign(tag.name, value);
+            state.dirty = true;
+            state.urgent = state.urgent || tag.now;
+        }
+    }
 }
 
 void RetainKeeper::read_current() {
@@ -504,7 +649,30 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     } else if (current_ != nullptr) {
         file.source = current_->identity;
     }
-    file.written_time_ns = realtime_ns();
+    // Decision D-59: what a later attach needs to tell the age of the
+    // values, in this boot and in another. A value the owner has not written
+    // since it was loaded is as old as the file it came from: while any is
+    // left, the file keeps the oldest of their stamps, so that a rewrite
+    // never makes an old value look new.
+    std::vector<RetainStamp> kept;
+    for (const auto& [tag, stamp] : state.not_written) {
+        if (state.values.contains(tag)) {
+            kept.push_back(stamp);
+        }
+    }
+    if (kept.empty()) {
+        const RetainClockSample clock = retain_clock_now();
+        file.written_time_ns = clock.realtime_ns;
+        file.written_boottime_ns = clock.boottime_ns;
+        file.boot_id = clock.boot_id;
+        file.clock_synced = clock.clock_synced;
+    } else {
+        const RetainStamp oldest = oldest_stamp(kept);
+        file.written_time_ns = oldest.written_time_ns;
+        file.written_boottime_ns = oldest.written_boottime_ns;
+        file.boot_id = oldest.boot_id;
+        file.clock_synced = oldest.clock_synced;
+    }
     file.config_hash = config_hash_;
     file.values.reserve(state.values.size());
     for (const auto& [tag, value] : state.values) {
@@ -535,7 +703,11 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
                 done.removed.end());
             if (!done.written) {
                 report.retain_problems.push_back(
-                    {"retain directory", done.detail});
+                    {"retain directory",
+                     done.detail,
+                     RetainProblemKind::WRITE_FAILED,
+                     {},
+                     {}});
             }
             continue;
         }
@@ -544,6 +716,7 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
         if (done.written) {
             state.has_file = true;
             state.failing = false;
+            state.written_time_on_disk = done.written_time_ns;
             if (done.final) {
                 state.final_on_disk = newer(state.final_on_disk, done.source);
             }
@@ -558,7 +731,11 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
             if (!state.failing) {
                 state.failing = true;
                 report.retain_problems.push_back(
-                    {done.owner, "cannot write: " + done.detail});
+                    {done.owner,
+                     "cannot write: " + done.detail,
+                     RetainProblemKind::WRITE_FAILED,
+                     {},
+                     {}});
             }
         }
     }
@@ -729,9 +906,12 @@ void RetainKeeper::finish(int base_fd, Watched& watched,
             continue;
         }
         const bool left = has_left(watched, owner, now_mono_ns);
-        if (left && newer_region_exists(base_fd, watched.generation, owner.name,
-                                        now_mono_ns)) {
+        if ((left || timed_out) &&
+            newer_region_exists(base_fd, watched.generation, owner.name,
+                                now_mono_ns)) {
             // A newer generation holds newer values: nothing from this one.
+            // Also at the timeout, while the owner hangs here (decision
+            // D-59, point 6).
             owner.done = true;
         } else if (left) {
             static_cast<void>(read_owner(watched, owner));
@@ -824,9 +1004,64 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
     });
 }
 
+bool RetainKeeper::adopt_moved_values() {
+    bool complete = true;
+    for (const WatchedOwner& owner : current_->owners) {
+        // An owner with a region restored its values at attach, and its
+        // records are read at every check.
+        if (current_has_region(owner.name)) {
+            continue;
+        }
+        std::vector<WantedValue> wanted;
+        wanted.reserve(owner.tags.size());
+        for (const RetainedTag& tag : owner.tags) {
+            wanted.push_back({tag.name, tag.type});
+        }
+        const LoadedValues loaded =
+            load_retained(directory_.get(), tagd_uid_, owner.name, wanted);
+        complete = complete && loaded.complete;
+        OwnerState& state = states_[owner.name];
+        // Review D2 of #93: from a look that did not see every file nothing
+        // is taken; an older value would stay for good. Rejected files are
+        // still reported.
+        for (std::size_t i = 0; loaded.complete && i < loaded.values.size();
+             ++i) {
+            const std::optional<RetainedValue>& value = loaded.values[i];
+            const RetainSource& source = loaded.sources.at(i);
+            if (!value.has_value() || source.own) {
+                continue;
+            }
+            // Review B3: marked as taken from another owner, and whether
+            // that file was FINAL; review B2: as old as that file.
+            RetainedValue taken = *value;
+            taken.adopted = true;
+            taken.source_not_final = taken.source_not_final || !source.final;
+            if (state.values.try_emplace(taken.name, taken).second) {
+                state.not_written.insert_or_assign(taken.name, source.stamp);
+                state.dirty = true;
+            }
+        }
+        for (const RejectedRetainFile& rejected : loaded.rejected) {
+            if (rejected_seen_.insert(rejected.file).second) {
+                pending_problems_.push_back({rejected.file,
+                                             "ignored: " + rejected.detail,
+                                             RetainProblemKind::FILE_REJECTED,
+                                             {},
+                                             {}});
+            }
+        }
+    }
+    return complete;
+}
+
 void RetainKeeper::remove_files_of_gone_owners() {
     if (gone_owners_removed_ || !persists() || !retired_.empty() ||
         current_ == nullptr) {
+        return;
+    }
+    // Not before the values of tags that moved are in the files of their
+    // new owners (`adopt_moved_values`, called by `check` first).
+    if (!moved_values_adopted_) {
         return;
     }
     for (const WatchedOwner& owner : current_->owners) {
@@ -870,7 +1105,7 @@ void RetainKeeper::finish_now(int base_fd, std::uint64_t generation,
         return;
     }
     std::map<std::string, std::vector<std::string>, std::less<>> ignored;
-    load_watched(*watched, ignored);
+    load_watched(*watched, ignored, false);
     for (const WatchedOwner& owner : watched->owners) {
         // Decision D-45: a newer generation that holds a region of the
         // owner holds newer values; nothing is written from this one.
@@ -900,6 +1135,31 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
     for (const std::unique_ptr<Watched>& watched : retired_) {
         finish(base_fd, *watched, now_mono_ns);
     }
+    // Decision D-59, point 4: a tag that moved to an owner that has not
+    // attached is on file only under its former owner, which may be in no
+    // generation any more. Once no generation is retired, so that every
+    // FINAL file is on disk, its value goes into the file of the new owner,
+    // which is written below, before the file of the former owner is
+    // removed. Once: what the former owners left does not change.
+    if (persists() && current_ != nullptr && retired_.empty() &&
+        !moved_values_adopted_ && now_mono_ns >= next_adoption_mono_ns_) {
+        // Review E1 of #93: an incomplete look is tried again once per
+        // retain interval, not at every check.
+        next_adoption_mono_ns_ = now_mono_ns + interval_ns_;
+        // Review B5: a look that could not see every file is tried again at
+        // the next check, and no file of a gone owner is removed meanwhile.
+        moved_values_adopted_ = adopt_moved_values();
+        if (!moved_values_adopted_ && !adoption_reported_) {
+            adoption_reported_ = true;
+            report.retain_problems.push_back(
+                {"retain directory",
+                 "not every retain file could be read for tags that moved; "
+                 "files of owners that are gone are kept",
+                 RetainProblemKind::ADOPTION_INCOMPLETE,
+                 {},
+                 {}});
+        }
+    }
     for (auto& [name, state] : states_) {
         if (!state.dirty || now_mono_ns < state.next_retry_mono_ns) {
             continue;
@@ -928,20 +1188,64 @@ void RetainKeeper::flush(CheckReport& report) {
     }
     wait_bounded(report);
     collect(now, report);
+    // Review E2 of #93: the names that fit one log value, and the count.
+    std::string unsaved;
+    std::size_t count = 0;
+    bool cut = false;
     for (const auto& [name, state] : states_) {
-        if (state.dirty || state.done_token != state.token) {
-            report.retain_problems.push_back(
-                {name, "retained values not saved at the stop"});
+        if (!state.dirty && state.done_token == state.token) {
+            continue;
+        }
+        ++count;
+        const std::string next = (unsaved.empty() ? "" : ", ") + name;
+        if (cut || unsaved.size() + next.size() > UNSAVED_NAMES_BYTES) {
+            cut = true;
+            continue;
+        }
+        unsaved += next;
+    }
+    if (count == 0) {
+        return;
+    }
+    if (cut) {
+        unsaved += ", ...";
+    }
+    RetainProblem problem{"retained values",
+                          "not saved at the stop",
+                          RetainProblemKind::UNSAVED_AT_EXIT,
+                          unsaved,
+                          "",
+                          count};
+    if (report.retain_writer_bound_reached) {
+        // Review N7: one record, naming the owner whose file is still being
+        // written and the file of it that stays.
+        const std::string writing = writer_->in_flight();
+        problem.detail = "a retain file was still being written at the stop";
+        if (!writing.empty()) {
+            problem.subject = writing;
+            // Review D4 of #93: from memory, never from the storage that
+            // just failed to finish a write.
+            const auto state = states_.find(writing);
+            problem.kept_written_time_ns =
+                state != states_.end() &&
+                        state->second.written_time_on_disk.has_value()
+                    ? std::to_string(*state->second.written_time_on_disk)
+                    : std::string("none");
         }
     }
+    report.retain_problems.push_back(std::move(problem));
 }
 
 void RetainKeeper::wait_bounded(CheckReport& report) {
     if (!writer_->wait_idle(RETAIN_WAIT_LIMIT)) {
+        report.retain_writer_bound_reached = true;
         report.retain_problems.push_back(
-            {"retain writer", "files not written within " +
-                                  std::to_string(RETAIN_WAIT_LIMIT.count()) +
-                                  " ms"});
+            {"retain writer",
+             "files not written within " +
+                 std::to_string(RETAIN_WAIT_LIMIT.count()) + " ms",
+             RetainProblemKind::WRITER_BOUND,
+             {},
+             {}});
     }
 }
 

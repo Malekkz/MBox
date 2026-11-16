@@ -306,10 +306,12 @@ and keeps the type of every tag, 1 byte each; a slot without a valid entry
 fails attach with `SCADA_E_LAYOUT`. And it checks the clocks, see "Tag read
 and write".
 
-Retained values (contract, section 12; decision D-45): a `tags` region that
-attach creates gets the values of its owner's `retain` tags before it is
-published, with quality UNCERTAIN, flag RESTORED, the stored source time and
-the time of the restore as update time. RESTORED stays, with no time
+Retained values (contract, section 12; decisions D-45, D-59): a `tags`
+region that attach creates gets the values of its owner's `retain` tags
+before it is published, with quality UNCERTAIN (never GOOD), flag RESTORED
+plus the stored flags that describe the value (SUBSTITUTED, BLOCKED, TEST,
+OUT_OF_RANGE, OVERFLOW, LOCAL_TIME, TIME_UNCERTAIN; not STALE or COMM_FAIL),
+the stored source time and the time of the restore as update time. RESTORED stays, with no time
 limit, until the owner writes the tag; tell a restored value by that flag,
 since `age_ns` counts from the restore. A value is taken from
 `<owner>.bin` in the retain directory (`scada_attach_opts.retain_dir`),
@@ -326,8 +328,17 @@ of these tags, attach first waits, at most 2 s, looking every 20 ms, for
 that owner's file to be marked FINAL for that generation, or for the
 generation's directory to be gone. A reused region keeps its values.
 `scada_tag_retain_status` reports the values restored, the files rejected,
-the waits that ran out (one deadline per attach) and the restores not done
-because the retain directory was unusable. String tags cannot be retained.
+the waits that ran out (one deadline per attach), the restores not done
+because the retain directory was unusable, and the values restored whose
+age is unknown. `scada_tag_retain_info` tells, for one tag of the process,
+where its value came from (none, own FINAL file, own periodic file, another
+owner's file), when that file was written, the age of the value or that it
+is unknown, the quality on file, and whether the FINAL wait ran out for it.
+The age is CLOCK_BOOTTIME since the write in the same boot; in another boot
+CLOCK_REALTIME since the write, only if the clock was synchronised at the
+write and is now (`adjtimex`); otherwise unknown. Attach never refuses a
+value on its age. The file format is version 2; files of version 1 are
+still read, as UNCERTAIN without flags. String tags cannot be retained.
 
 ## Tag read and write
 

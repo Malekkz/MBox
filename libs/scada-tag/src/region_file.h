@@ -134,6 +134,11 @@ struct RegionIdentity {
 // outside input.
 [[nodiscard]] Result<std::vector<std::string>> list_directory(
     int dir_fd, std::string& detail);
+// The same, and `complete` false if the directory held more than
+// MAX_DIRECTORY_ENTRIES entries, of which only the first were returned
+// (review D1 of #93: a caller that must see every entry can tell).
+[[nodiscard]] Result<std::vector<std::string>> list_directory(
+    int dir_fd, std::string& detail, bool& complete);
 
 // A region file under construction (section 3.2). It exists under its
 // temporary name until `publish`; if the builder is destroyed before that,
