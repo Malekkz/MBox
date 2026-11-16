@@ -64,7 +64,8 @@ constexpr std::uint32_t CAPACITY = 4;
 // Queue ids of the tag set: their position in name order.
 constexpr std::size_t CMD_WEB = 1;
 constexpr std::size_t EVENTS_IO = 2;
-constexpr std::size_t RESULT_WEB = 4;
+constexpr std::size_t RESULT_SOLO = 4;
+constexpr std::size_t RESULT_WEB = 5;
 // Records that pass through a queue of CAPACITY places in the ordering test,
 // and how many are posted between two looks of the consumer.
 constexpr std::uint64_t MANY = 1000;
@@ -274,7 +275,8 @@ protected:
     // scada-tagd; `io`, a driver with its events and the results of the
     // requests of `web`; `web`, which posts requests and consumes the
     // events and results; `late`, which produces events and never attaches.
-    // `cmd.io.solo` has no result queue.
+    // `cmd.io.solo` has no answer queue once SetUp has renamed
+    // `result.io.solo` in the header (D-52).
     [[nodiscard]] static TagSet queue_tag_set() {
         TagSet set = tag_set();
         set.processes.push_back({.name = "late", .uid = uid()});
@@ -295,6 +297,7 @@ protected:
              .producer = "web",
              .consumer = "io",
              .capacity = CAPACITY},
+            {.name = "result.io.solo", .producer = "io", .consumer = "web"},
             {.name = "events.late", .producer = "late", .consumer = "web"},
         };
         return set;
@@ -303,6 +306,7 @@ protected:
     void SetUp() override {
         AttachFixture::SetUp();
         start_host(queue_tag_set());
+        remove_answer_queue_of_solo();
         web_ = attached("web");
         io_ = attached("io");
         ASSERT_NE(io_, nullptr);
@@ -311,6 +315,25 @@ protected:
         // again only once a second (section 11.2): `web` asked for the
         // queues of `io` before `io` had created them.
         look_again(*web_);
+    }
+
+    // The tag-set builder refuses a `cmd` queue without its answer queue
+    // (D-52), but the header is outside input to the library: renaming
+    // `result.io.solo` in the header, before anyone attaches, leaves
+    // `cmd.io.solo` without one. The new name keeps the name order.
+    void remove_answer_queue_of_solo() const {
+        const MappedRegion header = map_file("header");
+        const auto& global =
+            shared_at<GlobalHeader>(header.bytes(), sizeof(RegionHeader));
+        auto& entry = shared_at<QueueEntry>(
+            header.bytes(),
+            static_cast<std::size_t>(global.queue_table_offset +
+                                     (RESULT_SOLO * sizeof(QueueEntry))));
+        constexpr std::string_view OLD_NAME = "result.io.solo";
+        constexpr std::string_view NEW_NAME = "result.io.sola";
+        ASSERT_EQ(std::string_view(entry.name.data(), OLD_NAME.size()),
+                  OLD_NAME);
+        std::ranges::copy(NEW_NAME, entry.name.begin());
     }
 
     [[nodiscard]] Attached attached(std::string_view process) {
@@ -1076,6 +1099,7 @@ TEST_F(Queues, RequestsQueuedBeforeTheDriverAttachesAreAnsweredAborted) {
     const QueuePtr solo_reader = open(*io(), "cmd.io.solo");
     EXPECT_EQ(reader->stats().aborted + solo_reader->stats().aborted,
               REQUESTS_DRAINED);
+    EXPECT_EQ(reader->stats().answers_dropped, 0U);
     // Without a result queue the answer was dropped and counted.
     EXPECT_EQ(solo_reader->stats().answers_dropped, 1U);
     EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));

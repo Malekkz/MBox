@@ -105,6 +105,8 @@ and a sentence that names the entry, when:
 | A change ring capacity is not a power of two from 1,024 to 1,048,576, or is less than twice the owner's tag count | `OUT_OF_RANGE` |
 | The only owner of a process is not named like the process, or one of several is not named `<process>.<writer>` | `INVALID_ARGUMENT` |
 | A queue name does not start with `events.`, `cmd.` or `result.`, or its capacity is not a power of two | `INVALID_ARGUMENT` |
+| A queue has one process as producer and consumer | `INVALID_ARGUMENT` |
+| A `cmd.<x>` queue has no `result.<x>` queue, or that queue does not go from the consumer of `cmd.<x>` to its producer (D-52) | `INVALID_ARGUMENT` |
 | `retain_now` without `retain`; `writable_by_command` or `retain` on a string tag; a uid of 4,294,967,295; a heartbeat time of 0 ms | `INVALID_ARGUMENT` |
 
 The limit of 4,194,303 tags per owner cannot be reached within 1,000,000

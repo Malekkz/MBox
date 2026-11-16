@@ -255,7 +255,10 @@ TEST(TagSetValidate, RejectsQueuesWithoutAKindPrefixOrPowerOfTwoCapacity) {
         return tag_set;
     };
     expect_valid(with_queue("events.p", 1));
-    expect_valid(with_queue("cmd.p.q", MAX_QUEUE_CAPACITY));
+    TagSet command = with_queue("cmd.c.p", MAX_QUEUE_CAPACITY);
+    command.queues.push_back(
+        {.name = "result.c.p", .producer = "c", .consumer = "p"});
+    expect_valid(command);
     expect_valid(with_queue("result.p.q", CAPACITY));
     expect_rejected(with_queue("alarms.p", CAPACITY),
                     StatusCode::INVALID_ARGUMENT,
@@ -274,6 +277,61 @@ TEST(TagSetValidate, RejectsQueuesWithoutAKindPrefixOrPowerOfTwoCapacity) {
     expect_rejected(one_process, StatusCode::INVALID_ARGUMENT,
                     "queue 'events.p': producer and consumer must be "
                     "different processes");
+}
+
+// Issue #52: a command needs a way back (reference 5.3 and 8.2, step 10), so
+// every `cmd.<x>` queue has the answer queue `result.<x>` of contract 9.2,
+// with producer and consumer swapped.
+TEST(TagSetValidate, RequiresTheResultQueueOfEveryCommandQueue) {
+    const auto with_queues = [](std::vector<QueueDefinition> queues) {
+        TagSet tag_set = samples::one_owner();
+        tag_set.processes.push_back({.name = "c", .uid = samples::UID_OTHER});
+        tag_set.processes.push_back({.name = "d", .uid = samples::UID_OTHER});
+        tag_set.queues = std::move(queues);
+        return tag_set;
+    };
+    const QueueDefinition command{
+        .name = "cmd.c.p", .producer = "p", .consumer = "c"};
+    expect_valid(with_queues(
+        {command, {.name = "result.c.p", .producer = "c", .consumer = "p"}}));
+    // A result queue without a command queue is allowed.
+    expect_valid(with_queues(
+        {{.name = "result.c.p", .producer = "c", .consumer = "p"}}));
+    expect_rejected(with_queues({command}), StatusCode::INVALID_ARGUMENT,
+                    "queue 'cmd.c.p': needs the queue 'result.c.p' for its "
+                    "results, from 'c' to 'p'");
+    // The answer queue is found by name only: a result queue of another name
+    // between the same processes does not count.
+    expect_rejected(
+        with_queues({command,
+                     {.name = "result.c.q", .producer = "c", .consumer = "p"}}),
+        StatusCode::INVALID_ARGUMENT,
+        "queue 'cmd.c.p': needs the queue 'result.c.p'");
+    // An events queue of the right name is not a result queue.
+    expect_rejected(
+        with_queues({command,
+                     {.name = "events.c.p", .producer = "c", .consumer = "p"}}),
+        StatusCode::INVALID_ARGUMENT,
+        "queue 'cmd.c.p': needs the queue 'result.c.p'");
+    const std::vector<QueueDefinition> wrong_ends{
+        {.name = "result.c.p", .producer = "p", .consumer = "c"},
+        {.name = "result.c.p", .producer = "c", .consumer = "d"},
+        {.name = "result.c.p", .producer = "d", .consumer = "p"},
+    };
+    for (const QueueDefinition& result : wrong_ends) {
+        expect_rejected(with_queues({command, result}),
+                        StatusCode::INVALID_ARGUMENT,
+                        "queue 'cmd.c.p': its result queue 'result.c.p' must "
+                        "go from 'c' to 'p'");
+    }
+    // A name that leaves no room for the prefix `result.` cannot be paired.
+    constexpr std::string_view CMD_PREFIX = "cmd.";
+    const std::string longest =
+        std::string(CMD_PREFIX) +
+        std::string(MAX_SHORT_NAME_LENGTH - CMD_PREFIX.size(), 'x');
+    expect_rejected(
+        with_queues({{.name = longest, .producer = "p", .consumer = "c"}}),
+        StatusCode::INVALID_ARGUMENT, "needs the queue 'result.xxx");
 }
 
 TEST(TagSetValidate, RejectsInvalidValuesAndFlagCombinations) {
@@ -475,7 +533,7 @@ TEST(TagSetHash, ChangesWithEveryFieldOfTheDefinition) {
         [](TagSet& set) { set.queues.at(0).capacity = OTHER_CAPACITY; },
         [](TagSet& set) { set.queues.at(1).consumer = "io"; },
         [](TagSet& set) { set.queues.at(1).producer = "io"; },
-        [](TagSet& set) { set.queues.at(0).name = "result.io.control.slow"; },
+        [](TagSet& set) { set.queues.at(1).name = "events.control.slow"; },
         [](TagSet& set) { set.tags.at(0).name = "plant.pump1.speed2"; },
         [](TagSet& set) { set.tags.at(0).owner = "control.fast"; },
         [](TagSet& set) { set.tags.at(0).type = TagType::INT64; },

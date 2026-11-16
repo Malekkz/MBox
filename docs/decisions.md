@@ -429,7 +429,7 @@ Decision:
 - SHA-256 is implemented in `libs/scada-tag/src/sha256.cpp` and checked against the vectors of the standard. It identifies a tag set; it protects no secret.
 - The library sorts: processes, owners and queues by name, their position being the process index, owner index and queue id; the slots of an owner are its tags by name. `config_hash` is the SHA-256 of the canonical encoding written in `libs/scada-tag/README.md`, which starts with a name and a version of the encoding. Generation and creation time are not hashed.
 - A process is given with its numeric uid. An owner entry gets the uid of its process.
-- A queue's kind is the prefix of its name (`events.`, `cmd.`, `result.`), and its record size follows from the kind. The producer and consumer are process names. The rest of the name is not checked against them.
+- A queue's kind is the prefix of its name (`events.`, `cmd.`, `result.`), and its record size follows from the kind. The producer and consumer are process names. The rest of the name is not checked against them (superseded for `cmd` and `result` queues by D-52).
 - Layout details the contract leaves open: each slot table is padded with zero bytes to a multiple of 8 bytes; an owner without tags has an empty slot table; the name pool holds the names in directory order without terminators, and `name_pool_size` is the number of name bytes; the file ends at the next multiple of 8 bytes; in the `RegionHeader` of `header`, `owner_index` is 0 and `queue_id` is 0xFFFF. The builder leaves `ready` 0 and `state` BUILDING for `scada-tagd` to set.
 - Rules added to those the contract states: `retain_now` needs `retain`; a string tag cannot be `writable_by_command` (contract 9.4: strings cannot be commanded); a queue capacity is a power of two up to 2,147,483,648, default 1,024; uid 4,294,967,295 is refused; heartbeat times are at least 1 ms. A change ring capacity that is omitted is 65,536 and is not raised automatically: an owner with more than 32,768 tags must state it.
 - An error is a `Status` with a fixed message plus a `std::string detail` filled by the function, because `Status` cannot carry text made at run time (D-14). A name from outside is repeated in the detail only after it passed the name grammar.
@@ -1069,6 +1069,23 @@ Consequences:
 - `scada-sim` gains `--hold` (help text, `services/scada-sim/README.md`, `libs/scada-sim/README.md`). Tests: `SimOptions.HoldIsAFlagOfRun`, `SimProcesses.AHeldSimulatorWritesOnlyAfterSigusr1` (several heartbeats and no tag written while held, every tag written after the release), `AHeldSimulatorStopsOnASignal`, `AHeldSimulatorStopsWhenTagdStaysDown`.
 - The note of D-34 says that a reader preempted inside one `scada_tag_read_many` can see a running owner down.
 - Tests that failed only under eight more test binaries in parallel on 4 cores are tracked in the issue "Tests that fail under extreme overload", not here.
+
+## D-52: The tag-set builder requires the `result` queue of every `cmd` queue
+Date: 2026-11-16
+Phase / issue: 1, #52
+Status: proposed; the rule was decided by the committee of the lead session on 2026-11-15 in the review of P1-08 (D-40)
+
+Context: a `cmd.<x>` queue without its answer queue `result.<x>` (contract 9.2) gives a command no way back, against reference 5.3 and 8.2, step 10. The builder accepted it, and the library dropped every answer (ABORTED at attach, EXPIRED in `scada_queue_next`) into `answers_dropped`. D-26 said that the rest of a queue name is not checked against its producer and consumer.
+Options, the status of a refused tag set: `NOT_FOUND`, as a reference to an unknown process; `INVALID_ARGUMENT`, as the other queue rules. Options, the tests of a `cmd` queue without an answer queue: keep them with a header changed after it was built; remove them.
+Decision:
+- `validate`, `config_hash` and `build_header` refuse a tag set in which a `cmd.<x>` queue has no queue named `result.<x>` of kind RESULT, or whose `result.<x>` queue does not have the consumer of `cmd.<x>` as producer and its producer as consumer. The status is `INVALID_ARGUMENT` ("tag set: invalid value"), the detail names the `cmd` queue, the result queue it needs and the two processes. The pair is found by name only.
+- A `result` queue without a `cmd` queue is allowed: it costs a region and harms nothing, and the issue asks for no more.
+- A `cmd` queue whose name leaves no room for the longer prefix (`cmd.` plus 28 bytes) cannot be paired and is refused by the same rule.
+- The library keeps its branch for a `cmd` queue without an answer queue (the answer is dropped and counted): the header is outside input to the library. Its tests (`Queues.AnExpiredRequestWithoutAResultQueueIsDroppedAndCounted` and the `cmd.io.solo` part of conformance test 17) stay: the queue tests build a valid header with `cmd.io.solo` and `result.io.solo`, then rename the second to `result.io.sola` in the header bytes before any process attaches, as the other tests of bad header input change its bytes (lead session, review of PR #80).
+Reason: the pair rule is a property of the queue table as a whole, so it belongs where the table is checked; `INVALID_ARGUMENT` keeps `NOT_FOUND` for references to processes and owners. Changing the bytes of a built header tests the branch without a second way to make a header.
+Consequences:
+- Contract 0.17, section 9 and 9.2; `libs/scada-tag/README.md`, "Tag-set rules", which also gains the row for one process at both ends (D-40).
+- The tag sets of the tests: the attach fixture gains `result.io.web` (one region more for `io`, three cursors in a `proc` region), the queue tests gain `result.io.solo`, renamed in the header (queue ids shift), and the hash test renames an events queue instead of the result queue. Test: `TagSetValidate.RequiresTheResultQueueOfEveryCommandQueue`.
 
 ## D-53: The processes not attached at the first check of a new generation are logged; the start value of `down` is in the contract
 Date: 2026-11-15
