@@ -59,9 +59,10 @@ using QueuePtr = std::unique_ptr<Queue>;
 
 constexpr std::uint32_t CAPACITY = 4;
 // Queue ids of the tag set: their position in name order.
-constexpr std::size_t CMD_WEB = 0;
-constexpr std::size_t EVENTS_IO = 1;
-constexpr std::size_t RESULT_WEB = 3;
+constexpr std::size_t CMD_WEB = 1;
+constexpr std::size_t EVENTS_IO = 2;
+constexpr std::size_t RESULT_SOLO = 4;
+constexpr std::size_t RESULT_WEB = 5;
 // Records that pass through a queue of CAPACITY places in the ordering test,
 // and how many are posted between two looks of the consumer.
 constexpr std::uint64_t MANY = 1000;
@@ -83,7 +84,7 @@ constexpr std::uint64_t BOOL_TWO = 2;
 constexpr std::size_t LAST_RESERVED = 7;
 constexpr std::size_t SHORT_RECORD = 8;
 constexpr std::uint64_t RECORDS_SKIPPED = 3;
-constexpr std::uint64_t REQUESTS_DRAINED = 2;
+constexpr std::uint64_t REQUESTS_DRAINED = 3;
 
 scada_event_record event(std::uint16_t kind = SCADA_EVENT_AUDIT,
                          std::uint16_t length = PAYLOAD_LENGTH) {
@@ -271,6 +272,8 @@ protected:
     // scada-tagd; `io`, a driver with its events and the results of the
     // requests of `web`; `web`, which posts requests and consumes the
     // events and results; `late`, which produces events and never attaches.
+    // `cmd.io.solo` has no answer queue once SetUp has renamed
+    // `result.io.solo` in the header (D-52).
     [[nodiscard]] static TagSet queue_tag_set() {
         TagSet set = tag_set();
         set.processes.push_back({.name = "late", .uid = uid()});
@@ -287,6 +290,11 @@ protected:
              .producer = "io",
              .consumer = "web",
              .capacity = CAPACITY},
+            {.name = "cmd.io.solo",
+             .producer = "web",
+             .consumer = "io",
+             .capacity = CAPACITY},
+            {.name = "result.io.solo", .producer = "io", .consumer = "web"},
             {.name = "events.late", .producer = "late", .consumer = "web"},
         };
         return set;
@@ -295,6 +303,7 @@ protected:
     void SetUp() override {
         AttachFixture::SetUp();
         start_host(queue_tag_set());
+        remove_answer_queue_of_solo();
         web_ = attached("web");
         io_ = attached("io");
         ASSERT_NE(io_, nullptr);
@@ -303,6 +312,25 @@ protected:
         // again only once a second (section 11.2): `web` asked for the
         // queues of `io` before `io` had created them.
         look_again(*web_);
+    }
+
+    // The tag-set builder refuses a `cmd` queue without its answer queue
+    // (D-52), but the header is outside input to the library: renaming
+    // `result.io.solo` in the header, before anyone attaches, leaves
+    // `cmd.io.solo` without one. The new name keeps the name order.
+    void remove_answer_queue_of_solo() const {
+        const MappedRegion header = map_file("header");
+        const auto& global =
+            shared_at<GlobalHeader>(header.bytes(), sizeof(RegionHeader));
+        auto& entry = shared_at<QueueEntry>(
+            header.bytes(),
+            static_cast<std::size_t>(global.queue_table_offset +
+                                     (RESULT_SOLO * sizeof(QueueEntry))));
+        constexpr std::string_view OLD_NAME = "result.io.solo";
+        constexpr std::string_view NEW_NAME = "result.io.sola";
+        ASSERT_EQ(std::string_view(entry.name.data(), OLD_NAME.size()),
+                  OLD_NAME);
+        std::ranges::copy(NEW_NAME, entry.name.begin());
     }
 
     [[nodiscard]] Attached attached(std::string_view process) {
@@ -981,16 +1009,24 @@ TEST_F(Queues, ARequestTakenIsNeverDeliveredAgain) {
 }
 
 // Conformance test 17: requests still queued when a driver attaches are
-// answered ABORTED and not executed.
+// answered ABORTED and not executed; without a result queue the answer is
+// dropped.
 TEST_F(Queues, RequestsQueuedBeforeTheDriverAttachesAreAnsweredAborted) {
     const QueuePtr out = open(*web(), "cmd.io.web");
+    const QueuePtr solo = open(*web(), "cmd.io.solo");
     ASSERT_TRUE(posts(*out, request()));
     ASSERT_TRUE(posts(*out, request(SCADA_OP_SELECT)));
+    ASSERT_TRUE(posts(*solo, request()));
     restart(io(), "io");
     const QueuePtr reader = open(*io(), "cmd.io.web");
-    EXPECT_EQ(reader->stats().aborted, REQUESTS_DRAINED);
+    const QueuePtr solo_reader = open(*io(), "cmd.io.solo");
+    EXPECT_EQ(reader->stats().aborted + solo_reader->stats().aborted,
+              REQUESTS_DRAINED);
     EXPECT_EQ(reader->stats().answers_dropped, 0U);
+    // Without a result queue the answer was dropped and counted.
+    EXPECT_EQ(solo_reader->stats().answers_dropped, 1U);
     EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));
+    EXPECT_TRUE(gives<scada_write_request>(*solo_reader, SCADA_E_TIMEOUT));
     const QueuePtr results = open(*web(), "result.io.web");
     EXPECT_TRUE(takes_answers(*results, SCADA_RESULT_ABORTED, {0, 1}));
 }
@@ -1042,6 +1078,17 @@ TEST_F(Queues, AnExpiredRequestIsNotDeliveredWhenItsAnswerCannotBePosted) {
     EXPECT_EQ(stats.expired, 1U);
     EXPECT_EQ(stats.answers_dropped, 1U);
     EXPECT_EQ(stats.delivered, 0U);
+}
+
+TEST_F(Queues, AnExpiredRequestWithoutAResultQueueIsDroppedAndCounted) {
+    const QueuePtr out = open(*web(), "cmd.io.solo");
+    const QueuePtr reader = open(*io(), "cmd.io.solo");
+    ASSERT_TRUE(posts(*out, request()));
+    change_record<WriteRequest>("cmd.io.solo", 0, [](WriteRequest& record) {
+        record.expiry_mono_ns = record.posted_mono_ns;
+    });
+    EXPECT_TRUE(gives<scada_write_request>(*reader, SCADA_E_TIMEOUT));
+    EXPECT_EQ(reader->stats().answers_dropped, 1U);
 }
 
 // Decision D-40, condition 2: a driver that dies after the cursor moved on
