@@ -1773,7 +1773,8 @@ ARM64:
 20. Restarting `scada-tagd` with an unchanged tag set leaves all other
     processes running without interruption.
 21. A generation change completes within 5 seconds with all processes
-    reattached and retained values restored. Its queue part: no event
+    reattached and retained values restored, UNCERTAIN with RESTORED and the
+    carried flags of section 12. Its queue part: no event
     record whose post returned `SCADA_OK` is lost, and each request a driver
     executed was posted in the generation in which the driver took it.
 22. RT-safe functions make no system calls and no allocations, including the
@@ -1940,6 +1941,12 @@ reader that compared `quality_flags` with RESTORED must test the bit.
 `scada_retain_status_t` grows from 16 to 24 bytes (`ages_unknown`,
 `reserved`): a caller compiled against 0.19 must be rebuilt.
 `scada_tag_retain_info` and `scada_tag_retain_info_t` are additions.
+`scada_tag_retain_status` takes no size, so it cannot refuse a caller built
+against the 16-byte structure; that is safe only because `libscada-tag` is a
+static library and its callers are built with it. A size argument is to be
+added before it is ever built as a shared library. A retain file of version 2
+kept in an export archive (reference 13) cannot be read by a build before
+0.20.
 
 Migration, 0.18 to 0.19: none for data; the layout version stays 1 and no
 structure in shared memory changed. A producer that posted events or requests
