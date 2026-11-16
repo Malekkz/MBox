@@ -197,6 +197,27 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
         before->whole.store(false, std::memory_order_release);
         return drop();
     }
+    // The same file as one mapped before, after a look that failed (for
+    // example a transient fstatat error) or while it was under another
+    // name: its kept mapping is used again, and no mapping slot is spent
+    // (decision D-51). Only a mapping that is still whole. It skips the
+    // header checks of section 3.1 that a fresh open makes: they passed
+    // when it was first mapped, and the checks that matter for a queue
+    // reused this way are the consumer's range rule and base (`follow_queue`),
+    // which stop a queue whose file was shrunk and grown again to its size
+    // between two looks (review of PR #86, N4).
+    for (const std::unique_ptr<PeerMapping>& kept : mappings_) {
+        if (kept->slot == &slot && kept->region.device == info.st_dev &&
+            kept->region.inode == info.st_ino && info.st_size >= 0 &&
+            static_cast<std::uint64_t>(info.st_size) ==
+                slot.identity.size_bytes &&
+            kept->whole.load(std::memory_order_relaxed)) {
+            // Release: publishes the mapping to readers, which load with
+            // acquire.
+            slot.current.store(kept.get(), std::memory_order_release);
+            return before != kept.get();
+        }
+    }
     if (slot.mappings >= MAX_MAPPINGS_PER_REGION) {
         // Relaxed: only this function writes it, under the mutex, and
         // readers judge it on its own.
@@ -268,6 +289,18 @@ bool PeerRegions::at_mapping_limit(std::size_t slot) const noexcept {
 
 std::size_t PeerRegions::refresh(int dir_fd, std::int64_t now_mono_ns) {
     const std::scoped_lock lock(mutex_);
+    return refresh_locked(dir_fd, now_mono_ns);
+}
+
+std::size_t PeerRegions::try_refresh(int dir_fd, std::int64_t now_mono_ns) {
+    // Another thread is looking, mapping or bringing a region into memory:
+    // its look covers this one, and the caller must not wait for it
+    // (decision D-51).
+    const std::unique_lock lock(mutex_, std::try_to_lock);
+    return lock.owns_lock() ? refresh_locked(dir_fd, now_mono_ns) : 0;
+}
+
+std::size_t PeerRegions::refresh_locked(int dir_fd, std::int64_t now_mono_ns) {
     std::size_t changed = 0;
     for (const std::size_t index : wanted_) {
         Slot& slot = slots_.at(index);

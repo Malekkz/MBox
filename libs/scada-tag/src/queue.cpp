@@ -270,6 +270,7 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     // queue's worth, then the deadline is looked at.
     std::uint32_t answered = 0;
     bool stopped = false;
+    bool switch_looked = false;
     for (;;) {
         // Decision D-54: in a RETIRING generation a queue is drained and
         // never waited on.
@@ -306,20 +307,43 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         // Section 8.4: no wait is longer than the slice.
         const std::int64_t slice_end =
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
-        const std::optional<FutexWaiter> word = waiter();
-        if (!word.has_value()) {
-            // The producer has not created the queue yet, or the queue is
-            // stopped: look for its region again (at most once a second),
-            // and meanwhile wait a slice.
-            attachment_.refresh_peers();
-            sleep_until(slice_end);
+        // Look for the queue's file again (at most once a second): also
+        // while it is mapped, so that a consumer that never calls
+        // scada_tag_notify finds a file created anew, or one changed in
+        // size, within about a second (decision D-51).
+        attachment_.refresh_peers();
+        if (look_again_now(switch_looked)) {
             continue;
         }
-        if (futex_wait(word->word, word->expected, slice_end) ==
-            FutexWait::FAILED) {
+        if (!wait_slice(slice_end)) {
             return SCADA_E_IO;
         }
     }
+}
+
+bool Queue::look_again_now(bool& looked) const noexcept {
+    // The look found a file to adopt, move to or stop at: look again now
+    // rather than wait a slice on the old `write_seq` (review of PR #86,
+    // N2). Once per slice, so that a switch that cannot happen yet never
+    // spins.
+    if (!looked && attachment_.queue_switch_pending(id_)) {
+        looked = true;
+        return true;
+    }
+    looked = false;
+    return false;
+}
+
+bool Queue::wait_slice(std::int64_t slice_end) const noexcept {
+    const std::optional<FutexWaiter> word = waiter();
+    if (!word.has_value()) {
+        // The producer has not created the queue yet, or the queue is
+        // stopped: wait a slice.
+        sleep_until(slice_end);
+        return true;
+    }
+    return futex_wait(word->word, word->expected, slice_end) !=
+           FutexWait::FAILED;
 }
 
 int Queue::ack() noexcept {
@@ -344,6 +368,11 @@ int Queue::ack() noexcept {
 bool Queue::ready() const noexcept {
     if (producer_ || attachment_.queue_is_dead(id_)) {
         return false;
+    }
+    if (attachment_.queue_switch_pending(id_)) {
+        // The next look adopts a file, moves on or stops the queue; a
+        // stopped queue is reported once, by next (decision D-51).
+        return true;
     }
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (bytes.empty()) {

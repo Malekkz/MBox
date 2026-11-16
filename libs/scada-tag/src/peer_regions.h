@@ -106,6 +106,11 @@ public:
     // and scada_tag_status; not real-time.
     std::size_t refresh(int dir_fd, std::int64_t now_mono_ns);
 
+    // As `refresh`, but looks only if no other thread is looking: returns
+    // 0 at once while another one holds the lock. For scada_tag_notify,
+    // which must not wait while a consumer maps and prefaults a region.
+    std::size_t try_refresh(int dir_fd, std::int64_t now_mono_ns);
+
     // Looks at the region of `slot`, which was asked for with `want`, now,
     // whenever `refresh` would look next: for scada-tagd, which reads the
     // RETAIN tags at every liveness check and must find a region that has
@@ -134,6 +139,9 @@ private:
 
     [[nodiscard]] std::size_t checked(std::size_t slot) const;
 
+    // The loop of `refresh`, with `mutex_` held.
+    std::size_t refresh_locked(int dir_fd, std::int64_t now_mono_ns);
+
     // Looks at one slot. True if what `bytes` returns changed.
     bool look(int dir_fd, Slot& slot);
     [[nodiscard]] static bool is_queue(const Slot& slot) noexcept;
@@ -146,7 +154,8 @@ private:
     std::vector<Slot> slots_;  // never resized after construction
 
     std::mutex mutex_;
-    std::vector<std::size_t> wanted_;  // guarded by mutex_
+    friend class PeerRegionsTestAccess;  // holds `mutex_` in a unit test
+    std::vector<std::size_t> wanted_;    // guarded by mutex_
     // Every mapping ever made, kept until destruction. Guarded by mutex_.
     std::vector<std::unique_ptr<PeerMapping>> mappings_;
 };

@@ -160,11 +160,20 @@ accepted for layout version 1:
   first; then two producers write, and the old queue file is not final when
   the consumer leaves it. The base guarantees unique ids only while at most
   one instance of the producer lives.
-- A shrink of a queue file that was already unlinked cannot be seen by
-  name; a consumer that still reads it is stopped by `SIGBUS`.
+- A shrink of a queue file that was already unlinked is seen by `fstat`
+  on the descriptor kept for its mapping, at the next look of the context
+  (at most about 1 s later, D-51): in `scada_tag_notify`,
+  `scada_tag_status`, and every wait of `scada_queue_next` or a wait set.
+  A consumer that reads the file before that look, or one that only polls
+  with timeout 0 and never calls `scada_tag_notify`, can be stopped by
+  `SIGBUS`. A shrink in place of the file under the name is seen the same
+  way, by name. A consumer blocked in `scada_queue_next` or a wait set
+  reads `write_seq` at every slice (at most 100 ms), while the look runs at
+  most once a second, so it usually meets `SIGBUS` before the look does.
 - A consumer keeps every mapping of a queue name it has seen, up to 16
   (D-28), so locked memory can reach 16 times the queue's size for a
-  process under `mlockall`.
+  process under `mlockall`. The same file mapped again after a failed look
+  uses its kept mapping and spends none of the 16 (D-51).
 - A group member can create a file or directory under a name it does not own.
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
@@ -778,10 +787,30 @@ a queue that became broken, and again one that no longer is, with its
 name, cursor, `write_seq` and capacity, once per change. It also logs an
 events or command queue that has had no usable file at two checks in a
 row while its producer was not down, and again when the file is there.
-It unmaps a queue file once the name refers to another file. The library
+It unmaps a queue file once the name refers to another file. It logs at
+ERROR a `write_seq` that is below the value of its previous check in the
+same file: only the producer writes it and it only grows, so the file was
+damaged or a second producer writes it, and ids may repeat (D-51). The library
 does not use the result.
+A consumer looks for its queue's file again, at most once a second, in
+`scada_tag_notify`, in `scada_tag_status`, and in every wait of
+`scada_queue_next` or of a wait set, also while the file is mapped, so that
+one that never calls `scada_tag_notify` finds a file created anew, or one
+changed in size, within about a second (D-51). A wait set reports a queue
+ready while its next look changes the file in use: a first file has
+appeared since the consumer opened the queue, another file is under its
+name, or a look found the file in use changed in size. The consumer's next
+`scada_queue_next` then adopts the file, follows it or stops the queue; a
+queue stopped this way returns `SCADA_E_LAYOUT` (at once with timeout 0),
+or `SCADA_E_RETIRING` in a RETIRING generation (section 9.5).
+No thread reads a file that a look found changed in size, nor the file of
+a stopped queue. `scada_tag_notify` does
+not wait for a look of another thread, which may be mapping a region: it
+skips its own and the next call looks. `scada_queue_next` with timeout 0
+makes no system call for any of this.
 On a stopped queue `scada_queue_next` waits out its timeout before it
-reports it, and a wait set never reports a stopped queue as ready, so
+reports it, and a wait set does not report a stopped queue as ready after
+the call that stopped it, so
 neither spins; a consumer that calls `scada_queue_next` only after a wake
 learns of the stop from `scada_queue_stats` or from a timed call.
 
@@ -1733,7 +1762,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Retained values across a generation change | Settled in P1-09 (D-45): FINAL retain files and the bounded wait of sections 11.3 and 12 | P1-09 | Conformance test 21, with a value changed immediately before the change (retained values; the queue part is #65) |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
-| A queue region recreated inside a generation | Settled by the base sequence (9.1, 9.2, D-49). Open in #53's second part: keeping a mapping on a transient failure in detail, the periodic look while waiting (`scada_queue_next`, wait sets) and the report of a `write_seq` that falls | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| A queue region recreated inside a generation | Settled: the base sequence (9.1, 9.2, D-49), the periodic look while waiting, the try-lock in `scada_tag_notify`, the kept mapping used again, and the report of a falling `write_seq` (D-51) | #53 | Conformance test 29 |
 | Commands after lost audit records (does not block 1.0) | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
 | Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
 
@@ -1826,6 +1855,7 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 | 0.15 | 2026-11-16 | Issue #53, first part of points 2 to 4 (D-49). Section 9: `QueueHeader.base_seq` and `flags` take 16 of the reserved bytes. Section 9.1: the producer's high-water mark and the base of a file created anew. Section 9.2: the consumer follows the file, delivers the old file first, jumps to the base, and when it stops the queue. Section 9.3: the second residual window replaced. Section 10: the slot of a produced queue. Section 3.3: the residuals of the base. Sections 16 and 17. |
+| 0.16 | 2026-11-16 | Issue #53, second part of points 2 to 4 (D-51). Section 9.2: the periodic look while waiting in `scada_queue_next` and wait sets, a wait set ready for a pending file, the try-lock of `scada_tag_notify`, the report of a falling `write_seq`. Section 3.3: the bound for a shrink of an unlinked file; the kept mapping used again. Section 16: the open point settled. |
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
@@ -1847,6 +1877,13 @@ Migration, 0.16 to 0.17: none for data; the layout version stays 1 and no
 structure in shared memory changed. A tag set with a `cmd.<x>` queue and no
 `result.<x>` queue from its consumer to its producer, which 0.16 accepted,
 is now refused; add the result queue. Such a queue lost every answer before.
+
+Migration, 0.15 to 0.16: none for data; the layout version stays 1 and no
+structure in shared memory changed. A consumer that waits in
+`scada_queue_next` or a wait set now looks at its peers' regions about once
+a second while it waits, which costs one `fstatat` per region and second.
+`scada_tag_notify` skips its look while another thread of the context
+looks.
 
 Migration, 0.14 to 0.15: none for data. The layout version stays 1:
 `base_seq` (offset 16), `flags` (24) and `reserved0` (28) were reserved and

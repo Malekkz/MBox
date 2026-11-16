@@ -55,6 +55,7 @@ Seen look_at(Attachment& attachment, WatchKind kind,
         if (!bytes.empty()) {
             seen.word = futex_word_of(queue_write_seq(bytes));
         }
+        seen.switch_pending = attachment.queue_switch_pending(index);
         return seen;
     }
     if (kind == WatchKind::RING) {
@@ -232,13 +233,13 @@ int WaitSet::wait(int timeout_ms) {
         const std::int64_t slice_end =
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
 
+        // Look for missing, replaced and resized regions again, at most
+        // once a second each; also while every source is mapped (decision
+        // D-51), then collect the words of what the look found.
+        attachment_.refresh_peers();
         std::array<FutexWaiter, MAX_FUTEX_WAITERS> waiters{};
         bool missing = false;
         const std::size_t count = collect_waiters(waiters, missing);
-        if (missing) {
-            // Look for missing regions again, at most once a second each.
-            attachment_.refresh_peers();
-        }
         if (count == 0) {
             sleep_until(slice_end);
             continue;
@@ -358,9 +359,9 @@ void WaitSet::watch(Attachment& attachment, std::span<const Watch> watches,
                                    .expected = seen[i].word,
                                    .process_private = false};
         }
-        if (missing) {
-            attachment.refresh_peers();
-        }
+        // As in the wait (decision D-51).
+        static_cast<void>(missing);
+        attachment.refresh_peers();
         // A failed wait is retried after the look below; the slice bounds
         // how often.
         const FutexWait result =
