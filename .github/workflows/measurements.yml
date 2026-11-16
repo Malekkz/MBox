@@ -1,0 +1,165 @@
+# The measurements of phase 1 (issues #40 and P1-12, decisions D-31 and
+# D-57). They measure; the pass or fail of a figure is the performance gate
+# in pipeline.yml. Not a check of a pull request.
+#
+# - `measurements`: the retry window of a tag read and SCADA_E_BUSY
+#   (scripts/measure-seqlock.sh), conformance test 2 and conformance test 26
+#   for `seconds` each (600, the 10 minutes of the contract), and every test
+#   with the label `perf`, on the `perf` build. By hand: x86-64, and ARM64
+#   with each pause instruction. Weekly: x86-64 and ARM64 with `isb`.
+# - `latency-spread`: by hand only, when asked: the latency test (conformance
+#   test 27) on `runs` fresh runners per architecture, the spread from which
+#   the tolerance of the gate is judged.
+#
+# The weekly run costs the owner Actions minutes (about 2 jobs of 35
+# minutes). To switch it off, delete the `schedule` lines below, or disable
+# the workflow "measurements" on the Actions page of the repository.
+name: measurements
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds of conformance tests 2 and 26 (600 for the contract)"
+        default: "600"
+        required: true
+      latency_spread:
+        description: "Also run the latency test on fresh runners to see its spread"
+        type: boolean
+        default: false
+      runs:
+        description: "Runners per architecture for the spread"
+        type: choice
+        options: ["10", "5"]
+        default: "10"
+  schedule:
+    # Mondays 03:17 UTC.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  measurements:
+    name: measurements (${{ matrix.arch }}, ${{ matrix.pause }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'schedule' && '[{"arch":"x86-64","runner":"ubuntu-24.04","machine":"x86_64","pause":"pause"},{"arch":"ARM64","runner":"ubuntu-24.04-arm","machine":"aarch64","pause":"isb"}]' || '[{"arch":"x86-64","runner":"ubuntu-24.04","machine":"x86_64","pause":"pause"},{"arch":"ARM64","runner":"ubuntu-24.04-arm","machine":"aarch64","pause":"yield"},{"arch":"ARM64","runner":"ubuntu-24.04-arm","machine":"aarch64","pause":"isb"}]') }}
+    env:
+      SECONDS_OF_LOAD: ${{ inputs.seconds || '600' }}
+    steps:
+      # tests 2 and 26 each run for SECONDS_OF_LOAD; more than 1,500 s
+      # would not fit in the time limit of the job.
+      - name: Check the inputs
+        shell: bash
+        run: |
+          if ! [[ "${SECONDS_OF_LOAD}" =~ ^[0-9]+$ ]] ||
+             (( SECONDS_OF_LOAD < 1 || SECONDS_OF_LOAD > 1500 )); then
+            echo "seconds must be an integer from 1 to 1500" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Check the architecture
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
+      - name: Describe the machine
+        shell: bash
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            uname -a
+            nproc
+            lscpu
+            cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+            free -m
+          } | tee machine.txt
+      - name: Build (perf)
+        env:
+          # x86-64 ignores the option; isb is its default.
+          PAUSE: ${{ matrix.pause == 'yield' && 'yield' || 'isb' }}
+        run: |
+          cmake --preset perf -B build/measure -DSCADA_ARM64_PAUSE="${PAUSE}"
+          cmake --build build/measure
+      - name: Read retry window and conformance test 2
+        shell: bash
+        run: |
+          scripts/measure-seqlock.sh build/measure 60 "${SECONDS_OF_LOAD}" \
+            | tee measurements.txt
+      - name: Conformance test 26 (as root)
+        shell: bash
+        run: |
+          sudo env "PATH=${PATH}" bash scripts/run-ctest-test.sh \
+            build/measure scada-tag-false-trip-root-test \
+            "SCADA_CONFORMANCE_SECONDS=${SECONDS_OF_LOAD}" | tee conformance26.txt
+      - name: Performance tests
+        shell: bash
+        run: |
+          ctest --test-dir build/measure -L '^perf$' --verbose \
+            --no-tests=error | tee perf.txt
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: measurements-${{ matrix.arch }}-${{ matrix.pause }}
+          path: |
+            machine.txt
+            measurements.txt
+            conformance26.txt
+            perf.txt
+          if-no-files-found: warn
+          retention-days: 90
+
+  latency-spread:
+    name: latency spread (${{ matrix.arch }}, run ${{ matrix.run }})
+    if: github.event_name == 'workflow_dispatch' && inputs.latency_spread
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86-64, ARM64]
+        run: ${{ fromJSON(inputs.runs == '5' && '[1,2,3,4,5]' || '[1,2,3,4,5,6,7,8,9,10]') }}
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+        run: |
+          if [[ "${RUNS}" != 5 && "${RUNS}" != 10 ]]; then
+            echo "runs must be 5 or 10" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Build (perf)
+        run: |
+          cmake --preset perf
+          cmake --build --preset perf --target \
+            scada-tag-latency-perf-test scada-tagd scada-sim
+      - name: Latency (conformance test 27)
+        shell: bash
+        run: |
+          {
+            uname -m
+            nproc
+            lscpu | grep -E 'Model name|^CPU\(s\)'
+            ctest --preset perf -R '^scada-tag-latency-perf-test$' --verbose \
+              --no-tests=error
+          } | tee latency.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: latency-${{ matrix.arch }}-${{ matrix.run }}
+          path: latency.txt
+          if-no-files-found: error
+          retention-days: 30
