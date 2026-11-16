@@ -1021,3 +1021,25 @@ Reason: the pair rule is a property of the queue table as a whole, so it belongs
 Consequences:
 - Contract 0.17, section 9 and 9.2; `libs/scada-tag/README.md`, "Tag-set rules", which also gains the row for one process at both ends (D-40).
 - The tag sets of the tests: the attach fixture gains `result.io.web` (one region more for `io`, three cursors in a `proc` region), the queue tests gain `result.io.solo`, renamed in the header (queue ids shift), and the hash test renames an events queue instead of the result queue. Test: `TagSetValidate.RequiresTheResultQueueOfEveryCommandQueue`.
+
+## D-53: The processes not attached at the first check of a new generation are logged; the start value of `down` is in the contract
+Date: 2026-11-15
+Phase / issue: 1, #60
+Status: accepted
+
+Context: since D-38 a new generation starts with `down` 1 for every process but `tagd`, so a process that never attaches is no change and left no trace in the log of `scada-tagd`. The contract did not state that start value.
+Options: one record listing every process not attached; one record per process; nothing, as D-38 left it.
+Decision:
+- At the first check of a new generation, `GenerationHost::check` lists the processes whose region is missing or not ready (`DownReason::REGION_MISSING`) in `CheckReport.not_attached`, in process index order. `scada-tagd` logs `process not attached PROCESS="<name>"` at INFO for each, once, with its own `MESSAGE_ID` (`0f57ce3d6dbc4891abd0e55e240f04f9`, as D-47 gives every liveness record).
+- A process that has a region but is not yet RUNNING has attached and is not listed. Its flag stays 1, and it is logged `process up` when it is up.
+- A reused generation lists nothing: the flags and the record are from the `scada-tagd` that created it.
+- The `down` flags and the `process up` and `process down` records are unchanged.
+- Contract 0.18: sections 5 and 10.1 state the start value of D-38 and this report. This is earlier than P1-13, which D-38 named.
+Reason: a log field holds at most 96 bytes (`LOG_MAX_VALUE_BYTES`) and a tag set may name 1,024 processes of up to 31 bytes. One list would be cut or would need to be split over several records. One record per process keeps every name and has the same form as `process up`. The list comes from the check, not from a second look at the directory: it is what that check found.
+Consequences:
+- A tag set of N processes that none has attached gives N INFO records at start, once.
+- Tests:
+  - `Host.TheFirstCheckOfANewGenerationNamesTheProcessesNotAttached`, `Host.TheFirstCheckNamesEveryProcessWhenNoneHasAttached` and `Host.AReusedGenerationNamesNoProcessNotAttached`;
+  - `Host.AProcessThatAttachesBeforeTheFirstCheckIsReportedUp` also checks the list;
+  - `ReportLog.EachProcessNotAttachedIsOneInfoRecord` (level, `MESSAGE_ID`, order);
+  - `TagdService.AProcessNotAttachedAtTheFirstCheckIsLogged` fails without the change.

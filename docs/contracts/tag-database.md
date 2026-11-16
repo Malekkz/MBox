@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.17 (draft) |
+| Contract version | 0.18 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -285,6 +285,10 @@ struct DirectoryEntry {          // 24 bytes
   process table.
 - Everything in `header` except `GlobalHeader.state` and
   `ProcessEntry.down` is immutable for the life of the generation.
+- In a new generation `ProcessEntry.down` is 1 for every process but `tagd`
+  and 0 for `tagd` from the moment the header is published, before `current`
+  points to it: a process that has not attached has no region and is down by
+  section 10.1. A reused generation keeps the flags it holds (section 11.1).
 
 ### 5.1 Handles
 
@@ -938,7 +942,12 @@ for readers and never down for a check. `starts` counts it:
 - `scada-tagd` checks every `heartbeat_check_ms` (default 250 ms), sets `down`
   when a process is down by the rules above and clears it when the heartbeat
   is fresh again and `state` is RUNNING. The flag is what `scada-tagd` reports
-  and alarms on.
+  and alarms on. A new generation starts with the flag at 1 for every
+  process but `tagd` (section 5), so a process that has attached is
+  reported up at the first check that finds it up. At the first check of a
+  new generation `scada-tagd` also reports, once each, the processes whose
+  region is missing or not ready: they have not attached, and their flag
+  does not change.
 - `scada-tagd` has its own `proc.tagd` region. If its heartbeat stops, the
   library reports `SCADA_E_TAGD_DOWN` from `scada_tag_status()`, but existing
   mappings keep working.
@@ -1625,6 +1634,11 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
+| 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
+
+Migration, 0.17 to 0.18: none. The layout version stays 1, no structure in
+shared memory changed, and `scada-tagd` has written these start values
+since D-38; the text now states them.
 
 Migration, 0.16 to 0.17: none for data; the layout version stays 1 and no
 structure in shared memory changed. A tag set with a `cmd.<x>` queue and no

@@ -643,6 +643,7 @@ private:
     OpenGeneration open_;
     OwnProcRegion proc_;
     bool reused_ = false;
+    bool checked_ = false;  // `check` ran at least once
     std::vector<std::string> notes_;
     std::uint32_t heartbeat_check_ms_ = 0;
     std::uint32_t heartbeat_timeout_ms_ = 0;
@@ -955,6 +956,10 @@ Status GenerationHost::Impl::watch_generations(std::string& detail) {
 
 CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
     CheckReport report;
+    // A new generation starts with these flags at 1 (D-38): a process that
+    // has not attached is no change and needs its own record.
+    const bool list_missing = !checked_ && !reused_;
+    checked_ = true;
     for (Peer& peer : peers_) {
         const DownReason reason =
             peer.self
@@ -974,6 +979,9 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
         }
         if (!peer.self) {
             note_starts(peer, !down, changed && !down, report);
+        }
+        if (list_missing && reason == DownReason::REGION_MISSING) {
+            report.not_attached.push_back(peer.region.process);
         }
         note_late_beats(peer, report);
     }
