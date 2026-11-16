@@ -3,13 +3,16 @@
 The figures that phase 1 is accepted on (contract section 15, reference
 section 15). Issue P1-12 (#20) adds the conformance suite, the benchmarks
 and the performance gate (decision D-57); its figures follow the section of
-issue #40.
+issue #40. Issue P1-13 (#21) adds a second measurement run with the tests of
+D-64 (the ring gap at the reference load, and huge pages); its figures
+follow those of #20 and settle contract section 16 (D-66).
 
 ## Hardware, and what it means
 
-Every figure below comes from GitHub-hosted runners: shared virtual
-machines, not the target board, without a real-time kernel, with neighbours
-on the same host.
+All phase 1 figures come from shared GitHub-hosted virtual machines, not
+the target board: 4 vCPUs for the runs of issues #20 and #21, 2 for the
+earlier run of issue #40. They run without a real-time kernel, with
+neighbours on the same host.
 
 | Runner | Processor | vCPUs | Clock source | Kernel |
 | --- | --- | --- | --- | --- |
@@ -17,18 +20,19 @@ on the same host.
 | `ubuntu-24.04-arm` | Neoverse-N2 | 4 | `arch_sys_counter` | Ubuntu 24.04 image of the run |
 
 "Separate cores" in conformance tests 3 and 26 means separate virtual
-processors. The figures of issue #20 must be taken again on the target
-board (issue #41) before phase 1 can be called done on it.
+processors. The figures of issues #20 and #21 must be taken again on the target
+board (issue #41) before phase 1 can be called done on it. Contract 1.0
+does not wait for it (D-66); #41 stays open as the hardware acceptance
+before the first release on the board.
 
 Not measured in phase 1:
 
 - the target board (#41);
 - the jitter and overruns of a fast task on a real-time kernel (reference
-  15.2);
-- gaps of a change ring consumer that keeps up with the reference load
-  (contract 16, the gap half of the ring capacity; tests 13 and 14 check
-  gaps at smaller loads);
-- huge pages for the `tags` regions (contract 16, still open).
+  15.2).
+
+The ring gap at the reference load and huge pages, listed here after
+issue #20, were measured in issue #21 (below).
 
 ## Read retry window and `SCADA_E_BUSY` (issue #40)
 
@@ -195,3 +199,123 @@ ARM64 with `isb`; 50,000 scalar tags at 50,000 writes per second gave 0
 `SCADA_E_BUSY` in 4.98 billion reads on x86-64 and 1 in 8.78 billion on
 ARM64.
 
+## Issue #21: the second measurement run
+
+Workflow `measurements`, run 43905525505, commit `5bbfa71` (main after PR
+#110, which added the tests of D-64), `perf` build, started by hand on
+2026-11-16 with `seconds=600`. Three measurement jobs: x86-64 with `pause`,
+ARM64 with `isb` and with `yield` (ARM64 ships `isb`, D-31). Same runners
+as run 43875571560: shared virtual machines with 4 vCPUs (AMD EPYC 9V74,
+Neoverse-N2).
+
+### Ring gap at the reference load
+
+`scada-tag-ring-gap-perf-test` (D-64): scada-sim writes 50,000 tags of 10
+owner threads at 50,000 updates per second with the default ring capacity
+of 65,536 entries; one consumer thread per ring takes every change. Any gap
+fails the test. 600 s.
+
+| | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| Changes received | 30,000,000 | 30,000,000 | 30,000,000 |
+| Gaps | 0 | 0 | 0 |
+
+The 10 s form, in the same jobs and in the pipeline's perf gate, received
+500,000 changes with 0 gaps on each runner. This settles the gap half of
+the ring capacity in contract 16; the size half is 28.8 MB (issue #20).
+
+### Huge pages
+
+`scada-tag-huge-pages-root-test` (D-64): one owner of 50,000 tags (3.2 MB),
+written at 50,000 updates per second, read 1,000,000 times with `read` and
+20,000 times with `read_many` of 500, with the database on a tmpfs mounted
+`huge=never` and on one mounted `huge=always`. One run of each, about
+0.6 s. Times in ns.
+
+| Runner | Mode | `read` median | `read` p99.9 | `read_many` 500 median | `read_many` 500 p99.9 | kB mapped huge |
+| --- | --- | --- | --- | --- | --- | --- |
+| x86-64 | never | 80 | 261 | 14,521 | 31,226 | 0 |
+| x86-64 | always | 80 | 270 | 14,521 | 29,704 | 2,048 |
+| ARM64, `isb` | never | 120 | 312 | 18,479 | 28,174 | 0 |
+| ARM64, `isb` | always | 104 | 272 | 18,503 | 25,655 | 2,048 |
+| ARM64, `yield` | never | 144 | 416 | 18,342 | 32,878 | 0 |
+| ARM64, `yield` | always | 104 | 384 | 18,343 | 27,302 | 2,048 |
+
+Huge pages are not used (D-66). There is no gain on x86-64: the read
+medians are equal at 80 ns, and the read 99.9th percentile is 261 ns
+without and 270 ns with huge pages. On ARM64 the read median was up to
+about 40 ns lower (`isb` 120 to 104 ns, `yield` 144 to 104 ns), within the
+noise of single 0.6 s runs, and not needed for any target; D-64 asked for
+a lower 99.9th percentile on both architectures. An owner region at the
+reference load (320 KB) is smaller than one 2 MB page. To be measured
+again on the target board (#41) if a target there needs it.
+
+### Conformance test 2, second run
+
+As in issue #20, 600 s.
+
+| | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| Updates per second | 50,000 | 49,999 | 50,000 |
+| Reads | 41.8 billion | 51.6 billion | 51.5 billion |
+| Torn reads | 0 | 0 | 0 |
+| `SCADA_E_BUSY` | 0 | 1 | 13 |
+
+### Conformance test 26, second run
+
+As in issue #20, 600 s. The first run (43875571560) beside the second
+(43905525505):
+
+| | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| Reads, second run | 1,200,240,000 | 1,200,220,000 | 1,200,220,000 |
+| `SCADA_E_BUSY`, first run | 0 | 0 | 149 |
+| `SCADA_E_BUSY`, second run | 1 | 424 | 169 |
+| Rate per 1,000,000 reads, first run | 0 | 0 | 0.124 |
+| Rate per 1,000,000 reads, second run | 0.0008 | 0.35 | 0.14 |
+| Bound of the test | 1,309 | 1,309 | 1,309 |
+| Torn, backwards, down, overruns, second run | 0 | 0 | 0 |
+| Longest reader cycle, second run | 1,397 us | 491 us | 351 us |
+
+Every job passed. The rate varies between runs on shared virtual machines:
+ARM64 with the shipped `isb` gave 0 in 1.20 billion reads in the first run
+and 424 in the second. Both are below the criterion of 1 per million; the
+margin in the second run was about 3 times. The limit of 64 attempts stays
+(D-66). The target board (#41) is to measure it again.
+
+### Conformance test 27, medians against the baselines
+
+One run of each job, in ns, as "run (baseline)". The baselines are those of
+issue #20 (`tests/perf/baseline/`); `yield` is not shipped and is given
+without one.
+
+| Call | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| `read` | 80 (87) | 104 (104) | 104 |
+| `read_many`, 500 tags | 14,501 (14,968) | 18,063 (18,272) | 18,439 |
+| `write` | 100 (101) | 136 (136) | 136 |
+| `write_many`, 500 tags | 12,419 (9,826) | 20,103 (19,900) | 19,727 |
+| `write_many`, 5,000 tags (the scan) | 123,912 (97,810) | 198,788 (197,422) | 194,076 |
+
+On x86-64 `write_many` reached 1.26 times its baseline for 500 tags and
+1.27 times for 5,000 tags, within the 2.0 times tolerance of the gate (the
+slowest of the 10 runs of issue #20 was 1.47 times). The scan stays below the 0.5 ms of contract 16.
+
+## Phase 1 issues at the close
+
+Contract changes merged after the measurements of issue #20, all before 1.0:
+
+| Issue | Pull request | Contract | Change |
+| --- | --- | --- | --- |
+| #92 | #95 | 0.23 | A consumer that sees a queue sees its producer (D-61) |
+| #96 | #111 | 0.24 | Minimum interval between two writes of one owner's retain file. A RETAIN_NOW change is on disk within 1 s while a write, queued writes included, takes at most 200 ms; a tag set with a RETAIN_NOW tag has `heartbeat_check_ms` of at most 400 ms; the warning `retain_now change reached the disk late` (D-62) |
+| #21 | #113 | 0.25 | Wording promised for 1.0; no behaviour changed (D-63) |
+| #112 | #114 | 0.26 | `scada_tag_write_string` returns `SCADA_E_NOT_OWNER` before it checks the text (D-65) |
+| #21 | #110 and this report's pull request | 1.0 | The tests of D-64; contract section 16 settled (D-66) |
+
+Carried forward, open:
+
+- #41: the phase 1 figures on the target board, the hardware acceptance
+  before the first release on the board.
+- #6 (P0-05): the acceptance of phase 0 on a test machine (restart on a hung
+  loop, read-only root), with #41.

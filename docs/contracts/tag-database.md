@@ -2,18 +2,18 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.26 (draft) |
+| Contract version | 1.0 |
 | Layout version | 1 |
-| Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
-| Implements | Reference architecture, section 5 |
+| Status | Accepted as 1.0 at the close of phase 1 (issue #21, P1-13, D-66). Layout version 1 is frozen. |
+| Implements | Reference architecture 1.1, section 5 |
 | Owners of this contract | `scada-tagd`, `libscada-tag` |
 
 This contract defines the shared-memory data plane exactly enough that two
 independent implementations would interoperate. All access goes through
 `libscada-tag`; no other code may depend on the binary layout.
 
-Until this contract reaches 1.0 it may change freely within phase 1. After
-that, any change needs a layout version bump and a migration note.
+This is version 1.0, and layout version 1 is frozen. Any later change needs
+a layout version bump and a migration note.
 
 ## 1. Conventions
 
@@ -2143,31 +2143,53 @@ ARM64:
     not valid, for a file changed in size in place (also when then
     replaced), and at the 17th file under the name.
 
-## 16. Open points to settle in phase 1
+## 16. Points settled in phase 1
 
-Each is settled by measurement or experiment in the issue named, recorded in
-the decisions log, and then written into this contract before it becomes 1.0
-(P1-13).
+Every point of this section is settled. Each was settled by measurement,
+experiment or decision in the issue named, recorded in the decisions log,
+and written into this contract before 1.0 (P1-13, D-66). The table is kept
+as the record; the pass criterion of each row is the one it was settled
+against.
+
+Every figure in the table comes from shared GitHub-hosted virtual machines
+with 4 vCPUs, not the target board. Issue #41, the target board, stays open:
+it is the hardware acceptance before the first release on the board, and
+measures these figures again there. Contract 1.0 does not wait for it (the
+product owner's decision, D-66).
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
 | Wake mechanism | Settled in P1-07 (D-32): futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
-| Read retry limit before `SCADA_E_BUSY` | Settled in P1-12 (D-57): confirmed at 64 attempts. Conformance test 26, 600 s: 0 `SCADA_E_BUSY` in 1.20 billion reads on x86-64 and on ARM64 with the shipped `isb` pause (at 99.9 % confidence the rate is below about 0.006 in 1,000,000); the `yield` pause, which is not shipped, gave 0.124 in 1,000,000, also within the criterion. Measured by the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure | P1-06, P1-12 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
-| Default change ring capacity per owner | 65,536. The size half is settled in P1-12 (D-57): the database of the reference load is 28.8 MB, below 64 MB, on both runners (conformance test 27; the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure). The gap half stays open: no test yet looks for gaps of a consumer that keeps up with the reference load; conformance tests 13 and 14 check gaps at smaller loads | P1-12 (size); open (gap), before 1.0 | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
-| Huge pages for the `tags` regions | Not used. Open: P1-12 did not measure huge pages (D-57) | Open, before 1.0 | Used only if the benchmark shows a lower 99.9th percentile read latency |
+| Read retry limit before `SCADA_E_BUSY` | Settled in P1-12 (D-57) and confirmed again in P1-13 (D-66): 64 attempts. Conformance test 26, 600 s, two runs of the workflow `measurements` (perf build). Run 43875571560 (commit 0fd68a2): 0 `SCADA_E_BUSY` in 1.20 billion reads on x86-64 and on ARM64 with the shipped `isb` pause; the `yield` pause, which is not shipped, gave 0.124 in 1,000,000. Run 43905525505 (commit 5bbfa71): x86-64 1 in 1.20 billion (0.0008 in 1,000,000); ARM64 `isb` 424 in 1.20 billion (0.35 in 1,000,000); ARM64 `yield` 169 (0.14 in 1,000,000; not shipped). The rate varies between runs on shared virtual machines. Both runs are below the criterion; the margin of ARM64 `isb` in the second run was about 3 times. Both ran on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is to measure it again | P1-06, P1-12, P1-13 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
+| Default change ring capacity per owner | Settled: 65,536, both halves. Size, in P1-12 (D-57): the database of the reference load is 28.8 MB, below 64 MB, on both runners (conformance test 27; the workflow `measurements`, run 43875571560, commit 0fd68a2, perf build). Gap, in P1-13 (D-64, D-66): `scada-tag-ring-gap-perf-test` received 30,000,000 changes with 0 gaps at the reference load for 600 s on each runner (x86-64, ARM64 `isb`, ARM64 `yield`; the workflow `measurements`, run 43905525505, commit 5bbfa71, perf build); its 10 s form runs in the pipeline's perf gate. Both on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure | P1-12 (size), P1-13 (gap) | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
+| Huge pages for the `tags` regions | Settled in P1-13 (D-64, D-66): not used. `scada-tag-huge-pages-root-test`, the workflow `measurements`, run 43905525505 (commit 5bbfa71, perf build). No gain on x86-64: the read medians were equal at 80 ns, and the read 99.9th percentile was 261 ns without and 270 ns with huge pages. On ARM64 the read median was up to about 40 ns lower (`isb` 120 to 104 ns, `yield` 144 to 104 ns; the 99.9th percentile 312 to 272 ns and 416 to 384 ns), within the noise of single 0.6 s runs, and not needed for any target; D-64 asked for a lower 99.9th percentile on both architectures. An owner region at the reference load (320 KB) is smaller than one 2 MB page. To be measured again on the target board (#41) if a target there needs it | P1-13 | Used only if the benchmark shows a lower 99.9th percentile read latency |
 | Heartbeat timeout defaults | Settled in P1-12 (D-57): confirmed at 3,000 ms general and 500 ms for real-time processes. Conformance test 5 passes on both architectures in the pipeline (for example run 43870993972); conformance test 26, 600 s, with real-time readers under SCHED_FIFO beside the owners, reported no process down and no late heartbeat on x86-64 and ARM64 (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-04, P1-12 | Conformance tests 5 and 26 |
 | Retained values across a generation change | Settled in P1-09 (D-45): FINAL retain files and the bounded wait of sections 11.3 and 12 | P1-09 | Conformance test 21, with a value changed immediately before the change (retained values; the queue part is #65) |
 | Cost of clock reads in `write` | Settled in P1-12 (D-57): kept at two reads per `write`, one pair per `write_many`. A scan writing 5,000 tags (`scada_tag_write_many`, conformance test 27, 2,000 scans per run, 10 runs per architecture on fresh runners and the 3 measurement jobs) took a median of 98 us on x86-64 and 197 us on ARM64 (the median of the 10 runs), and at most 296 us at the 99.9th percentile in any of the 23 runs, below 0.5 ms (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | Settled in P1-13 (D-63): not added; `scada_queue_stats` per queue only, `scada_status` stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
 | A queue region recreated inside a generation | Settled: the base sequence (9.1, 9.2, D-49), the periodic look while waiting, the try-lock in `scada_tag_notify`, the kept mapping used again, and the report of a falling `write_seq` (D-51) | #53 | Conformance test 29 |
-| Commands after lost audit records (does not block 1.0) | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
-| Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
+| Retiring the generation on a detected suspend | Settled in P1-13 (D-66) by the committee of the lead session: option A for 1.0. `scada-tagd` reports a detected suspend only, as before (section 3.4 forbids suspend; D-46), and starts no generation change. Option B, retiring the generation so that pending requests are answered ABORTED, is phase 5 (#109) | P1-13 | Decided before 1.0 |
+
+Deferred by the owner, does not block 1.0:
+
+- Commands after lost audit records: whether commands stay refused after
+  `scada-tagd` reported lost audit records, until an operator acknowledges.
+  It is safety-relevant, and the library has no such latch. It is for the
+  command service in phase 5 (D-49, C14; issues #74, #75 and #83). The
+  product owner approved the deferral (D-66).
 
 ## 17. Differences from the reference document
 
-This contract refines section 5 of the reference architecture. When the
-contract reaches 1.0, the reference document is updated to match and the
-change is recorded in its change log.
+This contract refines section 5 of the reference architecture. Section 5 of
+the reference document 1.1 matches this contract 1.0 (reference change log,
+version 1.1, issue #21). The list below is kept as the record of the
+differences that update resolved; the numbers are cited elsewhere.
+
+Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1 and 14.4
+that refer to section 5. The difference that remains:
+
+- Reference 10.4 has no system alarm for lost audit records or a broken
+  queue (item 22). It is a phase 5 gap (#75).
 
 Confirmed by the product owner in review P1-01:
 
@@ -2262,6 +2284,12 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: a file of an owner is written again only K checks after the last, K = max(1, floor((1000 ms − 200 ms) / P) − 1), also for RETAIN_NOW; FINAL, the timeout write and the flush are not held back; the 1 s bound of RETAIN_NOW holds while a retain write, with those queued before it, takes at most 200 ms, and a later write is logged (`retain_now change reached the disk late`); `heartbeat_check_ms` at most 400 ms in a tag set with a RETAIN_NOW tag; the D-45 window is up to K · P. Section 18, tests 16 and 25: the 200 ms condition. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
+| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen; later changes need a layout version bump and a migration note. Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1 and 14.4 that refer to it; reference 10.4 remains a phase 5 gap (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. |
+
+Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
+structure or behaviour changed: section 16 records settled points, section
+17 the state of the reference, and the header the version. 1.0 is cut on
+top of every phase 1 change, 0.24 (#96, PR #111) included.
 
 Migration, 0.25 to 0.26 (0.24 is used by #96): none for data;
 the layout version stays 1 and no structure changed. A process that calls

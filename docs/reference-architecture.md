@@ -2,7 +2,7 @@
 
 Nov 12, 2026 · @Malek
 
-**Version 1.0, frozen on 13 November 2026.** This is the baseline for the build. Later changes are reviewed before they are made and recorded in the change log (section 20).
+**Version 1.1, frozen on 13 November 2026; section 5 updated on 16 November 2026 (change log).** This is the baseline for the build. Later changes are reviewed before they are made and recorded in the change log (section 20).
 
 ## 1. Purpose and scope
 
@@ -112,7 +112,7 @@ The process names below are proposals; the builder may rename them but must keep
 
 | Process | Responsibility | Section |
 | --- | --- | --- |
-| `scada-tagd` | Creates the shared-memory segment from configuration, owns its layout, marks stale tags, persists retained values | 5 |
+| `scada-tagd` | Creates the generation directory and `header` from configuration (each process creates its own regions), owns the layout, reports processes that are down, persists retained values | 5 |
 | `scada-drv-<protocol>` | One process per protocol: polls devices, writes input tags, executes write requests | 6 |
 | `scada-io` | Local I/O hardware abstraction; behaves as a driver | 6 |
 | `scada-control` | Cyclic control tasks: function blocks and structured text | 7 |
@@ -157,7 +157,7 @@ The system targets 64-bit Linux on x86-64 and ARM64, with each process running a
 
 - Each process is a systemd unit of type `notify` with `WatchdogSec` set, so systemd restarts a hung process as well as a crashed one.
 - Start order: `scada-tagd`, then `scada-conf` and `scada-audit`, then drivers and `scada-io`, then `scada-control` and `scada-cmd`, then the remaining services.
-- Each service runs as its own system user. All belong to a `scada` group that grants access to the shared-memory segment; per-region access is narrowed further (section 5.4).
+- Each service runs as its own system user. All belong to a `scada` group that grants access to the shared-memory segment; per-region access is narrowed further (section 5.1).
 - Services must use systemd sandboxing: `ProtectSystem=strict`, `NoNewPrivileges=yes`, `PrivateTmp=yes`, and capabilities limited to what each needs (for example serial port access for the Modbus driver).
 
 ### 4.3 Real-time tier and fallback
@@ -189,41 +189,52 @@ Everything that changes at runtime lives under `/var/lib/scada`, so the root fil
 
 ## 5. Tag database
 
-The tag database is the only data plane: a set of shared-memory regions under `/dev/shm/scada/` holding live tag values, change rings, reliable event queues and command queues. All access goes through one client library, `libscada-tag`, so no service touches the raw layout.
+The tag database is the only data plane: a set of shared-memory regions under `/dev/shm/scada/` holding live tag values, change rings, reliable event queues and command queues. All access goes through one client library, `libscada-tag`, so no service touches the raw layout. The binary layout, the protocols and the library interface are specified in the tag database contract (`docs/contracts/tag-database.md`, version 1.0); this section summarises it.
 
 ### 5.1 Regions
 
-The database is split into one region file per writer, so the operating system enforces the one-writer rule: the owning service user maps its regions read-write, and everyone else maps them read-only.
+The database is split into one region file per writer, so the operating system enforces the one-writer rule: the region's file belongs to the service user that writes it, which maps it read-write, and everyone else maps it read-only. An owner is one writing thread of a process (for example one per control task or driver channel), so a process with several writing threads has several owners, and every ring and queue keeps one lock-free writer.
 
 | Region | Writer | Content |
 | --- | --- | --- |
-| `header` | `scada-tagd` | Magic, layout version, config generation, tag directory (name hash to region and slot), process table |
-| `tags.<owner>` | The owning process | Array of tag records for the tags that process writes |
-| `changes.<owner>` | The owning process | Broadcast ring of tag changes from that process |
-| `events.<producer>` | The producing process | Reliable queue of journal events (alarms, commands, audit) |
+| `header` | `scada-tagd` | Magic, layout version, config generation and its state, owner, process and queue tables (with the `down` flag of each process), tag directory (name hash to owner and slot) |
+| `proc.<process>` | That process | Heartbeat, cycle counter (`cycle_seq`), read cursors of the queues it consumes |
+| `tags.<owner>` | The owner | Array of tag records for the tags that owner writes |
+| `changes.<owner>` | The owner | Broadcast ring of tag changes from that owner |
+| `events.<producer>` | The producing thread | Reliable queue of journal events (alarms, commands, audit) |
 | `cmd.<driver>.<source>` | The source (`control` or `cmd`) | Write requests for that driver |
 | `result.<driver>.<source>` | The driver | Results of those write requests |
-| `strings.<owner>` | The owning process | Fixed-size slots for string tag values |
+| `strings.<owner>` | The owner | Fixed-size slots for string tag values |
+
+- The header holds no heartbeats: a process cannot write to a region of `scada-tagd`, so each heartbeat and queue cursor lives in the process's own `proc` region.
+- Each process creates its own regions when it attaches, from the sizes in `header`. `scada-tagd` creates only the generation directory and `header`, so it never creates files for another user.
+- The base directory `/dev/shm/scada/` is created at boot by the platform, not by `scada-tagd`.
+- The minimum kernel is Linux 5.16.
 
 ### 5.2 Tag record
 
-A tag record is 64 bytes, aligned to a cache line, and protected by a sequence lock. Because each tag has one writer, the writer never waits and a reader simply retries if it sees a write in progress.
+A tag record is 64 bytes, aligned to a cache line, and protected by a sequence lock. Because each tag has one writer, the writer never waits. A reader retries up to 64 times while it finds a write in progress; then the read returns `SCADA_E_BUSY`, not a BAD value, and the caller keeps its previous value for that cycle.
 
 ```cpp
 struct TagRecord {              // 64 bytes, alignas(64)
-  std::atomic<uint32_t> seq;    // odd while the owner is writing
+  uint32_t seq;                 // odd while the owner is writing
   uint8_t  type;                // BOOL, INT64, UINT64, FLOAT64, STRING
   uint8_t  quality;             // GOOD, UNCERTAIN, BAD
-  uint16_t quality_flags;       // STALE, COMM_FAIL, OUT_OF_RANGE,
-                                // SUBSTITUTED, NOT_INIT, OWNER_DOWN
-  union { bool b; int64_t i; uint64_t u; double f; uint64_t str_slot; } value;
+  uint16_t quality_flags;       // STALE, COMM_FAIL, OUT_OF_RANGE, SUBSTITUTED,
+                                // NOT_INIT, OWNER_DOWN, TIME_UNCERTAIN, BLOCKED,
+                                // TEST, OVERFLOW, RESTORED, LOCAL_TIME
+  uint64_t value;               // bit pattern of the type; a STRING's slot number
   int64_t  source_time_ns;      // device timestamp when the protocol has one, UTC
   int64_t  update_time_ns;      // when the owner wrote it, CLOCK_REALTIME
   int64_t  update_mono_ns;      // same instant, CLOCK_MONOTONIC, for age
-  uint32_t change_count;        // +1 on every value or quality change
+  uint32_t change_count;        // +1 on every change of value, quality or flags
   uint8_t  reserved[20];
 };
 ```
+
+- Shared structures hold plain integers. A field shared between processes while it changes is read and written atomically, field by field; no `std::atomic` object is placed in shared memory.
+- OWNER_DOWN is never stored: a read adds it while the owner is down (section 5.4). STALE is set by the owner, not by `scada-tagd`, which never writes a tag record.
+- Without a device timestamp the owner sets `source_time_ns` to the update time and sets LOCAL_TIME.
 
 Age calculations must use `update_mono_ns`, because NTP can step the wall clock. Engineering-unit scaling is applied by the driver before writing, so every reader sees scaled values.
 
@@ -233,55 +244,67 @@ Three mechanisms carry everything that is not a current value. All are single-pr
 
 | Mechanism | Delivery | Used for | When full |
 | --- | --- | --- | --- |
-| Change ring (`changes.*`) | Broadcast; each consumer keeps its own cursor | Tag changes for historian, alarms, API | Oldest entries are overwritten; a lagging consumer detects the gap by sequence number and resynchronises from the tag records |
-| Event queue (`events.*`) | Reliable, one consumer | Alarm transitions, command records, audit entries | The producer gets an error and must not proceed |
-| Command queue (`cmd.*`, `result.*`) | Reliable, one consumer | Write requests to drivers and their results | The requester gets a "queue full" rejection |
+| Change ring (`changes.*`) | Broadcast; each consumer keeps its own cursor | Tag changes for historian, alarms, API | Oldest entries are overwritten; a lagging consumer detects the gap from the ring's write count and resynchronises from the tag records |
+| Event queue (`events.*`) | Reliable, one consumer, at least once | Alarm transitions, command records, audit entries | The post is refused (`SCADA_E_FULL`) and the producer must not proceed |
+| Command queue (`cmd.*`, `result.*`) | One consumer; requests at most once, results at least once | Write requests to drivers and their results | The post is refused (`SCADA_E_FULL`); the requester gets a "queue full" rejection |
 
-- A change entry holds tag handle, value, quality, timestamps and a per-ring sequence number (32 bytes). Default ring size is 65,536 entries per writer and is configurable.
-- The rule for event queues is **no audit, no action**: if a command cannot be journalled, it is rejected.
+- A change entry holds tag handle, type, value, quality and flags, source time and update monotonic time (32 bytes), and no sequence number of its own. A consumer also gets a gap when the owner restarts (the ring's epoch changes), when the owner's process goes down or comes back, and when the ring file appears, disappears or is replaced. Default ring size is 65,536 entries per owner and is configurable; it must be at least twice the owner's tag count.
+- A subscription is per owner; a filter by tag is applied by the caller.
+- The rule for event queues is **no audit, no action**: if a command cannot be journalled, it is rejected. Every write request, `AUTO` included, needs its event record accepted first.
 - When the historian detects a change-ring gap, it must write a gap marker for the affected tags so that missing data is visible, not silently interpolated.
-- Consumers sleep until new entries arrive. The wake-up mechanism (shared futex or eventfd) is the builder's choice and must work with read-only mappings.
+- A command is never executed twice and never executed late. A driver takes a request before it acts on it, so a request is not delivered again after a driver crash. When a driver attaches, the library drains the requests still in its command queues without executing them and answers each `ABORTED`; selections do not survive a driver restart. A request that has expired, or whose lifetime is longer than the limit (60 seconds), is answered `EXPIRED` by the library and never reaches the driver.
+- Consumers sleep until new entries arrive, on a shared futex in the read-only mapping. Writers never wake anyone: a thread calls `scada_tag_notify` after its writes and posts (a real-time task once per cycle), so `write` and the queue post make no system call. A wait is capped at 100 ms, so a missed notify delays delivery but cannot lose it.
+- Limits of the reliable queues (contract 9.3): a consumer that has just died is seen as down only after its heartbeat timeout; a queue file created anew inside a generation loses the records of the old file that its consumer no longer holds, and `scada-tagd` logs the ids that may be lost; record ids of a new file continue from a base sequence, so they do not repeat while the producer's `proc` region or the consumer's cursor survives (contract 3.3 gives the exceptions); records left in a retiring generation are not carried into the next.
 
 A write request and its result have these fields:
 
 | Record | Fields |
 | --- | --- |
-| Write request | Request id, target tag handle, value, operation (`DIRECT`, `SELECT`, `OPERATE`, `CANCEL`, `READ_NOW`), source (`AUTO` or `OPERATOR`), user id, expiry time |
-| Result | Request id, status (`OK`, `REJECTED`, `TIMEOUT`, `DEVICE_ERROR`, `NOT_AUTHORISED`, `EXPIRED`), protocol error code, completion time |
+| Write request | Request id, target tag handle, value, operation (`DIRECT`, `SELECT`, `OPERATE`, `CANCEL`, `READ_NOW`), source (`AUTO`, `OPERATOR` or `REMOTE`), user id, expiry time, posted time, `select_request_id` (the `SELECT` an `OPERATE` or `CANCEL` belongs to) |
+| Result | Request id, status (`OK`, `REJECTED`, `TIMEOUT`, `DEVICE_ERROR`, `NOT_AUTHORISED`, `EXPIRED`, `ABORTED`), protocol error code, completion time |
 
 ### 5.4 Ownership rules
 
 - Every tag is assigned to exactly one owner in configuration. Input and feedback tags belong to their driver; calculated tags to `scada-control`; alarm state tags to `scada-alarm`; system tags to the process they describe.
 - An output is modelled as two tags plus a queue: a **request** tag owned by whoever commands it, a **feedback** tag owned by the driver, and the write request that travels through the command queue (section 8).
-- Each process updates a heartbeat counter in the process table at least once a second. If a heartbeat stops for a configurable time, `scada-tagd` cannot overwrite that owner's tags; instead it sets an `owner_down` bit in the process table, and `libscada-tag` reports quality `BAD` with `OWNER_DOWN` for every tag of that owner on read.
+- Each process writes a heartbeat in its `proc` region at an interval of at most one third of its heartbeat timeout. The defaults are 3,000 ms, and 500 ms for real-time processes.
+- Each reader judges liveness itself from the heartbeat: a process is down when its `proc` region is missing or not ready, its state is not running, or its heartbeat is older than its timeout (or further than the timeout ahead of the reader's clock). A clean stop therefore reads as down at once, and detection does not depend on `scada-tagd`. While the owner's process is down, `libscada-tag` reports quality `BAD` with `OWNER_DOWN` for every tag of that owner on read.
+- `scada-tagd` evaluates the same rules and keeps a `down` flag per process in the process table. The flag is for reporting and alarms only; readers do not use it.
+- Every age and timeout uses `CLOCK_MONOTONIC`. The unit therefore must not suspend, hibernate or hybrid-sleep, and processes must not run in a private time namespace (contract 3.4). `scada-tagd` reports a suspend it detects and does not act on it.
 
 ### 5.5 Versioning and reconfiguration
 
 - The header carries a layout version (the binary structure) and a config generation (the set of tags). `libscada-tag` refuses to attach when its compiled layout version differs.
 - Changes that do not alter the tag set (alarm limits, poll rates, scaling, logic parameters) are applied live by a reload signal.
-- Changes that add, remove or retype tags create a new generation. `scada-conf` then performs a coordinated restart of the data plane: outputs hold their last value or go to their safe state as configured, services reattach, and retained values are restored. This should complete within a configurable time limit (default 5 seconds). If the limit is exceeded, outputs go to their safe state and a system alarm is raised.
+- Restarting `scada-tagd` with an unchanged tag set keeps the generation, and the other processes keep running.
+- Changes that add, remove or retype tags create a new generation. `scada-tagd` builds it and marks the old one `RETIRING`. Each process then drains its queues (requests still queued are answered `ABORTED`), detaches, attaches to the new generation and resolves its handles again. Retained values are handed over through retain files that `scada-tagd` writes, marked final, once each owner has left the old generation. `scada-conf` performs the coordinated restart: outputs hold their last value or go to their safe state as configured, services reattach, and retained values are restored. This should complete within a configurable time limit (default 5 seconds; conformance test 21 checks 5 seconds). If the limit is exceeded, outputs go to their safe state and a system alarm is raised.
 - Adding tags without a restart may be built later; the tag directory format should not prevent it.
 
 ### 5.6 Retained values
 
-Tags marked `retain: true` (setpoints, auto/manual modes, counters, shelved alarm states) are written to `/var/lib/scada/retain/` at most every 5 seconds when changed, and on clean shutdown. Writes must be atomic: write a temporary file, `fsync`, then rename.
+Tags marked `retain: true` (setpoints, auto/manual modes, counters, shelved alarm states) are written by `scada-tagd` to `/var/lib/scada/retain/`, one file per owner, at most every 5 seconds when changed (configurable), and on clean shutdown. Tags also marked retain-now (modes, control authority) are on disk within 1 second of a change, provided the time from the hand-over of the file to the end of its write, the writes queued before it included, is at most 200 ms; a tag set with a retain-now tag checks at least every 400 ms, and `scada-tagd` logs a warning when a retain-now change reaches the disk late (contract section 12). One owner's file is written at most once in a fixed number of checks (500 ms at the default check), so a tag that changes often cannot keep the disk busy. Writes must be atomic: write a temporary file, `fsync`, rename, then `fsync` the directory.
+
+- The retain file has format version 2 and holds each value with its quality and the flags that describe the value; a restored value reads `UNCERTAIN` with `RESTORED` until the owner writes it.
+- At a generation change the file of an owner that left the old generation is marked final, so that the new generation restores the last values written there.
+- String tags cannot be retained.
 
 ### 5.7 Client library
 
-`libscada-tag` is a C++ library with a plain C interface underneath, so other languages can bind to it later. It must provide at least:
+`libscada-tag` is a C++ library with a plain C interface underneath, so other languages can bind to it later. The C interface is the stable one; the contract gives every function. It provides:
 
-- `attach(process_name)` and `detach()`.
-- `resolve(tag_name)`, returning a stable handle for the current generation.
-- `read(handle)` and `read_many(handles, out)`, returning value, quality, timestamps and age.
-- `write(handle, value, quality, source_time)` for owners only.
-- `subscribe(owner or tag filter)` and `next_change(timeout)` for change rings.
-- `post_event(event)` and `next_event(timeout)` for event queues.
-- `post_request(driver, request)` and `next_result(timeout)` for command queues.
-- Functions used inside real-time tasks (`read`, `read_many`, `write`, `post_request`) must not allocate, block or make system calls.
+- `scada_tag_attach` and `scada_tag_detach`; `scada_tag_heartbeat`, `scada_tag_notify` and `scada_tag_status`.
+- `scada_tag_observe`: a read-only observer context that needs no entry in the process table, creates no file and writes nothing, for tools such as `scadactl` (sections 11.5, 11.6). Read access is membership of group `scada`.
+- `scada_tag_resolve`, returning a handle for the current generation.
+- `scada_tag_read` and `scada_tag_read_many`, returning value, quality, timestamps and age.
+- `scada_tag_write` and `scada_tag_write_many`, for the owner thread only; string tags have their own read and write functions.
+- `scada_sub_open` and `scada_sub_next(timeout)` for change rings, per owner.
+- `scada_queue_open`, `scada_queue_post`, `scada_queue_next(timeout)` and `scada_queue_ack` for event and command queues; command queues deliver at most once.
+- Wait sets over several rings, queues and cycle counters, with a file descriptor for `poll` and `epoll`.
+- Functions used inside real-time tasks must not allocate, block or enter the kernel. The real-time-safe functions are `scada_tag_read`, `scada_tag_read_many`, `scada_tag_write`, `scada_tag_write_many`, `scada_queue_post`, `scada_tag_heartbeat`, `scada_proc_status` and `scada_tag_handle`. Clocks are read through the vDSO; the library checks that this holds and reports it when it does not.
 
 ### 5.8 Size
 
-At 50,000 tags the tag records occupy 3.2 MB. With change rings for 10 writers at the default size (about 21 MB) and queues, the whole database stays under 64 MB.
+At 50,000 tags the tag records occupy 3.2 MB. Measured in phase 1 on the pipeline runners, the whole database for 50,000 tags and 10 owners with change rings of 65,536 entries is 28.8 MB, under 64 MB.
 
 ## 6. Drivers and I/O HAL
 
@@ -289,7 +312,7 @@ Each protocol is a separate process built on one driver framework, so a new prot
 
 ### 6.1 Driver framework
 
-A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command queue handling, statistics, heartbeat and reload. A protocol implements this interface:
+A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command handling on top of the command queues (the tag library drains them at attach and answers expired requests, section 5.3), statistics, heartbeat and reload. A protocol implements this interface:
 
 ```cpp
 class ProtocolDriver {
@@ -1023,7 +1046,7 @@ The following constraints are in force now so the later move is a packaging chan
 | --- | --- | --- |
 | A service crashes or hangs | systemd exit status or missed watchdog | Restart with backoff; system alarm; its tags read `BAD` with `OWNER_DOWN` until it returns |
 | A service restarts repeatedly | Restart counter | Stop restarting after a limit, keep the alarm, leave the rest running |
-| `scada-control` stops | Heartbeat in the process table | `scada-io` and drivers apply each affected output's configured behaviour: hold, or go to safe state after a timeout |
+| `scada-control` stops | Heartbeat in its `proc` region (section 5.4) | `scada-io` and drivers apply each affected output's configured behaviour: hold, or go to safe state after a timeout |
 | A driver loses a device | Timeouts | Tags `BAD` with `COMM_FAIL`; device demoted; control blocks apply bad-input behaviour |
 | Whole system hangs | Hardware watchdog not refreshed | Reboot; onboard outputs go to their hardware default state |
 | Command path broken | Request expiry or missing feedback | Command fails visibly; no automatic retry of operator commands |
@@ -1369,3 +1392,4 @@ The design leaves room for each of these without rework of the core.
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0 | 13 November 2026 | Baseline frozen by the product owner. Includes per-tag logging granularity with configurable aggregate tiers, virtual tags, master and slave units over a direct node link, and distribution-agnostic packaging. |
+| 1.1 | 16 November 2026 | Section 5 updated to match the tag database contract 1.0 (issue #21, P1-13); approved by the product owner. Changed: section 5 and the lines in 3.1, 4.2, 6.1 and 14.4 that refer to it. In section 5: 5 (intro, pointer to the contract), 5.1 (`proc` regions, who creates what, owners are threads, base directory, minimum kernel), 5.2 (record layout, quality flags, atomic access, `SCADA_E_BUSY`), 5.3 (change entry, gaps, full queues, at-most-once commands, wake mechanism, queue limits, request and result fields), 5.4 (heartbeat, liveness judged by readers, timeouts, no suspend), 5.5 (generation change, restart of `scada-tagd`), 5.6 (retain file, retain-now, final files, no strings), 5.7 (C interface, observer, wait sets, real-time-safe functions) and 5.8 (measured size). In 3.1, the row of `scada-tagd`; in 4.2, the pointer for per-region access; in 6.1, command handling of `libscada-driver`; in 14.4, where the heartbeat of `scada-control` is. No other section changed; 10.4 does not yet list system alarms for lost audit records or a broken queue (phase 5, #75). |
