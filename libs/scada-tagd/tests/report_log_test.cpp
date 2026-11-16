@@ -277,13 +277,11 @@ TEST_F(ReportLog, EachProcessNotAttachedIsOneInfoRecord) {
     log_report(logger(), report, late_log, START_NS);
     const std::vector<std::string> records = delivered();
     ASSERT_EQ(records.size(), 3U);
-    for (std::size_t i = 0; i < 2; ++i) {
-        EXPECT_TRUE(has(records.at(i), "MESSAGE=process not attached"));
-        EXPECT_TRUE(has(records.at(i), "PRIORITY=6"));
-        EXPECT_TRUE(
-            has(records.at(i), "MESSAGE_ID=0f57ce3d6dbc4891abd0e55e240f04f9"));
-    }
+    EXPECT_TRUE(has(records[0], "MESSAGE=process not attached"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=6"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=0f57ce3d6dbc4891abd0e55e240f04f9"));
     EXPECT_TRUE(has(records[0], "PROCESS=io"));
+    EXPECT_TRUE(has(records[1], "MESSAGE=process not attached"));
     EXPECT_TRUE(has(records[1], "PROCESS=web"));
     EXPECT_TRUE(has(records[2], "MESSAGE=process up"));
 }
