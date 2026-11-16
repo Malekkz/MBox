@@ -74,6 +74,16 @@ if(EXISTS "${STAGE}/${UNITDIR}/scada-tagd.service.d/retain.conf")
   endif()
 endif()
 
+# The stop of scada-tagd is bounded and systemd waits for it (decision D-59).
+expect_file("${UNITDIR}/scada-tagd.service.d/stop.conf")
+if(EXISTS "${STAGE}/${UNITDIR}/scada-tagd.service.d/stop.conf")
+  file(STRINGS "${STAGE}/${UNITDIR}/scada-tagd.service.d/stop.conf"
+    stop_lines REGEX "^(TimeoutStopSec|KillMode)=")
+  if(NOT stop_lines STREQUAL "TimeoutStopSec=15s;KillMode=mixed")
+    message(SEND_ERROR "the stop drop-in of scada-tagd is not TimeoutStopSec=15s and KillMode=mixed: ${stop_lines}")
+  endif()
+endif()
+
 # scada-tagd needs no capability beyond its own user and the scada group
 # (issue P1-04).
 if(EXISTS "${STAGE}/${UNITDIR}/scada-tagd.service")

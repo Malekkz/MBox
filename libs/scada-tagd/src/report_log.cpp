@@ -176,6 +176,65 @@ void log_unconsumed(scada::Logger& logger,
     }
 }
 
+void log_retain_problem(scada::Logger& logger,
+                        const scada::tag::RetainProblem& problem) {
+    using scada::tag::RetainProblemKind;
+    // The subject may be a file name found in the directory: outside
+    // input, which the sinks escape and cut.
+    LogLevel level = LogLevel::WARNING;
+    std::string_view message;
+    std::string_view message_id;
+    switch (problem.kind) {
+        case RetainProblemKind::FILE_REJECTED:
+            message = "retain file ignored";
+            message_id = MESSAGE_ID_RETAIN_FILE_REJECTED;
+            break;
+        case RetainProblemKind::WRITE_FAILED:
+            message = "retain file not written";
+            message_id = MESSAGE_ID_RETAIN_WRITE_FAILED;
+            break;
+        case RetainProblemKind::WRITER_BOUND:
+            level = LogLevel::ERROR;
+            message = "retain writer did not finish within its bound";
+            message_id = MESSAGE_ID_RETAIN_WRITER_BOUND;
+            break;
+        case RetainProblemKind::UNSAVED_AT_EXIT:
+            level = LogLevel::ERROR;
+            message = "values unsaved at exit";
+            message_id = MESSAGE_ID_VALUES_UNSAVED_AT_EXIT;
+            break;
+    }
+    logger.log(level, message,
+               {{"SUBJECT", problem.subject},
+                {"DETAIL", problem.detail},
+                {"MESSAGE_ID", message_id}});
+}
+
+void log_still_attached(scada::Logger& logger,
+                        const scada::tag::RetiredGeneration& retired) {
+    const std::string generation = std::to_string(retired.generation);
+    for (const std::string& process : retired.still_attached) {
+        // Reference 5.5: a process that did not move to the new generation
+        // in time. Its values were written, not marked FINAL.
+        logger.log(LogLevel::WARNING,
+                   "process still attached to a retired generation",
+                   {{"GENERATION", generation},
+                    {"PROCESS", process},
+                    {"MESSAGE_ID", MESSAGE_ID_STILL_ATTACHED_AT_TIMEOUT}});
+    }
+}
+
+void log_retain_directory_unusable(scada::Logger& logger,
+                                   std::string_view directory,
+                                   std::string_view status,
+                                   std::string_view detail) {
+    logger.log(LogLevel::CRITICAL, "the retain directory is not usable",
+               {{"DIRECTORY", directory},
+                {"STATUS", status},
+                {"DETAIL", detail},
+                {"MESSAGE_ID", MESSAGE_ID_RETAIN_DIRECTORY_UNUSABLE}});
+}
+
 void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 LateLog& late_log, std::int64_t now_mono_ns) {
     // One record each, not one list: a field holds at most

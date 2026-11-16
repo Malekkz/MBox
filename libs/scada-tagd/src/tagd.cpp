@@ -96,7 +96,9 @@ constexpr std::string_view USAGE =
     "\n"
     "Signals:\n"
     "  SIGTERM, SIGINT  Write the retained values that changed, stop and exit\n"
-    "                   with code 0. The generation stays.\n"
+    "                   with code 0. The generation stays. If the retained\n"
+    "                   values are not on disk within 5 s (a hung fsync),\n"
+    "                   log it and exit at once with code 3.\n"
     "\n"
     "Environment (set by systemd):\n"
     "  NOTIFY_SOCKET    Socket for readiness and watchdog messages.\n"
@@ -105,9 +107,14 @@ constexpr std::string_view USAGE =
     "                   liveness.\n"
     "  WATCHDOG_PID     Process the watchdog applies to.\n"
     "\n"
-    "Exit codes: 0 stopped on request, 1 error, 2 wrong arguments.\n";
+    "Exit codes: 0 stopped on request, 1 error, 2 wrong arguments,\n"
+    "3 stopped with retained values possibly unsaved.\n";
 
 constexpr std::int64_t NANOSECONDS_PER_MILLISECOND = 1'000'000;
+// How long a stop that cannot wait for the retain writer waits for the log
+// to be delivered: with the 5-s bound of the writer, well inside the 15 s
+// of TimeoutStopSec in the unit file.
+constexpr std::chrono::milliseconds LOG_FLUSH_AT_EXIT{2000};
 constexpr std::int64_t NANOSECONDS_PER_MICROSECOND = 1'000;
 
 // A process writes its heartbeat at least this many times within its
@@ -274,20 +281,11 @@ void log_retained(Logger& logger, const CheckReport& report) {
                    {{"OWNER", written.owner}, {"VALUES", values}});
     }
     for (const scada::tag::RetainProblem& problem : report.retain_problems) {
-        // The subject may be a file name found in the directory: outside
-        // input, which the sinks escape and cut.
-        logger.log(LogLevel::WARNING, "retained values",
-                   {{"SUBJECT", problem.subject}, {"DETAIL", problem.detail}});
+        log_retain_problem(logger, problem);
     }
     for (const scada::tag::RetiredGeneration& retired : report.retired) {
         const std::string generation = std::to_string(retired.generation);
-        for (const std::string& process : retired.still_attached) {
-            // Reference 5.5: a process that did not move to the new
-            // generation in time. Its values were written, not marked FINAL.
-            logger.log(LogLevel::WARNING,
-                       "process still attached to a retired generation",
-                       {{"GENERATION", generation}, {"PROCESS", process}});
-        }
+        log_still_attached(logger, retired);
         log_unconsumed(logger, retired);
         if (retired.removed) {
             logger.log(retired.timed_out ? LogLevel::WARNING : LogLevel::NOTICE,
@@ -361,10 +359,33 @@ std::int64_t loop_period_ns(const GenerationHost& host,
     return period;
 }
 
+// The end of a stop at which the retain writer did not finish within its
+// bound (decision D-59, point 5): the write in flight may be in a hung
+// fsync, and joining the writer would wait for as long as the kernel holds
+// it. The file is safe whatever happens to that write: the old one or the
+// new one survives, and the next start removes the temporary file. The
+// thread keeps the lock of the base directory until it leaves the kernel,
+// so a restarted scada-tagd cannot become a second writer.
+int stop_unsaved(Logger& logger, const RunHooks& hooks) {
+    logger.log(LogLevel::ERROR, "values unsaved at exit",
+               {{"SUBJECT", "retain writer"},
+                {"DETAIL",
+                 "a retain file was still being written at the "
+                 "stop; exiting without waiting for it"},
+                {"MESSAGE_ID", MESSAGE_ID_VALUES_UNSAVED_AT_EXIT}});
+    // Best effort: what is not delivered within the bound is lost with
+    // the process.
+    static_cast<void>(logger.flush(LOG_FLUSH_AT_EXIT));
+    if (hooks.exit_now != nullptr) {
+        hooks.exit_now(EXIT_UNSAVED);
+    }
+    return EXIT_UNSAVED;
+}
+
 // Runs until a stop signal arrives. Returns the process exit code.
 int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
-          Logger& logger, SuspendWatch& suspend) {
+          Logger& logger, SuspendWatch& suspend, const RunHooks& hooks) {
     const std::int64_t period = loop_period_ns(host, settings);
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
     bool feeding = true;  // the last watchdog message was sent
@@ -400,17 +421,22 @@ int serve(GenerationHost& host, Notifier& notifier,
         switch (wait_for_signal(signals, next - done)) {
             case Wake::CHECK_DUE:
                 break;
-            case Wake::STOP:
+            case Wake::STOP: {
                 // Section 12: the retained values on clean shutdown.
-                log_retained(logger, host.flush_retained());
+                const CheckReport flushed = host.flush_retained();
+                log_retained(logger, flushed);
                 // Late heartbeats held back by the rate limit are not lost.
                 log_late(logger, late_log.drain());
                 host.stop();
                 // Best effort: the process exits either way, and the
                 // service manager sees the exit.
                 static_cast<void>(notifier.stopping());
+                if (flushed.retain_writer_bound_reached) {
+                    return stop_unsaved(logger, hooks);
+                }
                 logger.log(LogLevel::NOTICE, "stopped on request");
                 return EXIT_OK;
+            }
             case Wake::ERROR:
                 log_late(logger, late_log.drain());
                 logger.log(LogLevel::CRITICAL, "waiting for signals failed");
@@ -434,7 +460,7 @@ void fail(Logger* logger, std::ostream& err, std::string_view what,
     err << '\n' << std::flush;
 }
 
-int start(const Options& options, std::ostream& err) {
+int start(const Options& options, std::ostream& err, const RunHooks& hooks) {
     std::string detail;
     const Result<std::string> text = read_file(options.tag_set_path, detail);
     if (!text.ok()) {
@@ -483,14 +509,21 @@ int start(const Options& options, std::ostream& err) {
         return EXIT_ERROR;
     }
 
-    Result<GenerationHost> host = GenerationHost::start(
-        tag_set.value(),
-        {.base_dir = options.base_dir,
-         .tagd_uid = ::geteuid(),
-         .retain_dir = options.retain_dir,
-         .retain_interval_ms = options.retain_interval_ms},
-        detail);
+    scada::tag::HostStartFailure failure = scada::tag::HostStartFailure::NONE;
+    Result<GenerationHost> host =
+        GenerationHost::start(tag_set.value(),
+                              {.base_dir = options.base_dir,
+                               .tagd_uid = ::geteuid(),
+                               .retain_dir = options.retain_dir,
+                               .retain_interval_ms = options.retain_interval_ms,
+                               .retain_file_ops = hooks.retain_file_ops},
+                              detail, failure);
     if (!host.ok()) {
+        if (failure == scada::tag::HostStartFailure::RETAIN_DIRECTORY) {
+            log_retain_directory_unusable(logger.value(), options.retain_dir,
+                                          to_string(host.status().code()),
+                                          detail);
+        }
         fail(&logger.value(), err, "cannot start the tag database",
              host.status(), detail);
         return EXIT_ERROR;
@@ -528,13 +561,18 @@ int start(const Options& options, std::ostream& err) {
     // Best effort: the status line only helps the person looking.
     static_cast<void>(notifier.set_status_text("Generation " + generation));
     return serve(host.value(), notifier, settings.value(), signals,
-                 logger.value(), suspend);
+                 logger.value(), suspend, hooks);
 }
 
 }  // namespace
 
 int run(std::span<const std::string_view> args, std::ostream& out,
         std::ostream& err) {
+    return run(args, out, err, RunHooks{});
+}
+
+int run(std::span<const std::string_view> args, std::ostream& out,
+        std::ostream& err, const RunHooks& hooks) {
     const std::optional<Options> options = parse_options(args);
     if (!options.has_value()) {
         err << "scada-tagd: unexpected arguments\n" << USAGE;
@@ -544,7 +582,7 @@ int run(std::span<const std::string_view> args, std::ostream& out,
         out << USAGE;
         return EXIT_OK;
     }
-    return start(*options, err);
+    return start(*options, err, hooks);
 }
 
 }  // namespace scada::tagd

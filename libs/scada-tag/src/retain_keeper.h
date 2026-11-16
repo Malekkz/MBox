@@ -126,10 +126,12 @@ public:
     // removed. `config_hash` is that of the tag set scada-tagd runs with; it
     // goes into every file written. The codes of `open_base_directory` on
     // an error.
+    // `ops`, borrowed for the life of the keeper, are the file system calls
+    // of its writer.
     [[nodiscard]] static Result<std::unique_ptr<RetainKeeper>> open(
         const std::string& retain_dir, std::uint32_t tagd_uid, int base_fd,
         std::uint32_t interval_ms, const ConfigHash& config_hash,
-        std::string& detail);
+        std::string& detail, RetainFileOps& ops = system_retain_file_ops());
 
 private:
     // Only `open` can name it, so only `open` can construct.
@@ -140,7 +142,8 @@ private:
 public:
     // For `open` alone.
     RetainKeeper(Key key, Fd directory, std::uint32_t tagd_uid,
-                 std::int64_t interval_ns, const ConfigHash& config_hash);
+                 std::int64_t interval_ns, const ConfigHash& config_hash,
+                 RetainFileOps& ops);
 
     RetainKeeper(const RetainKeeper&) = delete;
     RetainKeeper& operator=(const RetainKeeper&) = delete;
@@ -252,11 +255,13 @@ private:
     // Fills `watched.owners` and `watched.processes` from its header.
     void describe(Watched& watched, bool retired,
                   std::int64_t now_mono_ns) const;
-    // Loads the values on file for the owners of `watched`. Names of the
-    // owner's own file go to `own_names`.
-    void load_watched(const Watched& watched,
-                      std::map<std::string, std::vector<std::string>,
-                               std::less<>>& own_names);
+    // Loads the values on file for the owners of `watched`; with
+    // `own_only` from each owner's own file only. Names of the owner's own
+    // file go to `own_names`.
+    void load_watched(
+        const Watched& watched,
+        std::map<std::string, std::vector<std::string>, std::less<>>& own_names,
+        bool own_only);
 
     // Reads the RETAIN tags of `owner` in `watched` into the state of its
     // name. False if its `tags` region is missing.
@@ -307,7 +312,14 @@ private:
     // Removes the retired generations that are done.
     void remove_done(int base_fd, std::int64_t now_mono_ns,
                      CheckReport& report);
-    // Removes the files of owners that are in no generation any more.
+    // Takes into the state of every owner of the current generation that
+    // has no region there the values of its RETAIN tags that only other
+    // owners' files hold (a tag that moved, decision D-59). True if any was
+    // taken; those owners are then written.
+    [[nodiscard]] bool adopt_moved_values();
+    // Removes the files of owners that are in no generation any more, once
+    // `adopt_moved_values` ran and every owner of the current generation
+    // with values has its file on disk.
     void remove_files_of_gone_owners();
 
     Fd directory_;  // the retain directory; invalid if none
@@ -321,6 +333,7 @@ private:
     std::set<std::string, std::less<>> rejected_seen_;
     std::vector<RetainProblem> pending_problems_;
     bool gone_owners_removed_ = false;
+    bool moved_values_adopted_ = false;
     std::uint64_t writer_lost_ = 0;  // RetainWriter::lost at the last look
     // Last: destroyed first, while the directory is still open.
     std::unique_ptr<RetainWriter> writer_;

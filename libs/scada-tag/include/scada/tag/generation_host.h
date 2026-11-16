@@ -23,6 +23,9 @@
 
 namespace scada::tag {
 
+// The file system calls of the retain writer (private to libscada-tag).
+class RetainFileOps;
+
 // Defaults of the contract, section 3.
 inline constexpr std::string_view DEFAULT_BASE_DIR = "/dev/shm/scada";
 
@@ -49,6 +52,16 @@ struct HostOptions {
     // Values that changed are written at most this often, in ms (section
     // 12); a RETAIN_NOW tag is written at the next check after its change.
     std::uint32_t retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS;
+    // Tests only: the file system calls of the retain writer, borrowed for
+    // the life of the host. Null: the operating system's.
+    RetainFileOps* retain_file_ops = nullptr;
+};
+
+// Why `GenerationHost::start` failed.
+enum class HostStartFailure : std::uint8_t {
+    NONE,
+    RETAIN_DIRECTORY,  // the retain directory is missing or not usable
+    OTHER,
 };
 
 // How long a retired generation may keep scada-tagd waiting for its
@@ -97,6 +110,15 @@ struct RetainWrite {
     bool final = false;
 };
 
+// What a retain problem is; each has a log record of its own (decision
+// D-59).
+enum class RetainProblemKind : std::uint8_t {
+    FILE_REJECTED,    // a retain file failed its checks and was ignored
+    WRITE_FAILED,     // a retain file, or the directory, could not be written
+    WRITER_BOUND,     // the writer did not finish within RETAIN_WAIT_LIMIT
+    UNSAVED_AT_EXIT,  // values of an owner not on disk at the stop
+};
+
 // A retain file that was ignored because it failed its checks, or one that
 // could not be written. Reported once until the problem goes away.
 struct RetainProblem {
@@ -104,6 +126,7 @@ struct RetainProblem {
     // bytes but '/' and NUL.
     std::string subject;
     std::string detail;
+    RetainProblemKind kind = RetainProblemKind::FILE_REJECTED;
 };
 
 // Records a producer posted in a retired generation that its consumer did
@@ -235,6 +258,10 @@ struct CheckReport {
     std::vector<LateHeartbeats> late;
     std::vector<RetainWrite> retain_written;
     std::vector<RetainProblem> retain_problems;
+    // True if a wait for the writer of retain files reached its bound of
+    // 5 s (decision D-59): a write is still in flight, possibly in a hung
+    // fsync. At a stop the process must then end without joining it.
+    bool retain_writer_bound_reached = false;
     std::vector<RetiredGeneration> retired;
     // Retain files of owners that are in no generation any more, removed
     // once every owner of the current generation has a file and no
@@ -283,6 +310,11 @@ public:
     // otherwise. On an error `detail` says what failed.
     [[nodiscard]] static Result<GenerationHost> start(
         const TagSet& tag_set, const HostOptions& options, std::string& detail);
+    // The same, and on an error `failure` says whether the retain directory
+    // was the cause (a log record of its own, decision D-59).
+    [[nodiscard]] static Result<GenerationHost> start(
+        const TagSet& tag_set, const HostOptions& options, std::string& detail,
+        HostStartFailure& failure);
 
     ~GenerationHost();
     GenerationHost(GenerationHost&&) noexcept;

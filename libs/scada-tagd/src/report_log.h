@@ -44,6 +44,19 @@ inline constexpr std::string_view MESSAGE_ID_PROCESS_NOT_ATTACHED =
     "0f57ce3d6dbc4891abd0e55e240f04f9";
 inline constexpr std::string_view MESSAGE_ID_RECORDS_UNCONSUMED =
     "42c8e35948cb467eb6d894d3bb0476a8";
+// Retain problems, one ID each (decision D-59, point 3).
+inline constexpr std::string_view MESSAGE_ID_RETAIN_FILE_REJECTED =
+    "586ec48106f748609721eef8957c56d5";
+inline constexpr std::string_view MESSAGE_ID_RETAIN_WRITE_FAILED =
+    "974151cda6fa452a998a576b2bb09bce";
+inline constexpr std::string_view MESSAGE_ID_RETAIN_DIRECTORY_UNUSABLE =
+    "8df1e064b8464d59ad5fa42e9a3070e4";
+inline constexpr std::string_view MESSAGE_ID_STILL_ATTACHED_AT_TIMEOUT =
+    "349b6814c6cc4a2fafa5d3d1af16e7a7";
+inline constexpr std::string_view MESSAGE_ID_RETAIN_WRITER_BOUND =
+    "0031dfe3391142b0b9fa995b07115e10";
+inline constexpr std::string_view MESSAGE_ID_VALUES_UNSAVED_AT_EXIT =
+    "7cf5c1c8535f44f6a297db538666d7a3";
 
 // Logs records of late heartbeats: `heartbeat late` at WARNING, or, for a
 // baseline, `heartbeat late before this check` at INFO.
@@ -56,6 +69,26 @@ void log_late(scada::Logger& logger, std::span<const LateRecord> records);
 // or "unknown") and, for a known count, FIRST_SEQ and END_SEQ.
 void log_unconsumed(scada::Logger& logger,
                     const scada::tag::RetiredGeneration& retired);
+
+// Logs one retain problem with the MESSAGE_ID of its kind (decision D-59):
+// `retain file ignored` (WARNING), `retain file not written` (WARNING),
+// `retain writer did not finish within its bound` (ERROR) or `values
+// unsaved at exit` (ERROR), with SUBJECT and DETAIL.
+void log_retain_problem(scada::Logger& logger,
+                        const scada::tag::RetainProblem& problem);
+
+// Logs, for a retired generation removed after its timeout, each process
+// still attached to it: WARNING, `process still attached to a retired
+// generation`, with GENERATION and PROCESS ("<name> (pid <pid>)").
+void log_still_attached(scada::Logger& logger,
+                        const scada::tag::RetiredGeneration& retired);
+
+// Logs that the retain directory is not usable at the start: CRITICAL,
+// `the retain directory is not usable`, with DIRECTORY, STATUS and DETAIL.
+void log_retain_directory_unusable(scada::Logger& logger,
+                                   std::string_view directory,
+                                   std::string_view status,
+                                   std::string_view detail);
 
 // Logs what one liveness check made at `now_mono_ns` found: each process
 // not attached at the first check of a new generation, every change

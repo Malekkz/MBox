@@ -3,6 +3,7 @@
 #include "scada/tagd/tagd.h"
 
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -20,5 +21,10 @@ int main(int argc, char* argv[]) {
         const std::span<char*> options = raw_args.subspan(1);
         args.assign(options.begin(), options.end());
     }
-    return scada::tagd::run(args, std::cout, std::cerr);
+    scada::tagd::RunHooks hooks;
+    // Coding standard, section 7: std::_Exit only here, after a bounded stop
+    // failed (decision D-59). It skips the join of a retain writer that is
+    // still inside a hung fsync.
+    hooks.exit_now = [](int status) { std::_Exit(status); };
+    return scada::tagd::run(args, std::cout, std::cerr, hooks);
 }

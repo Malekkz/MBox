@@ -141,18 +141,20 @@ endif()
 # retained-value part of conformance test 21, test 25, and SIGKILL at random
 # points (issue #17; decision D-45).
 scada_test_command(retainer_command scada-tag-test-retainer)
+scada_test_command(hung_writer_command scada-tagd-test-hung-writer)
 scada_add_test(scada-tag-retain-integration-test KIND integration
   SOURCES retain_integration_test.cpp
   DEPENDS scada::tag scada::tagd scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"
-    "SCADA_TAG_RETAINER_COMMAND=${retainer_command}")
+    "SCADA_TAG_RETAINER_COMMAND=${retainer_command}"
+    "SCADA_TAGD_HUNG_WRITER_COMMAND=${hung_writer_command}")
 # retain_file.h is private to the library: the test reads the files as
 # attach does.
 target_include_directories(scada-tag-retain-integration-test
   PRIVATE "${PROJECT_SOURCE_DIR}/libs/scada-tag/src")
 add_dependencies(scada-tag-retain-integration-test
-  scada-tagd scada-tag-test-retainer)
+  scada-tagd scada-tag-test-retainer scada-tagd-test-hung-writer)
 
 # The queue part of conformance test 21: across a generation change no
 # event a post accepted is lost and no request of the old generation is

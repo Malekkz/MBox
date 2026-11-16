@@ -5,6 +5,7 @@
 #include "queue_region.h"
 #include "region_file.h"
 #include "resolved_tag_set.h"
+#include "retain_file.h"
 #include "retain_keeper.h"
 #include "shared_memory.h"
 
@@ -562,7 +563,8 @@ class GenerationHost::Impl {
 public:
     // `GenerationHost::start`.
     [[nodiscard]] static Result<std::unique_ptr<Impl>> start(
-        const TagSet& tag_set, const HostOptions& options, std::string& detail);
+        const TagSet& tag_set, const HostOptions& options, std::string& detail,
+        HostStartFailure& failure);
 
     [[nodiscard]] std::uint64_t generation() const noexcept {
         return open_.generation;
@@ -866,7 +868,8 @@ Status GenerationHost::Impl::attach_own_region(std::string& detail) {
 }
 
 Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
-    const TagSet& tag_set, const HostOptions& options, std::string& detail) {
+    const TagSet& tag_set, const HostOptions& options, std::string& detail,
+    HostStartFailure& failure) {
     const Result<ResolvedTagSet> resolved = resolve(tag_set, detail);
     if (!resolved.ok()) {
         return resolved.status();
@@ -904,8 +907,11 @@ Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
     }
     Result<std::unique_ptr<RetainKeeper>> keeper = RetainKeeper::open(
         options.retain_dir, options.tagd_uid, impl->base_.get(),
-        options.retain_interval_ms, hash.value(), detail);
+        options.retain_interval_ms, hash.value(), detail,
+        options.retain_file_ops != nullptr ? *options.retain_file_ops
+                                           : system_retain_file_ops());
     if (!keeper.ok()) {
+        failure = HostStartFailure::RETAIN_DIRECTORY;
         return keeper.status();
     }
     impl->keeper_ = std::move(keeper).value();
@@ -1224,8 +1230,21 @@ GenerationHost& GenerationHost::operator=(GenerationHost&&) noexcept = default;
 Result<GenerationHost> GenerationHost::start(const TagSet& tag_set,
                                              const HostOptions& options,
                                              std::string& detail) {
-    Result<std::unique_ptr<Impl>> impl = Impl::start(tag_set, options, detail);
+    HostStartFailure ignored = HostStartFailure::NONE;
+    return start(tag_set, options, detail, ignored);
+}
+
+Result<GenerationHost> GenerationHost::start(const TagSet& tag_set,
+                                             const HostOptions& options,
+                                             std::string& detail,
+                                             HostStartFailure& failure) {
+    failure = HostStartFailure::NONE;
+    Result<std::unique_ptr<Impl>> impl =
+        Impl::start(tag_set, options, detail, failure);
     if (!impl.ok()) {
+        if (failure == HostStartFailure::NONE) {
+            failure = HostStartFailure::OTHER;
+        }
         return impl.status();
     }
     return GenerationHost(std::move(impl).value());

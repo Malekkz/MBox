@@ -964,3 +964,191 @@ TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
 }
 
 }  // namespace
+
+namespace {
+
+// Decision D-59, point 6: generation 1 has a hung owner that still holds
+// its lock, generation 2 holds that owner's newer value, and generation 3
+// has no region of it yet. At the 30-s timeout of generation 1 nothing of
+// it may replace the value of generation 2, which is on file marked FINAL.
+TEST_F(Keeper,
+       AtTheTimeoutAHungOwnerNeverOverwritesTheValueOfANewerGeneration) {
+    start_host(retained_set());  // generation 1
+    const Attached hung = attached("io");
+    ASSERT_NE(hung, nullptr);
+    write(*hung, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
+    drop_host();
+    start_host(changed_set());  // generation 2
+    {
+        // Its wait for the FINAL file of generation 1 runs out: the owner
+        // there never leaves.
+        const Attached newer = attached("io");
+        ASSERT_NE(newer, nullptr);
+        write(*newer, "plant.mode", SCADA_TYPE_INT64, VALUE_6);
+    }
+    drop_host();
+    TagSet third = changed_set();
+    third.tags.push_back(
+        {.name = "plant.third", .owner = "io", .type = TagType::BOOL});
+    // Generation 3; 1 and 2 are retired. io has left generation 2: the
+    // first checks write its FINAL file with VALUE_6 and remove it.
+    start_host(third);
+    ASSERT_EQ(host().generation(), 3U);
+    const std::int64_t now = scada::monotonic_ns();
+    CheckReport report = two_rounds(now);
+    ASSERT_EQ(report.retired.size(), 1U);
+    EXPECT_EQ(report.retired[0].generation, 2U);
+    RetainFile file = file_of("io");
+    ASSERT_TRUE(file.final);
+    ASSERT_EQ(file.source.generation, 2U);
+    ASSERT_EQ(value_in(file, "plant.mode"), VALUE_6);
+
+    // Generation 1 times out with io still attached.
+    report = two_rounds(now + RETIRED_TIMEOUT_NS);
+    ASSERT_EQ(report.retired.size(), 1U);
+    EXPECT_EQ(report.retired[0].generation, 1U);
+    EXPECT_TRUE(report.retired[0].timed_out);
+    file = file_of("io");
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_6);
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(file.source.generation, 2U);
+}
+
+}  // namespace
+
+// Decision D-59, point 4: a tag that moved to another owner keeps its value
+// when the new owner attaches late.
+namespace {
+
+// The tag set of `Keeper::retained_set` with every tag moved from `io` to
+// `web`, and `io` no longer an owner.
+TagSet moved_to_web(TagSet set) {
+    set.owners = {{.name = "web",
+                   .process = "web",
+                   .change_ring_capacity = MIN_CHANGE_RING_CAPACITY}};
+    for (auto& tag : set.tags) {
+        tag.owner = "web";
+    }
+    return set;
+}
+
+class MovedKeeper : public Keeper {
+protected:
+    // Generation 1 with `former`, attached as io, having written `value`
+    // to plant.level; then generation 2 with the tags moved to web.
+    [[nodiscard]] Attached former_wrote(std::uint64_t value) {
+        start_host(retained_set());
+        Attached former = attached("io");
+        if (former != nullptr) {
+            write(*former, "plant.level", SCADA_TYPE_FLOAT64, value);
+        }
+        drop_host();
+        start_host(moved_to_web(retained_set()));
+        return former;
+    }
+
+    // What the restore of `process` did for plant.level.
+    [[nodiscard]] static scada_tag_retain_info_t level_info(
+        Attachment& process) {
+        std::uint32_t handle = SCADA_INVALID_HANDLE;
+        scada_tag_retain_info_t info{};
+        EXPECT_EQ(process.resolve("plant.level", handle), SCADA_OK);
+        EXPECT_EQ(process.retain_info(handle, info), SCADA_OK);
+        return info;
+    }
+
+    // True if web.bin or io.bin holds `value` for plant.level.
+    [[nodiscard]] bool value_somewhere(std::uint64_t value) const {
+        const bool web_has =
+            has_file("web") && value_in(file_of("web"), "plant.level") == value;
+        const bool io_has =
+            has_file("io") && value_in(file_of("io"), "plant.level") == value;
+        return web_has || io_has;
+    }
+
+    // Rounds at `now + first` and the `count - 1` ns after it; fails at the
+    // first after which no file holds `value`.
+    [[nodiscard]] ::testing::AssertionResult rounds_keep(std::int64_t now,
+                                                         int first, int count,
+                                                         std::uint64_t value) {
+        for (int i = first; i < first + count; ++i) {
+            static_cast<void>(round(now + i));
+            if (!value_somewhere(value)) {
+                return ::testing::AssertionFailure() << "after round " << i;
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+};
+
+constexpr int ROUNDS = 6;
+
+// (a) The old generation is removed and its FINAL file is used: no wait.
+TEST_F(MovedKeeper, ATagAttachedAfterTheOldGenerationWasRemovedTakesItsFinal) {
+    Attached former = former_wrote(VALUE_7);
+    ASSERT_NE(former, nullptr);
+    former.reset();  // io leaves generation 1
+    const std::int64_t now = scada::monotonic_ns();
+    ASSERT_EQ(two_rounds(now).retired.size(), 1U);
+    ASSERT_FALSE(std::filesystem::exists(generation_dir(1)));
+    // io is in no generation any more. Its value of the moved tag goes to
+    // the file of web, which has not attached, before io.bin is removed.
+    ASSERT_TRUE(rounds_keep(now, 2, ROUNDS, VALUE_7));
+    EXPECT_FALSE(has_file("io"));
+    EXPECT_EQ(value_in(file_of("web"), "plant.level"), VALUE_7);
+
+    const std::int64_t start = scada::monotonic_ns();
+    const Attached web = attached("web");
+    ASSERT_NE(web, nullptr);
+    EXPECT_LT(scada::monotonic_ns() - start, RETAIN_FINAL_WAIT_NS / 2);
+    EXPECT_EQ(web->status().final_waits_expired, 0U);
+    EXPECT_EQ(read(*web, "plant.level"), VALUE_7);
+    const scada_tag_retain_info_t info = level_info(*web);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_PERIODIC);
+    EXPECT_EQ(info.final_wait_expired, 0);
+}
+
+// (b) The wait runs out while the former owner is still in the old
+// generation: the periodic file is used, and the expired wait counted.
+TEST_F(MovedKeeper, ATagWhoseFormerOwnerStaysTakesThePeriodicFileAfterTheWait) {
+    start_host(retained_set());
+    const Attached former = attached("io");
+    ASSERT_NE(former, nullptr);
+    write(*former, "plant.level", SCADA_TYPE_FLOAT64, VALUE_7);
+    // The first write of an owner is at once: the periodic file.
+    ASSERT_EQ(round(scada::monotonic_ns()).retain_written.size(), 1U);
+    // A later value that only a FINAL file would hold.
+    write(*former, "plant.level", SCADA_TYPE_FLOAT64, VALUE_8);
+    drop_host();
+    start_host(moved_to_web(retained_set()));
+
+    const Attached web = attached("web");  // io holds on: the wait runs out
+    ASSERT_NE(web, nullptr);
+    EXPECT_EQ(web->status().final_waits_expired, 1U);
+    EXPECT_EQ(read(*web, "plant.level"), VALUE_7);
+    const scada_tag_retain_info_t info = level_info(*web);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
+    EXPECT_EQ(info.final_wait_expired, 1);
+}
+
+// (c) The file of the new owner is on disk before the file of the former
+// owner, which is in no generation any more, is unlinked: at no point is
+// the value on file nowhere.
+TEST_F(MovedKeeper, TheNewOwnersFileIsWrittenBeforeTheFormerOwnersIsRemoved) {
+    Attached former = former_wrote(VALUE_7);
+    ASSERT_NE(former, nullptr);
+    former.reset();
+    // The FINAL file of io; then web attaches, before the removal of
+    // generation 1, and restores from it.
+    const std::int64_t now = scada::monotonic_ns();
+    static_cast<void>(round(now));
+    ASSERT_TRUE(file_of("io").final);
+    const Attached web = attached("web");
+    ASSERT_NE(web, nullptr);
+    ASSERT_EQ(read(*web, "plant.level"), VALUE_7);
+    ASSERT_TRUE(rounds_keep(now, 1, ROUNDS, VALUE_7));
+    EXPECT_FALSE(has_file("io"));
+    EXPECT_EQ(value_in(file_of("web"), "plant.level"), VALUE_7);
+}
+
+}  // namespace

@@ -230,13 +230,13 @@ void RetainWriter::run(const std::stop_token& stop) {
 
 RetainKeeper::RetainKeeper(Key /*key*/, Fd directory, std::uint32_t tagd_uid,
                            std::int64_t interval_ns,
-                           const ConfigHash& config_hash)
+                           const ConfigHash& config_hash, RetainFileOps& ops)
     : directory_(std::move(directory)),
       tagd_uid_(tagd_uid),
       interval_ns_(interval_ns),
       config_hash_(config_hash) {
     if (directory_.valid()) {
-        writer_ = std::make_unique<RetainWriter>(directory_.get());
+        writer_ = std::make_unique<RetainWriter>(directory_.get(), ops);
     }
 }
 
@@ -245,7 +245,7 @@ RetainKeeper::~RetainKeeper() = default;
 Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
     const std::string& retain_dir, std::uint32_t tagd_uid, int base_fd,
     std::uint32_t interval_ms, const ConfigHash& config_hash,
-    std::string& detail) {
+    std::string& detail, RetainFileOps& ops) {
     Fd directory;
     if (!retain_dir.empty()) {
         Result<Fd> opened =
@@ -258,7 +258,7 @@ Result<std::unique_ptr<RetainKeeper>> RetainKeeper::open(
     }
     return std::make_unique<RetainKeeper>(Key{}, std::move(directory), tagd_uid,
                                           std::int64_t{interval_ms} * NS_PER_MS,
-                                          config_hash);
+                                          config_hash, ops);
 }
 
 void RetainKeeper::describe(Watched& watched, bool retired,
@@ -368,7 +368,8 @@ std::optional<GenerationState> RetainKeeper::watch_retired(
 
 void RetainKeeper::load_watched(
     const Watched& watched,
-    std::map<std::string, std::vector<std::string>, std::less<>>& own_names) {
+    std::map<std::string, std::vector<std::string>, std::less<>>& own_names,
+    bool own_only) {
     for (const WatchedOwner& owner : watched.owners) {
         std::vector<WantedValue> wanted;
         wanted.reserve(owner.tags.size());
@@ -378,8 +379,9 @@ void RetainKeeper::load_watched(
         const LoadedValues loaded =
             load_retained(directory_.get(), tagd_uid_, owner.name, wanted);
         OwnerState& state = states_[owner.name];
-        for (const std::optional<RetainedValue>& value : loaded.values) {
-            if (value.has_value()) {
+        for (std::size_t i = 0; i < loaded.values.size(); ++i) {
+            const std::optional<RetainedValue>& value = loaded.values[i];
+            if (value.has_value() && (!own_only || loaded.sources.at(i).own)) {
                 state.values.try_emplace(value->name, *value);
             }
         }
@@ -398,8 +400,9 @@ void RetainKeeper::load_watched(
         }
         for (const RejectedRetainFile& rejected : loaded.rejected) {
             if (rejected_seen_.insert(rejected.file).second) {
-                pending_problems_.push_back(
-                    {rejected.file, "ignored: " + rejected.detail});
+                pending_problems_.push_back({rejected.file,
+                                             "ignored: " + rejected.detail,
+                                             RetainProblemKind::FILE_REJECTED});
             }
         }
     }
@@ -410,11 +413,16 @@ void RetainKeeper::load() {
         return;
     }
     std::map<std::string, std::vector<std::string>, std::less<>> own_names;
+    // Decision D-59: for the current generation the own files only. A value
+    // of a tag that moved is in a file of its former owner, which a retired
+    // generation may still replace with a FINAL one; it is taken once no
+    // generation is retired (`adopt_moved_values`), or by the owner's
+    // restore at attach.
     if (current_ != nullptr) {
-        load_watched(*current_, own_names);
+        load_watched(*current_, own_names, true);
     }
     for (const std::unique_ptr<Watched>& watched : retired_) {
-        load_watched(*watched, own_names);
+        load_watched(*watched, own_names, false);
     }
     for (auto& [name, state] : states_) {
         // A value found only in another owner's file, or a name the owner
@@ -566,7 +574,8 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
                 done.removed.end());
             if (!done.written) {
                 report.retain_problems.push_back(
-                    {"retain directory", done.detail});
+                    {"retain directory", done.detail,
+                     RetainProblemKind::WRITE_FAILED});
             }
             continue;
         }
@@ -589,7 +598,8 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
             if (!state.failing) {
                 state.failing = true;
                 report.retain_problems.push_back(
-                    {done.owner, "cannot write: " + done.detail});
+                    {done.owner, "cannot write: " + done.detail,
+                     RetainProblemKind::WRITE_FAILED});
             }
         }
     }
@@ -760,9 +770,12 @@ void RetainKeeper::finish(int base_fd, Watched& watched,
             continue;
         }
         const bool left = has_left(watched, owner, now_mono_ns);
-        if (left && newer_region_exists(base_fd, watched.generation, owner.name,
-                                        now_mono_ns)) {
+        if ((left || timed_out) &&
+            newer_region_exists(base_fd, watched.generation, owner.name,
+                                now_mono_ns)) {
             // A newer generation holds newer values: nothing from this one.
+            // Also at the timeout, while the owner hangs here (decision
+            // D-59, point 6).
             owner.done = true;
         } else if (left) {
             static_cast<void>(read_owner(watched, owner));
@@ -855,9 +868,49 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
     });
 }
 
+bool RetainKeeper::adopt_moved_values() {
+    bool adopted = false;
+    for (const WatchedOwner& owner : current_->owners) {
+        // An owner with a region restored its values at attach, and its
+        // records are read at every check.
+        if (current_has_region(owner.name)) {
+            continue;
+        }
+        std::vector<WantedValue> wanted;
+        wanted.reserve(owner.tags.size());
+        for (const RetainedTag& tag : owner.tags) {
+            wanted.push_back({tag.name, tag.type});
+        }
+        const LoadedValues loaded =
+            load_retained(directory_.get(), tagd_uid_, owner.name, wanted);
+        OwnerState& state = states_[owner.name];
+        for (std::size_t i = 0; i < loaded.values.size(); ++i) {
+            const std::optional<RetainedValue>& value = loaded.values[i];
+            if (value.has_value() && !loaded.sources.at(i).own &&
+                state.values.try_emplace(value->name, *value).second) {
+                state.dirty = true;
+                adopted = true;
+            }
+        }
+        for (const RejectedRetainFile& rejected : loaded.rejected) {
+            if (rejected_seen_.insert(rejected.file).second) {
+                pending_problems_.push_back({rejected.file,
+                                             "ignored: " + rejected.detail,
+                                             RetainProblemKind::FILE_REJECTED});
+            }
+        }
+    }
+    return adopted;
+}
+
 void RetainKeeper::remove_files_of_gone_owners() {
     if (gone_owners_removed_ || !persists() || !retired_.empty() ||
         current_ == nullptr) {
+        return;
+    }
+    // Not before the values of tags that moved are in the files of their
+    // new owners (`adopt_moved_values`, called by `check` first).
+    if (!moved_values_adopted_) {
         return;
     }
     for (const WatchedOwner& owner : current_->owners) {
@@ -901,7 +954,7 @@ void RetainKeeper::finish_now(int base_fd, std::uint64_t generation,
         return;
     }
     std::map<std::string, std::vector<std::string>, std::less<>> ignored;
-    load_watched(*watched, ignored);
+    load_watched(*watched, ignored, false);
     for (const WatchedOwner& owner : watched->owners) {
         // Decision D-45: a newer generation that holds a region of the
         // owner holds newer values; nothing is written from this one.
@@ -930,6 +983,17 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
     }
     for (const std::unique_ptr<Watched>& watched : retired_) {
         finish(base_fd, *watched, now_mono_ns);
+    }
+    // Decision D-59, point 4: a tag that moved to an owner that has not
+    // attached is on file only under its former owner, which may be in no
+    // generation any more. Once no generation is retired, so that every
+    // FINAL file is on disk, its value goes into the file of the new owner,
+    // which is written below, before the file of the former owner is
+    // removed. Once: what the former owners left does not change.
+    if (persists() && current_ != nullptr && retired_.empty() &&
+        !moved_values_adopted_) {
+        moved_values_adopted_ = true;
+        static_cast<void>(adopt_moved_values());
     }
     for (auto& [name, state] : states_) {
         if (!state.dirty || now_mono_ns < state.next_retry_mono_ns) {
@@ -962,17 +1026,20 @@ void RetainKeeper::flush(CheckReport& report) {
     for (const auto& [name, state] : states_) {
         if (state.dirty || state.done_token != state.token) {
             report.retain_problems.push_back(
-                {name, "retained values not saved at the stop"});
+                {name, "retained values not saved at the stop",
+                 RetainProblemKind::UNSAVED_AT_EXIT});
         }
     }
 }
 
 void RetainKeeper::wait_bounded(CheckReport& report) {
     if (!writer_->wait_idle(RETAIN_WAIT_LIMIT)) {
+        report.retain_writer_bound_reached = true;
         report.retain_problems.push_back(
-            {"retain writer", "files not written within " +
-                                  std::to_string(RETAIN_WAIT_LIMIT.count()) +
-                                  " ms"});
+            {"retain writer",
+             "files not written within " +
+                 std::to_string(RETAIN_WAIT_LIMIT.count()) + " ms",
+             RetainProblemKind::WRITER_BOUND});
     }
 }
 

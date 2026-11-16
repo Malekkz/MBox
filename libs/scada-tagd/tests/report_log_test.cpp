@@ -481,3 +481,96 @@ TEST_F(ReportLog, AGenerationWithoutAHeaderGivesOneUnknownRecord) {
 }
 
 }  // namespace
+
+namespace {
+
+using scada::tag::RetainProblem;
+using scada::tag::RetainProblemKind;
+
+// Decision D-59, point 3: each retain problem has a record and an ID of its
+// own.
+TEST_F(ReportLog, EachRetainProblemHasItsOwnRecordAndMessageId) {
+    scada::tagd::log_retain_problem(
+        logger(),
+        RetainProblem{"io.bin", "ignored: the check sum does not match",
+                      RetainProblemKind::FILE_REJECTED});
+    scada::tagd::log_retain_problem(
+        logger(), RetainProblem{"io", "cannot write: no space",
+                                RetainProblemKind::WRITE_FAILED});
+    scada::tagd::log_retain_problem(
+        logger(), RetainProblem{"retain writer", "not within 5000 ms",
+                                RetainProblemKind::WRITER_BOUND});
+    scada::tagd::log_retain_problem(
+        logger(), RetainProblem{"io", "not saved at the stop",
+                                RetainProblemKind::UNSAVED_AT_EXIT});
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 4U);
+    EXPECT_TRUE(has(records[0], "MESSAGE=retain file ignored"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[0], "SUBJECT=io.bin"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=586ec48106f748609721eef8957c56d5"));
+    EXPECT_TRUE(has(records[1], "MESSAGE=retain file not written"));
+    EXPECT_TRUE(has(records[1], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[1], "DETAIL=cannot write: no space"));
+    EXPECT_TRUE(has(records[1], "MESSAGE_ID=974151cda6fa452a998a576b2bb09bce"));
+    EXPECT_TRUE(has(records[2],
+                    "MESSAGE=retain writer did not finish within its bound"));
+    EXPECT_TRUE(has(records[2], "PRIORITY=3"));
+    EXPECT_TRUE(has(records[2], "MESSAGE_ID=0031dfe3391142b0b9fa995b07115e10"));
+    EXPECT_TRUE(has(records[3], "MESSAGE=values unsaved at exit"));
+    EXPECT_TRUE(has(records[3], "PRIORITY=3"));
+    EXPECT_TRUE(has(records[3], "SUBJECT=io"));
+    EXPECT_TRUE(has(records[3], "MESSAGE_ID=7cf5c1c8535f44f6a297db538666d7a3"));
+}
+
+TEST_F(ReportLog, AProcessStillAttachedAtTheTimeoutHasItsMessageId) {
+    scada::tag::RetiredGeneration retired;
+    retired.generation = 3;
+    retired.removed = true;
+    retired.timed_out = true;
+    retired.still_attached = {"io (pid 42)"};
+    scada::tagd::log_still_attached(logger(), retired);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=process still attached to a retired generation"));
+    EXPECT_TRUE(has(records[0], "GENERATION=3"));
+    EXPECT_TRUE(has(records[0], "PROCESS=io (pid 42)"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=349b6814c6cc4a2fafa5d3d1af16e7a7"));
+}
+
+TEST_F(ReportLog, AnUnusableRetainDirectoryHasItsMessageId) {
+    scada::tagd::log_retain_directory_unusable(
+        logger(), "/var/lib/scada/retain", "PERMISSION_DENIED", "mode 0777");
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0], "MESSAGE=the retain directory is not usable"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=2"));
+    EXPECT_TRUE(has(records[0], "DIRECTORY=/var/lib/scada/retain"));
+    EXPECT_TRUE(has(records[0], "STATUS=PERMISSION_DENIED"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=8df1e064b8464d59ad5fa42e9a3070e4"));
+}
+
+// The IDs are all different (D-47: a new meaning takes a new ID).
+TEST(ReportLogIds, EveryMessageIdIsDistinct) {
+    using namespace scada::tagd;
+    std::vector<std::string_view> ids = {MESSAGE_ID_PROCESS_DOWN,
+                                         MESSAGE_ID_PROCESS_UP,
+                                         MESSAGE_ID_HEARTBEAT_LATE,
+                                         MESSAGE_ID_HEARTBEAT_LATE_BEFORE,
+                                         MESSAGE_ID_PROCESS_RESTARTED,
+                                         MESSAGE_ID_QUEUE_RECREATED,
+                                         MESSAGE_ID_QUEUE_WRITE_SEQ_FELL,
+                                         MESSAGE_ID_PROCESS_NOT_ATTACHED,
+                                         MESSAGE_ID_RECORDS_UNCONSUMED,
+                                         MESSAGE_ID_RETAIN_FILE_REJECTED,
+                                         MESSAGE_ID_RETAIN_WRITE_FAILED,
+                                         MESSAGE_ID_RETAIN_DIRECTORY_UNUSABLE,
+                                         MESSAGE_ID_STILL_ATTACHED_AT_TIMEOUT,
+                                         MESSAGE_ID_RETAIN_WRITER_BOUND,
+                                         MESSAGE_ID_VALUES_UNSAVED_AT_EXIT};
+    std::ranges::sort(ids);
+    EXPECT_EQ(std::ranges::adjacent_find(ids), ids.end());
+}
+
+}  // namespace
