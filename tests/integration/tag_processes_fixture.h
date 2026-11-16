@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -44,6 +45,15 @@ inline constexpr int IO_PERIOD_MS = 50;
 // of the contract (section 15, test 2).
 inline constexpr std::size_t LOAD_OWNERS = 10;
 inline constexpr std::size_t LOAD_TAGS_PER_OWNER = 5000;
+// The heartbeat timeout of `load` and the readers of the large tag set, in
+// ms: as long as the longest wait of a test (WAIT_LIMIT). A loaded machine
+// can leave a process, or a reader inside one read_many, without the CPU
+// for more than the default 3 s; that owner is then down by the rules of
+// section 10.1 (decision D-34), which is not what the load tests look at
+// (issue #62).
+inline constexpr std::uint32_t LOAD_HEARTBEAT_TIMEOUT_MS = 30'000;
+static_assert(std::chrono::milliseconds(LOAD_HEARTBEAT_TIMEOUT_MS) ==
+              WAIT_LIMIT);
 
 inline scada::sim::Layout load_layout() {
     return scada::sim::Layout{.prefix = "load",
@@ -207,10 +217,14 @@ protected:
 
     // The tag set of the simulation `layout` (scada-sim, issue P1-10):
     // scada-tagd, the simulator processes of the layout and `reader`
-    // without tags, all running as the user of the test.
-    void write_sim_tag_set(const scada::sim::Layout& layout) const {
+    // without tags, all running as the user of the test, with the
+    // heartbeat timeout `heartbeat_timeout_ms` for all but scada-tagd.
+    void write_sim_tag_set(const scada::sim::Layout& layout,
+                           std::uint32_t heartbeat_timeout_ms =
+                               scada::tag::DEFAULT_HEARTBEAT_TIMEOUT_MS) const {
         scada::sim::TagSetOptions options;
         options.layout = layout;
+        options.heartbeat_timeout_ms = heartbeat_timeout_ms;
         options.uid = ::geteuid();
         options.tagd_uid = ::geteuid();
         options.readers = {"reader"};
@@ -225,8 +239,11 @@ protected:
         file << scada::sim::tag_set_json(tag_set.value());
     }
 
-    // The large tag set: the simulation `load_layout()`.
-    void write_load_tag_set() const { write_sim_tag_set(load_layout()); }
+    // The large tag set: the simulation `load_layout()`, with the heartbeat
+    // timeout LOAD_HEARTBEAT_TIMEOUT_MS.
+    void write_load_tag_set() const {
+        write_sim_tag_set(load_layout(), LOAD_HEARTBEAT_TIMEOUT_MS);
+    }
 
     // Starts the simulator process `instance` of `layout` with the options
     // `extra` of `scada-sim run`, and waits until it has attached. Nothing,
