@@ -1151,4 +1151,51 @@ TEST_F(MovedKeeper, TheNewOwnersFileIsWrittenBeforeTheFormerOwnersIsRemoved) {
     EXPECT_EQ(value_in(file_of("web"), "plant.level"), VALUE_7);
 }
 
+// Conditions of the lead on the fixes of point 4: the values a new owner
+// takes from other owners' files keep what the file holds, follow the same
+// rule as attach (one function, `load_retained`), and are only its RETAIN
+// tags.
+TEST_F(MovedKeeper, TakenValuesKeepTheirFileAndFollowTheRuleOfAttach) {
+    constexpr std::int64_t OLDER = 10;
+    constexpr std::int64_t NEWER = 20;
+    constexpr std::int64_t SOURCE = 1'234;
+    const RetainedValue newest{"plant.level", TagType::FLOAT64,
+                               VALUE_8,       SOURCE,
+                               Quality::GOOD, to_raw(QualityFlag::SUBSTITUTED)};
+    {
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        RetainFile older;
+        older.written_time_ns = OLDER;
+        older.values = {
+            {"plant.count", TagType::UINT64, VALUE_9, 0},  // not RETAIN
+            {"plant.level", TagType::FLOAT64, VALUE_7, 0}};
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", older, detail).ok());
+        RetainFile newer;
+        newer.written_time_ns = NEWER;
+        newer.values = {newest};
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "old", newer, detail).ok());
+    }
+    start_host(moved_to_web(retained_set()));  // no generation retired
+    // What attach would take, by the same function.
+    const Fd directory = scada::tag::testing::open_directory(retain());
+    const std::vector<WantedValue> wanted = {{"plant.level", TagType::FLOAT64}};
+    const LoadedValues attach_takes =
+        load_retained(directory.get(), uid(), "web", wanted);
+    ASSERT_TRUE(attach_takes.values.at(0).has_value());
+
+    static_cast<void>(round(scada::monotonic_ns()));
+    ASSERT_TRUE(has_file("web"));
+    const RetainFile web = file_of("web");
+    // Only plant.level: plant.count is no RETAIN tag, plant.mode is on no
+    // file.
+    ASSERT_EQ(web.values.size(), 1U);
+    EXPECT_EQ(web.values.at(0),
+              attach_takes.values.at(0).value_or(RetainedValue{}));
+    // The newest file, with its quality, flags and source time.
+    EXPECT_EQ(web.values.at(0), newest);
+}
+
 }  // namespace
