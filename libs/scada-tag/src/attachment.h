@@ -477,6 +477,14 @@ public:
     // false if the queue is dead.
     bool follow_queue(std::size_t queue_id) noexcept;
 
+    // True if a file other than the one in use is under the name of
+    // `queue_id`, which this process consumes: its consumer's next look
+    // (`follow_queue`) moves to it or stops the queue, so `scada_queue_next`
+    // has something to do and a wait set reports the queue ready (decision
+    // D-51). Changes nothing; any thread.
+    [[nodiscard]] bool queue_switch_pending(
+        std::size_t queue_id) const noexcept;
+
     // True if `follow_queue` found the queue dead. Changes nothing.
     [[nodiscard]] bool queue_is_dead(std::size_t queue_id) const noexcept;
 

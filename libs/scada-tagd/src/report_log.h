@@ -37,6 +37,9 @@ inline constexpr std::string_view MESSAGE_ID_PROCESS_RESTARTED =
 // record of possibly lost audit records (issue #53, decision D-49).
 inline constexpr std::string_view MESSAGE_ID_QUEUE_RECREATED =
     "330f9ce1bb0547c098562d406ce2f774";
+// A queue's `write_seq` fell in the same file (decision D-51).
+inline constexpr std::string_view MESSAGE_ID_QUEUE_WRITE_SEQ_FELL =
+    "d673f795274a49d1882153ae03003b15";
 inline constexpr std::string_view MESSAGE_ID_PROCESS_NOT_ATTACHED =
     "0f57ce3d6dbc4891abd0e55e240f04f9";
 

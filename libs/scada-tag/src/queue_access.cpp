@@ -291,6 +291,20 @@ std::optional<std::uint64_t> Attachment::base_for_new_queue(
     return base;
 }
 
+bool Attachment::queue_switch_pending(std::size_t queue_id) const noexcept {
+    const QueueAccess& access = queue(queue_id);
+    if (!access.consumed || access.produced || queue_is_dead(queue_id)) {
+        return false;
+    }
+    // Relaxed: see `queue_in_use_`; a stale value only delays the wake by
+    // one look.
+    const PeerMapping* const used =
+        queue_in_use_[queue_id].load(std::memory_order_relaxed);
+    const PeerMapping* const current = peers_.mapping(access.queue_slot);
+    return used != nullptr && current != nullptr && current != used &&
+           !same_file(*current, *used);
+}
+
 void Attachment::follow_queues() {
     for (const QueueAccess& access : queue_access_) {
         if (access.consumed && !access.produced) {

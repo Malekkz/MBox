@@ -275,12 +275,15 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         // Section 8.4: no wait is longer than the slice.
         const std::int64_t slice_end =
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
+        // Look for the queue's file again (at most once a second): also
+        // while it is mapped, so that a consumer that never calls
+        // scada_tag_notify finds a file created anew, or one changed in
+        // size, within about a second (decision D-51).
+        attachment_.refresh_peers();
         const std::optional<FutexWaiter> word = waiter();
         if (!word.has_value()) {
             // The producer has not created the queue yet, or the queue is
-            // stopped: look for its region again (at most once a second),
-            // and meanwhile wait a slice.
-            attachment_.refresh_peers();
+            // stopped: wait a slice.
             sleep_until(slice_end);
             continue;
         }
@@ -313,6 +316,9 @@ int Queue::ack() noexcept {
 bool Queue::ready() const noexcept {
     if (producer_ || attachment_.queue_is_dead(id_)) {
         return false;
+    }
+    if (attachment_.queue_switch_pending(id_)) {
+        return true;  // the next look moves on or stops (decision D-51)
     }
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (bytes.empty()) {

@@ -92,6 +92,19 @@ void log_recreated(scada::Logger& logger, const QueueChange& queue) {
                fields);
 }
 
+// Logs a `write_seq` that fell in the same queue file (decision D-51):
+// damage or a second producer, so ids may repeat; ERROR, since the
+// queue's records can no longer be trusted.
+void log_write_seq_fell(scada::Logger& logger, const QueueChange& queue) {
+    const std::string old_written = std::to_string(queue.old_write_seq);
+    const std::string written = std::to_string(queue.write_seq);
+    logger.log(LogLevel::ERROR, "queue write_seq fell; ids may repeat",
+               {{"QUEUE", queue.queue},
+                {"OLD_WRITE_SEQ", old_written},
+                {"WRITE_SEQ", written},
+                {"MESSAGE_ID", MESSAGE_ID_QUEUE_WRITE_SEQ_FELL}});
+}
+
 }  // namespace
 
 void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
@@ -186,6 +199,9 @@ void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 break;
             case QueueEvent::RECREATED:
                 log_recreated(logger, queue);
+                break;
+            case QueueEvent::WRITE_SEQ_FELL:
+                log_write_seq_fell(logger, queue);
                 break;
         }
     }

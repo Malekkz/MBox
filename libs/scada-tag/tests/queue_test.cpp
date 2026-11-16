@@ -44,6 +44,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -51,6 +52,19 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace scada::tag {
+
+// The peers' lock, held by a test to stand for a look that maps and
+// prefaults a region (the friend of PeerRegions).
+class PeerRegionsTestAccess {
+public:
+    [[nodiscard]] static std::unique_lock<std::mutex> hold(PeerRegions& peers) {
+        return std::unique_lock(peers.mutex_);
+    }
+};
+
+}  // namespace scada::tag
 
 namespace {
 
@@ -2041,6 +2055,114 @@ TEST_F(Queues, TheMarkIsStoredBeforeTheRecord) {
         << "the post did not fault";
     EXPECT_EQ(slot_of(map_file("proc.io"), EVENTS_IO), 2U);
     EXPECT_EQ(queue_write_seq(map_file("events.io").bytes()), 1U);
+}
+
+// Decision D-51 (Q3): a consumer that waits in scada_queue_next and never
+// calls scada_tag_notify finds a queue file created anew by itself, within
+// about a second: the jump to the new base shows in its cursor.
+TEST_F(Queues, AWaitingNextFindsAFileCreatedAnewWithoutNotify) {
+    constexpr int WAIT_MS = 2500;
+    // A fresh context: the looks of the fixture (`look_again`) set the next
+    // real look of each region far ahead; this one looks again a second
+    // after its attach, as a process does.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 2));
+    }
+    EXPECT_TRUE(takes_events(*reader, 0, 2));
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");  // base: the cursor 2 plus the capacity
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT));
+    scada_event_record record{};
+    EXPECT_EQ(next(*reader, record, WAIT_MS), SCADA_E_TIMEOUT);
+    EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), 2 + CAPACITY);
+    EXPECT_EQ(reader->stats().replaced, 1U);
+}
+
+// The same with a wait set: it reports the queue ready once another file is
+// under its name, and the consumer's next look moves on.
+TEST_F(Queues, AWaitSetFindsAFileCreatedAnewWithoutNotify) {
+    constexpr int WAIT_MS = 2500;
+    // A fresh context: the looks of the fixture (`look_again`) set the next
+    // real look of each region far ahead; this one looks again a second
+    // after its attach, as a process does.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 2));
+    }
+    EXPECT_TRUE(takes_events(*reader, 0, 2));
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT));
+    EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), 2 + CAPACITY);
+}
+
+// Decision D-51: scada_tag_notify does not wait for a look of another
+// thread, which may be mapping and prefaulting a region; it skips its own.
+TEST_F(Queues, NotifyDoesNotWaitForALookOfAnotherThread) {
+    std::unique_lock<std::mutex> held =
+        PeerRegionsTestAccess::hold(web()->peers());
+    std::atomic<bool> returned{false};
+    std::thread caller([&] {
+        static_cast<void>(web()->notify());
+        returned.store(true, std::memory_order_release);
+    });
+    caller.join();  // would never end if notify waited for the lock
+    EXPECT_TRUE(returned.load(std::memory_order_acquire));
+    held.unlock();
+}
+
+// Decision D-51: the same file mapped again after a failed look uses its
+// kept mapping; no mapping slot is spent, so more than 16 such looks leave
+// the queue working.
+TEST_F(Queues, TheSameFileMappedAgainSpendsNoMapping) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    const std::filesystem::path file = generation_dir() / "events.io";
+    const std::filesystem::path away = generation_dir() / "away";
+    for (std::uint32_t round = 0; round <= MAX_MAPPINGS_PER_REGION; ++round) {
+        std::filesystem::rename(file, away);
+        look_again(*web());
+        std::filesystem::rename(away, file);
+        look_again(*web());
+    }
+    EXPECT_FALSE(
+        web()->peers().at_mapping_limit(web()->peers().queue_slot(EVENTS_IO)));
+    ASSERT_TRUE(posts_events(*out, 1));
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// Decision D-51 (C10): scada-tagd reports a `write_seq` that falls in the
+// same file: damage or a second producer, and ids may repeat.
+TEST_F(Queues, TagdReportsAWriteSeqThatFalls) {
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        const QueuePtr reader = open(*web(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 3));
+        ASSERT_TRUE(takes_events(*reader, 0, 3));
+    }
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    {
+        const MappedRegion region = map_file("events.io");
+        store_shared(queue_header(region.bytes()).write_seq, std::uint64_t{1},
+                     std::memory_order_release);
+    }
+    const CheckReport report = host().check(scada::monotonic_ns());
+    // The fall is reported (the pair 3, 1 may be reported as broken too).
+    const bool reported =
+        std::ranges::any_of(report.queues, [](const QueueChange& change) {
+            return change.event == QueueEvent::WRITE_SEQ_FELL &&
+                   change.queue == "events.io" && change.old_write_seq == 3 &&
+                   change.write_seq == 1;
+        });
+    EXPECT_TRUE(reported);
 }
 
 TEST_F(Queues, ResultsReachTheRequester) {

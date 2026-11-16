@@ -1070,6 +1070,31 @@ Consequences:
 - The note of D-34 says that a reader preempted inside one `scada_tag_read_many` can see a running owner down.
 - Tests that failed only under eight more test binaries in parallel on 4 cores are tracked in the issue "Tests that fail under extreme overload", not here.
 
+## D-51: Queue consumers look while they wait; notify does not wait for a look; a kept mapping is used again; a falling write_seq is reported
+Date: 2026-11-16
+Phase / issue: 1, #53 (the second of the two pull requests of points 2 to 4; it closes #53)
+Status: accepted. Q3, Q4 (the falling `write_seq`) and the split were decided by the committee of the lead session (C++, SCADA architecture and Linux reviewers; the owner delegated these decisions to it) on 2026-11-15. The bound for a shrink of an unlinked file and the reuse of a kept mapping were asked for in the review of PR #77.
+
+Context: after D-49 a consumer moves to a queue file created anew only at a look at its peers' regions, and looks happened only in `scada_tag_notify`, `scada_tag_status`, and in waits while a region was missing. A consumer that only waits in `scada_queue_next` or a wait set and never calls notify kept its old file. Then gap (a) of PR #56 stayed open longer than 1 s, as `SCADA_E_FULL` for the producer, and a file shrunk in place was not seen. `scada_tag_notify` is called from real-time loops, and its look took the peers' mutex, which a consumer holds while it maps and prefaults a region. Each look that mapped the same file again, after a failed `fstatat` for example, spent one of the 16 mappings of a name. And `scada-tagd` did not report a `write_seq` that falls, which only damage or a second producer can cause (contract 3.3).
+Options, the look while waiting: in every wait slice (the per-region interval of 1 s bounds it); only while a region is missing (as before). Options, notify: wait for the lock; try the lock and skip. Options, a pending file in a wait set: the wait set follows it; the wait set reports the queue ready and the consumer's next look follows it.
+Decision:
+- `scada_queue_next` and `WaitSet::wait` call `refresh_peers` before each wait slice, also while every source is mapped; the descriptor thread of a wait set does the same. `PeerRegions::refresh` looks at a region at most once a second, so a waiting consumer costs one `fstatat` per region and second. A call with timeout 0 returns before the wait and makes no system call (conformance test 22 unchanged).
+- A wait set does not move a cursor: its descriptor thread is not the consumer's thread. `Attachment::queue_switch_pending` is true while another file is under the name of a queue in use. `Queue::ready` returns true for it, and the wait set's view of a queue (`WaitSetSeen::switch_pending`) includes it, so its descriptor is signalled. The consumer's next `scada_queue_next` then follows the file or stops the queue (D-49).
+- `scada_tag_notify` calls `PeerRegions::try_refresh`, which returns at once while another thread holds the lock: that thread's look covers the regions, and the next notify looks. `scada_tag_status` and the waits still wait for the lock.
+- A look that finds, under the name, a file it mapped before (same device and inode, the right size, still whole) publishes that kept mapping again and spends no mapping slot.
+- `scada-tagd` reports `QueueEvent::WRITE_SEQ_FELL` when a queue's `write_seq` is below the value of its previous check in the same file. It logs `queue write_seq fell; ids may repeat` at ERROR, with `QUEUE`, `OLD_WRITE_SEQ`, `WRITE_SEQ` and MESSAGE_ID `d673f795274a49d1882153ae03003b15` (C10).
+- Contract 3.3: a shrink of an unlinked queue file is seen at the next look, at most about 1 s later. A consumer that reads it before that look, or one that only polls with timeout 0 and never notifies, can be stopped by `SIGBUS`.
+Reason: the per-region interval already bounds the cost, so a look in every slice adds no rate limit of its own. Skipping the look in notify keeps a real-time loop from waiting behind a mapping and prefault; nothing is lost, since the thread that holds the lock looks. Only the consumer's thread may move its cursor (D-40), so a wait set only reports readiness.
+Consequences:
+- Contract 0.16: sections 3.3, 9.2 and 16; the layout version stays 1.
+- Tests:
+  - `Queues.AWaitingNextFindsAFileCreatedAnewWithoutNotify`, which fails without the look in the wait (checked), and `AWaitSetFindsAFileCreatedAnewWithoutNotify`. Both use a fresh context: the fixture's `look_again` sets the next real look of a region seconds ahead.
+  - `NotifyDoesNotWaitForALookOfAnotherThread`, which holds the peers' lock through `PeerRegionsTestAccess`; notify would never return without the try-lock.
+  - `TheSameFileMappedAgainSpendsNoMapping`: 17 renames away and back, no limit reached.
+  - `TagdReportsAWriteSeqThatFalls` and `ReportLog.AWriteSeqThatFellIsAnError`.
+- Not tested with real processes: truncation in place under a consumer that is reading. Between the shrink and the next look, a read ends the process by `SIGBUS` (contract 3.3, an accepted risk). The deterministic order, shrink then look, is in `ReplacedQueue.ATruncatedQueueFileKillsTheQueue` and `Queues.TagdReportsAReplacedQueueAsBroken`. The 17th file is in `Queues.TheSeventeenthFileUnderANameStopsTheQueue` (D-49).
+- Perf, the release build of the post path (N7 of the review of PR #77), on the x86-64 container with `scada-tag-queue-post-perf-test`: 640 to 880 ns per record with the high-water mark (six runs) and 630 to 770 ns without it (three runs). The two overlap within the noise of a shared 4-core machine.
+
 ## D-52: The tag-set builder requires the `result` queue of every `cmd` queue
 Date: 2026-11-16
 Phase / issue: 1, #52

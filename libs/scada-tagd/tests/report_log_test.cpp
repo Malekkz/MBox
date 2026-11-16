@@ -333,6 +333,27 @@ TEST_F(ReportLog, AQueueFileCreatedAnewWithABaseBelowTheOldWriteSeqHasNoBound) {
                     "REASON=base below the old write_seq: the queue stops"));
 }
 
+// Decision D-51: a `write_seq` that fell in the same file is an ERROR.
+TEST_F(ReportLog, AWriteSeqThatFellIsAnError) {
+    CheckReport report;
+    QueueChange change;
+    change.queue = "events.io";
+    change.event = QueueEvent::WRITE_SEQ_FELL;
+    change.old_write_seq = 3;
+    change.write_seq = 1;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(
+        has(records[0], "MESSAGE=queue write_seq fell; ids may repeat"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=3"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=d673f795274a49d1882153ae03003b15"));
+    EXPECT_TRUE(has(records[0], "OLD_WRITE_SEQ=3"));
+    EXPECT_TRUE(has(records[0], "WRITE_SEQ=1"));
+}
+
 TEST_F(ReportLog, ARestartSeenAsDownAndUpIsANotice) {
     CheckReport report;
     report.restarts.push_back(

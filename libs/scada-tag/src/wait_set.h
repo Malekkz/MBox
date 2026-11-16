@@ -35,6 +35,9 @@ struct WaitSetSeen {
     std::uint32_t epoch = 0;
     std::uint32_t word = 0;   // the futex word: write_seq or cycle_seq
     bool owner_down = false;  // of a ring: its owner's process is down
+    // Of a queue: another file is under its name, which its consumer's
+    // next look follows or refuses (decision D-51).
+    bool switch_pending = false;
 
     friend bool operator==(const WaitSetSeen&, const WaitSetSeen&) = default;
 };

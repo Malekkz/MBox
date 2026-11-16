@@ -1062,6 +1062,17 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
         change.cursor = queue.last_cursor;
         change.cursor_known = queue.last_cursor_known;
         report.queues.push_back(change);
+    } else if (const std::uint64_t written = queue_write_seq(file);
+               queue.file_seen && written < queue.last_written) {
+        // Only the producer writes `write_seq`, which only grows: in the
+        // same file it fell through damage or a second writer, and ids may
+        // repeat (decision D-51, condition C10).
+        report.queues.push_back(
+            QueueChange{.queue = queue.name,
+                        .event = QueueEvent::WRITE_SEQ_FELL,
+                        .write_seq = written,
+                        .capacity = queue.capacity,
+                        .old_write_seq = queue.last_written});
     }
     queue.file_seen = true;
     queue.last_device = queue.region->device;

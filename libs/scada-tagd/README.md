@@ -71,6 +71,7 @@ the standard error stream.
 | `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
 | `queue file found again` | NOTICE, once | `QUEUE` |
 | `queue file created anew; audit records may be lost` (events queue), `queue file created anew; records may be lost` (other queues) | WARNING, once, when the file under a queue's name is another one than at the previous check (contract 9.3, D-49). The records of the old file from the consumer's cursor to its last `write_seq` are lost unless the consumer still holds the old file | `QUEUE`, `BASE_SEQ` (or `none`), `OLD_WRITE_SEQ`, `CURSOR`, `LOST_AT_MOST`, `LOST_IDS` (`[from, to)`), `REASON` |
+| `queue write_seq fell; ids may repeat` | ERROR, once for each fall: a queue's `write_seq` is below the value of the previous check in the same file (damage or a second producer, contract 3.3; D-51) | `QUEUE`, `OLD_WRITE_SEQ`, `WRITE_SEQ` |
 | `the kernel offers sleep states; the unit must not suspend` | INFO, once at start, when `/sys/power/state` is not empty (contract 3.4). Expected on most kernels, also with sleep disabled | `STATES` |
 | `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound, rounded up to whole ms |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
@@ -125,7 +126,7 @@ before the first check. A reused generation keeps what the previous
 ## Interfaces
 
 - Contract: `docs/contracts/tag-database.md`, version 0.18, sections 3, 5,
-  9.2, 10 and 11.1; decisions D-27, D-36, D-38, D-46, D-47, D-49 and D-53 in
+  9.2, 10 and 11.1; decisions D-27, D-36, D-38, D-46, D-47, D-49, D-51 and D-53 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
