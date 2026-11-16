@@ -86,6 +86,11 @@ enum class QueueEvent : std::uint8_t {
     MISSING,
     // A queue reported MISSING has a usable file again.
     FOUND,
+    // The queue's file is another one than at the previous check: its
+    // producer created it anew inside the generation (issue #53).
+    // Records that were in the old file and that its consumer had not
+    // taken are lost unless the consumer still holds the old file.
+    RECREATED,
 };
 
 // A reliable queue whose state changed at a liveness check. The values are
@@ -100,6 +105,14 @@ struct QueueChange {
     // BROKEN: the cursor is the all-ones value a consumer stores when it
     // found the queue file replaced inside the generation (decision D-40).
     bool replaced = false;
+    // RECREATED: the new file's base, if its creator set one; the
+    // `write_seq` scada-tagd last saw in the old file, if it saw one
+    // (`old_write_seq_known`); `cursor` is the consumer's cursor now, if
+    // its region is there (`cursor_known`), and `write_seq` the new file's.
+    std::optional<std::uint64_t> base_seq{};
+    std::uint64_t old_write_seq = 0;
+    bool old_write_seq_known = false;
+    bool cursor_known = false;
 };
 
 // What one liveness check changed.

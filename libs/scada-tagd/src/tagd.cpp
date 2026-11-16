@@ -208,6 +208,46 @@ Wake wait_for_signal(const sigset_t& signals,
     return Wake::STOP;
 }
 
+// Logs a queue file created anew inside the generation (issue #53,
+// condition C13): the system log keeps what `scada_queue_stats`, which is
+// per process and lost at a restart, cannot. The records of the old file
+// from the consumer's cursor up to its last `write_seq` are lost unless
+// the consumer still holds the old file and takes them; hence "at most".
+// On an events queue they are audit records.
+void log_recreated(Logger& logger, const QueueChange& queue) {
+    const std::uint64_t from = queue.cursor_known ? queue.cursor : 0;
+    const std::uint64_t to = queue.old_write_seq;
+    const std::uint64_t lost = to > from ? to - from : 0;
+    std::string reason = "followed by the consumer";
+    if (!queue.base_seq.has_value()) {
+        reason = "no base (made by an older build): the queue stops";
+    } else if (*queue.base_seq < to) {
+        reason = "base below the old write_seq: the queue stops";
+    }
+    const std::string base =
+        queue.base_seq.has_value() ? std::to_string(*queue.base_seq) : "none";
+    const std::string old_written = std::to_string(to);
+    const std::string cursor =
+        queue.cursor_known ? std::to_string(queue.cursor) : "unknown";
+    const std::string lost_at_most = std::to_string(lost);
+    const std::string range =
+        "[" + std::to_string(from) + ", " + std::to_string(to) + ")";
+    const std::array<LogField, 7> fields{{
+        {"QUEUE", queue.queue},
+        {"BASE_SEQ", base},
+        {"OLD_WRITE_SEQ", old_written},
+        {"CURSOR", cursor},
+        {"LOST_AT_MOST", lost_at_most},
+        {"LOST_IDS", range},
+        {"REASON", reason},
+    }};
+    const bool events = queue.queue.starts_with("events.");
+    logger.log(LogLevel::WARNING,
+               events ? "queue file created anew; audit records may be lost"
+                      : "queue file created anew; records may be lost",
+               fields);
+}
+
 // Writes what one liveness check changed to the log.
 void log_report(Logger& logger, const CheckReport& report) {
     for (const ProcessChange& change : report.changes) {
@@ -276,6 +316,9 @@ void log_report(Logger& logger, const CheckReport& report) {
             case QueueEvent::FOUND:
                 logger.log(LogLevel::NOTICE, "queue file found again",
                            std::span(fields).first(1));
+                break;
+            case QueueEvent::RECREATED:
+                log_recreated(logger, queue);
                 break;
         }
     }

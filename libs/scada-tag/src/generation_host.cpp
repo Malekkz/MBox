@@ -95,6 +95,13 @@ struct WatchedQueue {
     // down, and whether that was reported.
     std::uint32_t missing_checks = 0;
     bool missing_reported = false;
+    // The file seen at the latest check that found one, and its
+    // `write_seq` then; kept while the name is missing, so that a file
+    // created anew is told from the old one (issue #53).
+    bool file_seen = false;
+    dev_t last_device = 0;
+    ino_t last_inode = 0;
+    std::uint64_t last_written = 0;
 };
 
 // Checks in a row without a queue file after which it is reported.
@@ -966,6 +973,26 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
     const std::span<std::byte> proc =
         consumer.self ? proc_.bytes() : consumer.probe.bytes();
     const std::uint64_t* const cursor = cursor_field(proc, queue.queue_id);
+    const std::span<std::byte> file = queue.region->memory.bytes();
+    if (queue.file_seen && (queue.region->device != queue.last_device ||
+                            queue.region->inode != queue.last_inode)) {
+        QueueChange change{.queue = queue.name,
+                           .event = QueueEvent::RECREATED,
+                           .write_seq = queue_write_seq(file),
+                           .capacity = queue.capacity};
+        change.base_seq = queue_base(file);
+        change.old_write_seq = queue.last_written;
+        change.old_write_seq_known = true;
+        if (cursor != nullptr) {
+            change.cursor = load_shared(*cursor, std::memory_order_acquire);
+            change.cursor_known = true;
+        }
+        report.queues.push_back(change);
+    }
+    queue.file_seen = true;
+    queue.last_device = queue.region->device;
+    queue.last_inode = queue.region->inode;
+    queue.last_written = queue_write_seq(file);
     if (cursor == nullptr) {
         return;  // the consumer's region is missing
     }

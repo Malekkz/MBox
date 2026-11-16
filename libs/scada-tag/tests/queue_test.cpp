@@ -625,6 +625,33 @@ TEST_F(Queues, TagdReportsAReplacedQueueAsBroken) {
     EXPECT_EQ(report.queues[0].cursor, DEAD_CURSOR);
 }
 
+// Condition C13: scada-tagd reports a queue file created anew with the new
+// base, the old file's last `write_seq` it saw and the consumer's cursor,
+// so that the records that may be lost, [cursor, old write_seq), reach the
+// system log.
+TEST_F(Queues, TagdReportsAQueueFileCreatedAnew) {
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        const QueuePtr reader = open(*web(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 3));
+        ASSERT_TRUE(takes_event(*reader, 0));  // the cursor is 1
+    }
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    const CheckReport report = host().check(scada::monotonic_ns());
+    ASSERT_EQ(report.queues.size(), 1U);
+    const QueueChange& change = report.queues[0];
+    EXPECT_EQ(change.event, QueueEvent::RECREATED);
+    EXPECT_EQ(change.base_seq, std::optional<std::uint64_t>(1 + CAPACITY));
+    EXPECT_TRUE(change.old_write_seq_known);
+    EXPECT_EQ(change.old_write_seq, 3U);
+    EXPECT_TRUE(change.cursor_known);
+    EXPECT_EQ(change.cursor, 1U);
+    // Once, not at every check.
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+}
+
 // Issue #53, review of the design: an events or command queue whose file
 // is missing at two checks in a row while its producer is up is reported,
 // once, and again when it is there again. One miss is not: a check may
