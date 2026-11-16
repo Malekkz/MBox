@@ -1,0 +1,58 @@
+
+gcc13-cold.cpp.o:     file format elf64-littleaarch64
+
+
+Disassembly of section .text:
+
+0000000000000000 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&)>:
+   0:	paciasp
+   4:	stp	x29, x30, [sp, #-64]!
+   8:	mov	x29, sp
+   c:	stp	x19, x20, [sp, #16]
+  10:	mov	x19, x0
+  14:	add	x20, x0, #0x10
+  18:	stp	x21, x22, [sp, #32]
+  1c:	add	x21, x0, #0x8
+  20:	mov	w22, #0x0                   	// #0
+  24:	ldar	w3, [x19]
+  28:	tbnz	w3, #0, 88 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&)+0x88>
+  2c:	ldr	x4, [x21]
+  30:	str	x4, [x1]
+  34:	ldr	x4, [x20]
+  38:	str	x4, [x2]
+  3c:	dmb	ishld
+  40:	ldr	w4, [x19]
+  44:	cmp	w3, w4
+  48:	b.eq	70 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&)+0x70>  // b.none
+  4c:	add	w22, w22, #0x1
+  50:	cmp	w22, #0x4
+  54:	b.ne	24 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&)+0x24>  // b.any
+  58:	ldp	x19, x20, [sp, #16]
+  5c:	mov	w0, #0x0                   	// #0
+  60:	ldp	x21, x22, [sp, #32]
+  64:	ldp	x29, x30, [sp], #64
+  68:	autiasp
+  6c:	ret
+  70:	ldp	x19, x20, [sp, #16]
+  74:	mov	w0, #0x1                   	// #1
+  78:	ldp	x21, x22, [sp, #32]
+  7c:	ldp	x29, x30, [sp], #64
+  80:	autiasp
+  84:	ret
+  88:	b	0 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&)>
+			88: R_AARCH64_JUMP26	.text.unlikely+0x8
+
+Disassembly of section .text.unlikely:
+
+0000000000000000 <scada::model_fixture::note_busy(int)>:
+   0:	bti	c
+   4:	ret
+
+0000000000000008 <scada::model_fixture::read_pair(scada::model_fixture::Record&, unsigned long&, unsigned long&) [clone .cold]>:
+   8:	mov	w0, w22
+   c:	stp	x1, x2, [sp, #48]
+  10:	bl	0 <scada::model_fixture::note_busy(int)>
+			10: R_AARCH64_CALL26	scada::model_fixture::note_busy(int)
+  14:	ldp	x1, x2, [sp, #48]
+  18:	b	0 <scada::model_fixture::note_busy(int)>
+			18: R_AARCH64_JUMP26	.text+0x4c
