@@ -281,6 +281,9 @@ private:
                                            const std::string& owner,
                                            std::int64_t now_mono_ns) const;
 
+    // The queues of `watched` that still hold records (decision D-54).
+    [[nodiscard]] static std::vector<UnconsumedQueue> unconsumed_records(
+        Watched& watched, std::int64_t now_mono_ns);
     // True if `owner` has left the retired generation `watched`.
     [[nodiscard]] static bool has_left(Watched& watched,
                                        const WatchedOwner& owner,

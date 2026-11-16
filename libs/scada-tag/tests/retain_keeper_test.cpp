@@ -7,6 +7,7 @@
 #include "attach_fixture.h"
 #include "attachment.h"
 #include "layout.h"
+#include "queue.h"
 #include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
@@ -31,10 +32,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -42,6 +45,9 @@
 #include <vector>
 
 namespace {
+
+// Later than the once-a-second look of PeerRegions.
+constexpr std::int64_t LOOK_AGAIN_NS = 2'000'000'000;
 
 using namespace scada::tag;
 using scada::Fd;
@@ -74,6 +80,65 @@ protected:
 
     // `io` owns plant.level (retain), plant.mode (retain_now) and
     // plant.count (not retained).
+    // `count` events posted by `producer` to events.io are accepted.
+    static ::testing::AssertionResult posts_events(Attachment& producer,
+                                                   std::uint64_t count) {
+        std::unique_ptr<Queue> events;
+        if (Queue::open(producer, "events.io", events) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "cannot open events.io";
+        }
+        for (std::uint64_t i = 0; i < count; ++i) {
+            const scada_event_record record = system_event();
+            if (const int code =
+                    events->post(std::as_bytes(std::span(&record, 1)));
+                code != SCADA_OK) {
+                return ::testing::AssertionFailure()
+                       << "post " << i << " returned " << code;
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    // In the current generation, `web` attaches first and finds nothing
+    // skipped, and the first event `io` posts has id 0.
+    [[nodiscard]] ::testing::AssertionResult first_event_has_id_zero() {
+        const Attached reader = attached("web");
+        const Attached feeder = attached("io");
+        if (reader == nullptr || feeder == nullptr) {
+            return ::testing::AssertionFailure() << "no attach";
+        }
+        std::unique_ptr<Queue> taker;
+        if (Queue::open(*reader, "events.io", taker) != SCADA_OK) {
+            return ::testing::AssertionFailure() << "cannot open events.io";
+        }
+        if (taker->stats().skipped != 0) {
+            return ::testing::AssertionFailure() << "records skipped";
+        }
+        if (const ::testing::AssertionResult posted = posts_events(*feeder, 1);
+            !posted) {
+            return posted;
+        }
+        static_cast<void>(reader->peers().refresh(
+            reader->directory(), scada::monotonic_ns() + LOOK_AGAIN_NS));
+        scada_event_record taken{};
+        if (const int code =
+                taker->next(std::as_writable_bytes(std::span(&taken, 1)), 0);
+            code != SCADA_OK) {
+            return ::testing::AssertionFailure() << "next returned " << code;
+        }
+        if (taken.seq != 0) {
+            return ::testing::AssertionFailure() << "id " << taken.seq;
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    static scada_event_record system_event() {
+        scada_event_record record{};
+        record.kind = SCADA_EVENT_SYSTEM;
+        record.source_handle = SCADA_INVALID_HANDLE;
+        return record;
+    }
+
     [[nodiscard]] static TagSet retained_set() {
         TagSet set = tag_set();
         set.tags = {
@@ -746,6 +811,47 @@ TEST_F(Keeper, TwoGenerationChangesInARowKeepTheLastValue) {
     ASSERT_NE(again, nullptr);
     EXPECT_EQ(again->status().final_waits_expired, 0U);
     EXPECT_EQ(read(*again, "plant.mode"), 3U);
+}
+
+// Issue #65 (decision D-54): records left in a queue of a retired
+// generation are counted when scada-tagd removes it.
+TEST_F(Keeper, RecordsLeftInARemovedGenerationAreCountedPerQueue) {
+    start_host(retained_set());
+    // The consumer first: the producer looks for its region at attach.
+    Attached reader = attached("web");
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    ASSERT_NE(reader, nullptr);
+    constexpr std::uint64_t POSTED = 3;
+    ASSERT_TRUE(posts_events(*feeder, POSTED));
+    drop_host();
+    start_host(changed_set());
+    feeder.reset();
+    reader.reset();
+    const CheckReport report = two_rounds(scada::monotonic_ns());
+    ASSERT_EQ(report.retired.size(), 1U);
+    const RetiredGeneration& retired = report.retired.at(0);
+    ASSERT_TRUE(retired.removed);
+    ASSERT_EQ(retired.unconsumed.size(), 1U);
+    EXPECT_EQ(retired.unconsumed.at(0).queue, "events.io");
+    EXPECT_EQ(retired.unconsumed.at(0).records, POSTED);
+}
+
+// Issue #65 (decision D-54): nothing of a queue is carried into the next
+// generation. Through two changes in a row, a consumer that attaches first
+// creates its region with the producer's `write_seq` 0, and event ids start
+// at 0 again.
+TEST_F(Keeper, EventIdsStartAtZeroAfterEachOfTwoGenerationChanges) {
+    const std::vector<TagSet> sets = {retained_set(), changed_set(),
+                                      retained_set()};
+    for (std::size_t round = 0; round < sets.size(); ++round) {
+        if (round > 0) {
+            drop_host();
+        }
+        start_host(sets.at(round));
+        ASSERT_EQ(host().generation(), round + 1);
+        EXPECT_TRUE(first_event_has_id_zero()) << "round " << round;
+    }
 }
 
 }  // namespace

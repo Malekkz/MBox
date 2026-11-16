@@ -206,6 +206,13 @@ void Attachment::drain_retiring_requests() noexcept {
     }
 }
 
+void Attachment::look_for_queue_now(std::size_t queue_id) {
+    const QueueAccess& access = queue(queue_id);
+    if (!access.produced && peers_.bytes(access.queue_slot).empty()) {
+        static_cast<void>(peers_.look_now(directory_.get(), access.queue_slot));
+    }
+}
+
 void Attachment::drain_request_queue(std::size_t queue_id) noexcept {
     const QueueAccess& access = queue(queue_id);
     if (access.consumed && access.kind == QueueKind::CMD &&

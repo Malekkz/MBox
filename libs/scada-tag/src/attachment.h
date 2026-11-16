@@ -434,6 +434,10 @@ public:
     // The same for the one `cmd` queue `queue_id`, in any state: the caller
     // has seen RETIRING. Not real-time safe.
     void drain_request_queue(std::size_t queue_id) noexcept;
+    // For a queue another process produces: looks for its region now if it
+    // has none mapped, not at most once a second. A drain must not end on a
+    // region it never looked for (decision D-54). Not real-time safe.
+    void look_for_queue_now(std::size_t queue_id);
     // True if the generation is RETIRING, loaded seq_cst (decision D-54).
     SCADA_RT [[nodiscard]] bool generation_retiring() const noexcept {
         return header_.retiring();

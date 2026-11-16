@@ -41,7 +41,10 @@ process. The executable in `services/scada-tagd` only calls it.
   locked, the generation is removed. After 30 s it is removed anyway; the
   values of a process still attached are written, but not marked FINAL. A
   generation that cannot be removed is tried for at most 60 s after it
-  retired, then logged as abandoned and left to the next boot.
+  retired, then logged as abandoned and left to the next boot. When it
+  removes one, it logs per queue the records the consumer did not take
+  (`records left unconsumed in a removed generation`, WARNING; decision
+  D-54).
 - Once no generation is retired and every owner has its file, files of
   owners the tag set no longer has are removed.
 - On `SIGTERM` or `SIGINT`: writes the retained values that changed,

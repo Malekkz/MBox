@@ -227,7 +227,10 @@ Queue::Look Queue::poll(std::span<std::byte> out,
     return Look::DELIVERED;
 }
 
-int Queue::drain_retiring(std::span<std::byte> out) noexcept {
+int Queue::drain_retiring(std::span<std::byte> out) {
+    // A producer that created its region after this process last looked
+    // may have posted to it: look now, before the drain can end.
+    attachment_.look_for_queue_now(id_);
     if (attachment_.queue(id_).kind == QueueKind::CMD) {
         // No request is executed there: each is answered ABORTED.
         attachment_.drain_request_queue(id_);

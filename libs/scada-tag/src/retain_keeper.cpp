@@ -4,6 +4,7 @@
 #include "layout.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
@@ -11,6 +12,7 @@
 
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
+#include "scada/common/mapped_region.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
@@ -21,6 +23,7 @@
 #include <fcntl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -609,6 +612,57 @@ bool RetainKeeper::newer_region_exists(int base_fd, std::uint64_t generation,
     return false;
 }
 
+std::vector<UnconsumedQueue> RetainKeeper::unconsumed_records(
+    Watched& watched, std::int64_t now_mono_ns) {
+    std::vector<UnconsumedQueue> found;
+    if (watched.header == nullptr) {
+        return found;
+    }
+    const HeaderContents& contents = watched.header->contents();
+    for (std::size_t queue_id = 0; queue_id < contents.queues.size();
+         ++queue_id) {
+        const QueueInfo& queue = contents.queues[queue_id];
+        if (queue.producer_process >= contents.processes.size() ||
+            queue.consumer_process >= watched.processes.size()) {
+            continue;
+        }
+        RegionIdentity identity;
+        identity.kind = queue_region_kind(queue.kind);
+        identity.generation = contents.generation;
+        identity.size_bytes =
+            queue_region_size(queue.capacity, queue.record_size);
+        identity.owner_index = queue.producer_process;
+        // Below MAX_QUEUES, which fits 16 bits.
+        identity.queue_id = static_cast<std::uint16_t>(queue_id);
+        identity.uid = contents.processes[queue.producer_process].uid;
+        std::string ignored;
+        const Result<OpenedRegion> region =
+            open_region(watched.dir_fd, queue.name, identity,
+                        MapAccess::READ_ONLY, ignored);
+        WatchedProcess& consumer = watched.processes[queue.consumer_process];
+        if (consumer.probe.bytes().empty()) {
+            // A consumer that owns no tags has not been looked at yet.
+            static_cast<void>(consumer.probe.observe(
+                watched.dir_fd, consumer.region, consumer.heartbeat_timeout_ms,
+                now_mono_ns));
+        }
+        const std::span<std::byte> proc = consumer.probe.bytes();
+        const std::uint64_t* const cursor = cursor_field(proc, queue_id);
+        if (!region.ok() || cursor == nullptr) {
+            continue;
+        }
+        const std::uint64_t written =
+            queue_write_seq(region.value().memory.bytes());
+        const std::uint64_t read =
+            load_shared(*cursor, std::memory_order_acquire);
+        // A pair that is no valid one says nothing about the count.
+        if (read < written && written - read <= queue.capacity) {
+            found.push_back({queue.name, written - read});
+        }
+    }
+    return found;
+}
+
 bool RetainKeeper::has_left(Watched& watched, const WatchedOwner& owner,
                             std::int64_t now_mono_ns) {
     // Left: the owner stored a state other than RUNNING after its last
@@ -691,7 +745,7 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
         const bool give_up =
             now_mono_ns - watched->retired_mono_ns >= 2 * RETIRED_TIMEOUT_NS;
         RetiredGeneration retired{
-            watched->generation, false, timed_out, {}, false};
+            watched->generation, false, timed_out, {}, false, {}};
         if (timed_out) {
             for (WatchedProcess& process : watched->processes) {
                 if (!proc_lock_held(watched->dir_fd,
@@ -710,7 +764,13 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
         }
         // Unlinked, never truncated: mappings that processes and observers
         // still hold stay valid, and go with them.
+        // Counted before the files go; reported once, with the removal.
+        std::vector<UnconsumedQueue> unconsumed =
+            unconsumed_records(*watched, now_mono_ns);
         retired.removed = remove_generation(base_fd, name);
+        if (retired.removed) {
+            retired.unconsumed = std::move(unconsumed);
+        }
         const bool removed = retired.removed;
         retired.abandoned = !removed && give_up;
         if (removed || retired.abandoned || !watched->removal_reported) {

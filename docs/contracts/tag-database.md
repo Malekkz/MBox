@@ -840,9 +840,22 @@ Decision D-54 (issue #65).
   it returns the records left and then `SCADA_E_RETIRING`, without waiting;
   on a request queue it answers every request still queued ABORTED and
   returns `SCADA_E_RETIRING`. Detach in a RETIRING generation answers
-  ABORTED what is left in the request queues the process consumes.
+  ABORTED what is left in the request queues the process consumes. Before
+  a drain can end, the library looks at once for a producer's region it has
+  not mapped, not at most once a second: a producer may have created it and
+  posted since the last look.
 - Nothing is carried over: every region of the new generation is new, so
-  `write_seq`, cursors and ids start at 0 (section 9.4).
+  `write_seq`, cursors and ids start at 0 (section 9.4). The processes do
+  their part: a driver never answers in the new generation a request it took
+  in the old one; a requester clears its table of pending requests at
+  detach, and reports a request that was taken (not answered ABORTED) and
+  not answered as failed with its outcome unknown, never as ABORTED; a
+  consumer that remembers ids to drop duplicates keys them by generation
+  (`scada_status.generation`) or forgets them at reattach.
+- When `scada-tagd` removes a retired generation it logs, per queue, the
+  records still in it that the consumer did not take (`records left
+  unconsumed in a removed generation`, WARNING), from the queue's
+  `write_seq` and the consumer's cursor.
 
 ## 10. Process regions (`proc.<process>`)
 
@@ -1662,7 +1675,8 @@ structure in shared memory changed. A producer that posted events or requests
 in a RETIRING generation now gets `SCADA_E_RETIRING` and must post again after
 it reattached. A consumer whose `scada_queue_next` returns
 `SCADA_E_RETIRING` has drained the queue and detaches; it no longer waits out
-its timeout there.
+its timeout there. Requesters and consumers that remember ids key them by
+generation or forget them at reattach (section 9.5).
 
 Migration, 0.13 to 0.14: none for data. The layout version stays 1: `starts`
 takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay

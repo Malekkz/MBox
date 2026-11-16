@@ -286,6 +286,16 @@ void log_retained(Logger& logger, const CheckReport& report) {
                        "process still attached to a retired generation",
                        {{"GENERATION", generation}, {"PROCESS", process}});
         }
+        for (const scada::tag::UnconsumedQueue& queue : retired.unconsumed) {
+            // Decision D-54: records a post accepted and nobody took. For
+            // an event queue, actions whose records the journal lacks.
+            const std::string records = std::to_string(queue.records);
+            logger.log(LogLevel::WARNING,
+                       "records left unconsumed in a removed generation",
+                       {{"GENERATION", generation},
+                        {"QUEUE", queue.queue},
+                        {"RECORDS", records}});
+        }
         if (retired.removed) {
             logger.log(retired.timed_out ? LogLevel::WARNING : LogLevel::NOTICE,
                        retired.timed_out
