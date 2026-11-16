@@ -249,6 +249,10 @@ enum RegionKind : uint32_t {
 A reader must not use a region until `ready` is 1. The creator writes `ready`
 last.
 
+`owner_index` is the process index in a `proc` region, the owner index in a
+`tags`, `strings` or `changes` region, the process index of the producer in
+a queue region, and 0 in `header`.
+
 ## 5. The `header` region
 
 Layout, in order: `RegionHeader`, `GlobalHeader`, owner table, process table,
@@ -509,7 +513,10 @@ resynchronise after an owner restart; the epoch tells it to.
 ## 7. String values (`strings.<owner>`)
 
 Layout: `RegionHeader`, then `string_slots` slots. A STRING tag's value is its
-slot number, fixed for the generation.
+slot number, fixed for the generation: the tag's rank among the owner's
+STRING tags in slot order (the first STRING tag has slot 0). It is written
+when the `tags` region is created; the repair of section 6.3 finds the slot
+by the same count, not from the record.
 
 ```cpp
 struct StringSlot {              // 256 bytes
@@ -1255,27 +1262,42 @@ for readers and never down for a check. `starts` counts it:
 
 ### 11.2 Attach (`scada_tag_attach`)
 
-1. Check the base directory (section 3.1). Open `current/header`. Fail with
-   `SCADA_E_LAYOUT` unless magic and layout version match the library's.
+1. Check the base directory (section 3.1). Read `current` once. Check the
+   generation directory as the base directory is checked: owned by the uid
+   of `scada-tagd`, mode `3770` (`SCADA_E_PERMISSION` otherwise). Open
+   `current/header`. Fail with `SCADA_E_LAYOUT` unless magic and layout
+   version match the library's.
 2. Find the calling process in the process table by name, and check its uid.
-3. For each of the process's own regions, the `proc` region first and the
-   queue regions after it (D-61, relied on by section 9.2: a peer that can
-   see a queue file can then see the `proc` region): if it exists with the right owner,
-   size and generation and is `ready`, reuse and repair it (section 6.3);
-   queue positions and cursors in a reused region are kept. If it exists, is
-   owned by the caller's uid, and is unready or has the wrong size, remove it.
-   If it is absent, create it (section 3.2), complete before its rename
-   publishes it, and load retained values (section 12) into a new `tags`
-   region. If it exists with another owner, attach fails
-   with `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
-4. Take the lock on `proc.<process>`. Map and pre-fault the process's own
-   regions. A process with the REALTIME flag is expected to run under
+3. Take the lock on `proc.<process>` before any other own region is looked
+   at, so that a second process of the same name fails before it can remove
+   or repair a region the first one uses. A `proc` region that can be
+   reused is locked before it is used; a new one is locked before it gets
+   its name; an unusable one of the caller is removed only if its lock is
+   free. Then the other own regions, owner by owner (`tags`, `strings`,
+   `changes`), then the queues the process produces: the `proc` region is
+   always there before the queue files (D-61, relied on by section 9.2: a
+   peer that can see a queue file can then see the `proc` region). For each
+   own region:
+   if it exists with the right owner, size and generation and is `ready`,
+   reuse and repair it (section 6.3); queue positions and cursors in a
+   reused region are kept. A reused region must also hold what the header
+   gives: a `tags` region the type of the tag directory in every record, a
+   ring the capacity of the owner table, a queue the capacity and record
+   size of the queue table; otherwise it is removed and created again, like
+   a region of the wrong size. If it exists, is owned by the caller's uid,
+   and is unready or has the wrong size, remove it. If it is absent, create
+   it (section 3.2), complete before its rename publishes it, and load
+   retained values (section 12) into a new `tags`
+   region. If it exists with another owner, attach fails with
+   `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
+4. Each own region is mapped and pre-faulted as it is attached. A process
+   with the REALTIME flag is expected to run under
    `mlockall(MCL_CURRENT | MCL_FUTURE)`.
 5. Drain the process's `cmd` queues (section 9.2).
 6. Set `state` RUNNING and write the first heartbeat. From here the caller
    must call `scada_tag_heartbeat()`.
 7. Read `GlobalHeader.state` again. If it is RETIRING, detach and start again
-   from step 1. The lock of step 4 failing in a RETIRING generation counts as
+   from step 1. The lock of step 3 failing in a RETIRING generation counts as
    RETIRING too, not as a second process of the name: `scada-tagd` takes such
    a lock for a moment to learn whether its process left (section 11.3).
 
@@ -1283,9 +1305,21 @@ Other processes' regions are mapped read-only and pre-faulted in
 `scada_tag_resolve`, `scada_sub_open`, `scada_queue_open` and
 `scada_proc_resolve`, never inside an RT-safe function. A region that is
 missing or not ready is not an error: its tags read as BAD with OWNER_DOWN.
-The library tries the mapping again inside `scada_tag_notify()`, at most once
-a second for each missing region, and at once for the `proc` region of the
-producer of a queue whose file a look maps (section 9.2, D-61).
+The library looks at each region it was asked for again inside
+`scada_tag_notify()`, at most once a second, also while it is mapped, and
+at once the `proc` region of the producer of a queue whose file a look maps
+(section 9.2, D-61): a
+missing region is mapped once it is there, and a mapped region whose file
+is gone, was replaced or changed in size is dropped or mapped anew. A
+mapping is kept until detach, because a reader may still hold it. A region
+is mapped at most 16 times in one context: when a further file is under its
+name, it reads as missing; a file mapped before is used again without
+spending a mapping.
+
+Pre-faulting uses `madvise` with `MADV_POPULATE_WRITE` for a read-write
+mapping and `MADV_POPULATE_READ` for a read-only one (Linux 5.14, below the
+minimum of section 1). It returns an error where touching the pages would
+end the process with a signal.
 
 ### 11.3 Generation change
 
@@ -1770,6 +1804,29 @@ typedef struct {
   uint8_t  reserved[6];
 } scada_proc_status_t;           /* 88 bytes */
 ```
+
+`scada_tag_status` fills `scada_status` and returns `SCADA_E_RETIRING`
+when the generation is RETIRING (for an observer also in the cases of
+section 11.4, step 5), otherwise `SCADA_E_TAGD_DOWN` when `scada-tagd` is
+down by the three rules of section 10.1, otherwise `SCADA_OK`.
+`scada_tag_heartbeat` returns `SCADA_E_RETIRING` when the generation is
+RETIRING; the heartbeat is written all the same.
+
+Return codes of `scada_tag_attach`:
+
+- `SCADA_E_NOT_FOUND` only for a process that is not in the process table.
+- `SCADA_E_LAYOUT` for another magic or layout version, a header that is
+  not valid, and a `current` that is not a symbolic link to a generation
+  name.
+- `SCADA_E_IO` with `errno` `ENOENT` for a missing base directory,
+  `current` or header; `ENOSPC` when the file system has no room for a
+  region; `EAGAIN` for a generation that is BUILDING.
+- `SCADA_E_INVALID` for a NULL argument, a name that is no process name,
+  or a `tagd_uid` that is neither -1 nor a uid.
+
+`errno` with `SCADA_E_IO` is the error number the library recorded where
+the failing system call was made, kept per thread, not the value the last
+clean-up call left.
 
 `scada_tag_handle` packs a handle as section 5.1 says, so that callers do
 not depend on the bit split; it returns `SCADA_INVALID_HANDLE` for an owner
