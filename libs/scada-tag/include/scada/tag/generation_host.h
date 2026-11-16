@@ -125,6 +125,24 @@ struct RetiredGeneration {
     bool abandoned = false;
 };
 
+// Lives a process started in its region since the previous sample, from
+// the `starts` count of its `proc` region (section 10.1). A process that
+// restarts into its reused region between two checks is otherwise not seen
+// by them. For diagnosis only. The figures are input: the process writes
+// them, and a life of a library before contract 0.14 counts nothing, so
+// they are a lower bound.
+struct Restarts {
+    std::string process;
+    // Lives started since the previous sample, at least 1.
+    std::uint32_t added = 0;
+    // Of those, the lives no check saw as down and up again: `added` minus
+    // the checks since the previous sample that found the process up after
+    // it was down, at least 0. A lower bound: a heartbeat that came back
+    // without a restart is such a check too.
+    std::uint32_t unseen = 0;
+    std::uint32_t total = 0;  // since the region was created; wraps
+};
+
 // What changed about a reliable queue at a liveness check (issue #53).
 enum class QueueEvent : std::uint8_t {
     // Its consumer's cursor and its `write_seq` became a pair out of range
@@ -168,6 +186,7 @@ struct CheckReport {
     // generation is retired (decision D-45). Names found in the
     // directory: outside input.
     std::vector<std::string> retain_files_removed;
+    std::vector<Restarts> restarts;
     std::vector<QueueChange> queues;
 };
 
@@ -236,7 +255,8 @@ public:
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
     // clears it for every process that is not, reads the late heartbeats
-    // every process recorded, applies the range rule of section 9.2 to
+    // every process recorded and the lives every other process started
+    // since the previous check, applies the range rule of section 9.2 to
     // every queue whose region and consumer's `proc` region are both there,
     // then removes every entry of the generation directory that the header
     // does not list or whose owner is wrong (section 3.1). Returns what

@@ -146,6 +146,23 @@ protected:
         return region.ok() ? std::move(region).value() : OwnProcRegion();
     }
 
+    // Ends the life `peer` and starts `lives` lives of `io` in generation
+    // 1 after it, as attach does, each at `now`; returns the last.
+    [[nodiscard]] OwnProcRegion restart_io(OwnProcRegion peer, int lives,
+                                           std::int64_t now) {
+        for (int life = 0; life < lives; ++life) {
+            peer = OwnProcRegion();
+            peer = attach_io(1);
+            if (!peer.valid()) {
+                return peer;
+            }
+            peer.count_start();
+            peer.first_heartbeat(now);
+            peer.set_state(ProcessState::RUNNING);
+        }
+        return peer;
+    }
+
     // The header of `generation`, mapped read-write as scada-tagd has it.
     [[nodiscard]] MappedRegion map_header(std::uint64_t generation) const {
         const std::filesystem::path path =
@@ -439,6 +456,124 @@ TEST_F(Host, LateHeartbeatsFoundAtStartAreABaseline) {
     EXPECT_TRUE(report.late[0].baseline);
     EXPECT_EQ(report.late[0].added, 1U);
     EXPECT_TRUE(host->check(late).late.empty());
+}
+
+// One life of `io` in generation 1 as attach makes it (section 11.2, step
+// 6): counted, first heartbeat at `now`, RUNNING. The previous life, if
+// any, must have released its region first.
+OwnProcRegion start_life(OwnProcRegion region, std::int64_t now) {
+    if (region.valid()) {
+        region.count_start();
+        region.first_heartbeat(now);
+        region.set_state(ProcessState::RUNNING);
+    }
+    return region;
+}
+
+// Issue #61 (D-47): a process that restarts into its reused region between
+// two checks is never seen down by them. The count of lives reports it.
+TEST_F(Host, ARestartBetweenTwoChecksIsReported) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    OwnProcRegion peer = start_life(attach_io(1), START_NS);
+    ASSERT_TRUE(peer.valid());
+    // The first sample of a mapping is a baseline.
+    const CheckReport first = host->check(START_NS);
+    EXPECT_EQ(changes_of(first).size(), 1U);
+    EXPECT_TRUE(first.restarts.empty());
+
+    peer = OwnProcRegion();  // the process ends
+    peer = start_life(attach_io(1), START_NS + 1);
+    ASSERT_TRUE(peer.valid());
+    const CheckReport report = host->check(START_NS + 1);
+    EXPECT_TRUE(changes_of(report).empty());
+    ASSERT_EQ(report.restarts.size(), 1U);
+    EXPECT_EQ(report.restarts[0].process, "io");
+    EXPECT_EQ(report.restarts[0].added, 1U);
+    EXPECT_EQ(report.restarts[0].unseen, 1U);
+    EXPECT_EQ(report.restarts[0].total, 2U);
+
+    // Reported once.
+    EXPECT_TRUE(host->check(START_NS + 1).restarts.empty());
+}
+
+TEST_F(Host, SeveralRestartsBetweenTwoChecksAreCounted) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    OwnProcRegion peer = start_life(attach_io(1), START_NS);
+    ASSERT_TRUE(peer.valid());
+    EXPECT_TRUE(host->check(START_NS).restarts.empty());
+    peer = restart_io(std::move(peer), 3, START_NS + 1);
+    ASSERT_TRUE(peer.valid());
+    const CheckReport report = host->check(START_NS + 1);
+    ASSERT_EQ(report.restarts.size(), 1U);
+    EXPECT_EQ(report.restarts[0].added, 3U);
+    EXPECT_EQ(report.restarts[0].unseen, 3U);
+    EXPECT_EQ(report.restarts[0].total, 4U);
+}
+
+// A restart that a check saw as down and the next as up is one of the lives
+// the count reports, but not an unseen one. The count is not sampled while
+// the process starts: a life counts itself just before RUNNING.
+TEST_F(Host, ARestartSeenAsDownAndUpIsNotUnseen) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    OwnProcRegion peer = start_life(attach_io(1), START_NS);
+    ASSERT_TRUE(peer.valid());
+    EXPECT_TRUE(host->check(START_NS).restarts.empty());
+
+    peer = OwnProcRegion();
+    peer = attach_io(1);  // STARTING
+    ASSERT_TRUE(peer.valid());
+    const CheckReport down = host->check(START_NS + 1);
+    ASSERT_EQ(changes_of(down).size(), 1U);
+    EXPECT_TRUE(down.restarts.empty());
+
+    peer.count_start();
+    // A check between the count and RUNNING sees the process down and does
+    // not sample the count.
+    EXPECT_TRUE(host->check(START_NS + 1).restarts.empty());
+    peer.first_heartbeat(START_NS + 2);
+    peer.set_state(ProcessState::RUNNING);
+    const CheckReport back = host->check(START_NS + 2);
+    ASSERT_EQ(changes_of(back).size(), 1U);
+    ASSERT_EQ(back.restarts.size(), 1U);
+    EXPECT_EQ(back.restarts[0].added, 1U);
+    EXPECT_EQ(back.restarts[0].unseen, 0U);
+}
+
+// A scada-tagd that starts takes the count it finds as a baseline: the
+// lives before it are not reported.
+TEST_F(Host, LivesFoundAtStartAreABaseline) {
+    OwnProcRegion peer;
+    {
+        const std::unique_ptr<GenerationHost> first = started();
+        ASSERT_NE(first, nullptr);
+        peer = start_life(attach_io(1), START_NS);
+        peer = OwnProcRegion();
+        peer = start_life(attach_io(1), START_NS);
+        ASSERT_TRUE(peer.valid());
+    }
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    EXPECT_TRUE(host->check(START_NS).restarts.empty());
+    EXPECT_TRUE(host->check(START_NS).restarts.empty());
+}
+
+// A life of a library before contract 0.14 does not count itself; the
+// count is a lower bound, and an unchanged count reports nothing.
+TEST_F(Host, ALifeThatDoesNotCountItselfIsNotReported) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    OwnProcRegion peer = start_life(attach_io(1), START_NS);
+    ASSERT_TRUE(peer.valid());
+    EXPECT_TRUE(host->check(START_NS).restarts.empty());
+    peer = OwnProcRegion();
+    peer = attach_io(1);
+    ASSERT_TRUE(peer.valid());
+    peer.first_heartbeat(START_NS + 1);
+    peer.set_state(ProcessState::RUNNING);
+    EXPECT_TRUE(host->check(START_NS + 1).restarts.empty());
 }
 
 TEST_F(Host, ChangedTagSetCreatesTheNextGenerationAndRetiresTheOld) {

@@ -806,7 +806,10 @@ ctest --preset perf -R scada-tag-wake-perf-test
   inside the markers depends only on the linker's layout (seen once on
   ARM64). It never uses `MCL_FUTURE`, so the shared regions mapped at
   attach must still be pre-faulted by the library, and a fault in one is a
-  failure (shown by dropping a region's pages after its pre-fault).
+  failure (shown by dropping a region's pages after its pre-fault). What
+  it cannot catch: a pre-fault removed from the library for a region whose
+  pages attach or the probe touches anyway before the markers; the test
+  then passes without it, as it did before the probe locked its memory.
 - `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
   one-thread check of contract 13.2 with a real process.
 - The writing side of the load tests is `scada-sim` (`libs/scada-sim`):

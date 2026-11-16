@@ -153,3 +153,23 @@ target_include_directories(scada-tag-retain-integration-test
   PRIVATE "${PROJECT_SOURCE_DIR}/libs/scada-tag/src")
 add_dependencies(scada-tag-retain-integration-test
   scada-tagd scada-tag-test-retainer)
+
+# A killed test binary leaves no process and no directory behind (issue
+# #64): the helper scada-test-killed-runner is a test binary that starts
+# scada-tagd and two simulator processes and waits; the test kills it with
+# SIGKILL and looks for what is left. The helper is not a CTest test.
+add_executable(scada-test-killed-runner killed_runner.cpp)
+target_link_libraries(scada-test-killed-runner PRIVATE
+  scada::tag scada::tagd scada::sim scada::service scada::test-support
+  GTest::gtest_main)
+scada_target_defaults(scada-test-killed-runner)
+scada_test_command(killed_runner_command scada-test-killed-runner)
+scada_add_test(scada-test-cleanup-integration-test KIND integration
+  SOURCES cleanup_integration_test.cpp
+  DEPENDS scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
+    "SCADA_KILLED_RUNNER_COMMAND=${killed_runner_command}")
+add_dependencies(scada-test-cleanup-integration-test
+  scada-tagd scada-sim scada-test-killed-runner)

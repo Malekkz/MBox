@@ -1,6 +1,9 @@
 #include "scada/tagd/tagd.h"
 #include "scada/tagd/suspend.h"
 
+#include "late_log.h"
+#include "report_log.h"
+
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/log.h"
@@ -8,7 +11,6 @@
 #include "scada/common/status.h"
 #include "scada/service/notify.h"
 #include "scada/tag/generation_host.h"
-#include "scada/tag/liveness.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/tag_set_json.h"
 
@@ -42,13 +44,7 @@ namespace {
 using scada::service::Notifier;
 using scada::service::NotifySettings;
 using scada::tag::CheckReport;
-using scada::tag::DownReason;
 using scada::tag::GenerationHost;
-using scada::tag::LateHeartbeats;
-using scada::tag::ProcessChange;
-using scada::tag::QueueChange;
-using scada::tag::QueueEvent;
-using scada::tag::SweptEntry;
 using scada::tag::TagSet;
 
 constexpr std::string_view USAGE =
@@ -314,94 +310,6 @@ void log_retained(Logger& logger, const CheckReport& report) {
     }
 }
 
-// Writes what one liveness check changed to the log.
-void log_report(Logger& logger, const CheckReport& report) {
-    for (const ProcessChange& change : report.changes) {
-        if (change.reason == DownReason::NONE) {
-            logger.log(LogLevel::NOTICE, "process up",
-                       {{"PROCESS", change.process}});
-        } else {
-            logger.log(LogLevel::WARNING, "process down",
-                       {{"PROCESS", change.process},
-                        {"REASON", scada::tag::to_string(change.reason)}});
-        }
-    }
-    for (const LateHeartbeats& late : report.late) {
-        // A late heartbeat is a moment in which readers saw the process
-        // down (BAD with OWNER_DOWN, a gap on its rings), also when no
-        // check fell into it. WARNING also when a change of the same
-        // process was logged above: the gap length is only here. What the
-        // first look at a region finds is a baseline, logged at INFO.
-        // The texts live until the end of the iteration: a field borrows.
-        const std::string added = std::to_string(late.added);
-        const std::string total = std::to_string(late.total);
-        const std::string longest =
-            std::to_string(late.longest_gap_ns / NANOSECONDS_PER_MILLISECOND);
-        const std::string last = std::to_string(late.last_late_mono_ns);
-        const std::array<LogField, 5> fields{{
-            {"PROCESS", late.process},
-            {"LATE_BEATS", added},
-            {"LATE_BEATS_TOTAL", total},
-            {"LONGEST_GAP_MS", longest},
-            {"LAST_LATE_MONO_NS", last},
-        }};
-        if (late.baseline) {
-            // Counted before this scada-tagd looked; not new.
-            logger.log(LogLevel::INFO, "heartbeat late before this check",
-                       fields);
-        } else {
-            logger.log(LogLevel::WARNING, "heartbeat late", fields);
-        }
-    }
-    log_retained(logger, report);
-    for (const QueueChange& queue : report.queues) {
-        // A broken queue refuses every post and delivers nothing until the
-        // next generation (contract 9.2): actions that need it are refused.
-        // Each is logged once per change, not at every check.
-        const std::string cursor = std::to_string(queue.cursor);
-        const std::string written = std::to_string(queue.write_seq);
-        const std::string capacity = std::to_string(queue.capacity);
-        const std::array<LogField, 5> fields{{
-            {"QUEUE", queue.queue},
-            {"CURSOR", cursor},
-            {"WRITE_SEQ", written},
-            {"CAPACITY", capacity},
-            {"REASON", queue.replaced ? "replaced" : "out of range"},
-        }};
-        switch (queue.event) {
-            case QueueEvent::BROKEN:
-                logger.log(LogLevel::WARNING, "queue broken", fields);
-                break;
-            case QueueEvent::NO_LONGER_BROKEN:
-                logger.log(LogLevel::NOTICE, "queue no longer broken",
-                           std::span(fields).first(4));
-                break;
-            case QueueEvent::MISSING:
-                logger.log(LogLevel::WARNING, "queue file missing",
-                           std::span(fields).first(1));
-                break;
-            case QueueEvent::FOUND:
-                logger.log(LogLevel::NOTICE, "queue file found again",
-                           std::span(fields).first(1));
-                break;
-        }
-    }
-    for (const SweptEntry& entry : report.swept) {
-        // The name is outside input; the sinks escape it and cut it.
-        if (entry.removed) {
-            logger.log(LogLevel::WARNING,
-                       "removed an entry that does not belong in the "
-                       "generation directory",
-                       {{"ENTRY", entry.name}});
-        } else {
-            logger.log(LogLevel::ERROR,
-                       "cannot remove an entry that does not belong in the "
-                       "generation directory",
-                       {{"ENTRY", entry.name}});
-        }
-    }
-}
-
 // Logs what a sample of the clocks showed about a system suspend (contract
 // 3.4): the unit must not suspend, and a suspend makes write requests
 // expire later in real time than their requesters meant.
@@ -459,12 +367,15 @@ int serve(GenerationHost& host, Notifier& notifier,
     bool feeding = true;  // the last watchdog message was sent
     std::int64_t next_feed = monotonic_ns();
     std::int64_t next = monotonic_ns();
+    LateLog late_log;
     for (;;) {
         const std::int64_t now = monotonic_ns();
         // The heartbeat, the check and the watchdog share this loop, so
         // that a hung loop stops all three (contract, sections 3.4, 10.1).
         host.heartbeat(now);
-        log_report(logger, host.check(now));
+        const CheckReport report = host.check(now);
+        log_report(logger, report, late_log, now);
+        log_retained(logger, report);
         note_suspend(logger, suspend);
         if (feed_period.has_value() && now >= next_feed) {
             const bool fed = notifier.watchdog().ok();
@@ -488,7 +399,9 @@ int serve(GenerationHost& host, Notifier& notifier,
                 break;
             case Wake::STOP:
                 // Section 12: the retained values on clean shutdown.
-                log_report(logger, host.flush_retained());
+                log_retained(logger, host.flush_retained());
+                // Late heartbeats held back by the rate limit are not lost.
+                log_late(logger, late_log.drain());
                 host.stop();
                 // Best effort: the process exits either way, and the
                 // service manager sees the exit.
@@ -496,6 +409,7 @@ int serve(GenerationHost& host, Notifier& notifier,
                 logger.log(LogLevel::NOTICE, "stopped on request");
                 return EXIT_OK;
             case Wake::ERROR:
+                log_late(logger, late_log.drain());
                 logger.log(LogLevel::CRITICAL, "waiting for signals failed");
                 return EXIT_ERROR;
         }
