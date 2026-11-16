@@ -1,8 +1,34 @@
 # Phase 1 report
 
 The figures that phase 1 is accepted on (contract section 15, reference
-section 15). Issue P1-12 completes this report with the benchmarks of every
-conformance test.
+section 15). Issue P1-12 (#20) adds the conformance suite, the benchmarks
+and the performance gate (decision D-57); its figures follow the section of
+issue #40.
+
+## Hardware, and what it means
+
+Every figure below comes from GitHub-hosted runners: shared virtual
+machines, not the target board, without a real-time kernel, with neighbours
+on the same host.
+
+| Runner | Processor | vCPUs | Clock source | Kernel |
+| --- | --- | --- | --- | --- |
+| `ubuntu-24.04` | AMD EPYC 9V74 | 4 | `tsc` | Ubuntu 24.04 image of the run |
+| `ubuntu-24.04-arm` | Neoverse-N2 | 4 | `arch_sys_counter` | Ubuntu 24.04 image of the run |
+
+"Separate cores" in conformance tests 3 and 26 means separate virtual
+processors. The figures of issue #20 must be taken again on the target
+board (issue #41) before phase 1 can be called done on it.
+
+Not measured in phase 1:
+
+- the target board (#41);
+- the jitter and overruns of a fast task on a real-time kernel (reference
+  15.2);
+- gaps of a change ring consumer that keeps up with the reference load
+  (contract 16, the gap half of the ring capacity; tests 13 and 14 check
+  gaps at smaller loads);
+- huge pages for the `tags` regions (contract 16, still open).
 
 ## Read retry window and `SCADA_E_BUSY` (issue #40)
 
@@ -61,3 +87,111 @@ section 16): fewer than 1 `SCADA_E_BUSY` in 1,000,000 reads.
 
 The rate on ARM64 is below the criterion with either instruction. ARM64 uses
 `isb` (D-31): it is the one that covers a string write.
+
+## Issue #20: the measurement run
+
+Workflow `measurements`, run 43875571560, commit `0fd68a2` (main after PR
+#94), `perf` build (GCC 13.3, `-O2 -g`, hardening flags), started by hand on
+2026-11-16 with `seconds=600` and `latency_spread=true`, `runs=10`. Three
+measurement jobs (x86-64 with `pause`, ARM64 with `isb` and with `yield`;
+ARM64 ships `isb`, D-31) and 20 runs of conformance test 27 on fresh runners.
+All 23 jobs passed.
+
+### Conformance test 2: the reference load for 10 minutes
+
+The acceptance line of the issue: 50,000 tags, 50,000 updates per second
+sustained for 10 minutes with 4 readers. scada-sim writes 50,000 tags of 10
+owners; 4 readers in another process read every tag with `read_many` of
+500 and check every value; 600 s.
+
+| | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| Updates per second | 50,000 | 50,000 | 50,000 |
+| Reads | 41.8 billion | 51.5 billion | 51.2 billion |
+| Torn reads | 0 | 0 | 0 |
+| `SCADA_E_BUSY` | 0 | 3 | 19 |
+
+### Conformance test 26: false trips, and the read retry limit
+
+The reference load with 4 readers under SCHED_FIFO in a process marked
+REALTIME (timeout 500 ms), reader i on the i-th processor, beside the
+owners (timeout 3,000 ms). Each reader is a 10 ms task that reads 5,000
+tags per cycle (2,000,000 reads per second in all); this load is fixed
+(D-57). 600 s.
+
+| | x86-64 | ARM64, `isb` | ARM64, `yield` |
+| --- | --- | --- | --- |
+| Reads | 1,200,240,000 | 1,200,220,000 | 1,200,220,000 |
+| `SCADA_E_BUSY` | 0 | 0 | 149 |
+| Rate per 1,000,000 reads | 0 | 0 | 0.124 |
+| Bound of the test (99.9 % Poisson at 1 per million) | 1,309 | 1,309 | 1,309 |
+| OWNER_DOWN reads, stale or late heartbeats | 0 | 0 | 0 |
+| Torn, backwards or failed reads | 0 | 0 | 0 |
+| Longest reader cycle | 1,190 us | 374 us | 773 us |
+
+Criterion of contract section 16: fewer than 1 `SCADA_E_BUSY` in 1,000,000
+reads. With the shipped code it is met on both runners: 0 in 1.2 billion
+reads puts the rate below about 0.006 per million at 99.9 % confidence. The
+limit of 64 attempts and the heartbeat defaults are confirmed (contract
+0.22). In the pipeline, the 10 s run of the release build gates the same
+criterion statistically (bound 35 for 20.24 million reads, D-57); in the dev
+build, whose write path is not optimised, it is reported only: 0 to 31 in
+about 20 million reads on a 4-processor container.
+
+### Conformance test 27: latency of read and write
+
+Under the reference load (scada-sim at 50,000 updates per second); each call
+timed alone with CLOCK_MONOTONIC. Samples per run: 200,000 `read` and
+`write`, 20,000 calls of 500 tags, 2,000 scans of 5,000 tags. Median of the
+medians of 10 runs on fresh runners, their range, and the worst 99.9th
+percentile of those 10 runs, in ns.
+
+| Call | x86-64 median (range) | x86-64 worst p99.9 | ARM64 median (range) | ARM64 worst p99.9 |
+| --- | --- | --- | --- | --- |
+| One clock reading | 21 (20–30) | 80 | 32 (32) | 33 |
+| `read` | 87 (80–100) | 461 | 104 (104) | 336 |
+| `read_many`, 500 tags | 14,968 (10,696–17,012) | 48,510 | 18,272 (17,839–18,447) | 34,441 |
+| `write` | 101 (80–120) | 351 | 136 (136) | 248 |
+| `write_many`, 500 tags | 9,826 (8,153–14,287) | 39,223 | 19,900 (19,646–20,151) | 30,982 |
+| `write_many`, 5,000 tags (the scan) | 97,810 (80,361–143,317) | 231,321 | 197,422 (193,340–198,812) | 296,449 |
+
+The scan stays below the 0.5 ms of contract 16 at the median and at the
+99.9th percentile in every run on the runners; on a busy 4-processor
+container one local run gave 2.5 ms at the 99.9th percentile, so the worst
+case is for the target board to decide. The x86-64 runners differ by up to
+1.47 times from the median (two runs with a clock reading of 30 ns instead
+of 20 ns, a different or busier host); ARM64 by 1.01 times. The medians of
+the 10 runs are the baselines of the gate (`tests/perf/baseline/`), which
+fails above 2.0 times them.
+
+### Memory and database
+
+Conformance test 27, during the reference load. Proportional set size (and
+resident set size), kB:
+
+| Process | x86-64 | ARM64 |
+| --- | --- | --- |
+| `scada-tagd` | 13,828 (20,464) | 13,677 (19,696) |
+| `scada-sim`, 10 owner threads, 50,000 tags | 24,869 (31,488) | 24,721 (30,728) |
+| A process that reads 50,000 and writes 5,000 tags | 10,028 (16,756) | 9,818 (15,960) |
+
+The database of the reference load (all regions of the generation) is
+28,825,112 bytes on both, below the 64 MB of contract 16. `scadactl`, the
+remaining process of phase 1, was not measured; it runs only on demand.
+
+### The other performance tests, measurement jobs
+
+| | x86-64 | ARM64, `isb` | Bound |
+| --- | --- | --- | --- |
+| Wake-up, one consumer, p99 (2,500 samples) | 13 us | 17 us | 1 ms (D-32) |
+| Wake-up, 8 observers, p99 (20,000 samples) | 40 us | 28 us | reported only (D-42) |
+| Simulator, reference rate, worst lateness | 2 ms | 1 ms | 250 ms (D-41) |
+| Simulator, one process at full speed | 33.3 million updates/s | 32.8 million updates/s | 50,000/s |
+| Queue post, two contexts, per record | 282 ns | 377 ns | 10 us (D-49) |
+
+Read retry window (`scada-tag-seqlock-bench`, as in issue #40): 64 attempts
+on a record mid-write take 1,586 ns on x86-64 with `pause` and 665 ns on
+ARM64 with `isb`; 50,000 scalar tags at 50,000 writes per second gave 0
+`SCADA_E_BUSY` in 4.98 billion reads on x86-64 and 1 in 8.78 billion on
+ARM64.
+

@@ -9,7 +9,8 @@
 #   with each pause instruction. Weekly: x86-64 and ARM64 with `isb`.
 # - `latency-spread`: by hand only, when asked: the latency test (conformance
 #   test 27) on `runs` fresh runners per architecture, the spread from which
-#   the tolerance of the gate is judged.
+#   the tolerance of the gate is judged. The `measurements` jobs run in the
+#   same dispatch too: one dispatch with `latency_spread` gives both.
 #
 # The weekly run costs the owner Actions minutes (about 2 jobs of 35
 # minutes). To switch it off, delete the `schedule` lines below, or disable

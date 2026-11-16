@@ -1,0 +1,11 @@
+# Baseline medians of conformance test 27 on ARM64, in ns (decision D-57).
+# The median of 10 runs on fresh GitHub-hosted runners (ubuntu-24.04-arm, 4
+# vCPUs, Neoverse-N2, pause isb), perf build, workflow `measurements` run
+# 43875571560, commit 0fd68a2. The gate fails above 2.0 times a value; the
+# worst of the 10 runs was 1.01 times its median. Change a value only in a
+# pull request that says why, with the runs it comes from.
+read 104
+read_many_500 18272
+write 136
+write_many_500 19900
+write_many_5000 197422

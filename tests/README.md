@@ -120,7 +120,9 @@ runs it in the step "Perf gate (perf)". `scada-tag-latency-perf-test`
 (conformance test 27) also compares the median of each call with
 `baseline/<processor>.txt` (lines `<call> <median ns>`, as the test prints
 the calls) and fails above `SCADA_PERF_TOLERANCE` times it (2.0). A call the
-baseline does not name is reported only. Change a baseline only in a pull
+baseline does not name is reported only. The baselines are the medians of 10
+runs on fresh runners per architecture (decision D-57,
+`docs/reports/phase-1.md`). Change a baseline only in a pull
 request that says why, with the figures of the runs it comes from.
 
 A conformance test of the contract (section 15) is listed in

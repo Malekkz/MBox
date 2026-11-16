@@ -159,8 +159,8 @@ tolerance catches a regression of a multiple, not of 10 %.
   runs in the `perf` build `scripts/measure-seqlock.sh`, conformance tests 2
   and 26 for 600 s each, and every `perf` test, and keeps the output for 90
   days as the artifacts `measurements-<arch>-<pause>` (decisions D-31,
-  D-57). Started by hand with `latency_spread`, it also runs conformance
-  test 27 on 10 fresh runners per architecture. The weekly run costs
+  D-57). Started by hand with `latency_spread`, it runs conformance test 27
+  on 10 fresh runners per architecture as well as the measurement jobs. The weekly run costs
   Actions minutes; to stop it, delete its `schedule` or disable the
   workflow on the Actions page.
 - `build and test (ARM64)` also checks, in `ctest --preset release`, that the
