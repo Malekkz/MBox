@@ -30,6 +30,11 @@ inline constexpr std::string_view DEFAULT_BASE_DIR = "/dev/shm/scada";
 // (section 10.1).
 inline constexpr std::string_view TAGD_PROCESS_NAME = "tagd";
 
+// The default retain interval and directory (section 12).
+inline constexpr std::uint32_t DEFAULT_RETAIN_INTERVAL_MS = 5000;
+inline constexpr std::string_view DEFAULT_RETAIN_DIR_PATH =
+    "/var/lib/scada/retain";
+
 struct HostOptions {
     // The database directory. It must exist, created by the platform
     // (section 3.1).
@@ -37,7 +42,18 @@ struct HostOptions {
     // The user id scada-tagd runs as: the owner the base directory must
     // have, and the uid of the process `tagd` in the tag set.
     std::uint32_t tagd_uid = 0;
+    // The directory of the retained values (section 12). It must exist,
+    // owned by `tagd_uid` with mode 2750. Empty: no value is persisted;
+    // retired generations are still finished and removed.
+    std::string retain_dir;
+    // Values that changed are written at most this often, in ms (section
+    // 12); a RETAIN_NOW tag is written at the next check after its change.
+    std::uint32_t retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS;
 };
+
+// How long a retired generation may keep scada-tagd waiting for its
+// processes to leave before it is removed anyway, in ms (section 11.3).
+inline constexpr std::uint32_t RETIRED_GENERATION_TIMEOUT_MS = 30'000;
 
 // A process whose `down` flag changed at a liveness check.
 struct ProcessChange {
@@ -70,6 +86,43 @@ struct LateHeartbeats {
     std::int64_t longest_gap_ns = 0;     // between any two heartbeats
     std::int64_t last_late_mono_ns = 0;  // CLOCK_MONOTONIC; end of the gap
     bool baseline = false;
+};
+
+// A retain file written (section 12).
+struct RetainWrite {
+    std::string owner;
+    std::size_t values = 0;
+    // True if the file marks that the owner left a retired generation
+    // (decision D-45).
+    bool final = false;
+};
+
+// A retain file that was ignored because it failed its checks, or one that
+// could not be written. Reported once until the problem goes away.
+struct RetainProblem {
+    // The file name or the owner. Outside input for a file name: any
+    // bytes but '/' and NUL.
+    std::string subject;
+    std::string detail;
+};
+
+// A retired generation that scada-tagd finished with (section 11.3, step
+// 3).
+struct RetiredGeneration {
+    std::uint64_t generation = 0;
+    // False if something of it stays; tried again at the next check, and
+    // reported again only once it is gone.
+    bool removed = false;
+    // True if it was removed because RETIRED_GENERATION_TIMEOUT_MS passed,
+    // not because every process had left.
+    bool timed_out = false;
+    // On a timeout: the processes that still held the lock of their `proc`
+    // region, as "<process> (pid <pid>)". Their values were written, but
+    // not marked FINAL.
+    std::vector<std::string> still_attached;
+    // True if it could not be removed by twice the timeout: it is no
+    // longer tried and stays until the next boot (section 3.3).
+    bool abandoned = false;
 };
 
 // Lives a process started in its region since the previous sample, from
@@ -125,6 +178,14 @@ struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
     std::vector<LateHeartbeats> late;
+    std::vector<RetainWrite> retain_written;
+    std::vector<RetainProblem> retain_problems;
+    std::vector<RetiredGeneration> retired;
+    // Retain files of owners that are in no generation any more, removed
+    // once every owner of the current generation has a file and no
+    // generation is retired (decision D-45). Names found in the
+    // directory: outside input.
+    std::vector<std::string> retain_files_removed;
     std::vector<Restarts> restarts;
     std::vector<QueueChange> queues;
 };
@@ -206,7 +267,33 @@ public:
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.
+    //
+    // Then, with a retain directory, reads the RETAIN tags of the
+    // generation and writes the retain file of every owner whose values
+    // changed: at the first check after a change of a RETAIN_NOW tag,
+    // otherwise once `retain_interval_ms` passed since its last write
+    // (section 12). A record counts as a value if its quality is GOOD or
+    // UNCERTAIN and it is not NOT_INIT; otherwise the value on file stays.
+    //
+    // Then finishes the retired generations (section 11.3, step 3;
+    // decision D-45): once the process of an owner has left one (down by
+    // section 10.1, or no longer holding the lock of its `proc` region),
+    // reads that owner's RETAIN tags there and writes its retain file
+    // marked FINAL; once every owner is done and no `proc` region is
+    // locked, removes the generation. After RETIRED_GENERATION_TIMEOUT_MS
+    // it does both whatever the processes do.
     [[nodiscard]] CheckReport check(std::int64_t now_mono_ns);
+
+    // Writes the retain file of every owner whose values changed since its
+    // last write, now (section 12: on clean shutdown).
+    [[nodiscard]] CheckReport flush_retained();
+
+    // The retain files are written by a thread of scada-tagd's own, so that
+    // a slow fsync does not hold up the liveness checks (decision D-45); a
+    // check reports the files that thread finished since the check before.
+    // This waits until it has finished every file it was given and reports
+    // them, and gives it nothing new.
+    [[nodiscard]] CheckReport wait_retained_written();
 
     // The `down` flag of `process` as other processes see it, or nothing if
     // the tag set has no such process.

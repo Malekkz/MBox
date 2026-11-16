@@ -55,9 +55,22 @@ expect_file("${TMPFILESDIR}/scada-tagd.conf")
 if(EXISTS "${STAGE}/${TMPFILESDIR}/scada-tagd.conf")
   file(STRINGS "${STAGE}/${TMPFILESDIR}/scada-tagd.conf" tmpfiles_lines
     REGEX "^[^#]")
-  if(NOT tmpfiles_lines STREQUAL "d /dev/shm/scada 2750 scada-tagd scada -")
+  set(expected_tmpfiles
+    "d /dev/shm/scada 2750 scada-tagd scada -"
+    "d /var/lib/scada/retain 2750 scada-tagd scada -")
+  if(NOT tmpfiles_lines STREQUAL expected_tmpfiles)
     message(SEND_ERROR
-      "scada-tagd.conf does not create /dev/shm/scada as the contract requires: ${tmpfiles_lines}")
+      "scada-tagd.conf does not create /dev/shm/scada and /var/lib/scada/retain as the contract requires: ${tmpfiles_lines}")
+  endif()
+endif()
+
+# scada-tagd may write the retain directory (contract, section 12).
+expect_file("${UNITDIR}/scada-tagd.service.d/retain.conf")
+if(EXISTS "${STAGE}/${UNITDIR}/scada-tagd.service.d/retain.conf")
+  file(STRINGS "${STAGE}/${UNITDIR}/scada-tagd.service.d/retain.conf"
+    retain_lines REGEX "^ReadWritePaths=")
+  if(NOT retain_lines STREQUAL "ReadWritePaths=/var/lib/scada/retain")
+    message(SEND_ERROR "the drop-in of scada-tagd does not allow writing /var/lib/scada/retain")
   endif()
 endif()
 
