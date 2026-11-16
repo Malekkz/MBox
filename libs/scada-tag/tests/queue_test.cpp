@@ -2161,6 +2161,23 @@ int steps_after_a_size_change(Attachment& process, Queue& reader) {
     return 0;
 }
 
+// B1 in the order of the rt probe (#73): the driver opens its request
+// queue and waits in a wait set before the requester attaches and creates
+// the file; the wait set reports the request.
+TEST_F(Queues, AWaitSetFindsARequestQueueCreatedAfterTheOpen) {
+    constexpr int WAIT_MS = 2500;
+    std::filesystem::remove(generation_dir() / "cmd.io.web");
+    restart(io(), "io");
+    const QueuePtr reader = open(*io(), "cmd.io.web");
+    WaitSet set(*io());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    restart(web(), "web");  // creates the file
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    ASSERT_TRUE(posts(*out, request()));
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(takes_request(*reader, request_id_of(CMD_WEB, 0)));
+}
+
 // Review of PR #86 (B2): once a look found the file in use changed in
 // size, a wait set does not read it (SIGBUS) but reports the queue ready;
 // next then stops it, and the stopped queue is not ready again. In a
