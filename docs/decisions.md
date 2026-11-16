@@ -1336,6 +1336,30 @@ Consequences:
 - Tests: `Peers.AQueueFoundLaterIsSeenWithItsProducer` (the producer's slot asked for first and looked at, missing, a second before the queue's, so that only the queue's slot is due), `Peers.AQueueCreatedAnewIsSeenWithItsNewProducer` (both files created anew, the path of D-49), `Queues.AConsumerThatSeesAQueueSeesItsProducer` (the producer attaches after the open; the look of the queue maps its `proc` region). Each fails without the change. From the review: `Peers.AnAskForARegionStillMissingLooksAgainAtOnce` (fails without the look of an ask of a missing slot) and `Peers.AProducerRegionMissingAtTheCoupledLookIsFoundLater` (the coupled look finds no `proc` file; the next `refresh` finds it).
 - The rt probe no longer waits until it sees the feeder live before its markers (D-56 added that wait): without the wait it passed 1,273 loaded runs of `scada-tag-rt-integration-test` (6 loops of it and 2 of unit tests, busy loops and `ctest -j8`, load average up to 22.7), where it had failed 2 of 1,074 without the coupling.
 
+## D-63: No process-wide queue counts in `scada_status`
+Date: 2026-11-16
+Phase / issue: 1, #21
+Status: accepted by the committee of the lead session on 2026-11-16
+
+Context: D-40 left open for contract 1.0 (P1-13) whether `scada_status` gets process-wide queue counts. Contract section 16 lists it as an open point to settle before 1.0.
+Options: add process-wide counts to `scada_status`; keep counts per queue in `scada_queue_stats` only.
+Decision: the choice of D-40 is kept. No process-wide queue counts are added; `scada_queue_stats` reports the counts of one side of one queue, and `scada_status` stays 32 bytes. Contract 0.25 marks the point of section 16 settled.
+Reason: `scada_status` is allocated by the caller without a size field, so growing it overruns callers built against the old size (D-40). A process that wants totals adds up the counts of its queues.
+Consequences: no change to code or to any structure. A later wish for process-wide counts needs a new function, not a larger `scada_status`.
+
+## D-64: The two open measurements of contract 16: the ring gap at the reference load, and huge pages
+Date: 2026-11-16
+Phase / issue: 1, #21 (P1-13)
+Status: accepted for the method, decided by the committee of the lead session on 2026-11-16 (plan of #21). The figures follow from the workflow `measurements` after this change is on main, and settle the two rows of contract section 16 in the pull request of contract 1.0.
+
+Context: two rows of contract section 16 were still open after P1-12 (D-57): the gap half of the default change ring capacity (no gap for a consumer that keeps up with the reference load) and huge pages for the `tags` regions (used only if they lower the 99.9th percentile of a read). Both can be measured on the pipeline runners.
+Decision:
+- Ring gap: `scada-tag-ring-gap-perf-test` (label `perf`). scada-sim writes the reference load (50,000 tags, 10 owner threads, 50,000 updates per second, notify each tick, the default heartbeat timeout of 3,000 ms) with the default ring capacity, 65,536 entries per owner. This process subscribes to all 10 rings before the simulator writes, and one thread per ring takes every change. Any gap, whatever its reason, fails the test, and every change written must arrive. It runs for 10 s in the pipeline's perf gate and for 600 s in the workflow `measurements`.
+- Huge pages: `scada-tag-huge-pages-root-test` (label `root`, since it mounts a file system). A huge page is 2 MB, and at the reference load an owner's `tags` region is 320 KB (5,000 records of 64 bytes), so huge pages cannot be used there at all. The test therefore uses one owner of 50,000 tags (3.2 MB), written at 50,000 updates per second, and measures 1,000,000 reads and 20,000 `read_many` of 500 while it is written. It does this with the database on a tmpfs mounted `huge=never` and on one mounted `huge=always`, in a mount namespace of its own (the method of conformance test 11). In the second, it checks that the region this process reads is mapped with huge pages (`ShmemPmdMapped` or `FilePmdMapped` above 0), so a run that did not use them cannot count. It reports the figures and gates on nothing: the decision is taken from the figures of both architectures. If huge pages give a lower 99.9th percentile on both, the lead is told before anything changes.
+- Both run in the workflow `measurements` (steps "Ring gap at the reference load" and "Huge pages (as root)"); the job's time limit goes from 75 to 100 minutes.
+Reason: a test of the reference load itself is the criterion the contract names; a gap at smaller loads (tests 13 and 14) says nothing about the capacity. Huge pages need a region of at least 2 MB; measuring them on a layout where they cannot apply would show nothing.
+Consequences: the root preset runs the huge-page test in the dev build too (a few seconds, figures only). Locally, on a 4-processor container: the ring-gap test received 500,000 changes with 0 gaps in 10 s; the huge-page test mapped 2,048 kB of the 3.2 MB region with huge pages, and two runs gave read 99.9th percentiles of 497 and 459 ns on huge=never and 478 and 452 ns on huge=always.
+
 ## D-65: `scada_tag_write_string` checks ownership before the text
 Date: 2026-11-16
 Phase / issue: 1, #112
