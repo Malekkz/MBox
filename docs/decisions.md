@@ -1426,5 +1426,5 @@ Reason: a and c meet their criteria on both architectures with the code that shi
 Consequences:
 - Contract section 16: every point settled; heading and intro say so; the lost-audit item moves to the deferred list.
 - Contract 1.0: layout version 1 frozen; a later change needs a layout version bump and a migration note, as the contract said before 1.0. Section 17 says that reference 1.1 section 5 matches the contract and lists what remains: reference 1.1 also corrects the lines of 3.1, 4.2, 6.1 and 14.4 that refer to section 5, and 10.4 stays a phase 5 gap (#75).
-- Reference document 1.1: section 5 updated to match the contract, approved by the product owner; no other section changed.
+- Reference document 1.1: section 5 updated to match the contract, and the lines of 3.1, 4.2, 6.1 and 14.4 that refer to it corrected, approved by the product owner; no other section changed.
 - No change to code or to any structure.
