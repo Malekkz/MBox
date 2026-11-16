@@ -2,18 +2,18 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.26 (draft) |
+| Contract version | 1.0 |
 | Layout version | 1 |
-| Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
-| Implements | Reference architecture, section 5 |
+| Status | Accepted as 1.0 at the close of phase 1 (issue #21, P1-13, D-66). Layout version 1 is frozen. |
+| Implements | Reference architecture 1.1, section 5 |
 | Owners of this contract | `scada-tagd`, `libscada-tag` |
 
 This contract defines the shared-memory data plane exactly enough that two
 independent implementations would interoperate. All access goes through
 `libscada-tag`; no other code may depend on the binary layout.
 
-Until this contract reaches 1.0 it may change freely within phase 1. After
-that, any change needs a layout version bump and a migration note.
+This is version 1.0, and layout version 1 is frozen. Any later change needs
+a version bump and a migration note (section 18).
 
 ## 1. Conventions
 
@@ -2147,9 +2147,22 @@ Deferred by the owner, does not block 1.0:
 
 ## 17. Differences from the reference document
 
-This contract refines section 5 of the reference architecture. When the
-contract reaches 1.0, the reference document is updated to match and the
-change is recorded in its change log.
+This contract refines section 5 of the reference architecture. Section 5 of
+the reference document 1.1 matches this contract 1.0 (reference change log,
+version 1.1, issue #21). The list below is kept as the record of the
+differences that update resolved; the numbers are cited elsewhere.
+
+Differences that remain, outside reference section 5:
+
+- Reference 3.1 says `scada-tagd` creates the shared-memory segment and
+  marks stale tags. Here each process creates its own regions (item 3) and
+  STALE is set by the owner (item 15).
+- Reference 14.4 names the heartbeat "in the process table". Here it is in
+  the process's `proc` region (item 1).
+- Reference 6.1 puts command queue handling in `libscada-driver`. Here
+  `libscada-tag` answers expired and over-long requests (item 19).
+- Reference 10.4 has no alarm for lost audit records or a broken queue
+  (item 22; #75).
 
 Confirmed by the product owner in review P1-01:
 
@@ -2243,6 +2256,13 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
+| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen; later changes need a version bump and a migration note. Section 17: reference 1.1 section 5 matches this contract; the differences that remain outside it are listed. Issue #41 stays open as the hardware acceptance before the first release on the target board. 0.24 (#96, PR #111) lands before 1.0 is cut. |
+
+Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
+structure or behaviour changed: section 16 records settled points, section
+17 the state of the reference, and the header the version. 0.24 is
+reserved for #96 (PR #111), which lands before 1.0 is cut and carries its
+own migration note.
 
 Migration, 0.25 to 0.26 (0.24 is reserved for #96, PR #111): none for data;
 the layout version stays 1 and no structure changed. A process that calls
