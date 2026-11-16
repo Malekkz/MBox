@@ -27,7 +27,8 @@
 //
 // The uid of scada-tagd is taken to be the user of the caller, as in the
 // tests. After attach and open it prints "attached aborted=<n>
-// skipped=<n>" with the counts of scada_queue_stats for the queue. On SIGTERM
+// dropped=<n> skipped=<n>" with the counts of scada_queue_stats for the
+// queue (`dropped`: answers_dropped). On SIGTERM
 // it closes the queues, detaches and exits with code 0. Exit code 1: an error;
 // 2: wrong arguments.
 
@@ -323,6 +324,7 @@ int run(std::span<const std::string_view> args) {
     scada_queue_stats_t stats{};
     static_cast<void>(scada_queue_stats(queue, &stats));
     std::cout << "attached aborted=" << stats.aborted
+              << " dropped=" << stats.answers_dropped
               << " skipped=" << stats.skipped << "\n"
               << std::flush;
 
