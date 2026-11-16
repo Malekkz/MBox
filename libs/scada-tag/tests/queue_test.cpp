@@ -30,6 +30,7 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>  // NOLINT(modernize-deprecated-headers): clock_gettime and CLOCK_THREAD_CPUTIME_ID are POSIX, declared here
 #include <unistd.h>
 
@@ -1980,17 +1981,23 @@ TEST_F(Queues, TheSeventeenthFileUnderANameStopsTheQueue) {
 // it, and `write_seq` must not have moved. With the mark stored after the
 // record or after `write_seq`, the mark is still at the old position.
 TEST_F(Queues, TheMarkIsStoredBeforeTheRecord) {
-    GTEST_FLAG_SET(death_test_style, "fast");
     const QueuePtr out = open(*io(), "events.io");
     const QueuePtr reader = open(*web(), "events.io");
     ASSERT_TRUE(posts_events(*out, 1));
     const std::span<std::byte> own = io()->queue(EVENTS_IO).own_region;
-    EXPECT_DEATH(
-        {
-            static_cast<void>(::mprotect(own.data(), own.size(), PROT_READ));
-            static_cast<void>(post(*out, event()));
-        },
-        "");
+    // A plain fork, not a death test: the child shares the mappings and
+    // never returns to the test.
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        static_cast<void>(::mprotect(own.data(), own.size(), PROT_READ));
+        static_cast<void>(post(*out, event()));
+        ::_exit(0);  // not reached: the post faults at the record
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    EXPECT_FALSE(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        << "the post did not fault";
     EXPECT_EQ(slot_of(map_file("proc.io"), EVENTS_IO), 2U);
     EXPECT_EQ(queue_write_seq(map_file("events.io").bytes()), 1U);
 }
