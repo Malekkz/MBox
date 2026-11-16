@@ -658,6 +658,14 @@ write_seq.store(w + 1, release)
 "Down" here uses the test of section 10.1, which the producer evaluates itself
 from the consumer's heartbeat; it does not wait for `scada-tagd`.
 
+A producer that attached before its consumer finds the consumer's region
+missing and gets `SCADA_E_PEER_DOWN` until its next look at that region
+(11.2), even after the consumer has attached: at most 1 s after the
+consumer's attach for a producer that calls `scada_tag_notify` at least
+once a second. A refusal, never a loss: nothing was put in the queue. A requester that
+consumes the answer queue of its driver also sees the driver once a look
+maps that queue's file (section 9.2, D-61).
+
 The producer also keeps a high-water mark `H`, the position after the last
 id it gave, in the cursor slot of the queue in its own `proc` region (the
 slot of a queue a process produces is no cursor; section 10). It stores
@@ -737,6 +745,24 @@ A command is never executed twice and never executed late:
   answer queue in a header the tag-set builder did not make) it is dropped
   and counted; the requester sees the request
   expire. `scada_queue_next` never blocks or fails on the answer queue.
+- A process that can see a record of a queue can also see the region of
+  the process at its other end, unless that process is down (D-61). A
+  look that maps a file of a queue the process consumes, its first file or
+  one created anew, looks at the producer's `proc` region in the same
+  look, outside every real-time function; attach creates that region
+  before the queue file (11.2, step 3). So "requester down" above means
+  down by section 10.1 (stopped, crashed, its heartbeat stale), never a
+  region the consumer has not looked for yet. A driver's own post of an
+  answer is judged the same way (section 9.1). When the requester really
+  is down, the answer is refused or dropped and counted, as above.
+  One exception remains: a producer whose `proc` region is created anew
+  inside a generation (removed or damaged, 11.2 step 3) while its queue
+  file is kept. The consumer then still reads the old region, and the
+  producer as down, until its next look at that region (11.2), at most
+  1 s after the producer's attach for a consumer that calls
+  `scada_tag_notify` or waits at least once a second; a resolve or another
+  ask looks at once. Answers in that time are refused or dropped and
+  counted.
 
 A record is outside input to the consumer. One that fails the checks of
 section 9.4 is passed over with `SCADA_E_LAYOUT`; a request passed over,
@@ -1165,12 +1191,15 @@ for readers and never down for a check. `starts` counts it:
 1. Check the base directory (section 3.1). Open `current/header`. Fail with
    `SCADA_E_LAYOUT` unless magic and layout version match the library's.
 2. Find the calling process in the process table by name, and check its uid.
-3. For each of the process's own regions: if it exists with the right owner,
+3. For each of the process's own regions, the `proc` region first and the
+   queue regions after it (D-61, relied on by section 9.2: a peer that can
+   see a queue file can then see the `proc` region): if it exists with the right owner,
    size and generation and is `ready`, reuse and repair it (section 6.3);
    queue positions and cursors in a reused region are kept. If it exists, is
    owned by the caller's uid, and is unready or has the wrong size, remove it.
-   If it is absent, create it (section 3.2) and load retained values (section
-   12) into a new `tags` region. If it exists with another owner, attach fails
+   If it is absent, create it (section 3.2), complete before its rename
+   publishes it, and load retained values (section 12) into a new `tags`
+   region. If it exists with another owner, attach fails
    with `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
 4. Take the lock on `proc.<process>`. Map and pre-fault the process's own
    regions. A process with the REALTIME flag is expected to run under
@@ -1188,7 +1217,8 @@ Other processes' regions are mapped read-only and pre-faulted in
 `scada_proc_resolve`, never inside an RT-safe function. A region that is
 missing or not ready is not an error: its tags read as BAD with OWNER_DOWN.
 The library tries the mapping again inside `scada_tag_notify()`, at most once
-a second for each missing region.
+a second for each missing region, and at once for the `proc` region of the
+producer of a queue whose file a look maps (section 9.2, D-61).
 
 ### 11.3 Generation change
 
@@ -1996,14 +2026,23 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
 | 0.20 | 2026-11-16 | Gaps in retained values (issue #72, D-59). Section 12: retain file format version 2 with quality and flags in the record and `boot_id`, `written_boottime_ns` and CLOCK_SYNCED in the header; version 1 still read; the checks of a version 2 file; a change of quality or flags is written; a restored value keeps the flags that describe it; the age rule, attach never refuses on age; per-tag restore information. Section 13: `scada_tag_retain_info`, `scada_tag_retain_info_t`, `scada_retain_status_t` grows to 24 bytes with `ages_unknown`. Section 12, second part: the stop that cannot wait for the writer exits with status 3; at the 30-s timeout no values over those of a newer generation; the values of a tag that moved go to the file of its new owner before the former owner's file is removed, and the start reads the own files only. Review: the exact restore, the stamp of a rewritten file, the ADOPTED and SOURCE_NOT_FINAL record flags, STALE and COMM_FAIL not kept, an incomplete look kept from removing files. |
 | 0.22 | 2026-11-16 | Issue #20 (P1-12, D-57). Section 16: the read retry limit (64), the heartbeat timeout defaults (3,000 ms, 500 ms) and two clock reads per `write` confirmed by measurement; the database size half of the change ring capacity confirmed, its gap half still open; huge pages still open. Each row names the run and the hardware. |
+| 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: two writes of one owner's retain file at least 1 s minus the check period apart, at least 250 ms, also for RETAIN_NOW, with the 1 s bound of RETAIN_NOW kept; `heartbeat_check_ms` at most 750 ms in a tag set with a RETAIN_NOW tag. |
 
-Migration, 0.22 to 0.24: none for data; the layout version stays 1 and the
+Migration, 0.23 to 0.24: none for data; the layout version stays 1 and the
 retain file format stays 2. A tag set with a `retain_now` tag and a
-`heartbeat_check_ms` above 750, which 0.20 accepted although it broke the
-1 s bound of RETAIN_NOW, is now refused; set it to 750 or less. A retain
+`heartbeat_check_ms` above 750, which 0.23 and earlier accepted although
+it broke the 1 s bound of RETAIN_NOW, is now refused; set it to 750 or less. A retain
 file is written at most once per 1 s minus the check period (750 ms by
 default); a change of a RETAIN_NOW tag is still on disk within 1 s.
+
+Migration, 0.22 to 0.23 (0.21 was not used; 0.24 is reserved for #96): none for data; the layout version stays 1 and no
+structure in shared memory changed. A consumer no longer drops, or has
+refused, an answer to a request taken within about 1 s of its requester's
+attach as "requester down": it looks at the requester's `proc` region with
+the queue's file. Answers to a requester that is down are dropped and
+counted as before. An implementation of attach must create the `proc`
+region before the queue regions.
 
 Migration, 0.20 to 0.22: none. Only section 16 changed: three open points are settled at the values the contract already gave, so no structure, default or behaviour changed and the layout version stays 1. (0.21 is the number held by another change of phase 1, and 0.23 by issue #92, PR #95.)
 

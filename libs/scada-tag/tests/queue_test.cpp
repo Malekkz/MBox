@@ -13,6 +13,7 @@
 #include "attachment.h"
 #include "layout.h"
 #include "peer_regions.h"
+#include "proc_region.h"
 #include "queue_region.h"
 #include "shared_memory.h"
 #include "wait_set.h"
@@ -21,6 +22,7 @@
 #include "scada/common/mapped_region.h"
 #include "scada/common/result.h"
 #include "scada/tag/generation_host.h"
+#include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
@@ -2433,6 +2435,33 @@ TEST_F(Queues, AQueueWhoseProducerNeverAttachedIsEmpty) {
     EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT));
     EXPECT_FALSE(reader->ready());
     EXPECT_FALSE(reader->waiter().has_value());
+}
+
+// The liveness of process `index` as `attachment` sees it now.
+DownReason liveness_of(const Attachment& attachment, std::uint16_t index) {
+    return proc_liveness(attachment.proc_of(index),
+                         DEFAULT_HEARTBEAT_TIMEOUT_MS, scada::monotonic_ns());
+}
+
+// Decision D-61 (issue #92): the look that finds the file of a queue maps
+// its producer's `proc` region in the same look, also for a producer the
+// consumer never resolved. Here the producer attaches after the open.
+TEST_F(Queues, AConsumerThatSeesAQueueSeesItsProducer) {
+    // `late` in the process table sorted by name: guest, io, late, tagd,
+    // web. Not resolved before the look: resolving asks for the region.
+    constexpr std::uint16_t LATE = 2;
+    const QueuePtr reader = open(*web(), "events.late");
+    const std::size_t queue_id = reader->id();
+    EXPECT_EQ(liveness_of(*web(), LATE), DownReason::REGION_MISSING);
+    const Attached late = attached("late");
+    ASSERT_NE(late, nullptr);
+    ASSERT_TRUE(web()->look_for_queue_now(queue_id));
+    // The consumer can see the queue's file: its next look adopts it.
+    EXPECT_TRUE(web()->queue_switch_pending(queue_id));
+    EXPECT_EQ(liveness_of(*web(), LATE), DownReason::NONE);
+    std::uint16_t index = 0;
+    EXPECT_EQ(web()->proc_resolve("late", index), SCADA_OK);
+    EXPECT_EQ(index, LATE);
 }
 
 // Section 8.4: a consumer blocked in next is woken by notify.
