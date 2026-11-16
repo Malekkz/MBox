@@ -68,11 +68,12 @@ jobs:
         run: ctest --preset release
       # Conformance test 26 on the build that ships: the release build gates
       # on the criterion for SCADA_E_BUSY, which the dev run above only
-      # reports (decision D-57). SCHED_FIFO needs root.
+      # reports (decision D-57). SCHED_FIFO needs root. Verbose, so that the
+      # log holds the count of SCADA_E_BUSY and the number of reads.
       - name: False trips as root (release)
         run: >-
           sudo "$(command -v ctest)" --test-dir build/release -L '^root$'
-          -R '^scada-tag-false-trip-root-test$' --output-on-failure
+          -R '^scada-tag-false-trip-root-test$' --verbose
           --no-tests=error
 
       # Issue P1-07 asks for the wake-up latency of a change ring consumer
