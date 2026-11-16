@@ -143,63 +143,72 @@ protected:
     }
 };
 
+// The four threads of the test, with the heartbeats of both contexts on
+// another one. Returns the time from the moment all four were warmed up
+// to the end, in ns.
+std::int64_t run_two_ways(scada_ctx* ctx_a, scada_ctx* ctx_b,
+                          scada_queue* a_out, scada_queue* a_in,
+                          scada_queue* b_out, scada_queue* b_in,
+                          std::atomic<bool>& failed) {
+    constexpr std::ptrdiff_t THREADS_AND_MAIN = 5;
+    constexpr int WORKERS = 4;
+    std::latch ready(THREADS_AND_MAIN);
+    std::atomic<int> running{WORKERS};
+    std::thread post_a([&] { post_all(ctx_a, a_out, ready, failed); });
+    std::thread post_b([&] { post_all(ctx_b, b_out, ready, failed); });
+    std::thread take_a([&] { take_all(a_in, ready, failed); });
+    std::thread take_b([&] { take_all(b_in, ready, failed); });
+    // The main loops of `a` and `b`: their heartbeats, so that neither
+    // looks down to the other's producer during the run.
+    std::thread beats([&] {
+        while (running.load() > 0) {
+            static_cast<void>(scada_tag_heartbeat(ctx_a));
+            static_cast<void>(scada_tag_heartbeat(ctx_b));
+            std::this_thread::sleep_for(BEAT_PERIOD);
+        }
+    });
+    ready.arrive_and_wait();
+    const Clock::time_point start = Clock::now();
+    for (std::thread* worker : {&post_a, &post_b, &take_a, &take_b}) {
+        worker->join();
+        running.fetch_sub(1);
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             Clock::now() - start)
+                             .count();
+    beats.join();
+    return elapsed;
+}
+
 TEST_F(QueuePostPerf, TwoWaysWithTheMarkBesideTheCursor) {
     write_pair_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
         return;
     }
-    const Attached a(base(), "a");
-    const Attached b(base(), "b");
+    const Attached first(base(), "a");
+    const Attached second(base(), "b");
     scada_queue* a_out = nullptr;
     scada_queue* a_in = nullptr;
     scada_queue* b_out = nullptr;
     scada_queue* b_in = nullptr;
-    ASSERT_EQ(scada_queue_open(a.ctx(), "events.a", &a_out), SCADA_OK);
-    ASSERT_EQ(scada_queue_open(b.ctx(), "events.a", &b_in), SCADA_OK);
-    ASSERT_EQ(scada_queue_open(b.ctx(), "events.b", &b_out), SCADA_OK);
-    ASSERT_EQ(scada_queue_open(a.ctx(), "events.b", &a_in), SCADA_OK);
+    const bool opened =
+        scada_queue_open(first.ctx(), "events.a", &a_out) == SCADA_OK &&
+        scada_queue_open(second.ctx(), "events.a", &b_in) == SCADA_OK &&
+        scada_queue_open(second.ctx(), "events.b", &b_out) == SCADA_OK &&
+        scada_queue_open(first.ctx(), "events.b", &a_in) == SCADA_OK;
+    ASSERT_TRUE(opened);
     std::atomic<bool> failed{false};
-    constexpr std::ptrdiff_t THREADS_AND_MAIN = 5;
-    std::latch ready(THREADS_AND_MAIN);
-    std::thread pa([&] { post_all(a.ctx(), a_out, ready, failed); });
-    std::thread pb([&] { post_all(b.ctx(), b_out, ready, failed); });
-    std::thread ca([&] { take_all(a_in, ready, failed); });
-    std::thread cb([&] { take_all(b_in, ready, failed); });
-    std::atomic<int> running{4};
-    const auto done = [&running] { running.fetch_sub(1); };
-    // The main loops of `a` and `b`: their heartbeats, so that neither
-    // looks down to the other's producer during the run.
-    std::thread beats([&] {
-        while (running.load() > 0) {
-            static_cast<void>(scada_tag_heartbeat(a.ctx()));
-            static_cast<void>(scada_tag_heartbeat(b.ctx()));
-            std::this_thread::sleep_for(BEAT_PERIOD);
-        }
-    });
-    ready.arrive_and_wait();
-    const Clock::time_point start = Clock::now();
-    pa.join();
-    done();
-    pb.join();
-    done();
-    ca.join();
-    done();
-    cb.join();
-    done();
-    beats.join();
-    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             Clock::now() - start)
-                             .count();
+    const std::int64_t elapsed = run_two_ways(first.ctx(), second.ctx(), a_out,
+                                              a_in, b_out, b_in, failed);
     EXPECT_FALSE(failed.load());
     const double per_record =
         static_cast<double>(elapsed) / static_cast<double>(RECORDS);
     std::cout << "queue post, two ways, mark beside the cursor: " << per_record
               << " ns per record\n";
     RecordProperty("ns_per_record", std::to_string(per_record));
-    if (IS_X86_64 && !report_only()) {
-        EXPECT_LT(per_record, LIMIT_NS_PER_RECORD);
-    }
+    EXPECT_TRUE(!IS_X86_64 || report_only() || per_record < LIMIT_NS_PER_RECORD)
+        << per_record << " ns per record";
     for (scada_queue* queue : {a_out, a_in, b_out, b_in}) {
         scada_queue_close(queue);
     }

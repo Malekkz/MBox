@@ -949,3 +949,59 @@ Consequences:
 - The cleaner itself is gone once it has removed the directory, or after about 5 s if it could not.
 - `kill()` and `stops_cleanly()` of `tagd_fixture.h` treat a child that has already ended as gone and judge it by how it ended (`ChildProcess::wait_for_ending`): `kill()` returns the ending and writes a note when it was not SIGKILL; `stops_cleanly()` still needs exit code 0. Found in `Scadactl.TagWatchNeverShowsTheTagsOfARetiredGeneration` (flaky under `ctest -j8`): its `scada-sim` writer exits by itself with code 1 once the second `scada-tagd` retires generation 1 (D-41), so under load it was often reaped before the test reached `kill()`, and `send_signal` returned false. The early exit is the designed one; the test now expects that exit, with its reason on the standard error stream, instead of killing the writer.
 - Test: `scada-test-cleanup-integration-test` starts `scada-test-killed-runner`, a test binary with the fixture `TagProcesses` that starts `scada-tagd` and two `scada-sim run` processes, kills it with SIGKILL, and expects the three processes and the cleaner to end and the directory to be gone. Without the parent-death signal the test fails with the processes still running; without the removal it fails with the directory left.
+
+## D-49: Base sequence of a queue file created anew inside a generation; the consumer follows the file
+Date: 2026-11-16
+Phase / issue: 1, #53 (points 2 to 4, first of their two pull requests; the second is D-51)
+Status: accepted. Option A of the design (issue #53) was decided by the committee of the lead session (C++, SCADA architecture and Linux reviewers; the owner delegated these decisions to it) on 2026-11-15, with conditions C1 to C14. The split was accepted on 2026-11-15. Q2 was accepted as reworded by the committee. The three questions the C++ reviewer could not verify were answered in issue #53 before the build.
+
+Context: a queue file that is removed, shrunk or damaged and created anew by its producer inside a generation stayed dead until the next generation (D-40). Two gaps stayed open. (a) Posts between the recreation and the consumer's next look returned `SCADA_OK` and were lost; on an events queue that is an action without an audit record. (b) A consumer that was not attached could not tell the new file from the old one, and ids could repeat. The committee rejected two simpler fixes: the consumer goes on using the unlinked file for up to 1 s, and records delivered but not acknowledged share ids with new ones.
+Options: A, a base sequence in `QueueHeader` from the producer's high-water mark and the consumer's cursor; B, from the cursor alone; C, a creation stamp.
+Decision: A.
+- Layout (C6): `QueueHeader.base_seq` (offset 16), `flags` (offset 24, bit `QUEUE_BASE_SET`) and `reserved0` (offset 28) come from the reserved bytes; 32 stay reserved; size 64; layout version 1. LayoutChecks and the lock-free test cover the fields.
+- Producer: the cursor slot of a queue in its own `proc` region holds the high-water mark H. `post_record` stores `H = w + 1`, relaxed, after every refusal check and before `store_record` (C4); a crash in between burns the id. A queue with one process at both ends ends the process before the slot is used (C5). When `attach_queue` creates the file, it sets the base `B = max(H', R')` and `write_seq = B` before `ready`:
+  - H' is the mark if the `proc` region was reused;
+  - R' is the consumer's cursor plus the capacity, if the cursor is readable, not 0 and not all-ones;
+  - H > R' is impossible and is ignored as damage;
+  - without room for a capacity of ids (2^48 for CMD), the file gets no `QUEUE_BASE_SET`.
+  The producer removes its own unusable file before it creates one, because the rename that publishes a region does not replace (C11). Contract 9.1.
+- Consumer (`Attachment::follow_queue`, before each look and at attach):
+  - It uses the first file it sees. A cursor below the base always jumps to the base; positions below it are in no file it can reach (C3).
+  - It keeps the file in use while the name is missing or a different file fails the checks (Q2 as reworded: ENOENT or an invalid other inode).
+  - On a different valid file it reads the old `write_seq` again (C2), delivers up to it, then jumps and counts `skipped` and `replaced`.
+  - It stops the queue and stores the all-ones cursor when:
+    - the new file has no base (older build, D-40);
+    - its base is below the old `write_seq` (C2);
+    - the file in use changed size in place, seen by name (`PeerRegions::resized`), or by `fstat` on a descriptor now kept for each queue mapping before the switch (a file shrunk and then replaced);
+    - the name reached the 16-mapping limit (Q2, `PeerRegions::at_mapping_limit`).
+  - `scada_queue_ack` returns `SCADA_E_INVALID` and stores nothing when the cursor is no longer at the delivered record (C1): the cursor never moves back except to all-ones.
+  - For a new `proc` region, `start_cursors` counts as skipped only what lies between the base and `write_seq`.
+- `scada-tagd` (C13): it remembers each queue's file and `write_seq` across a missing name. When another file appears it reports `QueueEvent::RECREATED` and logs at WARNING `queue file created anew; audit records may be lost` (events) or `...; records may be lost`, with `QUEUE`, `BASE_SEQ`, `OLD_WRITE_SEQ`, `CURSOR`, `LOST_AT_MOST` (old `write_seq` minus cursor, an upper bound) and `LOST_IDS` as `[from, to)`. `scada_queue_stats` is per process and lost at a restart; the system log is not. A `scada-tagd` that did not see the old file (it was restarted) cannot report it; the consumer still counts the skip.
+- Residuals, in contract 3.3 (C10 and the three answers in #53):
+  - ids can repeat for a consumer that was not attached when the queue file and the producer's `proc` region are lost together with the consumer's cursor at 0, or when all three regions are lost; that is likelier than it reads, since cleanup by name removes a process's files together;
+  - the `proc` lock is an `flock` on one file, so two producer instances can live if a running process's `proc` file is removed;
+  - a shrink of an already unlinked file cannot be seen by name;
+  - kept mappings count against the locked-memory limit, up to 16 times the queue's size.
+- C14: the library keeps no acknowledgement latch. Whether commands stay refused after lost audit records until an operator acknowledges is unspecified and safety-relevant; it is an open point of contract 16 for the owner, before the command service (phase 5). Follow-up issues, without the phase-1 label: #74 (a loss record in the audit chain, reference 13.4), #75 (a system alarm for lost audit records and a broken queue; reference 10.4 has none), #76 (`scadactl status` shows queue state). Contract 17, item 21, lists the differences from reference 5.3 and 18.2.
+Reason: both bounds hold under concurrency without a lock. Every id is below the cursor at its post plus the capacity, and the cursor only grows. The mark is the exact next position whenever the producer's region survived. Delivering the old file first closes gap (a) when the consumer holds it. The jump only moves forward, so no id repeats in the cases above. An older build reads the new fields as invalid records or a dead queue, never as a repeated id, so layout version 1 stays.
+Consequences:
+- Contract 0.15: sections 3.3, 9, 9.1, 9.2, 9.3, 10, 16, 17 (item 21), change log and migration note.
+- Left for D-51 (#53, second pull request, which closes it):
+  - the periodic look while a consumer waits in `scada_queue_next` or a wait set (Q3), with try-lock in `scada_tag_notify`;
+  - `scada-tagd` reporting a `write_seq` that falls (C10);
+  - the stress cases truncate in place and the 16th file.
+  Until then a consumer that never calls `scada_tag_notify` moves to a new file only when its own region is missing, as before. 2a stops the queue in every case 2b handles in more detail (same-inode shrink, the mapping limit), as main did.
+- Tests:
+  - `ReplacedQueue.*`: an unlinked file and a damaged header are followed without loss; truncation still kills.
+  - The queue tests:
+    - `AQueueFileRemovedUnderARunningProducerStillDelivers`;
+    - `AReplacedQueueFileLosesNothingAlsoWithTheCursorAtZero`, which turns D-40's test around;
+    - `TheProducerKeepsItsHighWaterMark`, `AnIdBurnedByACrashIsNotGivenAgain`, `AnImplausibleHighWaterMarkIsIgnored`, `AFirstQueueFileStartsAtZero`;
+    - `AnAckAfterTheCursorMovedOnIsRefused` (C1), `ANewFileWithABaseBelowTheOldWriteSeqKillsTheQueue` (C2), `ANewFileWithoutABaseKillsTheQueue`, `AnOlderConsumerFindsNoRecordBelowTheBase` (C6);
+    - `AConsumerThatWasAwayJumpsToTheNewBase`, `RequestsLeftInAnOldCmdFileAreNeverExecuted` (C12), `TagdReportsAQueueFileCreatedAnew` (C13), `TagdReportsAReplacedQueueAsBroken`.
+  - The layout test of `QueueHeader`.
+  - With real processes, `QueueProcesses.RandomKillsAndRecreationsLoseNothingSilently`:
+    - 8 rounds with a fixed seed: SIGKILL of the producer; its queue file unlinked under it or after the kill; the consumer detaching with a record unacknowledged.
+    - Asserted: no id is delivered twice with different content; every record is whole; the cursor never moves back; every position passed was delivered or counted skipped; the queue never dies.
+    - A kill exactly between the mark and `write_seq` cannot be aimed at from outside; the unit test covers it.
+  - Perf (C9), `scada-tag-queue-post-perf-test`: two contexts, four threads, one million records each way, with the mark beside a cursor the other producer reads. On the x86-64 container, dev build: 3.4 to 4.3 µs per record with the mark, 3.3 to 3.7 µs without it (three runs each). The two overlap within the noise of a shared 4-core machine running four spinning threads; the gate is a loose 10 µs per record.

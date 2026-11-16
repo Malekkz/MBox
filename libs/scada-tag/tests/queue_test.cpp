@@ -42,6 +42,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1636,7 +1637,8 @@ TEST_F(Queues, AnImplausibleHighWaterMarkIsIgnored) {
         ASSERT_TRUE(posts_events(*out, 1));
         ASSERT_TRUE(takes_event(*reader, 0));
     }
-    set_cursor("io", EVENTS_IO, std::uint64_t{1} << 40U);
+    constexpr std::uint64_t IMPLAUSIBLE_MARK = std::uint64_t{1} << 40U;
+    set_cursor("io", EVENTS_IO, IMPLAUSIBLE_MARK);
     std::filesystem::remove(generation_dir() / "events.io");
     restart(io(), "io");
     const MappedRegion region = map_file("events.io");
@@ -1701,6 +1703,25 @@ TEST_F(Queues, ANewFileWithoutABaseKillsTheQueue) {
     EXPECT_EQ(reader->stats().replaced, 1U);
 }
 
+// No position of the queue file `region` from `first` to below `base`
+// holds a record an older consumer would deliver: each fails its id check
+// as an event and its status check as a result.
+::testing::AssertionResult no_record_below(const MappedRegion& region,
+                                           std::uint64_t first,
+                                           std::uint64_t base) {
+    for (std::uint64_t position = first; position < base; ++position) {
+        RecordWords words;
+        load_record(region.bytes(), CAPACITY, sizeof(EventRecord), position,
+                    words);
+        const EventRecord record = event_of(words);
+        if ((record.seq == position && event_valid(record)) ||
+            result_valid(result_of(words))) {
+            return ::testing::AssertionFailure() << "a record at " << position;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // Condition C6: an older consumer, which knows no base, reads a new file
 // from a cursor below its base. The positions below the base were never
 // written, so each fails its id or status check and is passed over; none
@@ -1725,14 +1746,7 @@ TEST_F(Queues, AnOlderConsumerFindsNoRecordBelowTheBase) {
     const MappedRegion region = map_file("events.io");
     const std::uint64_t base = queue_base(region.bytes()).value_or(0);
     ASSERT_EQ(base, 1 + CAPACITY);
-    for (std::uint64_t position = 1; position < base; ++position) {
-        RecordWords words;
-        load_record(region.bytes(), CAPACITY, sizeof(EventRecord), position,
-                    words);
-        const EventRecord record = event_of(words);
-        EXPECT_FALSE(record.seq == position && event_valid(record)) << position;
-        EXPECT_FALSE(result_valid(result_of(words))) << position;
-    }
+    EXPECT_TRUE(no_record_below(region, 1, base));
 }
 
 // Case 3 of the design: a consumer that was not attached during the

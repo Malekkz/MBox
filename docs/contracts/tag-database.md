@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.14 (draft) |
+| Contract version | 0.15 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -147,6 +147,23 @@ accepted for layout version 1:
   9.2), so a producer that shrinks its queue file in place can stop
   `scada-tagd` by `SIGBUS` too, between its size check and its read. The
   service manager restarts it, and a restart reuses the generation.
+- Base sequence (9.1, D-49): ids of a queue file created anew can repeat ids
+  of an earlier file, for a consumer that was not attached during the
+  recreation, when both the queue file and the producer's `proc` region are
+  lost and the consumer's cursor is 0, or when all three regions are lost.
+  The first is likelier than it reads: cleanup by name removes a process's
+  files together. A consumer that was attached sees it (a base below the old
+  `write_seq`) and stops the queue.
+- The `proc` lock is an `flock` on one file (section 10). If a running
+  process's `proc` file is removed, a second instance can attach beside the
+  first; then two producers write, and the old queue file is not final when
+  the consumer leaves it. The base guarantees unique ids only while at most
+  one instance of the producer lives.
+- A shrink of a queue file that was already unlinked cannot be seen by
+  name; a consumer that still reads it is stopped by `SIGBUS`.
+- A consumer keeps every mapping of a queue name it has seen, up to 16
+  (D-28), so locked memory can reach 16 times the queue's size for a
+  process under `mlockall`.
 - A group member can create a file or directory under a name it does not own.
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
@@ -598,7 +615,10 @@ struct QueueHeader {             // 64 bytes, alignas(64), follows RegionHeader
   uint32_t capacity;             // power of two
   uint32_t record_size;
   uint64_t write_seq;            // A
-  uint8_t  reserved[48];
+  uint64_t base_seq;             // position of the first record of this file (9.1); never changes
+  uint32_t flags;                // bit 0 BASE_SET: the creator set base_seq
+  uint32_t reserved0;
+  uint8_t  reserved[32];
 };
 ```
 
@@ -620,6 +640,36 @@ write_seq.store(w + 1, release)
 
 "Down" here uses the test of section 10.1, which the producer evaluates itself
 from the consumer's heartbeat; it does not wait for `scada-tagd`.
+
+The producer also keeps a high-water mark `H`, the position after the last
+id it gave, in the cursor slot of the queue in its own `proc` region (the
+slot of a queue a process produces is no cursor; section 10). It stores
+`H = w + 1` (relaxed) after every refusal above and before the record, so
+that a crash between that store and `write_seq` only burns the id.
+
+Base sequence (D-49). When attach creates the queue file (11.2 step 3,
+also inside a generation, when the file was removed, shrunk or damaged:
+the producer removes its own unusable file first, since the rename that
+publishes a region does not replace), the producer gives it a base `B`;
+`write_seq` starts at `B`, `base_seq` is `B` and BASE_SET is set before
+`ready`:
+
+```
+H' = own H                  if the producer's proc region was reused, else 0
+R' = r + capacity           if the consumer's cursor r is readable, not 0, not all-ones
+H' = 0                      if R' != 0 and H' > R'   (impossible: damage)
+B  = max(H', R')            no base (BASE_SET clear) if B leaves no room for a
+                            capacity of ids (below 2^48 for CMD, 9.4)
+```
+
+Every id ever given is below `r + capacity` at its post (the rule above),
+and the cursor only grows, so `B` is above every id an earlier file of the
+queue gave, whenever the producer's `proc` region or the consumer's cursor
+survived. A cursor of 0 is left out so that the first file of a generation
+starts at 0 when the consumer attached first. The range rule is unchanged:
+with `r` below `B`, `w - r <= capacity` holds, and until the consumer moves
+to the new file the producer may get `SCADA_E_FULL`, a refusal, never a
+loss.
 
 ### 9.2 Consume
 
@@ -669,11 +719,29 @@ section 9.4 is passed over with `SCADA_E_LAYOUT`; a request passed over,
 when taken or by the drain at attach, is not answered, and its requester sees
 it expire. A cursor and `write_seq` out of range are reported with `SCADA_E_LAYOUT` and nothing is consumed;
 the producer gets `SCADA_E_PEER_DOWN` (section 9.1). The queue then stays
-stopped until the next generation; each look is counted. A consumer that
-finds the queue's file replaced, removed or shrunk inside the generation
-(another mapping than the first it saw) treats the queue as dead whatever
-cursor and `write_seq` say, and stores an all-ones cursor so that the
-producer gets `SCADA_E_PEER_DOWN` (section 16). The all-ones cursor
+stopped until the next generation; each look is counted.
+
+The consumer follows the queue's file (D-49). It uses the first file it
+sees; if that file has a base and the cursor is below it, the cursor jumps
+to the base (a cursor below the base always jumps: those positions are in
+no file it can reach). While the name is missing, or a different file
+there fails the checks of 3.1, it keeps the file it uses, whose mapping
+stays valid memory. When a different file that passes the checks is under
+the name, it reads the `write_seq` of the file in use again, delivers what
+that file holds up to it, and only then moves to the new file, jumping to
+its base and counting the positions passed over in `skipped` (an upper
+bound) and the change in `replaced`. Nothing accepted into the old file is
+lost while the consumer holds it, and no id repeats. The cursor never moves
+back except to all-ones: `scada_queue_ack` after a jump returns
+`SCADA_E_INVALID` and stores nothing. The consumer treats the queue as dead
+and stores an all-ones cursor, so that the producer gets
+`SCADA_E_PEER_DOWN`, when the new file has no base (made by a build before
+0.15), when its base is below the `write_seq` of the file in use (ids would
+repeat), when the file in use changed size in place (checked by name at
+each look, and by `fstat` on a descriptor kept for each queue mapping
+before the switch, so that a file shrunk and then replaced is not read:
+`SIGBUS`, section 3.3), and when the name reached the mapping limit
+(16 files in one context). The all-ones cursor
 (2^64 - 1) is reserved: no `write_seq` reaches it (a post that would make
 `write_seq` equal to it is refused with `SCADA_E_FULL`), so by the range rule
 every reader of a cursor finds it out of range and consumes nothing.
@@ -721,13 +789,13 @@ If the consumer's region is missing or its process is down, `post` returns
   its heartbeat timeout. Records accepted in that window are in shared memory
   and are delivered when the consumer restarts, unless the unit loses power
   first.
-- Second residual window, open until the base sequence of section 16: when
-  a queue's file is removed, shrunk or damaged and its producer creates it
-  anew inside the generation, a post made before the consumer's next look at
-  the file (up to about 1 s) returns `SCADA_OK`, and the record is then lost.
-  On an event queue that is an action taken without an audit record. A
-  consumer that was not attached during the recreation cannot tell the new
-  file from the old one, and may deliver records whose ids repeat.
+- A queue file created anew inside a generation (9.1, 9.2, D-49): posts to
+  the new file are delivered after what the consumer still holds of the old
+  one. Records of the old file that its consumer had not taken are lost if
+  the consumer no longer holds the old file (it was not attached, or it
+  restarted); the consumer counts them in `skipped`, and `scada-tagd` logs
+  the recreation at WARNING with the ids that may be lost ("at most"), as
+  audit records on an events queue. Ids repeat only in the cases of 3.3.
 
 Decided by the product owner in review P1-01 (D-23, D-24).
 
@@ -831,6 +899,7 @@ struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint8_t  reserved[12];
 };
 // followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
+//   for a queue the process produces, the slot holds its high-water mark (9.1)
 ```
 
 A process holds an exclusive, non-blocking `flock` on its `proc` region for
@@ -1436,7 +1505,8 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Retained values across a generation change | `scada-tagd` writes each owner's retain file after that owner leaves RUNNING in the old generation; attach to the new generation waits for it, with a bound | P1-09 | Conformance test 21, with a value changed immediately before the change |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
-| A queue region recreated inside a generation | The queue is dead: a consumer that finds another file under the name stores an out-of-range cursor, so the producer gets `SCADA_E_PEER_DOWN`. It stays dead until a tag-set change or a reboot, because a restart of `scada-tagd` reuses the generation (11.1). Until then a post made between the recreation and the consumer's next look (up to about 1 s) returns `SCADA_OK` and the record is lost; on an event queue that is an action without an audit record (9.3). Candidate fix: a base sequence in `QueueHeader.reserved`, a layout change (D-40, #53) | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| A queue region recreated inside a generation | Settled by the base sequence (9.1, 9.2, D-49). Open in #53's second part: keeping a mapping on a transient failure in detail, the periodic look while waiting (`scada_queue_next`, wait sets) and the report of a `write_seq` that falls | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| Commands after lost audit records | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
 | Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
 
 ## 17. Differences from the reference document
@@ -1498,6 +1568,12 @@ Smaller points where this contract adds to or narrows the reference:
 20. The unit must not suspend or hibernate (section 3.4, D-46). The
     reference says nothing about system sleep; `scada-tagd` reports a
     suspend it detects, and does not act on it.
+21. Reference 5.3 calls the queues reliable. A queue file created anew
+    inside a generation can lose the records its consumer had not taken
+    (9.3, D-49), and reference 10.4 has no alarm for lost audit records or
+    a broken queue (#75; also #74, #76). Reference 18.2 puts commands
+    in phase 5; the base sequence is in phase 1 so that command handling
+    starts on it.
 
 ## 18. Change log
 
@@ -1517,7 +1593,19 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
 | 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
+| 0.15 | 2026-11-16 | Issue #53, first part of points 2 to 4 (D-49). Section 9: `QueueHeader.base_seq` and `flags` take 16 of the reserved bytes. Section 9.1: the producer's high-water mark and the base of a file created anew. Section 9.2: the consumer follows the file, delivers the old file first, jumps to the base, and when it stops the queue. Section 9.3: the second residual window replaced. Section 10: the slot of a produced queue. Section 3.3: the residuals of the base. Sections 16 and 17. |
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
+
+Migration, 0.14 to 0.15: none for data. The layout version stays 1:
+`base_seq` (offset 16), `flags` (24) and `reserved0` (28) were reserved and
+zero, and 32 bytes stay reserved. A queue file made by an older build has
+no BASE_SET: this build reads it as before, and treats a new file without
+it as the end of the queue (D-40). An older consumer reading a file made by
+this build from a cursor below its base finds positions never written,
+which fail their id or status check and are passed over; if it saw the old
+file, it stops the queue as before. A `proc` region written by an older
+producer holds 0 in the slot of a produced queue, which reads as no
+high-water mark. The producer slot is no longer always 0.
 
 Migration, 0.13 to 0.14: none for data. The layout version stays 1: `starts`
 takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay

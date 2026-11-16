@@ -127,7 +127,7 @@ struct QueueChange {
     // `write_seq` scada-tagd last saw in the old file, if it saw one
     // (`old_write_seq_known`); `cursor` is the consumer's cursor now, if
     // its region is there (`cursor_known`), and `write_seq` the new file's.
-    std::optional<std::uint64_t> base_seq{};
+    std::optional<std::uint64_t> base_seq = std::nullopt;
     std::uint64_t old_write_seq = 0;
     bool old_write_seq_known = false;
     bool cursor_known = false;

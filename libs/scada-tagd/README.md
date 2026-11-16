@@ -43,6 +43,7 @@ the standard error stream.
 | `queue no longer broken` | NOTICE, once | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY` |
 | `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
 | `queue file found again` | NOTICE, once | `QUEUE` |
+| `queue file created anew; audit records may be lost` (events queue), `queue file created anew; records may be lost` (other queues) | WARNING, once, when the file under a queue's name is another one than at the previous check (contract 9.3, D-49). The records of the old file from the consumer's cursor to its last `write_seq` are lost unless the consumer still holds the old file | `QUEUE`, `BASE_SEQ` (or `none`), `OLD_WRITE_SEQ`, `CURSOR`, `LOST_AT_MOST`, `LOST_IDS` (`[from, to)`), `REASON` |
 | `the kernel offers sleep states; the unit must not suspend` | INFO, once at start, when `/sys/power/state` is not empty (contract 3.4). Expected on most kernels, also with sleep disabled | `STATES` |
 | `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound, rounded up to whole ms |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
@@ -86,7 +87,7 @@ keeps what the previous `scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.14, sections 3,
+- Contract: `docs/contracts/tag-database.md`, version 0.15, sections 3,
   9.2, 10 and 11.1; decisions D-27, D-36, D-46 and D-47 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
