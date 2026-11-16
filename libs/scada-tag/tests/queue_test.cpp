@@ -2180,9 +2180,8 @@ TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSize) {
     }
     int status = 0;
     ASSERT_EQ(::waitpid(child, &status, 0), child);
-    ASSERT_TRUE(WIFEXITED(status)) << "the child was killed by signal "
-                                   << (WIFSIGNALED(status) ? WTERMSIG(status)
-                                                           : 0);
+    ASSERT_TRUE(WIFEXITED(status))
+        << "the child was killed by signal " << WTERMSIG(status);
     EXPECT_EQ(WEXITSTATUS(status), 0) << "the step that failed";
 }
 
