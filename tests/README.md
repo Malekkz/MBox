@@ -76,9 +76,9 @@ machine that gives each process the CPU within about a second:
   3,000 ms.
 
 Beyond the stated load (load average 18 to 40, stalls of 3 s and more)
-these fail now and then without a fault in the code, and the ctest limit
-of 60 s of `scada-tag-unit-test` (35 s unloaded) and
-`scada-model-code-shape-self-test` (10 s of CPU) can be exceeded. The
+these fail now and then without a fault in the code, and the ctest
+limits of `scada-tag-unit-test` (120 s; 35 s unloaded) and
+`scada-model-code-shape-self-test` (60 s; 10 s of CPU) can be exceeded. The
 tag sets of the load tests use a heartbeat timeout of 30 s, so that such
 a stall does not make a running owner read as down.
 
