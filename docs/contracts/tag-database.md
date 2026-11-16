@@ -1417,8 +1417,12 @@ know they are there, and any number may run.
   file. Before that, once no generation is retired (so that every FINAL
   file is on disk), an owner of `current` that has no `tags` region yet
   takes into its own file the values of its RETAIN tags that only other
-  owners' files hold (a tag that moved to it), and its file is written; it
-  then restores them when it attaches, however late. At start,
+  owners' files hold (a tag that moved to it), with the precedence attach
+  uses and the quality, flags and source time those files hold, and its
+  file is written; it then restores them when it attaches, however late.
+  This runs once per start of `scada-tagd`, which is enough: a generation
+  changes only at a start of `scada-tagd`, so no tag moves while it
+  runs. At start,
   `scada-tagd` reads the values of the owners of `current` from their own
   files only: a former owner's file may still be replaced by its FINAL
   file.
