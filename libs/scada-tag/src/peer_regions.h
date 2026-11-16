@@ -71,13 +71,16 @@ public:
 
     // Asks for the region of `slot`: it is looked for now, in the
     // generation directory open as `dir_fd`, and from then on by `refresh`.
-    // Calling it again for the same slot does nothing. Not real-time.
+    // Calling it again for a slot whose region is mapped does nothing; for
+    // one still missing it looks again now (one `fstatat`). Not real-time.
     void want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns);
 
-    // True once `want` was called for `slot`, whether or not the region is
-    // there. Tells a tag that was never resolved in this context from one
-    // whose owner is down (contract, section 6.2). False for a slot that is
-    // none.
+    // True once `slot` was asked for, by `want` or, for the `proc` slot of
+    // a queue's producer, by the look that mapped the queue's file
+    // (`look_at_producer`), whether or not the region is there. Tells a tag
+    // that was never resolved in this context from one whose owner is down
+    // (contract, section 6.2); only tag regions are asked about. False for
+    // a slot that is none.
     SCADA_RT [[nodiscard]] bool asked(std::size_t slot) const noexcept;
 
     // The mapped bytes of the region of `slot`, read-only and brought into
@@ -142,8 +145,16 @@ private:
     // The loop of `refresh`, with `mutex_` held.
     std::size_t refresh_locked(int dir_fd, std::int64_t now_mono_ns);
 
-    // Looks at one slot. True if what `bytes` returns changed.
+    // Looks at one slot. True if what `bytes` returns changed. A queue
+    // slot that gets a new mapping also looks at its producer's `proc`
+    // slot (`look_at_producer`).
     bool look(int dir_fd, Slot& slot);
+    // `look` without the look at the producer.
+    bool look_slot(int dir_fd, Slot& slot);
+    // Asks for the `proc` slot of the producer of the queue slot `slot`, if
+    // nobody has, and looks at it now; nothing for another slot. Under
+    // `mutex_`.
+    void look_at_producer(int dir_fd, const Slot& slot);
     [[nodiscard]] static bool is_queue(const Slot& slot) noexcept;
     // Marks every kept mapping of the queue slot `slot` whose file changed
     // size (`PeerMapping::whole`). Under `mutex_`.

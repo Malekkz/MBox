@@ -12,8 +12,8 @@
 // event queue `events.<process>`, whose consumer is attached, and consumes
 // the request queue `cmd.<process>.feeder`, into which another process
 // posts one request that expires 1 ms later. Before the markers it waits
-// until the request is there and has expired, and until it sees the
-// feeder live; between them it looks at the
+// until the request is there and has expired (the look that found the
+// queue also found the feeder, decision D-61); between them it looks at the
 // queue without waiting, which answers the request EXPIRED in
 // `result.<process>.feeder` (decision D-40). It also posts one request to
 // `io` in `cmd.io.<process>` and one answer in `result.<process>.feeder`. The
@@ -383,34 +383,6 @@ bool wait_for_expired_request(Prepared& prepared) {
     return arrived;
 }
 
-// Waits until this context sees the process `name` live. A process that
-// attached after this one asked for its region is found only by a look,
-// at most once a second (scada_tag_notify does one), and a post between
-// the markers makes none: without the wait, the answer to the feeder,
-// whose request may have come within that second, is refused with
-// PEER_DOWN (issue #73).
-bool wait_until_live(scada_ctx* ctx, const char* name) {
-    constexpr std::int64_t WAIT_LIMIT_NS = 30'000'000'000;
-    constexpr long PAUSE_NS = 10'000'000;
-    std::uint16_t index = 0;
-    if (scada_proc_resolve(ctx, name, &index) != SCADA_OK) {
-        return false;
-    }
-    const std::int64_t deadline = monotonic_now() + WAIT_LIMIT_NS;
-    while (monotonic_now() < deadline) {
-        scada_proc_status_t status{};
-        if (scada_proc_status(ctx, index, &status) == SCADA_OK &&
-            status.down == 0) {
-            return true;
-        }
-        static_cast<void>(scada_tag_notify(ctx));
-        static_cast<void>(scada_tag_heartbeat(ctx));
-        const timespec pause{.tv_sec = 0, .tv_nsec = PAUSE_NS};
-        static_cast<void>(::nanosleep(&pause, nullptr));
-    }
-    return false;
-}
-
 int run(std::span<const std::string_view> args) {
     const std::string_view fault =
         args.size() == MAX_ARGUMENTS ? args[MAX_ARGUMENTS - 1] : "";
@@ -516,13 +488,6 @@ int run(std::span<const std::string_view> args) {
     prepared.answer.status = SCADA_RESULT_OK;
     if (!wait_for_expired_request(prepared)) {
         std::cerr << "scada-tag-rt-probe: no request arrived\n";
-        scada_queue_close(prepared.requests);
-        scada_queue_close(prepared.queue);
-        scada_tag_detach(prepared.ctx);
-        return EXIT_FAILED;
-    }
-    if (!wait_until_live(prepared.ctx, "feeder")) {
-        std::cerr << "scada-tag-rt-probe: the feeder never read as live\n";
         scada_queue_close(prepared.requests);
         scada_queue_close(prepared.queue);
         scada_tag_detach(prepared.ctx);
