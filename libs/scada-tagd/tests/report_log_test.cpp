@@ -535,6 +535,30 @@ TEST_F(ReportLog, EachRetainProblemHasItsOwnRecordAndMessageId) {
     EXPECT_TRUE(has(records[3], "MESSAGE_ID=7cf5c1c8535f44f6a297db538666d7a3"));
 }
 
+// Decision D-62: the keeper's report of a RETAIN_NOW change that reached
+// the disk after 1 s (RetainNowLate in retain_keeper_test) is a WARNING
+// with its own MESSAGE_ID.
+TEST_F(ReportLog, ALateRetainNowWriteIsAWarningWithItsMessageId) {
+    scada::tagd::log_retain_problem(
+        logger(),
+        RetainProblem{"io",
+                      "a retain_now change reached the disk after 1700 ms, "
+                      "more than 1000 ms",
+                      RetainProblemKind::RETAIN_NOW_LATE,
+                      {},
+                      {}});
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(
+        has(records[0], "MESSAGE=retain_now change reached the disk late"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[0], "SUBJECT=io"));
+    EXPECT_TRUE(has(records[0],
+                    "DETAIL=a retain_now change reached the disk "
+                    "after 1700 ms, more than 1000 ms"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=51a87b54784a4a21bd45dfb59069996d"));
+}
+
 TEST_F(ReportLog, AProcessStillAttachedAtTheTimeoutHasItsMessageId) {
     scada::tag::RetiredGeneration retired;
     retired.generation = 3;
@@ -580,7 +604,9 @@ TEST(ReportLogIds, EveryMessageIdIsDistinct) {
                                          MESSAGE_ID_RETAIN_DIRECTORY_UNUSABLE,
                                          MESSAGE_ID_STILL_ATTACHED_AT_TIMEOUT,
                                          MESSAGE_ID_RETAIN_WRITER_BOUND,
-                                         MESSAGE_ID_VALUES_UNSAVED_AT_EXIT};
+                                         MESSAGE_ID_VALUES_UNSAVED_AT_EXIT,
+                                         MESSAGE_ID_MOVED_VALUES_INCOMPLETE,
+                                         MESSAGE_ID_RETAIN_NOW_LATE};
     std::ranges::sort(ids);
     EXPECT_EQ(std::ranges::adjacent_find(ids), ids.end());
 }

@@ -53,19 +53,23 @@ inline constexpr std::chrono::milliseconds RETAIN_WAIT_LIMIT{5000};
 // The bound of contract 12 for a RETAIN_NOW change, from the change to its
 // file on disk, in ns.
 inline constexpr std::int64_t RETAIN_NOW_BOUND_NS = 1'000'000'000;
-// The smallest gap between two writes of one owner's file (decision D-62).
-inline constexpr std::int64_t MIN_REWRITE_FLOOR_NS = 250'000'000;
+// W of decision D-62: the time one retain write, with the writes queued
+// before it, may take for the bound to hold.
+inline constexpr std::int64_t RETAIN_WRITE_BUDGET_NS = 200'000'000;
 
-// The shortest time between two writes of one owner's file when its checks
-// come every `check_period_ns` (decision D-62): RETAIN_NOW_BOUND_NS minus
-// the period, so that a change that comes just after a write is still on
-// disk within the bound, and never below MIN_REWRITE_FLOOR_NS. The tag-set
-// builder keeps the period at or below 750 ms when a RETAIN_NOW tag
-// exists, so the floor applies only to sets without one.
-[[nodiscard]] constexpr std::int64_t min_rewrite_ns(
+// K of decision D-62: the checks that must pass after a file of an owner
+// was handed to the writer before the next one may be, when the checks come
+// every `check_period_ns` (taken as 1 ns if not positive).
+// K = max(1, floor((RETAIN_NOW_BOUND_NS - RETAIN_WRITE_BUDGET_NS) / P) - 1),
+// so that K checks plus less than one period of lateness of a check, plus
+// W, stay within the bound. Counting checks, not ns, keeps a check that
+// wakes a little late from pushing a write a whole period later.
+[[nodiscard]] constexpr std::int64_t checks_between_writes(
     std::int64_t check_period_ns) noexcept {
-    const std::int64_t left = RETAIN_NOW_BOUND_NS - check_period_ns;
-    return left > MIN_REWRITE_FLOOR_NS ? left : MIN_REWRITE_FLOOR_NS;
+    const std::int64_t period = check_period_ns > 0 ? check_period_ns : 1;
+    const std::int64_t checks =
+        ((RETAIN_NOW_BOUND_NS - RETAIN_WRITE_BUDGET_NS) / period) - 1;
+    return checks > 1 ? checks : 1;
 }
 
 // Writes retain files on a thread of its own, so that a slow fsync never
@@ -87,6 +91,9 @@ public:
         std::vector<std::string> removed;
         // The written_time_ns of the file written.
         std::int64_t written_time_ns = 0;
+        // From the submit of the file to the end of its write, by the clock
+        // of RetainFileOps (decision D-62).
+        std::int64_t took_ns = 0;
     };
 
     // `dir_fd` and `ops` are borrowed and stay valid while this object
@@ -121,6 +128,7 @@ private:
     struct Job {
         RetainFile file;
         std::uint64_t token = 0;
+        std::int64_t submitted_ns = 0;  // by the clock of ops_
     };
 
     void run(const std::stop_token& stop);
@@ -216,11 +224,12 @@ public:
     // changed, now, and waits until the files are on disk.
     void flush(CheckReport& report);
 
-    // The period of the checks, which sets the shortest time between two
-    // writes of one owner's file (`min_rewrite_ns`, decision D-62). Until
-    // it is called, the period is the `heartbeat_check_ms` of the tag set.
+    // The period of the checks, `period_ns` > 0 (a value not positive is
+    // taken as 1 ns), which sets how many checks pass between two writes of
+    // one owner's file (`checks_between_writes`, decision D-62). Until it
+    // is called, the period is the `heartbeat_check_ms` of the tag set.
     void set_check_period(std::int64_t period_ns) noexcept {
-        min_rewrite_ns_ = min_rewrite_ns(period_ns);
+        checks_between_writes_ = checks_between_writes(period_ns);
     }
 
     // Waits until the writer has finished every file handed to it, and
@@ -270,7 +279,18 @@ private:
         std::map<std::string, RetainedValue, std::less<>> values;
         bool dirty = false;
         bool urgent = false;  // a RETAIN_NOW tag changed
+        // When the last file was handed to the writer.
         std::optional<std::int64_t> last_write_mono_ns;
+        // Checks since then, up to checks_between_writes_ (decision D-62).
+        std::int64_t checks_since_write = 0;
+        // Decision D-62: the earliest time the oldest RETAIN_NOW change can
+        // have happened (the check before the one that saw it), while it is
+        // not handed to the writer, and once it is, until it is on disk; and
+        // whether a late write was reported and not yet followed by one
+        // within the bound.
+        std::optional<std::int64_t> urgent_since_mono_ns;
+        std::optional<std::int64_t> submitted_since_mono_ns;
+        bool late_reported = false;
         std::int64_t next_retry_mono_ns = 0;
         // The newest retired generation this owner was seen to leave, whose
         // values the file therefore holds; sticky (decision D-45).
@@ -330,6 +350,14 @@ private:
     void submit(const std::string& name, std::int64_t now_mono_ns);
     // Applies what the writer did.
     void collect(std::int64_t now_mono_ns, CheckReport& report);
+    // A file the writer wrote: the state of its owner, and the report.
+    static void note_written(const RetainWriter::Done& done, OwnerState& state,
+                             CheckReport& report);
+    // Decision D-62: reports, once until a later one is within the bound, a
+    // RETAIN_NOW change that took longer than RETAIN_NOW_BOUND_NS to reach
+    // the disk; `took_ns` is the writer's part.
+    static void note_time_to_disk(const std::string& owner, OwnerState& state,
+                                  std::int64_t took_ns, CheckReport& report);
 
     // True if a generation newer than `generation` in the base directory
     // `base_fd` has a ready `tags` region of `owner`, or the owner's file
@@ -378,7 +406,10 @@ private:
     Fd directory_;  // the retain directory; invalid if none
     std::uint32_t tagd_uid_ = 0;
     std::int64_t interval_ns_ = 0;
-    std::int64_t min_rewrite_ns_ = min_rewrite_ns(RETAIN_NOW_BOUND_NS / 4);
+    std::int64_t checks_between_writes_ =
+        checks_between_writes(RETAIN_NOW_BOUND_NS / 4);
+    // The time of the previous check, nothing before the first.
+    std::optional<std::int64_t> last_check_mono_ns_;
     ConfigHash config_hash_{};
     std::unique_ptr<Watched> current_;
     std::vector<std::unique_ptr<Watched>> retired_;

@@ -554,7 +554,9 @@ Result<ResolvedTagSet> resolve(const TagSet& tag_set, std::string& detail) {
     }
     // Decision D-62: a RETAIN_NOW change is on disk within 1 s only if the
     // checks that write it come at most MAX_RETAIN_NOW_CHECK_MS apart; the
-    // loop of scada-tagd checks at most every heartbeat_check_ms.
+    // loop of scada-tagd checks at most every heartbeat_check_ms, and the
+    // other limits of its period (timeout / 3, watchdog / 4) only shorten
+    // it.
     if (tag_set.heartbeat_check_ms > MAX_RETAIN_NOW_CHECK_MS &&
         std::ranges::any_of(tag_set.tags, [](const TagDefinition& tag) {
             return tag.retain_now;

@@ -120,6 +120,10 @@ enum class RetainProblemKind : std::uint8_t {
     // Not every retain file could be read for the tags that moved to owners
     // that have not attached; files of gone owners are kept (review B5).
     ADOPTION_INCOMPLETE,
+    // A change of a RETAIN_NOW tag took longer than 1 s to reach the disk
+    // (decision D-62): the writes took longer than their budget of 200 ms.
+    // Once per owner until a later one is within the bound.
+    RETAIN_NOW_LATE,
 };
 
 // A retain file that was ignored because it failed its checks, or one that

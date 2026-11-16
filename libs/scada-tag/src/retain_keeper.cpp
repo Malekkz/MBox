@@ -144,7 +144,8 @@ void RetainWriter::submit(const std::string& owner, RetainFile file,
                           std::uint64_t token) {
     {
         const std::scoped_lock lock(mutex_);
-        waiting_.insert_or_assign(owner, Job{std::move(file), token});
+        waiting_.insert_or_assign(
+            owner, Job{std::move(file), token, ops_.now_mono_ns()});
     }
     changed_.notify_all();
 }
@@ -234,6 +235,7 @@ void RetainWriter::run(const std::stop_token& stop) {
                     write_retain_file(dir_fd_, done.owner, job->mapped().file,
                                       done.detail, ops_)
                         .ok();
+                done.took_ns = ops_.now_mono_ns() - job->mapped().submitted_ns;
             } else {
                 done = remove_files(removals);
             }
@@ -638,7 +640,13 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     state.dirty = false;
     state.urgent = false;
     state.last_write_mono_ns = now_mono_ns;
+    state.checks_since_write = 0;
+    if (!state.submitted_since_mono_ns.has_value()) {
+        state.submitted_since_mono_ns = state.urgent_since_mono_ns;
+    }
+    state.urgent_since_mono_ns.reset();
     if (!persists()) {
+        state.submitted_since_mono_ns.reset();
         state.done_token = ++state.token;
         return;
     }
@@ -681,6 +689,50 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     writer_->submit(name, std::move(file), ++state.token);
 }
 
+void RetainKeeper::note_time_to_disk(const std::string& owner,
+                                     OwnerState& state, std::int64_t took_ns,
+                                     CheckReport& report) {
+    if (!state.submitted_since_mono_ns.has_value() ||
+        !state.last_write_mono_ns.has_value()) {
+        return;
+    }
+    // From the earliest time of the change to the submit by the clock of
+    // the checks, then to the disk by the clock of the writer.
+    const std::int64_t took =
+        *state.last_write_mono_ns - *state.submitted_since_mono_ns + took_ns;
+    state.submitted_since_mono_ns.reset();
+    if (took <= RETAIN_NOW_BOUND_NS) {
+        state.late_reported = false;
+        return;
+    }
+    if (state.late_reported) {
+        return;
+    }
+    state.late_reported = true;
+    report.retain_problems.push_back(
+        {owner,
+         "a retain_now change reached the disk after " +
+             std::to_string(took / NS_PER_MS) + " ms, more than " +
+             std::to_string(RETAIN_NOW_BOUND_NS / NS_PER_MS) + " ms",
+         RetainProblemKind::RETAIN_NOW_LATE,
+         {},
+         {}});
+}
+
+void RetainKeeper::note_written(const RetainWriter::Done& done,
+                                OwnerState& state, CheckReport& report) {
+    state.has_file = true;
+    state.failing = false;
+    state.written_time_on_disk = done.written_time_ns;
+    if (done.final) {
+        state.final_on_disk = newer(state.final_on_disk, done.source);
+    }
+    report.retain_written.push_back({done.owner, done.values, done.final});
+    if (done.token == state.token) {
+        note_time_to_disk(done.owner, state, done.took_ns, report);
+    }
+}
+
 void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
     if (!persists()) {
         return;
@@ -714,14 +766,7 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
         OwnerState& state = states_[done.owner];
         state.done_token = std::max(state.done_token, done.token);
         if (done.written) {
-            state.has_file = true;
-            state.failing = false;
-            state.written_time_on_disk = done.written_time_ns;
-            if (done.final) {
-                state.final_on_disk = newer(state.final_on_disk, done.source);
-            }
-            report.retain_written.push_back(
-                {done.owner, done.values, done.final});
+            note_written(done, state, report);
             continue;
         }
         // Only the newest file matters; an older one was replaced.
@@ -1128,6 +1173,10 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
                                   pending_problems_.begin(),
                                   pending_problems_.end());
     pending_problems_.clear();
+    for (auto& [name, state] : states_) {
+        state.checks_since_write =
+            std::min(state.checks_since_write + 1, checks_between_writes_);
+    }
     collect(now_mono_ns, report);
     if (persists() && current_ != nullptr) {
         read_current();
@@ -1161,21 +1210,27 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
         }
     }
     for (auto& [name, state] : states_) {
+        if (state.urgent && !state.urgent_since_mono_ns.has_value()) {
+            state.urgent_since_mono_ns =
+                last_check_mono_ns_.value_or(now_mono_ns);
+        }
         if (!state.dirty || now_mono_ns < state.next_retry_mono_ns) {
             continue;
         }
-        // Decision D-62: two writes of one file are at least
-        // min_rewrite_ns_ apart, also for RETAIN_NOW; the first change
-        // after a quiet time is written at once. A tag that flaps writes at
-        // most 60 s / min_rewrite_ns_ files a minute.
+        // Decision D-62: a file is handed to the writer only once
+        // checks_between_writes_ checks have passed since the last one,
+        // also for RETAIN_NOW; the first change after a quiet time is
+        // written at once. Checks are counted, not ns, so that a check that
+        // wakes late does not push the write a whole period later.
         const bool first = !state.last_write_mono_ns.has_value();
-        const std::int64_t since =
-            first ? 0 : now_mono_ns - *state.last_write_mono_ns;
-        if (first || (since >= min_rewrite_ns_ &&
-                      (state.urgent || since >= interval_ns_))) {
+        const bool may = state.checks_since_write >= checks_between_writes_;
+        if (first ||
+            (may && (state.urgent || now_mono_ns - *state.last_write_mono_ns >=
+                                         interval_ns_))) {
             submit(name, now_mono_ns);
         }
     }
+    last_check_mono_ns_ = now_mono_ns;
     remove_done(base_fd, now_mono_ns, report);
     remove_files_of_gone_owners();
 }
