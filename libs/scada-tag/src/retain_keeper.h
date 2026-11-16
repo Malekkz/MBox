@@ -50,6 +50,24 @@ inline constexpr std::int64_t RETAIN_RETRY_INTERVAL_NS = 1'000'000'000;
 // service watchdog.
 inline constexpr std::chrono::milliseconds RETAIN_WAIT_LIMIT{5000};
 
+// The bound of contract 12 for a RETAIN_NOW change, from the change to its
+// file on disk, in ns.
+inline constexpr std::int64_t RETAIN_NOW_BOUND_NS = 1'000'000'000;
+// The smallest gap between two writes of one owner's file (decision D-62).
+inline constexpr std::int64_t MIN_REWRITE_FLOOR_NS = 250'000'000;
+
+// The shortest time between two writes of one owner's file when its checks
+// come every `check_period_ns` (decision D-62): RETAIN_NOW_BOUND_NS minus
+// the period, so that a change that comes just after a write is still on
+// disk within the bound, and never below MIN_REWRITE_FLOOR_NS. The tag-set
+// builder keeps the period at or below 750 ms when a RETAIN_NOW tag
+// exists, so the floor applies only to sets without one.
+[[nodiscard]] constexpr std::int64_t min_rewrite_ns(
+    std::int64_t check_period_ns) noexcept {
+    const std::int64_t left = RETAIN_NOW_BOUND_NS - check_period_ns;
+    return left > MIN_REWRITE_FLOOR_NS ? left : MIN_REWRITE_FLOOR_NS;
+}
+
 // Writes retain files on a thread of its own, so that a slow fsync never
 // holds up the liveness loop of scada-tagd (decision D-45). Of several
 // files of one owner waiting, only the newest is written.
@@ -197,6 +215,13 @@ public:
     // Reads the current generation and writes every owner whose values
     // changed, now, and waits until the files are on disk.
     void flush(CheckReport& report);
+
+    // The period of the checks, which sets the shortest time between two
+    // writes of one owner's file (`min_rewrite_ns`, decision D-62). Until
+    // it is called, the period is the `heartbeat_check_ms` of the tag set.
+    void set_check_period(std::int64_t period_ns) noexcept {
+        min_rewrite_ns_ = min_rewrite_ns(period_ns);
+    }
 
     // Waits until the writer has finished every file handed to it, and
     // reports what it did; hands it nothing new.
@@ -353,6 +378,7 @@ private:
     Fd directory_;  // the retain directory; invalid if none
     std::uint32_t tagd_uid_ = 0;
     std::int64_t interval_ns_ = 0;
+    std::int64_t min_rewrite_ns_ = min_rewrite_ns(RETAIN_NOW_BOUND_NS / 4);
     ConfigHash config_hash_{};
     std::unique_ptr<Watched> current_;
     std::vector<std::unique_ptr<Watched>> retired_;

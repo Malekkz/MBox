@@ -407,6 +407,12 @@ public:
     // once, section 10.1). The generation keeps running.
     void stop() noexcept;
 
+    // The period at which `check` is called, in ns: the shortest time
+    // between two writes of one owner's retain file is one second minus it
+    // (decision D-62), so that a RETAIN_NOW change is on disk within 1 s.
+    // Until it is called, the `heartbeat_check_ms` of the tag set.
+    void set_check_period(std::int64_t period_ns) noexcept;
+
 private:
     class Impl;
     explicit GenerationHost(std::unique_ptr<Impl> impl) noexcept;

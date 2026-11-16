@@ -4,6 +4,7 @@
 // file of an owner that left a retired generation, and the removal of
 // that generation, also with an observer still in it.
 
+#include "retain_keeper.h"
 #include "attach_fixture.h"
 #include "attachment.h"
 #include "layout.h"
@@ -57,6 +58,9 @@ using Attached = std::unique_ptr<Attachment>;
 constexpr std::int64_t NS_PER_MS = 1'000'000;
 constexpr std::int64_t INTERVAL_NS =
     std::int64_t{DEFAULT_RETAIN_INTERVAL_MS} * NS_PER_MS;
+// The shortest time between two writes of one owner's file at the default
+// check of 250 ms (decision D-62).
+constexpr std::int64_t REWRITE_NS = 750'000'000;
 constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 constexpr mode_t RETAIN_DIR_MODE = 02750;
@@ -323,7 +327,7 @@ TEST_F(Keeper, AValueTheOwnerMarkedBadIsRemovedFromTheFile) {
     ASSERT_EQ(round(now).retain_written.size(), 1U);
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_9, SCADA_QUALITY_BAD);
     // plant.mode is RETAIN_NOW: written at the next check.
-    EXPECT_EQ(round(now + 1).retain_written.size(), 1U);
+    EXPECT_EQ(round(now + REWRITE_NS).retain_written.size(), 1U);
     const RetainFile file = file_of("io");
     EXPECT_FALSE(value_in(file, "plant.mode").has_value());
     EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
@@ -490,7 +494,7 @@ TEST_F(Keeper, AFinalFileStaysMarkedFinalWhenLaterValuesAreWritten) {
     const Attached again = attached("io");
     ASSERT_NE(again, nullptr);
     write(*again, "plant.mode", SCADA_TYPE_INT64, 4);
-    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    ASSERT_EQ(round(now + REWRITE_NS).retain_written.size(), 1U);
     const RetainFile file = file_of("io");
     EXPECT_TRUE(file.final);
     EXPECT_EQ(file.source.generation, 1U);
@@ -921,18 +925,18 @@ TEST_F(Keeper, AChangeOfQualityOrFlagsAloneIsWritten) {
     // SUBSTITUTED alone: plant.mode is RETAIN_NOW, so the next check.
     write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_GOOD,
                   SCADA_FLAG_SUBSTITUTED);
-    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    ASSERT_EQ(round(now + REWRITE_NS).retain_written.size(), 1U);
     file = file_of("io");
     EXPECT_EQ(find_retained(file, "plant.mode")->quality_flags,
               SCADA_FLAG_SUBSTITUTED);
     // The quality alone.
     write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_UNCERTAIN,
                   SCADA_FLAG_SUBSTITUTED);
-    ASSERT_EQ(round(now + 2).retain_written.size(), 1U);
+    ASSERT_EQ(round(now + (2 * REWRITE_NS)).retain_written.size(), 1U);
     EXPECT_EQ(find_retained(file_of("io"), "plant.mode")->quality,
               Quality::UNCERTAIN);
     // No change: no write.
-    EXPECT_TRUE(round(now + 3).retain_written.empty());
+    EXPECT_TRUE(round(now + (3 * REWRITE_NS)).retain_written.empty());
 }
 
 TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
@@ -1337,7 +1341,7 @@ TEST_F(KeeperAfterRestore,
     EXPECT_EQ(stamp_of(file_of("io")), old_stamp());
     // plant.mode written too: the next file has the stamp of its write.
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_8);
-    ASSERT_EQ(round(now + INTERVAL_NS + 1).retain_written.size(), 1U);
+    ASSERT_EQ(round(now + INTERVAL_NS + REWRITE_NS).retain_written.size(), 1U);
     const RetainFile file = file_of("io");
     EXPECT_GT(file.written_boottime_ns, old_stamp().written_boottime_ns);
     EXPECT_GT(file.written_time_ns, old_stamp().written_time_ns);
@@ -1510,6 +1514,154 @@ TEST_F(MovedKeeper, AnOlderValueBeforeTheCutIsNotTaken) {
         static_cast<void>(round(now + (i * INTERVAL_NS)));
     }
     EXPECT_FALSE(has_file("web"));
+}
+
+}  // namespace
+
+// Decision D-62 (issue #96): two writes of one owner's file are at least
+// 1 s minus the check period apart, so a tag that flaps writes at most
+// 60 s / M files a minute, and a RETAIN_NOW change is still on disk within
+// 1 s.
+namespace {
+
+constexpr std::int64_t A_SECOND_NS = 1'000 * NS_PER_MS;
+constexpr std::int64_t A_MINUTE_NS = 60 * A_SECOND_NS;
+constexpr std::int64_t DEFAULT_CHECK_NS = 250 * NS_PER_MS;
+constexpr std::int64_t FAST_CHECK_NS = 50 * NS_PER_MS;
+constexpr std::int64_t SLOW_CHECK_NS = 750 * NS_PER_MS;
+constexpr std::int64_t SLOWER_CHECK_NS = 2 * A_SECOND_NS;
+// How long `time_to_disk` looks: twice the bound.
+constexpr std::int64_t LOOK_NS = 2 * A_SECOND_NS;
+
+TEST(MinRewrite, IsTheBoundMinusTheCheckPeriodAndNeverBelowTheFloor) {
+    EXPECT_EQ(min_rewrite_ns(DEFAULT_CHECK_NS), A_SECOND_NS - DEFAULT_CHECK_NS);
+    EXPECT_EQ(min_rewrite_ns(FAST_CHECK_NS), A_SECOND_NS - FAST_CHECK_NS);
+    EXPECT_EQ(min_rewrite_ns(SLOW_CHECK_NS), MIN_REWRITE_FLOOR_NS);
+    EXPECT_EQ(min_rewrite_ns(SLOWER_CHECK_NS), MIN_REWRITE_FLOOR_NS);
+}
+
+class Rewrite : public Keeper {
+protected:
+    // Writes plant.mode (RETAIN_NOW) of `feeder`: GOOD with `value`, or BAD
+    // with COMM_FAIL as a device that lost its link.
+    static void flap_to(Attachment& feeder, bool bad, std::uint64_t value) {
+        write_flagged(feeder, "plant.mode", value,
+                      bad ? SCADA_QUALITY_BAD : SCADA_QUALITY_GOOD,
+                      bad ? SCADA_FLAG_COMM_FAIL : 0);
+    }
+
+    // Checks every `period` from `start` until plant.mode holds `value` on
+    // file; the time that took, or -1 within LOOK_NS.
+    std::int64_t time_to_disk(std::int64_t start, std::int64_t period,
+                              std::uint64_t value) {
+        for (std::int64_t at = start; at <= start + LOOK_NS; at += period) {
+            static_cast<void>(round(at));
+            const RetainFile file = file_of("io");
+            if (value_in(file, "plant.mode") == value) {
+                return at - start;
+            }
+        }
+        return -1;
+    }
+
+    // The bound of contract 12 at a check period of `period`: a change
+    // just after a write is on disk within 1 s, and not before M.
+    void change_after_a_write_is_on_disk_within_a_second(std::int64_t period) {
+        start_host(retained_set());
+        host().set_check_period(period);
+        const Attached feeder = attached("io");
+        ASSERT_NE(feeder, nullptr);
+        const std::int64_t now = scada::monotonic_ns();
+        flap_to(*feeder, false, VALUE_5);
+        ASSERT_EQ(round(now).retain_written.size(), 1U);
+        flap_to(*feeder, false, VALUE_6);  // just after the write
+        const std::int64_t took = time_to_disk(now + period, period, VALUE_6);
+        ASSERT_GE(took, 0);
+        // From the change, at `now`.
+        EXPECT_LE(took + period, A_SECOND_NS);
+        EXPECT_GE(took + period, min_rewrite_ns(period));
+    }
+
+    // Flaps plant.mode at every check, ends `ends_bad`, and gives the last
+    // state time to reach the file.
+    void flap_and_end(bool ends_bad) {
+        start_host(retained_set());
+        const Attached feeder = attached("io");
+        ASSERT_NE(feeder, nullptr);
+        const std::int64_t now = scada::monotonic_ns();
+        constexpr int FLAPS = 8;
+        for (int i = 0; i < FLAPS; ++i) {
+            flap_to(*feeder, (i % 2) != 0, VALUE_7);
+            static_cast<void>(round(now + (i * DEFAULT_CHECK_NS)));
+        }
+        flap_to(*feeder, ends_bad, VALUE_7);
+        static_cast<void>(
+            round(now + (FLAPS * DEFAULT_CHECK_NS) + A_SECOND_NS));
+        drop_host();
+    }
+
+    // Restores into a new base directory, as after a reboot; what plant.mode
+    // holds then.
+    scada_value restored_in_a_new_base() {
+        std::filesystem::remove_all(base());
+        EXPECT_EQ(::mkdir(base().c_str(), RETAIN_DIR_MODE), 0);
+        EXPECT_EQ(::chmod(base().c_str(), RETAIN_DIR_MODE), 0);
+        start_host(retained_set());
+        const Attached again = attached("io");
+        scada_value value{};
+        if (again != nullptr) {
+            std::uint32_t handle = SCADA_INVALID_HANDLE;
+            EXPECT_EQ(again->resolve("plant.mode", handle), SCADA_OK);
+            EXPECT_EQ(again->read(handle, value), SCADA_OK);
+        }
+        return value;
+    }
+};
+
+TEST_F(Rewrite,
+       AFlappingRetainNowTagWritesAtMostSixtySecondsOverMFilesAMinute) {
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    std::size_t written = 0;
+    bool bad = false;
+    // One flap at every check for a simulated minute: the worst case.
+    for (std::int64_t at = now; at < now + A_MINUTE_NS;
+         at += DEFAULT_CHECK_NS) {
+        flap_to(*feeder, bad, VALUE_7);
+        written += round(at).retain_written.size();
+        bad = !bad;
+    }
+    const auto bound = static_cast<std::size_t>(
+        A_MINUTE_NS / min_rewrite_ns(DEFAULT_CHECK_NS));
+    EXPECT_LE(written, bound);      // 80, against 240 before
+    EXPECT_GE(written, bound - 1);  // it still writes as often as it may
+}
+
+TEST_F(Rewrite, ARetainNowChangeIsOnDiskWithinASecondAtChecksOf250Ms) {
+    change_after_a_write_is_on_disk_within_a_second(DEFAULT_CHECK_NS);
+}
+
+TEST_F(Rewrite, ARetainNowChangeIsOnDiskWithinASecondAtChecksOf50Ms) {
+    change_after_a_write_is_on_disk_within_a_second(FAST_CHECK_NS);
+}
+
+// After a flap, a restart restores what D-45 says of the last state on
+// file: nothing after BAD, the value after GOOD.
+TEST_F(Rewrite, ARestartAfterAFlapThatEndsBadRestoresNothing) {
+    flap_and_end(true);
+    const scada_value value = restored_in_a_new_base();
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_NOT_INIT);
+}
+
+TEST_F(Rewrite, ARestartAfterAFlapThatEndsGoodRestoresTheValue) {
+    flap_and_end(false);
+    const scada_value value = restored_in_a_new_base();
+    EXPECT_EQ(value.value, VALUE_7);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_RESTORED);
 }
 
 }  // namespace

@@ -22,7 +22,10 @@ process. The executable in `services/scada-tagd` only calls it.
   D-45): the tags marked `retain` are read with the sequence-lock read, and
   the file `<owner>.bin` in the retain directory is written when a value
   changed, at most every `--retain-interval-ms`, at the next check for a
-  `retain_now` tag. The files are written by a thread of their own, so that
+  `retain_now` tag. Two writes of one file are at least 1 s minus the check
+  period apart (750 ms by default; at least 250 ms), so a tag that flaps
+  writes its owner's file at most 80 times a minute and a `retain_now`
+  change is still on disk within 1 s (decision D-62). The files are written by a thread of their own, so that
   a slow `fsync` does not hold up the heartbeat; the removal of old files
   and its directory `fsync` run there too. A record read consistently that
   is BAD, written by the owner (no NOT_INIT), removes the tag from the

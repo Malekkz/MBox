@@ -169,7 +169,7 @@ One JSON document. Lists and entries may be in any order.
 | Key | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `format` | yes | | Version of this file format; must be 1 |
-| `heartbeat_check_ms` | no | 250 | How often `scada-tagd` checks heartbeats, in ms |
+| `heartbeat_check_ms` | no | 250 | How often `scada-tagd` checks heartbeats, in ms; at most 750 when a tag has `retain_now`, so that its change is on disk within 1 s (D-62) |
 | `processes[].name`, `uid` | yes | | Process name and the numeric user id it runs as |
 | `processes[].heartbeat_timeout_ms` | no | 3,000; 500 if `realtime` | Heartbeat timeout in ms |
 | `processes[].realtime` | no | `false` | The process is a real-time process |

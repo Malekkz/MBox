@@ -1164,8 +1164,15 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
         if (!state.dirty || now_mono_ns < state.next_retry_mono_ns) {
             continue;
         }
-        if (state.urgent || !state.last_write_mono_ns.has_value() ||
-            now_mono_ns - *state.last_write_mono_ns >= interval_ns_) {
+        // Decision D-62: two writes of one file are at least
+        // min_rewrite_ns_ apart, also for RETAIN_NOW; the first change
+        // after a quiet time is written at once. A tag that flaps writes at
+        // most 60 s / min_rewrite_ns_ files a minute.
+        const bool first = !state.last_write_mono_ns.has_value();
+        const std::int64_t since =
+            first ? 0 : now_mono_ns - *state.last_write_mono_ns;
+        if (first || (since >= min_rewrite_ns_ &&
+                      (state.urgent || since >= interval_ns_))) {
             submit(name, now_mono_ns);
         }
     }

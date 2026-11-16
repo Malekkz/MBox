@@ -552,6 +552,18 @@ Result<ResolvedTagSet> resolve(const TagSet& tag_set, std::string& detail) {
         detail = "heartbeat_check_ms must be at least 1";
         return INVALID_VALUE;
     }
+    // Decision D-62: a RETAIN_NOW change is on disk within 1 s only if the
+    // checks that write it come at most MAX_RETAIN_NOW_CHECK_MS apart; the
+    // loop of scada-tagd checks at most every heartbeat_check_ms.
+    if (tag_set.heartbeat_check_ms > MAX_RETAIN_NOW_CHECK_MS &&
+        std::ranges::any_of(tag_set.tags, [](const TagDefinition& tag) {
+            return tag.retain_now;
+        })) {
+        detail = "heartbeat_check_ms must be at most " +
+                 std::to_string(MAX_RETAIN_NOW_CHECK_MS) +
+                 " in a tag set with a retain_now tag";
+        return INVALID_VALUE;
+    }
     ResolvedTagSet resolved;
     if (const Status status = resolve_processes(tag_set, resolved, detail);
         !status.ok()) {

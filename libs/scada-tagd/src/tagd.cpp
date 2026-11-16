@@ -383,6 +383,9 @@ int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
           Logger& logger, SuspendWatch& suspend, const RunHooks& hooks) {
     const std::int64_t period = loop_period_ns(host, settings);
+    // Decision D-62: the shortest time between two writes of one owner's
+    // retain file follows from the real period of the checks.
+    host.set_check_period(period);
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
     bool feeding = true;  // the last watchdog message was sent
     std::int64_t next_feed = monotonic_ns();
