@@ -230,6 +230,61 @@ TEST_F(Peers, AShrunkRegionIsDropped) {
     EXPECT_TRUE(peers().bytes(ring).empty());
 }
 
+// Decision D-61 (issue #92): a look that maps a queue file also looks at
+// the `proc` region of the queue's producer, which attach created before
+// the queue file. The timers are arranged so that the queue's slot is due
+// and the producer's is not: without the coupled look, the consumer would
+// see the queue for up to a second before it sees its producer.
+TEST_F(Peers, AQueueFoundLaterIsSeenWithItsProducer) {
+    const std::size_t proc = peers().proc_slot(PROCESS_IO);
+    const std::size_t queue = peers().queue_slot(QUEUE_EVENTS);
+    peers().want(directory(), proc, START_NS);
+    peers().want(directory(), queue, START_NS + (SECOND_NS / 2));
+    // The producer's slot is looked at again, still missing; its next
+    // look is a second later.
+    EXPECT_EQ(peers().refresh(directory(), START_NS + SECOND_NS), 0U);
+    const auto feeder = attached_io();
+    // Only the queue's slot is due.
+    EXPECT_EQ(peers().refresh(directory(), START_NS + (3 * SECOND_NS / 2)), 1U);
+    ASSERT_FALSE(peers().bytes(queue).empty());
+    EXPECT_EQ(proc_liveness(peers().bytes(proc), DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                            scada::monotonic_ns()),
+              DownReason::NONE);
+}
+
+// The same for a queue file created anew with the producer's `proc` region
+// (decision D-49, the path of PR #77): the old mapping of the region reads
+// the producer that left as down; the look that adopts the new queue file
+// maps the new region too.
+TEST_F(Peers, AQueueCreatedAnewIsSeenWithItsNewProducer) {
+    const std::size_t proc = peers().proc_slot(PROCESS_IO);
+    const std::size_t queue = peers().queue_slot(QUEUE_EVENTS);
+    auto feeder = attached_io();
+    peers().want(directory(), queue, START_NS);
+    peers().want(directory(), proc, START_NS + (SECOND_NS / 2));
+    const std::span<std::byte> old_queue = peers().bytes(queue);
+    const std::span<std::byte> old_proc = peers().bytes(proc);
+    ASSERT_FALSE(old_queue.empty());
+    ASSERT_FALSE(old_proc.empty());
+
+    feeder.reset();
+    std::filesystem::remove(generation_dir() / "proc.io");
+    std::filesystem::remove(generation_dir() / "events.io");
+    feeder = attached_io();
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_NE(proc_liveness(old_proc, DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                            scada::monotonic_ns()),
+              DownReason::NONE);
+    // Only the queue's slot is due.
+    EXPECT_EQ(peers().refresh(directory(), START_NS + SECOND_NS), 1U);
+    ASSERT_FALSE(peers().bytes(queue).empty());
+    EXPECT_NE(peers().bytes(queue).data(), old_queue.data());
+    EXPECT_NE(peers().bytes(proc).data(), old_proc.data());
+    EXPECT_EQ(proc_liveness(peers().bytes(proc), DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                            scada::monotonic_ns()),
+              DownReason::NONE);
+}
+
 TEST_F(Peers, ARegionReplacedTooOftenStaysMissing) {
     const std::size_t tags = peers().tags_slot(OWNER_IO);
     peers().want(directory(), tags, START_NS);

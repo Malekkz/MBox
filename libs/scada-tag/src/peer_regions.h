@@ -142,8 +142,14 @@ private:
     // The loop of `refresh`, with `mutex_` held.
     std::size_t refresh_locked(int dir_fd, std::int64_t now_mono_ns);
 
-    // Looks at one slot. True if what `bytes` returns changed.
+    // Looks at one slot. True if what `bytes` returns changed. A queue
+    // slot that gets a new mapping also looks at its producer's `proc`
+    // slot (`look_at_producer`).
     bool look(int dir_fd, Slot& slot);
+    // Asks for the `proc` slot of the producer of the queue slot `slot`, if
+    // nobody has, and looks at it now; nothing for another slot. Under
+    // `mutex_`.
+    void look_at_producer(int dir_fd, const Slot& slot);
     [[nodiscard]] static bool is_queue(const Slot& slot) noexcept;
     // Marks every kept mapping of the queue slot `slot` whose file changed
     // size (`PeerMapping::whole`). Under `mutex_`.

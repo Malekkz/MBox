@@ -215,7 +215,11 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
             // Release: publishes the mapping to readers, which load with
             // acquire.
             slot.current.store(kept.get(), std::memory_order_release);
-            return before != kept.get();
+            if (before != kept.get()) {
+                look_at_producer(dir_fd, slot);
+                return true;
+            }
+            return false;
         }
     }
     if (slot.mappings >= MAX_MAPPINGS_PER_REGION) {
@@ -245,7 +249,31 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
     ++slot.mappings;
     // Release: publishes the mapping to readers, which load with acquire.
     slot.current.store(mappings_.back().get(), std::memory_order_release);
+    look_at_producer(dir_fd, slot);
     return true;
+}
+
+void PeerRegions::look_at_producer(int dir_fd, const Slot& slot) {
+    if (!is_queue(slot)) {
+        return;
+    }
+    // The producer created its `proc` region, complete, before the queue
+    // file (contract 11.2, step 3), so it is there unless the producer has
+    // gone since: a consumer that can see a record of the queue can see the
+    // producer, which its answers and its liveness need (section 9.2,
+    // decision D-61). Without this, the two slots are looked at on timers
+    // of their own, up to a second apart (issue #92). Asked for here, not
+    // when the queue is opened: a slot asked for while missing is not
+    // looked at again by a later `want` (a resolve), only by `refresh`.
+    const std::size_t index = slot.identity.owner_index;
+    Slot& producer = slots_.at(index);
+    if (!producer.wanted) {
+        producer.wanted = true;
+        wanted_.push_back(index);
+    }
+    static_cast<void>(look(dir_fd, producer));
+    // Release, after the look: as in `want`.
+    producer.asked.store(true, std::memory_order_release);
 }
 
 void PeerRegions::want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns) {
@@ -302,8 +330,10 @@ std::size_t PeerRegions::try_refresh(int dir_fd, std::int64_t now_mono_ns) {
 
 std::size_t PeerRegions::refresh_locked(int dir_fd, std::int64_t now_mono_ns) {
     std::size_t changed = 0;
-    for (const std::size_t index : wanted_) {
-        Slot& slot = slots_.at(index);
+    // By position: a look can ask for a slot (`look_at_producer`), which
+    // appends to `wanted_`.
+    for (std::size_t i = 0; i < wanted_.size(); ++i) {
+        Slot& slot = slots_.at(wanted_[i]);
         if (now_mono_ns < slot.next_look_mono_ns) {
             continue;
         }
