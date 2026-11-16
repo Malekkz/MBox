@@ -10,10 +10,10 @@ or release access fails here although the model still passes. See README.md.
 The order is checked along every path through a function from its entry to
 a return, with each branch taken at most twice, so a retry loop runs one or
 two times. Calls of functions of the same object (helpers the compiler did
-not inline) and jumps into a part the compiler split off (GCC's
-`[clone .cold]`) are followed into them. A path that ends in a function
-that does not return (`panic`, a failed library assertion, the stack
-protector) is left out: it publishes nothing.
+not inline) are followed into them; a jump into a part the compiler split
+off (GCC's `[clone .cold]`) and back continues the same walk. A path that
+ends in a function that does not return (`panic`, a failed library
+assertion, the stack protector) is left out: it publishes nothing.
 
 Along each path the registers and the stack slots are followed
 symbolically from the entry of the function, so each memory access is known
@@ -221,34 +221,57 @@ class Program:
     def paths(self, function, start=0, depth=0, times=2):
         """Every path from instruction `start` of `function` to a return,
         as a tuple of instructions and markers, each branch taken at most
-        `times` times."""
+        `times` times.
+
+        A jump between a function and a part split off from it (`[clone
+        .cold]`), either way, continues the same walk, with the same counts
+        of branches taken: GCC jumps back from such a part into the loop it
+        left (issue #63), and walking the part as a call of its own would
+        start the counts again at each visit."""
         key = (function.obj, function.section, function.name, start, times)
         if key in self.cache:
             return self.cache[key]
         if depth > MAX_DEPTH:
             raise StructuralError(f"calls nested too deep in {function.name}")
         found = []
-        # (index, events, times each branch was taken)
-        stack = [(start, (), {})]
+        # (function or part of it, index, events, times each branch was
+        # taken)
+        stack = [(function, start, (), {})]
         while stack:
-            index, events, taken = stack.pop()
-            if index is None or index >= len(function.code):
+            part, index, events, taken = stack.pop()
+            if index is None or index >= len(part.code):
                 raise StructuralError(
-                    f"{function.name}: a path leaves the function")
-            instruction = function.code[index]
+                    f"{part.name}: a path leaves the function")
+            instruction = part.code[index]
             mnemonic = instruction.mnemonic
             base = mnemonic.split(".")[0]
             events += (instruction,)
             external = instruction.target is None and instruction.symbol
+            conditional = base in BRANCHES and mnemonic != "b"
+
+            def branch(target_part, target_index):
+                edge = (id(part), index, id(target_part), target_index)
+                if taken.get(edge, 0) < times:
+                    again = dict(taken)
+                    again[edge] = taken.get(edge, 0) + 1
+                    stack.append((target_part, target_index, events, again))
+
             if mnemonic in RETURNS:
                 found.append(events)
             elif mnemonic in CALLS or (base in BRANCHES and external):
                 symbol = instruction.symbol or ""
                 if symbol.startswith(NO_RETURN):
                     if mnemonic not in CALLS and mnemonic != "b":
-                        stack.append((index + 1, events, taken))
+                        stack.append((part, index + 1, events, taken))
                     continue
-                target = self.resolve(function, symbol)
+                target = self.resolve(part, symbol)
+                if mnemonic not in CALLS and target is not None and \
+                        same_function(part, target[0]):
+                    # Into the split-off part, or back from it.
+                    branch(*target)
+                    if conditional:
+                        stack.append((part, index + 1, events, taken))
+                    continue
                 if target is None:
                     inner_paths = [(Marker("C", f"call {symbol}"),
                                     Marker("clobber", "(call returns)"))]
@@ -257,21 +280,21 @@ class Program:
                                              times)
                 if mnemonic in CALLS:
                     for inner in inner_paths:
-                        stack.append((index + 1, events + inner, taken))
+                        stack.append((part, index + 1, events + inner,
+                                      taken))
                 else:
-                    # A jump: its paths end this one (a tail call returns
-                    # for this function, a split-off part is the rest of
-                    # it). A conditional jump may also fall through.
+                    # A tail call: its paths end this one. A conditional
+                    # jump may also fall through.
                     for inner in inner_paths:
                         found.append(events + inner)
-                    if mnemonic != "b":
-                        stack.append((index + 1, events, taken))
+                    if conditional:
+                        stack.append((part, index + 1, events, taken))
             elif base in BRANCHES:
-                target = function.index_of(instruction.target)
+                target = part.index_of(instruction.target)
                 if target is None and mnemonic == "b" and self.resolve(
-                        function, instruction.symbol) is not None:
+                        part, instruction.symbol) is not None:
                     # A tail call within the section, without relocation.
-                    callee, start_index = self.resolve(function,
+                    callee, start_index = self.resolve(part,
                                                        instruction.symbol)
                     for inner in self.paths(callee, start_index, depth + 1,
                                             times):
@@ -279,25 +302,30 @@ class Program:
                     continue
                 if target is None:
                     raise StructuralError(
-                        f"{function.name}: branch to an unknown address: "
+                        f"{part.name}: branch to an unknown address: "
                         f"{instruction.text()}")
-                edge = (index, target)
-                if taken.get(edge, 0) < times:
-                    again = dict(taken)
-                    again[edge] = taken.get(edge, 0) + 1
-                    stack.append((target, events, again))
-                if mnemonic != "b":  # conditional: may fall through
-                    stack.append((index + 1, events, taken))
+                branch(part, target)
+                if conditional:
+                    stack.append((part, index + 1, events, taken))
             elif mnemonic in INDIRECT:
-                stack.append((index + 1, events + (
+                stack.append((part, index + 1, events + (
                     Marker("C", f"indirect {instruction.text()}"),
                     Marker("clobber", "(call returns)")), taken))
             else:
-                stack.append((index + 1, events, taken))
+                stack.append((part, index + 1, events, taken))
             if len(found) > MAX_PATHS:
                 raise StructuralError(f"{function.name}: too many paths")
         self.cache[key] = found
         return found
+
+
+COLD = re.compile(r" \[clone \.cold(?:\.\d+)?\]$")
+
+
+def same_function(a, b):
+    """Whether `a` and `b` are one function or parts of one: a function and
+    the part the compiler split off from it (`f(...) [clone .cold]`)."""
+    return a.obj == b.obj and COLD.sub("", a.name) == COLD.sub("", b.name)
 
 
 # Symbolic values. A value is (root, offset): root is ("arg", n) for the
@@ -555,13 +583,16 @@ def check_reader(events, min_loads):
     """One path of the read side: sections 6.2 and 8.2. Returns (problem,
     whether an attempt had the fence).
 
-    Each attempt starts with the acquire load of shared memory. An attempt
+    Each attempt starts with the acquire load of shared memory; no load of
+    shared memory comes before the first one. An attempt
     that loads shared memory at all must reach DMB ISHLD after at least
     `min_loads` such loads (a copy; compilers do not merge atomic loads),
     and the first load of other than the caller's own memory after it must
-    load the address of the acquire load: the second load. After the second load the attempt loads no more shared
-    memory, nor anything this script cannot place: that would be a load
-    outside the window."""
+    load the address of the acquire load: the second load. After the second
+    load the attempt loads no more shared memory, nor anything this script
+    cannot place: that would be a load outside the window. A stronger
+    ordering than the litmus tests model (an acquire second load, DMB ISH)
+    fails too: the code would no longer be what the model checks."""
     letters = letters_of(events)
     for bad in "FRXC":
         if bad in letters:
@@ -601,7 +632,13 @@ def check_reader(events, min_loads):
                         "between the acquire load and the fence"), False
             attempt["fenced"] = True
             fenced_any = True
-        elif letter == "L" and attempt is not None:
+        elif letter == "L" and attempt is None:
+            # A load the compiler hoisted above the retry loop is outside
+            # every attempt's window (issue #63).
+            if where == "shared":
+                return ("a load of shared memory before the acquire load"
+                        ), False
+        elif letter == "L":
             if not attempt["fenced"]:
                 if where == "shared":
                     attempt["loads"] += 1

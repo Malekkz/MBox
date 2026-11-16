@@ -52,13 +52,16 @@ set(scada_check_tools
 
 # The fixtures break the rules on purpose; the tests below cover them. The
 # sanitizer fixtures are deliberate bugs too, and exist only in the sanitizer
-# builds (tests/sanitizer-fixtures/CMakeLists.txt).
+# builds (tests/sanitizer-fixtures/CMakeLists.txt). The model fixtures are
+# compiler input kept for their disassembly, not part of any build
+# (tests/model/README.md).
 add_custom_target(check
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scada_check.py"
     --source-dir "${PROJECT_SOURCE_DIR}"
     --build-dir "${PROJECT_BINARY_DIR}"
     --exclude tools/check/tests/fixtures
     --exclude tests/sanitizer-fixtures
+    --exclude tests/model/fixtures
     ${scada_check_tools}
   COMMENT "Checking format, lint, banned functions and SCADA_RT"
   USES_TERMINAL

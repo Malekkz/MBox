@@ -23,12 +23,25 @@ runs:
       shell: bash
       env:
         LLVM_VERSION: ${{ inputs.llvm-version }}
+      # apt retries each download itself (Acquire::Retries); the loop also
+      # retries an index that changed under it, up to four times, 10 s,
+      # 20 s and 30 s apart (issue #63).
       run: |
-        sudo apt-get update --quiet
-        sudo apt-get install --yes --quiet --no-install-recommends \
-          "clang-${LLVM_VERSION}" "clang-format-${LLVM_VERSION}" \
-          "clang-tidy-${LLVM_VERSION}" "clang-tools-${LLVM_VERSION}" \
-          "libclang-rt-${LLVM_VERSION}-dev" "llvm-${LLVM_VERSION}"
+        for attempt in 1 2 3 4; do
+          if sudo apt-get -o Acquire::Retries=3 update --quiet &&
+             sudo apt-get -o Acquire::Retries=3 install --yes --quiet \
+               --no-install-recommends \
+               "clang-${LLVM_VERSION}" "clang-format-${LLVM_VERSION}" \
+               "clang-tidy-${LLVM_VERSION}" "clang-tools-${LLVM_VERSION}" \
+               "libclang-rt-${LLVM_VERSION}-dev" "llvm-${LLVM_VERSION}"; then
+            break
+          fi
+          if [ "${attempt}" = 4 ]; then
+            echo "cannot install LLVM ${LLVM_VERSION}" >&2
+            exit 1
+          fi
+          sleep $((attempt * 10))
+        done
 
     # The build looks for `clang++`, `clang-tidy` and so on. The runner image
     # carries several LLVM versions, so the plain names are pointed at the
@@ -51,8 +64,10 @@ runs:
     # commit listed there, with the OCaml tools of the distribution, and
     # installed with the layout `make install` of herdtools7 gives (bin/,
     # share/herdtools7/), which is where the binary looks for its models.
-    # The build is cached under the commit and the runner image, so it runs
-    # again only when one of the two changes (issue #50).
+    # The build is cached under the commit, the runner image and a hash of
+    # this file, which holds the recipe, so it runs again when one of the
+    # three changes (issues #50 and #63). The binary, built or restored, is
+    # checked against the version and commit it reports.
     - name: Find the herdtools7 version
       id: herdtools
       if: inputs.herd7 == 'true'
@@ -71,6 +86,10 @@ runs:
         # bring other OCaml libraries, so it builds herd7 again.
         echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}-$(uname -m)" \
           >> "${GITHUB_OUTPUT}"
+        # Any change of this file builds herd7 again: the packages, the
+        # build commands and the layout are all written here.
+        echo "recipe=$(sha256sum "${GITHUB_ACTION_PATH}/action.yml" | cut -c1-16)" \
+          >> "${GITHUB_OUTPUT}"
 
     - name: Restore herd7 from the cache
       id: herd7-cache
@@ -78,7 +97,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ steps.herdtools.outputs.prefix }}
-        key: herd7-${{ steps.herdtools.outputs.commit }}-${{ steps.herdtools.outputs.image }}
+        key: herd7-${{ steps.herdtools.outputs.commit }}-${{ steps.herdtools.outputs.image }}-${{ steps.herdtools.outputs.recipe }}
 
     - name: Build herd7
       if: inputs.herd7 == 'true' && steps.herd7-cache.outputs.cache-hit != 'true'
@@ -88,8 +107,19 @@ runs:
         HERDTOOLS_COMMIT: ${{ steps.herdtools.outputs.commit }}
         PREFIX: ${{ steps.herdtools.outputs.prefix }}
       run: |
-        sudo apt-get install --yes --quiet --no-install-recommends \
-          ocaml-nox ocaml-dune menhir libmenhir-ocaml-dev libzarith-ocaml-dev
+        for attempt in 1 2 3 4; do
+          if sudo apt-get -o Acquire::Retries=3 install --yes --quiet \
+               --no-install-recommends ocaml-nox ocaml-dune menhir \
+               libmenhir-ocaml-dev libzarith-ocaml-dev; then
+            break
+          fi
+          if [ "${attempt}" = 4 ]; then
+            echo "cannot install the OCaml packages" >&2
+            exit 1
+          fi
+          sleep $((attempt * 10))
+          sudo apt-get -o Acquire::Retries=3 update --quiet || true
+        done
         src="${RUNNER_TEMP}/herdtools7-src"
         # The fetch is retried: a failed fetch of a third-party host must
         # not fail the model check on its first try.
@@ -113,12 +143,27 @@ runs:
         cp _build/default/herd/herd.exe "${PREFIX}/bin/herd7"
         cp -R herd/libdir "${PREFIX}/share/herdtools7/herd"
 
-    - name: Put herd7 on PATH
+    # Also after a cache hit, which skips the check of the source commit
+    # above: `herd7 -version` prints the version and the commit it was
+    # built from (version-gen.sh of herdtools7).
+    - name: Check herd7 and put it on PATH
       if: inputs.herd7 == 'true'
       shell: bash
       env:
+        HERDTOOLS_VERSION: ${{ steps.herdtools.outputs.version }}
+        HERDTOOLS_COMMIT: ${{ steps.herdtools.outputs.commit }}
         PREFIX: ${{ steps.herdtools.outputs.prefix }}
-      run: echo "${PREFIX}/bin" >> "${GITHUB_PATH}"
+        CACHE_HIT: ${{ steps.herd7-cache.outputs.cache-hit }}
+      run: |
+        echo "herd7 from the cache: ${CACHE_HIT:-false}"
+        reported="$("${PREFIX}/bin/herd7" -version)"
+        expected="${HERDTOOLS_VERSION}, Rev: ${HERDTOOLS_COMMIT}"
+        if [ "${reported}" != "${expected}" ]; then
+          echo "herd7 reports '${reported}', expected '${expected}'" >&2
+          exit 1
+        fi
+        test -f "${PREFIX}/share/herdtools7/herd/aarch64.cat"
+        echo "${PREFIX}/bin" >> "${GITHUB_PATH}"
 
     - name: Tool versions
       shell: bash

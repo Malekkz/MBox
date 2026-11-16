@@ -84,9 +84,11 @@ if(scada_check_arm64_code)
     COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/code_shape_mutants.py"
       --objdump "${CMAKE_OBJDUMP}"
-      --compile-commands "${CMAKE_BINARY_DIR}/compile_commands.json")
-  # 22 compilations, as many at a time as there are processors: about 10 s
-  # on 4 processors.
+      --compile-commands "${CMAKE_BINARY_DIR}/compile_commands.json"
+      --jobs 4)
+  # 28 compilations, at most 4 at a time (fewer on a machine with fewer
+  # processors), and PROCESSORS tells `ctest -j` so: about 10 s on 4
+  # processors (issue #63).
   set_tests_properties(scada-model-code-shape-mutants-test
-    PROPERTIES LABELS unit TIMEOUT 600)
+    PROPERTIES LABELS unit TIMEOUT 600 PROCESSORS 4)
 endif()
