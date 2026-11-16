@@ -1307,3 +1307,22 @@ Consequences (second pull request):
   - E4: accepted cost of B2: a tag the owner never writes keeps the old stamp on its whole file, so at the next start every value of that owner, also those written live, reports that old age, or an unknown one. That is the safe side for an age bound (#89).
   - E5: README: a process stuck in the kernel in state D is never reaped, systemd never sees exit code 3, only a reboot clears it; with more than 1,023 other files the adoption never completes until the files of owners in no tag set are removed.
   - E6: a tag demoted to BAD + COMM_FAIL and back costs two rewrites per flap (D-45 removes a BAD record), with no lower limit for RETAIN_NOW: issue #96, phase 1.
+
+## D-62: A minimum interval between two writes of one owner's retain file
+Date: 2026-11-16
+Phase / issue: 1, #96 (follow-up E6 of the review of #93, D-59)
+Status: accepted; decided by the committee of the lead session on 2026-11-16 (option A of the proposal, B not taken)
+
+Context: a RETAIN_NOW change is written at the next check, period P = min(`heartbeat_check_ms`, the timeout of `proc.tagd` / 3, the watchdog interval / 4), 250 ms by default, and a record the owner marks BAD leaves the file at the next write (D-45). A RETAIN_NOW tag that flaps BAD with COMM_FAIL and back therefore rewrote its owner's file at every check: 60 s / P files a minute, 240 at 250 ms and 1,200 at 50 ms. A tag without RETAIN_NOW is already limited to one write per retain interval (12 a minute at 5 s). Since D-59 (B4) COMM_FAIL alone writes nothing.
+Options: A, a minimum interval M between two writes of one owner's file, also for RETAIN_NOW; B, a hold-off H before a BAD record removes the value from the file; both.
+Decision: A alone.
+- M = 1 s − P, at least 250 ms (`min_rewrite_ns`). A change that comes just after a write is on disk within M + P = 1 s, so the 1 s bound of RETAIN_NOW in contract 12 and conformance test 25 stay as they are. The first change after a quiet time is written at the next check, as before. M applies to every write of a check (periodic and RETAIN_NOW); the FINAL file of a retired generation and the flush at a stop are not delayed.
+- P is the real period: `scada-tagd` gives its loop period to the host (`GenerationHost::set_check_period`); until then the `heartbeat_check_ms` of the tag set, which bounds it from above.
+- The tag-set builder refuses a `heartbeat_check_ms` above 750 ms (`MAX_RETAIN_NOW_CHECK_MS`) in a set with a RETAIN_NOW tag; the loop checks at most every `heartbeat_check_ms`, so P never exceeds 750 ms there and M is never below 250 ms. Before, such a set broke the 1 s bound without a word.
+- B, considered and not taken: it would relax the D-45 rule that a value the owner disowned does not come back after a restart (within H a restart would restore the last good value), a committee decision, for a gain only on tags that are already limited to one write per retain interval.
+Reason: A alone bounds the worst case for every tag and keeps both the 1 s bound and D-45.
+Consequences:
+- Worst case per owner file, all its tags together: 60 s / M writes a minute, 80 at the default check (950 ms and 63 a minute at 50 ms checks). With a file of 100 tags of 32-byte names (5,708 bytes, D-59) that is about 115,000 writes and 658 MB a day, each with a rename and two `fsync`, against about 2 GB a day at 240 a minute and 9.9 GB at 1,200. A RETAIN_NOW tag is for modes and authority, which do not flap in normal operation; a device tag that flaps is normally not RETAIN_NOW and writes at most once per retain interval.
+- After a flap, a restart restores the last state on file, at most 1 s old: the value after GOOD, nothing (BAD, NOT_INIT) after BAD, as D-45 says.
+- Tests: `MinRewrite.IsTheBoundMinusTheCheckPeriodAndNeverBelowTheFloor`; `Rewrite.AFlappingRetainNowTagWritesAtMostSixtySecondsOverMFilesAMinute` (a flap at every check for a simulated minute: at most 80 files, 240 without the rule); `Rewrite.ARetainNowChangeIsOnDiskWithinASecondAtChecksOf250Ms` and `...Of50Ms` (a change just after a write is on disk within 1 s and not before M); `Rewrite.ARestartAfterAFlapThatEndsBadRestoresNothing` and `...EndsGoodRestoresTheValue`; `TagSetValidate.RefusesASlowCheckWhenATagIsRetainNow`. Four Keeper tests that wrote twice 1 ns apart now step by M (750 ms), as the rule requires.
+- Contract 0.24 (section 12 and the change log; migration note).
