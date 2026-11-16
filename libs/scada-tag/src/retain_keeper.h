@@ -283,13 +283,23 @@ private:
         std::optional<std::int64_t> last_write_mono_ns;
         // Checks since then, up to checks_between_writes_ (decision D-62).
         std::int64_t checks_since_write = 0;
-        // Decision D-62: the earliest time the oldest RETAIN_NOW change can
-        // have happened (the check before the one that saw it), while it is
-        // not handed to the writer, and once it is, until it is on disk; and
-        // whether a late write was reported and not yet followed by one
-        // within the bound.
+        // Decision D-62: the earliest time the oldest RETAIN_NOW change not
+        // yet handed to the writer can have happened (the check before the
+        // one that saw it).
         std::optional<std::int64_t> urgent_since_mono_ns;
-        std::optional<std::int64_t> submitted_since_mono_ns;
+        // The files handed to the writer whose result has not come, each
+        // with the time it was handed over and the earliest time of the
+        // RETAIN_NOW change it carries, so that each is measured on its own
+        // result (review F1 of #111). A file the writer replaced before it
+        // began has no result; its change is on disk with the next one.
+        struct PendingWrite {
+            std::uint64_t token = 0;
+            std::int64_t submitted_mono_ns = 0;
+            std::optional<std::int64_t> since_mono_ns;
+        };
+        std::vector<PendingWrite> pending_writes;
+        // A late write was reported and not yet followed by one within the
+        // bound.
         bool late_reported = false;
         std::int64_t next_retry_mono_ns = 0;
         // The newest retired generation this owner was seen to leave, whose
@@ -355,9 +365,13 @@ private:
                              CheckReport& report);
     // Decision D-62: reports, once until a later one is within the bound, a
     // RETAIN_NOW change that took longer than RETAIN_NOW_BOUND_NS to reach
-    // the disk; `took_ns` is the writer's part.
-    static void note_time_to_disk(const std::string& owner, OwnerState& state,
-                                  std::int64_t took_ns, CheckReport& report);
+    // the disk with the file `done`, and forgets the files up to it.
+    static void note_time_to_disk(const RetainWriter::Done& done,
+                                  OwnerState& state, CheckReport& report);
+    // Decision D-62: a file `done` that failed; the RETAIN_NOW changes it
+    // carried wait for the next file.
+    static void note_failed_write(const RetainWriter::Done& done,
+                                  OwnerState& state);
 
     // True if a generation newer than `generation` in the base directory
     // `base_fd` has a ready `tags` region of `owner`, or the owner's file

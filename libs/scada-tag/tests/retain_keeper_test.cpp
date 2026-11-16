@@ -33,10 +33,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -1863,6 +1866,92 @@ TEST_F(Keeper, ALateRetainNowWriteIsReportedOnceUntilOneIsInTime) {
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_8);
     EXPECT_EQ(late_reports(round_after_the_gate(now + (2 * GATE_NS))), 1U);
     EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_8);
+}
+
+// Storage that holds the next write in its directory fsync until released,
+// and lets it take HELD_WRITE_NS longer by the clock the writer reads.
+class HeldStorage final : public RetainFileOps {
+public:
+    int create(int dir_fd, const std::string& name,
+               std::unique_ptr<RetainWriteFile>& out) override {
+        return system_retain_file_ops().create(dir_fd, name, out);
+    }
+    int rename(int dir_fd, const std::string& from,
+               const std::string& target) noexcept override {
+        return system_retain_file_ops().rename(dir_fd, from, target);
+    }
+    int sync_directory(int dir_fd) noexcept override {
+        {
+            std::unique_lock lock(mutex_);
+            if (hold_next_) {
+                hold_next_ = false;
+                held_ = true;
+                changed_.notify_all();
+                changed_.wait(lock, [this] { return !held_; });
+                added_.fetch_add(HELD_WRITE_NS);
+            }
+        }
+        return system_retain_file_ops().sync_directory(dir_fd);
+    }
+    int unlink(int dir_fd, const std::string& name) noexcept override {
+        return system_retain_file_ops().unlink(dir_fd, name);
+    }
+    std::int64_t now_mono_ns() noexcept override {
+        return scada::monotonic_ns() + added_.load();
+    }
+
+    void hold_next() {
+        const std::scoped_lock lock(mutex_);
+        hold_next_ = true;
+    }
+    // Waits, at most `limit`, until a write is held.
+    [[nodiscard]] bool wait_held(std::chrono::milliseconds limit) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, limit, [this] { return held_; });
+    }
+    void release() {
+        {
+            const std::scoped_lock lock(mutex_);
+            held_ = false;
+        }
+        changed_.notify_all();
+    }
+
+    static constexpr std::int64_t HELD_WRITE_NS = 400 * NS_PER_MS;
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool hold_next_ = false;  // guarded by mutex_
+    bool held_ = false;       // guarded by mutex_
+    std::atomic<std::int64_t> added_{0};
+};
+
+// F1 of the review of #111: at K = 1 (P = 400 ms) a write can still be in
+// flight when the next is handed over. Each is measured from its own change
+// on its own result: about 800 ms each here, where measuring the second from
+// the first change gave 1,200 ms and a false report.
+TEST_F(Keeper, AWriteInFlightAndTheNextAreEachMeasuredOnTheirOwnResult) {
+    HeldStorage storage;
+    start_host(retained_set(), &storage);
+    host().set_check_period(LONGEST_CHECK_NS);  // K = 1
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
+    std::size_t late = late_reports(round(now));
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_6);  // change A
+    storage.hold_next();
+    late += late_reports(host().check(now + LONGEST_CHECK_NS));
+    ASSERT_TRUE(storage.wait_held(std::chrono::seconds(5)));
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_7);  // change B
+    late += late_reports(host().check(now + (2 * LONGEST_CHECK_NS)));
+    storage.release();
+    const CheckReport written = host().wait_retained_written();
+    late += late_reports(written);
+    EXPECT_EQ(written.retain_written.size(), 2U);  // A and B, not replaced
+    EXPECT_EQ(late, 0U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_7);
 }
 
 }  // namespace

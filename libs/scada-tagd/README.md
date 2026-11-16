@@ -26,8 +26,10 @@ process. The executable in `services/scada-tagd` only calls it.
   max(1, floor((1000 ms - 200 ms) / P) - 1) for a check period P (2 at the
   default 250 ms, so at most every 500 ms and 120 times a minute for a tag
   that flaps), so that a `retain_now` change is on disk within 1 s while a
-  write takes at most 200 ms; a later one logs `retain_now change reached
-  the disk late` (decision D-62). The files are written by a thread of their own, so that
+  write takes at most 200 ms and no check runs longer than its period; a
+  later one logs `retain_now change reached the disk late` (decision D-62).
+  A wait of the loop that another signal interrupts is waited again, so a
+  check never comes early. The files are written by a thread of their own, so that
   a slow `fsync` does not hold up the heartbeat; the removal of old files
   and its directory `fsync` run there too. A record read consistently that
   is BAD, written by the owner (no NOT_INIT), removes the tag from the
@@ -123,7 +125,7 @@ the standard error stream.
 | `values unsaved at exit` | ERROR, once at the stop when values of owners are not on disk; when the writer is still busy (exit with code 3), `SUBJECT` is the owner whose file is being written | `SUBJECT`, `DETAIL`, `UNSAVED_COUNT`, `UNSAVED_OWNERS` (as many names as fit, then `...`), `KEPT_WRITTEN_TIME_NS` (the `written_time_ns` of the file of `SUBJECT` that stays, as `scada-tagd` last wrote or read it, not read at the stop; it is the oldest stamp of its values, which can be older than the write; `none` if none is known; `-` if no file was being written) |
 | `the retain directory is not usable` | CRITICAL, at the start, which then fails | `DIRECTORY`, `STATUS`, `DETAIL` |
 | `retain files not all read for moved tags` | ERROR, once per start: the retain directory could not be listed, or holds more than 1,023 other owners' files, so the values of tags that moved to an owner that has not attached cannot all be found. Files of owners that are gone are kept, and it is tried again at every check | `SUBJECT`, `DETAIL` |
-| `retain_now change reached the disk late` | WARNING, once per owner until a later change is on disk within 1 s: from the check before the one that saw a `retain_now` change to the end of its write took more than 1,000 ms, because retain writes took longer than their 200 ms budget (D-62) | `SUBJECT` (owner), `DETAIL` (the time) |
+| `retain_now change reached the disk late` | WARNING, once per owner until a later change is on disk within 1 s: from the check before the one that saw a `retain_now` change to the end of the write that carried it took more than 1,000 ms. Causes: a slow write (with the writes queued before it, more than the 200 ms budget), or a check that came late or ran long. At risk: a power loss in that time restores the mode or control authority from before the change. A write that hangs in `fsync` is reported only when it ends (D-62) | `SUBJECT` (owner), `DETAIL` (the time) |
 | `removed the retain file of an owner that is gone` | NOTICE | `FILE` |
 | `retired generation removed` | NOTICE | `GENERATION` |
 | `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |

@@ -581,7 +581,7 @@ TEST(TagSetValidate, RefusesASlowCheckWhenATagIsRetainNow) {
     tag_set.tags.front().retain_now = true;
     expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
                     "heartbeat_check_ms must be at most 400 in a tag set "
-                    "with a retain_now tag");
+                    "with a retain_now tag (p.mode)");
     tag_set.heartbeat_check_ms = MAX_RETAIN_NOW_CHECK_MS;
     expect_valid(tag_set);
 }

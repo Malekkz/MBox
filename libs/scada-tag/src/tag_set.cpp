@@ -557,14 +557,17 @@ Result<ResolvedTagSet> resolve(const TagSet& tag_set, std::string& detail) {
     // loop of scada-tagd checks at most every heartbeat_check_ms, and the
     // other limits of its period (timeout / 3, watchdog / 4) only shorten
     // it.
-    if (tag_set.heartbeat_check_ms > MAX_RETAIN_NOW_CHECK_MS &&
-        std::ranges::any_of(tag_set.tags, [](const TagDefinition& tag) {
-            return tag.retain_now;
-        })) {
-        detail = "heartbeat_check_ms must be at most " +
-                 std::to_string(MAX_RETAIN_NOW_CHECK_MS) +
-                 " in a tag set with a retain_now tag";
-        return INVALID_VALUE;
+    if (tag_set.heartbeat_check_ms > MAX_RETAIN_NOW_CHECK_MS) {
+        const auto now_tag = std::ranges::find_if(
+            tag_set.tags,
+            [](const TagDefinition& tag) { return tag.retain_now; });
+        if (now_tag != tag_set.tags.end()) {
+            detail = "heartbeat_check_ms must be at most " +
+                     std::to_string(MAX_RETAIN_NOW_CHECK_MS) +
+                     " in a tag set with a retain_now tag (" + now_tag->name +
+                     ")";
+            return INVALID_VALUE;
+        }
     }
     ResolvedTagSet resolved;
     if (const Status status = resolve_processes(tag_set, resolved, detail);

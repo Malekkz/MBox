@@ -641,12 +641,9 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     state.urgent = false;
     state.last_write_mono_ns = now_mono_ns;
     state.checks_since_write = 0;
-    if (!state.submitted_since_mono_ns.has_value()) {
-        state.submitted_since_mono_ns = state.urgent_since_mono_ns;
-    }
+    const std::optional<std::int64_t> since = state.urgent_since_mono_ns;
     state.urgent_since_mono_ns.reset();
     if (!persists()) {
-        state.submitted_since_mono_ns.reset();
         state.done_token = ++state.token;
         return;
     }
@@ -686,21 +683,36 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     for (const auto& [tag, value] : state.values) {
         file.values.push_back(value);
     }
-    writer_->submit(name, std::move(file), ++state.token);
+    const std::uint64_t token = ++state.token;
+    state.pending_writes.push_back({token, now_mono_ns, since});
+    writer_->submit(name, std::move(file), token);
 }
 
-void RetainKeeper::note_time_to_disk(const std::string& owner,
-                                     OwnerState& state, std::int64_t took_ns,
-                                     CheckReport& report) {
-    if (!state.submitted_since_mono_ns.has_value() ||
-        !state.last_write_mono_ns.has_value()) {
+void RetainKeeper::note_time_to_disk(const RetainWriter::Done& done,
+                                     OwnerState& state, CheckReport& report) {
+    std::optional<std::int64_t> submitted;
+    std::optional<std::int64_t> since;
+    for (const OwnerState::PendingWrite& pending : state.pending_writes) {
+        if (pending.token == done.token) {
+            submitted = pending.submitted_mono_ns;
+        }
+        // Files up to this one: a file the writer replaced carried a change
+        // that is on disk only now.
+        if (pending.token <= done.token && pending.since_mono_ns.has_value()) {
+            since = std::min(since.value_or(*pending.since_mono_ns),
+                             *pending.since_mono_ns);
+        }
+    }
+    std::erase_if(state.pending_writes,
+                  [&done](const OwnerState::PendingWrite& pending) {
+                      return pending.token <= done.token;
+                  });
+    if (!submitted.has_value() || !since.has_value()) {
         return;
     }
-    // From the earliest time of the change to the submit by the clock of
+    // From the earliest time of the change to the hand-over by the clock of
     // the checks, then to the disk by the clock of the writer.
-    const std::int64_t took =
-        *state.last_write_mono_ns - *state.submitted_since_mono_ns + took_ns;
-    state.submitted_since_mono_ns.reset();
+    const std::int64_t took = *submitted - *since + done.took_ns;
     if (took <= RETAIN_NOW_BOUND_NS) {
         state.late_reported = false;
         return;
@@ -710,13 +722,28 @@ void RetainKeeper::note_time_to_disk(const std::string& owner,
     }
     state.late_reported = true;
     report.retain_problems.push_back(
-        {owner,
+        {done.owner,
          "a retain_now change reached the disk after " +
              std::to_string(took / NS_PER_MS) + " ms, more than " +
              std::to_string(RETAIN_NOW_BOUND_NS / NS_PER_MS) + " ms",
          RetainProblemKind::RETAIN_NOW_LATE,
          {},
          {}});
+}
+
+void RetainKeeper::note_failed_write(const RetainWriter::Done& done,
+                                     OwnerState& state) {
+    for (const OwnerState::PendingWrite& pending : state.pending_writes) {
+        if (pending.token <= done.token && pending.since_mono_ns.has_value()) {
+            state.urgent_since_mono_ns = std::min(
+                state.urgent_since_mono_ns.value_or(*pending.since_mono_ns),
+                *pending.since_mono_ns);
+        }
+    }
+    std::erase_if(state.pending_writes,
+                  [&done](const OwnerState::PendingWrite& pending) {
+                      return pending.token <= done.token;
+                  });
 }
 
 void RetainKeeper::note_written(const RetainWriter::Done& done,
@@ -728,9 +755,7 @@ void RetainKeeper::note_written(const RetainWriter::Done& done,
         state.final_on_disk = newer(state.final_on_disk, done.source);
     }
     report.retain_written.push_back({done.owner, done.values, done.final});
-    if (done.token == state.token) {
-        note_time_to_disk(done.owner, state, done.took_ns, report);
-    }
+    note_time_to_disk(done, state, report);
 }
 
 void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
@@ -769,6 +794,7 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
             note_written(done, state, report);
             continue;
         }
+        note_failed_write(done, state);
         // Only the newest file matters; an older one was replaced.
         if (done.token == state.token) {
             state.dirty = true;

@@ -3,6 +3,7 @@
 
 #include "late_log.h"
 #include "report_log.h"
+#include "wait.h"
 
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
@@ -246,27 +247,6 @@ Result<std::string> read_file(const std::string& path, std::string& detail) {
     }
 }
 
-// What ended one wait of the main loop.
-enum class Wake : std::uint8_t { CHECK_DUE, STOP, ERROR };
-
-// Waits for one of the signals in `signals`, which must be blocked, for at
-// most `timeout_ns`.
-Wake wait_for_signal(const sigset_t& signals,
-                     std::int64_t timeout_ns) noexcept {
-    timespec limit{};
-    limit.tv_sec =
-        static_cast<std::time_t>(timeout_ns / NANOSECONDS_PER_SECOND);
-    // Below one second, which fits every `long`.
-    limit.tv_nsec = static_cast<long>(timeout_ns % NANOSECONDS_PER_SECOND);
-    if (::sigtimedwait(&signals, nullptr, &limit) < 0) {
-        // EAGAIN is the timeout. EINTR means an unrelated signal interrupted
-        // the wait; checking early is harmless, checking late is not.
-        return (errno == EAGAIN || errno == EINTR) ? Wake::CHECK_DUE
-                                                   : Wake::ERROR;
-    }
-    return Wake::STOP;
-}
-
 // Writes what one check did with retained values and retired generations
 // to the log (contract, sections 11.3 and 12).
 void log_retained(Logger& logger, const CheckReport& report) {
@@ -383,7 +363,7 @@ int serve(GenerationHost& host, Notifier& notifier,
           const NotifySettings& settings, const sigset_t& signals,
           Logger& logger, SuspendWatch& suspend, const RunHooks& hooks) {
     const std::int64_t period = loop_period_ns(host, settings);
-    // Decision D-62: the shortest time between two writes of one owner's
+    // Decision D-62: how many checks pass between two writes of one owner's
     // retain file follows from the real period of the checks.
     host.set_check_period(period);
     const std::optional<std::int64_t> feed_period = feed_period_ns(settings);
@@ -414,10 +394,9 @@ int serve(GenerationHost& host, Notifier& notifier,
 
         // The next round is due one period after this one was; a round
         // that came late does not shift the ones after it, and rounds that
-        // were missed are not made up.
-        const std::int64_t done = monotonic_ns();
-        next = std::max(next + period, done);
-        switch (wait_for_signal(signals, next - done)) {
+        // were missed are not made up. A round never comes early (D-62).
+        next = std::max(next + period, monotonic_ns());
+        switch (wait_until(signals, next)) {
             case Wake::CHECK_DUE:
                 break;
             case Wake::STOP: {
