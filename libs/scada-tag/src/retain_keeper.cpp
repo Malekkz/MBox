@@ -83,16 +83,25 @@ RetainedValue value_seen(const std::string& name, TagType type,
             retainable_flags(copy.quality_flags)};
 }
 
-// True if `copy` is the restore of `on_file` that the owner has not written
-// since: RESTORED with the value and source time on file. The file keeps
-// the quality the owner stored, which the restored record no longer shows
-// (decision D-59).
+// True if `copy` is exactly what the restore of `on_file` wrote, and the
+// owner has not written the tag since: UNCERTAIN, RESTORED with the carried
+// flags of the file, the value and source time on file. The file keeps the
+// quality the owner stored, which the restored record no longer shows
+// (decision D-59). An owner may store RESTORED itself; a record that differs
+// in quality or flags is its write, not the restore, and is kept.
 bool restored_as_on_file(const RetainedValue& on_file,
                          const RecordCopy& copy) noexcept {
-    return (copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0 &&
+    const auto restored_flags = static_cast<std::uint16_t>(
+        to_raw(QualityFlag::RESTORED) |
+        (on_file.quality_flags & RETAIN_CARRIED_FLAGS));
+    return copy.quality == to_raw(Quality::UNCERTAIN) &&
+           copy.quality_flags == restored_flags &&
            copy.type == to_raw(on_file.type) && on_file.value == copy.value &&
            on_file.source_time_ns == copy.source_time_ns;
 }
+
+// A stamp that gives no age: no boot id, not synchronised.
+constexpr RetainStamp UNKNOWN_AGE_STAMP{};
 
 // The later of two identities, by generation number.
 GenerationIdentity newer(const std::optional<GenerationIdentity>& kept,
@@ -381,8 +390,12 @@ void RetainKeeper::load_watched(
         OwnerState& state = states_[owner.name];
         for (std::size_t i = 0; i < loaded.values.size(); ++i) {
             const std::optional<RetainedValue>& value = loaded.values[i];
-            if (value.has_value() && (!own_only || loaded.sources.at(i).own)) {
-                state.values.try_emplace(value->name, *value);
+            if (value.has_value() && (!own_only || loaded.sources.at(i).own) &&
+                state.values.try_emplace(value->name, *value).second) {
+                // Not written by the owner in this life of scada-tagd: the
+                // file keeps the stamp it came with (decision D-59).
+                state.not_written.insert_or_assign(value->name,
+                                                   loaded.sources.at(i).stamp);
             }
         }
         if (loaded.own.has_value()) {
@@ -475,6 +488,7 @@ bool RetainKeeper::read_owner(const Watched& watched,
                 state.dirty = true;
                 state.urgent = state.urgent || tag.now;
             }
+            state.not_written.erase(tag.name);
             continue;
         }
         if (!holds_value(copy, tag.type)) {
@@ -483,18 +497,33 @@ bool RetainKeeper::read_owner(const Watched& watched,
             // record on file stays. So does anything else that is no value.
             continue;
         }
-        const RetainedValue seen = value_seen(tag.name, tag.type, copy);
-        const auto known = state.values.find(tag.name);
-        if (known != state.values.end() &&
-            (known->second == seen ||
-             restored_as_on_file(known->second, copy))) {
-            continue;
-        }
-        state.values.insert_or_assign(tag.name, seen);
-        state.dirty = true;
-        state.urgent = state.urgent || tag.now;
+        note_value(state, tag, copy);
     }
     return true;
+}
+
+void RetainKeeper::note_value(OwnerState& state, const RetainedTag& tag,
+                              const RecordCopy& copy) {
+    const RetainedValue seen = value_seen(tag.name, tag.type, copy);
+    const auto known = state.values.find(tag.name);
+    if (known != state.values.end() &&
+        restored_as_on_file(known->second, copy)) {
+        return;  // restored, not written since: its stamp stays
+    }
+    if ((copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0) {
+        // A restore this keeper does not know the source of (another
+        // owner's file, or a file changed since): its age is unknown until
+        // the owner writes the tag (decision D-59).
+        state.not_written.insert_or_assign(tag.name, UNKNOWN_AGE_STAMP);
+    } else {
+        state.not_written.erase(tag.name);  // a write of the owner
+    }
+    if (known != state.values.end() && known->second == seen) {
+        return;
+    }
+    state.values.insert_or_assign(tag.name, seen);
+    state.dirty = true;
+    state.urgent = state.urgent || tag.now;
 }
 
 void RetainKeeper::read_current() {
@@ -538,12 +567,29 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
         file.source = current_->identity;
     }
     // Decision D-59: what a later attach needs to tell the age of the
-    // values, in this boot and in another.
-    const RetainClockSample clock = retain_clock_now();
-    file.written_time_ns = clock.realtime_ns;
-    file.written_boottime_ns = clock.boottime_ns;
-    file.boot_id = clock.boot_id;
-    file.clock_synced = clock.clock_synced;
+    // values, in this boot and in another. A value the owner has not written
+    // since it was loaded is as old as the file it came from: while any is
+    // left, the file keeps the oldest of their stamps, so that a rewrite
+    // never makes an old value look new.
+    std::vector<RetainStamp> kept;
+    for (const auto& [tag, stamp] : state.not_written) {
+        if (state.values.contains(tag)) {
+            kept.push_back(stamp);
+        }
+    }
+    if (kept.empty()) {
+        const RetainClockSample clock = retain_clock_now();
+        file.written_time_ns = clock.realtime_ns;
+        file.written_boottime_ns = clock.boottime_ns;
+        file.boot_id = clock.boot_id;
+        file.clock_synced = clock.clock_synced;
+    } else {
+        const RetainStamp oldest = oldest_stamp(kept);
+        file.written_time_ns = oldest.written_time_ns;
+        file.written_boottime_ns = oldest.written_boottime_ns;
+        file.boot_id = oldest.boot_id;
+        file.clock_synced = oldest.clock_synced;
+    }
     file.config_hash = config_hash_;
     file.values.reserve(state.values.size());
     for (const auto& [tag, value] : state.values) {

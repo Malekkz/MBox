@@ -796,6 +796,24 @@ std::optional<std::int64_t> retained_age_ns(
     return std::nullopt;
 }
 
+RetainStamp oldest_stamp(std::span<const RetainStamp> stamps) noexcept {
+    RetainStamp oldest = stamps.front();
+    bool one_boot = oldest.boot_id != BootId{};
+    for (const RetainStamp& stamp : stamps.subspan(1)) {
+        one_boot = one_boot && stamp.boot_id == oldest.boot_id;
+        oldest.written_time_ns =
+            std::min(oldest.written_time_ns, stamp.written_time_ns);
+        oldest.written_boottime_ns =
+            std::min(oldest.written_boottime_ns, stamp.written_boottime_ns);
+        oldest.clock_synced = oldest.clock_synced && stamp.clock_synced;
+    }
+    if (!one_boot) {
+        oldest.boot_id = {};
+        oldest.written_boottime_ns = 0;
+    }
+    return oldest;
+}
+
 const RetainedValue* find_retained(const RetainFile& file,
                                    std::string_view name) noexcept {
     const auto found = std::ranges::lower_bound(

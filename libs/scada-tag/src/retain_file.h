@@ -157,6 +157,14 @@ struct RetainClockSample {
 [[nodiscard]] std::optional<std::int64_t> retained_age_ns(
     const RetainStamp& stamp, const RetainClockSample& now) noexcept;
 
+// The stamp that makes none of `stamps` look newer than it is (decision
+// D-59): in one boot (equal boot ids, none all zero) the earliest boot time
+// and the earliest wall-clock time; across boots no boot id, the earliest
+// wall-clock time, and CLOCK_SYNCED only if every stamp has it, so that the
+// age is unknown unless the wall clock can tell it. `stamps` is not empty.
+[[nodiscard]] RetainStamp oldest_stamp(
+    std::span<const RetainStamp> stamps) noexcept;
+
 // The contents of a retain file.
 struct RetainFile {
     GenerationIdentity source;

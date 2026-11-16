@@ -661,6 +661,11 @@ void Attachment::apply_retained(std::span<std::byte> tags,
     const std::int64_t now_real = realtime_ns();
     const std::int64_t now_mono = monotonic_ns();
     const RetainClockSample clock = retain_clock_now();
+    // One entry per handle: a second restore of this owner replaces its own.
+    std::erase_if(retain_infos_, [owner_index](const RetainInfo& info) {
+        const std::optional<HandleParts> parts = unpack_handle(info.handle);
+        return parts.has_value() && parts->owner_index == owner_index;
+    });
     for (std::size_t i = 0; i < slots.size(); ++i) {
         RetainInfo info;
         // In range: the owner index and the slot come from the header.

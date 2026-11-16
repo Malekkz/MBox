@@ -14,6 +14,7 @@
 #include "peer_regions.h"
 #include "proc_region.h"
 #include "retain_file.h"
+#include "tag_record.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
@@ -250,6 +251,10 @@ private:
         std::uint64_t token = 0;       // of the last file submitted
         std::uint64_t done_token = 0;  // of the last file the writer finished
         bool failing = false;          // the last write failed and was reported
+        // The values the owner has not written since they were loaded or
+        // restored, with the stamp of the file they came from (decision
+        // D-59); a write of the owner removes the entry.
+        std::map<std::string, RetainStamp, std::less<>> not_written;
     };
 
     // Fills `watched.owners` and `watched.processes` from its header.
@@ -266,6 +271,11 @@ private:
     // Reads the RETAIN tags of `owner` in `watched` into the state of its
     // name. False if its `tags` region is missing.
     bool read_owner(const Watched& watched, const WatchedOwner& owner);
+    // What `read_owner` learns from `copy`, a record of `tag` that holds a
+    // value: a change of value, quality or flags makes the owner dirty; a
+    // write of the owner, unlike the restore, ends the stamp it came with.
+    static void note_value(OwnerState& state, const RetainedTag& tag,
+                           const RecordCopy& copy);
     void read_current();
 
     // True if the current generation has a ready `tags` region of the

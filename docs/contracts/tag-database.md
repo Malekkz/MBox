@@ -1353,9 +1353,18 @@ know they are there, and any number may run.
   encoder refuses the same.
 - The quality and flags the owner stored are kept with the value; a change
   of quality or flags alone is a change and is written (a change of
-  SUBSTITUTED, for example). A record read with RESTORED that holds the
-  value and source time on file is no change: the file keeps the quality
-  the owner stored. RESTORED is never stored, and OWNER_DOWN and NOT_INIT
+  SUBSTITUTED, for example). A record that is exactly what the restore of
+  the value on file wrote (UNCERTAIN, RESTORED plus the carried flags of
+  the file, the value and source time on file) is no change: the file
+  keeps the quality the owner stored. Any other record, also one in which
+  the owner kept RESTORED, is the owner's write.
+- A file written again holds the stamp of its oldest value the owner has
+  not written since it was loaded or restored: in one boot the earliest
+  times of their source files; across boots no `boot_id`, the earliest
+  `written_time_ns`, and CLOCK_SYNCED only if every source had it. A
+  restored value whose source is not known has an unknown age. Only a
+  file whose values the owner has all written since gets the stamp of the
+  write, so a rewrite never makes an old value look new. RESTORED is never stored, and OWNER_DOWN and NOT_INIT
   are never read into the file.
 - FINAL with a generation (number and `created_time_ns`, since numbers
   start again at 1 after a boot) means: the file holds what the owner wrote
@@ -1795,7 +1804,8 @@ ARM64:
 20. Restarting `scada-tagd` with an unchanged tag set leaves all other
     processes running without interruption.
 21. A generation change completes within 5 seconds with all processes
-    reattached and retained values restored. Its queue part: no event
+    reattached and retained values restored, UNCERTAIN with RESTORED and the
+    carried flags of section 12. Its queue part: no event
     record whose post returned `SCADA_OK` is lost, and each request a driver
     executed was posted in the generation in which the driver took it.
 22. RT-safe functions make no system calls and no allocations, including the
@@ -1967,6 +1977,12 @@ the installed drop-in `scada-tagd.service.d/stop.conf` sets
 `TimeoutStopSec=15s` and `KillMode=mixed`. Its retain log records have new
 texts and a MESSAGE_ID each (`libs/scada-tagd/README.md`); a filter on the
 text `retained values` must change.
+`scada_tag_retain_status` takes no size, so it cannot refuse a caller built
+against the 16-byte structure; that is safe only because `libscada-tag` is a
+static library and its callers are built with it. A size argument is to be
+added before it is ever built as a shared library. A retain file of version 2
+kept in an export archive (reference 13) cannot be read by a build before
+0.20.
 
 Migration, 0.18 to 0.19: none for data; the layout version stays 1 and no
 structure in shared memory changed. A producer that posted events or requests
