@@ -323,7 +323,8 @@ TEST(Conformance01Layout, ProcHeader) {
         field(object, &ProcHeader::late_beats, "late_beats", 4),
         field(object, &ProcHeader::longest_gap_ns, "longest_gap_ns", 8),
         field(object, &ProcHeader::last_late_mono_ns, "last_late_mono_ns", 8),
-        field(object, &ProcHeader::reserved, "reserved", 16),
+        field(object, &ProcHeader::starts, "starts", 4),
+        field(object, &ProcHeader::reserved, "reserved", 12),
     };
     const Documented documented{.size = 64, .alignment = 64};
     expect_layout<ProcHeader>(fields, documented);
