@@ -3,16 +3,17 @@
 # in pipeline.yml. Not a check of a pull request.
 #
 # - `measurements`: the retry window of a tag read and SCADA_E_BUSY
-#   (scripts/measure-seqlock.sh), conformance test 2 and conformance test 26
-#   for `seconds` each (600, the 10 minutes of the contract), and every test
-#   with the label `perf`, on the `perf` build. By hand: x86-64, and ARM64
+#   (scripts/measure-seqlock.sh), conformance test 2, conformance test 26 and
+#   the ring gap at the reference load for `seconds` each (600, the 10
+#   minutes of the contract), the huge-page reads (decision D-64), and every
+#   test with the label `perf`, on the `perf` build. By hand: x86-64, and ARM64
 #   with each pause instruction. Weekly: x86-64 and ARM64 with `isb`.
 # - `latency-spread`: by hand only, when asked: the latency test (conformance
 #   test 27) on `runs` fresh runners per architecture, the spread from which
 #   the tolerance of the gate is judged. The `measurements` jobs run in the
 #   same dispatch too: one dispatch with `latency_spread` gives both.
 #
-# The weekly run costs the owner Actions minutes (about 2 jobs of 35
+# The weekly run costs the owner Actions minutes (about 2 jobs of 40
 # minutes). To switch it off, delete the `schedule` lines below, or disable
 # the workflow "measurements" on the Actions page of the repository.
 name: measurements
@@ -44,7 +45,7 @@ jobs:
   measurements:
     name: measurements (${{ matrix.arch }}, ${{ matrix.pause }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -52,8 +53,8 @@ jobs:
     env:
       SECONDS_OF_LOAD: ${{ inputs.seconds || '600' }}
     steps:
-      # tests 2 and 26 each run for SECONDS_OF_LOAD; more than 1,500 s
-      # would not fit in the time limit of the job.
+      # Tests 2 and 26 and the ring gap each run for SECONDS_OF_LOAD; more
+      # than 1,500 s would not fit in the time limit of the job.
       - name: Check the inputs
         shell: bash
         run: |
@@ -97,6 +98,21 @@ jobs:
           sudo env "PATH=${PATH}" bash scripts/run-ctest-test.sh \
             build/measure scada-tag-false-trip-root-test \
             "SCADA_CONFORMANCE_SECONDS=${SECONDS_OF_LOAD}" | tee conformance26.txt
+      # The gap half of contract 16, "default change ring capacity", at the
+      # reference load (decision D-64).
+      - name: Ring gap at the reference load
+        shell: bash
+        run: |
+          bash scripts/run-ctest-test.sh build/measure \
+            scada-tag-ring-gap-perf-test \
+            "SCADA_CONFORMANCE_SECONDS=${SECONDS_OF_LOAD}" | tee ring-gap.txt
+      # Huge pages for the `tags` regions (contract 16, D-64): reads on a
+      # tmpfs mounted huge=never and huge=always. Mounting needs root.
+      - name: Huge pages (as root)
+        shell: bash
+        run: |
+          sudo env "PATH=${PATH}" bash scripts/run-ctest-test.sh \
+            build/measure scada-tag-huge-pages-root-test | tee huge-pages.txt
       - name: Performance tests
         shell: bash
         run: |
@@ -110,6 +126,8 @@ jobs:
             machine.txt
             measurements.txt
             conformance26.txt
+            ring-gap.txt
+            huge-pages.txt
             perf.txt
           if-no-files-found: warn
           retention-days: 90
