@@ -82,6 +82,10 @@ private:
         ANSWERED,   // an expired request was answered and passed over
     };
 
+    // `next` in a RETIRING generation (decision D-54): a record that is
+    // left, or SCADA_E_RETIRING once the queue is drained; a `cmd` queue
+    // answered ABORTED. Never waits.
+    [[nodiscard]] int drain_retiring(std::span<std::byte> out) noexcept;
     // One look at the queue without waiting; `write_seq` is loaded with
     // `order` (decision D-54).
     [[nodiscard]] Look poll(
