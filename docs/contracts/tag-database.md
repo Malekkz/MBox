@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.13 (draft) |
+| Contract version | 0.17 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -591,7 +591,10 @@ was kept in reserve, one eventfd per ring passed to consumers by
 A reliable queue has exactly one producing thread and one consuming thread,
 in the processes fixed in the queue table. They are two different
 processes; the tag-set builder refuses a queue with one process at both
-ends. Nothing is ever overwritten.
+ends. Every `cmd.<x>` queue has the answer queue `result.<x>`, whose
+producer and consumer are the consumer and producer of `cmd.<x>`, so that
+every command has a way back (reference 5.3 and 8.2, step 10); the tag-set
+builder refuses a `cmd` queue without it. Nothing is ever overwritten.
 
 ```cpp
 struct QueueHeader {             // 64 bytes, alignas(64), follows RegionHeader
@@ -661,7 +664,8 @@ A command is never executed twice and never executed late:
   and the driver checks `expiry_mono_ns` again right before it acts on the
   device.
 - If the answer cannot be posted (result queue full, requester down, or no
-  answer queue) it is dropped and counted; the requester sees the request
+  answer queue in a header the tag-set builder did not make) it is dropped
+  and counted; the requester sees the request
   expire. `scada_queue_next` never blocks or fails on the answer queue.
 
 A record is outside input to the consumer. One that fails the checks of
@@ -1485,6 +1489,12 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
 | 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
+| 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
+
+Migration, 0.16 to 0.17: none for data; the layout version stays 1 and no
+structure in shared memory changed. A tag set with a `cmd.<x>` queue and no
+`result.<x>` queue from its consumer to its producer, which 0.16 accepted,
+is now refused; add the result queue. Such a queue lost every answer before.
 
 Migration, 0.12 to 0.13: none for data; the layout version stays 1 and no
 structure in shared memory changed. `scada-tagd` now maps every queue

@@ -77,8 +77,9 @@ inline constexpr std::uint32_t TAGD_TIMEOUT_MS = 3000;
 class AttachFixture : public TempDatabase {
 protected:
     // scada-tagd; `io` with one owner, four tags of which two are strings,
-    // and an event queue; `web` without tags, which posts commands; and
-    // `guest`, which the header gives to another user.
+    // an event queue and the results of the commands of `web`; `web`
+    // without tags, which posts commands; and `guest`, which the header
+    // gives to another user.
     [[nodiscard]] static TagSet tag_set() {
         TagSet set;
         set.processes = {
@@ -94,7 +95,8 @@ protected:
                        .change_ring_capacity = MIN_CHANGE_RING_CAPACITY}};
         set.queues = {
             {.name = "events.io", .producer = "io", .consumer = "web"},
-            {.name = "cmd.io.web", .producer = "web", .consumer = "io"}};
+            {.name = "cmd.io.web", .producer = "web", .consumer = "io"},
+            {.name = "result.io.web", .producer = "io", .consumer = "web"}};
         set.tags = {
             {.name = "plant.level", .owner = "io", .type = TagType::FLOAT64},
             {.name = "plant.label", .owner = "io", .type = TagType::STRING},

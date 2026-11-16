@@ -272,6 +272,47 @@ std::optional<QueueKind> queue_kind_of(std::string_view name) noexcept {
     return std::nullopt;
 }
 
+// A command needs a way back (reference 5.3 and 8.2, step 10): every
+// `cmd.<x>` queue must have a `result.<x>` queue with producer and consumer
+// swapped, the answer queue of contract section 9.2 (D-40, issue #52).
+// `order` is `order_by_name(tag_set.queues)`, and `resolved.queues` follows
+// it.
+Status check_answer_queues(const TagSet& tag_set,
+                           const ResolvedTagSet& resolved,
+                           const std::vector<std::size_t>& order,
+                           std::string& detail) {
+    constexpr std::string_view CMD_PREFIX = "cmd.";
+    constexpr std::string_view RESULT_PREFIX = "result.";
+    for (const ResolvedQueue& command : resolved.queues) {
+        if (command.kind != QueueKind::CMD) {
+            continue;
+        }
+        const QueueDefinition& queue = tag_set.queues.at(command.definition);
+        std::string answer_name(RESULT_PREFIX);
+        answer_name += std::string_view(queue.name).substr(CMD_PREFIX.size());
+        const std::optional<std::size_t> answer =
+            find_by_name(tag_set.queues, order, answer_name);
+        if (!answer.has_value()) {
+            detail =
+                about(QUEUE, queue.name,
+                      "needs the queue " + quoted(answer_name) +
+                          " for its results, from " + quoted(queue.consumer) +
+                          " to " + quoted(queue.producer));
+            return INVALID_VALUE;
+        }
+        const ResolvedQueue& result = resolved.queues.at(*answer);
+        if (result.producer_process != command.consumer_process ||
+            result.consumer_process != command.producer_process) {
+            detail = about(QUEUE, queue.name,
+                           "its result queue " + quoted(answer_name) +
+                               " must go from " + quoted(queue.consumer) +
+                               " to " + quoted(queue.producer));
+            return INVALID_VALUE;
+        }
+    }
+    return {};
+}
+
 Status resolve_queues(const TagSet& tag_set, ResolvedTagSet& resolved,
                       std::string& detail) {
     const std::vector<std::size_t> order = order_by_name(tag_set.queues);
@@ -323,7 +364,7 @@ Status resolve_queues(const TagSet& tag_set, ResolvedTagSet& resolved,
                           .producer_process = producer.value(),
                           .consumer_process = consumer.value()});
     }
-    return {};
+    return check_answer_queues(tag_set, resolved, order, detail);
 }
 
 // Checks the type and the flags of `tag` and returns its TagFlag bits.
