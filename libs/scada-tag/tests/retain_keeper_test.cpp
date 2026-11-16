@@ -878,3 +878,89 @@ TEST_F(Keeper, EventIdsStartAtZeroAfterEachOfTwoGenerationChanges) {
 }
 
 }  // namespace
+
+// Decision D-59: format version 2 keeps quality and flags.
+namespace {
+
+constexpr std::int64_t FIXED_SOURCE_TIME = 1'000;
+
+// Writes `value` to `name` with `quality` and `flags` and a fixed source
+// time, so that only quality and flags differ between two writes.
+void write_flagged(Attachment& feeder, std::string_view name,
+                   std::uint64_t value, std::uint8_t quality,
+                   std::uint16_t flags) {
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(feeder.resolve(name, handle), SCADA_OK);
+    scada_value written{};
+    written.type = SCADA_TYPE_INT64;
+    written.quality = quality;
+    written.quality_flags = flags;
+    written.value = value;
+    written.source_time_ns = FIXED_SOURCE_TIME;
+    ASSERT_EQ(feeder.write(handle, written), SCADA_OK);
+}
+
+TEST_F(Keeper, AChangeOfQualityOrFlagsAloneIsWritten) {
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_GOOD, 0);
+    ASSERT_EQ(round(now).retain_written.size(), 1U);
+    RetainFile file = file_of("io");
+    EXPECT_EQ(file.version, RETAIN_FORMAT_VERSION);
+    ASSERT_NE(find_retained(file, "plant.mode"), nullptr);
+    EXPECT_EQ(find_retained(file, "plant.mode")->quality, Quality::GOOD);
+    EXPECT_EQ(find_retained(file, "plant.mode")->quality_flags, 0U);
+    // The stamp of this boot (decision D-59, point 2).
+    const RetainClockSample clock = retain_clock_now();
+    EXPECT_EQ(file.boot_id, clock.boot_id);
+    EXPECT_GT(file.written_boottime_ns, 0);
+    EXPECT_LE(file.written_boottime_ns, clock.boottime_ns);
+
+    // SUBSTITUTED alone: plant.mode is RETAIN_NOW, so the next check.
+    write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_GOOD,
+                  SCADA_FLAG_SUBSTITUTED);
+    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    file = file_of("io");
+    EXPECT_EQ(find_retained(file, "plant.mode")->quality_flags,
+              SCADA_FLAG_SUBSTITUTED);
+    // The quality alone.
+    write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_UNCERTAIN,
+                  SCADA_FLAG_SUBSTITUTED);
+    ASSERT_EQ(round(now + 2).retain_written.size(), 1U);
+    EXPECT_EQ(find_retained(file_of("io"), "plant.mode")->quality,
+              Quality::UNCERTAIN);
+    // No change: no write.
+    EXPECT_TRUE(round(now + 3).retain_written.empty());
+}
+
+TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
+    RetainFile stored;
+    stored.values = {{"plant.mode", TagType::INT64, VALUE_7, FIXED_SOURCE_TIME,
+                      Quality::GOOD, to_raw(QualityFlag::SUBSTITUTED)}};
+    {
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", stored, detail).ok())
+            << detail;
+    }
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    ASSERT_EQ(feeder->status().values_restored, 1U);
+    const std::int64_t now = scada::monotonic_ns();
+    // The restored record (UNCERTAIN, RESTORED, SUBSTITUTED) is no change.
+    EXPECT_TRUE(round(now).retain_written.empty());
+    // A write of another tag writes the file again; plant.mode keeps what
+    // the owner stored, not what the restore made of it.
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
+    ASSERT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
+    const RetainFile file = file_of("io");
+    ASSERT_NE(find_retained(file, "plant.mode"), nullptr);
+    EXPECT_EQ(*find_retained(file, "plant.mode"), stored.values.at(0));
+    EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
+}
+
+}  // namespace

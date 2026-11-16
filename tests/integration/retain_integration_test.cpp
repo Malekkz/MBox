@@ -206,7 +206,9 @@ bool reattached(std::string_view out) {
 
 // After a generation change that `second` made: the retainer reattached
 // within CHANGE_LIMIT, restored the last value it wrote, UNCERTAIN with
-// RESTORED (contract, section 12), and the old generation is gone.
+// RESTORED and the LOCAL_TIME the library set at its write, which a
+// restored value keeps (contract, section 12; decision D-59), and the old
+// generation is gone.
 ::testing::AssertionResult Retained::restored_after_change(
     ChildProcess& feeder, RunningTagd& second) const {
     const auto ready = std::chrono::steady_clock::now();
@@ -222,7 +224,7 @@ bool reattached(std::string_view out) {
     const std::int64_t restored =
         last_number(out, "attached value=").value_or(-1);
     if (last <= 1 || restored != last ||
-        !has(out.substr(out.rfind("attached")), "quality=1 flags=1024")) {
+        !has(out.substr(out.rfind("attached")), "quality=1 flags=3072")) {
         return ::testing::AssertionFailure() << "not restored: " << out;
     }
     if (!logs(second, "retired generation removed") ||

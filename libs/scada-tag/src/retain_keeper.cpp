@@ -68,6 +68,32 @@ bool disowned(const RecordCopy& copy) noexcept {
            (copy.quality_flags & to_raw(QualityFlag::NOT_INIT)) == 0;
 }
 
+// The value an owner stored in `copy`, a record of a tag `name` of type
+// `type` that holds a value (decision D-59): quality and flags are kept.
+// NOT_INIT is not set in such a record, OWNER_DOWN is never stored and
+// RESTORED is the mark of a restore, not of the value.
+RetainedValue value_seen(const std::string& name, TagType type,
+                         const RecordCopy& copy) {
+    return {name,
+            type,
+            copy.value,
+            copy.source_time_ns,
+            copy.quality == to_raw(Quality::GOOD) ? Quality::GOOD
+                                                  : Quality::UNCERTAIN,
+            retainable_flags(copy.quality_flags)};
+}
+
+// True if `copy` is the restore of `on_file` that the owner has not written
+// since: RESTORED with the value and source time on file. The file keeps
+// the quality the owner stored, which the restored record no longer shows
+// (decision D-59).
+bool restored_as_on_file(const RetainedValue& on_file,
+                         const RecordCopy& copy) noexcept {
+    return (copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0 &&
+           copy.type == to_raw(on_file.type) && on_file.value == copy.value &&
+           on_file.source_time_ns == copy.source_time_ns;
+}
+
 // The later of two identities, by generation number.
 GenerationIdentity newer(const std::optional<GenerationIdentity>& kept,
                          const GenerationIdentity& seen) noexcept {
@@ -449,15 +475,14 @@ bool RetainKeeper::read_owner(const Watched& watched,
             // record on file stays. So does anything else that is no value.
             continue;
         }
+        const RetainedValue seen = value_seen(tag.name, tag.type, copy);
         const auto known = state.values.find(tag.name);
-        if (known != state.values.end() && known->second.type == tag.type &&
-            known->second.value == copy.value &&
-            known->second.source_time_ns == copy.source_time_ns) {
+        if (known != state.values.end() &&
+            (known->second == seen ||
+             restored_as_on_file(known->second, copy))) {
             continue;
         }
-        state.values.insert_or_assign(
-            tag.name,
-            RetainedValue{tag.name, tag.type, copy.value, copy.source_time_ns});
+        state.values.insert_or_assign(tag.name, seen);
         state.dirty = true;
         state.urgent = state.urgent || tag.now;
     }
@@ -504,7 +529,13 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     } else if (current_ != nullptr) {
         file.source = current_->identity;
     }
-    file.written_time_ns = realtime_ns();
+    // Decision D-59: what a later attach needs to tell the age of the
+    // values, in this boot and in another.
+    const RetainClockSample clock = retain_clock_now();
+    file.written_time_ns = clock.realtime_ns;
+    file.written_boottime_ns = clock.boottime_ns;
+    file.boot_id = clock.boot_id;
+    file.clock_synced = clock.clock_synced;
     file.config_hash = config_hash_;
     file.values.reserve(state.values.size());
     for (const auto& [tag, value] : state.values) {
