@@ -25,10 +25,12 @@
 //        -     4  CRC-32 of every byte before it
 //
 //   record: type (1 byte; BOOL, INT64, UINT64 or FLOAT64), name length (1
-//   byte, 1 to 127), quality (1 byte; GOOD or UNCERTAIN), reserved (1 byte,
-//   0), quality_flags (2), reserved (2, 0), value (8), source_time_ns (8),
-//   the name, then zero bytes to the next multiple of 8. The flags have no
-//   unknown bit and none of NOT_INIT, OWNER_DOWN and RESTORED.
+//   byte, 1 to 127), quality (1 byte; GOOD or UNCERTAIN), record flags (1
+//   byte: bit 0 ADOPTED, bit 1 SOURCE_NOT_FINAL, only with ADOPTED; the
+//   other bits 0), quality_flags (2), reserved (2, 0), value (8),
+//   source_time_ns (8), the name, then zero bytes to the next multiple of 8.
+//   The quality flags have no unknown bit and none of NOT_INIT, OWNER_DOWN
+//   and RESTORED.
 //
 // Format version 1 (decision D-45) is read, never written: a header of the
 // first 80 bytes above, with no flag CLOCK_SYNCED, and records whose six
@@ -123,9 +125,19 @@ struct RetainedValue {
     // without NOT_INIT, OWNER_DOWN and RESTORED.
     Quality quality = Quality::UNCERTAIN;
     std::uint16_t quality_flags = 0;
+    // Version 2 only (decision D-59, review B3): scada-tagd took the value
+    // for this owner from another owner's file (a tag that moved), and the
+    // owner has not written it since; with `source_not_final`, that file was
+    // not marked FINAL.
+    bool adopted = false;
+    bool source_not_final = false;
     friend bool operator==(const RetainedValue&,
                            const RetainedValue&) = default;
 };
+
+// Bits of the record flags byte of version 2 (offset 3 of a record).
+inline constexpr std::uint8_t RETAIN_RECORD_ADOPTED = 1U;
+inline constexpr std::uint8_t RETAIN_RECORD_SOURCE_NOT_FINAL = 2U;
 
 // When and by which boot a retain file was written (decision D-59).
 struct RetainStamp {
@@ -327,6 +339,11 @@ struct LoadedValues {
     std::vector<RetainSource> sources;
     // The owner's own file, if it could be read.
     std::optional<RetainFile> own;
+    // False if other owners' files were needed and not all could be looked
+    // at: the directory could not be listed, or it holds more than
+    // MAX_OWNERS of them (review B5). `values` may then lack a value that
+    // is on file.
+    bool complete = true;
     std::vector<RejectedRetainFile> rejected;
 };
 

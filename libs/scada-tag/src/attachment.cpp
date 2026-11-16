@@ -679,7 +679,12 @@ void Attachment::apply_retained(std::span<std::byte> tags,
             continue;
         }
         const RetainSource& source = loaded.sources.at(i);
-        info.origin = origin_of(source);
+        // Review B3: a value scada-tagd took from another owner's file into
+        // this owner's file keeps that origin, and its FINAL mark.
+        info.origin =
+            value->adopted ? RetainOrigin::OTHER_OWNER : origin_of(source);
+        info.final_wait_expired =
+            info.final_wait_expired || value->source_not_final;
         info.written_time_ns = source.stamp.written_time_ns;
         info.age_ns = retained_age_ns(source.stamp, clock);
         info.stored_quality = value->quality;

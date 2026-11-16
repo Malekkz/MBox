@@ -91,6 +91,8 @@ public:
     // Results that could not be recorded (a failed allocation), since the
     // start.
     [[nodiscard]] std::uint64_t lost() const;
+    // The owner whose file is being written now; empty if none.
+    [[nodiscard]] std::string in_flight() const;
     // Waits, at most `limit`, until nothing waits and nothing is being
     // written. False if the limit was reached.
     [[nodiscard]] bool wait_idle(std::chrono::milliseconds limit);
@@ -113,6 +115,7 @@ private:
     std::vector<std::string> removals_;                // guarded by mutex_
     std::uint64_t lost_ = 0;                           // guarded by mutex_
     bool busy_ = false;                                // guarded by mutex_
+    std::string in_flight_;                            // guarded by mutex_
     // Last: started after everything it uses, stopped and joined first.
     std::jthread thread_;
 };
@@ -274,8 +277,18 @@ private:
     // What `read_owner` learns from `copy`, a record of `tag` that holds a
     // value: a change of value, quality or flags makes the owner dirty; a
     // write of the owner, unlike the restore, ends the stamp it came with.
-    static void note_value(OwnerState& state, const RetainedTag& tag,
-                           const RecordCopy& copy);
+    // True for a restore of a value this keeper does not have as it is on
+    // file, which `note_restores` takes.
+    [[nodiscard]] static bool note_value(OwnerState& state,
+                                         const RetainedTag& tag,
+                                         const RecordCopy& copy);
+    // Takes the restored records `copies` of `tags` of `owner` with the
+    // value, quality, flags and stamp of the file they came from, marked
+    // adopted when that file is another owner's (decision D-59, review B2,
+    // B3); a source no longer found gives an unknown age and SOURCE_NOT_FINAL.
+    void note_restores(const std::string& owner,
+                       std::span<const RetainedTag> tags,
+                       std::span<const RecordCopy> copies);
     void read_current();
 
     // True if the current generation has a ready `tags` region of the
@@ -324,8 +337,8 @@ private:
                      CheckReport& report);
     // Takes into the state of every owner of the current generation that
     // has no region there the values of its RETAIN tags that only other
-    // owners' files hold (a tag that moved, decision D-59). True if any was
-    // taken; those owners are then written.
+    // owners' files hold (a tag that moved, decision D-59); those owners are
+    // then written. False if not every file could be looked at (review B5).
     [[nodiscard]] bool adopt_moved_values();
     // Removes the files of owners that are in no generation any more, once
     // `adopt_moved_values` ran and every owner of the current generation
@@ -344,7 +357,8 @@ private:
     std::vector<RetainProblem> pending_problems_;
     bool gone_owners_removed_ = false;
     bool moved_values_adopted_ = false;
-    std::uint64_t writer_lost_ = 0;  // RetainWriter::lost at the last look
+    bool adoption_reported_ = false;  // an incomplete look, logged once
+    std::uint64_t writer_lost_ = 0;   // RetainWriter::lost at the last look
     // Last: destroyed first, while the directory is still open.
     std::unique_ptr<RetainWriter> writer_;
 };

@@ -1103,9 +1103,15 @@ TEST_F(MovedKeeper, ATagAttachedAfterTheOldGenerationWasRemovedTakesItsFinal) {
     EXPECT_LT(scada::monotonic_ns() - start, RETAIN_FINAL_WAIT_NS / 2);
     EXPECT_EQ(web->status().final_waits_expired, 0U);
     EXPECT_EQ(read(*web, "plant.level"), VALUE_7);
+    // Review B3: from web's own file, but taken from io's: that origin,
+    // and io's file was FINAL.
     const scada_tag_retain_info_t info = level_info(*web);
-    EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_PERIODIC);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
     EXPECT_EQ(info.final_wait_expired, 0);
+    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    ASSERT_NE(level, nullptr);
+    EXPECT_TRUE(level->adopted);
+    EXPECT_FALSE(level->source_not_final);
 }
 
 // (b) The wait runs out while the former owner is still in the old
@@ -1148,7 +1154,13 @@ TEST_F(MovedKeeper, TheNewOwnersFileIsWrittenBeforeTheFormerOwnersIsRemoved) {
     ASSERT_EQ(read(*web, "plant.level"), VALUE_7);
     ASSERT_TRUE(rounds_keep(now, 1, ROUNDS, VALUE_7));
     EXPECT_FALSE(has_file("io"));
-    EXPECT_EQ(value_in(file_of("web"), "plant.level"), VALUE_7);
+    // Restored by web from io's FINAL file and not written since: web's
+    // file marks it as taken from another owner (review B3).
+    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    ASSERT_NE(level, nullptr);
+    EXPECT_EQ(level->value, VALUE_7);
+    EXPECT_TRUE(level->adopted);
+    EXPECT_FALSE(level->source_not_final);
 }
 
 // Conditions of the lead on the fixes of point 4: the values a new owner
@@ -1192,10 +1204,29 @@ TEST_F(MovedKeeper, TakenValuesKeepTheirFileAndFollowTheRuleOfAttach) {
     // Only plant.level: plant.count is no RETAIN tag, plant.mode is on no
     // file.
     ASSERT_EQ(web.values.size(), 1U);
-    EXPECT_EQ(web.values.at(0),
-              attach_takes.values.at(0).value_or(RetainedValue{}));
-    // The newest file, with its quality, flags and source time.
-    EXPECT_EQ(web.values.at(0), newest);
+    // The newest file, with its quality, flags and source time, marked as
+    // taken from a file that was not FINAL (review B3).
+    RetainedValue expected =
+        attach_takes.values.at(0).value_or(RetainedValue{});
+    EXPECT_EQ(expected, newest);
+    expected.adopted = true;
+    expected.source_not_final = true;
+    EXPECT_EQ(web.values.at(0), expected);
+
+    // Attach reports that origin, and the FINAL file it lacked; a write of
+    // the owner clears the mark.
+    const Attached owner = attached("web");
+    ASSERT_NE(owner, nullptr);
+    const scada_tag_retain_info_t info = level_info(*owner);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
+    EXPECT_EQ(info.final_wait_expired, 1);
+    write(*owner, "plant.level", SCADA_TYPE_FLOAT64, VALUE_9);
+    static_cast<void>(round(scada::monotonic_ns() + INTERVAL_NS));
+    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    ASSERT_NE(level, nullptr);
+    EXPECT_EQ(level->value, VALUE_9);
+    EXPECT_FALSE(level->adopted);
+    EXPECT_FALSE(level->source_not_final);
 }
 
 }  // namespace
@@ -1305,6 +1336,107 @@ TEST_F(KeeperAfterRestore,
     const RetainFile file = file_of("io");
     EXPECT_GT(file.written_boottime_ns, old_stamp().written_boottime_ns);
     EXPECT_GT(file.written_time_ns, old_stamp().written_time_ns);
+}
+
+}  // namespace
+
+// Committee review of PR #93, B4: STALE and COMM_FAIL describe the live
+// link, are not restored, and a link that flaps writes nothing.
+namespace {
+
+TEST_F(Keeper, AFlappingLinkWritesNothing) {
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_GOOD, 0);
+    ASSERT_EQ(round(now).retain_written.size(), 1U);
+    // plant.mode is RETAIN_NOW: any change would be written at once.
+    constexpr int FLAPS = 4;
+    for (int i = 1; i <= FLAPS; ++i) {
+        write_flagged(
+            *feeder, "plant.mode", 2, SCADA_QUALITY_GOOD,
+            (i % 2) != 0 ? SCADA_FLAG_STALE | SCADA_FLAG_COMM_FAIL : 0);
+        EXPECT_TRUE(round(now + i).retain_written.empty()) << i;
+    }
+    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(mode->quality_flags, 0U);
+}
+
+}  // namespace
+
+// Committee review of PR #93, B5: a look at the other owners' files that
+// cannot see them all takes nothing for certain, so no file of a gone owner
+// is removed, and it is reported once.
+namespace {
+
+// io.bin with the moved plant.level, and MAX_OWNERS + 1 files of other
+// owners that are gone, in the directory `retain`.
+::testing::AssertionResult more_files_than_are_read(
+    const std::filesystem::path& retain) {
+    const Fd directory = scada::tag::testing::open_directory(retain);
+    std::string detail;
+    RetainFile moved;
+    moved.values = {{"plant.level", TagType::FLOAT64, VALUE_7, 0}};
+    bool written = write_retain_file(directory.get(), "io", moved, detail).ok();
+    RetainFile other;
+    other.values = {{"other.tag", TagType::INT64, 1, 0}};
+    for (std::uint32_t i = 0; written && i <= MAX_OWNERS; ++i) {
+        written = write_retain_file(directory.get(), "gone" + std::to_string(i),
+                                    other, detail)
+                      .ok();
+    }
+    return written ? ::testing::AssertionSuccess()
+                   : ::testing::AssertionFailure() << detail;
+}
+
+TEST_F(MovedKeeper, MoreFilesThanAreReadKeepTheFilesOfGoneOwners) {
+    ASSERT_TRUE(more_files_than_are_read(retain()));
+    start_host(moved_to_web(retained_set()));
+    const std::int64_t now = scada::monotonic_ns();
+    std::size_t reported = 0;
+    constexpr int CHECKS = 4;
+    for (int i = 0; i < CHECKS; ++i) {
+        const CheckReport report = round(now + i);
+        EXPECT_TRUE(report.retain_files_removed.empty()) << i;
+        reported += static_cast<std::size_t>(std::ranges::count(
+            report.retain_problems, RetainProblemKind::ADOPTION_INCOMPLETE,
+            &RetainProblem::kind));
+    }
+    EXPECT_EQ(reported, 1U);
+    EXPECT_TRUE(has_file("io"));
+}
+
+}  // namespace
+
+// Committee review of PR #93, N10: the start reads the current owners' own
+// files only; a value of a moved tag waits for the FINAL file of its former
+// owner.
+namespace {
+
+TEST_F(MovedKeeper, TheStartTakesNoValueFromAFormerOwnersPeriodicFile) {
+    start_host(retained_set());
+    Attached former = attached("io");
+    ASSERT_NE(former, nullptr);
+    write(*former, "plant.level", SCADA_TYPE_FLOAT64, VALUE_8);
+    {
+        // io's periodic file, older than what io holds.
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        RetainFile periodic;
+        periodic.values = {{"plant.level", TagType::FLOAT64, VALUE_7, 0}};
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", periodic, detail).ok());
+    }
+    drop_host();
+    start_host(moved_to_web(retained_set()));
+    const std::int64_t now = scada::monotonic_ns();
+    static_cast<void>(round(now));
+    EXPECT_FALSE(has_file("web"));  // not from the periodic file
+    former.reset();                 // io leaves: its FINAL file holds 8
+    ASSERT_TRUE(rounds_keep(now, 1, ROUNDS, VALUE_8));
+    EXPECT_EQ(value_in(file_of("web"), "plant.level"), VALUE_8);
 }
 
 }  // namespace

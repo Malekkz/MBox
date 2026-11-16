@@ -57,6 +57,8 @@ inline constexpr std::string_view MESSAGE_ID_RETAIN_WRITER_BOUND =
     "0031dfe3391142b0b9fa995b07115e10";
 inline constexpr std::string_view MESSAGE_ID_VALUES_UNSAVED_AT_EXIT =
     "7cf5c1c8535f44f6a297db538666d7a3";
+inline constexpr std::string_view MESSAGE_ID_MOVED_VALUES_INCOMPLETE =
+    "624f9b58ba224d5eadd528279c0f8e7d";
 
 // Logs records of late heartbeats: `heartbeat late` at WARNING, or, for a
 // baseline, `heartbeat late before this check` at INFO.
@@ -72,8 +74,9 @@ void log_unconsumed(scada::Logger& logger,
 
 // Logs one retain problem with the MESSAGE_ID of its kind (decision D-59):
 // `retain file ignored` (WARNING), `retain file not written` (WARNING),
-// `retain writer did not finish within its bound` (ERROR) or `values
-// unsaved at exit` (ERROR), with SUBJECT and DETAIL.
+// `retain writer did not finish within its bound` (ERROR), `values unsaved
+// at exit` (ERROR) or `retain files not all read for moved tags` (ERROR),
+// with SUBJECT and DETAIL.
 void log_retain_problem(scada::Logger& logger,
                         const scada::tag::RetainProblem& problem);
 

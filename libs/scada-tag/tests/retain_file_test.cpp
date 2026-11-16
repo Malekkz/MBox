@@ -66,7 +66,7 @@ struct Damage {
 // Offsets in the file of `sample()`: the header, then the first record
 // ("a.flag", BOOL) at RETAIN_HEADER_BYTES.
 constexpr std::size_t FIRST = RETAIN_HEADER_BYTES;
-constexpr std::array<Damage, 21> DAMAGES{{
+constexpr std::array<Damage, 22> DAMAGES{{
     {8, 3, "format version"},
     {12, 5, "record count beyond the file"},
     {12, 3, "record count below the records"},
@@ -76,7 +76,8 @@ constexpr std::array<Damage, 21> DAMAGES{{
     {FIRST, 0, "no type"},
     {FIRST + 2, 2, "quality BAD"},
     {FIRST + 2, 3, "a quality that is none"},
-    {FIRST + 3, 1, "reserved byte after the quality"},
+    {FIRST + 3, 4, "an unknown record flag"},
+    {FIRST + 3, 2, "SOURCE_NOT_FINAL without ADOPTED"},
     {FIRST + 4, 0x10, "NOT_INIT"},
     {FIRST + 4, 0x20, "OWNER_DOWN"},
     {FIRST + 5, 0x04, "RESTORED"},
@@ -145,8 +146,10 @@ RetainFile sample() {
                                     flag(QualityFlag::LOCAL_TIME) |
                                     flag(QualityFlag::OVERFLOW))},
         {"z", TagType::UINT64, ~std::uint64_t{0}, 0, Quality::UNCERTAIN,
-         static_cast<std::uint16_t>(retainable_flags(QUALITY_FLAGS_MASK))},
+         static_cast<std::uint16_t>(retainable_flags(QUALITY_FLAGS_MASK)), true,
+         true},
     };
+    file.values.at(1).adopted = true;  // plant.mode, from a FINAL file
     return file;
 }
 
@@ -159,6 +162,8 @@ RetainFile sample_v1() {
     for (RetainedValue& value : file.values) {
         value.quality = Quality::UNCERTAIN;
         value.quality_flags = 0;
+        value.adopted = false;
+        value.source_not_final = false;
     }
     return file;
 }
@@ -315,6 +320,18 @@ TEST(RetainFile, EncodeRefusesAQualityOrFlagAFileCannotHold) {
                   StatusCode::INVALID_ARGUMENT)
             << refused;
     }
+}
+
+TEST(RetainFile, EncodeRefusesSourceNotFinalWithoutAdopted) {
+    std::string detail;
+    RetainFile file = sample();
+    file.values[0].source_not_final = true;  // not adopted
+    EXPECT_EQ(encode_retain_file(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
+    file = sample_v1();
+    file.values[0].adopted = true;
+    EXPECT_EQ(encode_retain_file_v1(file, detail).status().code(),
+              StatusCode::INVALID_ARGUMENT);
 }
 
 TEST(RetainFile, Version1EncodeRefusesWhatOnlyVersion2Holds) {

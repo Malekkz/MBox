@@ -117,6 +117,9 @@ enum class RetainProblemKind : std::uint8_t {
     WRITE_FAILED,     // a retain file, or the directory, could not be written
     WRITER_BOUND,     // the writer did not finish within RETAIN_WAIT_LIMIT
     UNSAVED_AT_EXIT,  // values of an owner not on disk at the stop
+    // Not every retain file could be read for the tags that moved to owners
+    // that have not attached; files of gone owners are kept (review B5).
+    ADOPTION_INCOMPLETE,
 };
 
 // A retain file that was ignored because it failed its checks, or one that
@@ -127,6 +130,11 @@ struct RetainProblem {
     std::string subject;
     std::string detail;
     RetainProblemKind kind = RetainProblemKind::FILE_REJECTED;
+    // UNSAVED_AT_EXIT only: the owners whose changes are not on disk,
+    // comma-separated, and, when a file was still being written, the
+    // written_time_ns of the file of that owner that stays (review N7).
+    std::string unsaved_owners;
+    std::string kept_written_time_ns;
 };
 
 // Records a producer posted in a retired generation that its consumer did

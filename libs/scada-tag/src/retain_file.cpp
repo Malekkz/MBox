@@ -198,11 +198,21 @@ namespace {
 // file may hold (decision D-59); in version 1 UNCERTAIN and no flag.
 bool quality_fits(const RetainedValue& value, std::uint32_t version) noexcept {
     if (version == RETAIN_FORMAT_VERSION_1) {
-        return value.quality == Quality::UNCERTAIN && value.quality_flags == 0;
+        return value.quality == Quality::UNCERTAIN &&
+               value.quality_flags == 0 && !value.adopted &&
+               !value.source_not_final;
     }
     return (value.quality == Quality::GOOD ||
             value.quality == Quality::UNCERTAIN) &&
-           retainable_flags(value.quality_flags) == value.quality_flags;
+           retainable_flags(value.quality_flags) == value.quality_flags &&
+           (value.adopted || !value.source_not_final);
+}
+
+// The record flags byte of `value`.
+std::uint8_t record_flags(const RetainedValue& value) noexcept {
+    return static_cast<std::uint8_t>(
+        (value.adopted ? RETAIN_RECORD_ADOPTED : 0U) |
+        (value.source_not_final ? RETAIN_RECORD_SOURCE_NOT_FINAL : 0U));
 }
 
 Result<std::vector<std::byte>> encode(const RetainFile& file,
@@ -276,7 +286,7 @@ Result<std::vector<std::byte>> encode(const RetainFile& file,
             put_zeros(bytes, RECORD_RESERVED_BYTES_V1);
         } else {
             put(bytes, to_raw(value.quality));
-            put(bytes, std::uint8_t{0});
+            put(bytes, record_flags(value));
             put(bytes, value.quality_flags);
             put(bytes, std::uint16_t{0});
         }
@@ -359,15 +369,17 @@ Status decode_header(Reader& input, RetainFile& file, std::uint32_t& count,
 }
 
 // The six bytes after the name length of a record of `version`: in
-// version 2 quality, reserved, flags and reserved; in version 1 reserved.
+// version 2 quality, record flags, quality flags and reserved; in version 1
+// reserved.
 bool decode_quality(Reader& input, std::uint32_t version, std::uint8_t& quality,
-                    std::uint16_t& flags) noexcept {
+                    std::uint8_t& record, std::uint16_t& flags) noexcept {
     if (version == RETAIN_FORMAT_VERSION_1) {
         quality = to_raw(Quality::UNCERTAIN);
+        record = 0;
         flags = 0;
         return input.skip_zeros(RECORD_RESERVED_BYTES_V1);
     }
-    return input.get(quality) && input.skip_zeros(1) && input.get(flags) &&
+    return input.get(quality) && input.get(record) && input.get(flags) &&
            input.skip_zeros(sizeof(std::uint16_t));
 }
 
@@ -379,11 +391,12 @@ Status decode_record(Reader& input, std::uint32_t version, std::uint32_t index,
     std::uint8_t type = 0;
     std::uint8_t length = 0;
     std::uint8_t quality = 0;
+    std::uint8_t record = 0;
     std::uint16_t flags = 0;
     std::uint64_t source_time = 0;
     const std::string which = "record " + std::to_string(index);
     if (!input.get(type) || !input.get(length) ||
-        !decode_quality(input, version, quality, flags) ||
+        !decode_quality(input, version, quality, record, flags) ||
         !input.get(value.value) || !input.get(source_time) ||
         !input.get_text(length, value.name) ||
         !input.skip_zeros(padding_after(length))) {
@@ -399,6 +412,15 @@ Status decode_record(Reader& input, std::uint32_t version, std::uint32_t index,
     if (retainable_flags(flags) != flags) {
         return corrupt(detail, which + " has a quality flag that is not valid");
     }
+    // SOURCE_NOT_FINAL only with ADOPTED; no other bit (review B3).
+    constexpr auto KNOWN_RECORD_FLAGS = static_cast<std::uint8_t>(
+        RETAIN_RECORD_ADOPTED | RETAIN_RECORD_SOURCE_NOT_FINAL);
+    if ((record & ~KNOWN_RECORD_FLAGS) != 0 ||
+        record == RETAIN_RECORD_SOURCE_NOT_FINAL) {
+        return corrupt(detail, which + " has record flags that are not valid");
+    }
+    value.adopted = (record & RETAIN_RECORD_ADOPTED) != 0;
+    value.source_not_final = (record & RETAIN_RECORD_SOURCE_NOT_FINAL) != 0;
     value.quality =
         quality == to_raw(Quality::GOOD) ? Quality::GOOD : Quality::UNCERTAIN;
     value.quality_flags = flags;
@@ -839,6 +861,7 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
     const Result<std::vector<std::string>> entries =
         list_directory(dir_fd, detail);
     if (!entries.ok()) {
+        loaded.complete = false;
         return;
     }
     std::vector<std::int64_t> found_written(wanted.size());
@@ -850,6 +873,7 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
             continue;
         }
         if (++files > MAX_OWNERS) {
+            loaded.complete = false;
             break;
         }
         const Result<RetainFile> other =

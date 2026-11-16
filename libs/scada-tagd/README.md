@@ -58,6 +58,21 @@ process. The executable in `services/scada-tagd` only calls it.
   old or the new one survives, and the next start removes the temporary
   file. The writer thread keeps the lock of the base directory while it is
   in the kernel, so a restarted `scada-tagd` cannot become a second writer.
+  The worst case of a stop is 12 s: a stop during the 5-s wait of the
+  start for its finished generations, the 5-s bound of the stop, 2 s for
+  the log; the unit allows 15 s.
+- A write stuck in the kernel (an `fsync` of failing storage) keeps the
+  process after `_Exit` as a zombie until the thread leaves the kernel. It
+  keeps the lock of the base directory, `SIGKILL` of systemd does not end
+  it, a restart fails on the lock and `Restart=on-failure` runs into the
+  start limit, so `scada-tagd` stays down after the storage recovers. The
+  stuck process cannot become a second writer. Recovery: repair the
+  storage, then `systemctl reset-failed scada-tagd.service` and
+  `systemctl start scada-tagd.service`.
+- The age of a retained value across a reboot needs `adjtimex(2)` (the
+  `@clock` system-call set of systemd). A unit with `ProtectClock=yes` or
+  `SystemCallFilter=~@clock` would make every such age unknown, or end the
+  process with `SIGSYS`; neither may be set for `scada-tagd`.
 
 It does not touch the shared memory itself; that is in `libscada-tag`.
 
@@ -92,8 +107,9 @@ the standard error stream.
 | `retain file ignored` | WARNING, once for each file: it failed its checks | `SUBJECT` (the file; outside input), `DETAIL` |
 | `retain file not written` | WARNING, once until a write succeeds: a retain file, or the directory after removals, could not be written | `SUBJECT` (owner, or `retain directory`), `DETAIL` |
 | `retain writer did not finish within its bound` | ERROR: a wait for the writer thread reached 5 s | `SUBJECT` (`retain writer`), `DETAIL` |
-| `values unsaved at exit` | ERROR, at the stop: for each owner whose values are not on disk, and once more before the exit with code 3 when the writer is still busy | `SUBJECT` (owner, or `retain writer`), `DETAIL` |
+| `values unsaved at exit` | ERROR, once at the stop when values of owners are not on disk; when the writer is still busy (exit with code 3), `SUBJECT` is the owner whose file is being written | `SUBJECT`, `DETAIL`, `UNSAVED_OWNERS`, `KEPT_WRITTEN_TIME_NS` (the `written_time_ns` of the file of `SUBJECT` that stays; `none` if it has none; `-` if no file was being written) |
 | `the retain directory is not usable` | CRITICAL, at the start, which then fails | `DIRECTORY`, `STATUS`, `DETAIL` |
+| `retain files not all read for moved tags` | ERROR, once per start: the retain directory could not be listed, or holds more than 1,023 other owners' files, so the values of tags that moved to an owner that has not attached cannot all be found. Files of owners that are gone are kept, and it is tried again at every check | `SUBJECT`, `DETAIL` |
 | `removed the retain file of an owner that is gone` | NOTICE | `FILE` |
 | `retired generation removed` | NOTICE | `GENERATION` |
 | `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |
@@ -123,6 +139,9 @@ the text:
 | `process still attached to a retired generation` | `349b6814c6cc4a2fafa5d3d1af16e7a7` |
 | `retain writer did not finish within its bound` | `0031dfe3391142b0b9fa995b07115e10` |
 | `values unsaved at exit` | `7cf5c1c8535f44f6a297db538666d7a3` |
+| `retain files not all read for moved tags` | `624f9b58ba224d5eadd528279c0f8e7d` |
+| `queue file created anew; audit records may be lost`, `queue file created anew; records may be lost` | `330f9ce1bb0547c098562d406ce2f774` |
+| `queue write_seq fell; ids may repeat` | `d673f795274a49d1882153ae03003b15` |
 
 ```
 journalctl MESSAGE_ID=31aad0d613b645d39a83e7978c4531ec -o verbose

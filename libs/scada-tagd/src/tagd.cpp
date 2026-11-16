@@ -367,12 +367,8 @@ std::int64_t loop_period_ns(const GenerationHost& host,
 // thread keeps the lock of the base directory until it leaves the kernel,
 // so a restarted scada-tagd cannot become a second writer.
 int stop_unsaved(Logger& logger, const RunHooks& hooks) {
-    logger.log(LogLevel::ERROR, "values unsaved at exit",
-               {{"SUBJECT", "retain writer"},
-                {"DETAIL",
-                 "a retain file was still being written at the "
-                 "stop; exiting without waiting for it"},
-                {"MESSAGE_ID", MESSAGE_ID_VALUES_UNSAVED_AT_EXIT}});
+    // `values unsaved at exit` is in the report of the flush, logged once,
+    // with the owners concerned (review N7).
     // Best effort: what is not delivered within the bound is lost with
     // the process.
     static_cast<void>(logger.flush(LOG_FLUSH_AT_EXIT));

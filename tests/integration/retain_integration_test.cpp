@@ -439,9 +439,10 @@ TEST_F(Retained,
 namespace {
 
 constexpr std::int64_t OLD_VALUE = 41;
-// The 5-s bound of the writer, then the exit; far below the 15 s of
-// TimeoutStopSec.
-constexpr std::chrono::seconds UNSAVED_EXIT_LIMIT{12};
+// The worst case is 12 s (a stop during the 5-s wait of the start, the 5-s
+// bound of the stop, 2 s for the log); this test sees about 5 s. Below the
+// 15 s of TimeoutStopSec, with a margin over the worst case.
+constexpr std::chrono::seconds UNSAVED_EXIT_LIMIT{14};
 
 // Decision D-59, point 5: a retain write that hangs in fsync at the stop.
 class HungWrite : public Retained {
@@ -507,7 +508,15 @@ protected:
                           .count()
                    << " ms: " << err;
         }
-        if (!has(err, "values unsaved at exit") ||
+        // One record of unsaved values (review N7), naming io and the file
+        // of it that stays.
+        const std::size_t unsaved = err.find("values unsaved at exit");
+        if (unsaved == std::string::npos ||
+            err.find("values unsaved at exit", unsaved + 1) !=
+                std::string::npos ||
+            !has(err, R"(SUBJECT="io")") ||
+            !has(err, R"(UNSAVED_OWNERS="io")") ||
+            !has(err, "KEPT_WRITTEN_TIME_NS=") ||
             !has(err, "7cf5c1c8535f44f6a297db538666d7a3") ||
             !has(err, "0031dfe3391142b0b9fa995b07115e10")) {
             return ::testing::AssertionFailure() << "records missing: " << err;

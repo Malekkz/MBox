@@ -203,6 +203,25 @@ void log_retain_problem(scada::Logger& logger,
             message = "values unsaved at exit";
             message_id = MESSAGE_ID_VALUES_UNSAVED_AT_EXIT;
             break;
+        case RetainProblemKind::ADOPTION_INCOMPLETE:
+            level = LogLevel::ERROR;
+            message = "retain files not all read for moved tags";
+            message_id = MESSAGE_ID_MOVED_VALUES_INCOMPLETE;
+            break;
+    }
+    if (problem.kind == RetainProblemKind::UNSAVED_AT_EXIT) {
+        // KEPT_WRITTEN_TIME_NS: the file of SUBJECT that survives the write
+        // that did not finish; "none" if it has none.
+        logger.log(
+            level, message,
+            {{"SUBJECT", problem.subject},
+             {"DETAIL", problem.detail},
+             {"UNSAVED_OWNERS", problem.unsaved_owners},
+             {"KEPT_WRITTEN_TIME_NS", problem.kept_written_time_ns.empty()
+                                          ? std::string("-")
+                                          : problem.kept_written_time_ns},
+             {"MESSAGE_ID", message_id}});
+        return;
     }
     logger.log(level, message,
                {{"SUBJECT", problem.subject},
