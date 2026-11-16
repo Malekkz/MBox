@@ -103,6 +103,20 @@ TEST(SimOptions, RunTakesTheWaveform) {
     EXPECT_EQ(options.waveform.seed, 9U);
 }
 
+// --hold takes no value: the option after it is read as an option.
+TEST(SimOptions, HoldIsAFlagOfRun) {
+    EXPECT_FALSE(parsed({"run"}).hold);
+    const Options options =
+        parsed({"run", "--hold", "--rounds", "3", "--notify", "each"});
+    EXPECT_TRUE(options.hold);
+    EXPECT_EQ(options.rounds, 3U);
+    EXPECT_EQ(options.notify, Notify::EACH);
+    EXPECT_TRUE(parsed({"run", "--rounds", "3", "--hold"}).hold);
+    EXPECT_TRUE(refused({"run", "--hold", "--hold"}));
+    EXPECT_TRUE(refused({"tag-set", "--hold"}));
+    EXPECT_TRUE(refused({"run", "--hold", "1"}));
+}
+
 TEST(SimOptions, TheDefaultRateIsATenthOfTheTags) {
     std::string detail;
     const Result<Options> parsed = parse({"run", "--tags", "50000"}, detail);
