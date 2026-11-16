@@ -131,13 +131,13 @@ TEST_F(Attach, CreatesTheRegionsOfTheProcessAndNoOthers) {
     ASSERT_NE(feeder, nullptr);
     EXPECT_EQ(names_in(generation_dir()),
               (std::vector<std::string>{"changes.io", "events.io", "header",
-                                        "proc.io", "proc.tagd", "strings.io",
-                                        "tags.io"}));
+                                        "proc.io", "proc.tagd", "result.io.web",
+                                        "strings.io", "tags.io"}));
     const AttachmentStatus status = feeder->status();
     EXPECT_EQ(status.generation, 1U);
     EXPECT_EQ(status.state, GenerationState::RUNNING);
     EXPECT_EQ(status.process_index, PROCESS_IO);
-    EXPECT_EQ(status.regions_created, 5U);
+    EXPECT_EQ(status.regions_created, 6U);
     EXPECT_EQ(status.regions_reused, 0U);
     EXPECT_EQ(status.records_repaired, 0U);
 
@@ -213,7 +213,7 @@ TEST_F(Attach, ANewRingAndANewQueueAreEmpty) {
     EXPECT_EQ(ring.epoch, 0U);
     EXPECT_EQ(ring.write_seq, 0U);
 
-    ASSERT_EQ(feeder->queues().size(), 1U);
+    ASSERT_EQ(feeder->queues().size(), 2U);
     EXPECT_EQ(feeder->queues()[0].queue_id, QUEUE_EVENTS);
     const std::span<std::byte> bytes =
         feeder->queues()[0].region.memory.bytes();
@@ -386,7 +386,7 @@ TEST_F(Attach, ARestartReusesTheRegionsAndKeepsTheirContent) {
     EXPECT_EQ(inode_of(generation_dir() / "proc.io"), proc_file);
     const AttachmentStatus status = feeder->status();
     EXPECT_EQ(status.regions_created, 0U);
-    EXPECT_EQ(status.regions_reused, 5U);
+    EXPECT_EQ(status.regions_reused, 6U);
     EXPECT_EQ(status.records_repaired, 0U);
     const TagRecord& level =
         record(feeder->owners()[0].tags.memory.bytes(), SLOT_LEVEL);
@@ -538,7 +538,7 @@ TEST_F(Attach, AnUnreadyOrWrongSizedOwnRegionIsRemovedAndCreatedAgain) {
     EXPECT_EQ(inode_of(generation_dir() / "events.io"), queue_file);
     const AttachmentStatus status = feeder->status();
     EXPECT_EQ(status.regions_created, 2U);
-    EXPECT_EQ(status.regions_reused, 3U);
+    EXPECT_EQ(status.regions_reused, 4U);
     EXPECT_EQ(
         record(feeder->owners()[0].tags.memory.bytes(), SLOT_LEVEL).quality,
         to_raw(Quality::BAD));
@@ -567,7 +567,7 @@ TEST_F(Attach, AnOwnRegionWithOtherContentThanTheHeaderAsksForIsCreatedAgain) {
     ASSERT_NE(feeder, nullptr);
     const AttachmentStatus status = feeder->status();
     EXPECT_EQ(status.regions_created, 3U);
-    EXPECT_EQ(status.regions_reused, 2U);
+    EXPECT_EQ(status.regions_reused, 3U);
     EXPECT_EQ(record(feeder->owners()[0].tags.memory.bytes(), SLOT_LEVEL).type,
               to_raw(TagType::FLOAT64));
     EXPECT_EQ(shared_at<QueueHeader>(feeder->queues()[0].region.memory.bytes(),
@@ -601,7 +601,7 @@ TEST_F(Attach, Conformance10AProcessKilledWhileCreatingARegionAttachesAgain) {
     const Attached feeder = attached("io");
     ASSERT_NE(feeder, nullptr);
     EXPECT_FALSE(std::filesystem::exists(generation_dir() / stale));
-    EXPECT_EQ(feeder->status().regions_created, 5U);
+    EXPECT_EQ(feeder->status().regions_created, 6U);
 }
 
 TEST_F(Attach, ADirectoryUnderAnOwnRegionNameFailsTheAttach) {
