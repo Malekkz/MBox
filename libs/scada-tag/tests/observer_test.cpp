@@ -672,6 +672,30 @@ bool becomes_retiring(scada_ctx* ctx, scada_status& status) {
     return false;
 }
 
+// scada_tag_status of `ctx` right after `host` wrote the heartbeat of
+// scada-tagd. The host of the fixture writes it only when a test asks, so
+// a machine stalled for longer than the heartbeat timeout of `tagd`
+// between the two makes the status TAGD_DOWN, as the contract says it
+// should (section 10.1). Such a status is asked again, within
+// WAIT_LIMIT_MS; any other is returned (issue #73).
+int status_after_a_heartbeat(scada::tag::GenerationHost& host, scada_ctx* ctx,
+                             scada_status& status) {
+    constexpr std::int64_t TIMEOUT_NS =
+        std::int64_t{scada::tag::testing::TAGD_TIMEOUT_MS} * 1'000'000;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(WAIT_LIMIT_MS);
+    for (;;) {
+        const std::int64_t beat = scada::monotonic_ns();
+        host.heartbeat(beat);
+        const int code = scada_tag_status(ctx, &status);
+        if (code != SCADA_E_TAGD_DOWN ||
+            scada::monotonic_ns() - beat < TIMEOUT_NS ||
+            std::chrono::steady_clock::now() >= deadline) {
+            return code;
+        }
+    }
+}
+
 TEST_F(Observer, ReportsACurrentThatNamesAnotherGeneration) {
     start_host();
     Context observer;
@@ -716,7 +740,8 @@ TEST_F(Observer, ReportsABaseDirectoryThatWasSetUpAgain) {
     EXPECT_TRUE(becomes_retiring(observer.get(), status));
     observer.detach();
     ASSERT_EQ(observe(observer), SCADA_OK);
-    EXPECT_EQ(scada_tag_status(observer.get(), &status), SCADA_OK);
+    EXPECT_EQ(status_after_a_heartbeat(host(), observer.get(), status),
+              SCADA_OK);
 }
 
 TEST_F(Observer, NeedsADatabase) {
