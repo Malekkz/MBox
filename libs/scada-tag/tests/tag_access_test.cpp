@@ -1166,9 +1166,13 @@ void expect_whole_writes(std::span<const RaceCounts> counts) {
     ::testing::Test::RecordProperty("down", std::to_string(down));
 }
 
-// The counts of a reader that made `reads` reads, `live` of them of the
-// live owner and the rest with OWNER_DOWN.
-RaceCounts counts_of(std::uint64_t reads, std::uint64_t live, bool saw_last) {
+// The reads of a reader of the checker's own tests.
+constexpr std::uint64_t CHECKER_READS = 5;
+
+// The counts of a reader that made CHECKER_READS reads, `live` of them of
+// the live owner and the rest with OWNER_DOWN.
+RaceCounts counts_of(std::uint64_t live, bool saw_last) {
+    const std::uint64_t reads = CHECKER_READS;
     RaceCounts counts;
     counts.reads = reads;
     counts.live = live;
@@ -1181,14 +1185,14 @@ RaceCounts counts_of(std::uint64_t reads, std::uint64_t live, bool saw_last) {
 // that read it live only before the last write, fails the race (issue
 // #73).
 TEST(RaceChecker, AReaderThatNeverReadTheLiveOwnerFails) {
-    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(5, 0, false)),
+    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(0, false)),
                             "no read of a live owner");
-    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(5, 1, false)),
+    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(1, false)),
                             "no read of the live owner after the last write");
 }
 
 TEST(RaceChecker, AReaderThatReadTheLastWriteLivePasses) {
-    expect_whole_writes_of(counts_of(5, 1, true));
+    expect_whole_writes_of(counts_of(1, true));
 }
 
 // Conformance test 3: values whose fields are derived from one another, a

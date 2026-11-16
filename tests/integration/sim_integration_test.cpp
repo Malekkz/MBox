@@ -672,6 +672,21 @@ TEST_F(SimProcesses, AHeldSimulatorStopsWhenTagdStaysDown) {
     EXPECT_EQ(sim->out().find("writing"), std::string::npos) << sim->out();
 }
 
+// The held simulator "sim", seen by `reader`, has written RESOLVE_BEATS
+// heartbeats or more.
+::testing::AssertionResult beat_while_resolving(const Attached& reader) {
+    std::uint16_t index = 0;
+    if (scada_proc_resolve(reader.ctx(), "sim", &index) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "sim not resolved";
+    }
+    const std::uint64_t beats = heartbeat_of(reader, index);
+    if (beats < RESOLVE_BEATS) {
+        return ::testing::AssertionFailure()
+               << "heartbeat " << beats << ", wanted " << RESOLVE_BEATS;
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // While it resolves the tags of a large layout, which can take longer than
 // a heartbeat timeout on a slow machine, the simulator writes its
 // heartbeat every 256 tags (libs/scada-sim/README.md). Held after
@@ -698,9 +713,7 @@ TEST_F(SimProcesses, ALargeLayoutWritesItsHeartbeatWhileItResolves) {
         return;
     }
     const Attached reader(base(), "reader");
-    std::uint16_t index = 0;
-    ASSERT_EQ(scada_proc_resolve(reader.ctx(), "sim", &index), SCADA_OK);
-    EXPECT_GE(heartbeat_of(reader, index), RESOLVE_BEATS);
+    EXPECT_TRUE(beat_while_resolving(reader));
     ASSERT_TRUE(sim->send_signal(SIGUSR1));
     EXPECT_TRUE(prints(*sim, "writing\n"));
     EXPECT_TRUE(logs(*tagd, R"(process up PROCESS="sim")"));

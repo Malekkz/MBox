@@ -22,11 +22,11 @@
 
 #include <gtest/gtest.h>
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 #include <sys/syscall.h>
 
 #include <algorithm>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -102,6 +102,21 @@ void release_late(const std::string& base_dir, ChildProcess& feeder) {
     EXPECT_TRUE(feeder.send_signal(SIGCONT));
 }
 
+// Stops the attached `feeder` and starts the thread that lets it go on
+// (`release_late`).
+std::optional<std::jthread> hold_feeder(const std::string& base_dir,
+                                        ChildProcess& feeder) {
+    // Attached, it handles SIGTERM; it cannot have posted, since the probe
+    // has not attached yet.
+    EXPECT_TRUE(feeder.wait_for_output(
+        [](std::string_view out) {
+            return out.find("attached") != std::string_view::npos;
+        },
+        WAIT_LIMIT));
+    EXPECT_TRUE(feeder.send_signal(SIGSTOP));
+    return std::jthread(release_late, base_dir, std::ref(feeder));
+}
+
 class RealTimeSafety : public TagProcesses {
 protected:
     // Runs the probe as the process `probe` against a running scada-tagd,
@@ -129,15 +144,7 @@ protected:
         }
         std::optional<std::jthread> releaser;
         if (late_feeder) {
-            // Attached, it handles SIGTERM; it cannot have posted, since
-            // the probe has not attached yet.
-            EXPECT_TRUE(feeder->wait_for_output(
-                [](std::string_view out) {
-                    return out.find("attached") != std::string_view::npos;
-                },
-                WAIT_LIMIT));
-            EXPECT_TRUE(feeder->send_signal(SIGSTOP));
-            releaser.emplace(release_late, base(), std::ref(*feeder));
+            releaser = hold_feeder(base(), *feeder);
         }
         const TraceResult result = scada::test::trace_marked_syscalls(
             command_from("SCADA_TAG_RT_PROBE_COMMAND", arguments), PROBE_LIMIT);
