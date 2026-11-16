@@ -799,7 +799,14 @@ ctest --preset perf -R scada-tag-wake-perf-test
   takes a page fault, or if the library reports that the clocks of the
   machine cannot be read without a system call. It does not see a direct
   call of `malloc`; the banned-function check keeps those out of the
-  library. It exists only in a native build without a sanitizer.
+  library. It exists only in a native build without a sanitizer. The
+  probe locks its own memory before attach (`mlockall(MCL_CURRENT)`, or,
+  where that is refused, it touches its code and data pages), as contract
+  11.2 expects of a REALTIME process: a first touch of the probe's own code
+  inside the markers depends only on the linker's layout (seen once on
+  ARM64). It never uses `MCL_FUTURE`, so the shared regions mapped at
+  attach must still be pre-faulted by the library, and a fault in one is a
+  failure (shown by dropping a region's pages after its pre-fault).
 - `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
   one-thread check of contract 13.2 with a real process.
 - The writing side of the load tests is `scada-sim` (`libs/scada-sim`):

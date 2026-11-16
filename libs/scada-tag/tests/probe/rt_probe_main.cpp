@@ -29,6 +29,15 @@
 // (-1 if the operating system did not tell).
 // Exit code 0; 1: an error before the markers; 2: wrong arguments.
 //
+// Before it attaches, it locks its own memory with mlockall(MCL_CURRENT), as
+// contract 11.2, step 4, expects of a REALTIME process: otherwise the first
+// touch of a page of its own code or data inside the markers, which depends
+// only on how the linker laid them out, would count as a page fault of the
+// library (decision D-45). MCL_FUTURE is not used, so every shared region
+// the library maps later must still be pre-faulted by the library, and a
+// fault in one remains a failure. Where mlockall is refused (a locked-
+// memory limit), it touches those pages instead.
+//
 // Allocations are counted by replacing the global allocation functions of
 // this program. A call of `malloc` itself would not be counted; the
 // library has none, which the banned-function check enforces. The replacement
@@ -38,6 +47,9 @@
 #include "scada/tag/scada_tag.h"
 #include "scada/test/syscall_trace.h"
 
+#include <elf.h>
+#include <link.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -54,6 +66,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -163,6 +176,77 @@ long page_faults_so_far() noexcept {
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): the C library declares these fields of rusage inside unions
     return usage.ru_minflt + usage.ru_majflt;
+}
+
+// The bounds of the RELRO part of the object `info`, which is read-only
+// after relocation, or {0, 0}.
+std::pair<std::uintptr_t, std::uintptr_t> relro_of(
+    const dl_phdr_info& info) noexcept {
+    const std::span<const ElfW(Phdr)> headers(info.dlpi_phdr, info.dlpi_phnum);
+    for (const ElfW(Phdr) & header : headers) {
+        if (header.p_type == PT_GNU_RELRO) {
+            const std::uintptr_t start = info.dlpi_addr + header.p_vaddr;
+            return {start, start + header.p_memsz};
+        }
+    }
+    return {0, 0};
+}
+
+// Touches every page of the loaded segments of the object `info`: reads
+// one byte of each, and writes back one byte of each writable page outside
+// RELRO, so that a later first write is no page fault either. The program
+// has one thread when this runs.
+int touch_object(dl_phdr_info* info, std::size_t /*size*/,
+                 void* page_size) noexcept {
+    const auto page = *static_cast<const std::size_t*>(page_size);
+    // The loader protects RELRO from the page its start is in up to the
+    // page its end is in, not including that one.
+    const auto [relro_start, relro_end] = relro_of(*info);
+    const std::uintptr_t protected_start = relro_start / page * page;
+    const std::uintptr_t protected_end = relro_end / page * page;
+    const std::span<const ElfW(Phdr)> headers(info->dlpi_phdr,
+                                              info->dlpi_phnum);
+    for (const ElfW(Phdr) & header : headers) {
+        if (header.p_type != PT_LOAD) {
+            continue;
+        }
+        const std::uintptr_t first = info->dlpi_addr + header.p_vaddr;
+        const std::uintptr_t end = first + header.p_memsz;
+        for (std::uintptr_t address = first / page * page; address < end;
+             address += page) {
+            // The kernel maps a segment from the start of its first
+            // page, with the segment's protection; RELRO is made read-only
+            // later.
+            const bool writable =
+                (header.p_flags & PF_W) != 0 &&
+                (address < protected_start || address >= protected_end);
+            // In the segment: from the first byte of the segment on.
+            const std::uintptr_t touched = std::max(address, first);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): an address from the program headers of a loaded object
+            auto* const byte = reinterpret_cast<unsigned char*>(touched);
+            const std::atomic_ref<unsigned char> cell(*byte);
+            if (writable) {
+                cell.fetch_or(0, std::memory_order_relaxed);
+            } else {
+                static_cast<void>(cell.load(std::memory_order_relaxed));
+            }
+        }
+    }
+    return 0;
+}
+
+// Brings the program's own code and data into memory before attach (see
+// the top of this file). Not the shared regions: they are not mapped yet.
+void lock_own_memory() noexcept {
+    if (::mlockall(MCL_CURRENT) == 0) {
+        return;
+    }
+    const long page = ::sysconf(_SC_PAGESIZE);
+    if (page <= 0) {
+        return;
+    }
+    auto page_size = static_cast<std::size_t>(page);
+    static_cast<void>(::dl_iterate_phdr(touch_object, &page_size));
 }
 
 // Everything the marked part uses, prepared before it.
@@ -298,6 +382,7 @@ int run(std::span<const std::string_view> args) {
     const std::string own_name(args[3]);
     const std::string other_name(args[4]);
 
+    lock_own_memory();
     const scada_attach_opts options{.base_dir = base.c_str(),
                                     .retain_dir = nullptr,
                                     .tagd_uid = std::int64_t{::geteuid()}};
