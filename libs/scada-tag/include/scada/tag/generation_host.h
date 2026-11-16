@@ -133,8 +133,9 @@ struct RetainProblem {
     // UNSAVED_AT_EXIT only: the owners whose changes are not on disk,
     // comma-separated, and, when a file was still being written, the
     // written_time_ns of the file of that owner that stays (review N7).
-    std::string unsaved_owners;
+    std::string unsaved_owners;  // cut to fit a log value, ending in "..."
     std::string kept_written_time_ns;
+    std::size_t unsaved_count = 0;  // every owner, also those cut
 };
 
 // Records a producer posted in a retired generation that its consumer did

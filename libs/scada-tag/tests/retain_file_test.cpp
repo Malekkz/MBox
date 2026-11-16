@@ -713,3 +713,21 @@ TEST_F(RetainDirectory, ACorruptOwnFileIsRejectedAndOthersStillServe) {
 }
 
 }  // namespace
+
+namespace {
+
+// Review D1 of #93: a file that cannot be opened makes the look incomplete.
+TEST_F(RetainDirectory, AnOtherFileThatCannotBeOpenedMakesTheLookIncomplete) {
+    RetainFile other;
+    other.values = {{"t.a", TagType::INT64, OTHER_A, 0}};
+    write("other", other);
+    const std::vector<WantedValue> wanted = {{"t.a", TagType::INT64}};
+    EXPECT_TRUE(load_retained(dir(), uid(), "ctl", wanted).complete);
+    std::filesystem::create_symlink("other.bin", base() / "link.bin");
+    const LoadedValues loaded = load_retained(dir(), uid(), "ctl", wanted);
+    EXPECT_FALSE(loaded.complete);
+    ASSERT_EQ(loaded.rejected.size(), 1U);
+    EXPECT_EQ(loaded.rejected[0].file, "link.bin");
+}
+
+}  // namespace

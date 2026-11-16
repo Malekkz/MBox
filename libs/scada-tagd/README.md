@@ -68,7 +68,15 @@ process. The executable in `services/scada-tagd` only calls it.
   start limit, so `scada-tagd` stays down after the storage recovers. The
   stuck process cannot become a second writer. Recovery: repair the
   storage, then `systemctl reset-failed scada-tagd.service` and
-  `systemctl start scada-tagd.service`.
+  `systemctl start scada-tagd.service`. A process stuck in the kernel in
+  state D can never be reaped: systemd never sees the exit code 3, and only
+  a reboot clears it.
+- `retain files not all read for moved tags` stays until the look
+  succeeds. With more than 1,023 other owners' files it never does: remove
+  from the retain directory the files of owners that are in no tag set any
+  more (`<owner>.bin` for an owner no `tag-set.json` lists); a damaged file
+  that is logged as `retain file ignored` blocks it too and is removed the
+  same way.
 - The age of a retained value across a reboot needs `adjtimex(2)` (the
   `@clock` system-call set of systemd). A unit with `ProtectClock=yes` or
   `SystemCallFilter=~@clock` would make every such age unknown, or end the
@@ -107,7 +115,7 @@ the standard error stream.
 | `retain file ignored` | WARNING, once for each file: it failed its checks | `SUBJECT` (the file; outside input), `DETAIL` |
 | `retain file not written` | WARNING, once until a write succeeds: a retain file, or the directory after removals, could not be written | `SUBJECT` (owner, or `retain directory`), `DETAIL` |
 | `retain writer did not finish within its bound` | ERROR: a wait for the writer thread reached 5 s | `SUBJECT` (`retain writer`), `DETAIL` |
-| `values unsaved at exit` | ERROR, once at the stop when values of owners are not on disk; when the writer is still busy (exit with code 3), `SUBJECT` is the owner whose file is being written | `SUBJECT`, `DETAIL`, `UNSAVED_OWNERS`, `KEPT_WRITTEN_TIME_NS` (the `written_time_ns` of the file of `SUBJECT` that stays; `none` if it has none; `-` if no file was being written) |
+| `values unsaved at exit` | ERROR, once at the stop when values of owners are not on disk; when the writer is still busy (exit with code 3), `SUBJECT` is the owner whose file is being written | `SUBJECT`, `DETAIL`, `UNSAVED_COUNT`, `UNSAVED_OWNERS` (as many names as fit, then `...`), `KEPT_WRITTEN_TIME_NS` (the `written_time_ns` of the file of `SUBJECT` that stays, as `scada-tagd` last wrote or read it, not read at the stop; it is the oldest stamp of its values, which can be older than the write; `none` if none is known; `-` if no file was being written) |
 | `the retain directory is not usable` | CRITICAL, at the start, which then fails | `DIRECTORY`, `STATUS`, `DETAIL` |
 | `retain files not all read for moved tags` | ERROR, once per start: the retain directory could not be listed, or holds more than 1,023 other owners' files, so the values of tags that moved to an owner that has not attached cannot all be found. Files of owners that are gone are kept, and it is tried again at every check | `SUBJECT`, `DETAIL` |
 | `removed the retain file of an owner that is gone` | NOTICE | `FILE` |

@@ -1446,3 +1446,70 @@ TEST_F(MovedKeeper, TheStartTakesNoValueFromAFormerOwnersPeriodicFile) {
 }
 
 }  // namespace
+
+// Review D1 and D2 of #93: a look that could not read a file, or that did
+// not reach the newest holder of a value, takes nothing.
+namespace {
+
+TEST_F(MovedKeeper, AFileThatCannotBeOpenedKeepsTheFilesOfGoneOwners) {
+    {
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        RetainFile moved;
+        moved.values = {{"plant.level", TagType::FLOAT64, VALUE_7, 0}};
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", moved, detail).ok());
+    }
+    // Opened with O_NOFOLLOW, a symbolic link fails with ELOOP: an open
+    // error, as EMFILE or EIO would be.
+    std::filesystem::create_symlink("io.bin", retain() / "link.bin");
+    start_host(moved_to_web(retained_set()));
+    const std::int64_t now = scada::monotonic_ns();
+    for (int i = 0; i < ROUNDS; ++i) {
+        const CheckReport report = round(now + (i * INTERVAL_NS));
+        EXPECT_TRUE(report.retain_files_removed.empty()) << i;
+    }
+    EXPECT_TRUE(has_file("io"));
+    EXPECT_FALSE(has_file("web"));  // nothing taken from an incomplete look
+}
+
+// The newest file holding plant.level sorts after MAX_OWNERS other files:
+// an older value seen before the cut is not taken.
+::testing::AssertionResult newest_holder_past_the_cut(
+    const std::filesystem::path& retain) {
+    const Fd directory = scada::tag::testing::open_directory(retain);
+    std::string detail;
+    RetainFile older;
+    older.written_time_ns = 1;
+    older.values = {{"plant.level", TagType::FLOAT64, VALUE_7, 0}};
+    bool written =
+        write_retain_file(directory.get(), "a.older", older, detail).ok();
+    RetainFile other;
+    other.values = {{"other.tag", TagType::INT64, 1, 0}};
+    for (std::uint32_t i = 0; written && i < MAX_OWNERS; ++i) {
+        written = write_retain_file(directory.get(), "m" + std::to_string(i),
+                                    other, detail)
+                      .ok();
+    }
+    RetainFile newest;
+    newest.written_time_ns = 2;
+    newest.final = true;
+    newest.values = {{"plant.level", TagType::FLOAT64, VALUE_8, 0}};
+    written =
+        written &&
+        write_retain_file(directory.get(), "z.newest", newest, detail).ok();
+    return written ? ::testing::AssertionSuccess()
+                   : ::testing::AssertionFailure() << detail;
+}
+
+TEST_F(MovedKeeper, AnOlderValueBeforeTheCutIsNotTaken) {
+    ASSERT_TRUE(newest_holder_past_the_cut(retain()));
+    start_host(moved_to_web(retained_set()));
+    const std::int64_t now = scada::monotonic_ns();
+    for (int i = 0; i < ROUNDS; ++i) {
+        static_cast<void>(round(now + (i * INTERVAL_NS)));
+    }
+    EXPECT_FALSE(has_file("web"));
+}
+
+}  // namespace

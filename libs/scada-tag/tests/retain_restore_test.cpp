@@ -606,8 +606,26 @@ TEST_F(Restore, AMovedTagHasTheOriginOfAnotherOwner) {
     const Attached feeder = attached("io");
     ASSERT_NE(feeder, nullptr);
     EXPECT_EQ(info_of(*feeder, "plant.level").origin, SCADA_RETAIN_OTHER_OWNER);
+    // From a FINAL file: no FINAL wait is missing.
+    EXPECT_EQ(info_of(*feeder, "plant.level").final_wait_expired, 0);
     // Nothing on file for plant.mode.
     EXPECT_EQ(info_of(*feeder, "plant.mode").origin, SCADA_RETAIN_NONE);
+}
+
+// Review D3 of #93: a value taken from another owner's file that is not
+// FINAL reports an expired FINAL wait, although no wait happened (#90).
+TEST_F(Restore, AMovedTagFromAFileThatIsNotFinalReportsAnExpiredWait) {
+    RetainFile former;
+    former.values = {
+        {"plant.level", TagType::FLOAT64, LEVEL_BITS, SOURCE_TIME}};
+    write_file("io.old", former);
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().final_waits_expired, 0U);  // none ran out
+    const scada_tag_retain_info_t info = info_of(*feeder, "plant.level");
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
+    EXPECT_EQ(info.final_wait_expired, 1);
 }
 
 TEST_F(Restore, AReusedRegionReportsNoRestore) {

@@ -46,6 +46,9 @@ namespace scada::tag {
 namespace {
 
 constexpr std::int64_t NS_PER_MS = 1'000'000;
+// The names of owners with unsaved values that `values unsaved at exit`
+// lists, in bytes: below the 96 of a log value, with room for ", ...".
+constexpr std::size_t UNSAVED_NAMES_BYTES = 88;
 constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 
@@ -226,6 +229,7 @@ void RetainWriter::run(const std::stop_token& stop) {
                 done.values = job->mapped().file.values.size();
                 done.final = job->mapped().file.final;
                 done.source = job->mapped().file.source;
+                done.written_time_ns = job->mapped().file.written_time_ns;
                 done.written =
                     write_retain_file(dir_fd_, done.owner, job->mapped().file,
                                       done.detail, ops_)
@@ -417,6 +421,7 @@ void RetainKeeper::load_watched(
         }
         if (loaded.own.has_value()) {
             state.has_file = true;
+            state.written_time_on_disk = loaded.own->written_time_ns;
             if (loaded.own->final) {
                 state.final_source =
                     newer(state.final_source, loaded.own->source);
@@ -586,8 +591,11 @@ void RetainKeeper::note_restores(const std::string& owner,
                 value.source_not_final || (!source.own && !source.final);
             stamp = source.stamp;
         } else {
-            // The source is not found any more: of unknown age, and not
-            // known to be FINAL.
+            // No file holds the restored value: it came from a file that
+            // changed since, or from the owner itself (scada-link passing on
+            // a slave's restored value, reference 17). Marked ADOPTED and not
+            // FINAL, of unknown age: the safe side, which a restart reports
+            // as a degraded restore (#90) until the owner writes the tag.
             value.adopted = true;
             value.source_not_final = true;
         }
@@ -708,6 +716,7 @@ void RetainKeeper::collect(std::int64_t now_mono_ns, CheckReport& report) {
         if (done.written) {
             state.has_file = true;
             state.failing = false;
+            state.written_time_on_disk = done.written_time_ns;
             if (done.final) {
                 state.final_on_disk = newer(state.final_on_disk, done.source);
             }
@@ -1012,7 +1021,11 @@ bool RetainKeeper::adopt_moved_values() {
             load_retained(directory_.get(), tagd_uid_, owner.name, wanted);
         complete = complete && loaded.complete;
         OwnerState& state = states_[owner.name];
-        for (std::size_t i = 0; i < loaded.values.size(); ++i) {
+        // Review D2 of #93: from a look that did not see every file nothing
+        // is taken; an older value would stay for good. Rejected files are
+        // still reported.
+        for (std::size_t i = 0; loaded.complete && i < loaded.values.size();
+             ++i) {
             const std::optional<RetainedValue>& value = loaded.values[i];
             const RetainSource& source = loaded.sources.at(i);
             if (!value.has_value() || source.own) {
@@ -1129,7 +1142,10 @@ void RetainKeeper::check(int base_fd, std::int64_t now_mono_ns,
     // which is written below, before the file of the former owner is
     // removed. Once: what the former owners left does not change.
     if (persists() && current_ != nullptr && retired_.empty() &&
-        !moved_values_adopted_) {
+        !moved_values_adopted_ && now_mono_ns >= next_adoption_mono_ns_) {
+        // Review E1 of #93: an incomplete look is tried again once per
+        // retain interval, not at every check.
+        next_adoption_mono_ns_ = now_mono_ns + interval_ns_;
         // Review B5: a look that could not see every file is tried again at
         // the next check, and no file of a gone owner is removed meanwhile.
         moved_values_adopted_ = adopt_moved_values();
@@ -1172,17 +1188,34 @@ void RetainKeeper::flush(CheckReport& report) {
     }
     wait_bounded(report);
     collect(now, report);
+    // Review E2 of #93: the names that fit one log value, and the count.
     std::string unsaved;
+    std::size_t count = 0;
+    bool cut = false;
     for (const auto& [name, state] : states_) {
-        if (state.dirty || state.done_token != state.token) {
-            unsaved += (unsaved.empty() ? "" : ", ") + name;
+        if (!state.dirty && state.done_token == state.token) {
+            continue;
         }
+        ++count;
+        const std::string next = (unsaved.empty() ? "" : ", ") + name;
+        if (cut || unsaved.size() + next.size() > UNSAVED_NAMES_BYTES) {
+            cut = true;
+            continue;
+        }
+        unsaved += next;
     }
-    if (unsaved.empty()) {
+    if (count == 0) {
         return;
     }
-    RetainProblem problem{"retained values", "not saved at the stop",
-                          RetainProblemKind::UNSAVED_AT_EXIT, unsaved, ""};
+    if (cut) {
+        unsaved += ", ...";
+    }
+    RetainProblem problem{"retained values",
+                          "not saved at the stop",
+                          RetainProblemKind::UNSAVED_AT_EXIT,
+                          unsaved,
+                          "",
+                          count};
     if (report.retain_writer_bound_reached) {
         // Review N7: one record, naming the owner whose file is still being
         // written and the file of it that stays.
@@ -1190,13 +1223,14 @@ void RetainKeeper::flush(CheckReport& report) {
         problem.detail = "a retain file was still being written at the stop";
         if (!writing.empty()) {
             problem.subject = writing;
-            std::string ignored;
-            const Result<RetainFile> previous =
-                read_retain_file(directory_.get(), retain_file_name(writing),
-                                 tagd_uid_, ignored);
+            // Review D4 of #93: from memory, never from the storage that
+            // just failed to finish a write.
+            const auto state = states_.find(writing);
             problem.kept_written_time_ns =
-                previous.ok() ? std::to_string(previous.value().written_time_ns)
-                              : std::string("none");
+                state != states_.end() &&
+                        state->second.written_time_on_disk.has_value()
+                    ? std::to_string(*state->second.written_time_on_disk)
+                    : std::string("none");
         }
     }
     report.retain_problems.push_back(std::move(problem));

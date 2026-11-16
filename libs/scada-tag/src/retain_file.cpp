@@ -858,12 +858,14 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
                            std::span<const WantedValue> wanted,
                            LoadedValues& loaded) {
     std::string detail;
+    bool listed_all = true;
     const Result<std::vector<std::string>> entries =
-        list_directory(dir_fd, detail);
+        list_directory(dir_fd, detail, listed_all);
     if (!entries.ok()) {
         loaded.complete = false;
         return;
     }
+    loaded.complete = loaded.complete && listed_all;
     std::vector<std::int64_t> found_written(wanted.size());
     std::vector<std::optional<RetainedValue>> others(wanted.size());
     std::vector<RetainSource> other_sources(wanted.size());
@@ -880,6 +882,10 @@ void take_from_other_files(int dir_fd, std::uint32_t tagd_uid,
             read_retain_file(dir_fd, entry, tagd_uid, detail);
         if (!other.ok()) {
             if (other.status().code() != StatusCode::NOT_FOUND) {
+                // Review D1 of #93: a file that could not be read may hold
+                // the value (an open failing with EMFILE or EIO, a damaged
+                // file): the look did not see everything.
+                loaded.complete = false;
                 loaded.rejected.push_back({entry, detail});
             }
             continue;
@@ -931,6 +937,7 @@ LoadedValues load_retained(int dir_fd, std::uint32_t tagd_uid,
         }
         loaded.own = std::move(own).value();
     } else if (own.status().code() != StatusCode::NOT_FOUND) {
+        loaded.complete = false;
         loaded.rejected.push_back({own_name, detail});
     }
     // A tag that moved to this owner.

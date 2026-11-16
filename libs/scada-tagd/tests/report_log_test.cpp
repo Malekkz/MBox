@@ -509,9 +509,9 @@ TEST_F(ReportLog, EachRetainProblemHasItsOwnRecordAndMessageId) {
                                 {},
                                 {}});
     scada::tagd::log_retain_problem(
-        logger(),
-        RetainProblem{"io", "still being written",
-                      RetainProblemKind::UNSAVED_AT_EXIT, "io, web", "1700"});
+        logger(), RetainProblem{"io", "still being written",
+                                RetainProblemKind::UNSAVED_AT_EXIT,
+                                "io, web, ...", "1700", 3});
     const std::vector<std::string> records = delivered();
     ASSERT_EQ(records.size(), 4U);
     EXPECT_TRUE(has(records[0], "MESSAGE=retain file ignored"));
@@ -529,7 +529,8 @@ TEST_F(ReportLog, EachRetainProblemHasItsOwnRecordAndMessageId) {
     EXPECT_TRUE(has(records[3], "MESSAGE=values unsaved at exit"));
     EXPECT_TRUE(has(records[3], "PRIORITY=3"));
     EXPECT_TRUE(has(records[3], "SUBJECT=io"));
-    EXPECT_TRUE(has(records[3], "UNSAVED_OWNERS=io, web"));
+    EXPECT_TRUE(has(records[3], "UNSAVED_OWNERS=io, web, ..."));
+    EXPECT_TRUE(has(records[3], "UNSAVED_COUNT=3"));
     EXPECT_TRUE(has(records[3], "KEPT_WRITTEN_TIME_NS=1700"));
     EXPECT_TRUE(has(records[3], "MESSAGE_ID=7cf5c1c8535f44f6a297db538666d7a3"));
 }

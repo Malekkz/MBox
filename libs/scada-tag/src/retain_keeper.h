@@ -67,6 +67,8 @@ public:
         // `written` false if the directory could not be synced.
         bool removal = false;
         std::vector<std::string> removed;
+        // The written_time_ns of the file written.
+        std::int64_t written_time_ns = 0;
     };
 
     // `dir_fd` and `ops` are borrowed and stay valid while this object
@@ -258,6 +260,9 @@ private:
         // restored, with the stamp of the file they came from (decision
         // D-59); a write of the owner removes the entry.
         std::map<std::string, RetainStamp, std::less<>> not_written;
+        // The written_time_ns of the owner's file on disk, as last read or
+        // written; nothing if it has none known (review D4 of #93).
+        std::optional<std::int64_t> written_time_on_disk;
     };
 
     // Fills `watched.owners` and `watched.processes` from its header.
@@ -357,8 +362,9 @@ private:
     std::vector<RetainProblem> pending_problems_;
     bool gone_owners_removed_ = false;
     bool moved_values_adopted_ = false;
-    bool adoption_reported_ = false;  // an incomplete look, logged once
-    std::uint64_t writer_lost_ = 0;   // RetainWriter::lost at the last look
+    bool adoption_reported_ = false;          // an incomplete look, logged once
+    std::int64_t next_adoption_mono_ns_ = 0;  // the next look, if incomplete
+    std::uint64_t writer_lost_ = 0;  // RetainWriter::lost at the last look
     // Last: destroyed first, while the directory is still open.
     std::unique_ptr<RetainWriter> writer_;
 };

@@ -212,10 +212,12 @@ void log_retain_problem(scada::Logger& logger,
     if (problem.kind == RetainProblemKind::UNSAVED_AT_EXIT) {
         // KEPT_WRITTEN_TIME_NS: the file of SUBJECT that survives the write
         // that did not finish; "none" if it has none.
+        const std::string count = std::to_string(problem.unsaved_count);
         logger.log(
             level, message,
             {{"SUBJECT", problem.subject},
              {"DETAIL", problem.detail},
+             {"UNSAVED_COUNT", count},
              {"UNSAVED_OWNERS", problem.unsaved_owners},
              {"KEPT_WRITTEN_TIME_NS", problem.kept_written_time_ns.empty()
                                           ? std::string("-")

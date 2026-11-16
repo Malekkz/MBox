@@ -485,6 +485,7 @@ TEST_F(Retained,
 namespace {
 
 constexpr std::int64_t OLD_VALUE = 41;
+constexpr std::int64_t OLD_WRITTEN_TIME = 1'234'567;
 // The worst case is 12 s (a stop during the 5-s wait of the start, the 5-s
 // bound of the stop, 2 s for the log); this test sees about 5 s. Below the
 // 15 s of TimeoutStopSec, with a margin over the worst case.
@@ -498,6 +499,7 @@ protected:
         scada::tag::RetainFile old;
         old.values = {{"plant.count", scada::tag::TagType::INT64,
                        static_cast<std::uint64_t>(OLD_VALUE), 0}};
+        old.written_time_ns = OLD_WRITTEN_TIME;
         const scada::Fd directory(
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
             ::open(retain().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
@@ -562,7 +564,9 @@ protected:
                 std::string::npos ||
             !has(err, R"(SUBJECT="io")") ||
             !has(err, R"(UNSAVED_OWNERS="io")") ||
-            !has(err, "KEPT_WRITTEN_TIME_NS=") ||
+            !has(err, R"(UNSAVED_COUNT="1")") ||
+            // The file that stays, as scada-tagd knew it (review D4 of #93).
+            !has(err, R"(KEPT_WRITTEN_TIME_NS="1234567")") ||
             !has(err, "7cf5c1c8535f44f6a297db538666d7a3") ||
             !has(err, "0031dfe3391142b0b9fa995b07115e10")) {
             return ::testing::AssertionFailure() << "records missing: " << err;

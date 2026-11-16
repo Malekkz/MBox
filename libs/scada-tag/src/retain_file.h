@@ -339,10 +339,12 @@ struct LoadedValues {
     std::vector<RetainSource> sources;
     // The owner's own file, if it could be read.
     std::optional<RetainFile> own;
-    // False if other owners' files were needed and not all could be looked
-    // at: the directory could not be listed, or it holds more than
-    // MAX_OWNERS of them (review B5). `values` may then lack a value that
-    // is on file.
+    // False if not every file that may hold a wanted value could be looked
+    // at: a file other than a missing one could not be read (the own file
+    // or another owner's), the directory could not be listed or held more
+    // than MAX_DIRECTORY_ENTRIES entries, or more than MAX_OWNERS other
+    // owners' files were needed (reviews B5, D1). `values` may then lack a
+    // value that is on file, or hold an older one.
     bool complete = true;
     std::vector<RejectedRetainFile> rejected;
 };
