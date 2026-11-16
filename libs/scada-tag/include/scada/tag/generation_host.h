@@ -112,6 +112,16 @@ struct RetainProblem {
 // write: input.
 struct UnconsumedQueue {
     std::string queue;
+    // An events queue: its records are audit records.
+    bool events = false;
+    // False if the count cannot be told: the region or the cursor cannot be
+    // read, the pair is not valid (a stopped queue, the all-ones cursor of
+    // a replaced file), or the generation was abandoned, not removed.
+    bool known = false;
+    // Known: the positions [first, end) were not taken, `records` of them.
+    // A position is an event's `seq` and the low part of a request id.
+    std::uint64_t first = 0;
+    std::uint64_t end = 0;
     std::uint64_t records = 0;
 };
 
@@ -132,8 +142,9 @@ struct RetiredGeneration {
     // True if it could not be removed by twice the timeout: it is no
     // longer tried and stays until the next boot (section 3.3).
     bool abandoned = false;
-    // When it was removed: the queues that still held records. A queue
-    // whose region or cursor cannot be read is not listed.
+    // When it was removed, or abandoned: the queues that still held
+    // records, and those whose count is unknown. An empty queue is not
+    // listed.
     std::vector<UnconsumedQueue> unconsumed;
 };
 

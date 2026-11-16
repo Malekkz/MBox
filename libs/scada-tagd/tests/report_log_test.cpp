@@ -320,4 +320,45 @@ TEST_F(ReportLog, HeldLateHeartbeatsAreLoggedAtTheStop) {
     EXPECT_TRUE(has(records[1], "LATE_BEATS=2"));
 }
 
+// Positions of records left in a queue, for the record of decision D-54.
+constexpr std::uint64_t FIRST_LEFT = 10;
+constexpr std::uint64_t END_LEFT = 13;
+
+// Decision D-54 (review of PR #82, B5): records left in a removed
+// generation, a known count with its positions, and an unknown one.
+TEST_F(ReportLog, UnconsumedRecordsCarryTheirMessageIdRangeOrUnknown) {
+    scada::tag::RetiredGeneration retired;
+    retired.generation = 4;
+    retired.removed = true;
+    scada::tag::UnconsumedQueue events;
+    events.queue = "events.io";
+    events.events = true;
+    events.known = true;
+    events.first = FIRST_LEFT;
+    events.end = END_LEFT;
+    events.records = END_LEFT - FIRST_LEFT;
+    retired.unconsumed.push_back(events);
+    scada::tag::UnconsumedQueue requests;
+    requests.queue = "cmd.io.web";
+    retired.unconsumed.push_back(requests);
+    scada::tagd::log_unconsumed(logger(), retired);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=audit records left unconsumed in a removed "
+                    "generation"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=42c8e35948cb467eb6d894d3bb0476a8"));
+    EXPECT_TRUE(has(records[0], "GENERATION=4"));
+    EXPECT_TRUE(has(records[0], "QUEUE=events.io"));
+    EXPECT_TRUE(has(records[0], "RECORDS=3"));
+    EXPECT_TRUE(has(records[0], "FIRST_SEQ=10"));
+    EXPECT_TRUE(has(records[0], "END_SEQ=13"));
+    EXPECT_TRUE(has(records[1],
+                    "MESSAGE=records left unconsumed in a removed generation"));
+    EXPECT_TRUE(has(records[1], "QUEUE=cmd.io.web"));
+    EXPECT_TRUE(has(records[1], "RECORDS=unknown"));
+    EXPECT_FALSE(has(records[1], "FIRST_SEQ="));
+}
+
 }  // namespace

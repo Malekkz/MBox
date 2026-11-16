@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -195,6 +196,11 @@ void Attachment::drain_retiring_requests() noexcept {
         return;
     }
     for (const QueueAccess& access : queue_access_) {
+        if (access.consumed && access.kind == QueueKind::CMD) {
+            // A requester that created its queue after this process last
+            // looked may have posted to it (review of PR #82, B2).
+            static_cast<void>(look_for_queue_now(access.id));
+        }
         if (access.consumed && access.kind == QueueKind::CMD &&
             drain_queue(access) && access.answer_queue.has_value()) {
             // As in drain_requests: a failed wake delays the answers by one
@@ -206,11 +212,18 @@ void Attachment::drain_retiring_requests() noexcept {
     }
 }
 
-void Attachment::look_for_queue_now(std::size_t queue_id) {
+bool Attachment::look_for_queue_now(std::size_t queue_id) noexcept {
     const QueueAccess& access = queue(queue_id);
-    if (!access.produced && peers_.bytes(access.queue_slot).empty()) {
-        static_cast<void>(peers_.look_now(directory_.get(), access.queue_slot));
+    if (access.produced || !peers_.bytes(access.queue_slot).empty()) {
+        return true;
     }
+    try {
+        static_cast<void>(peers_.look_now(directory_.get(), access.queue_slot));
+    } catch (const std::exception&) {
+        // A failed allocation: the region stays unmapped, as if missing.
+        return false;
+    }
+    return true;
 }
 
 void Attachment::drain_request_queue(std::size_t queue_id) noexcept {

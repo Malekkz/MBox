@@ -833,8 +833,13 @@ TEST_F(Keeper, RecordsLeftInARemovedGenerationAreCountedPerQueue) {
     const RetiredGeneration& retired = report.retired.at(0);
     ASSERT_TRUE(retired.removed);
     ASSERT_EQ(retired.unconsumed.size(), 1U);
-    EXPECT_EQ(retired.unconsumed.at(0).queue, "events.io");
-    EXPECT_EQ(retired.unconsumed.at(0).records, POSTED);
+    const UnconsumedQueue& left = retired.unconsumed.at(0);
+    EXPECT_EQ(left.queue, "events.io");
+    EXPECT_TRUE(left.events);
+    EXPECT_TRUE(left.known);
+    EXPECT_EQ(left.first, 0U);
+    EXPECT_EQ(left.end, POSTED);
+    EXPECT_EQ(left.records, POSTED);
 }
 
 // Issue #65 (decision D-54): nothing of a queue is carried into the next

@@ -76,6 +76,10 @@ std::int64_t monotonic_now() noexcept {
     return (std::int64_t{now.tv_sec} * NANOSECONDS_PER_SECOND) + now.tv_nsec;
 }
 
+// A pause, not a wait for a condition (review of PR #82, N3): the posts are
+// paced on purpose, so that the generation change of the test falls into
+// the middle of the stream, and an attach after RETIRING has nothing to
+// wait on while scada-tagd builds the next generation; it is retried.
 void pause_ns(long nanoseconds) noexcept {
     const timespec pause{.tv_sec = 0, .tv_nsec = nanoseconds};
     static_cast<void>(::nanosleep(&pause, nullptr));
@@ -286,9 +290,17 @@ public:
     }
 
 private:
+    // Writes the heartbeat until SIGTERM, waiting for the signal itself,
+    // at most RETRY_PAUSE_NS at a time.
     void idle() {
-        while (!stopping()) {
-            pause_ns(RETRY_PAUSE_NS);
+        const timespec period{.tv_sec = 0, .tv_nsec = RETRY_PAUSE_NS};
+        for (;;) {
+            if (scada_tag_heartbeat(ctx_) == SCADA_E_RETIRING && !reattach()) {
+                return;
+            }
+            if (::sigtimedwait(&signals_, nullptr, &period) >= 0) {
+                return;
+            }
         }
     }
 

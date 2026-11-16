@@ -244,14 +244,25 @@ std::uint64_t post_until_retiring(Queue& queue) {
 
 // Consumes `queue`, counting into `delivered`; after a few records sets
 // `state` to RETIRING, as scada-tagd would, and drains until
-// SCADA_E_RETIRING.
+// SCADA_E_RETIRING. Gives up after LIMIT (review of PR #82, N3): sets
+// `state` to RETIRING then, so that the poster stops too, and the counts
+// show the failure.
 void consume_retire_and_drain(Queue& queue, std::uint32_t& state,
                               std::atomic<std::uint64_t>& delivered) {
     constexpr std::uint64_t RETIRE_AFTER = 5;
+    // Far longer than a round takes on a loaded machine.
+    constexpr std::int64_t ROUND_LIMIT_NS = 10'000'000'000;
+    const std::int64_t deadline = scada::monotonic_ns() + ROUND_LIMIT_NS;
     scada_event_record record{};
     for (;;) {
         const int code = next(queue, record);
         if (code == SCADA_E_RETIRING) {
+            return;
+        }
+        if (scada::monotonic_ns() >= deadline) {
+            ADD_FAILURE() << "the consumer did not finish, last code " << code;
+            store_shared(state, to_raw(GenerationState::RETIRING),
+                         std::memory_order_seq_cst);
             return;
         }
         if (code != SCADA_OK) {
@@ -1847,6 +1858,29 @@ TEST_F(Queues, RequestsLeftInARetiringGenerationAreAnsweredAborted) {
 }
 
 TEST_F(Queues, ADetachInARetiringGenerationAnswersItsRequestsAborted) {
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    io().reset();
+    look_again(*web());
+    EXPECT_TRUE(
+        takes_answers(*answers, SCADA_RESULT_ABORTED, {0}, SCADA_E_RETIRING));
+}
+
+// Review of PR #82, B2: a driver that attached before its requester
+// created the request queue has not mapped it when the generation retires;
+// its detach still answers the request ABORTED.
+TEST_F(Queues, ADetachAnswersRequestsOfAQueueItHadNotSeen) {
+    io().reset();
+    web().reset();
+    std::filesystem::remove(generation_dir() / "cmd.io.web");
+    io() = attached("io");
+    web() = attached("web");
+    ASSERT_NE(io(), nullptr);
+    ASSERT_NE(web(), nullptr);
     const QueuePtr requests = open(*web(), "cmd.io.web");
     const QueuePtr answers = open(*web(), "result.io.web");
     ASSERT_NE(requests, nullptr);

@@ -844,6 +844,25 @@ Decision D-54 (issue #65).
   RETIRING. An event refused at the second load may still be delivered
   (the safe side). A request is checked before publishing only: its
   requester is never told "refused" for a request a driver may execute.
+- Two consequences of the handshake. A request whose post loaded RUNNING
+  and published after its consumer drained and detached is accepted and
+  never answered: it is not executed, and its requester reports it at
+  detach as failed with its outcome unknown. An event refused after it was
+  published and posted again after the reattach leaves two journal
+  records for one action.
+- What a poster does on `SCADA_E_RETIRING` (reference 14.4, 5.5; review of
+  PR #82):
+  - an event refused: the action it records is not taken;
+  - a request refused: the command fails visibly, as not executed. An
+    OPERATOR command is never posted again by the service: its interlocks
+    were judged on the state of the old generation, and its
+    `select_request_id` names an id of the old generation. The operator
+    gives it again if it is still wanted;
+  - AUTO writes are computed again by the next cycle in the new generation;
+    until then outputs hold or go to their safe behaviour (reference 5.5,
+    section 9.3);
+  - selections (select before operate) do not survive a generation change:
+    a selection made in the old generation is gone, and its OPERATE fails.
 - `scada_queue_next` in a RETIRING generation: on an event or result queue
   it returns the records left and then `SCADA_E_RETIRING`, without waiting;
   on a request queue it answers every request still queued ABORTED and
@@ -852,6 +871,17 @@ Decision D-54 (issue #65).
   a drain can end, the library looks at once for a producer's region it has
   not mapped, not at most once a second: a producer may have created it and
   posted since the last look.
+- A driver and a request it already took: it executes the request and
+  posts its answer before it detaches, or it drops it unexecuted (the
+  requester then reports it as unknown). It never acts on it after it
+  detached: the operator may have given the command again, and the output
+  would operate twice.
+- `scada_queue_next` in a RETIRING generation makes system calls, also
+  with timeout 0: it looks for a producer region it has not mapped
+  (`fstatat`, and `open`, `mmap` and the pre-fault when the region is
+  there) and wakes the requester after answering ABORTED (`futex`). A
+  real-time driver that polls in its cycle stops polling there and
+  detaches outside the cycle.
 - Nothing is carried over: every region of the new generation is new, so
   `write_seq`, cursors and ids start at 0 (section 9.4). The processes do
   their part: a driver never answers in the new generation a request it took
@@ -860,10 +890,14 @@ Decision D-54 (issue #65).
   not answered as failed with its outcome unknown, never as ABORTED; a
   consumer that remembers ids to drop duplicates keys them by generation
   (`scada_status.generation`) or forgets them at reattach.
-- When `scada-tagd` removes a retired generation it logs, per queue, the
-  records still in it that the consumer did not take (`records left
-  unconsumed in a removed generation`, WARNING), from the queue's
-  `write_seq` and the consumer's cursor.
+- When `scada-tagd` removes or abandons a retired generation it logs, per
+  queue, the records still in it that the consumer did not take, from the
+  queue's `write_seq` and the consumer's cursor: a WARNING with a fixed
+  `MESSAGE_ID`, the count and the positions `[cursor, write_seq)`, named
+  audit records for an events queue, and "unknown" when the pair cannot be
+  read or is not valid, or the generation was abandoned. After the 30-s
+  timeout the count is an upper bound: a consumer may still have been
+  draining.
 
 ## 10. Process regions (`proc.<process>`)
 
@@ -1052,7 +1086,7 @@ a second for each missing region.
    accepted has been delivered; on a request queue that call answers every
    request still queued ABORTED. The process does this within 1 second, the
    part of the 5 s of conformance test 21 left for draining after the 1 s in
-   which processes see RETIRING (reference 5.3). Then it detaches (which
+   which processes see RETIRING (reference 5.5). Then it detaches (which
    answers ABORTED what is still in its request queues), attaches to
    `current`, and resolves its handles again. Tag writes stay allowed until
    the process detaches: what it writes there is kept by step 3.
@@ -1551,8 +1585,9 @@ ARM64:
 20. Restarting `scada-tagd` with an unchanged tag set leaves all other
     processes running without interruption.
 21. A generation change completes within 5 seconds with all processes
-    reattached, retained values restored, no event record lost, and no write
-    request of the old generation executed.
+    reattached and retained values restored. Its queue part: no event
+    record whose post returned `SCADA_OK` is lost, and each request a driver
+    executed was posted in the generation in which the driver took it.
 22. RT-safe functions make no system calls and no allocations, including the
     first read of a tag after resolve (checked by instrumentation in the test
     build).
@@ -1683,12 +1718,13 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
-| 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.3. |
+| 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain. Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
 
 Migration, 0.18 to 0.19: none for data; the layout version stays 1 and no
 structure in shared memory changed. A producer that posted events or requests
-in a RETIRING generation now gets `SCADA_E_RETIRING` and must post again after
-it reattached. A consumer whose `scada_queue_next` returns
+in a RETIRING generation now gets `SCADA_E_RETIRING`. A refused event means the
+action is not taken; a refused request fails visibly as not executed, and an
+OPERATOR command is not posted again by the service (section 9.5). A consumer whose `scada_queue_next` returns
 `SCADA_E_RETIRING` has drained the queue and detaches; it no longer waits out
 its timeout there. Requesters and consumers that remember ids key them by
 generation or forget them at reattach (section 9.5).

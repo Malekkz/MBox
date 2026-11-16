@@ -42,9 +42,8 @@ process. The executable in `services/scada-tagd` only calls it.
   values of a process still attached are written, but not marked FINAL. A
   generation that cannot be removed is tried for at most 60 s after it
   retired, then logged as abandoned and left to the next boot. When it
-  removes one, it logs per queue the records the consumer did not take
-  (`records left unconsumed in a removed generation`, WARNING; decision
-  D-54).
+  removes or abandons one, it logs per queue the records the consumer did
+  not take (decision D-54; see the log records below).
 - Once no generation is retired and every owner has its file, files of
   owners the tag set no longer has are removed.
 - On `SIGTERM` or `SIGINT`: writes the retained values that changed,
@@ -86,6 +85,7 @@ the standard error stream.
 | `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |
 | `process still attached to a retired generation` | WARNING, before such a removal | `GENERATION`, `PROCESS` (`<name> (pid <pid>)`) |
 | `cannot remove a retired generation` | ERROR, once | `GENERATION` |
+| `audit records left unconsumed in a removed generation` (an events queue), `records left unconsumed in a removed generation` (a request or result queue) | WARNING, once for each such queue when a retired generation is removed or abandoned (decision D-54). Records a post accepted that the consumer never took; for an events queue, actions whose records the journal lacks. After the 30-s timeout a consumer may still have been draining, so `RECORDS` is then an upper bound | `GENERATION`, `QUEUE`, `RECORDS` (a count, or `unknown` when the queue file or the consumer's cursor cannot be read, the pair is not valid, or the generation was abandoned), and for a count `FIRST_SEQ` and `END_SEQ`: the positions `[FIRST_SEQ, END_SEQ)` not taken, an event's `seq` and the low part of a request id |
 | `stopped on request` | NOTICE | |
 
 ### Message IDs
@@ -99,6 +99,7 @@ The liveness records carry a fixed journald `MESSAGE_ID` as their last field
 | `process up` | `3e293a9e793b4fa08fafb02b5f16ae7f` |
 | `process restarted` | `f35dfeb8e8124cc88b219cabf6947b00` |
 | `process not attached` | `0f57ce3d6dbc4891abd0e55e240f04f9` |
+| `audit records left unconsumed in a removed generation`, `records left unconsumed in a removed generation` | `42c8e35948cb467eb6d894d3bb0476a8` |
 | `heartbeat late` | `31aad0d613b645d39a83e7978c4531ec` |
 | `heartbeat late before this check` | `c4de2438d3574ca38f45771de9254e3a` |
 
