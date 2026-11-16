@@ -1,0 +1,34 @@
+AArch64 handshake
+"A post against the retirement of its generation and the drain of its consumer, contract 0.19 section 9.5, decision D-54"
+(*
+ * P0 is scada_queue_post on an event queue (libs/scada-tag/src/
+ * queue_access.cpp, post_record): the first load of the state
+ * (HeaderView::retiring, LDAR), the store of the record (here only the
+ * store that publishes it matters), the store of write_seq
+ * (publish_write_seq, STLR), and the second load of the state (LDAR). Both
+ * loads find RUNNING (0 here) when the post returns SCADA_OK.
+ *
+ * P1 is scada-tagd setting the state to RETIRING (3;
+ * HeaderView::set_retiring, STLR).
+ *
+ * P2 is the drain of the consumer (Queue::next in a RETIRING generation):
+ * the load of the state (HeaderView::retiring, LDAR), which finds
+ * RETIRING, then the load of write_seq (queue_write_seq_sc, LDAR).
+ *
+ * The condition is the loss the handshake forbids: the post returned
+ * SCADA_OK (both its loads gave 0) and the drain that saw RETIRING missed
+ * its record (write_seq 0). seq_cst loads and stores compile to LDAR and
+ * STLR on Armv8.0, as acquire and release do; model_check.py also runs
+ * copies with each access made plain.
+ *)
+{
+0:X0=ws; 0:X1=st;
+1:X1=st;
+2:X0=ws; 2:X1=st;
+}
+ P0             | P1            | P2            ;
+ LDAR W4,[X1]   | MOV W5,#3     | LDAR W6,[X1]  ;
+ MOV W7,#1      | STLR W5,[X1]  | LDAR W8,[X0]  ;
+ STLR W7,[X0]   |               |               ;
+ LDAR W9,[X1]   |               |               ;
+exists (0:X4=0 /\ 0:X9=0 /\ 2:X6=3 /\ 2:X8=0)

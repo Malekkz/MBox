@@ -383,6 +383,11 @@ std::span<const TagType> Attachment::types_of(
 }
 
 Attachment::~Attachment() {
+    // Decision D-54: requests left in a RETIRING generation are answered
+    // ABORTED, so that no requester waits for a driver that has left.
+    if (proc_.valid() && !queue_access_.empty()) {
+        drain_retiring_requests();
+    }
     if (proc_.valid()) {
         proc_.set_state(ProcessState::STOPPING);
     }

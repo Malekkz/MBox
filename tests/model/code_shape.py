@@ -686,6 +686,46 @@ def check_repair(events, min_stores):
     return None
 
 
+def check_single(events, letter):
+    """One path of a function that is one access of the handshake of a
+    RETIRING generation (decision D-54, handshake.litmus): exactly one
+    acquire load (`letter` A) or one release store (R), and no other
+    barrier, atomic or unknown call. On Armv8.0 a seq_cst load is LDAR and
+    a seq_cst store STLR, as acquire and release are."""
+    letters = letters_of(events)
+    for bad in "FGXC":
+        if bad in letters:
+            return f"unexpected instruction ({bad})"
+    other = "R" if letter == "A" else "A"
+    if other in letters:
+        return f"unexpected instruction ({other})"
+    name = "seq_cst load" if letter == "A" else "seq_cst store"
+    if letters.count(letter) != 1:
+        return f"{letters.count(letter)} instructions of the {name}, not 1"
+    return None
+
+
+def check_publish(events):
+    """One path of publish_write_seq (decision D-54, handshake.litmus): the
+    seq_cst store of `write_seq` (STLR), then the seq_cst load of the state
+    (LDAR, in HeaderView::retiring, which is followed), and no store after
+    the STLR."""
+    letters = "".join(e[0] for e in events if e[0] in "ARSFGXC")
+    for bad in "FGXC":
+        if bad in letters:
+            return f"unexpected instruction ({bad})"
+    if letters.count("R") != 1:
+        return f"{letters.count('R')} seq_cst stores of write_seq, not 1"
+    end = letters.index("R")
+    if "A" in letters[:end]:
+        return "a seq_cst load before the store of write_seq"
+    if "A" not in letters[end + 1:]:
+        return "no seq_cst load of the state after the store of write_seq"
+    if "S" in letters[end + 1:]:
+        return "a store after the store of write_seq"
+    return None
+
+
 def check_function(program, function, rule, shared, argument):
     # The repair is a loop over every record with several branches in its
     # body: each branch taken once already gives every order of two
@@ -699,6 +739,10 @@ def check_function(program, function, rule, shared, argument):
         events = evaluate(path, shared)
         if rule == "writer":
             problem = check_writer(events, *argument)
+        elif rule == "single":
+            problem = check_single(events, argument)
+        elif rule == "publish":
+            problem = check_publish(events)
         elif rule == "repair":
             problem = check_repair(events, argument)
             any_release = any_release or "R" in letters_of(events)
@@ -736,6 +780,23 @@ CHECKS = (
     ("scada::tag::read_change(", "reader", {0}, 7),
     ("scada::tag::repair_tag_records(", "repair", {0, 2}, 2),
 )
+
+
+# The handshake of a RETIRING generation (decision D-54): each of its
+# accesses is in one of these functions (src/queue_region.h). The state load
+# of every post and drain is HeaderView::retiring; the RETIRING store of
+# scada-tagd is HeaderView::set_retiring; the store of `write_seq` and the
+# second state load of a post are publish_write_seq; the `write_seq` load of
+# a drain is queue_write_seq_sc. A seq_cst access made relaxed compiles to a
+# plain LDR or STR there and fails. Kept apart from CHECKS: the fixture of
+# the self-test holds only the functions of the sequence lock and the ring.
+HANDSHAKE_CHECKS = (
+    ("scada::tag::HeaderView::retiring(", "single", set(), "A"),
+    ("scada::tag::HeaderView::set_retiring(", "single", set(), "R"),
+    ("scada::tag::queue_write_seq_sc(", "single", set(), "A"),
+    ("scada::tag::publish_write_seq(", "publish", set(), None),
+)
+ALL_CHECKS = CHECKS + HANDSHAKE_CHECKS
 
 
 def check(disassembly, report=None, checks=CHECKS, findings=None):
@@ -813,7 +874,7 @@ def main():
         print(f"FAIL {error}")
         return 1
     report = []
-    failures = check(disassembly, report)
+    failures = check(disassembly, report, checks=ALL_CHECKS)
     for failure in failures:
         print(f"FAIL {failure}")
     if failures:
@@ -821,7 +882,7 @@ def main():
         print("\nDisassembly of the functions that failed:")
         print("\n".join(report))
         return 1
-    print(f"ok   {len(CHECKS)} functions have the order of the model")
+    print(f"ok   {len(ALL_CHECKS)} functions have the order of the model")
     return 0
 
 

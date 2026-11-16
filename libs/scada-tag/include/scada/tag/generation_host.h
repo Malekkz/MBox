@@ -106,6 +106,27 @@ struct RetainProblem {
     std::string detail;
 };
 
+// Records a producer posted in a retired generation that its consumer did
+// not take before the generation was removed (decision D-54). From the
+// queue's `write_seq` and the consumer's cursor, which those processes
+// write: input.
+struct UnconsumedQueue {
+    // Empty for the one entry of a generation whose header cannot be read:
+    // its queues are not known.
+    std::string queue;
+    // An events queue: its records are audit records.
+    bool events = false;
+    // False if the count cannot be told: the region or the cursor cannot be
+    // read, the pair is not valid (a stopped queue, the all-ones cursor of
+    // a replaced file), or the generation was abandoned, not removed.
+    bool known = false;
+    // Known: the positions [first, end) were not taken, `records` of them.
+    // A position is an event's `seq` and the low part of a request id.
+    std::uint64_t first = 0;
+    std::uint64_t end = 0;
+    std::uint64_t records = 0;
+};
+
 // A retired generation that scada-tagd finished with (section 11.3, step
 // 3).
 struct RetiredGeneration {
@@ -123,6 +144,10 @@ struct RetiredGeneration {
     // True if it could not be removed by twice the timeout: it is no
     // longer tried and stays until the next boot (section 3.3).
     bool abandoned = false;
+    // When it was removed, or abandoned: the queues that still held
+    // records, and those whose count is unknown. An empty queue is not
+    // listed.
+    std::vector<UnconsumedQueue> unconsumed;
 };
 
 // Lives a process started in its region since the previous sample, from

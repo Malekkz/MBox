@@ -281,6 +281,20 @@ private:
                                            const std::string& owner,
                                            std::int64_t now_mono_ns) const;
 
+    // The processes of `watched` that still hold the lock of their `proc`
+    // region, as "<process> (pid <pid>)".
+    [[nodiscard]] static std::vector<std::string> still_attached(
+        Watched& watched, std::int64_t now_mono_ns);
+    // Makes every count of `queues` unknown.
+    static void forget_counts(std::vector<UnconsumedQueue>& queues);
+    // The consumer's cursor and the `write_seq` of queue `queue_id` of
+    // `watched`, or nothing if either cannot be read.
+    [[nodiscard]] static std::optional<std::pair<std::uint64_t, std::uint64_t>>
+    queue_pair(Watched& watched, std::size_t queue_id,
+               std::int64_t now_mono_ns);
+    // The queues of `watched` that still hold records (decision D-54).
+    [[nodiscard]] static std::vector<UnconsumedQueue> unconsumed_records(
+        Watched& watched, std::int64_t now_mono_ns);
     // True if `owner` has left the retired generation `watched`.
     [[nodiscard]] static bool has_left(Watched& watched,
                                        const WatchedOwner& owner,

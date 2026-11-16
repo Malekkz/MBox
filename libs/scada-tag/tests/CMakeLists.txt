@@ -84,6 +84,9 @@ scada_target_defaults(scada-tag-test-queue)
 # A process that writes a retained counter and follows a generation change,
 # for the integration tests of retained values (contract, sections 11.3 and
 # 12). Not installed.
+add_executable(scada-tag-test-crosser crosser/crosser_main.cpp)
+target_link_libraries(scada-tag-test-crosser PRIVATE scada::tag)
+scada_target_defaults(scada-tag-test-crosser)
 add_executable(scada-tag-test-retainer retainer/retainer_main.cpp)
 target_link_libraries(scada-tag-test-retainer PRIVATE scada::tag)
 scada_target_defaults(scada-tag-test-retainer)

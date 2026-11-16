@@ -144,6 +144,38 @@ void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
     }
 }
 
+void log_unconsumed(scada::Logger& logger,
+                    const scada::tag::RetiredGeneration& retired) {
+    const std::string generation = std::to_string(retired.generation);
+    for (const scada::tag::UnconsumedQueue& queue : retired.unconsumed) {
+        // Records a post accepted and nobody took. For an event queue,
+        // actions whose records the journal lacks.
+        const std::string_view message =
+            queue.events
+                ? "audit records left unconsumed in a removed generation"
+                : "records left unconsumed in a removed generation";
+        if (!queue.known) {
+            logger.log(LogLevel::WARNING, message,
+                       {{"GENERATION", generation},
+                        {"QUEUE", queue.queue.empty() ? std::string("unknown")
+                                                      : queue.queue},
+                        {"RECORDS", "unknown"},
+                        {"MESSAGE_ID", MESSAGE_ID_RECORDS_UNCONSUMED}});
+            continue;
+        }
+        const std::string records = std::to_string(queue.records);
+        const std::string first = std::to_string(queue.first);
+        const std::string end = std::to_string(queue.end);
+        logger.log(LogLevel::WARNING, message,
+                   {{"GENERATION", generation},
+                    {"QUEUE", queue.queue},
+                    {"RECORDS", records},
+                    {"FIRST_SEQ", first},
+                    {"END_SEQ", end},
+                    {"MESSAGE_ID", MESSAGE_ID_RECORDS_UNCONSUMED}});
+    }
+}
+
 void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 LateLog& late_log, std::int64_t now_mono_ns) {
     // One record each, not one list: a field holds at most
