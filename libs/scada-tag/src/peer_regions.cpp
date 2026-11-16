@@ -137,37 +137,69 @@ std::size_t PeerRegions::queue_slot(std::size_t queue_id) const {
     return checked(first + queue_id);
 }
 
+bool PeerRegions::is_queue(const Slot& slot) noexcept {
+    const RegionKind kind = slot.identity.kind;
+    return kind == RegionKind::EVENTS || kind == RegionKind::CMD ||
+           kind == RegionKind::RESULT;
+}
+
+void PeerRegions::check_kept(const Slot& slot) noexcept {
+    // Issue #53: a queue file can be shrunk in place and then replaced
+    // under its name, which no look by name sees; its consumer may still
+    // read the old mapping. Every kept mapping of the slot is checked by
+    // its descriptor here, outside real-time code, and a changed one is
+    // marked before any new mapping is published.
+    for (const std::unique_ptr<PeerMapping>& mapping : mappings_) {
+        if (mapping->slot != &slot || !mapping->region.file.valid() ||
+            !mapping->whole.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        struct stat info {};
+        if (::fstat(mapping->region.file.get(), &info) != 0 ||
+            info.st_size < 0 ||
+            static_cast<std::uint64_t>(info.st_size) !=
+                slot.identity.size_bytes) {
+            // Release: a reader that loads the slot's new mapping with
+            // acquire, or this flag with acquire, sees it.
+            mapping->whole.store(false, std::memory_order_release);
+        }
+    }
+}
+
 bool PeerRegions::look(int dir_fd, Slot& slot) {
     // Relaxed: only this function writes it, under the mutex.
-    const OpenedRegion* const before =
+    const PeerMapping* const before =
         slot.current.load(std::memory_order_relaxed);
     const auto drop = [&] {
         // Release: readers load with acquire.
         slot.current.store(nullptr, std::memory_order_release);
         return before != nullptr;
     };
+    if (is_queue(slot)) {
+        check_kept(slot);
+    }
 
     struct stat info {};
     if (::fstatat(dir_fd, slot.name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
         return drop();
     }
     // The same file as before, and not shrunk (section 3.3): nothing to do.
-    const bool same_file = before != nullptr && info.st_dev == before->device &&
-                           info.st_ino == before->inode;
+    const bool same_file = before != nullptr &&
+                           info.st_dev == before->region.device &&
+                           info.st_ino == before->region.inode;
     if (same_file && info.st_size >= 0 &&
         static_cast<std::uint64_t>(info.st_size) == slot.identity.size_bytes) {
         return false;
     }
     if (same_file) {
-        // The mapped file itself changed size (issue #53). Relaxed: only
-        // this function writes it, under the mutex, and readers judge it on
-        // its own.
-        slot.resized.store(slot.resized.load(std::memory_order_relaxed) + 1,
-                           std::memory_order_relaxed);
+        // The mapped file itself changed size (issue #53): its mapping must
+        // not be read again. Release: as in `check_kept`.
+        before->whole.store(false, std::memory_order_release);
         return drop();
     }
     if (slot.mappings >= MAX_MAPPINGS_PER_REGION) {
-        // Relaxed: as `resized`.
+        // Relaxed: only this function writes it, under the mutex, and
+        // readers judge it on its own.
         slot.at_limit.store(true, std::memory_order_relaxed);
         return drop();
     }
@@ -181,15 +213,14 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
         return drop();
     }
     // The mapping stays without the descriptor, except for a queue region,
-    // whose consumer checks the size of the file it still reads before it
-    // moves to a new one (`still_whole`).
-    const RegionKind kind = slot.identity.kind;
-    if (kind != RegionKind::EVENTS && kind != RegionKind::CMD &&
-        kind != RegionKind::RESULT) {
+    // whose descriptor `check_kept` uses.
+    if (!is_queue(slot)) {
         opened.value().file.reset();
     }
-    mappings_.push_back(
-        std::make_unique<const OpenedRegion>(std::move(opened).value()));
+    auto mapping = std::make_unique<PeerMapping>();
+    mapping->region = std::move(opened).value();
+    mapping->slot = &slot;
+    mappings_.push_back(std::move(mapping));
     ++slot.mappings;
     // Release: publishes the mapping to readers, which load with acquire.
     slot.current.store(mappings_.back().get(), std::memory_order_release);
@@ -217,40 +248,22 @@ bool PeerRegions::asked(std::size_t slot) const noexcept {
 }
 
 std::span<std::byte> PeerRegions::bytes(std::size_t slot) const noexcept {
-    if (slot >= slots_.size()) {
-        return {};
-    }
-    // Acquire: pairs with the release store that published the mapping.
-    const OpenedRegion* const region =
-        slots_[slot].current.load(std::memory_order_acquire);
-    return region == nullptr ? std::span<std::byte>{} : region->memory.bytes();
+    const PeerMapping* const current = mapping(slot);
+    return current == nullptr ? std::span<std::byte>{}
+                              : current->region.memory.bytes();
 }
 
-std::uint32_t PeerRegions::resized(std::size_t slot) const noexcept {
-    return slot < slots_.size()
-               ? slots_[slot].resized.load(std::memory_order_relaxed)
-               : 0;
+const PeerMapping* PeerRegions::mapping(std::size_t slot) const noexcept {
+    if (slot >= slots_.size()) {
+        return nullptr;
+    }
+    // Acquire: pairs with the release store that published the mapping.
+    return slots_[slot].current.load(std::memory_order_acquire);
 }
 
 bool PeerRegions::at_mapping_limit(std::size_t slot) const noexcept {
     return slot < slots_.size() &&
            slots_[slot].at_limit.load(std::memory_order_relaxed);
-}
-
-bool PeerRegions::still_whole(std::size_t slot, const std::byte* data) {
-    const Slot& wanted = slots_.at(checked(slot));
-    const std::scoped_lock lock(mutex_);
-    for (const std::unique_ptr<const OpenedRegion>& mapping : mappings_) {
-        if (mapping->memory.bytes().data() != data) {
-            continue;
-        }
-        struct stat info {};
-        return mapping->file.valid() &&
-               ::fstat(mapping->file.get(), &info) == 0 && info.st_size >= 0 &&
-               static_cast<std::uint64_t>(info.st_size) ==
-                   wanted.identity.size_bytes;
-    }
-    return false;
 }
 
 std::size_t PeerRegions::refresh(int dir_fd, std::int64_t now_mono_ns) {

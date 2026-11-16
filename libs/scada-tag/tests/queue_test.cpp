@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 
 #include <poll.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <time.h>  // NOLINT(modernize-deprecated-headers): clock_gettime and CLOCK_THREAD_CPUTIME_ID are POSIX, declared here
 #include <unistd.h>
@@ -645,12 +646,60 @@ TEST_F(Queues, TagdReportsAQueueFileCreatedAnew) {
     const QueueChange& change = report.queues[0];
     EXPECT_EQ(change.event, QueueEvent::RECREATED);
     EXPECT_EQ(change.base_seq, std::optional<std::uint64_t>(1 + CAPACITY));
-    EXPECT_TRUE(change.old_write_seq_known);
     EXPECT_EQ(change.old_write_seq, 3U);
     EXPECT_TRUE(change.cursor_known);
     EXPECT_EQ(change.cursor, 1U);
+    const LostIds lost = lost_ids(change);
+    EXPECT_TRUE(lost.bounded);
+    EXPECT_EQ(lost.from, 1U);
+    EXPECT_EQ(lost.until, 1 + CAPACITY);
     // Once, not at every check.
     EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+}
+
+// Review of PR #77, B1: the reproduction of the SCADA and Linux reviewers.
+// Five events posted and one taken, the last check saw `write_seq` 3, and
+// the consumer attached again and jumped to the new base before the check
+// that finds the new file. The range starts at the cursor of the last
+// check, not at the cursor now, and ends at the base, so that it bounds
+// also the posts after that check.
+TEST_F(Queues, TagdBoundsTheLostIdsAlsoWhenTheConsumerJumpedFirst) {
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        const QueuePtr reader = open(*web(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 3));
+        ASSERT_TRUE(takes_event(*reader, 0));  // the cursor is 1
+        EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+        ASSERT_TRUE(posts_events(*out, 2));  // after the last check
+    }
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    restart(web(), "web");  // jumps to the new base before the check
+    const CheckReport report = host().check(scada::monotonic_ns());
+    ASSERT_EQ(report.queues.size(), 1U);
+    const QueueChange& change = report.queues[0];
+    ASSERT_EQ(change.event, QueueEvent::RECREATED);
+    EXPECT_EQ(change.cursor, 1U);
+    const LostIds lost = lost_ids(change);
+    EXPECT_TRUE(lost.bounded);
+    EXPECT_EQ(lost.from, 1U);
+    EXPECT_EQ(std::optional<std::uint64_t>(lost.until), change.base_seq);
+    EXPECT_GE(lost.until - lost.from, 4U);  // the four lost events
+}
+
+// Without a base nothing bounds the posts after the last check, and the
+// range is never inverted.
+TEST(LostIds, AreUnboundedWithoutABaseAndNeverInverted) {
+    constexpr std::uint64_t CURSOR_AFTER = 5;
+    QueueChange change;
+    change.event = QueueEvent::RECREATED;
+    change.old_write_seq = 3;
+    change.cursor = CURSOR_AFTER;
+    change.cursor_known = true;
+    const LostIds lost = lost_ids(change);
+    EXPECT_FALSE(lost.bounded);
+    EXPECT_EQ(lost.from, CURSOR_AFTER);
+    EXPECT_EQ(lost.until, CURSOR_AFTER);
 }
 
 // Issue #53, review of the design: an events or command queue whose file
@@ -1795,6 +1844,155 @@ TEST_F(Queues, RequestsLeftInAnOldCmdFileAreNeverExecuted) {
     const QueuePtr answers = open(*web(), "result.io.web");
     look_again(*web());
     EXPECT_TRUE(gives<scada_write_result>(*answers, SCADA_E_TIMEOUT));
+}
+
+// Review of PR #77, B2: a file mapped again is the file in use. The name
+// is gone for one look and back for the next: the look in between drops the
+// mapping, the next maps the same file anew, and the consumer goes on.
+TEST_F(Queues, TheSameFileMappedAgainIsTheFileInUse) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    const std::filesystem::path file = generation_dir() / "events.io";
+    const std::filesystem::path away = generation_dir() / "away";
+    std::filesystem::rename(file, away);
+    look_again(*web());
+    std::filesystem::rename(away, file);
+    look_again(*web());
+    EXPECT_TRUE(takes_event(*reader, 0));
+    ASSERT_TRUE(posts_events(*out, 1));
+    EXPECT_TRUE(takes_events(*reader, 1, 2));
+    EXPECT_EQ(reader->stats().replaced, 0U);
+}
+
+// Review of PR #77, B5: the header of a new file is outside input. Each
+// change makes the file one the consumer must not follow: it stops the
+// queue, counts it and stores the all-ones cursor.
+class BrokenNewFile : public Queues {
+protected:
+    // Creates `events.io` anew under a consumer that holds the old file,
+    // changes its header with `change`, and expects the queue dead.
+    ::testing::AssertionResult refused(void (*change)(QueueHeader&)) {
+        {
+            const QueuePtr out = open(*io(), "events.io");
+            if (!posts_events(*out, 1)) {
+                return ::testing::AssertionFailure() << "no post";
+            }
+        }
+        const QueuePtr reader = open(*web(), "events.io");
+        std::filesystem::remove(generation_dir() / "events.io");
+        restart(io(), "io");
+        {
+            const MappedRegion region = map_file("events.io");
+            change(queue_header(region.bytes()));
+        }
+        look_again(*web());
+        if (!gives<scada_event_record>(*reader, SCADA_E_LAYOUT)) {
+            return ::testing::AssertionFailure() << "the queue goes on";
+        }
+        if (reader->stats().replaced != 1 ||
+            slot_of(map_file("proc.web"), EVENTS_IO) != DEAD_CURSOR) {
+            return ::testing::AssertionFailure() << "not dead";
+        }
+        return ::testing::AssertionSuccess();
+    }
+};
+
+TEST_F(BrokenNewFile, ABaseBeyondWriteSeqIsRefused) {
+    EXPECT_TRUE(refused([](QueueHeader& header) {
+        store_shared(
+            header.base_seq,
+            load_shared(header.write_seq, std::memory_order_relaxed) + 1,
+            std::memory_order_release);
+    }));
+}
+
+TEST_F(BrokenNewFile, AnAllOnesBaseIsRefused) {
+    EXPECT_TRUE(refused([](QueueHeader& header) {
+        store_shared(header.base_seq, DEAD_CURSOR, std::memory_order_release);
+        store_shared(header.write_seq, DEAD_CURSOR, std::memory_order_release);
+    }));
+}
+
+TEST_F(BrokenNewFile, AFlagBitThatIsNoneIsRefused) {
+    EXPECT_TRUE(refused([](QueueHeader& header) {
+        store_shared(header.flags, QUEUE_BASE_SET | (QUEUE_BASE_SET << 1U),
+                     std::memory_order_release);
+    }));
+}
+
+TEST_F(BrokenNewFile, AReservedFieldThatIsNotZeroIsRefused) {
+    EXPECT_TRUE(refused([](QueueHeader& header) {
+        store_shared(header.reserved0, std::uint32_t{1},
+                     std::memory_order_release);
+    }));
+}
+
+// The first file a consumer sees is checked too.
+TEST_F(Queues, ABrokenFirstFileIsRefused) {
+    web().reset();
+    {
+        const MappedRegion region = map_file("events.io");
+        store_shared(queue_header(region.bytes()).reserved0, std::uint32_t{1},
+                     std::memory_order_release);
+    }
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_LAYOUT));
+}
+
+// N3: a base that leaves no room for ids creates the queue dead: base and
+// `write_seq` all-ones, refused by the consumer, PEER_DOWN for the producer.
+TEST_F(Queues, AFileWithoutRoomForIdsIsCreatedDead) {
+    {
+        const QueuePtr reader = open(*web(), "events.io");
+        look_again(*web());
+    }
+    set_cursor("web", EVENTS_IO, DEAD_CURSOR - CAPACITY - 1);
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    const MappedRegion region = map_file("events.io");
+    EXPECT_EQ(queue_write_seq(region.bytes()), DEAD_CURSOR);
+    const QueuePtr out = open(*io(), "events.io");
+    EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
+}
+
+// N2: the 17th file under one name is not mapped (MAX_MAPPINGS_PER_REGION);
+// the consumer stops the queue.
+TEST_F(Queues, TheSeventeenthFileUnderANameStopsTheQueue) {
+    const QueuePtr reader = open(*web(), "events.io");
+    for (std::uint32_t file = 1; file <= MAX_MAPPINGS_PER_REGION; ++file) {
+        std::filesystem::remove(generation_dir() / "events.io");
+        restart(io(), "io");
+        look_again(*web());
+        if (file < MAX_MAPPINGS_PER_REGION) {
+            ASSERT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT))
+                << file;
+        }
+    }
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_LAYOUT));
+    EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), DEAD_CURSOR);
+}
+
+// Review of PR #77, B4 (condition C4): the high-water mark is stored before
+// the record. A child posts with its queue mapping made read-only, so the
+// post faults at the record: the mark must already hold the position after
+// it, and `write_seq` must not have moved. With the mark stored after the
+// record or after `write_seq`, the mark is still at the old position.
+TEST_F(Queues, TheMarkIsStoredBeforeTheRecord) {
+    GTEST_FLAG_SET(death_test_style, "fast");
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    const std::span<std::byte> own = io()->queue(EVENTS_IO).own_region;
+    EXPECT_DEATH(
+        {
+            static_cast<void>(::mprotect(own.data(), own.size(), PROT_READ));
+            static_cast<void>(post(*out, event()));
+        },
+        "");
+    EXPECT_EQ(slot_of(map_file("proc.io"), EVENTS_IO), 2U);
+    EXPECT_EQ(queue_write_seq(map_file("events.io").bytes()), 1U);
 }
 
 TEST_F(Queues, ResultsReachTheRequester) {

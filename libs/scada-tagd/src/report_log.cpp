@@ -56,24 +56,26 @@ void log_restarts(scada::Logger& logger, std::span<const Restarts> restarts) {
 // the consumer still holds the old file and takes them; hence "at most".
 // On an events queue they are audit records.
 void log_recreated(scada::Logger& logger, const QueueChange& queue) {
-    const std::uint64_t from = queue.cursor_known ? queue.cursor : 0;
-    const std::uint64_t until = queue.old_write_seq;
-    const std::uint64_t lost = until > from ? until - from : 0;
+    const scada::tag::LostIds lost = scada::tag::lost_ids(queue);
     std::string reason = "followed by the consumer";
     if (!queue.base_seq.has_value()) {
-        reason = "no base (made by an older build): the queue stops";
-    } else if (*queue.base_seq < until) {
+        reason = "no base: the queue stops";
+    } else if (*queue.base_seq < queue.old_write_seq) {
         reason = "base below the old write_seq: the queue stops";
     }
     const std::string base =
         queue.base_seq.has_value() ? std::to_string(*queue.base_seq) : "none";
-    const std::string old_written = std::to_string(until);
+    const std::string old_written = std::to_string(queue.old_write_seq);
     const std::string cursor =
         queue.cursor_known ? std::to_string(queue.cursor) : "unknown";
-    const std::string lost_at_most = std::to_string(lost);
+    // A true upper bound only with a base: every id of the old file is
+    // below it. Without one, posts after the last check are not bounded.
+    const std::string lost_at_most =
+        lost.bounded ? std::to_string(lost.until - lost.from) : "unknown";
     const std::string range =
-        "[" + std::to_string(from) + ", " + std::to_string(until) + ")";
-    const std::array<LogField, 7> fields{{
+        "[" + std::to_string(lost.from) + ", " +
+        (lost.bounded ? std::to_string(lost.until) : std::string("?")) + ")";
+    const std::array<LogField, 8> fields{{
         {"QUEUE", queue.queue},
         {"BASE_SEQ", base},
         {"OLD_WRITE_SEQ", old_written},
@@ -81,6 +83,7 @@ void log_recreated(scada::Logger& logger, const QueueChange& queue) {
         {"LOST_AT_MOST", lost_at_most},
         {"LOST_IDS", range},
         {"REASON", reason},
+        {"MESSAGE_ID", MESSAGE_ID_QUEUE_RECREATED},
     }};
     const bool events = queue.queue.starts_with("events.");
     logger.log(LogLevel::WARNING,

@@ -623,7 +623,7 @@ private:
     void follow_queues();
     // Uses `bytes` as the file of `queue_id` from now on.
     void use_queue_file(std::size_t queue_id,
-                        std::span<std::byte> bytes) noexcept;
+                        const PeerMapping* mapping) noexcept;
     // Moves the own cursor of `queue_id` from `read` up to `base`, counting
     // the positions in `skipped`.
     void jump_cursor(std::size_t queue_id, std::uint64_t read,
@@ -701,13 +701,11 @@ private:
     std::mutex queue_sides_mutex_;
     std::vector<std::uint8_t> queue_open_;  // guarded by queue_sides_mutex_
     std::vector<QueueCounters> queue_counters_;
-    // For each queue this process consumes: the file in use, as the start
-    // of its mapping (null before the first), the `resized` count of its
-    // slot when it was taken, and whether the queue died (see
-    // `follow_queue`). Written by the consumer's thread, or by attach
+    // For each queue this process consumes: the file in use, as its
+    // mapping in `peers_` (null before the first), and whether the queue
+    // died (see `follow_queue`). Written by the consumer's thread, or by attach
     // before any other thread can use the context; relaxed.
-    std::vector<std::atomic<std::byte*>> queue_in_use_;
-    std::vector<std::atomic<std::uint32_t>> queue_resized_seen_;
+    std::vector<std::atomic<const PeerMapping*>> queue_in_use_;
     std::vector<std::atomic<bool>> queue_dead_;
     // For every process, whether its `proc` region was asked for by
     // `want_proc` (scada_proc_resolve, a wait set, scada-tagd at attach),

@@ -151,6 +151,25 @@ WARNING `the system was suspended` (or `... since boot` at start) with
 `SUSPENDED_MS` when it measures that the system slept. A virtual machine that is paused is not seen: its clocks stop
 too. Do not pause a virtual machine that runs the unit.
 
+### Size the limits for the reliable queues
+
+A process that consumes reliable queues keeps every file it has mapped under
+a queue's name, up to 16 per queue, and a descriptor for each (contract 3.3
+and 9.2, decision D-49). A file that was removed keeps its space in
+`/dev/shm` while it is mapped. For each service unit, count the queues it
+consumes:
+
+- `LimitNOFILE` must cover the descriptors the service uses for itself
+  plus 16 per consumed queue.
+- `LimitMEMLOCK`, for a real-time service that runs under `mlockall`, must
+  cover its regions plus 16 times the size of each consumed queue file.
+- `/dev/shm` must hold every region of the generation plus, for each queue,
+  up to 16 old files while their consumer keeps them.
+
+The size of a queue file is 128 bytes plus its capacity times its record
+size (256 bytes for events, 64 for requests, 32 for results). These are
+upper bounds: a queue file is replaced only after damage or removal.
+
 ### Start it
 
 `scada-tagd` creates the shared-memory tag database from a tag-set file. In

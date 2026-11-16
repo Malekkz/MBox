@@ -963,20 +963,22 @@ Decision: A.
   - H' is the mark if the `proc` region was reused;
   - R' is the consumer's cursor plus the capacity, if the cursor is readable, not 0 and not all-ones;
   - H > R' is impossible and is ignored as damage;
-  - without room for a capacity of ids (2^48 for CMD), the file gets no `QUEUE_BASE_SET`.
+  - without room for a capacity of ids (2^48 for CMD), the file is created dead: `QUEUE_BASE_SET` with base and `write_seq` all-ones, which a consumer refuses and by which the producer gets `SCADA_E_PEER_DOWN` (as the design said; the first version gave an older-style file at 0, review of PR #77, N3).
   The producer removes its own unusable file before it creates one, because the rename that publishes a region does not replace (C11). Contract 9.1.
 - Consumer (`Attachment::follow_queue`, before each look and at attach):
   - It uses the first file it sees. A cursor below the base always jumps to the base; positions below it are in no file it can reach (C3).
   - It keeps the file in use while the name is missing or a different file fails the checks (Q2 as reworded: ENOENT or an invalid other inode).
   - On a different valid file it reads the old `write_seq` again (C2), delivers up to it, then jumps and counts `skipped` and `replaced`.
+  - The `QueueHeader` of every file is outside input (`queue_base_of`): a flag bit other than `QUEUE_BASE_SET`, `reserved0` not 0, or a base that is all-ones or beyond `write_seq` make the file refused, not ignored (review of PR #77, B5).
+  - Two mappings of the same device and inode are the same file: a file mapped again after a look that failed is the file in use (B2; the first version told files apart by mapping address, and a rename away for one look killed the queue).
   - It stops the queue and stores the all-ones cursor when:
-    - the new file has no base (older build, D-40);
+    - the new file has no base (older build, D-40), or a header that is refused;
     - its base is below the old `write_seq` (C2);
-    - the file in use changed size in place, seen by name (`PeerRegions::resized`), or by `fstat` on a descriptor now kept for each queue mapping before the switch (a file shrunk and then replaced);
+    - the file in use changed size in place: each `PeerMapping` has a `whole` flag, which a look (in `scada_tag_notify` or a wait, never in real-time code) clears by name for the current file and by `fstat` on the descriptor now kept for each older queue mapping, before it publishes a newer one. So a file shrunk and then replaced is not read, and `scada_queue_next` takes no lock and makes no system call for it (B3, B6: the first version called `fstat` under the peers' mutex on every look while an old file drained, and read a `resized` count after the mapping);
     - the name reached the 16-mapping limit (Q2, `PeerRegions::at_mapping_limit`).
   - `scada_queue_ack` returns `SCADA_E_INVALID` and stores nothing when the cursor is no longer at the delivered record (C1): the cursor never moves back except to all-ones.
   - For a new `proc` region, `start_cursors` counts as skipped only what lies between the base and `write_seq`.
-- `scada-tagd` (C13): it remembers each queue's file and `write_seq` across a missing name. When another file appears it reports `QueueEvent::RECREATED` and logs at WARNING `queue file created anew; audit records may be lost` (events) or `...; records may be lost`, with `QUEUE`, `BASE_SEQ`, `OLD_WRITE_SEQ`, `CURSOR`, `LOST_AT_MOST` (old `write_seq` minus cursor, an upper bound) and `LOST_IDS` as `[from, to)`. `scada_queue_stats` is per process and lost at a restart; the system log is not. A `scada-tagd` that did not see the old file (it was restarted) cannot report it; the consumer still counts the skip.
+- `scada-tagd` (C13): it remembers each queue's file, `write_seq` and the consumer's cursor at its last check, across a missing name. When another file appears it reports `QueueEvent::RECREATED` and logs at WARNING `queue file created anew; audit records may be lost` (events) or `...; records may be lost`, with `QUEUE`, `BASE_SEQ`, `OLD_WRITE_SEQ`, `CURSOR` (at the last check of the old file), `LOST_AT_MOST`, `LOST_IDS` as `[from, until)` and `MESSAGE_ID` `330f9ce1bb0547c098562d406ce2f774` (N1). The range (`lost_ids`) runs from that cursor to the new base, a true upper bound, since every id of the old file is below the base. Without a base the bound is `unknown` and the range `[from, ?)`. It is never inverted. The first version took the cursor at report time and the old `write_seq` of the last check, which gave `[5, 3)` and 0 for four lost audit records (review of PR #77, B1). `scada_queue_stats` is per process and lost at a restart; the system log is not. A `scada-tagd` that did not see the old file (it was restarted) cannot report it; the consumer still counts the skip.
 - Residuals, in contract 3.3 (C10 and the three answers in #53):
   - ids can repeat for a consumer that was not attached when the queue file and the producer's `proc` region are lost together with the consumer's cursor at 0, or when all three regions are lost; that is likelier than it reads, since cleanup by name removes a process's files together;
   - the `proc` lock is an `flock` on one file, so two producer instances can live if a running process's `proc` file is removed;
@@ -985,13 +987,20 @@ Decision: A.
 - C14: the library keeps no acknowledgement latch. Whether commands stay refused after lost audit records until an operator acknowledges is unspecified and safety-relevant; it is an open point of contract 16 for the owner, before the command service (phase 5). Follow-up issues, without the phase-1 label: #74 (a loss record in the audit chain, reference 13.4), #75 (a system alarm for lost audit records and a broken queue; reference 10.4 has none), #76 (`scadactl status` shows queue state). Contract 17, item 21, lists the differences from reference 5.3 and 18.2.
 Reason: both bounds hold under concurrency without a lock. Every id is below the cursor at its post plus the capacity, and the cursor only grows. The mark is the exact next position whenever the producer's region survived. Delivering the old file first closes gap (a) when the consumer holds it. The jump only moves forward, so no id repeats in the cases above. An older build reads the new fields as invalid records or a dead queue, never as a repeated id, so layout version 1 stays.
 Consequences:
-- Contract 0.15: sections 3.3, 9, 9.1, 9.2, 9.3, 10, 16, 17 (item 21), change log and migration note.
+- Contract 0.15: sections 3.3, 9, 9.1, 9.2, 9.3, 10, 13 (`skipped`, `replaced`), 15 (conformance test 29), 16, 17 (item 21), change log and migration note. `docs/install.md`: limits for kept descriptors and mappings (N4). Issues #74 and #76 are labelled phase 4, #75 phase 7 (N6).
 - Left for D-51 (#53, second pull request, which closes it):
   - the periodic look while a consumer waits in `scada_queue_next` or a wait set (Q3), with try-lock in `scada_tag_notify`;
   - `scada-tagd` reporting a `write_seq` that falls (C10);
   - the stress cases truncate in place and the 16th file.
   Until then a consumer that never calls `scada_tag_notify` moves to a new file only when its own region is missing, as before. 2a stops the queue in every case 2b handles in more detail (same-inode shrink, the mapping limit), as main did.
+- Review of PR #77 (the three reviewers of the committee, merge with conditions; the lead session ruled on severity): B1 to B7 and N1 to N6 are done as recorded above and in the tests below. N7, the post path in a release build, follows when the perf preset runs; it may follow the merge.
 - Tests:
+  - Review of PR #77:
+    - `TheMarkIsStoredBeforeTheRecord` (B4, C4): a child posts with its queue mapping read-only, so the post faults at the record; the mark must already be the position after it and `write_seq` unchanged. The test fails with the stores reversed (checked).
+    - `TheSameFileMappedAgainIsTheFileInUse` (B2).
+    - `BrokenNewFile.*` (base beyond `write_seq`, all-ones base, an unknown flag bit, `reserved0`; B5), `ABrokenFirstFileIsRefused`, `AFileWithoutRoomForIdsIsCreatedDead` (N3), `TheSeventeenthFileUnderANameStopsTheQueue` (N2).
+    - `TagdBoundsTheLostIdsAlsoWhenTheConsumerJumpedFirst` (the reviewers' reproduction), `LostIds.AreUnboundedWithoutABaseAndNeverInverted`, `ReportLog.AQueueFileCreatedAnew*` (the log fields; B1, N1).
+    - Shrunk then replaced: `ReplacedQueue.ATruncatedQueueFileKillsTheQueue` (N2).
   - `ReplacedQueue.*`: an unlinked file and a damaged header are followed without loss; truncation still kills.
   - The queue tests:
     - `AQueueFileRemovedUnderARunningProducerStillDelivers`;

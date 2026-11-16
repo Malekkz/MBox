@@ -73,8 +73,7 @@ void Attachment::prepare_queues() {
     queue_woken_seq_ = std::vector<std::atomic<std::uint64_t>>(count);
     queue_open_ = std::vector<std::uint8_t>(count, 0);
     queue_counters_ = std::vector<QueueCounters>(count);
-    queue_in_use_ = std::vector<std::atomic<std::byte*>>(count);
-    queue_resized_seen_ = std::vector<std::atomic<std::uint32_t>>(count);
+    queue_in_use_ = std::vector<std::atomic<const PeerMapping*>>(count);
     queue_dead_ = std::vector<std::atomic<bool>>(count);
     queue_access_.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -143,11 +142,9 @@ void Attachment::kill_queue(std::size_t queue_id) noexcept {
 }
 
 void Attachment::use_queue_file(std::size_t queue_id,
-                                std::span<std::byte> bytes) noexcept {
+                                const PeerMapping* mapping) noexcept {
     // Relaxed: see `queue_in_use_`.
-    queue_in_use_[queue_id].store(bytes.data(), std::memory_order_relaxed);
-    queue_resized_seen_[queue_id].store(
-        peers_.resized(queue(queue_id).queue_slot), std::memory_order_relaxed);
+    queue_in_use_[queue_id].store(mapping, std::memory_order_relaxed);
 }
 
 void Attachment::jump_cursor(std::size_t queue_id, std::uint64_t read,
@@ -161,6 +158,17 @@ void Attachment::jump_cursor(std::size_t queue_id, std::uint64_t read,
     store_shared(own_cursor(queue_id), base, std::memory_order_release);
 }
 
+namespace {
+
+// True if the two mappings are of the same file (issue #53, review of PR
+// #77): a file mapped again, after a look that failed, is the file in use.
+bool same_file(const PeerMapping& one, const PeerMapping& other) noexcept {
+    return one.region.device == other.region.device &&
+           one.region.inode == other.region.inode;
+}
+
+}  // namespace
+
 bool Attachment::follow_queue(std::size_t queue_id) noexcept {
     const QueueAccess& access = queue(queue_id);
     if (queue_is_dead(queue_id)) {
@@ -171,54 +179,56 @@ bool Attachment::follow_queue(std::size_t queue_id) noexcept {
         return false;
     }
     // Relaxed: see `queue_in_use_`.
-    std::byte* const used =
+    const PeerMapping* const used =
         queue_in_use_[queue_id].load(std::memory_order_relaxed);
-    if (used != nullptr &&
-        peers_.resized(access.queue_slot) !=
-            queue_resized_seen_[queue_id].load(std::memory_order_relaxed)) {
-        // The file in use changed size in place: its mapping must not be
-        // read again (section 3.3).
+    // Acquire: pairs with the release store of the look that marked it.
+    if (used != nullptr && !used->whole.load(std::memory_order_acquire)) {
+        // The file in use changed size: its mapping must not be read again
+        // (section 3.3).
         kill_queue(queue_id);
         return false;
     }
-    const std::span<std::byte> current = peers_.bytes(access.queue_slot);
+    const PeerMapping* const current = peers_.mapping(access.queue_slot);
     std::uint64_t& cursor = own_cursor(queue_id);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
     if (used == nullptr) {
-        if (current.empty()) {
+        if (current == nullptr) {
             return true;  // not created yet
         }
+        std::uint64_t base = 0;
+        const QueueBase kind =
+            queue_base_of(current->region.memory.bytes(), base);
+        if (kind == QueueBase::BROKEN) {
+            kill_queue(queue_id);  // outside input (condition B5)
+            return false;
+        }
         use_queue_file(queue_id, current);
-        if (const std::optional<std::uint64_t> base = queue_base(current)) {
+        if (kind == QueueBase::SET) {
             // Positions below the base are in no file this consumer can
             // reach: a cursor below it always jumps (condition C3).
-            jump_cursor(queue_id, read, *base);
+            jump_cursor(queue_id, read, base);
         }
         return true;
     }
-    if (current.empty() || current.data() == used) {
+    if (current == nullptr || current == used || same_file(*current, *used)) {
         return true;  // the name is missing, or the same file: keep it
     }
     // Another file under the name (issue #53).
-    const std::optional<std::uint64_t> base = queue_base(current);
-    if (!base.has_value()) {
-        kill_queue(queue_id);  // made by an older build (decision D-40)
+    std::uint64_t base = 0;
+    if (queue_base_of(current->region.memory.bytes(), base) != QueueBase::SET) {
+        // No base (an older build, decision D-40) or one that is not valid.
+        kill_queue(queue_id);
         return false;
     }
     // Read again now that the new file is ready (condition C2): only the
     // producer writes `write_seq`, and it created the new file at attach,
     // so the file in use is final unless two instances of it live
-    // (contract 3.3).
-    const std::span<std::byte> old_file = queue_bytes(queue_id);
-    if (!peers_.still_whole(access.queue_slot, old_file.data())) {
-        // Shrunk in place and then replaced: its mapping must not be read
-        // again (section 3.3, decision D-49, Q2).
-        kill_queue(queue_id);
-        return false;
-    }
-    const std::uint64_t old_written = queue_write_seq(old_file);
-    if (*base < old_written) {
+    // (contract 3.3). It is whole: `check_kept` ran in the look that
+    // published the new file.
+    const std::uint64_t old_written =
+        queue_write_seq(used->region.memory.bytes());
+    if (base < old_written) {
         kill_queue(queue_id);  // ids of the new file would repeat
         return false;
     }
@@ -226,7 +236,7 @@ bool Attachment::follow_queue(std::size_t queue_id) noexcept {
         !out_of_range(read, old_written, access.capacity)) {
         return true;  // deliver what the file in use holds first
     }
-    jump_cursor(queue_id, read, *base);
+    jump_cursor(queue_id, read, base);
     use_queue_file(queue_id, current);
     count_one(counters(queue_id).replaced);
     return true;
@@ -295,13 +305,19 @@ void Attachment::start_cursors() {
         // A new `proc` region has lost its cursors: each starts at the
         // queue's `write_seq`, and the records before it, from the file's
         // base on, are skipped (section 9.2).
-        const std::span<std::byte> bytes = peers_.bytes(access.queue_slot);
+        const PeerMapping* const current = peers_.mapping(access.queue_slot);
         std::uint64_t written = 0;
         std::uint64_t first = 0;
-        if (!bytes.empty()) {
-            use_queue_file(access.id, bytes);
+        if (current != nullptr) {
+            const std::span<std::byte> bytes = current->region.memory.bytes();
+            std::uint64_t base = 0;
+            if (queue_base_of(bytes, base) == QueueBase::BROKEN) {
+                kill_queue(access.id);
+                continue;
+            }
+            use_queue_file(access.id, current);
             written = queue_write_seq(bytes);
-            first = std::min(queue_base(bytes).value_or(0), written);
+            first = std::min(base, written);
         }
         count_one(counters(access.id).skipped, written - first);
         // Release: the producer loads the cursor with acquire.
@@ -445,12 +461,10 @@ std::span<std::byte> Attachment::queue_bytes(
     }
     // The file in use (`follow_queue`), which stays mapped as long as the
     // context. Relaxed: see `queue_in_use_`.
-    std::byte* const used =
+    const PeerMapping* const used =
         queue_in_use_[queue_id].load(std::memory_order_relaxed);
-    if (used == nullptr) {
-        return {};
-    }
-    return {used, queue_region_size(access.capacity, access.record_size)};
+    return used == nullptr ? std::span<std::byte>{}
+                           : used->region.memory.bytes();
 }
 
 std::uint64_t& Attachment::own_cursor(std::size_t queue_id) const noexcept {

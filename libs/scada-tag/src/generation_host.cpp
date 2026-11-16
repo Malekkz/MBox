@@ -110,6 +110,9 @@ struct WatchedQueue {
     dev_t last_device = 0;
     ino_t last_inode = 0;
     std::uint64_t last_written = 0;
+    // The consumer's cursor at that check, if it was readable.
+    bool last_cursor_known = false;
+    std::uint64_t last_cursor = 0;
 };
 
 // Checks in a row without a queue file after which it is reported.
@@ -1004,17 +1007,21 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
                            .capacity = queue.capacity};
         change.base_seq = queue_base(file);
         change.old_write_seq = queue.last_written;
-        change.old_write_seq_known = true;
-        if (cursor != nullptr) {
-            change.cursor = load_shared(*cursor, std::memory_order_acquire);
-            change.cursor_known = true;
-        }
+        // The cursor at the last check of the old file, not now: the
+        // consumer may have jumped to the new base since (review of PR
+        // #77, B1).
+        change.cursor = queue.last_cursor;
+        change.cursor_known = queue.last_cursor_known;
         report.queues.push_back(change);
     }
     queue.file_seen = true;
     queue.last_device = queue.region->device;
     queue.last_inode = queue.region->inode;
     queue.last_written = queue_write_seq(file);
+    queue.last_cursor_known = cursor != nullptr;
+    if (cursor != nullptr) {
+        queue.last_cursor = load_shared(*cursor, std::memory_order_acquire);
+    }
     if (cursor == nullptr) {
         return;  // the consumer's region is missing
     }
@@ -1048,6 +1055,19 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
         .replaced = read == DEAD_CURSOR,
     });
 }
+
+}  // namespace scada::tag
+
+scada::tag::LostIds scada::tag::lost_ids(const QueueChange& change) noexcept {
+    LostIds lost;
+    lost.from = change.cursor_known ? change.cursor : 0;
+    lost.bounded = change.base_seq.has_value();
+    lost.until = lost.bounded ? *change.base_seq : change.old_write_seq;
+    lost.until = std::max(lost.until, lost.from);
+    return lost;
+}
+
+namespace scada::tag {
 
 void GenerationHost::Impl::note_late_beats(Peer& peer,
                                            CheckReport& report) const {
