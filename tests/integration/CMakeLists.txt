@@ -48,6 +48,24 @@ scada_add_test(scada-tag-access-integration-test KIND integration
     "SCADA_TAG_THREAD_CHECK=${thread_check}")
 add_dependencies(scada-tag-access-integration-test
   scada-tagd scada-tag-test-peer scada-tag-test-writer scada-sim)
+# Conformance test 3 at the maximum rate, with writer and readers on
+# separate processors, is a CTest test of its own, so that it shows as
+# skipped, not passed, on a machine with one processor (decision D-57). The
+# test above leaves it out. A command-line filter takes precedence over
+# GTEST_FILTER in the environment.
+set(separate_cores_case
+  "TagAccessProcesses.Conformance03MaximumWriteRateWithFourReaders")
+get_test_property(scada-tag-access-integration-test ENVIRONMENT access_env)
+add_test(NAME scada-tag-separate-cores-integration-test
+  COMMAND scada-tag-access-integration-test
+    "--gtest_filter=${separate_cores_case}")
+set_tests_properties(scada-tag-separate-cores-integration-test PROPERTIES
+  LABELS integration
+  TIMEOUT 300
+  ENVIRONMENT "${access_env}"
+  SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
+set_property(TEST scada-tag-access-integration-test APPEND PROPERTY
+  ENVIRONMENT "GTEST_FILTER=-${separate_cores_case}")
 
 # The change rings with real processes: conformance tests 7 (the ring), 13
 # and 24.

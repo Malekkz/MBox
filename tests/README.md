@@ -81,6 +81,9 @@ process and a thread inherit the set of the thread that starts them.
 `TagAccessProcesses.Conformance03*` runs the writer on one processor and
 the readers on the others. It skips with fewer than 2 processors, unless
 `SCADA_REQUIRE_SEPARATE_CORES=1`, which the pipeline sets: then it fails.
+It is the CTest test `scada-tag-separate-cores-integration-test` of its
+own, whose SKIP_REGULAR_EXPRESSION makes a skip show as skipped;
+`scada-tag-access-integration-test` leaves it out with GTEST_FILTER.
 
 Tests that need root have the label `root` instead of `integration`, and
 `sudo ctest --preset root` runs them (decision D-42):

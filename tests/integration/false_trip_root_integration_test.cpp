@@ -13,8 +13,9 @@
 // that reads 5,000 tags per cycle: 2,000,000 reads per second in all. That
 // load is fixed (decision D-57): the rate of SCADA_E_BUSY is per read, so a
 // different number of reads per cycle would change it. The run lasts 10 s,
-// or SCADA_CONFORMANCE_SECONDS (600 for the 10 minutes of the contract;
-// the job `measurements` does that).
+// or SCADA_CONFORMANCE_SECONDS (600 for the 10 minutes of the contract; the
+// 600 s run in the job `measurements` comes with the next part of issue
+// #20).
 //
 // Every build fails on a false trip: a read that gives OWNER_DOWN while
 // the owner runs, a stale or late heartbeat, a torn, backwards or failed
@@ -242,8 +243,10 @@ bool busy_rate_gates() {
 // quantile of a Poisson count with the mean that a rate of exactly 1 in
 // 1,000,000 gives over the reads of this run (35 for 20 million reads). A
 // change that doubles the rate fails it most of the time; a build at the
-// criterion fails it about once in a thousand runs. The 600 s run of the
-// job `measurements` decides the criterion itself.
+// criterion fails it about once in a thousand runs. It catches a
+// regression; it does not prove the criterion, which a 600 s run of the
+// perf build decides (the next part of issue #20 adds it to the job
+// `measurements`).
 void expect_busy_rate(const std::string& counts) {
     const std::uint64_t reads = field(counts, "reads");
     const std::uint64_t busy = field(counts, "busy");
