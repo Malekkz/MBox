@@ -115,6 +115,12 @@ void OwnProcRegion::first_heartbeat(std::int64_t mono_ns) noexcept {
     store_shared(proc.heartbeat_mono_ns, mono_ns, std::memory_order_release);
 }
 
+void OwnProcRegion::count_start() noexcept {
+    // Relaxed: the release store of RUNNING after it publishes it. Wraps
+    // modulo 2^32; readers compare.
+    fetch_add_shared(header().starts, 1U, std::memory_order_relaxed);
+}
+
 void OwnProcRegion::heartbeat(std::int64_t mono_ns) noexcept {
     ProcHeader& proc = header();
     // Relaxed: the counter orders nothing; the release below publishes it.
@@ -293,6 +299,28 @@ std::optional<LateBeats> late_beats_of(std::span<std::byte> region) noexcept {
     beats.last_late_mono_ns =
         load_shared(proc.last_late_mono_ns, std::memory_order_relaxed);
     return beats;
+}
+
+std::optional<std::uint32_t> starts_of(std::span<std::byte> region) noexcept {
+    if (!fits(region.size(), sizeof(RegionHeader), sizeof(ProcHeader))) {
+        return std::nullopt;
+    }
+    auto& proc = shared_at<ProcHeader>(region, sizeof(RegionHeader));
+    // Acquire, before the count: pairs with the release store of RUNNING,
+    // which the owner makes after counting the life.
+    if (load_shared(proc.state, std::memory_order_acquire) !=
+        to_raw(ProcessState::RUNNING)) {
+        return std::nullopt;
+    }
+    // Relaxed: ordered after the acquire load above.
+    return load_shared(proc.starts, std::memory_order_relaxed);
+}
+
+std::optional<std::uint32_t> ProcProbe::starts() const noexcept {
+    if (!region_.has_value()) {
+        return std::nullopt;
+    }
+    return starts_of(region_->memory.bytes());
 }
 
 std::optional<LateBeats> ProcProbe::late_beats() const noexcept {
