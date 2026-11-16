@@ -731,9 +731,50 @@ TEST_F(Host, AProcessThatAttachesBeforeTheFirstCheckIsReportedUp) {
     ASSERT_NE(host, nullptr);
     const OwnProcRegion peer = running_io(1, START_NS);
     ASSERT_TRUE(peer.valid());
-    EXPECT_EQ(changes_of(host->check(START_NS)),
-              (Changes{{"io", DownReason::NONE}}));
+    const CheckReport report = host->check(START_NS);
+    EXPECT_EQ(changes_of(report), (Changes{{"io", DownReason::NONE}}));
+    EXPECT_EQ(report.not_attached, std::vector<std::string>{"web"});
     EXPECT_EQ(host->is_down("io"), false);
+    EXPECT_EQ(host->is_down("web"), true);
+}
+
+// Issue #60: a process that has not attached to a new generation is no
+// change (D-38), so the first check names it separately, once. A process
+// that has a region, even one that is not RUNNING yet, has attached.
+TEST_F(Host, TheFirstCheckOfANewGenerationNamesTheProcessesNotAttached) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    const OwnProcRegion peer = attach_io(1);
+    ASSERT_TRUE(peer.valid());
+    const CheckReport first = host->check(START_NS);
+    EXPECT_TRUE(first.changes.empty());
+    EXPECT_EQ(first.not_attached, std::vector<std::string>{"web"});
+
+    // Only the first check; the flags are unchanged by it.
+    EXPECT_TRUE(host->check(START_NS).not_attached.empty());
+    EXPECT_EQ(host->is_down("web"), true);
+    EXPECT_EQ(host->is_down("io"), true);
+}
+
+TEST_F(Host, TheFirstCheckNamesEveryProcessWhenNoneHasAttached) {
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    EXPECT_EQ(host->check(START_NS).not_attached,
+              (std::vector<std::string>{"io", "web"}));
+}
+
+// A reused generation keeps the flags and the log of the scada-tagd that
+// created it; the processes not attached were named then.
+TEST_F(Host, AReusedGenerationNamesNoProcessNotAttached) {
+    {
+        const std::unique_ptr<GenerationHost> first = started();
+        ASSERT_NE(first, nullptr);
+        EXPECT_FALSE(first->check(START_NS).not_attached.empty());
+    }
+    const std::unique_ptr<GenerationHost> host = started();
+    ASSERT_NE(host, nullptr);
+    ASSERT_TRUE(host->reused());
+    EXPECT_TRUE(host->check(START_NS).not_attached.empty());
     EXPECT_EQ(host->is_down("web"), true);
 }
 

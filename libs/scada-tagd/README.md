@@ -36,6 +36,7 @@ the standard error stream.
 | A note of the start, for example `gen-3 is not reused: the tag set changed` or `gen-2 was removed` | NOTICE | |
 | `process down` | WARNING | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
 | `process up` | NOTICE | `PROCESS` |
+| `process not attached` | INFO, once for each process, only at the first check of a new generation: the process has no usable region yet | `PROCESS` |
 | `heartbeat late` | WARNING, at most once per process and check. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous check), `LATE_BEATS_TOTAL`, `LONGEST_GAP_MS`, `LAST_LATE_MONO_NS` (CLOCK_MONOTONIC) |
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
@@ -43,15 +44,16 @@ the standard error stream.
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
 | `stopped on request` | NOTICE | |
 
-A new generation starts with every other process down, so a process that has
-not attached yet is not logged; each is logged `process up` once it has
-attached, also when that happens before the first check. A reused generation
-keeps what the previous `scada-tagd` recorded and logs only changes from it.
+A new generation starts with every other process down. The first check logs
+`process not attached` for each process that has no region yet. Each process
+is logged `process up` once it has attached and is up, also when that happens
+before the first check. A reused generation keeps what the previous
+`scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.5, sections 3, 10
-  and 11.1; decision D-27 in `docs/decisions.md`.
+- Contract: `docs/contracts/tag-database.md`, version 0.18, sections 3, 5,
+  10 and 11.1; decisions D-27, D-38 and D-53 in `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),

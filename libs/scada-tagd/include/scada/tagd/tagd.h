@@ -36,9 +36,10 @@ inline constexpr std::string_view DEFAULT_TAG_SET_PATH =
 //   (NOTIFY_SOCKET);
 // - at every liveness check it writes its own heartbeat, sets and clears
 //   the `down` flag of every process, removes entries that do not belong in
-//   the generation directory and logs every change; from the same loop it
-//   feeds the service manager's watchdog four times in its interval
-//   (WATCHDOG_USEC);
+//   the generation directory and logs every change; the first check of a
+//   new generation also logs each process that has not attached; from the
+//   same loop it feeds the service manager's watchdog four times in its
+//   interval (WATCHDOG_USEC);
 // - on SIGTERM or SIGINT it marks itself as stopping, leaves the generation
 //   in place and returns EXIT_OK;
 // - it returns EXIT_ERROR if the tag-set file, the base directory or the

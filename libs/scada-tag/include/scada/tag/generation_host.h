@@ -77,6 +77,12 @@ struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
     std::vector<LateHeartbeats> late;
+    // Only at the first check of a new generation: the processes that have
+    // no usable region yet (DownReason::REGION_MISSING), in process index
+    // order. Their `down` flag starts at 1 and stays, so they are not in
+    // `changes`; this is their one trace (issue #60). Empty at every later
+    // check and in a reused generation.
+    std::vector<std::string> not_attached;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -146,7 +152,8 @@ public:
     // clears it for every process that is not, reads the late heartbeats
     // every process recorded, then removes every entry of the generation
     // directory that the header does not list or whose owner is wrong
-    // (section 3.1). Returns what changed.
+    // (section 3.1). Returns what changed, and at the first check of a new
+    // generation the processes that have not attached yet.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.

@@ -848,3 +848,24 @@ Consequences:
 - Tests: the unit tests `Observer.*` and `TagHandle.*`; the integration test `scada-tag-observer-integration-test` (several observers beside a live writer and a live attach, only read-only mappings in `/proc/self/maps`, an observer before `scada-tagd`, a generation change); `scada-tag-observer-users-test`, with the new CTest label `root` and the test preset `root`, which becomes other users: root and a group member who is in no entry of the process table observe, a user outside the group gets `SCADA_E_PERMISSION`. The presets that run unprivileged leave the label out; the pipeline runs `sudo ctest --preset root` after the dev tests on both architectures. `Observer.ACallerWhoMayNotReadTheBaseDirectoryGetsPermission` takes the same path in both cases: as root it drops to nobody in a child, otherwise it removes the search permission of the base directory. The perf test `WakeLatency.EightWaitingObserversEachWakeWithinOneMillisecond` measures the wake of 8 observers on one ring against the target of P1-07.
 - Accepted deviation (review of #55): RETIRING and `current` are looked at only in `scada_tag_status`, so calling it about once a second, detaching and observing again are the caller's duty (contract 11.4, items 5 and 6). The perf case with 8 observers reports only: its 99th percentile is noisy on shared machines.
 - Open for phase 10, not changed now: (a) reference 11.6 gives direct mode to group `scada-emergency`, but the base directory is `2750 scada-tagd:scada`, so such a user cannot enter it; (b) the audit record of a `scadactl` invocation belongs in `scadactl`, not in the library.
+
+## D-53: The processes not attached at the first check of a new generation are logged; the start value of `down` is in the contract
+Date: 2026-11-15
+Phase / issue: 1, #60
+Status: accepted
+
+Context: since D-38 a new generation starts with `down` 1 for every process but `tagd`, so a process that never attaches is no change and left no trace in the log of `scada-tagd`. The contract did not state that start value.
+Options: one record listing every process not attached; one record per process; nothing, as D-38 left it.
+Decision:
+- At the first check of a new generation, `GenerationHost::check` lists the processes whose region is missing or not ready (`DownReason::REGION_MISSING`) in `CheckReport.not_attached`, in process index order. `scada-tagd` logs `process not attached PROCESS="<name>"` at INFO for each, once.
+- A process that has a region but is not yet RUNNING has attached and is not listed. Its flag stays 1, and it is logged `process up` when it is up.
+- A reused generation lists nothing: the flags and the record are from the `scada-tagd` that created it.
+- The `down` flags and the `process up` and `process down` records are unchanged.
+- Contract 0.11: sections 5 and 10.1 state the start value of D-38 and this report. This is earlier than P1-13, which D-38 named.
+Reason: a log field holds at most 96 bytes (`LOG_MAX_VALUE_BYTES`) and a tag set may name 1,024 processes of up to 31 bytes. One list would be cut or would need to be split over several records. One record per process keeps every name and has the same form as `process up`. The list comes from the check, not from a second look at the directory: it is what that check found.
+Consequences:
+- A tag set of N processes that none has attached gives N INFO records at start, once.
+- Tests:
+  - `Host.TheFirstCheckOfANewGenerationNamesTheProcessesNotAttached`, `Host.TheFirstCheckNamesEveryProcessWhenNoneHasAttached` and `Host.AReusedGenerationNamesNoProcessNotAttached`;
+  - `Host.AProcessThatAttachesBeforeTheFirstCheckIsReportedUp` also checks the list;
+  - `TagdService.AProcessNotAttachedAtTheFirstCheckIsLogged` fails without the change.

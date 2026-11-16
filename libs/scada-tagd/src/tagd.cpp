@@ -58,7 +58,8 @@ constexpr std::string_view USAGE =
     "so that a restart does not disturb the other services. Otherwise it\n"
     "creates the next generation and switches to it. It then checks every\n"
     "heartbeat_check_ms (from the tag-set file, 250 ms by default) which\n"
-    "processes are down, and logs every change.\n"
+    "processes are down, and logs every change. The first check of a new\n"
+    "generation also logs each process that has not attached yet.\n"
     "\n"
     "Options:\n"
     "  --tag-set <file>        Tag-set file (JSON). It must hold a process\n"
@@ -205,6 +206,12 @@ Wake wait_for_signal(const sigset_t& signals,
 
 // Writes what one liveness check changed to the log.
 void log_report(Logger& logger, const CheckReport& report) {
+    // One record each, not one list: a field holds at most
+    // LOG_MAX_VALUE_BYTES, too few for the names of a large tag set.
+    for (const std::string& process : report.not_attached) {
+        logger.log(LogLevel::INFO, "process not attached",
+                   {{"PROCESS", process}});
+    }
     for (const ProcessChange& change : report.changes) {
         if (change.reason == DownReason::NONE) {
             logger.log(LogLevel::NOTICE, "process up",

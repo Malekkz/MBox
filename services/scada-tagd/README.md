@@ -10,7 +10,8 @@ The tag database daemon (reference section 5): a thin executable over
 - Reuses the current generation when the tag set is unchanged, so that a
   restart of `scada-tagd` does not disturb the other services.
 - Checks every `heartbeat_check_ms` (250 ms by default) which processes are
-  down, sets and clears their `down` flag, and logs every change.
+  down, sets and clears their `down` flag, and logs every change. The first
+  check of a new generation also logs each process that has not attached.
 - Removes from the generation directory what the header does not list or
   what belongs to the wrong user.
 - Exit codes: 0 stopped on request (`SIGTERM`, `SIGINT`), 1 error, 2 wrong

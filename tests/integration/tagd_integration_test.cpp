@@ -74,6 +74,8 @@ ino_t inode_of(const std::filesystem::path& path) {
 
 // The log lines of scada-tagd about the process `io`.
 constexpr std::string_view IO_UP = R"(process up PROCESS="io")";
+constexpr std::string_view IO_NOT_ATTACHED =
+    R"(process not attached PROCESS="io")";
 constexpr std::string_view IO_HEARTBEAT_STALE =
     R"(process down PROCESS="io" REASON="heartbeat stale")";
 constexpr std::string_view IO_NOT_RUNNING =
@@ -286,6 +288,22 @@ TEST_F(TagdService, Conformance06CleanlyStoppedProcessIsMarkedDown) {
 
     EXPECT_TRUE(stops_cleanly(*helper));
     EXPECT_TRUE(logs(*tagd, IO_NOT_RUNNING));
+    stop(*tagd);
+}
+
+// Issue #60: a process that has not attached to a new generation leaves a
+// trace in the log of the first check. Its flag is unchanged by that, so
+// attaching later is still logged as `process up`.
+TEST_F(TagdService, AProcessNotAttachedAtTheFirstCheckIsLogged) {
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(logs(*tagd, IO_NOT_ATTACHED));
+
+    const std::size_t mark = tagd->child.err().size();
+    const std::optional<ChildProcess> helper = attached_io();
+    EXPECT_TRUE(logs(*tagd, IO_UP, mark));
     stop(*tagd);
 }
 
