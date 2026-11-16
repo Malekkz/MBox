@@ -37,8 +37,14 @@ that, any change needs a layout version bump and a migration note.
 - Names are ASCII, lower case, `[a-z0-9_.-]`, at most 127 bytes for tags and
   31 bytes for owners, processes and queues. An owner name does not start
   with `.` (section 12).
-- Every offset in a region is a multiple of 8 and is validated against the
-  mapped size before use.
+- "Sorted by name" means sorted by the bytes of the name, compared as
+  unsigned values. This order is the rule of the tag-set builder for layout
+  version 1 (section 5), not a promise to consumers: a consumer finds
+  processes, owners, queues and tags by name, not by position.
+- Every offset in a region is a multiple of 8, except
+  `DirectoryEntry.name_offset`, which is a byte offset into the name pool.
+  Every offset is validated against the mapped size before use. An offset
+  may equal the file size when the part it points to is empty.
 - The minimum kernel is Linux 5.16 (`futex_waitv`, section 8.4).
 
 ## 2. Terms
@@ -315,6 +321,43 @@ struct DirectoryEntry {          // 24 bytes
   and 0 for `tagd` from the moment the header is published, before `current`
   points to it: a process that has not attached has no region and is down by
   section 10.1. A reused generation keeps the flags it holds (section 11.1).
+
+How the tag-set builder fills the header in layout version 1 (D-26):
+
+- Processes, owners and queues are sorted by name (section 1). The position
+  of a process in the process table is its process index, of an owner in
+  the owner table its owner index, of a queue in the queue table its queue
+  id. The slots of an owner are its tags sorted by name.
+- `OwnerEntry.uid` is the uid of the owner's process. A queue's kind comes
+  from the prefix of its name (`events.`, `cmd.`, `result.`), and its
+  `record_size` from the kind (section 9.4).
+- Each slot table is padded with zero bytes to a multiple of 8 bytes. An
+  owner without tags has an empty slot table. The name pool holds the tag
+  names in directory order, without terminators; `name_pool_size` is the
+  number of name bytes. The file ends at the next multiple of 8 bytes after
+  the name pool.
+- In the `RegionHeader` of `header`, `owner_index` is 0 and `queue_id` is
+  0xFFFF.
+- `config_hash` is the SHA-256 of the canonical encoding of the tag set,
+  defined in `libs/scada-tag/README.md` ("Order independence"). The encoding
+  starts with a name (`scada-tag-set`) and an encoding version (1), and
+  holds every setting of the tag set in name order. The generation number
+  and `created_time_ns` are not hashed. The encoding version changes
+  whenever the canonical encoding changes, and a changed version always
+  gives a new generation, never a reuse (section 11.1).
+
+Besides the rules stated elsewhere in this contract, the tag-set builder
+refuses:
+
+- `retain_now` without `retain`;
+- a STRING tag that is `writable_by_command` (section 9.4);
+- a process uid of 4,294,967,295;
+- a heartbeat timeout or `heartbeat_check_ms` below 1 ms;
+- a queue capacity that is not a power of two (at most 2,147,483,648;
+  default 1,024 records);
+- a change ring capacity below twice the owner's tag count (section 8.3).
+  The default of 65,536 entries is not raised automatically: an owner with
+  more than 32,768 tags must state its capacity.
 
 ### 5.1 Handles
 
@@ -1800,6 +1843,7 @@ because the real-time rule no longer holds on that unit.
 | Tag name length | 127 bytes |
 | String value length | 250 bytes |
 | Change ring capacity | 1,024 to 1,048,576 entries (32 MB); default 65,536; at least twice the owner's tag count |
+| Reliable queue capacity | A power of two up to 2,147,483,648 records; default 1,024 |
 | Event payload | 232 bytes |
 | Write request lifetime | 60 seconds |
 
