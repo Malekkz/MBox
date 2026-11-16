@@ -80,7 +80,10 @@ its heartbeat until SIGTERM, SIGINT or SIGHUP, so the last values read as
 good. It stops with an error once `scada-tagd` has been down for 5 s, so
 that a simulator left behind by a test does not write on until it is
 killed; a shorter outage, such as a restart of `scada-tagd`, which every
-process must tolerate (reference 3.3), does not stop it. See `services/scada-sim/README.md` for the
+process must tolerate (reference 3.3), does not stop it. With `--hold` the
+process waits after resolving, with its heartbeat and the same stop rules,
+until SIGUSR1, so that a test can start its readers before the first write
+(decision D-50). See `services/scada-sim/README.md` for the
 output.
 
 A simulator that attaches again to regions it wrote before goes on with

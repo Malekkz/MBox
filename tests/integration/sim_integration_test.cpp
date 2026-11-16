@@ -1,8 +1,9 @@
 // Integration tests for scada-sim, the simulator writer (issue P1-10), with
 // real processes: the tag-set file it writes is the one scada-tagd runs on;
 // every pattern gives the values its definition promises; several simulator
-// processes share one simulation; a run stops on a signal; and a tag set
-// that does not fit the run is refused.
+// processes share one simulation; a run stops on a signal; a run started
+// with --hold writes only once released; and a tag set that does not fit
+// the run is refused.
 //
 // Every wait is on a condition with a limit.
 
@@ -201,6 +202,19 @@ protected:
             return ::testing::AssertionFailure() << sim->err();
         }
         return stops_cleanly(*sim);
+    }
+
+    // Starts the simulator of `layout` with --hold and `extra`, and waits
+    // until it holds. Nothing, with a failed expectation, if it does not.
+    [[nodiscard]] std::optional<ChildProcess> start_held_sim(
+        const Layout& layout, std::vector<std::string> extra = {}) const {
+        extra.insert(extra.begin(), "--hold");
+        std::optional<ChildProcess> sim = start_sim(layout, extra);
+        if (sim.has_value() && !prints(*sim, "ready\n")) {
+            ADD_FAILURE() << "scada-sim did not hold";
+            return std::nullopt;
+        }
+        return sim;
     }
 
     // Runs `scada-sim <arguments>` to its end and returns its exit code.
@@ -501,6 +515,161 @@ TEST_F(SimProcesses, ALeftBehindSimulatorStopsWhenTagdStaysDown) {
         << shell->err();
     EXPECT_NE(shell->err().find("scada-tagd has been down"), std::string::npos)
         << shell->err();
+}
+
+// The heartbeat count of the process `index`, as `reader` sees it; 0 if it
+// cannot be read.
+std::uint64_t heartbeat_of(const Attached& reader, std::uint16_t index) {
+    scada_proc_status_t status{};
+    if (scada_proc_status(reader.ctx(), index, &status) != SCADA_OK) {
+        return 0;
+    }
+    return status.heartbeat;
+}
+
+// Heartbeats a held simulator must write while the test looks.
+constexpr std::uint64_t HELD_BEATS = 3;
+
+// The process `index` writes `beats` more heartbeats within WAIT_LIMIT.
+::testing::AssertionResult beats_on(const Attached& reader, std::uint16_t index,
+                                    std::uint64_t beats) {
+    const std::uint64_t first = heartbeat_of(reader, index);
+    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
+    while (heartbeat_of(reader, index) < first + beats) {
+        if (Clock::now() >= deadline) {
+            return ::testing::AssertionFailure()
+                   << "heartbeat " << heartbeat_of(reader, index) << ", wanted "
+                   << first + beats;
+        }
+        std::this_thread::yield();
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// No tag of the owners of `layout` has been written.
+::testing::AssertionResult no_tag_written(const Attached& reader,
+                                          const Layout& layout) {
+    for (std::uint32_t owner = 0; owner < layout.owners; ++owner) {
+        for (std::uint64_t tag = 0;
+             tag < scada::sim::tags_of_owner(layout, owner); ++tag) {
+            const std::string name = scada::sim::tag_name(layout, owner, tag);
+            scada_value value{};
+            if (scada_tag_read(reader.ctx(), reader.resolve(name), &value) !=
+                    SCADA_OK ||
+                value.change_count != 0 ||
+                (value.quality_flags & SCADA_FLAG_NOT_INIT) == 0) {
+                return ::testing::AssertionFailure()
+                       << name << " was written: change count "
+                       << value.change_count;
+            }
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// The held simulator `sim`, the process "sim" of `layout`, writes
+// HELD_BEATS heartbeats while not one of its tags is written and it has not
+// printed "writing".
+::testing::AssertionResult held_without_writing(const Attached& reader,
+                                                const Layout& layout,
+                                                const ChildProcess& sim) {
+    std::uint16_t index = 0;
+    if (scada_proc_resolve(reader.ctx(), "sim", &index) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "sim not resolved";
+    }
+    if (const ::testing::AssertionResult beats =
+            beats_on(reader, index, HELD_BEATS);
+        !beats) {
+        return beats;
+    }
+    if (const ::testing::AssertionResult none = no_tag_written(reader, layout);
+        !none) {
+        return none;
+    }
+    if (sim.out().find("writing") != std::string::npos) {
+        return ::testing::AssertionFailure() << sim.out();
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// A simulator started with --hold writes nothing until SIGUSR1, while its
+// heartbeat goes on; after SIGUSR1 it runs as one without the option.
+TEST_F(SimProcesses, AHeldSimulatorWritesOnlyAfterSigusr1) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 2,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim = start_held_sim(
+        layout, {"--rate", "0", "--rounds", std::to_string(ROUNDS)});
+    if (!sim.has_value()) {
+        return;
+    }
+    const Attached reader(base(), "reader");
+    EXPECT_TRUE(held_without_writing(reader, layout, *sim));
+
+    ASSERT_TRUE(sim->send_signal(SIGUSR1));
+    EXPECT_TRUE(prints(*sim, "done "));
+    EXPECT_TRUE(holds_rounds(reader, layout, ROUNDS));
+    EXPECT_TRUE(stops_cleanly(*sim));
+    stop(*tagd);
+}
+
+// A held simulator stops on SIGTERM as a running one does, having written
+// nothing.
+TEST_F(SimProcesses, AHeldSimulatorStopsOnASignal) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 1,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim = start_held_sim(layout);
+    if (!sim.has_value()) {
+        return;
+    }
+    ASSERT_TRUE(sim->send_signal(SIGTERM));
+    EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_OK)
+        << sim->err();
+    EXPECT_NE(sim->out().find("stopped updates=0 elapsed_ms=0\n"),
+              std::string::npos)
+        << sim->out();
+    EXPECT_EQ(sim->out().find("writing"), std::string::npos) << sim->out();
+    stop(*tagd);
+}
+
+// A held simulator whose test died does not wait for ever: the rule for
+// one left behind applies while it holds (decision D-50).
+TEST_F(SimProcesses, AHeldSimulatorStopsWhenTagdStaysDown) {
+    const Layout layout{.prefix = "sim",
+                        .processes = 1,
+                        .owners = 1,
+                        .tags = SMALL_TAGS,
+                        .patterns = {Pattern::CHECK}};
+    write_sim_tag_set(layout);
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    std::optional<ChildProcess> sim = start_held_sim(layout);
+    if (!sim.has_value()) {
+        return;
+    }
+    stop(*tagd);
+    EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_ERROR)
+        << sim->err();
+    EXPECT_NE(sim->err().find("scada-tagd has been down"), std::string::npos)
+        << sim->err();
+    EXPECT_EQ(sim->out().find("writing"), std::string::npos) << sim->out();
 }
 
 // Resolving many tags takes longer than a short heartbeat timeout; the
