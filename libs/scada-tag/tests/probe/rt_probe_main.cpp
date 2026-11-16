@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -222,8 +223,8 @@ int touch_object(dl_phdr_info* info, std::size_t /*size*/,
                 (address < protected_start || address >= protected_end);
             // In the segment: from the first byte of the segment on.
             const std::uintptr_t touched = std::max(address, first);
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): an address from the program headers of a loaded object
-            auto* const byte = reinterpret_cast<unsigned char*>(touched);
+            // An address from the program headers of a loaded object.
+            auto* const byte = std::bit_cast<unsigned char*>(touched);
             const std::atomic_ref<unsigned char> cell(*byte);
             if (writable) {
                 cell.fetch_or(0, std::memory_order_relaxed);
