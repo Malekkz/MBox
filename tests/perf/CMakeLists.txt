@@ -47,3 +47,19 @@ scada_add_test(scada-tag-queue-post-perf-test KIND perf
 target_include_directories(scada-tag-queue-post-perf-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
 add_dependencies(scada-tag-queue-post-perf-test scada-tagd)
+
+# Conformance test 27: the latency of read, read_many, write and write_many
+# under the reference load, the scan of 5,000 tags, the memory of each
+# process and the size of the database (issue P1-12, decision D-57). The
+# medians are compared with the baseline of the architecture the tests run
+# on, in baseline/, if it names the call.
+scada_add_test(scada-tag-latency-perf-test KIND perf
+  SOURCES tag_latency_perf_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
+    "SCADA_PERF_BASELINE=${CMAKE_CURRENT_SOURCE_DIR}/baseline/${CMAKE_SYSTEM_PROCESSOR}.txt")
+target_include_directories(scada-tag-latency-perf-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
+add_dependencies(scada-tag-latency-perf-test scada-tagd scada-sim)
