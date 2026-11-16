@@ -43,8 +43,10 @@
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -71,8 +73,13 @@ constexpr const char* RT_PROCESS = "rtreader";
 constexpr std::uint64_t RATE_PERCENT = 95;
 constexpr std::uint64_t PERCENT = 100;
 constexpr std::uint64_t MILLISECONDS_PER_SECOND = 1000;
-// The criterion of contract section 16 for the read retry limit.
-constexpr std::uint64_t READS_PER_ALLOWED_BUSY = 1'000'000;
+// The criterion of contract section 16 for the read retry limit: fewer
+// than 1 SCADA_E_BUSY in this many reads.
+constexpr double READS_PER_ALLOWED_BUSY = 1'000'000.0;
+// The run fails when its count of SCADA_E_BUSY is above this quantile of
+// the count a true rate of exactly the criterion would give over its reads
+// (decision D-57).
+constexpr double BUSY_QUANTILE = 0.999;
 
 // The number after `key` in `text`, or nothing.
 std::optional<std::uint64_t> number_after(std::string_view text,
@@ -199,6 +206,27 @@ void expect_reader_counts(const std::string& counts) {
               scada::tag::DEFAULT_REALTIME_HEARTBEAT_TIMEOUT_MS);
 }
 
+// The smallest count k with P(X <= k) >= `quantile` for X Poisson with mean
+// `mean`. Summed in logarithms, so that a mean of thousands does not
+// underflow; the terms far below the mean are 0 and do not matter.
+std::uint64_t poisson_quantile(double mean, double quantile) {
+    double log_term = -mean;  // log P(X = 0)
+    double sum = 0.0;
+    // Far above the quantile of any mean: the loop always ends.
+    const auto last =
+        static_cast<std::uint64_t>(mean + (20.0 * std::sqrt(mean)) + 100.0);
+    for (std::uint64_t k = 0; k < last; ++k) {
+        if (k > 0) {
+            log_term += std::log(mean) - std::log(static_cast<double>(k));
+        }
+        sum += std::exp(log_term);
+        if (sum >= quantile) {
+            return k;
+        }
+    }
+    return last;
+}
+
 // True if CTest says that this build gates on the criterion for
 // SCADA_E_BUSY: an optimised build without a sanitizer (decision D-57).
 bool busy_rate_gates() {
@@ -207,19 +235,32 @@ bool busy_rate_gates() {
     return gate != nullptr && std::string_view(gate) == "1";
 }
 
-// The real-time readers stayed below the criterion of contract section 16
-// for SCADA_E_BUSY, in a build that gates on it; other builds only report
-// the rate, with its sample size.
+// The count of SCADA_E_BUSY of the real-time readers is consistent with
+// the criterion of contract section 16 (fewer than 1 in 1,000,000 reads),
+// in a build that gates on it; other builds only report it. The test is
+// statistical (decision D-57): it fails when the count is above the 99.9 %
+// quantile of a Poisson count with the mean that a rate of exactly 1 in
+// 1,000,000 gives over the reads of this run (35 for 20 million reads). A
+// change that doubles the rate fails it most of the time; a build at the
+// criterion fails it about once in a thousand runs. The 600 s run of the
+// job `measurements` decides the criterion itself.
 void expect_busy_rate(const std::string& counts) {
     const std::uint64_t reads = field(counts, "reads");
     const std::uint64_t busy = field(counts, "busy");
     EXPECT_GT(reads, 0U);
     const bool gates = busy_rate_gates();
-    std::cout << "busy=" << busy << " in reads=" << reads
+    const std::uint64_t bound = poisson_quantile(
+        static_cast<double>(reads) / READS_PER_ALLOWED_BUSY, BUSY_QUANTILE);
+    const double per_million =
+        static_cast<double>(busy) * READS_PER_ALLOWED_BUSY /
+        static_cast<double>(std::max<std::uint64_t>(reads, 1));
+    std::cout << "busy=" << busy << " reads=" << reads << " bound=" << bound
+              << " per_million=" << per_million
               << (gates ? " (gated)" : " (reported only)") << "\n";
+    ::testing::Test::RecordProperty("busy_bound", std::to_string(bound));
     if (gates) {
-        EXPECT_LT(busy * READS_PER_ALLOWED_BUSY, reads)
-            << busy << " SCADA_E_BUSY in " << reads << " reads";
+        EXPECT_LE(busy, bound) << busy << " SCADA_E_BUSY in " << reads
+                               << " reads; bound " << bound;
     }
 }
 
