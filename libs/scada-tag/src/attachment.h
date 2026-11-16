@@ -413,8 +413,10 @@ public:
     void want_queue(std::size_t queue_id);
 
     // The mapped region of `queue_id`: the own mapping if this process
-    // produces it, otherwise the read-only one, or an empty span while it
-    // is missing, with the guarantees of `changes_of`.
+    // produces it, otherwise the read-only one of the file in use, or an
+    // empty span while it is missing, after the queue died, or once a look
+    // found the file in use changed in size (section 3.3), with the
+    // guarantees of `changes_of`. Any thread.
     [[nodiscard]] std::span<std::byte> queue_bytes(
         std::size_t queue_id) const noexcept;
 
@@ -493,6 +495,17 @@ public:
     // The cursor never moves back, except to the all-ones value. Returns
     // false if the queue is dead.
     bool follow_queue(std::size_t queue_id) noexcept;
+
+    // True if the consumer's next look (`follow_queue`) of `queue_id`,
+    // which this process consumes and which is not dead, changes what is
+    // in use: a first file is mapped while none is in use, a file other
+    // than the one in use is under the name, or a look found the file in
+    // use changed in size. The next look then adopts the file, moves to it
+    // or stops the queue, so `scada_queue_next` has something to do and a
+    // wait set reports the queue ready (decision D-51). Changes nothing;
+    // any thread.
+    [[nodiscard]] bool queue_switch_pending(
+        std::size_t queue_id) const noexcept;
 
     // True if `follow_queue` found the queue dead. Changes nothing.
     [[nodiscard]] bool queue_is_dead(std::size_t queue_id) const noexcept;
@@ -780,7 +793,10 @@ private:
     // For each queue this process consumes: the file in use, as its
     // mapping in `peers_` (null before the first), and whether the queue
     // died (see `follow_queue`). Written by the consumer's thread, or by attach
-    // before any other thread can use the context; relaxed.
+    // before any other thread can use the context. The pointer is stored
+    // with release and loaded with acquire by the other threads that read
+    // the mapping it names (wait sets, review of PR #86, N1); the dead flag
+    // is relaxed.
     std::vector<std::atomic<const PeerMapping*>> queue_in_use_;
     std::vector<std::atomic<bool>> queue_dead_;
     // For every process, whether its `proc` region was asked for by

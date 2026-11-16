@@ -187,6 +187,10 @@ enum class QueueEvent : std::uint8_t {
     // Records that were in the old file and that its consumer had not
     // taken are lost unless the consumer still holds the old file.
     RECREATED,
+    // In the same file, `write_seq` is below the value of the previous
+    // check (decision D-51): the file was damaged or a second producer
+    // writes it, and ids may repeat. `old_write_seq` is the earlier value.
+    WRITE_SEQ_FELL,
 };
 
 // A reliable queue whose state changed at a liveness check. The values are

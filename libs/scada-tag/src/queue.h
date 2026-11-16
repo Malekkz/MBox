@@ -92,6 +92,16 @@ private:
     [[nodiscard]] Look poll(std::span<std::byte> out,
                             bool retiring = false) noexcept;
 
+    // True if next should look again at once instead of waiting a slice:
+    // a switch of the file in use is pending and `looked`, which this
+    // sets, says it has not looked again since the last wait.
+    [[nodiscard]] bool look_again_now(bool& looked) const noexcept;
+
+    // Waits on the queue's `write_seq` until `slice_end` (monotonic ns), or
+    // sleeps until then while it has no word (`waiter`). False if the wait
+    // failed. Not real-time.
+    [[nodiscard]] bool wait_slice(std::int64_t slice_end) const noexcept;
+
     Attachment& attachment_;
     std::size_t id_ = 0;
     bool producer_ = false;
