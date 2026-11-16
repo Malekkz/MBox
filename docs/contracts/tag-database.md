@@ -98,6 +98,12 @@ parallel and without the service users.
   the uid of the user `scada-tagd` with exactly that mode. The client looks the
   uid up by name at attach. With a replaced base directory (tests), the
   expected uid is given in the options.
+- `scada-tagd` takes its own effective uid as the uid of the user
+  `scada-tagd`; it looks up no user name. The tag set must hold a process
+  named `tagd` with that uid, or `scada-tagd` does not start.
+- `scada-tagd` holds an exclusive `flock` on the base directory for its
+  whole life, besides the lock on `proc.tagd`. A second instance fails
+  before it reads `current` or changes anything.
 - `gen-<generation>/` is owned by `scada-tagd:scada`, mode `3770` (setgid and
   sticky): group members can create files; a file can be removed only by its
   owner or by `scada-tagd` as owner of the directory.
@@ -124,7 +130,11 @@ parallel and without the service users.
   to that directory, so a switch of `current` cannot mix two generations.
 - `scada-tagd` removes, at each liveness check, any entry in the generation
   directory that the header does not list or whose owner uid is wrong, and
-  reports it.
+  reports it. Two kinds of entry are left: an entry under a listed name
+  whose owner uid is right, whatever its type; and a file
+  `.tmp.<region>.<digits>` of a listed region owned by that region's user,
+  which is a region being created (section 3.2). An entry it cannot remove
+  is reported once.
 
 ### 3.2 Who creates what
 
@@ -136,7 +146,8 @@ never needs to create files on behalf of another user.
 A region is created under a temporary name (`.tmp.<name>.<pid>`): create with
 `O_CREAT | O_EXCL`, `fchmod`, `ftruncate`, `posix_fallocate` (so a full
 `/dev/shm` fails here with an error, not later with a signal), initialise, set
-`ready`, then rename into place. A crash therefore never leaves a half-built
+`ready`, then rename into place with `renameat2` and `RENAME_NOREPLACE`, so
+that a file already under the name is never replaced. A crash therefore never leaves a half-built
 region under its real name. At attach a process removes its own stale
 temporary files.
 
@@ -1128,6 +1139,9 @@ the reader spent between the two, which is far below the timeout. A time
 further ahead comes from a corrupt region or a process on another clock, and
 counts as down so that it cannot keep a dead process alive for readers.
 
+The rules are tested in the order listed, and the first that holds is the
+reason (`down_reason` of `scada_proc_status_t`, section 13).
+
 The library evaluates these three rules itself on every use (the read
 overlay, `scada_proc_status`, `post`), so detection does not depend on
 `scada-tagd` being alive and a clean stop is seen at once.
@@ -1222,12 +1236,22 @@ for readers and never down for a check. `starts` counts it:
 1. Compute the tag-set definition and its `config_hash`.
 2. If `current` points to a generation with the same layout version and
    `config_hash`, reuse it: restarting `scada-tagd` does not disturb the data
-   plane.
+   plane. The generation is reused only if all of these hold: its directory
+   has the owner and mode of section 3.1; its `header` passes the checks of
+   section 3.1 (a regular file of the uid of `scada-tagd`, the size the tag
+   set builds, `ready`, and a matching `RegionHeader`); its state is
+   RUNNING; its `config_hash` equals the one computed in step 1; and it
+   equals byte for byte the header the library builds for the tag set,
+   apart from `ready`, `state`, `created_time_ns` and the `down` flags.
 3. Otherwise remove every `gen-*` directory that `current` does not point to
    and that has no live process (left by a crash while building), create
    `gen-<n+1>/`, write `header` with state BUILDING, set `ready`, set state
    RUNNING, then switch `current`: create a symlink under a temporary name and
-   rename it over `current`.
+   rename it over `current`. A live process is a `proc.*` file in the
+   directory whose lock (section 10) is held; a lock that cannot be tested
+   counts as held. `n` is the highest generation number among the `gen-*`
+   entries of the base directory and the target of `current`, also when
+   that directory is then removed.
 
 ### 11.2 Attach (`scada_tag_attach`)
 
