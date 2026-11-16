@@ -204,6 +204,19 @@ protected:
         return stops_cleanly(*sim);
     }
 
+    // Starts the simulator of `layout` with --hold and `extra`, and waits
+    // until it holds. Nothing, with a failed expectation, if it does not.
+    [[nodiscard]] std::optional<ChildProcess> start_held_sim(
+        const Layout& layout, std::vector<std::string> extra = {}) const {
+        extra.insert(extra.begin(), "--hold");
+        std::optional<ChildProcess> sim = start_sim(layout, extra);
+        if (sim.has_value() && !prints(*sim, "ready\n")) {
+            ADD_FAILURE() << "scada-sim did not hold";
+            return std::nullopt;
+        }
+        return sim;
+    }
+
     // Runs `scada-sim <arguments>` to its end and returns its exit code.
     [[nodiscard]] static std::optional<int> sim_exit(
         const std::vector<std::string>& arguments, std::string* err = nullptr) {
@@ -514,6 +527,71 @@ std::uint64_t heartbeat_of(const Attached& reader, std::uint16_t index) {
     return status.heartbeat;
 }
 
+// Heartbeats a held simulator must write while the test looks.
+constexpr std::uint64_t HELD_BEATS = 3;
+
+// The process `index` writes `beats` more heartbeats within WAIT_LIMIT.
+::testing::AssertionResult beats_on(const Attached& reader, std::uint16_t index,
+                                    std::uint64_t beats) {
+    const std::uint64_t first = heartbeat_of(reader, index);
+    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
+    while (heartbeat_of(reader, index) < first + beats) {
+        if (Clock::now() >= deadline) {
+            return ::testing::AssertionFailure()
+                   << "heartbeat " << heartbeat_of(reader, index) << ", wanted "
+                   << first + beats;
+        }
+        std::this_thread::yield();
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// No tag of the owners of `layout` has been written.
+::testing::AssertionResult no_tag_written(const Attached& reader,
+                                          const Layout& layout) {
+    for (std::uint32_t owner = 0; owner < layout.owners; ++owner) {
+        for (std::uint64_t tag = 0;
+             tag < scada::sim::tags_of_owner(layout, owner); ++tag) {
+            const std::string name = scada::sim::tag_name(layout, owner, tag);
+            scada_value value{};
+            if (scada_tag_read(reader.ctx(), reader.resolve(name), &value) !=
+                    SCADA_OK ||
+                value.change_count != 0 ||
+                (value.quality_flags & SCADA_FLAG_NOT_INIT) == 0) {
+                return ::testing::AssertionFailure()
+                       << name << " was written: change count "
+                       << value.change_count;
+            }
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// The held simulator `sim`, the process "sim" of `layout`, writes
+// HELD_BEATS heartbeats while not one of its tags is written and it has not
+// printed "writing".
+::testing::AssertionResult held_without_writing(const Attached& reader,
+                                                const Layout& layout,
+                                                const ChildProcess& sim) {
+    std::uint16_t index = 0;
+    if (scada_proc_resolve(reader.ctx(), "sim", &index) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "sim not resolved";
+    }
+    if (const ::testing::AssertionResult beats =
+            beats_on(reader, index, HELD_BEATS);
+        !beats) {
+        return beats;
+    }
+    if (const ::testing::AssertionResult none = no_tag_written(reader, layout);
+        !none) {
+        return none;
+    }
+    if (sim.out().find("writing") != std::string::npos) {
+        return ::testing::AssertionFailure() << sim.out();
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // A simulator started with --hold writes nothing until SIGUSR1, while its
 // heartbeat goes on; after SIGUSR1 it runs as one without the option.
 TEST_F(SimProcesses, AHeldSimulatorWritesOnlyAfterSigusr1) {
@@ -527,40 +605,16 @@ TEST_F(SimProcesses, AHeldSimulatorWritesOnlyAfterSigusr1) {
     if (!tagd.has_value()) {
         return;
     }
-    std::optional<ChildProcess> sim = start_sim(
-        layout, {"--hold", "--rate", "0", "--rounds", std::to_string(ROUNDS)});
+    std::optional<ChildProcess> sim = start_held_sim(
+        layout, {"--rate", "0", "--rounds", std::to_string(ROUNDS)});
     if (!sim.has_value()) {
         return;
     }
-    ASSERT_TRUE(prints(*sim, "ready\n"));
     const Attached reader(base(), "reader");
-    std::uint16_t index = 0;
-    ASSERT_EQ(scada_proc_resolve(reader.ctx(), "sim", &index), SCADA_OK);
-    // Held for some heartbeats: alive, and not one tag written.
-    const std::uint64_t first = heartbeat_of(reader, index);
-    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
-    while (heartbeat_of(reader, index) < first + 3 && Clock::now() < deadline) {
-        std::this_thread::yield();
-    }
-    EXPECT_GE(heartbeat_of(reader, index), first + 3);
-    for (std::uint32_t owner = 0; owner < layout.owners; ++owner) {
-        for (std::uint64_t tag = 0;
-             tag < scada::sim::tags_of_owner(layout, owner); ++tag) {
-            scada_value value{};
-            EXPECT_EQ(
-                scada_tag_read(
-                    reader.ctx(),
-                    reader.resolve(scada::sim::tag_name(layout, owner, tag)),
-                    &value),
-                SCADA_OK);
-            EXPECT_EQ(value.change_count, 0U);
-            EXPECT_NE(value.quality_flags & SCADA_FLAG_NOT_INIT, 0);
-        }
-    }
-    EXPECT_EQ(sim->out().find("writing"), std::string::npos) << sim->out();
+    EXPECT_TRUE(held_without_writing(reader, layout, *sim));
 
     ASSERT_TRUE(sim->send_signal(SIGUSR1));
-    EXPECT_TRUE(sim->wait_for_output(done, WAIT_LIMIT)) << sim->err();
+    EXPECT_TRUE(prints(*sim, "done "));
     EXPECT_TRUE(holds_rounds(reader, layout, ROUNDS));
     EXPECT_TRUE(stops_cleanly(*sim));
     stop(*tagd);
@@ -579,11 +633,10 @@ TEST_F(SimProcesses, AHeldSimulatorStopsOnASignal) {
     if (!tagd.has_value()) {
         return;
     }
-    std::optional<ChildProcess> sim = start_sim(layout, {"--hold"});
+    std::optional<ChildProcess> sim = start_held_sim(layout);
     if (!sim.has_value()) {
         return;
     }
-    ASSERT_TRUE(prints(*sim, "ready\n"));
     ASSERT_TRUE(sim->send_signal(SIGTERM));
     EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_OK)
         << sim->err();
@@ -607,11 +660,10 @@ TEST_F(SimProcesses, AHeldSimulatorStopsWhenTagdStaysDown) {
     if (!tagd.has_value()) {
         return;
     }
-    std::optional<ChildProcess> sim = start_sim(layout, {"--hold"});
+    std::optional<ChildProcess> sim = start_held_sim(layout);
     if (!sim.has_value()) {
         return;
     }
-    ASSERT_TRUE(prints(*sim, "ready\n"));
     stop(*tagd);
     EXPECT_EQ(sim->wait_for_exit(WAIT_LIMIT), scada::sim::EXIT_ERROR)
         << sim->err();

@@ -185,9 +185,8 @@ void read_all_until(scada_ctx* ctx, std::span<const std::uint32_t> handles,
 
 // True once every reader of `counts` has `wanted(count)` at least 1, false
 // if WAIT_LIMIT passes first.
-bool every_reader_has(
-    std::span<const ReaderCounts> counts,
-    const std::atomic<std::uint64_t> ReaderCounts::* wanted) {
+bool every_reader_has(std::span<const ReaderCounts> counts,
+                      const std::atomic<std::uint64_t> ReaderCounts::*wanted) {
     const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
     while (!std::ranges::all_of(counts, [&](const ReaderCounts& count) {
         // Acquire: pairs with the release increment of the reader.
@@ -201,6 +200,25 @@ bool every_reader_has(
     return true;
 }
 
+// One reader saw only whole writes of a running owner, and read every tag
+// at least once after the writer was released. Called once it is joined.
+void expect_whole_writes_of(const ReaderCounts& count) {
+    const std::uint64_t passes =
+        count.passes_released.load(std::memory_order_relaxed);
+    // With every failure, so that the failing case can be told from the
+    // output alone (issue #62).
+    SCOPED_TRACE(::testing::Message()
+                 << "reader: reads=" << count.reads << " busy=" << count.busy
+                 << " passes=" << count.passes.load(std::memory_order_relaxed)
+                 << " passes_released=" << passes);
+    EXPECT_EQ(count.torn, 0U);
+    EXPECT_EQ(count.backwards, 0U);
+    EXPECT_EQ(count.errors, 0U);
+    EXPECT_EQ(count.down, 0U);
+    EXPECT_GE(passes, 1U)
+        << "a reader did not read every tag after the release";
+}
+
 // No reader saw anything but whole writes of a running owner, and each
 // read every tag at least once after the writer was released. Records the
 // reads of all readers. Called once the readers are joined.
@@ -208,26 +226,51 @@ void expect_whole_writes(std::span<const ReaderCounts> counts) {
     std::uint64_t reads = 0;
     std::uint64_t busy = 0;
     for (const ReaderCounts& count : counts) {
-        const std::uint64_t passes =
-            count.passes_released.load(std::memory_order_relaxed);
-        // With every failure, so that the failing case can be told from
-        // the output alone (issue #62).
-        SCOPED_TRACE(::testing::Message()
-                     << "reader: reads=" << count.reads
-                     << " busy=" << count.busy << " passes="
-                     << count.passes.load(std::memory_order_relaxed)
-                     << " passes_released=" << passes);
-        EXPECT_EQ(count.torn, 0U);
-        EXPECT_EQ(count.backwards, 0U);
-        EXPECT_EQ(count.errors, 0U);
-        EXPECT_EQ(count.down, 0U);
-        EXPECT_GE(passes, 1U)
-            << "a reader did not read every tag after the release";
+        expect_whole_writes_of(count);
         reads += count.reads;
         busy += count.busy;
     }
     ::testing::Test::RecordProperty("reads", std::to_string(reads));
     ::testing::Test::RecordProperty("busy", std::to_string(busy));
+}
+
+// Runs one reader thread for each of `counts` on `handles` while `writer`,
+// a simulator started with --hold, writes: releases it once every reader
+// has read every tag, and stops the readers once it has printed "done"
+// within `limit` and every reader has read every tag in a pass that began
+// after the release. True if the writer printed "done".
+bool read_while_writing(scada_ctx* ctx, std::span<const std::uint32_t> handles,
+                        ChildProcess& writer, std::chrono::seconds limit,
+                        std::span<ReaderCounts> counts) {
+    std::atomic<bool> released{false};
+    std::atomic<bool> readers_stop{false};
+    bool done = false;
+    {
+        std::vector<std::jthread> readers;
+        readers.reserve(counts.size());
+        for (ReaderCounts& count : counts) {
+            readers.emplace_back(
+                [ctx, handles, &released, &readers_stop, &count] {
+                    read_all_until(ctx, handles, released, readers_stop, count);
+                });
+        }
+        EXPECT_TRUE(every_reader_has(counts, &ReaderCounts::passes))
+            << "a reader did not read every tag before the release";
+        // Release: the readers load with acquire. Set before the signal, so
+        // that a pass that counts began after it.
+        released.store(true, std::memory_order_release);
+        EXPECT_TRUE(writer.send_signal(SIGUSR1));
+        done = writer.wait_for_output(
+            [](std::string_view out) {
+                return out.find("done ") != std::string_view::npos;
+            },
+            limit);
+        EXPECT_TRUE(every_reader_has(counts, &ReaderCounts::passes_released))
+            << "a reader did not read every tag after the release";
+        // Release: the readers load with acquire.
+        readers_stop.store(true, std::memory_order_release);
+    }
+    return done;
 }
 
 // How many of the tags `handles` do not hold write number `rounds`.
@@ -323,37 +366,9 @@ protected:
         const Attached reader(base(), "reader");
         const std::vector<std::uint32_t> handles = load_handles(reader);
 
-        std::atomic<bool> released{false};
-        std::atomic<bool> readers_stop{false};
         std::array<ReaderCounts, READER_THREADS> counts{};
-        bool done = false;
-        {
-            std::vector<std::jthread> readers;
-            readers.reserve(counts.size());
-            for (ReaderCounts& count : counts) {
-                readers.emplace_back([&reader, &handles, &released,
-                                      &readers_stop, &count] {
-                    read_all_until(reader.ctx(), handles, released,
-                                   readers_stop, count);
-                });
-            }
-            EXPECT_TRUE(every_reader_has(counts, &ReaderCounts::passes))
-                << "a reader did not read every tag before the release";
-            // Release: the readers load with acquire. Set before the
-            // signal, so that a pass that counts began after it.
-            released.store(true, std::memory_order_release);
-            EXPECT_TRUE(writer->send_signal(SIGUSR1));
-            done = writer->wait_for_output(
-                [](std::string_view out) {
-                    return out.find("done ") != std::string_view::npos;
-                },
-                limit);
-            EXPECT_TRUE(
-                every_reader_has(counts, &ReaderCounts::passes_released))
-                << "a reader did not read every tag after the release";
-            // Release: the readers load with acquire.
-            readers_stop.store(true, std::memory_order_release);
-        }
+        const bool done =
+            read_while_writing(reader.ctx(), handles, *writer, limit, counts);
         EXPECT_TRUE(done) << writer->out() << writer->err();
         expect_whole_writes(counts);
         EXPECT_EQ(tags_without_last_write(reader.ctx(), handles, rounds), 0U);

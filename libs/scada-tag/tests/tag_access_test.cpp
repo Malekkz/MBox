@@ -1065,24 +1065,29 @@ void read_texts_until(Attachment& reader, std::uint32_t handle,
     }
 }
 
+// The fields of `value`, if there is one, for a failure message.
+std::string fields_or_none(const std::optional<scada_value>& value) {
+    return value.has_value() ? fields_of(*value) : "none";
+}
+
+// One reader of a race saw only whole writes of a live owner.
+void expect_whole_writes_of(const RaceCounts& count) {
+    EXPECT_GT(count.reads, 0U);
+    EXPECT_EQ(count.torn, 0U)
+        << "first torn read: " << fields_or_none(count.first_torn)
+        << " length=" << count.first_torn_length;
+    EXPECT_EQ(count.backwards, 0U)
+        << "first backwards read: " << fields_or_none(count.first_backwards);
+    EXPECT_EQ(count.errors, 0U);
+}
+
 // No reader of a race saw anything but whole writes of a live owner.
 // Reads while the owner was judged down are not counted against it, but
 // recorded.
 void expect_whole_writes(std::span<const RaceCounts> counts) {
     std::uint64_t down = 0;
     for (const RaceCounts& count : counts) {
-        EXPECT_GT(count.reads, 0U);
-        EXPECT_EQ(count.torn, 0U)
-            << "first torn read: "
-            << (count.first_torn.has_value() ? fields_of(*count.first_torn)
-                                             : "")
-            << " length=" << count.first_torn_length;
-        EXPECT_EQ(count.backwards, 0U)
-            << "first backwards read: "
-            << (count.first_backwards.has_value()
-                    ? fields_of(*count.first_backwards)
-                    : "");
-        EXPECT_EQ(count.errors, 0U);
+        expect_whole_writes_of(count);
         down += count.down;
     }
     ::testing::Test::RecordProperty("down", std::to_string(down));
