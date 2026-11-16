@@ -12,7 +12,8 @@
 // event queue `events.<process>`, whose consumer is attached, and consumes
 // the request queue `cmd.<process>.feeder`, into which another process
 // posts one request that expires 1 ms later. Before the markers it waits
-// until the request is there and has expired; between them it looks at the
+// until the request is there and has expired, and until it sees the
+// feeder live; between them it looks at the
 // queue without waiting, which answers the request EXPIRED in
 // `result.<process>.feeder` (decision D-40). It also posts one request to
 // `io` in `cmd.io.<process>` and one answer in `result.<process>.feeder`. The
@@ -352,23 +353,62 @@ std::int64_t monotonic_now() noexcept {
 
 // Waits until the request queue holds a record, without taking it, and
 // then until the 1 ms lifetime of that record has passed: it was posted
-// before the wait returned.
+// before the wait returned. It writes its heartbeat between slices of the
+// wait: the feeder posts only to a consumer it sees live (contract 9.1),
+// and a probe that waited longer than its heartbeat timeout without one
+// would never get the request (issue #73).
 bool wait_for_expired_request(Prepared& prepared) {
-    constexpr int WAIT_LIMIT_MS = 30'000;
+    constexpr std::int64_t WAIT_LIMIT_NS = 30'000'000'000;
+    constexpr int SLICE_MS = 100;
     constexpr std::int64_t LIFETIME_NS = 1'000'000;
     scada_waitset* set = nullptr;
     if (scada_waitset_create(prepared.ctx, &set) != SCADA_OK) {
         return false;
     }
-    const bool arrived =
-        scada_waitset_add_queue(set, prepared.requests) == SCADA_OK &&
-        scada_waitset_wait(set, WAIT_LIMIT_MS) == SCADA_OK;
+    bool arrived = false;
+    if (scada_waitset_add_queue(set, prepared.requests) == SCADA_OK) {
+        const std::int64_t deadline = monotonic_now() + WAIT_LIMIT_NS;
+        int code = SCADA_E_TIMEOUT;
+        while (code == SCADA_E_TIMEOUT && monotonic_now() < deadline) {
+            static_cast<void>(scada_tag_heartbeat(prepared.ctx));
+            code = scada_waitset_wait(set, SLICE_MS);
+        }
+        arrived = code == SCADA_OK;
+    }
     scada_waitset_destroy(set);
     const std::int64_t expired_after = monotonic_now() + LIFETIME_NS;
     while (monotonic_now() <= expired_after) {
         // The clock is the condition: a lifetime is a time.
     }
     return arrived;
+}
+
+// Waits until this context sees the process `name` live. A process that
+// attached after this one asked for its region is found only by a look,
+// at most once a second (scada_tag_notify does one), and a post between
+// the markers makes none: without the wait, the answer to the feeder,
+// whose request may have come within that second, is refused with
+// PEER_DOWN (issue #73).
+bool wait_until_live(scada_ctx* ctx, const char* name) {
+    constexpr std::int64_t WAIT_LIMIT_NS = 30'000'000'000;
+    constexpr long PAUSE_NS = 10'000'000;
+    std::uint16_t index = 0;
+    if (scada_proc_resolve(ctx, name, &index) != SCADA_OK) {
+        return false;
+    }
+    const std::int64_t deadline = monotonic_now() + WAIT_LIMIT_NS;
+    while (monotonic_now() < deadline) {
+        scada_proc_status_t status{};
+        if (scada_proc_status(ctx, index, &status) == SCADA_OK &&
+            status.down == 0) {
+            return true;
+        }
+        static_cast<void>(scada_tag_notify(ctx));
+        static_cast<void>(scada_tag_heartbeat(ctx));
+        const timespec pause{.tv_sec = 0, .tv_nsec = PAUSE_NS};
+        static_cast<void>(::nanosleep(&pause, nullptr));
+    }
+    return false;
 }
 
 int run(std::span<const std::string_view> args) {
@@ -476,6 +516,13 @@ int run(std::span<const std::string_view> args) {
     prepared.answer.status = SCADA_RESULT_OK;
     if (!wait_for_expired_request(prepared)) {
         std::cerr << "scada-tag-rt-probe: no request arrived\n";
+        scada_queue_close(prepared.requests);
+        scada_queue_close(prepared.queue);
+        scada_tag_detach(prepared.ctx);
+        return EXIT_FAILED;
+    }
+    if (!wait_until_live(prepared.ctx, "feeder")) {
+        std::cerr << "scada-tag-rt-probe: the feeder never read as live\n";
         scada_queue_close(prepared.requests);
         scada_queue_close(prepared.queue);
         scada_tag_detach(prepared.ctx);

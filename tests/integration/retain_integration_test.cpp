@@ -40,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -207,6 +208,36 @@ protected:
         return false;
     }
 
+    // Waits until plant.count holds at least `least` in shared memory, as
+    // an observer context reads it (contract 11.4), within `limit`.
+    [[nodiscard]] bool tag_reaches(std::int64_t least,
+                                   std::chrono::milliseconds limit) const {
+        const scada_attach_opts options{.base_dir = base_.c_str(),
+                                        .retain_dir = nullptr,
+                                        .tagd_uid = std::int64_t{::geteuid()}};
+        scada_ctx* raw = nullptr;
+        if (scada_tag_observe_opts(&options, &raw) != SCADA_OK) {
+            return false;
+        }
+        const std::unique_ptr<scada_ctx, decltype(&scada_tag_detach)> ctx(
+            raw, &scada_tag_detach);
+        std::uint32_t handle = SCADA_INVALID_HANDLE;
+        if (scada_tag_resolve(ctx.get(), "plant.count", &handle) != SCADA_OK) {
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (std::chrono::steady_clock::now() < deadline) {
+            scada_value value{};
+            // An INT64 value holds the bits of an int64_t.
+            if (scada_tag_read(ctx.get(), handle, &value) == SCADA_OK &&
+                static_cast<std::int64_t>(value.value) >= least) {
+                return true;
+            }
+            std::this_thread::yield();
+        }
+        return false;
+    }
+
     [[nodiscard]] const std::filesystem::path& base() const { return base_; }
     [[nodiscard]] const std::string& retain() const { return retain_; }
 
@@ -279,6 +310,10 @@ TEST_F(Retained, Conformance21AValueWrittenRightBeforeTheChangeIsRestored) {
         WAIT_LIMIT));
     // The first write of the owner is on disk; later ones wait for the hour.
     ASSERT_TRUE(file_reaches(1, WAIT_LIMIT));
+    // A value written after it, so that only the write right before the
+    // change can give the restored value. On a loaded machine the 10 ms
+    // period of the retainer can pass the change without one (issue #73).
+    ASSERT_TRUE(tag_reaches(2, WAIT_LIMIT));
     stop(*first);
 
     // The tag set changes; the retainer goes on counting meanwhile.
@@ -391,6 +426,16 @@ std::optional<std::int64_t> Retained::kill_round(
                 WAIT_LIMIT)) {
             return std::nullopt;
         }
+    }
+    // The kill point counts from a valid file on disk. Later rounds find
+    // the file of the round before; the first finds none until scada-tagd
+    // has written the first value of the owner, which a loaded machine
+    // can delay past the kill point (issue #73). Without it the round
+    // would test nothing: no file was ever written to leave unreadable.
+    if (!file_reaches(0, WAIT_LIMIT)) {
+        ADD_FAILURE() << "no retain file within the wait limit: "
+                      << feeder->out() << service->child.err();
+        return std::nullopt;
     }
     // A random point to kill at, not a wait for a condition.
     std::this_thread::sleep_for(after);

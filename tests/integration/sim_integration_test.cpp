@@ -48,13 +48,13 @@ constexpr std::uint64_t SMALL_TAGS = 10;
 constexpr std::uint64_t FIRST_RUN_ROUNDS = 5;
 constexpr std::uint64_t SECOND_RUN_ROUNDS = 2;
 constexpr std::uint32_t TEN_OWNERS = 10;
-// Tags that take far longer than SHORT_TIMEOUT_MS to resolve: about 0.2 s
-// in a dev build, so that the test fails every time without the heartbeat
-// while resolving (20,000 failed in one of three runs); scada-tagd builds
+// Tags whose resolve takes about 0.2 s in a dev build; scada-tagd builds
 // their header well within its readiness limit under ThreadSanitizer.
 constexpr std::uint64_t MANY_TAGS = 40'000;
+// The heartbeats scada-sim writes while it resolves MANY_TAGS, one every
+// 256 tags.
+constexpr std::uint64_t RESOLVE_BEATS = MANY_TAGS / 256;
 constexpr const char* SHORT_TIMEOUT_MS = "100";
-constexpr const char* SHORT_CHECK_MS = "20";
 // An overloaded run: 2 owners of 1,000 tags at the largest rate, stopped
 // once every tag of the first owner has been written OVERLOAD_ROUNDS times
 // (about 0.3 s in a dev build, several seconds under ThreadSanitizer).
@@ -672,37 +672,53 @@ TEST_F(SimProcesses, AHeldSimulatorStopsWhenTagdStaysDown) {
     EXPECT_EQ(sim->out().find("writing"), std::string::npos) << sim->out();
 }
 
-// Resolving many tags takes longer than a short heartbeat timeout; the
-// simulator writes its heartbeat meanwhile, so scada-tagd never sees it
-// down while it starts.
-TEST_F(SimProcesses, ALargeLayoutDoesNotReadAsDownWhileItStarts) {
+// The held simulator "sim", seen by `reader`, has written RESOLVE_BEATS
+// heartbeats or more.
+::testing::AssertionResult beat_while_resolving(const Attached& reader) {
+    std::uint16_t index = 0;
+    if (scada_proc_resolve(reader.ctx(), "sim", &index) != SCADA_OK) {
+        return ::testing::AssertionFailure() << "sim not resolved";
+    }
+    const std::uint64_t beats = heartbeat_of(reader, index);
+    if (beats < RESOLVE_BEATS) {
+        return ::testing::AssertionFailure()
+               << "heartbeat " << beats << ", wanted " << RESOLVE_BEATS;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// While it resolves the tags of a large layout, which can take longer than
+// a heartbeat timeout on a slow machine, the simulator writes its
+// heartbeat every 256 tags (libs/scada-sim/README.md). Held after
+// resolving, it has written RESOLVE_BEATS of them before it prints
+// "ready"; the held loop writes one every 20 ms, so without the beats of
+// the resolve the count is reached only about 3 s after "ready". The test
+// counts the beats instead of waiting for scada-tagd to judge a short
+// timeout, which a stall of the machine exceeds without a fault (issue
+// #73).
+TEST_F(SimProcesses, ALargeLayoutWritesItsHeartbeatWhileItResolves) {
     const Layout layout{.prefix = "sim",
                         .processes = 1,
                         .owners = 1,
                         .tags = MANY_TAGS,
                         .patterns = {Pattern::CHECK}};
-    std::vector<std::string> arguments = sim_arguments("tag-set", layout);
-    arguments.insert(
-        arguments.end(),
-        {"--heartbeat-timeout-ms", SHORT_TIMEOUT_MS, "--heartbeat-check-ms",
-         SHORT_CHECK_MS, "--reader", "reader", "--output", tag_set_path()});
-    EXPECT_EQ(sim_exit(arguments), scada::sim::EXIT_OK);
+    write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
         return;
     }
-    std::optional<ChildProcess> sim = start_sim(layout, {"--rate", "1000"});
+    std::optional<ChildProcess> sim =
+        start_held_sim(layout, {"--rate", "1000"});
     if (!sim.has_value()) {
         return;
     }
+    const Attached reader(base(), "reader");
+    EXPECT_TRUE(beat_while_resolving(reader));
+    ASSERT_TRUE(sim->send_signal(SIGUSR1));
     EXPECT_TRUE(prints(*sim, "writing\n"));
     EXPECT_TRUE(logs(*tagd, R"(process up PROCESS="sim")"));
     EXPECT_TRUE(stops_cleanly(*sim));
     stop(*tagd);
-    EXPECT_EQ(
-        tagd->child.err().find(R"(PROCESS="sim" REASON="heartbeat stale")"),
-        std::string::npos)
-        << tagd->child.err();
 }
 
 // A run whose patterns do not give the types of the tag set is refused

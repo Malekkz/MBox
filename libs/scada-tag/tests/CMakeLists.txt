@@ -16,6 +16,11 @@ scada_add_test(scada-tag-unit-test KIND unit
     proc_region_test.cpp
     queue_test.cpp
     region_file_test.cpp
+    retain_file_test.cpp
+    retain_keeper_test.cpp
+    retain_power_loss_test.cpp
+    retain_restore_test.cpp
+    retain_writer_test.cpp
     sha256_test.cpp
     subscription_test.cpp
     tag_access_test.cpp
@@ -24,23 +29,11 @@ scada_add_test(scada-tag-unit-test KIND unit
     tag_set_test.cpp
     types_test.cpp
   DEPENDS scada::tag)
+# A limit for a hung binary, not a bound: about 35 s unloaded, most of it
+# fixed waits of tests, and more under load (decision D-56).
+set_tests_properties(scada-tag-unit-test PROPERTIES TIMEOUT 120)
 # The headers in src/ are private to the library.
 target_include_directories(scada-tag-unit-test
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
-
-# Retained values (contract, section 12; decisions D-45, D-59): a binary of
-# their own, so that each of the two stays well inside the 60-s limit of a
-# unit test under ThreadSanitizer. Their bounded waits for FINAL files take
-# 2 s each by design.
-scada_add_test(scada-tag-retain-unit-test KIND unit
-  SOURCES
-    retain_file_test.cpp
-    retain_keeper_test.cpp
-    retain_power_loss_test.cpp
-    retain_restore_test.cpp
-    retain_writer_test.cpp
-  DEPENDS scada::tag)
-target_include_directories(scada-tag-retain-unit-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
 # Stands in for a service in the integration tests: it attaches through the

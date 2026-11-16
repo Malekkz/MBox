@@ -1108,7 +1108,8 @@ TEST_F(MovedKeeper, ATagAttachedAfterTheOldGenerationWasRemovedTakesItsFinal) {
     const scada_tag_retain_info_t info = level_info(*web);
     EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
     EXPECT_EQ(info.final_wait_expired, 0);
-    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    const RetainFile level_file = file_of("web");
+    const RetainedValue* level = find_retained(level_file, "plant.level");
     ASSERT_NE(level, nullptr);
     EXPECT_TRUE(level->adopted);
     EXPECT_FALSE(level->source_not_final);
@@ -1156,7 +1157,8 @@ TEST_F(MovedKeeper, TheNewOwnersFileIsWrittenBeforeTheFormerOwnersIsRemoved) {
     EXPECT_FALSE(has_file("io"));
     // Restored by web from io's FINAL file and not written since: web's
     // file marks it as taken from another owner (review B3).
-    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    const RetainFile level_file = file_of("web");
+    const RetainedValue* level = find_retained(level_file, "plant.level");
     ASSERT_NE(level, nullptr);
     EXPECT_EQ(level->value, VALUE_7);
     EXPECT_TRUE(level->adopted);
@@ -1222,7 +1224,8 @@ TEST_F(MovedKeeper, TakenValuesKeepTheirFileAndFollowTheRuleOfAttach) {
     EXPECT_EQ(info.final_wait_expired, 1);
     write(*owner, "plant.level", SCADA_TYPE_FLOAT64, VALUE_9);
     static_cast<void>(round(scada::monotonic_ns() + INTERVAL_NS));
-    const RetainedValue* level = find_retained(file_of("web"), "plant.level");
+    const RetainFile level_file = file_of("web");
+    const RetainedValue* level = find_retained(level_file, "plant.level");
     ASSERT_NE(level, nullptr);
     EXPECT_EQ(level->value, VALUE_9);
     EXPECT_FALSE(level->adopted);
@@ -1277,7 +1280,8 @@ TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsGoodIsAChange) {
     write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_GOOD,
                   SCADA_FLAG_RESTORED);
     ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
-    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    const RetainFile mode_file = file_of("io");
+    const RetainedValue* mode = find_retained(mode_file, "plant.mode");
     ASSERT_NE(mode, nullptr);
     EXPECT_EQ(mode->quality, Quality::GOOD);
     EXPECT_EQ(mode->quality_flags, 0U);
@@ -1292,7 +1296,8 @@ TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsAFlagIsAChange) {
     write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_UNCERTAIN,
                   SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
     ASSERT_EQ(round(now).retain_written.size(), 1U);
-    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    const RetainFile mode_file = file_of("io");
+    const RetainedValue* mode = find_retained(mode_file, "plant.mode");
     ASSERT_NE(mode, nullptr);
     EXPECT_EQ(mode->quality_flags, SCADA_FLAG_SUBSTITUTED);
 }
@@ -1359,7 +1364,8 @@ TEST_F(Keeper, AFlappingLinkWritesNothing) {
             (i % 2) != 0 ? SCADA_FLAG_STALE | SCADA_FLAG_COMM_FAIL : 0);
         EXPECT_TRUE(round(now + i).retain_written.empty()) << i;
     }
-    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    const RetainFile mode_file = file_of("io");
+    const RetainedValue* mode = find_retained(mode_file, "plant.mode");
     ASSERT_NE(mode, nullptr);
     EXPECT_EQ(mode->quality_flags, 0U);
 }
