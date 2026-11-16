@@ -37,6 +37,7 @@
 // bytes after the name length are all 0. A version 1 record reads as
 // UNCERTAIN with flags 0, of a file with no boot_id and no boot time.
 
+#include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -285,6 +286,12 @@ public:
     // unlinkat(2).
     [[nodiscard]] virtual int unlink(int dir_fd,
                                      const std::string& name) noexcept = 0;
+    // CLOCK_MONOTONIC in ns, read by the writer when it takes a file and
+    // when the file is on disk, so that the time a write took can be
+    // measured (decision D-62). Tests replace it to model slow storage.
+    [[nodiscard]] virtual std::int64_t now_mono_ns() noexcept {
+        return monotonic_ns();
+    }
 };
 
 // The operating system's calls.

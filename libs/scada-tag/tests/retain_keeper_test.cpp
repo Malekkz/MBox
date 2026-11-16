@@ -4,6 +4,7 @@
 // file of an owner that left a retired generation, and the removal of
 // that generation, also with an observer still in it.
 
+#include "retain_keeper.h"
 #include "attach_fixture.h"
 #include "attachment.h"
 #include "layout.h"
@@ -32,10 +33,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -57,6 +61,11 @@ using Attached = std::unique_ptr<Attachment>;
 constexpr std::int64_t NS_PER_MS = 1'000'000;
 constexpr std::int64_t INTERVAL_NS =
     std::int64_t{DEFAULT_RETAIN_INTERVAL_MS} * NS_PER_MS;
+// Decision D-62: at the default check of 250 ms, a file written at a check
+// may be written again GATE_CHECKS checks later.
+constexpr std::int64_t CHECK_NS = 250 * NS_PER_MS;
+constexpr std::int64_t GATE_CHECKS = 2;
+constexpr std::int64_t GATE_NS = GATE_CHECKS * CHECK_NS;
 constexpr std::int64_t RETIRED_TIMEOUT_NS =
     std::int64_t{RETIRED_GENERATION_TIMEOUT_MS} * NS_PER_MS;
 constexpr mode_t RETAIN_DIR_MODE = 02750;
@@ -257,6 +266,17 @@ protected:
 
     // Two rounds, at `now` and 1 ns later: a generation whose owners left is
     // removed at the check after the one that wrote their FINAL files.
+    // Decision D-62: after a write at the check at `written_at`, the next
+    // may come only GATE_CHECKS checks later. Runs the checks between, which
+    // write nothing, and returns the round GATE_CHECKS checks later.
+    [[nodiscard]] CheckReport round_after_the_gate(std::int64_t written_at) {
+        for (std::int64_t i = 1; i < GATE_CHECKS; ++i) {
+            EXPECT_TRUE(
+                round(written_at + (i * CHECK_NS)).retain_written.empty());
+        }
+        return round(written_at + GATE_NS);
+    }
+
     [[nodiscard]] CheckReport two_rounds(std::int64_t now) {
         CheckReport report = round(now);
         const CheckReport second = round(now + 1);
@@ -322,8 +342,8 @@ TEST_F(Keeper, AValueTheOwnerMarkedBadIsRemovedFromTheFile) {
     write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
     ASSERT_EQ(round(now).retain_written.size(), 1U);
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_9, SCADA_QUALITY_BAD);
-    // plant.mode is RETAIN_NOW: written at the next check.
-    EXPECT_EQ(round(now + 1).retain_written.size(), 1U);
+    // plant.mode is RETAIN_NOW: written as soon as the gate of D-62 lets it.
+    EXPECT_EQ(round_after_the_gate(now).retain_written.size(), 1U);
     const RetainFile file = file_of("io");
     EXPECT_FALSE(value_in(file, "plant.mode").has_value());
     EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
@@ -490,7 +510,9 @@ TEST_F(Keeper, AFinalFileStaysMarkedFinalWhenLaterValuesAreWritten) {
     const Attached again = attached("io");
     ASSERT_NE(again, nullptr);
     write(*again, "plant.mode", SCADA_TYPE_INT64, 4);
-    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    // The FINAL file was written at `now`; the rounds at now + 1 ns and
+    // this one are the GATE_CHECKS checks of decision D-62.
+    ASSERT_EQ(round(now + CHECK_NS).retain_written.size(), 1U);
     const RetainFile file = file_of("io");
     EXPECT_TRUE(file.final);
     EXPECT_EQ(file.source.generation, 1U);
@@ -918,21 +940,22 @@ TEST_F(Keeper, AChangeOfQualityOrFlagsAloneIsWritten) {
     EXPECT_GT(file.written_boottime_ns, 0);
     EXPECT_LE(file.written_boottime_ns, clock.boottime_ns);
 
-    // SUBSTITUTED alone: plant.mode is RETAIN_NOW, so the next check.
+    // SUBSTITUTED alone: plant.mode is RETAIN_NOW, so as soon as the gate
+    // of D-62 lets it.
     write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_GOOD,
                   SCADA_FLAG_SUBSTITUTED);
-    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    ASSERT_EQ(round_after_the_gate(now).retain_written.size(), 1U);
     file = file_of("io");
     EXPECT_EQ(find_retained(file, "plant.mode")->quality_flags,
               SCADA_FLAG_SUBSTITUTED);
     // The quality alone.
     write_flagged(*feeder, "plant.mode", 2, SCADA_QUALITY_UNCERTAIN,
                   SCADA_FLAG_SUBSTITUTED);
-    ASSERT_EQ(round(now + 2).retain_written.size(), 1U);
+    ASSERT_EQ(round_after_the_gate(now + GATE_NS).retain_written.size(), 1U);
     EXPECT_EQ(find_retained(file_of("io"), "plant.mode")->quality,
               Quality::UNCERTAIN);
     // No change: no write.
-    EXPECT_TRUE(round(now + 3).retain_written.empty());
+    EXPECT_TRUE(round(now + (3 * GATE_NS)).retain_written.empty());
 }
 
 TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
@@ -1223,7 +1246,9 @@ TEST_F(MovedKeeper, TakenValuesKeepTheirFileAndFollowTheRuleOfAttach) {
     EXPECT_EQ(info.origin, SCADA_RETAIN_OTHER_OWNER);
     EXPECT_EQ(info.final_wait_expired, 1);
     write(*owner, "plant.level", SCADA_TYPE_FLOAT64, VALUE_9);
-    static_cast<void>(round(scada::monotonic_ns() + INTERVAL_NS));
+    // One retain interval later, and GATE_CHECKS checks (decision D-62).
+    const std::int64_t later = scada::monotonic_ns() + INTERVAL_NS;
+    ASSERT_EQ(round_after_the_gate(later - GATE_NS).retain_written.size(), 1U);
     const RetainFile level_file = file_of("web");
     const RetainedValue* level = find_retained(level_file, "plant.level");
     ASSERT_NE(level, nullptr);
@@ -1337,7 +1362,8 @@ TEST_F(KeeperAfterRestore,
     EXPECT_EQ(stamp_of(file_of("io")), old_stamp());
     // plant.mode written too: the next file has the stamp of its write.
     write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_8);
-    ASSERT_EQ(round(now + INTERVAL_NS + 1).retain_written.size(), 1U);
+    ASSERT_EQ(round_after_the_gate(now + INTERVAL_NS).retain_written.size(),
+              1U);
     const RetainFile file = file_of("io");
     EXPECT_GT(file.written_boottime_ns, old_stamp().written_boottime_ns);
     EXPECT_GT(file.written_time_ns, old_stamp().written_time_ns);
@@ -1510,6 +1536,422 @@ TEST_F(MovedKeeper, AnOlderValueBeforeTheCutIsNotTaken) {
         static_cast<void>(round(now + (i * INTERVAL_NS)));
     }
     EXPECT_FALSE(has_file("web"));
+}
+
+}  // namespace
+
+// Decision D-62 (issue #96): a file written at a check is written again
+// only K checks later, K = max(1, floor((1000 ms - W) / P) - 1) with the
+// write budget W = 200 ms, so that a RETAIN_NOW change is handed to the
+// writer within K * P plus less than one period of lateness of a check, on
+// disk within 1 s, and a tag that flaps writes at most 60 s / (K * P) files a
+// minute.
+namespace {
+
+constexpr std::int64_t A_SECOND_NS = 1'000 * NS_PER_MS;
+constexpr std::int64_t A_MINUTE_NS = 60 * A_SECOND_NS;
+constexpr std::int64_t FAST_CHECK_NS = 50 * NS_PER_MS;
+constexpr std::int64_t LONGEST_CHECK_NS =
+    std::int64_t{MAX_RETAIN_NOW_CHECK_MS} * NS_PER_MS;
+constexpr std::int64_t SLOWER_CHECK_NS = 2 * A_SECOND_NS;
+// A change, 1 ms after the check that wrote the file before it.
+constexpr std::int64_t AFTER_A_WRITE_NS = NS_PER_MS;
+// The changes each lateness pattern makes.
+constexpr int CHANGES = 12;
+// The checks a pattern may take for them; more is a failure.
+constexpr std::int64_t MOST_CHECKS = 400;
+// Multiplier of a hash that spreads the lateness of the checks.
+constexpr std::int64_t SPREAD = 2'654'435'761;
+// How much a slow storage adds to a write, by the clock of the writer.
+constexpr std::int64_t SLOW_WRITE_NS = 1'500 * NS_PER_MS;
+
+TEST(ChecksBetweenWrites, AreTheBoundLessTheBudgetOverThePeriodLessOne) {
+    EXPECT_EQ(checks_between_writes(CHECK_NS), 2);          // 500 ms
+    EXPECT_EQ(checks_between_writes(FAST_CHECK_NS), 15);    // 750 ms
+    EXPECT_EQ(checks_between_writes(LONGEST_CHECK_NS), 1);  // 400 ms
+    EXPECT_EQ(checks_between_writes(LONGEST_CHECK_NS + 1), 1);
+    EXPECT_EQ(checks_between_writes(SLOWER_CHECK_NS), 1);
+    // N3 of the review: a period that is not positive is taken as 1 ns.
+    EXPECT_EQ(checks_between_writes(0), checks_between_writes(1));
+    EXPECT_EQ(checks_between_writes(-1), checks_between_writes(1));
+}
+
+// K checks and one period of lateness leave the budget W for the write.
+TEST(ChecksBetweenWrites, LeaveTheWriteBudgetOfTheSecond) {
+    for (const std::int64_t period :
+         {FAST_CHECK_NS, CHECK_NS, LONGEST_CHECK_NS}) {
+        EXPECT_LE((checks_between_writes(period) + 1) * period,
+                  RETAIN_NOW_BOUND_NS - RETAIN_WRITE_BUDGET_NS)
+            << period;
+    }
+}
+
+// How late the check `check` of a period `period` wakes, from 0 to
+// period - 1.
+using Lateness = std::int64_t (*)(std::int64_t check, std::int64_t period);
+
+// The probe of the review: the check that wrote wakes as late as it can,
+// the next ones on time.
+std::int64_t late_then_on_time(std::int64_t check, std::int64_t period) {
+    return check == 0 ? period - 1 : 0;
+}
+// Every other check as late as it can.
+std::int64_t every_other_late(std::int64_t check, std::int64_t period) {
+    return (check % 2) == 0 ? period - 1 : 0;
+}
+// Lateness spread over the period.
+std::int64_t spread_late(std::int64_t check, std::int64_t period) {
+    return (check * SPREAD) % period;
+}
+
+// The time of each write to the file of `owner` in a test of the bound.
+class Rewrite : public Keeper {
+protected:
+    // Writes plant.mode (RETAIN_NOW) of `feeder`: GOOD with `value`, or BAD
+    // with COMM_FAIL as a device that lost its link.
+    static void flap_to(Attachment& feeder, bool bad, std::uint64_t value) {
+        write_flagged(feeder, "plant.mode", value,
+                      bad ? SCADA_QUALITY_BAD : SCADA_QUALITY_GOOD,
+                      bad ? SCADA_FLAG_COMM_FAIL : 0);
+    }
+
+    // Checks every `period`, each late by `late`, and changes plant.mode
+    // 1 ms after each check that wrote its file, CHANGES times. The longest
+    // time from a change to the check that handed it to the writer, or -1
+    // if the changes did not all reach the file within MOST_CHECKS checks.
+    std::int64_t longest_change_to_submit(std::int64_t period, Lateness late) {
+        start_host(retained_set());
+        host().set_check_period(period);
+        const Attached feeder = attached("io");
+        if (feeder == nullptr) {
+            ADD_FAILURE() << "io did not attach";
+            return -1;
+        }
+        const std::int64_t base = scada::monotonic_ns();
+        std::uint64_t value = 1;
+        flap_to(*feeder, false, value);
+        std::int64_t changed_at = base;
+        std::int64_t longest = 0;
+        int changes = 0;
+        for (std::int64_t check = 0; check < MOST_CHECKS; ++check) {
+            const std::int64_t check_at =
+                base + (check * period) + late(check, period);
+            if (round(check_at).retain_written.empty()) {
+                continue;
+            }
+            if (value_in(file_of("io"), "plant.mode") != value) {
+                ADD_FAILURE() << "the file does not hold the change";
+                return -1;
+            }
+            longest = std::max(longest, check_at - changed_at);
+            if (++changes == CHANGES) {
+                return longest;
+            }
+            flap_to(*feeder, false, ++value);
+            changed_at = check_at + AFTER_A_WRITE_NS;
+        }
+        return -1;
+    }
+
+    // The bound of contract 12 at checks of `period` that wake late by up
+    // to period - 1 ns: a change is handed to the writer within K * P + P,
+    // which leaves W of the second.
+    void handed_over_within_the_bound(std::int64_t period) {
+        const std::int64_t most = (checks_between_writes(period) + 1) * period;
+        for (const Lateness late :
+             {&late_then_on_time, &every_other_late, &spread_late}) {
+            const std::int64_t took = longest_change_to_submit(period, late);
+            EXPECT_GE(took, 0);
+            EXPECT_LE(took, most);
+            EXPECT_LE(took + RETAIN_WRITE_BUDGET_NS, RETAIN_NOW_BOUND_NS);
+            drop_host();
+            new_base();
+        }
+    }
+
+    // An empty base directory, as after a reboot.
+    void new_base() {
+        std::filesystem::remove_all(base());
+        EXPECT_EQ(::mkdir(base().c_str(), RETAIN_DIR_MODE), 0);
+        EXPECT_EQ(::chmod(base().c_str(), RETAIN_DIR_MODE), 0);
+    }
+
+    // Flaps plant.mode at every check, ends `ends_bad`, and gives the last
+    // state time to reach the file.
+    void flap_and_end(bool ends_bad) {
+        start_host(retained_set());
+        const Attached feeder = attached("io");
+        ASSERT_NE(feeder, nullptr);
+        const std::int64_t now = scada::monotonic_ns();
+        constexpr int FLAPS = 8;
+        for (int i = 0; i < FLAPS; ++i) {
+            flap_to(*feeder, (i % 2) != 0, VALUE_7);
+            static_cast<void>(round(now + (i * CHECK_NS)));
+        }
+        flap_to(*feeder, ends_bad, VALUE_7);
+        static_cast<void>(round(now + (FLAPS * CHECK_NS) + A_SECOND_NS));
+        drop_host();
+    }
+
+    // Restores into a new base directory, as after a reboot; what plant.mode
+    // holds then.
+    scada_value restored_in_a_new_base() {
+        new_base();
+        start_host(retained_set());
+        const Attached again = attached("io");
+        scada_value value{};
+        if (again != nullptr) {
+            std::uint32_t handle = SCADA_INVALID_HANDLE;
+            EXPECT_EQ(again->resolve("plant.mode", handle), SCADA_OK);
+            EXPECT_EQ(again->read(handle, value), SCADA_OK);
+        }
+        return value;
+    }
+};
+
+TEST_F(Rewrite, AFlappingRetainNowTagWritesAtMostOnceInKChecks) {
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    std::size_t written = 0;
+    bool bad = false;
+    // One flap at every check for a simulated minute: the worst case.
+    for (std::int64_t at = now; at < now + A_MINUTE_NS; at += CHECK_NS) {
+        flap_to(*feeder, bad, VALUE_7);
+        written += round(at).retain_written.size();
+        bad = !bad;
+    }
+    const auto bound = static_cast<std::size_t>(A_MINUTE_NS / GATE_NS);
+    EXPECT_LE(written, bound);      // 120, against 240 at every check
+    EXPECT_GE(written, bound - 1);  // it still writes as often as it may
+}
+
+TEST_F(Rewrite, AChangeIsHandedOverWithinTheBoundAtLateChecksOf250Ms) {
+    handed_over_within_the_bound(CHECK_NS);
+}
+
+TEST_F(Rewrite, AChangeIsHandedOverWithinTheBoundAtLateChecksOf50Ms) {
+    handed_over_within_the_bound(FAST_CHECK_NS);
+}
+
+TEST_F(Rewrite, AChangeIsHandedOverWithinTheBoundAtLateChecksOf400Ms) {
+    handed_over_within_the_bound(LONGEST_CHECK_NS);
+}
+
+// The gate of D-62 holds back periodic writes only: a write it deferred is
+// written at the stop.
+TEST_F(Rewrite, AWriteTheGateDeferredIsWrittenAtTheFlush) {
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    flap_to(*feeder, false, VALUE_5);
+    ASSERT_EQ(round(now).retain_written.size(), 1U);
+    flap_to(*feeder, false, VALUE_6);
+    ASSERT_TRUE(round(now + CHECK_NS).retain_written.empty());  // deferred
+    EXPECT_EQ(host().flush_retained().retain_written.size(), 1U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_6);
+}
+
+// ... and the FINAL file of an owner that left a retired generation is not
+// held back by a write just before it.
+TEST_F(Rewrite, AFinalFileIsNotHeldBackByAWriteJustBeforeIt) {
+    start_host(retained_set());
+    Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    drop_host();
+    {
+        // A file of io with a tag it no longer has: the new host writes the
+        // file again at its first check.
+        RetainFile gone;
+        gone.values = {{"plant.gone", TagType::INT64, 1, 0}};
+        const RetainClockSample clock = retain_clock_now();
+        gone.written_time_ns = clock.realtime_ns;
+        gone.written_boottime_ns = clock.boottime_ns;
+        gone.boot_id = clock.boot_id;
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        ASSERT_TRUE(write_retain_file(directory.get(), "io", gone, detail).ok())
+            << detail;
+    }
+    start_host(changed_set());
+    const std::int64_t now = scada::monotonic_ns();
+    ASSERT_EQ(round(now).retain_written.size(), 1U);
+    EXPECT_FALSE(file_of("io").final);
+    flap_to(*feeder, false, VALUE_6);
+    feeder.reset();                                    // io leaves generation 1
+    const CheckReport report = round(now + CHECK_NS);  // one check later
+    ASSERT_EQ(report.retain_written.size(), 1U);
+    EXPECT_TRUE(report.retain_written[0].final);
+    const RetainFile file = file_of("io");
+    EXPECT_TRUE(file.final);
+    EXPECT_EQ(value_in(file, "plant.mode"), VALUE_6);
+}
+
+// After a flap, a restart restores what D-45 says of the last state on
+// file: nothing after BAD, the value after GOOD.
+TEST_F(Rewrite, ARestartAfterAFlapThatEndsBadRestoresNothing) {
+    flap_and_end(true);
+    const scada_value value = restored_in_a_new_base();
+    EXPECT_EQ(value.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_NOT_INIT);
+}
+
+TEST_F(Rewrite, ARestartAfterAFlapThatEndsGoodRestoresTheValue) {
+    flap_and_end(false);
+    const scada_value value = restored_in_a_new_base();
+    EXPECT_EQ(value.value, VALUE_7);
+    EXPECT_EQ(value.quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(value.quality_flags, SCADA_FLAG_RESTORED);
+}
+
+// Storage whose writes take SLOW_WRITE_NS longer while it is slow, by the
+// clock the writer reads (RetainFileOps::now_mono_ns); the calls themselves
+// are the system's.
+class SlowStorage final : public RetainFileOps {
+public:
+    int create(int dir_fd, const std::string& name,
+               std::unique_ptr<RetainWriteFile>& out) override {
+        return system_retain_file_ops().create(dir_fd, name, out);
+    }
+    int rename(int dir_fd, const std::string& from,
+               const std::string& target) noexcept override {
+        return system_retain_file_ops().rename(dir_fd, from, target);
+    }
+    int sync_directory(int dir_fd) noexcept override {
+        if (slow_.load()) {
+            added_.fetch_add(SLOW_WRITE_NS);
+        }
+        return system_retain_file_ops().sync_directory(dir_fd);
+    }
+    int unlink(int dir_fd, const std::string& name) noexcept override {
+        return system_retain_file_ops().unlink(dir_fd, name);
+    }
+    std::int64_t now_mono_ns() noexcept override {
+        return scada::monotonic_ns() + added_.load();
+    }
+
+    void set_slow(bool slow) noexcept { slow_.store(slow); }
+
+private:
+    std::atomic<bool> slow_{true};
+    std::atomic<std::int64_t> added_{0};
+};
+
+std::size_t late_reports(const CheckReport& report) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        report.retain_problems, [](const RetainProblem& problem) {
+            return problem.kind == RetainProblemKind::RETAIN_NOW_LATE &&
+                   problem.subject == "io";
+        }));
+}
+
+// B3 of the review: a RETAIN_NOW change that reaches the disk after 1 s is
+// reported, once until one is within the bound again.
+TEST_F(Keeper, ALateRetainNowWriteIsReportedOnceUntilOneIsInTime) {
+    SlowStorage storage;
+    start_host(retained_set(), &storage);
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
+    EXPECT_EQ(late_reports(round(now)), 1U);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_6);
+    EXPECT_EQ(late_reports(round_after_the_gate(now)), 0U);  // once
+    storage.set_slow(false);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_7);
+    EXPECT_EQ(late_reports(round_after_the_gate(now + GATE_NS)), 0U);
+    storage.set_slow(true);
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_8);
+    EXPECT_EQ(late_reports(round_after_the_gate(now + (2 * GATE_NS))), 1U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_8);
+}
+
+// Storage that holds the next write in its directory fsync until released,
+// and lets it take HELD_WRITE_NS longer by the clock the writer reads.
+class HeldStorage final : public RetainFileOps {
+public:
+    int create(int dir_fd, const std::string& name,
+               std::unique_ptr<RetainWriteFile>& out) override {
+        return system_retain_file_ops().create(dir_fd, name, out);
+    }
+    int rename(int dir_fd, const std::string& from,
+               const std::string& target) noexcept override {
+        return system_retain_file_ops().rename(dir_fd, from, target);
+    }
+    int sync_directory(int dir_fd) noexcept override {
+        {
+            std::unique_lock lock(mutex_);
+            if (hold_next_) {
+                hold_next_ = false;
+                held_ = true;
+                changed_.notify_all();
+                changed_.wait(lock, [this] { return !held_; });
+                added_.fetch_add(HELD_WRITE_NS);
+            }
+        }
+        return system_retain_file_ops().sync_directory(dir_fd);
+    }
+    int unlink(int dir_fd, const std::string& name) noexcept override {
+        return system_retain_file_ops().unlink(dir_fd, name);
+    }
+    std::int64_t now_mono_ns() noexcept override {
+        return scada::monotonic_ns() + added_.load();
+    }
+
+    void hold_next() {
+        const std::scoped_lock lock(mutex_);
+        hold_next_ = true;
+    }
+    // Waits, at most `limit`, until a write is held.
+    [[nodiscard]] bool wait_held(std::chrono::milliseconds limit) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, limit, [this] { return held_; });
+    }
+    void release() {
+        {
+            const std::scoped_lock lock(mutex_);
+            held_ = false;
+        }
+        changed_.notify_all();
+    }
+
+    static constexpr std::int64_t HELD_WRITE_NS = 400 * NS_PER_MS;
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool hold_next_ = false;  // guarded by mutex_
+    bool held_ = false;       // guarded by mutex_
+    std::atomic<std::int64_t> added_{0};
+};
+
+// F1 of the review of #111: at K = 1 (P = 400 ms) a write can still be in
+// flight when the next is handed over. Each is measured from its own change
+// on its own result: about 800 ms each here, where measuring the second from
+// the first change gave 1,200 ms and a false report.
+TEST_F(Keeper, AWriteInFlightAndTheNextAreEachMeasuredOnTheirOwnResult) {
+    HeldStorage storage;
+    start_host(retained_set(), &storage);
+    host().set_check_period(LONGEST_CHECK_NS);  // K = 1
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_5);
+    std::size_t late = late_reports(round(now));
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_6);  // change A
+    storage.hold_next();
+    late += late_reports(host().check(now + LONGEST_CHECK_NS));
+    ASSERT_TRUE(storage.wait_held(std::chrono::seconds(5)));
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_7);  // change B
+    late += late_reports(host().check(now + (2 * LONGEST_CHECK_NS)));
+    storage.release();
+    const CheckReport written = host().wait_retained_written();
+    late += late_reports(written);
+    EXPECT_EQ(written.retain_written.size(), 2U);  // A and B, not replaced
+    EXPECT_EQ(late, 0U);
+    EXPECT_EQ(value_in(file_of("io"), "plant.mode"), VALUE_7);
 }
 
 }  // namespace

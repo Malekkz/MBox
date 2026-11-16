@@ -46,6 +46,10 @@ inline constexpr std::uint32_t MAX_UID = 0xFFFF'FFFEU;
 // Defaults (contract, sections 10.1 and 14). The queue capacity default is
 // this library's choice.
 inline constexpr std::uint32_t DEFAULT_HEARTBEAT_CHECK_MS = 250;
+// The largest heartbeat_check_ms of a tag set with a retain_now tag
+// (contract 12, decision D-62): a RETAIN_NOW change is on disk within 1 s
+// when two checks plus a write of 200 ms fit in it, (1000 - 200) / 2.
+inline constexpr std::uint32_t MAX_RETAIN_NOW_CHECK_MS = 400;
 inline constexpr std::uint32_t DEFAULT_HEARTBEAT_TIMEOUT_MS = 3000;
 inline constexpr std::uint32_t DEFAULT_REALTIME_HEARTBEAT_TIMEOUT_MS = 500;
 inline constexpr std::uint32_t DEFAULT_CHANGE_RING_CAPACITY = 65'536;

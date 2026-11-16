@@ -49,6 +49,8 @@ namespace scada::tag {
 
 namespace {
 
+constexpr std::int64_t NANOSECONDS_PER_MS = 1'000'000;
+
 // Mode of a generation directory between mkdir and the explicit chmod.
 constexpr mode_t DIRECTORY_CREATION_MODE = 0700;
 
@@ -593,6 +595,9 @@ public:
     [[nodiscard]] std::optional<bool> is_down(
         std::string_view process) const noexcept;
     void stop() noexcept { proc_.set_state(ProcessState::STOPPING); }
+    void set_check_period(std::int64_t period_ns) noexcept {
+        keeper_->set_check_period(period_ns);
+    }
 
 private:
     // Opens and locks the base directory and reads `current`.
@@ -915,6 +920,10 @@ Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
         return keeper.status();
     }
     impl->keeper_ = std::move(keeper).value();
+    // Until scada-tagd says its loop period, the check interval of the set
+    // bounds it (decision D-62).
+    impl->keeper_->set_check_period(std::int64_t{tag_set.heartbeat_check_ms} *
+                                    NANOSECONDS_PER_MS);
     if (const Status opened = impl->open_generation(tag_set, resolved.value(),
                                                     current.value(), detail);
         !opened.ok()) {
@@ -1289,6 +1298,10 @@ CheckReport GenerationHost::flush_retained() {
 
 CheckReport GenerationHost::wait_retained_written() {
     return impl_->wait_retained_written();
+}
+
+void GenerationHost::set_check_period(std::int64_t period_ns) noexcept {
+    impl_->set_check_period(period_ns);
 }
 
 void GenerationHost::stop() noexcept {

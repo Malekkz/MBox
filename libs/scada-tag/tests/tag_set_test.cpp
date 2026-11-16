@@ -565,3 +565,25 @@ TEST(TagSetHash, KeepsAdjacentTextsApart) {
 }
 
 }  // namespace
+
+namespace {
+
+// Decision D-62: a RETAIN_NOW change is on disk within 1 s only with checks
+// at most 400 ms apart.
+TEST(TagSetValidate, RefusesASlowCheckWhenATagIsRetainNow) {
+    TagSet tag_set = samples::one_owner();
+    tag_set.tags = {{.name = "p.mode",
+                     .owner = "p",
+                     .type = TagType::INT64,
+                     .retain = true}};
+    tag_set.heartbeat_check_ms = MAX_RETAIN_NOW_CHECK_MS + 1;
+    expect_valid(tag_set);  // no retain_now tag
+    tag_set.tags.front().retain_now = true;
+    expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
+                    "heartbeat_check_ms must be at most 400 in a tag set "
+                    "with a retain_now tag (p.mode)");
+    tag_set.heartbeat_check_ms = MAX_RETAIN_NOW_CHECK_MS;
+    expect_valid(tag_set);
+}
+
+}  // namespace
