@@ -63,3 +63,32 @@ scada_add_test(scada-tag-latency-perf-test KIND perf
 target_include_directories(scada-tag-latency-perf-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
 add_dependencies(scada-tag-latency-perf-test scada-tagd scada-sim)
+
+# The gap half of contract 16, "default change ring capacity": a consumer
+# that keeps up with the reference load gets no gap (issue P1-13, decision
+# D-64). 10 s here; the workflow `measurements` runs it for 600 s.
+scada_add_test(scada-tag-ring-gap-perf-test KIND perf
+  SOURCES ring_gap_perf_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}")
+target_include_directories(scada-tag-ring-gap-perf-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
+add_dependencies(scada-tag-ring-gap-perf-test scada-tagd scada-sim)
+
+# Huge pages for the `tags` regions (contract 16): read latency with the
+# database on a tmpfs mounted huge=never and huge=always (issue P1-13,
+# decision D-64). It mounts a file system, so its label is `root` instead
+# of `perf`: `sudo ctest --preset root` runs it, and the workflow
+# `measurements` runs it in the `perf` build.
+scada_add_test(scada-tag-huge-pages-root-test KIND perf
+  SOURCES huge_pages_root_perf_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}")
+set_tests_properties(scada-tag-huge-pages-root-test PROPERTIES LABELS root)
+target_include_directories(scada-tag-huge-pages-root-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
+add_dependencies(scada-tag-huge-pages-root-test scada-tagd scada-sim)

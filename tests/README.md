@@ -110,7 +110,11 @@ in a mount namespace of its own and never touches `/dev/shm`;
 criterion for `SCADA_E_BUSY` gates only in a Release or RelWithDebInfo
 build without a sanitizer (`SCADA_TAG_BUSY_GATE=1`, set by CMake); the dev
 build prints the rate (decision D-57). It runs 10 s, or
-`SCADA_CONFORMANCE_SECONDS`.
+`SCADA_CONFORMANCE_SECONDS`. `scada-tag-huge-pages-root-test` (in
+`tests/perf/`) reads one owner of 50,000 tags while it is written, with the
+database on a tmpfs mounted `huge=never` and on one mounted `huge=always`,
+and checks that the second really maps the region with huge pages; it
+reports the figures and decides nothing (decision D-64).
 
 ### Performance gate
 
