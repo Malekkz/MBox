@@ -300,3 +300,22 @@ without one.
 On x86-64 `write_many` reached 1.26 times its baseline for 500 tags and
 1.27 times for 5,000 tags, within the 2.0 times tolerance of the gate (the
 slowest of the 10 runs of issue #20 was 1.47 times). The scan stays below the 0.5 ms of contract 16.
+
+## Phase 1 issues at the close
+
+Contract changes merged after the measurements of issue #20, all before 1.0:
+
+| Issue | Pull request | Contract | Change |
+| --- | --- | --- | --- |
+| #92 | #95 | 0.23 | A consumer that sees a queue sees its producer (D-61) |
+| #96 | #111 | 0.24 | Minimum interval between two writes of one owner's retain file. A RETAIN_NOW change is on disk within 1 s while a write, queued writes included, takes at most 200 ms; a tag set with a RETAIN_NOW tag has `heartbeat_check_ms` of at most 400 ms; the warning `retain_now change reached the disk late` (D-62) |
+| #21 | #113 | 0.25 | Wording promised for 1.0; no behaviour changed (D-63) |
+| #112 | #114 | 0.26 | `scada_tag_write_string` returns `SCADA_E_NOT_OWNER` before it checks the text (D-65) |
+| #21 | #110 and this report's pull request | 1.0 | The tests of D-64; contract section 16 settled (D-66) |
+
+Carried forward, open:
+
+- #41: the phase 1 figures on the target board, the hardware acceptance
+  before the first release on the board.
+- #6 (P0-05): the acceptance of phase 0 on a test machine (restart on a hung
+  loop, read-only root), with #41.

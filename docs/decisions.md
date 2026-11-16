@@ -1421,7 +1421,7 @@ Decision:
 - e. Commands after lost audit records: deferred by the product owner; it does not block 1.0. Whether commands stay refused after `scada-tagd` reported lost audit records, until an operator acknowledges, is safety-relevant, and the library has no such latch. It is for the command service in phase 5 (issues #74, #75 and #83). The row leaves the table of contract section 16 for a list "Deferred by the owner, does not block 1.0" below it.
 - Every other row of section 16 was already settled and stays as it is.
 - Issue #41, the target board, does not block contract 1.0 (the product owner's decision). It stays open as the hardware acceptance before the first release on the board.
-- Contract version 0.24 is reserved for issue #96 (PR #111), not yet merged. It lands before 1.0 is cut; the 1.0 change-log row and migration note follow 0.26.
+- 1.0 is cut on top of every phase 1 contract change: 0.24 (issue #96, PR #111, D-62) is merged; the 1.0 change-log row and migration note follow 0.26.
 Reason: a and c meet their criteria on both architectures with the code that ships. For b, huge pages cannot apply to a region of the reference load, and the one architecture where they lowered the figures needs no gain for a target. For d, option A keeps one clock for every age and timeout (D-46), and option B is restart behaviour that belongs with the command service. For e, the latch is a behaviour of the command service, which is built in phase 5 (reference 18.2).
 Consequences:
 - Contract section 16: every point settled; heading and intro say so; the lost-audit item moves to the deferred list.
