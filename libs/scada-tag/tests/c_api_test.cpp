@@ -409,6 +409,33 @@ TEST_F(CApi, NullArgumentsOfTheTagFunctionsAreInvalid) {
               SCADA_E_INVALID);
 }
 
+// D-29, issue #112: SCADA_E_NOT_OWNER comes before any check of the value,
+// the length of the text included.
+TEST_F(CApi, WriteStringOfAnotherOwnersTagIsNotOwnerWhateverTheText) {
+    start_host();
+    Context feeder;
+    Context web;
+    ASSERT_EQ(attach("io", feeder), SCADA_OK);
+    ASSERT_EQ(attach("web", web), SCADA_OK);
+    std::uint32_t note = 0;
+    ASSERT_EQ(scada_tag_resolve(web.get(), "plant.note", &note), SCADA_OK);
+
+    const std::string too_long(SCADA_STRING_MAX + 1, 'x');
+    EXPECT_EQ(scada_tag_write_string(web.get(), note, too_long.data(),
+                                     too_long.size(), SCADA_QUALITY_GOOD, 0, 0),
+              SCADA_E_NOT_OWNER);
+    const std::string not_utf8(1, '\xFF');
+    EXPECT_EQ(scada_tag_write_string(web.get(), note, not_utf8.data(),
+                                     not_utf8.size(), SCADA_QUALITY_GOOD, 0, 0),
+              SCADA_E_NOT_OWNER);
+    // The owner still gets SCADA_E_INVALID for the same text.
+    std::uint32_t own = 0;
+    ASSERT_EQ(scada_tag_resolve(feeder.get(), "plant.note", &own), SCADA_OK);
+    EXPECT_EQ(scada_tag_write_string(feeder.get(), own, too_long.data(),
+                                     too_long.size(), SCADA_QUALITY_GOOD, 0, 0),
+              SCADA_E_INVALID);
+}
+
 TEST_F(CApi, TheChangeStructuresHaveTheirDocumentedSizes) {
     EXPECT_EQ(sizeof(scada_change), 32U);
     EXPECT_EQ(sizeof(scada_sub_stats_t), 48U);

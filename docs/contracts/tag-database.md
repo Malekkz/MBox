@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.25 (draft) |
+| Contract version | 0.26 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -1726,8 +1726,13 @@ void scada_waitset_destroy(scada_waitset *ws);
   or may not be stored, and a BOOL that is neither 0 nor 1.
   `scada_tag_write_many` checks every pair this way before it writes the
   first, and writes all or nothing.
-- `scada_tag_write_string` refuses with `SCADA_E_INVALID` text longer than
-  250 bytes or not well-formed UTF-8. `scada_tag_read_string` returns the
+- `scada_tag_write_string` checks in this order (D-65): `SCADA_E_INVALID`
+  for a NULL context or a NULL `text` with `len` above 0, and for a handle
+  that is none of this generation; `SCADA_E_NOT_OWNER` before the text is
+  looked at; `SCADA_E_TYPE` for a tag that is not a STRING;
+  `SCADA_E_INVALID` for text longer than 250 bytes or not well-formed
+  UTF-8, and for a quality or quality flag that is none or may not be
+  stored. `scada_tag_read_string` returns the
   bytes the owner stored, not NUL-terminated, and does not check UTF-8;
   with a buffer that is too small it returns `SCADA_E_INVALID` and stores
   the length in `len`. The string functions are not RT-safe.
@@ -2222,6 +2227,13 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.22 | 2026-11-16 | Issue #20 (P1-12, D-57). Section 16: the read retry limit (64), the heartbeat timeout defaults (3,000 ms, 500 ms) and two clock reads per `write` confirmed by measurement; the database size half of the change ring capacity confirmed, its gap half still open; huge pages still open. Each row names the run and the hardware. |
 | 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
+| 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
+
+Migration, 0.25 to 0.26 (0.24 is reserved for #96, PR #111): none for data;
+the layout version stays 1 and no structure changed. A process that calls
+`scada_tag_write_string` on a tag it does not own with text longer than 250
+bytes now gets `SCADA_E_NOT_OWNER` instead of `SCADA_E_INVALID`. Every other
+call returns what it returned.
 
 Migration, 0.23 to 0.25 (0.24 is reserved for #96): none. No structure, default or behaviour changed; the contract now states what libscada-tag and scada-tagd already do.
 
