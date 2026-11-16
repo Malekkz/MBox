@@ -15,9 +15,12 @@
 
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 
+#include <sys/stat.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -197,16 +200,35 @@ inline bool attached(std::string_view out) {
     return out.find("attached\n") != std::string_view::npos;
 }
 
+// The retain directory of a test whose base directory is `base_dir`:
+// `retain` beside it, created with the owner and mode scada-tagd requires
+// (mode 2750) if it is not there.
+[[nodiscard]] inline std::string retain_dir_for(const std::string& base_dir) {
+    const std::filesystem::path retain =
+        std::filesystem::path(base_dir).parent_path() / "retain";
+    constexpr mode_t RETAIN_MODE = 02750;
+    constexpr mode_t PRIVATE_MODE = 0700;
+    if (::mkdir(retain.c_str(), PRIVATE_MODE) == 0) {
+        EXPECT_EQ(::chmod(retain.c_str(), RETAIN_MODE), 0) << retain;
+    }
+    return retain.string();
+}
+
 // Starts scada-tagd on the tag set file `tag_set_path` and the base
-// directory `base_dir`, with the watchdog interval `watchdog`. Nothing,
+// directory `base_dir`, with the retain directory of `retain_dir_for`, the
+// watchdog interval `watchdog` and the arguments `extra` added. Nothing,
 // with a failed expectation, if it could not be started.
 [[nodiscard]] inline std::optional<RunningTagd> start_tagd(
     const std::string& tag_set_path, const std::string& base_dir,
-    std::chrono::milliseconds watchdog = QUIET_WATCHDOG) {
+    std::chrono::milliseconds watchdog = QUIET_WATCHDOG,
+    const std::vector<std::string>& extra = {}) {
     scada::Result<NotifyListener> listener = NotifyListener::create();
+    std::vector<std::string> arguments{
+        "--tag-set", tag_set_path,   "--base-dir",
+        base_dir,    "--retain-dir", retain_dir_for(base_dir)};
+    arguments.insert(arguments.end(), extra.begin(), extra.end());
     const std::vector<std::string> tagd =
-        command_from("SCADA_TAGD_COMMAND",
-                     {"--tag-set", tag_set_path, "--base-dir", base_dir});
+        command_from("SCADA_TAGD_COMMAND", arguments);
     if (!listener.ok() || tagd.empty()) {
         ADD_FAILURE() << "no listener or no command for scada-tagd";
         return std::nullopt;
@@ -236,9 +258,10 @@ inline bool attached(std::string_view out) {
 // Starts scada-tagd and waits until it has reported readiness.
 [[nodiscard]] inline std::optional<RunningTagd> ready_tagd(
     const std::string& tag_set_path, const std::string& base_dir,
-    std::chrono::milliseconds watchdog = QUIET_WATCHDOG) {
+    std::chrono::milliseconds watchdog = QUIET_WATCHDOG,
+    const std::vector<std::string>& extra = {}) {
     std::optional<RunningTagd> tagd =
-        start_tagd(tag_set_path, base_dir, watchdog);
+        start_tagd(tag_set_path, base_dir, watchdog, extra);
     if (tagd.has_value()) {
         EXPECT_TRUE(receives(tagd->listener, "READY=1")) << tagd->child.err();
     }

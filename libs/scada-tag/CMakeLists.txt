@@ -4,6 +4,7 @@ scada_add_library(scada-tag
     src/c_api.cpp
     src/change_ring.cpp
     src/clock_check.cpp
+    src/crc32.cpp
     src/futex.cpp
     src/generation_host.cpp
     src/header_builder.cpp
@@ -17,6 +18,8 @@ scada_add_library(scada-tag
     src/queue_access.cpp
     src/queue_region.cpp
     src/region_file.cpp
+    src/retain_file.cpp
+    src/retain_keeper.cpp
     src/ring_access.cpp
     src/sha256.cpp
     src/subscription.cpp

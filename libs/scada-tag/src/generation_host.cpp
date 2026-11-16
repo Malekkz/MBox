@@ -5,6 +5,7 @@
 #include "queue_region.h"
 #include "region_file.h"
 #include "resolved_tag_set.h"
+#include "retain_keeper.h"
 #include "shared_memory.h"
 
 #include "scada/common/clock.h"
@@ -195,52 +196,6 @@ Result<std::optional<std::uint64_t>> read_current(
         notes.emplace_back("current does not point to a generation");
     }
     return generation;
-}
-
-// True if a process holds the lock on a `proc` region in the generation
-// directory `name` (section 10): the generation has a live process.
-bool has_live_process(int base_fd, const std::string& name) {
-    const Fd directory = open_directory_at(base_fd, name);
-    if (!directory.valid()) {
-        return false;
-    }
-    std::string ignored;
-    const Result<std::vector<std::string>> entries =
-        list_directory(directory.get(), ignored);
-    if (!entries.ok()) {
-        return false;
-    }
-    return std::ranges::any_of(entries.value(), [&](const std::string& entry) {
-        if (!entry.starts_with("proc.")) {
-            return false;
-        }
-        const Fd file = open_at(directory.get(), entry,
-                                O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        // The lock taken here, if any, ends when `file` is closed.
-        return file.valid() && ::flock(file.get(), LOCK_EX | LOCK_NB) != 0 &&
-               errno == EWOULDBLOCK;
-    });
-}
-
-// Removes the generation directory `name` with what is in it. Best effort
-// (section 3.3): false if something stays.
-bool remove_generation(int base_fd, const std::string& name) {
-    const Fd directory = open_directory_at(base_fd, name);
-    if (directory.valid()) {
-        std::string ignored;
-        const Result<std::vector<std::string>> entries =
-            list_directory(directory.get(), ignored);
-        if (entries.ok()) {
-            for (const std::string& entry : entries.value()) {
-                if (::unlinkat(directory.get(), entry.c_str(), 0) != 0 &&
-                    errno == EISDIR) {
-                    static_cast<void>(::unlinkat(directory.get(), entry.c_str(),
-                                                 AT_REMOVEDIR));
-                }
-            }
-        }
-    }
-    return ::unlinkat(base_fd, name.c_str(), AT_REMOVEDIR) == 0;
 }
 
 // The bytes all regions of the tag set take together.
@@ -447,10 +402,14 @@ Status switch_current(int base_fd, const std::string& target,
 
 // Removes what earlier runs left in the base directory (section 11.1, step
 // 3) and returns the highest generation number seen, `current` included.
-Result<std::uint64_t> clean_base_directory(int base_fd,
-                                           std::optional<std::uint64_t> current,
-                                           std::vector<std::string>& notes,
-                                           std::string& detail) {
+//
+// Before a generation without a live process is removed, `finish` is called
+// with its number, so that the retained values written there are kept
+// (decision D-45).
+Result<std::uint64_t> clean_base_directory(
+    int base_fd, std::optional<std::uint64_t> current,
+    const std::function<void(std::uint64_t)>& finish,
+    std::vector<std::string>& notes, std::string& detail) {
     const Result<std::vector<std::string>> entries =
         list_directory(base_fd, detail);
     if (!entries.ok()) {
@@ -474,7 +433,10 @@ Result<std::uint64_t> clean_base_directory(int base_fd,
         }
         if (has_live_process(base_fd, entry)) {
             notes.push_back(entry + " stays: a process is attached to it");
-        } else if (remove_generation(base_fd, entry)) {
+            continue;
+        }
+        finish(*generation);
+        if (remove_generation(base_fd, entry)) {
             notes.push_back(entry + " was removed");
         } else {
             notes.push_back(entry + " could not be removed");
@@ -623,6 +585,12 @@ public:
         proc_.heartbeat(now_mono_ns);
     }
     [[nodiscard]] CheckReport check(std::int64_t now_mono_ns);
+    [[nodiscard]] CheckReport flush_retained();
+    [[nodiscard]] CheckReport wait_retained_written() {
+        CheckReport report;
+        keeper_->wait_written(report);
+        return report;
+    }
     [[nodiscard]] std::optional<bool> is_down(
         std::string_view process) const noexcept;
     void stop() noexcept { proc_.set_state(ProcessState::STOPPING); }
@@ -646,6 +614,11 @@ private:
 
     // Attaches `proc.tagd`, sets it RUNNING and writes the first heartbeat.
     [[nodiscard]] Status attach_own_region(std::string& detail);
+
+    // Watches the current generation and every other generation in the
+    // base directory for retained values and removal (decision D-45); sets
+    // a generation that is not current and not yet RETIRING to RETIRING.
+    [[nodiscard]] Status watch_generations(std::string& detail);
 
     // The user that must own `entry`, or nothing if the header does not
     // list it.
@@ -689,6 +662,9 @@ private:
     ExpectedEntries expected_;
     // Entries that could not be removed and were reported.
     std::set<std::string, std::less<>> stuck_;
+    std::unique_ptr<RetainKeeper> keeper_;
+    // What `start` did to retained values, reported by the first check.
+    CheckReport start_report_;
 };
 
 void GenerationHost::Impl::describe(const TagSet& tag_set,
@@ -835,8 +811,12 @@ Status GenerationHost::Impl::open_generation(
         return {};
     }
 
+    const auto finish = [this](std::uint64_t generation) {
+        keeper_->finish_now(base_.get(), generation, monotonic_ns(),
+                            start_report_);
+    };
     const Result<std::uint64_t> highest =
-        clean_base_directory(base_.get(), current, notes_, detail);
+        clean_base_directory(base_.get(), current, finish, notes_, detail);
     if (!highest.ok()) {
         return highest.status();
     }
@@ -920,6 +900,17 @@ Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
     if (!current.ok()) {
         return current.status();
     }
+    const Result<ConfigHash> hash = config_hash(tag_set, detail);
+    if (!hash.ok()) {
+        return hash.status();
+    }
+    Result<std::unique_ptr<RetainKeeper>> keeper = RetainKeeper::open(
+        options.retain_dir, options.tagd_uid, impl->base_.get(),
+        options.retain_interval_ms, hash.value(), detail);
+    if (!keeper.ok()) {
+        return keeper.status();
+    }
+    impl->keeper_ = std::move(keeper).value();
     if (const Status opened = impl->open_generation(tag_set, resolved.value(),
                                                     current.value(), detail);
         !opened.ok()) {
@@ -936,7 +927,40 @@ Result<std::unique_ptr<GenerationHost::Impl>> GenerationHost::Impl::start(
         !attached.ok()) {
         return attached;
     }
+    if (const Status watched = impl->watch_generations(detail); !watched.ok()) {
+        return watched;
+    }
     return impl;
+}
+
+Status GenerationHost::Impl::watch_generations(std::string& detail) {
+    if (Status current = keeper_->watch_current(open_.directory.get(),
+                                                open_.generation, detail);
+        !current.ok()) {
+        return current;
+    }
+    const Result<std::vector<std::string>> entries =
+        list_directory(base_.get(), detail);
+    if (!entries.ok()) {
+        return entries.status();
+    }
+    const std::int64_t now = monotonic_ns();
+    for (const std::string& entry : entries.value()) {
+        const std::optional<std::uint64_t> generation =
+            parse_generation_dir_name(entry);
+        if (!generation.has_value() || *generation == open_.generation) {
+            continue;
+        }
+        const std::optional<GenerationState> state =
+            keeper_->watch_retired(base_.get(), *generation, now);
+        if (state.has_value() && state != GenerationState::RETIRING) {
+            // Left RUNNING by a scada-tagd that stopped between switching
+            // `current` and retiring it.
+            retire(base_.get(), *generation, tagd_uid_, notes_);
+        }
+    }
+    keeper_->load();
+    return {};
 }
 
 CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
@@ -967,6 +991,23 @@ CheckReport GenerationHost::Impl::check(std::int64_t now_mono_ns) {
         judge_queue(queue, report);
     }
     sweep(report);
+    keeper_->check(base_.get(), now_mono_ns, report);
+    if (!start_report_.retain_written.empty() ||
+        !start_report_.retain_problems.empty()) {
+        report.retain_written.insert(report.retain_written.begin(),
+                                     start_report_.retain_written.begin(),
+                                     start_report_.retain_written.end());
+        report.retain_problems.insert(report.retain_problems.begin(),
+                                      start_report_.retain_problems.begin(),
+                                      start_report_.retain_problems.end());
+        start_report_ = {};
+    }
+    return report;
+}
+
+CheckReport GenerationHost::Impl::flush_retained() {
+    CheckReport report;
+    keeper_->flush(report);
     return report;
 }
 
@@ -1201,6 +1242,14 @@ CheckReport GenerationHost::check(std::int64_t now_mono_ns) {
 std::optional<bool> GenerationHost::is_down(
     std::string_view process) const noexcept {
     return impl_->is_down(process);
+}
+
+CheckReport GenerationHost::flush_retained() {
+    return impl_->flush_retained();
+}
+
+CheckReport GenerationHost::wait_retained_written() {
+    return impl_->wait_retained_written();
 }
 
 void GenerationHost::stop() noexcept {

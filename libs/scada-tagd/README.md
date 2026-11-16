@@ -18,12 +18,38 @@ process. The executable in `services/scada-tagd` only calls it.
   and logs every change. The same loop feeds the watchdog four times in its
   interval. A hung loop therefore stops the heartbeat and the watchdog
   together.
-- On `SIGTERM` or `SIGINT`: marks itself as stopping and exits. The
-  generation stays, so that the other services keep running.
+- From the same loop, retained values (contract, section 12; decision
+  D-45): the tags marked `retain` are read with the sequence-lock read, and
+  the file `<owner>.bin` in the retain directory is written when a value
+  changed, at most every `--retain-interval-ms`, at the next check for a
+  `retain_now` tag. The files are written by a thread of their own, so that
+  a slow `fsync` does not hold up the heartbeat; the removal of old files
+  and its directory `fsync` run there too. A record read consistently that
+  is BAD, written by the owner (no NOT_INIT), removes the tag from the
+  file; one that is NOT_INIT (not written yet, for example after a failed
+  restore) leaves the value on file, as does one that cannot be read
+  consistently (mid-write). No FINAL file is
+  written over newer values: not for an owner that has a ready `tags`
+  region in a newer generation, nor one whose file is already FINAL for a
+  newer generation.
+- Retired generations (contract, section 11.3): every generation in the base
+  directory other than the current one is watched, also after a restart.
+  Once the process of an owner has left one (its state is not RUNNING, or it
+  no longer holds the lock of its `proc` region), that owner's values there
+  are written to its file marked FINAL, which its attach to the new
+  generation waits for. Once every owner is done and no `proc` region is
+  locked, the generation is removed. After 30 s it is removed anyway; the
+  values of a process still attached are written, but not marked FINAL. A
+  generation that cannot be removed is tried for at most 60 s after it
+  retired, then logged as abandoned and left to the next boot.
+- Once no generation is retired and every owner has its file, files of
+  owners the tag set no longer has are removed.
+- On `SIGTERM` or `SIGINT`: writes the retained values that changed,
+  waiting for the writer at most 5 s (logged if values stay unsaved), marks
+  itself as stopping and exits. The generation stays, so that the other
+  services keep running.
 
-It does not touch the shared memory itself; that is in `libscada-tag`. It
-does not persist retained values and does not remove an old generation while
-it runs; both come with issue P1-09.
+It does not touch the shared memory itself; that is in `libscada-tag`.
 
 ## Log records
 
@@ -49,6 +75,14 @@ the standard error stream.
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
+| `retained values written` | DEBUG | `OWNER`, `VALUES` |
+| `retained values written after the owner left a retired generation` | INFO | `OWNER`, `VALUES` |
+| `retained values` | WARNING, once until the problem is gone: a file that failed its checks and was ignored, or a file that could not be written | `SUBJECT` (file or owner), `DETAIL` |
+| `removed the retain file of an owner that is gone` | NOTICE | `FILE` |
+| `retired generation removed` | NOTICE | `GENERATION` |
+| `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |
+| `process still attached to a retired generation` | WARNING, before such a removal | `GENERATION`, `PROCESS` (`<name> (pid <pid>)`) |
+| `cannot remove a retired generation` | ERROR, once | `GENERATION` |
 | `stopped on request` | NOTICE | |
 
 ### Message IDs

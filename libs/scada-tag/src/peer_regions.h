@@ -106,6 +106,14 @@ public:
     // and scada_tag_status; not real-time.
     std::size_t refresh(int dir_fd, std::int64_t now_mono_ns);
 
+    // Looks at the region of `slot`, which was asked for with `want`, now,
+    // whenever `refresh` would look next: for scada-tagd, which reads the
+    // RETAIN tags at every liveness check and must find a region that has
+    // just appeared within that time (contract, section 12: RETAIN_NOW
+    // within 1 second). True if what `bytes` returns changed. Nothing for a
+    // slot that was not asked for. Not real-time.
+    bool look_now(int dir_fd, std::size_t slot);
+
 private:
     struct Slot {
         std::string name;
