@@ -32,6 +32,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -524,24 +525,38 @@ protected:
         return ::testing::AssertionSuccess();
     }
 
-    [[nodiscard]] ::testing::AssertionResult next_start_removes_the_temporary()
-        const;
+    [[nodiscard]] ::testing::AssertionResult next_start_removes(
+        const std::string& name) const;
+
+    // io.bin still holds OLD_VALUE and `temporary` is the one temporary
+    // file: the hung write changed nothing under the real name.
+    [[nodiscard]] ::testing::AssertionResult left_as_it_was(
+        const std::string& temporary) const {
+        const std::optional<std::int64_t> value = on_file();
+        const std::vector<std::string> temporaries = temporaries_in(retain());
+        if (value != OLD_VALUE ||
+            temporaries != std::vector<std::string>{temporary}) {
+            return ::testing::AssertionFailure()
+                   << "value " << value.value_or(-1) << ", "
+                   << temporaries.size() << " temporary files";
+        }
+        return ::testing::AssertionSuccess();
+    }
 };
 
-// A later scada-tagd started and stopped leaves no temporary file and the
-// old value on file.
-::testing::AssertionResult HungWrite::next_start_removes_the_temporary() const {
+// A later scada-tagd removes the temporary file `name` the hung write
+// left. Only that one: the new scada-tagd writes io's current values at
+// its first check, through a temporary file of its own.
+::testing::AssertionResult HungWrite::next_start_removes(
+    const std::string& name) const {
     std::optional<RunningTagd> next = tagd();
     if (!next.has_value()) {
         return ::testing::AssertionFailure() << "no scada-tagd";
     }
-    const bool clean = temporaries_in(retain()).empty();
-    const std::optional<std::int64_t> value = on_file();
+    const std::vector<std::string> left = temporaries_in(retain());
     stop(*next);
-    if (!clean || value != OLD_VALUE) {
-        return ::testing::AssertionFailure()
-               << "temporaries left: " << !clean
-               << ", value: " << value.value_or(-1);
+    if (std::ranges::find(left, name) != left.end()) {
+        return ::testing::AssertionFailure() << name << " is still there";
     }
     return ::testing::AssertionSuccess();
 }
@@ -563,8 +578,10 @@ TEST_F(HungWrite, AtTheStopTagdEndsWithCode3AndTheOldFileStays) {
     EXPECT_TRUE(ends_unsaved(*hung));
     // The old file is intact; the temporary file is still there until the
     // next start.
-    EXPECT_TRUE(on_file() == OLD_VALUE && temporaries_in(retain()).size() == 1);
-    EXPECT_TRUE(stops_cleanly(*feeder) && next_start_removes_the_temporary());
+    const std::string temporary =
+        ".tmp.io.bin." + std::to_string(hung->child.pid());
+    EXPECT_TRUE(left_as_it_was(temporary));
+    EXPECT_TRUE(stops_cleanly(*feeder) && next_start_removes(temporary));
 }
 
 // Decision D-59, point 4: plant.count moves from io to web, and web
