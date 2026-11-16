@@ -659,9 +659,10 @@ write_seq.store(w + 1, release)
 from the consumer's heartbeat; it does not wait for `scada-tagd`.
 
 A producer that attached before its consumer finds the consumer's region
-missing and gets `SCADA_E_PEER_DOWN` until its next look at that region,
-at most once a second (11.2), even after the consumer has attached: a
-refusal, never a loss; nothing was put in the queue. A requester that
+missing and gets `SCADA_E_PEER_DOWN` until its next look at that region
+(11.2), even after the consumer has attached: at most 1 s after the
+consumer's attach for a producer that calls `scada_tag_notify` at least
+once a second. A refusal, never a loss: nothing was put in the queue. A requester that
 consumes the answer queue of its driver also sees the driver once a look
 maps that queue's file (section 9.2, D-61).
 
@@ -754,6 +755,14 @@ A command is never executed twice and never executed late:
   region the consumer has not looked for yet. A driver's own post of an
   answer is judged the same way (section 9.1). When the requester really
   is down, the answer is refused or dropped and counted, as above.
+  One exception remains: a producer whose `proc` region is created anew
+  inside a generation (removed or damaged, 11.2 step 3) while its queue
+  file is kept. The consumer then still reads the old region, and the
+  producer as down, until its next look at that region (11.2), at most
+  1 s after the producer's attach for a consumer that calls
+  `scada_tag_notify` or waits at least once a second; a resolve or another
+  ask looks at once. Answers in that time are refused or dropped and
+  counted.
 
 A record is outside input to the consumer. One that fails the checks of
 section 9.4 is passed over with `SCADA_E_LAYOUT`; a request passed over,
@@ -1880,9 +1889,10 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
-| 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
+| 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
 
-Migration, 0.22 to 0.23: none for data; the layout version stays 1 and no
+Migration, 0.19 to 0.23 (0.20 to 0.22 are in open pull requests; the rows
+stay in numeric order when they merge): none for data; the layout version stays 1 and no
 structure in shared memory changed. A consumer no longer drops, or has
 refused, an answer to a request taken within about 1 s of its requester's
 attach as "requester down": it looks at the requester's `proc` region with

@@ -285,6 +285,52 @@ TEST_F(Peers, AQueueCreatedAnewIsSeenWithItsNewProducer) {
               DownReason::NONE);
 }
 
+// The queue's file is found while the producer's `proc` region is missing
+// (here removed by name after the attach): the coupled look asks for the
+// region and finds nothing; it is found once it is there again, by the
+// next `refresh` (review of PR #95). The producer attaches again and
+// creates a new `proc` region, and keeps its queue file.
+TEST_F(Peers, AProducerRegionMissingAtTheCoupledLookIsFoundLater) {
+    const std::size_t proc = peers().proc_slot(PROCESS_IO);
+    const std::size_t queue = peers().queue_slot(QUEUE_EVENTS);
+    auto feeder = attached_io();
+    std::filesystem::remove(generation_dir() / "proc.io");
+    peers().want(directory(), queue, START_NS);
+    ASSERT_FALSE(peers().bytes(queue).empty());
+    EXPECT_TRUE(peers().bytes(proc).empty());
+    feeder.reset();
+    feeder = attached_io();
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_GE(peers().refresh(directory(), START_NS + SECOND_NS), 1U);
+    EXPECT_EQ(proc_liveness(peers().bytes(proc), DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                            scada::monotonic_ns()),
+              DownReason::NONE);
+}
+
+// The same start; then a resolve asks for the `proc` slot, which the
+// coupled look already asked for while it was missing. The ask looks again
+// at once, as a first ask does, not only at the next `refresh` (review of
+// PR #95: no new queue mapping, so no coupled look, would map it).
+TEST_F(Peers, AnAskForARegionStillMissingLooksAgainAtOnce) {
+    const std::size_t proc = peers().proc_slot(PROCESS_IO);
+    const std::size_t queue = peers().queue_slot(QUEUE_EVENTS);
+    auto feeder = attached_io();
+    std::filesystem::remove(generation_dir() / "proc.io");
+    peers().want(directory(), queue, START_NS);
+    EXPECT_TRUE(peers().bytes(proc).empty());
+    feeder.reset();
+    feeder = attached_io();
+    ASSERT_NE(feeder, nullptr);
+    peers().want(directory(), proc, START_NS);
+    EXPECT_EQ(proc_liveness(peers().bytes(proc), DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                            scada::monotonic_ns()),
+              DownReason::NONE);
+    // A mapped region is not looked at again by an ask.
+    const std::span<std::byte> mapped = peers().bytes(proc);
+    peers().want(directory(), proc, START_NS);
+    EXPECT_EQ(peers().bytes(proc).data(), mapped.data());
+}
+
 TEST_F(Peers, ARegionReplacedTooOftenStaysMissing) {
     const std::size_t tags = peers().tags_slot(OWNER_IO);
     peers().want(directory(), tags, START_NS);

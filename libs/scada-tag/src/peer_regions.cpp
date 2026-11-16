@@ -268,13 +268,15 @@ void PeerRegions::look_at_producer(int dir_fd, const Slot& slot) {
     // producer, which its answers and its liveness need (section 9.2,
     // decision D-61). Without this, the two slots are looked at on timers
     // of their own, up to a second apart (issue #92). Asked for here, not
-    // when the queue is opened: a slot asked for while missing is not
-    // looked at again by a later `want` (a resolve), only by `refresh`.
+    // when the queue is opened, so that the first look of the slot finds
+    // the region.
     const std::size_t index = slot.identity.owner_index;
     Slot& producer = slots_.at(index);
     if (!producer.wanted) {
-        producer.wanted = true;
+        // The flag after the push: a failed push leaves the slot not asked
+        // for, never asked for and in no list of `refresh`.
         wanted_.push_back(index);
+        producer.wanted = true;
     }
     static_cast<void>(look_slot(dir_fd, producer));
     // Release, after the look: as in `want`.
@@ -285,10 +287,20 @@ void PeerRegions::want(int dir_fd, std::size_t slot, std::int64_t now_mono_ns) {
     Slot& wanted = slots_.at(checked(slot));
     const std::scoped_lock lock(mutex_);
     if (wanted.wanted) {
+        // Asked for before, by an earlier `want` or by a look of a queue
+        // (`look_at_producer`), and still missing: looked at again now, as
+        // the first ask would, rather than at the next `refresh` up to a
+        // second later (review of PR #95). Relaxed: written under the
+        // mutex, which this thread holds.
+        if (wanted.current.load(std::memory_order_relaxed) == nullptr) {
+            static_cast<void>(look(dir_fd, wanted));
+            wanted.next_look_mono_ns = now_mono_ns + PEER_RETRY_INTERVAL_NS;
+        }
         return;
     }
-    wanted.wanted = true;
+    // The flag after the push, as in `look_at_producer`.
     wanted_.push_back(slot);
+    wanted.wanted = true;
     static_cast<void>(look(dir_fd, wanted));
     wanted.next_look_mono_ns = now_mono_ns + PEER_RETRY_INTERVAL_NS;
     // Release, after the first look: a reader that sees the flag with
