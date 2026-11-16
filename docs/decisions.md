@@ -1335,3 +1335,14 @@ Consequences:
 - `libs/scada-tag/src/peer_regions.cpp`: `look_at_producer`; `refresh_locked` walks the asked slots by position, since a look can ask for one.
 - Tests: `Peers.AQueueFoundLaterIsSeenWithItsProducer` (the producer's slot asked for first and looked at, missing, a second before the queue's, so that only the queue's slot is due), `Peers.AQueueCreatedAnewIsSeenWithItsNewProducer` (both files created anew, the path of D-49), `Queues.AConsumerThatSeesAQueueSeesItsProducer` (the producer attaches after the open; the look of the queue maps its `proc` region). Each fails without the change. From the review: `Peers.AnAskForARegionStillMissingLooksAgainAtOnce` (fails without the look of an ask of a missing slot) and `Peers.AProducerRegionMissingAtTheCoupledLookIsFoundLater` (the coupled look finds no `proc` file; the next `refresh` finds it).
 - The rt probe no longer waits until it sees the feeder live before its markers (D-56 added that wait): without the wait it passed 1,273 loaded runs of `scada-tag-rt-integration-test` (6 loops of it and 2 of unit tests, busy loops and `ctest -j8`, load average up to 22.7), where it had failed 2 of 1,074 without the coupling.
+
+## D-63: No process-wide queue counts in `scada_status`
+Date: 2026-11-16
+Phase / issue: 1, #21
+Status: accepted by the committee of the lead session on 2026-11-16
+
+Context: D-40 left open for contract 1.0 (P1-13) whether `scada_status` gets process-wide queue counts. Contract section 16 lists it as an open point to settle before 1.0.
+Options: add process-wide counts to `scada_status`; keep counts per queue in `scada_queue_stats` only.
+Decision: the choice of D-40 is kept. No process-wide queue counts are added; `scada_queue_stats` reports the counts of one side of one queue, and `scada_status` stays 32 bytes. Contract 0.25 marks the point of section 16 settled.
+Reason: `scada_status` is allocated by the caller without a size field, so growing it overruns callers built against the old size (D-40). A process that wants totals adds up the counts of its queues.
+Consequences: no change to code or to any structure. A later wish for process-wide counts needs a new function, not a larger `scada_status`.
