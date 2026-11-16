@@ -4,7 +4,8 @@
 # one, and makes temporary directories that a killed test does not leave
 # behind.
 scada_add_library(scada-test-support
-  SOURCES src/child_process.cpp src/exec.cpp src/syscall_trace.cpp
+  SOURCES src/child_process.cpp src/cpu_affinity.cpp src/exec.cpp
+          src/syscall_trace.cpp
           src/temp_directory.cpp)
 
 # The cleaner of TempDirectory. The library starts it by the command below:
