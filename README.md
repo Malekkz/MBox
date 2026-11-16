@@ -157,9 +157,9 @@ tolerance catches a regression of a multiple, not of 10 %.
   a check. Started by hand, on x86-64 and on ARM64 with `isb` and with
   `yield`, and every Monday at 03:17 UTC on x86-64 and ARM64 with `isb`, it
   runs in the `perf` build `scripts/measure-seqlock.sh`, conformance tests 2
-  and 26 for 600 s each, and every `perf` test, and keeps the output for 90
-  days as the artifacts `measurements-<arch>-<pause>` (decisions D-31,
-  D-57). Started by hand with `latency_spread`, it runs conformance test 27
+  and 26 and the ring-gap test for 600 s each, the huge-page reads as root,
+  and every `perf` test, and keeps the output for 90 days as the artifacts
+  `measurements-<arch>-<pause>` (decisions D-31, D-57, D-64). Started by hand with `latency_spread`, it runs conformance test 27
   on 10 fresh runners per architecture as well as the measurement jobs. The weekly run costs
   Actions minutes; to stop it, delete its `schedule` or disable the
   workflow on the Actions page.
