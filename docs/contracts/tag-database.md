@@ -1358,7 +1358,10 @@ know they are there, and any number may run.
   and that the owner has not written since; SOURCE_NOT_FINAL, that the
   file it came from was not marked FINAL, or is not known. Attach reports
   such a value with origin "other owner", and with SOURCE_NOT_FINAL as a
-  FINAL wait that ran out; a write of the owner clears both.
+  FINAL wait that ran out; a write of the owner clears both. A value attach
+  takes itself from another owner's file that is not marked FINAL is
+  reported the same way, as a FINAL wait that ran out, whether a wait
+  happened or not.
 - The quality and the flags that describe the value (those a restore
   carries) are kept with it; STALE and COMM_FAIL, which describe the live
   link, are not, so a link that comes and goes writes nothing. A change of
@@ -1366,8 +1369,15 @@ know they are there, and any number may run.
   SUBSTITUTED, for example). A record that is exactly what the restore of
   the value on file wrote (UNCERTAIN, RESTORED plus the carried flags of
   the file, the value and source time on file) is no change: the file
-  keeps the quality the owner stored. Any other record, also one in which
-  the owner kept RESTORED, is the owner's write.
+  keeps the quality the owner stored. A record with RESTORED and the value
+  and source time on file but another quality or flags is the owner's
+  write. A record with RESTORED and another value or source time is taken
+  as a restore from another file: `scada-tagd` looks up its source in the
+  files and records it ADOPTED, with SOURCE_NOT_FINAL and an unknown age if
+  none holds it. That is the safe side also for an owner that writes
+  RESTORED itself, for example `scada-link` on a master, which passes the
+  quality and flags of a slave's tag through unchanged (reference 17), so
+  that a restored value of the slave arrives with RESTORED.
 - A file written again holds the stamp of its oldest value the owner has
   not written since it was loaded or restored: in one boot the earliest
   times of their source files; across boots no `boot_id`, the earliest
@@ -1441,9 +1451,12 @@ know they are there, and any number may run.
   file is written; it then restores them when it attaches, however late.
   This runs once per start of `scada-tagd`, which is enough: a generation
   changes only at a start of `scada-tagd`, so no tag moves while it
-  runs. If the retain directory cannot be listed, or holds more than 1,023
-  other owners' files, it is not done: it is tried again at every check,
-  no file of a gone owner is removed, and it is logged. At start,
+  runs. If any file but a missing one cannot be read (an open that fails,
+  a damaged file), the retain directory cannot be listed or holds more
+  than 65,536 entries, or more than 1,023 other owners' files are needed,
+  the look is incomplete: nothing is taken for that owner, it is tried
+  again once per retain interval, no file of a gone owner is removed, and
+  it is logged once. At start,
   `scada-tagd` reads the values of the owners of `current` from their own
   files only: a former owner's file may still be replaced by its FINAL
   file.
