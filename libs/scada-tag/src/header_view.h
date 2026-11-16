@@ -183,6 +183,16 @@ public:
     SCADA_RT [[nodiscard]] std::optional<GenerationState> state()
         const noexcept;
 
+    // True if `GlobalHeader.state` is RETIRING, loaded seq_cst: one load of
+    // the handshake between a post and the drain of a RETIRING generation
+    // (decision D-54).
+    SCADA_RT [[nodiscard]] bool retiring() const noexcept;
+
+    // Stores RETIRING into the state of the header mapped as `header`
+    // (RegionHeader at its start), seq_cst: the store of the handshake
+    // (decision D-54). The caller has checked the region.
+    static void set_retiring(std::span<std::byte> header) noexcept;
+
     // The `down` flag scada-tagd keeps for the process `process_index`
     // (section 10.1). True for an index that is no process.
     SCADA_RT [[nodiscard]] bool marked_down(

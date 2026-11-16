@@ -92,6 +92,19 @@ void log_recreated(scada::Logger& logger, const QueueChange& queue) {
                fields);
 }
 
+// Logs a `write_seq` that fell in the same queue file (decision D-51):
+// damage or a second producer, so ids may repeat; ERROR, since the
+// queue's records can no longer be trusted.
+void log_write_seq_fell(scada::Logger& logger, const QueueChange& queue) {
+    const std::string old_written = std::to_string(queue.old_write_seq);
+    const std::string written = std::to_string(queue.write_seq);
+    logger.log(LogLevel::ERROR, "queue write_seq fell; ids may repeat",
+               {{"QUEUE", queue.queue},
+                {"OLD_WRITE_SEQ", old_written},
+                {"WRITE_SEQ", written},
+                {"MESSAGE_ID", MESSAGE_ID_QUEUE_WRITE_SEQ_FELL}});
+}
+
 }  // namespace
 
 void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
@@ -128,6 +141,38 @@ void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
         } else {
             logger.log(LogLevel::WARNING, "heartbeat late", fields);
         }
+    }
+}
+
+void log_unconsumed(scada::Logger& logger,
+                    const scada::tag::RetiredGeneration& retired) {
+    const std::string generation = std::to_string(retired.generation);
+    for (const scada::tag::UnconsumedQueue& queue : retired.unconsumed) {
+        // Records a post accepted and nobody took. For an event queue,
+        // actions whose records the journal lacks.
+        const std::string_view message =
+            queue.events
+                ? "audit records left unconsumed in a removed generation"
+                : "records left unconsumed in a removed generation";
+        if (!queue.known) {
+            logger.log(LogLevel::WARNING, message,
+                       {{"GENERATION", generation},
+                        {"QUEUE", queue.queue.empty() ? std::string("unknown")
+                                                      : queue.queue},
+                        {"RECORDS", "unknown"},
+                        {"MESSAGE_ID", MESSAGE_ID_RECORDS_UNCONSUMED}});
+            continue;
+        }
+        const std::string records = std::to_string(queue.records);
+        const std::string first = std::to_string(queue.first);
+        const std::string end = std::to_string(queue.end);
+        logger.log(LogLevel::WARNING, message,
+                   {{"GENERATION", generation},
+                    {"QUEUE", queue.queue},
+                    {"RECORDS", records},
+                    {"FIRST_SEQ", first},
+                    {"END_SEQ", end},
+                    {"MESSAGE_ID", MESSAGE_ID_RECORDS_UNCONSUMED}});
     }
 }
 
@@ -186,6 +231,9 @@ void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 break;
             case QueueEvent::RECREATED:
                 log_recreated(logger, queue);
+                break;
+            case QueueEvent::WRITE_SEQ_FELL:
+                log_write_seq_fell(logger, queue);
                 break;
         }
     }

@@ -413,8 +413,10 @@ public:
     void want_queue(std::size_t queue_id);
 
     // The mapped region of `queue_id`: the own mapping if this process
-    // produces it, otherwise the read-only one, or an empty span while it
-    // is missing, with the guarantees of `changes_of`.
+    // produces it, otherwise the read-only one of the file in use, or an
+    // empty span while it is missing, after the queue died, or once a look
+    // found the file in use changed in size (section 3.3), with the
+    // guarantees of `changes_of`. Any thread.
     [[nodiscard]] std::span<std::byte> queue_bytes(
         std::size_t queue_id) const noexcept;
 
@@ -427,6 +429,23 @@ public:
     // `write_seq` (EventRecord.seq, WriteRequest.request_id) and, for a
     // request, `posted_mono_ns` to now. A return code as scada_queue_post
     // states. Real-time safe. One thread posts to a queue.
+    // In a RETIRING generation (decision D-54): every request still in a
+    // `cmd` queue this process consumes is answered ABORTED and passed
+    // over. Nothing in any other generation. Not real-time safe.
+    void drain_retiring_requests() noexcept;
+    // The same for the one `cmd` queue `queue_id`, in any state: the caller
+    // has seen RETIRING. Not real-time safe.
+    void drain_request_queue(std::size_t queue_id) noexcept;
+    // For a queue another process produces: looks for its region now if it
+    // has none mapped, not at most once a second. A drain must not end on a
+    // region it never looked for (decision D-54). Not real-time safe.
+    // False if the look failed (a failed allocation).
+    [[nodiscard]] bool look_for_queue_now(std::size_t queue_id) noexcept;
+    // True if the generation is RETIRING, loaded seq_cst (decision D-54).
+    SCADA_RT [[nodiscard]] bool generation_retiring() const noexcept {
+        return header_.retiring();
+    }
+
     SCADA_RT [[nodiscard]] int post_record(std::size_t queue_id,
                                            RecordWords& record) noexcept;
 
@@ -476,6 +495,17 @@ public:
     // The cursor never moves back, except to the all-ones value. Returns
     // false if the queue is dead.
     bool follow_queue(std::size_t queue_id) noexcept;
+
+    // True if the consumer's next look (`follow_queue`) of `queue_id`,
+    // which this process consumes and which is not dead, changes what is
+    // in use: a first file is mapped while none is in use, a file other
+    // than the one in use is under the name, or a look found the file in
+    // use changed in size. The next look then adopts the file, moves to it
+    // or stops the queue, so `scada_queue_next` has something to do and a
+    // wait set reports the queue ready (decision D-51). Changes nothing;
+    // any thread.
+    [[nodiscard]] bool queue_switch_pending(
+        std::size_t queue_id) const noexcept;
 
     // True if `follow_queue` found the queue dead. Changes nothing.
     [[nodiscard]] bool queue_is_dead(std::size_t queue_id) const noexcept;
@@ -685,9 +715,14 @@ private:
     [[nodiscard]] std::optional<std::uint64_t> base_for_new_queue(
         std::size_t queue_id) noexcept;
     void drain_requests();
-    // The drain of one `cmd` queue the process consumes. True if an answer
-    // was posted.
+    // The drain of one `cmd` queue the process consumes, every request
+    // answered ABORTED. True if an answer was posted.
     [[nodiscard]] bool drain_queue(const QueueAccess& access) noexcept;
+    // Answers ABORTED every request of the file of `access` in use, setting
+    // `posted` if an answer was posted. False if there is none or it is
+    // stopped.
+    [[nodiscard]] bool drain_file(const QueueAccess& access,
+                                  bool& posted) noexcept;
     // For an observer: true if `current` names another generation now,
     // looked at no more than every CURRENT_RECHECK_INTERVAL_NS.
     [[nodiscard]] bool current_moved(std::int64_t now_mono_ns);
@@ -758,7 +793,10 @@ private:
     // For each queue this process consumes: the file in use, as its
     // mapping in `peers_` (null before the first), and whether the queue
     // died (see `follow_queue`). Written by the consumer's thread, or by attach
-    // before any other thread can use the context; relaxed.
+    // before any other thread can use the context. The pointer is stored
+    // with release and loaded with acquire by the other threads that read
+    // the mapping it names (wait sets, review of PR #86, N1); the dead flag
+    // is relaxed.
     std::vector<std::atomic<const PeerMapping*>> queue_in_use_;
     std::vector<std::atomic<bool>> queue_dead_;
     // For every process, whether its `proc` region was asked for by

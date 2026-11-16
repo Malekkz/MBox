@@ -75,7 +75,8 @@ int Attachment::notify() {
     }
 
     const std::int64_t now = monotonic_ns();
-    static_cast<void>(peers_.refresh(directory_.get(), now));
+    // Not waiting for a look of another thread (decision D-51).
+    static_cast<void>(peers_.try_refresh(directory_.get(), now));
     // Relaxed: see the declaration.
     if (now >= next_clock_check_mono_ns_.load(std::memory_order_relaxed)) {
         check_clock(now);

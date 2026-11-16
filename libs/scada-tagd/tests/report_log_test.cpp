@@ -333,6 +333,27 @@ TEST_F(ReportLog, AQueueFileCreatedAnewWithABaseBelowTheOldWriteSeqHasNoBound) {
                     "REASON=base below the old write_seq: the queue stops"));
 }
 
+// Decision D-51: a `write_seq` that fell in the same file is an ERROR.
+TEST_F(ReportLog, AWriteSeqThatFellIsAnError) {
+    CheckReport report;
+    QueueChange change;
+    change.queue = "events.io";
+    change.event = QueueEvent::WRITE_SEQ_FELL;
+    change.old_write_seq = 3;
+    change.write_seq = 1;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(
+        has(records[0], "MESSAGE=queue write_seq fell; ids may repeat"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=3"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=d673f795274a49d1882153ae03003b15"));
+    EXPECT_TRUE(has(records[0], "OLD_WRITE_SEQ=3"));
+    EXPECT_TRUE(has(records[0], "WRITE_SEQ=1"));
+}
+
 TEST_F(ReportLog, ARestartSeenAsDownAndUpIsANotice) {
     CheckReport report;
     report.restarts.push_back(
@@ -396,6 +417,67 @@ TEST_F(ReportLog, HeldLateHeartbeatsAreLoggedAtTheStop) {
     const std::vector<std::string> records = delivered();
     ASSERT_EQ(records.size(), 2U);
     EXPECT_TRUE(has(records[1], "LATE_BEATS=2"));
+}
+
+// Positions of records left in a queue, for the record of decision D-54.
+constexpr std::uint64_t FIRST_LEFT = 10;
+constexpr std::uint64_t END_LEFT = 13;
+
+// Decision D-54 (review of PR #82, B5): records left in a removed
+// generation, a known count with its positions, and an unknown one.
+TEST_F(ReportLog, UnconsumedRecordsCarryTheirMessageIdRangeOrUnknown) {
+    scada::tag::RetiredGeneration retired;
+    retired.generation = 4;
+    retired.removed = true;
+    scada::tag::UnconsumedQueue events;
+    events.queue = "events.io";
+    events.events = true;
+    events.known = true;
+    events.first = FIRST_LEFT;
+    events.end = END_LEFT;
+    events.records = END_LEFT - FIRST_LEFT;
+    retired.unconsumed.push_back(events);
+    scada::tag::UnconsumedQueue requests;
+    requests.queue = "cmd.io.web";
+    retired.unconsumed.push_back(requests);
+    scada::tagd::log_unconsumed(logger(), retired);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=audit records left unconsumed in a removed "
+                    "generation"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=42c8e35948cb467eb6d894d3bb0476a8"));
+    EXPECT_TRUE(has(records[0], "GENERATION=4"));
+    EXPECT_TRUE(has(records[0], "QUEUE=events.io"));
+    EXPECT_TRUE(has(records[0], "RECORDS=3"));
+    EXPECT_TRUE(has(records[0], "FIRST_SEQ=10"));
+    EXPECT_TRUE(has(records[0], "END_SEQ=13"));
+    EXPECT_TRUE(has(records[1],
+                    "MESSAGE=records left unconsumed in a removed generation"));
+    EXPECT_TRUE(has(records[1], "QUEUE=cmd.io.web"));
+    EXPECT_TRUE(has(records[1], "RECORDS=unknown"));
+    EXPECT_FALSE(has(records[1], "FIRST_SEQ="));
+}
+
+// Review of PR #82 (T5): a generation whose header cannot be read gives one
+// record, with its queue unknown, as one that may hold audit records.
+TEST_F(ReportLog, AGenerationWithoutAHeaderGivesOneUnknownRecord) {
+    scada::tag::RetiredGeneration retired;
+    retired.generation = 4;
+    retired.removed = true;
+    scada::tag::UnconsumedQueue unknown;
+    unknown.events = true;
+    retired.unconsumed.push_back(unknown);
+    scada::tagd::log_unconsumed(logger(), retired);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=audit records left unconsumed in a removed "
+                    "generation"));
+    EXPECT_TRUE(has(records[0], "QUEUE=unknown"));
+    EXPECT_TRUE(has(records[0], "RECORDS=unknown"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=42c8e35948cb467eb6d894d3bb0476a8"));
 }
 
 }  // namespace

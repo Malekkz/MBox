@@ -288,6 +288,7 @@ void log_retained(Logger& logger, const CheckReport& report) {
                        "process still attached to a retired generation",
                        {{"GENERATION", generation}, {"PROCESS", process}});
         }
+        log_unconsumed(logger, retired);
         if (retired.removed) {
             logger.log(retired.timed_out ? LogLevel::WARNING : LogLevel::NOTICE,
                        retired.timed_out

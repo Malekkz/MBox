@@ -512,6 +512,99 @@ class FrameTest(unittest.TestCase):
                       self.check("      31:\tstr\tx1, [x0, #16]\n"))
 
 
+
+# The functions of the handshake of a RETIRING generation (decision D-54) in
+# the shapes GCC gives at -O2: the state load and the RETIRING store each a
+# function of their own, the drain's load of `write_seq`, and the post's
+# store of `write_seq` followed by a tail call of the state load.
+HANDSHAKE = """\
+handshake.o:     file format elf64-littleaarch64
+
+
+Disassembly of section .text:
+
+0000000000000000 <scada::tag::HeaderView::retiring() const>:
+   0:\tldr\tx1, [x0, #8]
+   4:\tadd\tx1, x1, #0x40
+   8:\tldar\tw1, [x1]
+   c:\tcmp\tw1, #0x3
+  10:\tcset\tw0, eq
+  14:\tret
+
+0000000000000020 <scada::tag::HeaderView::set_retiring(std::span<std::byte, \
+18446744073709551615ul>)>:
+  20:\tmov\tw2, #0x3
+  24:\tadd\tx0, x0, #0x40
+  28:\tstlr\tw2, [x0]
+  2c:\tret
+
+0000000000000040 <scada::tag::queue_write_seq_sc(std::span<std::byte, \
+18446744073709551615ul>)>:
+  40:\tadd\tx0, x0, #0x48
+  44:\tldar\tx0, [x0]
+  48:\tret
+
+0000000000000060 <scada::tag::publish_write_seq(std::span<std::byte, \
+18446744073709551615ul>, unsigned long, scada::tag::HeaderView const&)>:
+  60:\tadd\tx0, x0, #0x48
+  64:\tstlr\tx2, [x0]
+  68:\tmov\tx0, x3
+  6c:\tb\t0 <scada::tag::HeaderView::retiring() const>
+"""
+
+
+class HandshakeTest(unittest.TestCase):
+    """The rules of HANDSHAKE_CHECKS on the shapes above, and each access
+    made relaxed or moved (review of PR #82, B1)."""
+
+    def findings(self, text):
+        found = []
+        code_shape.check(text, checks=code_shape.HANDSHAKE_CHECKS,
+                         findings=found)
+        return found
+
+    def rejected(self, text):
+        """The functions failed with a finding about the order."""
+        return {name for name, _, order in self.findings(text) if order}
+
+    def test_the_shapes_pass(self):
+        self.assertEqual(self.findings(HANDSHAKE), [])
+
+    def test_a_relaxed_state_load_fails(self):
+        text = HANDSHAKE.replace("ldar\tw1, [x1]", "ldr\tw1, [x1]")
+        # Also the post, whose second load it is.
+        self.assertEqual(self.rejected(text),
+                         {"HeaderView::retiring", "publish_write_seq"})
+
+    def test_a_relaxed_retiring_store_fails(self):
+        text = HANDSHAKE.replace("stlr\tw2, [x0]", "str\tw2, [x0]")
+        self.assertEqual(self.rejected(text), {"HeaderView::set_retiring"})
+
+    def test_a_relaxed_drain_load_fails(self):
+        text = HANDSHAKE.replace("ldar\tx0, [x0]", "ldr\tx0, [x0]")
+        self.assertEqual(self.rejected(text), {"queue_write_seq_sc"})
+
+    def test_a_relaxed_store_of_write_seq_fails(self):
+        text = HANDSHAKE.replace("stlr\tx2, [x0]", "str\tx2, [x0]")
+        self.assertEqual(self.rejected(text), {"publish_write_seq"})
+
+    def test_a_post_without_its_second_load_fails(self):
+        text = HANDSHAKE.replace(
+            "  6c:\tb\t0 <scada::tag::HeaderView::retiring() const>\n",
+            "  6c:\tret\n")
+        self.assertEqual(self.rejected(text), {"publish_write_seq"})
+
+    def test_a_second_load_before_the_store_fails(self):
+        text = HANDSHAKE.replace(
+            "  60:\tadd\tx0, x0, #0x48\n  64:\tstlr\tx2, [x0]\n"
+            "  68:\tmov\tx0, x3\n"
+            "  6c:\tb\t0 <scada::tag::HeaderView::retiring() const>\n",
+            "  60:\tbl\t0 <scada::tag::HeaderView::retiring() const>\n"
+            "  64:\tadd\tx1, x1, #0x48\n  68:\tstlr\tx2, [x1]\n"
+            "  6c:\tret\n")
+        self.assertEqual(self.rejected(text), {"publish_write_seq"})
+
+
 class MutantCommandTest(unittest.TestCase):
     """The command that compiles an edited source (issue #63)."""
 

@@ -141,7 +141,7 @@ int Queue::post(std::span<const std::byte> record) noexcept {
     return attachment_.post_record(id_, words);
 }
 
-Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
+Queue::Look Queue::poll(std::span<std::byte> out, bool retiring) noexcept {
     const QueueAccess& access = attachment_.queue(id_);
     if (!attachment_.follow_queue(id_)) {
         pending_ = false;
@@ -156,7 +156,8 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     std::uint64_t& cursor = attachment_.own_cursor(id_);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
-    const std::uint64_t written = queue_write_seq(bytes);
+    const std::uint64_t written =
+        retiring ? queue_write_seq_sc(bytes) : queue_write_seq(bytes);
     if (read == written) {
         pending_ = false;
         return Look::NOTHING;
@@ -225,6 +226,31 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     return Look::DELIVERED;
 }
 
+int Queue::drain_retiring(std::span<std::byte> out) {
+    // A producer that created its region after this process last looked
+    // may have posted to it: look now, before the drain can end.
+    static_cast<void>(attachment_.look_for_queue_now(id_));
+    if (attachment_.queue(id_).kind == QueueKind::CMD) {
+        // No request is executed there: each is answered ABORTED.
+        attachment_.drain_request_queue(id_);
+        return SCADA_E_RETIRING;
+    }
+    // seq_cst, after the seq_cst load of the state that saw RETIRING: every
+    // event post that returned SCADA_OK is seen (decision D-54).
+    switch (poll(out, true)) {
+        case Look::DELIVERED:
+            return SCADA_OK;
+        case Look::INVALID:
+            return SCADA_E_LAYOUT;  // one record passed over: progress
+        case Look::NOTHING:
+        case Look::BAD_RANGE:
+        case Look::ANSWERED:
+            break;
+    }
+    // Drained, or stopped with nothing that can be drained.
+    return SCADA_E_RETIRING;
+}
+
 int Queue::next(std::span<std::byte> out, int timeout_ms) {
     if (producer_ || timeout_ms < 0 || out.size() != record_size() ||
         out.size() > MAX_RECORD_SIZE) {
@@ -244,7 +270,13 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     // queue's worth, then the deadline is looked at.
     std::uint32_t answered = 0;
     bool stopped = false;
+    bool switch_looked = false;
     for (;;) {
+        // Decision D-54: in a RETIRING generation a queue is drained and
+        // never waited on.
+        if (attachment_.generation_retiring()) {
+            return drain_retiring(out);
+        }
         switch (poll(out)) {
             case Look::DELIVERED:
                 return SCADA_OK;
@@ -275,20 +307,43 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         // Section 8.4: no wait is longer than the slice.
         const std::int64_t slice_end =
             deadline - now < WAIT_SLICE_NS ? deadline : now + WAIT_SLICE_NS;
-        const std::optional<FutexWaiter> word = waiter();
-        if (!word.has_value()) {
-            // The producer has not created the queue yet, or the queue is
-            // stopped: look for its region again (at most once a second),
-            // and meanwhile wait a slice.
-            attachment_.refresh_peers();
-            sleep_until(slice_end);
+        // Look for the queue's file again (at most once a second): also
+        // while it is mapped, so that a consumer that never calls
+        // scada_tag_notify finds a file created anew, or one changed in
+        // size, within about a second (decision D-51).
+        attachment_.refresh_peers();
+        if (look_again_now(switch_looked)) {
             continue;
         }
-        if (futex_wait(word->word, word->expected, slice_end) ==
-            FutexWait::FAILED) {
+        if (!wait_slice(slice_end)) {
             return SCADA_E_IO;
         }
     }
+}
+
+bool Queue::look_again_now(bool& looked) const noexcept {
+    // The look found a file to adopt, move to or stop at: look again now
+    // rather than wait a slice on the old `write_seq` (review of PR #86,
+    // N2). Once per slice, so that a switch that cannot happen yet never
+    // spins.
+    if (!looked && attachment_.queue_switch_pending(id_)) {
+        looked = true;
+        return true;
+    }
+    looked = false;
+    return false;
+}
+
+bool Queue::wait_slice(std::int64_t slice_end) const noexcept {
+    const std::optional<FutexWaiter> word = waiter();
+    if (!word.has_value()) {
+        // The producer has not created the queue yet, or the queue is
+        // stopped: wait a slice.
+        sleep_until(slice_end);
+        return true;
+    }
+    return futex_wait(word->word, word->expected, slice_end) !=
+           FutexWait::FAILED;
 }
 
 int Queue::ack() noexcept {
@@ -313,6 +368,11 @@ int Queue::ack() noexcept {
 bool Queue::ready() const noexcept {
     if (producer_ || attachment_.queue_is_dead(id_)) {
         return false;
+    }
+    if (attachment_.queue_switch_pending(id_)) {
+        // The next look adopts a file, moves on or stops the queue; a
+        // stopped queue is reported once, by next (decision D-51).
+        return true;
     }
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (bytes.empty()) {

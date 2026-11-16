@@ -44,6 +44,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -51,6 +52,19 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace scada::tag {
+
+// The peers' lock, held by a test to stand for a look that maps and
+// prefaults a region (the friend of PeerRegions).
+class PeerRegionsTestAccess {
+public:
+    [[nodiscard]] static std::unique_lock<std::mutex> hold(PeerRegions& peers) {
+        return std::unique_lock(peers.mutex_);
+    }
+};
+
+}  // namespace scada::tag
 
 namespace {
 
@@ -208,6 +222,85 @@ enum class Ack : std::uint8_t { YES, NO };
     return gives<scada_event_record>(queue, SCADA_E_TIMEOUT);
 }
 
+// `queue` gives the events 0 to `count - 1`, each acknowledged, and then,
+// at once although the call may wait 5 s, SCADA_E_RETIRING.
+::testing::AssertionResult takes_events_then_retiring(Queue& queue,
+                                                      std::uint64_t count) {
+    for (std::uint64_t seq = 0; seq < count; ++seq) {
+        if (const ::testing::AssertionResult taken = takes_event(queue, seq);
+            !taken) {
+            return taken;
+        }
+    }
+    constexpr int LONG_WAIT_MS = 5000;
+    constexpr std::int64_t AT_ONCE_NS = 1'000'000'000;
+    const std::int64_t start = scada::monotonic_ns();
+    scada_event_record record{};
+    const int code = next(queue, record, LONG_WAIT_MS);
+    if (code != SCADA_E_RETIRING) {
+        return ::testing::AssertionFailure() << "next returned " << code;
+    }
+    if (scada::monotonic_ns() - start >= AT_ONCE_NS) {
+        return ::testing::AssertionFailure() << "next waited";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Posts events to `queue` until a post returns SCADA_E_RETIRING; how many
+// returned SCADA_OK.
+std::uint64_t post_until_retiring(Queue& queue) {
+    std::uint64_t accepted = 0;
+    for (;;) {
+        const int code = post(queue, event());
+        if (code == SCADA_E_RETIRING) {
+            return accepted;
+        }
+        accepted += code == SCADA_OK ? 1 : 0;
+    }
+}
+
+// Consumes `queue`, counting into `delivered`; after a few records sets
+// `state` to RETIRING, as scada-tagd would, and drains until
+// SCADA_E_RETIRING. Gives up after LIMIT (review of PR #82, N3): sets
+// `state` to RETIRING then, so that the poster stops too, and the counts
+// show the failure.
+void consume_retire_and_drain(Queue& queue, std::uint32_t& state,
+                              std::atomic<std::uint64_t>& delivered) {
+    constexpr std::uint64_t RETIRE_AFTER = 5;
+    // Far longer than a round takes on a loaded machine.
+    constexpr std::int64_t ROUND_LIMIT_NS = 10'000'000'000;
+    const std::int64_t deadline = scada::monotonic_ns() + ROUND_LIMIT_NS;
+    scada_event_record record{};
+    for (;;) {
+        const int code = next(queue, record);
+        if (code == SCADA_E_RETIRING) {
+            return;
+        }
+        if (scada::monotonic_ns() >= deadline) {
+            ADD_FAILURE() << "the consumer did not finish, last code " << code;
+            store_shared(state, to_raw(GenerationState::RETIRING),
+                         std::memory_order_seq_cst);
+            return;
+        }
+        if (code != SCADA_OK) {
+            continue;
+        }
+        static_cast<void>(queue.ack());
+        if (delivered.fetch_add(1) + 1 == RETIRE_AFTER) {
+            store_shared(state, to_raw(GenerationState::RETIRING),
+                         std::memory_order_seq_cst);
+        }
+    }
+}
+
+// Takes and acknowledges every record `queue` has now.
+void drain_all(Queue& queue) {
+    scada_event_record record{};
+    while (next(queue, record) == SCADA_OK) {
+        static_cast<void>(queue.ack());
+    }
+}
+
 // `count` results posted to `queue` are accepted.
 ::testing::AssertionResult posts_results(Queue& queue, std::uint64_t count) {
     for (std::uint64_t i = 0; i < count; ++i) {
@@ -234,10 +327,10 @@ enum class Ack : std::uint8_t { YES, NO };
 }
 
 // `queue` gives the answers `status` to the requests of `cmd.io.web` at
-// `positions`, in order, each acknowledged, and then nothing.
+// `positions`, in order, each acknowledged, and then `then` (nothing).
 ::testing::AssertionResult takes_answers(
     Queue& queue, std::uint8_t status,
-    const std::vector<std::uint64_t>& positions) {
+    const std::vector<std::uint64_t>& positions, int then = SCADA_E_TIMEOUT) {
     for (const std::uint64_t position : positions) {
         scada_write_result record{};
         if (const int code = next(queue, record); code != SCADA_OK) {
@@ -251,7 +344,7 @@ enum class Ack : std::uint8_t { YES, NO };
                    << record.request_id << " for " << position;
         }
     }
-    return gives<scada_write_result>(queue, SCADA_E_TIMEOUT);
+    return gives<scada_write_result>(queue, then);
 }
 
 using RequestChange = std::function<void(scada_write_request&)>;
@@ -2049,6 +2142,257 @@ TEST_F(Queues, TheMarkIsStoredBeforeTheRecord) {
     EXPECT_EQ(queue_write_seq(map_file("events.io").bytes()), 1U);
 }
 
+// Decision D-51 (Q3): a consumer that waits in scada_queue_next and never
+// calls scada_tag_notify finds a queue file created anew by itself, within
+// about a second: the jump to the new base shows in its cursor.
+TEST_F(Queues, AWaitingNextFindsAFileCreatedAnewWithoutNotify) {
+    constexpr int WAIT_MS = 2500;
+    // A fresh context: the looks of the fixture (`look_again`) set the next
+    // real look of each region far ahead; this one looks again a second
+    // after its attach, as a process does.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 2));
+    }
+    EXPECT_TRUE(takes_events(*reader, 0, 2));
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");  // base: the cursor 2 plus the capacity
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT));
+    scada_event_record record{};
+    EXPECT_EQ(next(*reader, record, WAIT_MS), SCADA_E_TIMEOUT);
+    EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), 2 + CAPACITY);
+    EXPECT_EQ(reader->stats().replaced, 1U);
+}
+
+// The same with a wait set: it reports the queue ready once another file is
+// under its name, and the consumer's next look moves on.
+TEST_F(Queues, AWaitSetFindsAFileCreatedAnewWithoutNotify) {
+    constexpr int WAIT_MS = 2500;
+    // A fresh context: the looks of the fixture (`look_again`) set the next
+    // real look of each region far ahead; this one looks again a second
+    // after its attach, as a process does.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 2));
+    }
+    EXPECT_TRUE(takes_events(*reader, 0, 2));
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(gives<scada_event_record>(*reader, SCADA_E_TIMEOUT));
+    EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), 2 + CAPACITY);
+}
+
+// Review of PR #86 (B1): the first file of a queue appears after the
+// consumer opened it. A wait set reports the queue ready, without notify,
+// and the next look adopts the file.
+TEST_F(Queues, AWaitSetFindsAFirstFileCreatedAfterTheOpen) {
+    constexpr int WAIT_MS = 2500;
+    std::filesystem::remove(generation_dir() / "events.io");
+    // A fresh context, which finds no file and looks again a second later.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
+    restart(io(), "io");  // creates the file
+    const QueuePtr out = open(*io(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// The same for the descriptor of a wait set (B1).
+TEST_F(Queues, TheDescriptorOfAWaitSetFindsAFirstFileCreatedAfterTheOpen) {
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    int descriptor = -1;
+    ASSERT_EQ(set.fd(descriptor), SCADA_OK);
+    restart(io(), "io");
+    const QueuePtr out = open(*io(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    pollfd ready{.fd = descriptor, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&ready, 1, WAIT_LIMIT_MS), 1);
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// The steps after a look found the file in use changed in size, in a
+// child: the number of the first step that failed, 0 if none. `stopped`
+// is what next returns for the queue it stops.
+int steps_after_a_size_change(Attachment& process, Queue& reader, int stopped) {
+    int step = 0;
+    WaitSet set(process);
+    if (++step; set.add_queue(reader) != SCADA_OK) {
+        return step;
+    }
+    if (++step; set.wait(0) != SCADA_OK) {
+        return step;  // without the fix: SIGBUS here
+    }
+    scada_event_record record{};
+    if (++step; next(reader, record, 0) != stopped) {
+        return step;
+    }
+    if (++step; set.wait(0) != SCADA_E_TIMEOUT) {
+        return step;
+    }
+    return 0;
+}
+
+// Runs `steps_after_a_size_change` in a child. A plain fork, not a death
+// test: the child shares the mappings and never returns to the test.
+::testing::AssertionResult survives_a_size_change(Attachment& process,
+                                                  Queue& reader, int stopped) {
+    const pid_t child = ::fork();
+    if (child < 0) {
+        return ::testing::AssertionFailure() << "fork failed";
+    }
+    if (child == 0) {
+        ::_exit(steps_after_a_size_change(process, reader, stopped));
+    }
+    int status = 0;
+    if (::waitpid(child, &status, 0) != child) {
+        return ::testing::AssertionFailure() << "waitpid failed";
+    }
+    if (!WIFEXITED(status)) {
+        return ::testing::AssertionFailure()
+               << "the child was killed by signal " << WTERMSIG(status);
+    }
+    if (WEXITSTATUS(status) != 0) {
+        return ::testing::AssertionFailure()
+               << "step " << WEXITSTATUS(status) << " failed";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// B1 in the order of the rt probe (#73): the driver opens its request
+// queue and waits in a wait set before the requester attaches and creates
+// the file; the wait set reports the request.
+TEST_F(Queues, AWaitSetFindsARequestQueueCreatedAfterTheOpen) {
+    constexpr int WAIT_MS = 2500;
+    std::filesystem::remove(generation_dir() / "cmd.io.web");
+    restart(io(), "io");
+    const QueuePtr reader = open(*io(), "cmd.io.web");
+    WaitSet set(*io());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    restart(web(), "web");  // creates the file
+    const QueuePtr out = open(*web(), "cmd.io.web");
+    ASSERT_TRUE(posts(*out, request()));
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(takes_request(*reader, request_id_of(CMD_WEB, 0)));
+}
+
+// Review of PR #86 (B2): once a look found the file in use changed in
+// size, a wait set does not read it (SIGBUS) but reports the queue ready;
+// next then stops it, and the stopped queue is not ready again. In a
+// child: without the fix the wait faults.
+TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSize) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    ASSERT_TRUE(takes_events(*reader, 0, 1));
+    // To nothing: a read of the header page then faults.
+    std::filesystem::resize_file(generation_dir() / "events.io", 0);
+    look_again(*web());
+    EXPECT_TRUE(survives_a_size_change(*web(), *reader, SCADA_E_LAYOUT));
+}
+
+// The same in a RETIRING generation (decision D-54): the drain stops the
+// queue and next returns SCADA_E_RETIRING; the file is never read.
+TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSizeWhileRetiring) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    ASSERT_TRUE(takes_events(*reader, 0, 1));
+    std::filesystem::resize_file(generation_dir() / "events.io", 0);
+    look_again(*web());
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(survives_a_size_change(*web(), *reader, SCADA_E_RETIRING));
+}
+
+// In a RETIRING generation a wait set reports a queue ready while records
+// are left in it (decision D-54).
+TEST_F(Queues, AWaitSetReportsARetiringQueueWithRecordsLeft) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    constexpr std::uint64_t POSTED = 2;
+    ASSERT_TRUE(posts_events(*out, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(0), SCADA_OK);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
+}
+
+// Decision D-51: scada_tag_notify does not wait for a look of another
+// thread, which may be mapping and prefaulting a region; it skips its own.
+TEST_F(Queues, NotifyDoesNotWaitForALookOfAnotherThread) {
+    std::unique_lock<std::mutex> held =
+        PeerRegionsTestAccess::hold(web()->peers());
+    std::atomic<bool> returned{false};
+    std::thread caller([&] {
+        static_cast<void>(web()->notify());
+        returned.store(true, std::memory_order_release);
+    });
+    caller.join();  // would never end if notify waited for the lock
+    EXPECT_TRUE(returned.load(std::memory_order_acquire));
+    held.unlock();
+}
+
+// Decision D-51: the same file mapped again after a failed look uses its
+// kept mapping; no mapping slot is spent, so more than 16 such looks leave
+// the queue working.
+TEST_F(Queues, TheSameFileMappedAgainSpendsNoMapping) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    const std::filesystem::path file = generation_dir() / "events.io";
+    const std::filesystem::path away = generation_dir() / "away";
+    for (std::uint32_t round = 0; round <= MAX_MAPPINGS_PER_REGION; ++round) {
+        std::filesystem::rename(file, away);
+        look_again(*web());
+        std::filesystem::rename(away, file);
+        look_again(*web());
+    }
+    EXPECT_FALSE(
+        web()->peers().at_mapping_limit(web()->peers().queue_slot(EVENTS_IO)));
+    ASSERT_TRUE(posts_events(*out, 1));
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// Decision D-51 (C10): scada-tagd reports a `write_seq` that falls in the
+// same file: damage or a second producer, and ids may repeat.
+TEST_F(Queues, TagdReportsAWriteSeqThatFalls) {
+    {
+        const QueuePtr out = open(*io(), "events.io");
+        const QueuePtr reader = open(*web(), "events.io");
+        ASSERT_TRUE(posts_events(*out, 3));
+        ASSERT_TRUE(takes_events(*reader, 0, 3));
+    }
+    EXPECT_TRUE(host().check(scada::monotonic_ns()).queues.empty());
+    {
+        const MappedRegion region = map_file("events.io");
+        store_shared(queue_header(region.bytes()).write_seq, std::uint64_t{1},
+                     std::memory_order_release);
+    }
+    const CheckReport report = host().check(scada::monotonic_ns());
+    // The fall is reported (the pair 3, 1 may be reported as broken too).
+    const bool reported =
+        std::ranges::any_of(report.queues, [](const QueueChange& change) {
+            return change.event == QueueEvent::WRITE_SEQ_FELL &&
+                   change.queue == "events.io" && change.old_write_seq == 3 &&
+                   change.write_seq == 1;
+        });
+    EXPECT_TRUE(reported);
+}
+
 TEST_F(Queues, ResultsReachTheRequester) {
     const QueuePtr out = open(*io(), "result.io.web");
     const QueuePtr reader = open(*web(), "result.io.web");
@@ -2272,6 +2616,140 @@ TEST(QueueRecords, ACursorFieldOutsideTheRegionIsNone) {
     EXPECT_EQ(cursor_field(bytes, 1), nullptr);
     EXPECT_EQ(cursor_field(bytes, std::size_t{1} << 62U), nullptr);
     EXPECT_EQ(cursor_field({}, 0), nullptr);
+}
+
+// Issue #65 (decision D-54): queues in a RETIRING generation.
+
+TEST_F(Queues, InARetiringGenerationOnlyAnswersArePosted) {
+    const QueuePtr events = open(*io(), "events.io");
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr results = open(*io(), "result.io.web");
+    ASSERT_NE(events, nullptr);
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(results, nullptr);
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(posts(*events, event(), SCADA_E_RETIRING));
+    EXPECT_TRUE(posts(*requests, request(), SCADA_E_RETIRING));
+    // A driver's result for a request it already took is still accepted.
+    EXPECT_TRUE(posts(*results, result(0)));
+    EXPECT_EQ(events->stats().posted, 0U);
+}
+
+TEST_F(Queues, AConsumerDrainsARetiringQueueWithoutWaiting) {
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    constexpr std::uint64_t POSTED = 3;
+    ASSERT_TRUE(posts_events(*writer, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
+}
+
+TEST_F(Queues, RequestsLeftInARetiringGenerationAreAnsweredAborted) {
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr taken = open(*io(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(taken, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    scada_write_request record{};
+    EXPECT_EQ(next(*taken, record), SCADA_E_RETIRING);
+    EXPECT_EQ(taken->stats().aborted, 2U);
+    look_again(*web());
+    EXPECT_TRUE(takes_answers(*answers, SCADA_RESULT_ABORTED, {0, 1},
+                              SCADA_E_RETIRING));
+}
+
+TEST_F(Queues, ADetachInARetiringGenerationAnswersItsRequestsAborted) {
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    io().reset();
+    look_again(*web());
+    EXPECT_TRUE(
+        takes_answers(*answers, SCADA_RESULT_ABORTED, {0}, SCADA_E_RETIRING));
+}
+
+// Review of PR #82, B2: a driver that attached before its requester
+// created the request queue has not mapped it when the generation retires;
+// its detach still answers the request ABORTED.
+TEST_F(Queues, ADetachAnswersRequestsOfAQueueItHadNotSeen) {
+    io().reset();
+    web().reset();
+    std::filesystem::remove(generation_dir() / "cmd.io.web");
+    io() = attached("io");
+    web() = attached("web");
+    ASSERT_NE(io(), nullptr);
+    ASSERT_NE(web(), nullptr);
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    io().reset();
+    look_again(*web());
+    EXPECT_TRUE(
+        takes_answers(*answers, SCADA_RESULT_ABORTED, {0}, SCADA_E_RETIRING));
+}
+
+// Review of PR #82 (after #77): the producer creates its queue file anew in
+// the last moments of a generation and posts to it; the consumer still has
+// the old file mapped when the generation retires. The drain looks at the
+// name again and delivers what the new file holds.
+TEST_F(Queues, ADrainFollowsAQueueFileCreatedAnewBeforeTheRetirement) {
+    // A consumer cursor of 0 gives the new file the base 0, so the
+    // producer can post to it before the consumer has looked at it.
+    ASSERT_NE(open(*web(), "events.io"), nullptr);
+    io().reset();
+    std::filesystem::remove(generation_dir() / "events.io");
+    io() = attached("io");
+    ASSERT_NE(io(), nullptr);
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    constexpr std::uint64_t POSTED = 2;
+    ASSERT_TRUE(posts_events(*writer, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
+}
+
+// The handshake of decision D-54: a post that returned SCADA_OK is always
+// delivered by a consumer that drains after it saw RETIRING; a post refused
+// after it published may be delivered too, at most one per round.
+TEST_F(Queues, EveryPostThatReturnedOkIsDrainedAfterRetire) {
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    const MappedRegion header = map_file("header");
+    auto& state =
+        shared_at<GlobalHeader>(header.bytes(), sizeof(RegionHeader)).state;
+    constexpr int ROUNDS = 200;
+    for (int round = 0; round < ROUNDS; ++round) {
+        store_shared(state, to_raw(GenerationState::RUNNING),
+                     std::memory_order_seq_cst);
+        std::atomic<std::uint64_t> delivered{0};
+        std::jthread consumer(
+            [&] { consume_retire_and_drain(*reader, state, delivered); });
+        const std::uint64_t accepted = post_until_retiring(*writer);
+        consumer.join();
+        ASSERT_GE(delivered.load(), accepted) << "round " << round;
+        ASSERT_LE(delivered.load(), accepted + 1) << "round " << round;
+        store_shared(state, to_raw(GenerationState::RUNNING),
+                     std::memory_order_seq_cst);
+        drain_all(*reader);
+        static_cast<void>(io()->heartbeat());
+        static_cast<void>(web()->heartbeat());
+    }
 }
 
 }  // namespace

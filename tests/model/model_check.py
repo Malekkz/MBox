@@ -3,11 +3,12 @@
 the repair after an owner restart.
 
 Runs herd7 with the Armv8 memory model (aarch64.cat) on each litmus test of
-this directory, and on four copies of each that lack one ordering of the
-protocol: either fence, the release store, the acquire load. The test
-passes when herd7 finds the condition of every test unreachable ("Never")
-and reachable ("Sometimes") in every weakened copy, which shows that each
-of the four orderings is needed. See README.md.
+this directory, and on copies of each that lack one ordering of the
+protocol: for the sequence lock, the ring and the repair either fence, the
+release store, the acquire load; for the handshake of a RETIRING generation
+each of its six accesses. The test passes when herd7 finds the condition of
+every test unreachable ("Never") and the expected result in every weakened
+copy: "Sometimes" where the ordering is needed. See README.md.
 """
 
 import argparse
@@ -18,20 +19,49 @@ import sys
 import tempfile
 import time
 
-TESTS = ("seqlock.litmus", "change-ring.litmus", "repair.litmus")
-
-# (name, what is taken away, pattern, replacement). The patterns match the
-# instructions the protocol compiles to; tests/model/code_shape.py checks
-# that the library still compiles to them.
+# (name, what is taken away, pattern, replacement, expected result). The
+# patterns match the instructions the protocol compiles to;
+# tests/model/code_shape.py checks that the library still compiles to them.
 WEAKENINGS = (
     ("no-fence-release", "fence_release (DMB ISH) left out",
-     re.compile(r"DMB ISH(?!LD)"), "NOP    "),
+     re.compile(r"DMB ISH(?!LD)"), "NOP    ", "Sometimes"),
     ("no-fence-acquire", "fence_acquire (DMB ISHLD) left out",
-     re.compile(r"DMB ISHLD"), "NOP      "),
+     re.compile(r"DMB ISHLD"), "NOP      ", "Sometimes"),
     ("relaxed-end-store", "release store of the end of a write made relaxed",
-     re.compile(r"STLR "), "STR  "),
+     re.compile(r"STLR "), "STR  ", "Sometimes"),
     ("relaxed-first-load", "acquire load of a read made relaxed",
-     re.compile(r"LDAR "), "LDR  "),
+     re.compile(r"LDAR "), "LDR  ", "Sometimes"),
+)
+
+# The handshake of a RETIRING generation (decision D-54). The store of
+# write_seq, the second load of a post and the drain's load of the state
+# are each needed: without one the loss is reachable. The other three are
+# not needed on Armv8 for this outcome (a lone store, a load that an
+# acquire load before it already orders, a load before the publication),
+# which herd7 shows as Never; C++ needs them seq_cst all the same, and
+# code_shape.py keeps them LDAR and STLR.
+HANDSHAKE_WEAKENINGS = (
+    ("relaxed-publish-store", "store of write_seq of a post made relaxed",
+     re.compile(r"STLR W7"), "STR  W7", "Sometimes"),
+    ("relaxed-second-load", "second load of the state of a post made relaxed",
+     re.compile(r"LDAR W9"), "LDR  W9", "Sometimes"),
+    ("relaxed-drain-state-load", "load of the state of a drain made relaxed",
+     re.compile(r"LDAR W6"), "LDR  W6", "Sometimes"),
+    ("relaxed-retire-store", "RETIRING store made relaxed (Armv8 only)",
+     re.compile(r"STLR W5"), "STR  W5", "Never"),
+    ("relaxed-drain-write-seq-load",
+     "load of write_seq of a drain made relaxed (Armv8 only)",
+     re.compile(r"LDAR W8"), "LDR  W8", "Never"),
+    ("relaxed-first-load-of-post",
+     "first load of the state of a post made relaxed",
+     re.compile(r"LDAR W4"), "LDR  W4", "Never"),
+)
+
+TESTS = (
+    ("seqlock.litmus", WEAKENINGS),
+    ("change-ring.litmus", WEAKENINGS),
+    ("repair.litmus", WEAKENINGS),
+    ("handshake.litmus", HANDSHAKE_WEAKENINGS),
 )
 
 OBSERVATION = re.compile(r"^Observation (\S+) (Never|Sometimes|Always)\b",
@@ -76,15 +106,15 @@ def main():
     here = pathlib.Path(__file__).resolve().parent
     failures = 0
     with tempfile.TemporaryDirectory() as work:
-        for test in TESTS:
+        for test, weakenings in TESTS:
             source = here / test
             text = source.read_text(encoding="utf-8")
             runs = [(source, "Never", "as written")]
-            for name, what, pattern, replacement in WEAKENINGS:
+            for name, what, pattern, replacement, expected in weakenings:
                 path = pathlib.Path(work) / f"{source.stem}+{name}.litmus"
                 path.write_text(weaken(text, name, pattern, replacement),
                                 encoding="utf-8")
-                runs.append((path, "Sometimes", what))
+                runs.append((path, expected, what))
             for path, expected, what in runs:
                 start = time.monotonic()
                 found, output = run_herd(args.herd7, args.libdir, path,

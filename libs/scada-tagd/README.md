@@ -41,7 +41,9 @@ process. The executable in `services/scada-tagd` only calls it.
   locked, the generation is removed. After 30 s it is removed anyway; the
   values of a process still attached are written, but not marked FINAL. A
   generation that cannot be removed is tried for at most 60 s after it
-  retired, then logged as abandoned and left to the next boot.
+  retired, then logged as abandoned and left to the next boot. When it
+  removes or abandons one, it logs per queue the records the consumer did
+  not take (decision D-54; see the log records below).
 - Once no generation is retired and every owner has its file, files of
   owners the tag set no longer has are removed.
 - On `SIGTERM` or `SIGINT`: writes the retained values that changed,
@@ -71,6 +73,7 @@ the standard error stream.
 | `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
 | `queue file found again` | NOTICE, once | `QUEUE` |
 | `queue file created anew; audit records may be lost` (events queue), `queue file created anew; records may be lost` (other queues) | WARNING, once, when the file under a queue's name is another one than at the previous check (contract 9.3, D-49). The records of the old file from the consumer's cursor to its last `write_seq` are lost unless the consumer still holds the old file | `QUEUE`, `BASE_SEQ` (or `none`), `OLD_WRITE_SEQ`, `CURSOR`, `LOST_AT_MOST`, `LOST_IDS` (`[from, to)`), `REASON` |
+| `queue write_seq fell; ids may repeat` | ERROR, once for each fall: a queue's `write_seq` is below the value of the previous check in the same file (damage or a second producer, contract 3.3; D-51) | `QUEUE`, `OLD_WRITE_SEQ`, `WRITE_SEQ` |
 | `the kernel offers sleep states; the unit must not suspend` | INFO, once at start, when `/sys/power/state` is not empty (contract 3.4). Expected on most kernels, also with sleep disabled | `STATES` |
 | `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound, rounded up to whole ms |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
@@ -84,6 +87,7 @@ the standard error stream.
 | `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |
 | `process still attached to a retired generation` | WARNING, before such a removal | `GENERATION`, `PROCESS` (`<name> (pid <pid>)`) |
 | `cannot remove a retired generation` | ERROR, once | `GENERATION` |
+| `audit records left unconsumed in a removed generation` (an events queue), `records left unconsumed in a removed generation` (a request or result queue) | WARNING, once for each such queue when a retired generation is removed or abandoned (decision D-54). Records a post accepted that the consumer never took; for an events queue, actions whose records the journal lacks. After the 30-s timeout a consumer may still have been draining, so `RECORDS` is then an upper bound | `GENERATION`, `QUEUE`, `RECORDS` (a count, or `unknown` when the queue file or the consumer's cursor cannot be read, the pair is not valid, or the generation was abandoned; a generation whose header cannot be read gives one record, `audit records ...`, with `QUEUE` and `RECORDS` `unknown`), and for a count `FIRST_SEQ` and `END_SEQ`: the positions `[FIRST_SEQ, END_SEQ)` not taken, an event's `seq` and the low part of a request id |
 | `stopped on request` | NOTICE | |
 
 ### Message IDs
@@ -97,6 +101,7 @@ The liveness records carry a fixed journald `MESSAGE_ID` as their last field
 | `process up` | `3e293a9e793b4fa08fafb02b5f16ae7f` |
 | `process restarted` | `f35dfeb8e8124cc88b219cabf6947b00` |
 | `process not attached` | `0f57ce3d6dbc4891abd0e55e240f04f9` |
+| `audit records left unconsumed in a removed generation`, `records left unconsumed in a removed generation` | `42c8e35948cb467eb6d894d3bb0476a8` |
 | `heartbeat late` | `31aad0d613b645d39a83e7978c4531ec` |
 | `heartbeat late before this check` | `c4de2438d3574ca38f45771de9254e3a` |
 
@@ -124,8 +129,9 @@ before the first check. A reused generation keeps what the previous
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.18, sections 3, 5,
-  9.2, 10 and 11.1; decisions D-27, D-36, D-38, D-46, D-47, D-49 and D-53 in
+- Contract: `docs/contracts/tag-database.md`, version 0.19, sections 3, 5,
+  9.2, 9.5, 10, 11.1 and 11.3; decisions D-27, D-36, D-38, D-46, D-47, D-49,
+  D-51, D-53 and D-54 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.

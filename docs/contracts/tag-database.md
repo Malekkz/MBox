@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.18 (draft) |
+| Contract version | 0.19 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -160,11 +160,20 @@ accepted for layout version 1:
   first; then two producers write, and the old queue file is not final when
   the consumer leaves it. The base guarantees unique ids only while at most
   one instance of the producer lives.
-- A shrink of a queue file that was already unlinked cannot be seen by
-  name; a consumer that still reads it is stopped by `SIGBUS`.
+- A shrink of a queue file that was already unlinked is seen by `fstat`
+  on the descriptor kept for its mapping, at the next look of the context
+  (at most about 1 s later, D-51): in `scada_tag_notify`,
+  `scada_tag_status`, and every wait of `scada_queue_next` or a wait set.
+  A consumer that reads the file before that look, or one that only polls
+  with timeout 0 and never calls `scada_tag_notify`, can be stopped by
+  `SIGBUS`. A shrink in place of the file under the name is seen the same
+  way, by name. A consumer blocked in `scada_queue_next` or a wait set
+  reads `write_seq` at every slice (at most 100 ms), while the look runs at
+  most once a second, so it usually meets `SIGBUS` before the look does.
 - A consumer keeps every mapping of a queue name it has seen, up to 16
   (D-28), so locked memory can reach 16 times the queue's size for a
-  process under `mlockall`.
+  process under `mlockall`. The same file mapped again after a failed look
+  uses its kept mapping and spends none of the 16 (D-51).
 - A group member can create a file or directory under a name it does not own.
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
@@ -778,10 +787,30 @@ a queue that became broken, and again one that no longer is, with its
 name, cursor, `write_seq` and capacity, once per change. It also logs an
 events or command queue that has had no usable file at two checks in a
 row while its producer was not down, and again when the file is there.
-It unmaps a queue file once the name refers to another file. The library
+It unmaps a queue file once the name refers to another file. It logs at
+ERROR a `write_seq` that is below the value of its previous check in the
+same file: only the producer writes it and it only grows, so the file was
+damaged or a second producer writes it, and ids may repeat (D-51). The library
 does not use the result.
+A consumer looks for its queue's file again, at most once a second, in
+`scada_tag_notify`, in `scada_tag_status`, and in every wait of
+`scada_queue_next` or of a wait set, also while the file is mapped, so that
+one that never calls `scada_tag_notify` finds a file created anew, or one
+changed in size, within about a second (D-51). A wait set reports a queue
+ready while its next look changes the file in use: a first file has
+appeared since the consumer opened the queue, another file is under its
+name, or a look found the file in use changed in size. The consumer's next
+`scada_queue_next` then adopts the file, follows it or stops the queue; a
+queue stopped this way returns `SCADA_E_LAYOUT` (at once with timeout 0),
+or `SCADA_E_RETIRING` in a RETIRING generation (section 9.5).
+No thread reads a file that a look found changed in size, nor the file of
+a stopped queue. `scada_tag_notify` does
+not wait for a look of another thread, which may be mapping a region: it
+skips its own and the next call looks. `scada_queue_next` with timeout 0
+makes no system call for any of this.
 On a stopped queue `scada_queue_next` waits out its timeout before it
-reports it, and a wait set never reports a stopped queue as ready, so
+reports it, and a wait set does not report a stopped queue as ready after
+the call that stopped it, so
 neither spins; a consumer that calls `scada_queue_next` only after a wake
 learns of the stop from `scada_queue_stats` or from a timed call.
 
@@ -819,6 +848,12 @@ If the consumer's region is missing or its process is down, `post` returns
   consumer's cursor at its last check of the old file to the new base, an
   upper bound ("at most"; with no base it says the bound is unknown), as
   audit records on an events queue. Ids repeat only in the cases of 3.3.
+
+- Third limit, of a generation change (section 9.5): a consumer that is
+  down when its generation retires, or that does not drain within the 1 s of
+  section 11.3, leaves records that posts accepted. They are not carried
+  into the next generation; events among them are actions whose records the
+  journal does not hold.
 
 Decided by the product owner in review P1-01 (D-23, D-24).
 
@@ -902,6 +937,82 @@ Record ids come from the queue's `write_seq`, which lives in the region and
 survives a producer restart, so an id is never reused within a generation. Ids
 start again in a new generation and after a boot; anything stored on disk
 qualifies an id with the time of the record.
+
+### 9.5 Queues in a RETIRING generation
+
+Decision D-54 (issue #65).
+
+- `scada_queue_post` returns `SCADA_E_RETIRING` on an event or request
+  queue whose generation is RETIRING. Results are accepted: the library's
+  own ABORTED and EXPIRED answers, and a driver's answer to a request it
+  took before.
+- The handshake: a post loads the state, publishes the record with a
+  seq_cst store of `write_seq`, and, on an event queue, loads the state
+  again; `scada-tagd` stores RETIRING seq_cst; a consumer's
+  `scada_queue_next` loads the state and then `write_seq`; all these
+  accesses are seq_cst and no fences are used. So an event post that
+  returned `SCADA_OK` is seen by a consumer that drains after it saw
+  RETIRING. An event refused at the second load may still be delivered
+  (the safe side). A request is checked before publishing only: its
+  requester is never told "refused" for a request a driver may execute.
+- Two consequences of the handshake. A request whose post loaded RUNNING
+  and published after its consumer drained and detached is accepted and
+  never answered: it is not executed, and its requester reports it at
+  detach as failed with its outcome unknown. An event refused after it was
+  published and posted again after the reattach leaves two journal
+  records for one action.
+- What a poster does on `SCADA_E_RETIRING` (reference 14.4, 5.5; review of
+  PR #82):
+  - an event refused: the action it records is not taken;
+  - a request refused: the command fails visibly, as not executed. An
+    OPERATOR command is never posted again by the service: its interlocks
+    were judged on the state of the old generation, and its
+    `select_request_id` names an id of the old generation. The operator
+    gives it again if it is still wanted;
+  - AUTO writes are computed again by the next cycle in the new generation;
+    until then outputs hold or go to their safe behaviour (reference 5.5,
+    section 9.3);
+  - selections (select before operate) do not survive a generation change:
+    a selection made in the old generation is gone, and its OPERATE fails.
+- `scada_queue_next` in a RETIRING generation: on an event or result queue
+  it returns the records left and then `SCADA_E_RETIRING`, without waiting;
+  on a request queue it answers every request still queued ABORTED and
+  returns `SCADA_E_RETIRING`. Detach in a RETIRING generation answers
+  ABORTED what is left in the request queues the process consumes. Before
+  a drain can end, the library looks at the producer's region by its name
+  at once, not at most once a second, also when it has one mapped: the
+  producer may have created the file, or created it anew (section 9.2), and
+  posted since the last look. A file created anew is followed once the one
+  in use is drained, and drained as well.
+- A driver and a request it already took: it executes the request and
+  posts its answer before it detaches, or it drops it unexecuted (the
+  requester then reports it as unknown). It never acts on it after it
+  detached: the operator may have given the command again, and the output
+  would operate twice.
+- `scada_queue_next` in a RETIRING generation makes system calls, also
+  with timeout 0: it looks for a producer region it has not mapped
+  (`fstatat`, and `open`, `mmap` and the pre-fault when the region is
+  there) and wakes the requester after answering ABORTED (`futex`). A
+  real-time driver that polls in its cycle stops polling there and
+  detaches outside the cycle.
+- Nothing is carried over: every region of the new generation is new, so
+  `write_seq`, cursors and ids start at 0 (section 9.4). The processes do
+  their part: a driver never answers in the new generation a request it took
+  in the old one; a requester clears its table of pending requests at
+  detach, and reports a request that was taken (not answered ABORTED) and
+  not answered as failed with its outcome unknown, never as ABORTED; a
+  consumer that remembers ids to drop duplicates keys them by generation
+  (`scada_status.generation`) or forgets them at reattach.
+- When `scada-tagd` removes or abandons a retired generation it logs, per
+  queue, the records still in it that the consumer did not take, from the
+  queue's `write_seq` and the consumer's cursor: a WARNING with a fixed
+  `MESSAGE_ID`, the count and the positions `[cursor, write_seq)`, named
+  audit records for an events queue, and "unknown" when the pair cannot be
+  read or is not valid, or the generation was abandoned. A generation
+  whose header cannot be read gives one such record, its queue and count
+  "unknown". After the 30-s
+  timeout the count is an upper bound: a consumer may still have been
+  draining.
 
 ## 10. Process regions (`proc.<process>`)
 
@@ -1083,14 +1194,18 @@ a second for each missing region.
 
 1. `scada-tagd` builds the new generation as in 11.1 and sets the old header's
    state to RETIRING.
-2. Each process sees RETIRING (checked on every heartbeat). A producer stops
-   writing and posting and calls notify. A consumer first drains its event and
-   result queues until its cursor equals `write_seq`, bounded by 1 second, so
-   that no journal or audit record is dropped. Write requests still queued are
-   answered ABORTED. Then the process detaches, attaches to `current`, and
-   resolves its handles again. Tag writes stay allowed until the process
-   detaches: what it writes there is kept by step 3. (What the library does
-   to queues in a RETIRING generation is issue #65.)
+2. Each process sees RETIRING (checked on every heartbeat). The library then
+   refuses new records (section 9.5): `scada_queue_post` returns
+   `SCADA_E_RETIRING` on event and request queues. A consumer drains its
+   event and result queues with `scada_queue_next` until it returns
+   `SCADA_E_RETIRING`, which it does at once once every record a post
+   accepted has been delivered; on a request queue that call answers every
+   request still queued ABORTED. The process does this within 1 second, the
+   part of the 5 s of conformance test 21 left for draining after the 1 s in
+   which processes see RETIRING (reference 5.5). Then it detaches (which
+   answers ABORTED what is still in its request queues), attaches to
+   `current`, and resolves its handles again. Tag writes stay allowed until
+   the process detaches: what it writes there is kept by step 3.
 3. `scada-tagd` watches every generation in the base directory other than
    `current`, also after a restart of its own, when it finds them by their
    directories (D-45):
@@ -1590,8 +1705,9 @@ ARM64:
 20. Restarting `scada-tagd` with an unchanged tag set leaves all other
     processes running without interruption.
 21. A generation change completes within 5 seconds with all processes
-    reattached, retained values restored, no event record lost, and no write
-    request of the old generation executed.
+    reattached and retained values restored. Its queue part: no event
+    record whose post returned `SCADA_OK` is lost, and each request a driver
+    executed was posted in the generation in which the driver took it.
 22. RT-safe functions make no system calls and no allocations, including the
     first read of a tag after resolve (checked by instrumentation in the test
     build).
@@ -1646,7 +1762,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Retained values across a generation change | Settled in P1-09 (D-45): FINAL retain files and the bounded wait of sections 11.3 and 12 | P1-09 | Conformance test 21, with a value changed immediately before the change (retained values; the queue part is #65) |
 | Cost of clock reads in `write` | Two reads per `write`, one pair per `write_many` | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
-| A queue region recreated inside a generation | Settled by the base sequence (9.1, 9.2, D-49). Open in #53's second part: keeping a mapping on a transient failure in detail, the periodic look while waiting (`scada_queue_next`, wait sets) and the report of a `write_seq` that falls | #53, then P1-13 | Decided by the committee and tested before 1.0 |
+| A queue region recreated inside a generation | Settled: the base sequence (9.1, 9.2, D-49), the periodic look while waiting, the try-lock in `scada_tag_notify`, the kept mapping used again, and the report of a falling `write_seq` (D-51) | #53 | Conformance test 29 |
 | Commands after lost audit records (does not block 1.0) | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
 | Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
 
@@ -1739,8 +1855,19 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 | 0.15 | 2026-11-16 | Issue #53, first part of points 2 to 4 (D-49). Section 9: `QueueHeader.base_seq` and `flags` take 16 of the reserved bytes. Section 9.1: the producer's high-water mark and the base of a file created anew. Section 9.2: the consumer follows the file, delivers the old file first, jumps to the base, and when it stops the queue. Section 9.3: the second residual window replaced. Section 10: the slot of a produced queue. Section 3.3: the residuals of the base. Sections 16 and 17. |
+| 0.16 | 2026-11-16 | Issue #53, second part of points 2 to 4 (D-51). Section 9.2: the periodic look while waiting in `scada_queue_next` and wait sets, a wait set ready for a pending file, the try-lock of `scada_tag_notify`, the report of a falling `write_seq`. Section 3.3: the bound for a shrink of an unlinked file; the kept mapping used again. Section 16: the open point settled. |
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
+| 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
+
+Migration, 0.18 to 0.19: none for data; the layout version stays 1 and no
+structure in shared memory changed. A producer that posted events or requests
+in a RETIRING generation now gets `SCADA_E_RETIRING`. A refused event means the
+action is not taken; a refused request fails visibly as not executed, and an
+OPERATOR command is not posted again by the service (section 9.5). A consumer whose `scada_queue_next` returns
+`SCADA_E_RETIRING` has drained the queue and detaches; it no longer waits out
+its timeout there. Requesters and consumers that remember ids key them by
+generation or forget them at reattach (section 9.5).
 
 Migration, 0.17 to 0.18: none. The layout version stays 1, no structure in
 shared memory changed, and `scada-tagd` has written these start values
@@ -1750,6 +1877,13 @@ Migration, 0.16 to 0.17: none for data; the layout version stays 1 and no
 structure in shared memory changed. A tag set with a `cmd.<x>` queue and no
 `result.<x>` queue from its consumer to its producer, which 0.16 accepted,
 is now refused; add the result queue. Such a queue lost every answer before.
+
+Migration, 0.15 to 0.16: none for data; the layout version stays 1 and no
+structure in shared memory changed. A consumer that waits in
+`scada_queue_next` or a wait set now looks at its peers' regions about once
+a second while it waits, which costs one `fstatat` per region and second.
+`scada_tag_notify` skips its look while another thread of the context
+looks.
 
 Migration, 0.14 to 0.15: none for data. The layout version stays 1:
 `base_seq` (offset 16), `flags` (24) and `reserved0` (28) were reserved and
