@@ -1011,7 +1011,8 @@ TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsGoodIsAChange) {
     write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_GOOD,
                   SCADA_FLAG_RESTORED);
     ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
-    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    const RetainFile mode_file = file_of("io");
+    const RetainedValue* mode = find_retained(mode_file, "plant.mode");
     ASSERT_NE(mode, nullptr);
     EXPECT_EQ(mode->quality, Quality::GOOD);
     EXPECT_EQ(mode->quality_flags, 0U);
@@ -1026,7 +1027,8 @@ TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsAFlagIsAChange) {
     write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_UNCERTAIN,
                   SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
     ASSERT_EQ(round(now).retain_written.size(), 1U);
-    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    const RetainFile mode_file = file_of("io");
+    const RetainedValue* mode = find_retained(mode_file, "plant.mode");
     ASSERT_NE(mode, nullptr);
     EXPECT_EQ(mode->quality_flags, SCADA_FLAG_SUBSTITUTED);
 }
