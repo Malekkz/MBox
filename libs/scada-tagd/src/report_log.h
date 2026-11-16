@@ -37,12 +37,15 @@ inline constexpr std::string_view MESSAGE_ID_PROCESS_RESTARTED =
 // record of possibly lost audit records (issue #53, decision D-49).
 inline constexpr std::string_view MESSAGE_ID_QUEUE_RECREATED =
     "330f9ce1bb0547c098562d406ce2f774";
+inline constexpr std::string_view MESSAGE_ID_PROCESS_NOT_ATTACHED =
+    "0f57ce3d6dbc4891abd0e55e240f04f9";
 
 // Logs records of late heartbeats: `heartbeat late` at WARNING, or, for a
 // baseline, `heartbeat late before this check` at INFO.
 void log_late(scada::Logger& logger, std::span<const LateRecord> records);
 
-// Logs what one liveness check made at `now_mono_ns` found: every change
+// Logs what one liveness check made at `now_mono_ns` found: each process
+// not attached at the first check of a new generation, every change
 // of a `down` flag, every restart, late heartbeats after the rate limit of
 // `late_log`, every change of a queue's state, and every swept entry. Changes
 // and restarts are not rate limited.

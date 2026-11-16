@@ -62,6 +62,7 @@ the standard error stream.
 | A note of the start, for example `gen-3 is not reused: the tag set changed` or `gen-2 was removed` | NOTICE | |
 | `process down` | WARNING | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
 | `process up` | NOTICE | `PROCESS` |
+| `process not attached` | INFO, once for each process, only at the first check of a new generation: the process has no usable region yet | `PROCESS` |
 | `process restarted` | WARNING if a life came and went between two checks, else NOTICE. Never rate limited | `PROCESS`, `RESTARTS` (lives since the previous sample), `RESTARTS_UNSEEN` (of those, the lives no check saw as down and up), `STARTS_TOTAL` (since the region was created; wraps) |
 | `heartbeat late` | WARNING, at most once per process in 10 s; growth in between is summed into the next record. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous record of this process), `LATE_BEATS_TOTAL` (since the region was created; wraps), `LONGEST_GAP_MS` (ms), `LAST_LATE_MONO_US` (µs, CLOCK_MONOTONIC, as journald's `__MONOTONIC_TIMESTAMP`), `CHECKS` (checks the record sums) |
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
@@ -95,6 +96,7 @@ The liveness records carry a fixed journald `MESSAGE_ID` as their last field
 | `process down` | `51ad850aac4848fab6eade0000eaa868` |
 | `process up` | `3e293a9e793b4fa08fafb02b5f16ae7f` |
 | `process restarted` | `f35dfeb8e8124cc88b219cabf6947b00` |
+| `process not attached` | `0f57ce3d6dbc4891abd0e55e240f04f9` |
 | `heartbeat late` | `31aad0d613b645d39a83e7978c4531ec` |
 | `heartbeat late before this check` | `c4de2438d3574ca38f45771de9254e3a` |
 
@@ -114,15 +116,16 @@ journalctl MESSAGE_ID=31aad0d613b645d39a83e7978c4531ec -o verbose
   The 10 s limit of `heartbeat late` keeps `scada-tagd` below it;
   `LATE_BEATS_TOTAL` lets a reader see records that were lost.
 
-A new generation starts with every other process down, so a process that has
-not attached yet is not logged; each is logged `process up` once it has
-attached, also when that happens before the first check. A reused generation
-keeps what the previous `scada-tagd` recorded and logs only changes from it.
+A new generation starts with every other process down. The first check logs
+`process not attached` for each process that has no region yet. Each process
+is logged `process up` once it has attached and is up, also when that happens
+before the first check. A reused generation keeps what the previous
+`scada-tagd` recorded and logs only changes from it.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.15, sections 3,
-  9.2, 10 and 11.1; decisions D-27, D-36, D-46 and D-47 in
+- Contract: `docs/contracts/tag-database.md`, version 0.18, sections 3, 5,
+  9.2, 10 and 11.1; decisions D-27, D-36, D-38, D-46, D-47, D-49 and D-53 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.

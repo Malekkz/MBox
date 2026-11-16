@@ -23,7 +23,7 @@ boundary.
 
 | Contract | File | Needed by | Status |
 | --- | --- | --- | --- |
-| Tag database | `tag-database.md` | Phase 1 | Draft 0.15, accepted for phase 1 implementation |
+| Tag database | `tag-database.md` | Phase 1 | Draft 0.18, accepted for phase 1 implementation |
 | Configuration schemas | `config-schemas.md` | Phase 2 | Outline below |
 | Driver interface | `driver-interface.md` | Phase 2 | Outline below |
 | Historian file format and upload | `historian-format.md` | Phase 3 | Outline below |
