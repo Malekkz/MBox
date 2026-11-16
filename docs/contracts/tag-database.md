@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.10 (draft) |
+| Contract version | 0.18 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -268,6 +268,10 @@ struct DirectoryEntry {          // 24 bytes
   process table.
 - Everything in `header` except `GlobalHeader.state` and
   `ProcessEntry.down` is immutable for the life of the generation.
+- In a new generation `ProcessEntry.down` is 1 for every process but `tagd`
+  and 0 for `tagd` from the moment the header is published, before `current`
+  points to it: a process that has not attached has no region and is down by
+  section 10.1. A reused generation keeps the flags it holds (section 11.1).
 
 ### 5.1 Handles
 
@@ -857,7 +861,12 @@ The process records such gaps itself, so that they can be traced:
 - `scada-tagd` checks every `heartbeat_check_ms` (default 250 ms), sets `down`
   when a process is down by the rules above and clears it when the heartbeat
   is fresh again and `state` is RUNNING. The flag is what `scada-tagd` reports
-  and alarms on.
+  and alarms on. A new generation starts with the flag at 1 for
+  every process but `tagd` (section 5), so a process that has attached is
+  reported up at the first check that finds it up. At the first check of a
+  new generation `scada-tagd` also reports, once each, the processes whose
+  region is missing or not ready: they have not attached, and their flag
+  does not change.
 - `scada-tagd` has its own `proc.tagd` region. If its heartbeat stops, the
   library reports `SCADA_E_TAGD_DOWN` from `scada_tag_status()`, but existing
   mappings keep working.
@@ -1435,6 +1444,11 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.8 | 2026-11-15 | Issue #42, point 4 (D-36). Section 10: `late_beats`, `longest_gap_ns` and `last_late_mono_ns` take 20 of the reserved bytes of `ProcHeader`. Section 10.1: the process records its late heartbeats and `scada-tagd` logs them; the published heartbeat time never goes back. Section 13.2: heartbeats from several threads. |
 | 0.9 | 2026-11-15 | Issue #49 (D-42). Section 11.4: observer contexts (`scada_tag_observe`, `scada_tag_observe_opts`), what they may not do, and how they detect a generation change. Section 3.1: read access is membership of group `scada`. Section 13: `scada_owner_info`, `scada_tag_handle`, `SCADA_NO_PROCESS`, `scada_proc_status_t` defined; `scada_status.reserved1` split into `owner_count` and `process_count`. `EACCES` on the base or generation directory is `SCADA_E_PERMISSION`. `scada_proc_status` of a process not resolved in the context returns `SCADA_E_INVALID` with reason 4. Section 15, test 28. Section 17, item 18. |
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
+| 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
+
+Migration, 0.17 to 0.18: none. The layout version stays 1, no structure in
+shared memory changed, and `scada-tagd` has written these start values
+since D-38; the text now states them.
 
 Migration, 0.9 to 0.10: none for data; the layout version stays 1 and no
 structure in shared memory changed. The queue functions are new; nothing
