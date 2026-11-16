@@ -87,9 +87,12 @@ SCADA_RT [[nodiscard]] constexpr bool queue_pair_broken(
 SCADA_RT [[nodiscard]] QueueHeader& queue_header(
     std::span<std::byte> region) noexcept;
 
-// `write_seq` of the queue in `region`, loaded with acquire.
+// `write_seq` of the queue in `region`, loaded with `order`: acquire, or
+// seq_cst where the load takes part in the handshake with a RETIRING
+// generation (decision D-54).
 SCADA_RT [[nodiscard]] std::uint64_t queue_write_seq(
-    std::span<std::byte> region) noexcept;
+    std::span<std::byte> region,
+    std::memory_order order = std::memory_order_acquire) noexcept;
 
 // The cursor of queue `queue_id` in the mapped `proc` region `region`, or
 // null if the region is too small to hold it (an empty span too). The

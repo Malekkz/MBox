@@ -142,7 +142,8 @@ int Queue::post(std::span<const std::byte> record) noexcept {
     return attachment_.post_record(id_, words);
 }
 
-Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
+Queue::Look Queue::poll(std::span<std::byte> out,
+                        std::memory_order order) noexcept {
     const QueueAccess& access = attachment_.queue(id_);
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (attachment_.queue_dead(id_, bytes)) {
@@ -157,7 +158,7 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     std::uint64_t& cursor = attachment_.own_cursor(id_);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
-    const std::uint64_t written = queue_write_seq(bytes);
+    const std::uint64_t written = queue_write_seq(bytes, order);
     if (read == written) {
         pending_ = false;
         return Look::NOTHING;
@@ -246,12 +247,24 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     std::uint32_t answered = 0;
     bool stopped = false;
     for (;;) {
-        switch (poll(out)) {
+        // Decision D-54: the state first, then `write_seq`, both seq_cst. In
+        // a RETIRING generation a queue is drained and never waited on.
+        const bool retiring = attachment_.generation_retiring();
+        if (retiring && access.kind == QueueKind::CMD) {
+            // No request is executed there: each is answered ABORTED.
+            attachment_.drain_request_queue(id_);
+            return SCADA_E_RETIRING;
+        }
+        switch (poll(out, retiring ? std::memory_order_seq_cst
+                                   : std::memory_order_acquire)) {
             case Look::DELIVERED:
                 return SCADA_OK;
             case Look::INVALID:
                 return SCADA_E_LAYOUT;  // one record passed over: progress
             case Look::BAD_RANGE:
+                if (retiring) {
+                    return SCADA_E_RETIRING;  // nothing can be drained
+                }
                 // A stopped queue (section 9.2, decision D-40) does not end
                 // the wait early: a caller that loops on next must not spin.
                 // It is reported when the timeout has passed.
@@ -267,6 +280,11 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
                 }
                 continue;
             case Look::NOTHING:
+                if (retiring) {
+                    // Drained: every post that returned SCADA_OK has been
+                    // delivered.
+                    return SCADA_E_RETIRING;
+                }
                 break;
         }
         const std::int64_t now = monotonic_ns();

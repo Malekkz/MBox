@@ -62,9 +62,9 @@ QueueHeader& queue_header(std::span<std::byte> region) noexcept {
     return shared_at<QueueHeader>(region, sizeof(RegionHeader));
 }
 
-std::uint64_t queue_write_seq(std::span<std::byte> region) noexcept {
-    return load_shared(queue_header(region).write_seq,
-                       std::memory_order_acquire);
+std::uint64_t queue_write_seq(std::span<std::byte> region,
+                              std::memory_order order) noexcept {
+    return load_shared(queue_header(region).write_seq, order);
 }
 
 std::uint64_t* cursor_field(std::span<std::byte> region,

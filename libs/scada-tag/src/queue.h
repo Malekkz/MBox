@@ -82,8 +82,11 @@ private:
         ANSWERED,   // an expired request was answered and passed over
     };
 
-    // One look at the queue without waiting.
-    [[nodiscard]] Look poll(std::span<std::byte> out) noexcept;
+    // One look at the queue without waiting; `write_seq` is loaded with
+    // `order` (decision D-54).
+    [[nodiscard]] Look poll(
+        std::span<std::byte> out,
+        std::memory_order order = std::memory_order_acquire) noexcept;
 
     Attachment& attachment_;
     std::size_t id_ = 0;

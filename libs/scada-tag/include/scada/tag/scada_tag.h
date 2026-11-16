@@ -916,6 +916,12 @@ int scada_queue_open(scada_ctx* ctx, const char* queue_name, scada_queue** out);
  * OPERATOR, a select_request_id
  * where it does not belong or missing where it does, or a request that
  * has expired or would live longer than SCADA_REQUEST_LIFETIME_MAX_MS.
+ * SCADA_E_RETIRING: the generation is RETIRING (section 11.3); reattach and
+ * post again there. An event or request is then not queued, with one
+ * exception: an event can be refused after it was published, when RETIRING
+ * came during the post, and may still be delivered; the journal then holds
+ * a record of an action that was not taken. A result is accepted in a
+ * RETIRING generation: the answer to a request already taken.
  *
  * Real-time safe: no allocation, no lock, no system call. One thread posts
  * to a queue; a library built without NDEBUG stops the process when a
@@ -955,7 +961,11 @@ int scada_queue_post(scada_queue* queue, const void* record, size_t size);
  * change or a reboot; log it once. SCADA_E_INVALID: an argument is NULL,
  * `queue` is the producer's side, `size` is not the record size, or
  * `timeout_ms` is negative. SCADA_E_IO with errno set: the kernel refused the
- * wait. `record` is changed only with SCADA_OK.
+ * wait. SCADA_E_RETIRING: the generation is RETIRING (section 11.3) and the
+ * queue is drained: on EVENTS and RESULT every record a post accepted has
+ * been returned; on CMD every request still queued was answered
+ * SCADA_RESULT_ABORTED and none is returned. It comes at once, without
+ * waiting; detach and reattach then. `record` is changed only with SCADA_OK.
  *
  * Not real-time: it may block. One thread uses the consumer's side.
  */

@@ -1004,3 +1004,21 @@ Consequences:
 - `scada-sim` gains `--hold` (help text, `services/scada-sim/README.md`, `libs/scada-sim/README.md`). Tests: `SimOptions.HoldIsAFlagOfRun`, `SimProcesses.AHeldSimulatorWritesOnlyAfterSigusr1` (several heartbeats and no tag written while held, every tag written after the release), `AHeldSimulatorStopsOnASignal`, `AHeldSimulatorStopsWhenTagdStaysDown`.
 - The note of D-34 says that a reader preempted inside one `scada_tag_read_many` can see a running owner down.
 - Tests that failed only under eight more test binaries in parallel on 4 cores are tracked in the issue "Tests that fail under extreme overload", not here.
+
+## D-54: Queues in a RETIRING generation: posts refused, a seq_cst handshake, drains that answer ABORTED
+Date: 2026-11-16
+Phase / issue: 1, #65 (P1-09b, the second pull request of P1-09)
+Status: accepted; the design was decided by the committee of the lead session on 2026-11-15 (comments on #17, scope of #65)
+
+Context: contract 11.3 asked a producer to stop posting once it saw RETIRING, as a duty of the process. A producer can post for up to a third of its heartbeat timeout after RETIRING, after the consumer's drain, and the record is accepted with `SCADA_OK` and then lost: an action without an audit record.
+Options: leave it to the processes; let the library refuse posts in a RETIRING generation, with an ordering that makes every accepted post visible to the final drain.
+Decision: the library refuses (contract 9.5).
+- `scada_queue_post` returns `SCADA_E_RETIRING` on EVENTS and CMD queues in a RETIRING generation; RESULT posts are accepted (the library's ABORTED and EXPIRED answers, a driver's answer to a request it already took).
+- Handshake: EVENTS loads the state before and after publishing; the `write_seq` store, both state loads, the RETIRING store of `scada-tagd` and the consumer's state and `write_seq` loads in `scada_queue_next` are seq_cst, with no fences. An event post that returned `SCADA_OK` is then always drained; one refused after publishing may still be delivered (a journal record of an action not taken, the safe side). CMD checks before publishing only, so that a requester is never told "refused" for a request a driver may execute.
+- `scada_queue_next` in a RETIRING generation never waits: EVENTS and RESULT return what is left and then `SCADA_E_RETIRING`; CMD answers every request still queued ABORTED and returns `SCADA_E_RETIRING`. Detach in a RETIRING generation does the same for every request queue the process consumes. `scada_queue_post` stays real-time safe: one more load, no lock, call or allocation.
+Reason: a post that the library accepts after the consumer's last look is exactly the loss the "no audit, no action" rule forbids. The seq_cst order is the cheapest that closes it without a lock in the real-time post.
+Consequences:
+- Tests: `Queues.InARetiringGenerationOnlyAnswersArePosted`, `AConsumerDrainsARetiringQueueWithoutWaiting`, `RequestsLeftInARetiringGenerationAreAnsweredAborted`, `ADetachInARetiringGenerationAnswersItsRequestsAborted`, and the stress `EveryPostThatReturnedOkIsDrainedAfterRetire` (200 rounds of a poster against a consumer that retires and drains; it fails in every run when the second state load is removed).
+- Contract 0.19: section 9.5 (new), 9.3 (the limit of a generation change), 11.3 step 2. The layout version stays 1.
+- Not yet in this change, still in #65: the requester's pending table cleared at detach, with a request taken and not answered reported as failed with outcome unknown; the consumer's duplicate-id memory per generation; undrained event records counted at detach and logged by `scada-tagd` per queue at removal; the queue part of conformance test 21 with real processes.
+

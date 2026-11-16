@@ -183,6 +183,11 @@ public:
     SCADA_RT [[nodiscard]] std::optional<GenerationState> state()
         const noexcept;
 
+    // True if `GlobalHeader.state` is RETIRING, loaded seq_cst: one load of
+    // the handshake between a post and the drain of a RETIRING generation
+    // (decision D-54).
+    SCADA_RT [[nodiscard]] bool retiring() const noexcept;
+
     // The `down` flag scada-tagd keeps for the process `process_index`
     // (section 10.1). True for an index that is no process.
     SCADA_RT [[nodiscard]] bool marked_down(
