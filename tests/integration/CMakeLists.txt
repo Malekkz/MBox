@@ -118,6 +118,47 @@ scada_add_test(scada-tag-observer-users-test KIND integration
   DEPENDS scada::tag)
 set_tests_properties(scada-tag-observer-users-test PROPERTIES LABELS root)
 
+# Conformance test 11, second part, on a file system that is really full: a
+# small tmpfs mounted in a mount namespace of the test. Mounting needs root,
+# so it has the label `root`, as the test above.
+scada_add_test(scada-tag-full-shm-root-test KIND integration
+  SOURCES full_shm_root_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}")
+set_tests_properties(scada-tag-full-shm-root-test PROPERTIES LABELS root)
+add_dependencies(scada-tag-full-shm-root-test scada-tagd scada-tag-test-peer)
+
+# Conformance test 26, false trips: the reference load with real-time
+# readers under SCHED_FIFO beside the owners. SCHED_FIFO needs root, so it
+# has the label `root`. scada-tag-rt-reader runs the readers; it is not a
+# CTest test and is not installed.
+add_executable(scada-tag-rt-reader rt_reader_main.cpp)
+target_link_libraries(scada-tag-rt-reader
+  PRIVATE scada::tag scada::sim scada::test-support)
+scada_target_defaults(scada-tag-rt-reader)
+scada_test_command(rt_reader_command scada-tag-rt-reader)
+# The criterion of contract section 16 for SCADA_E_BUSY is a property of the
+# code that ships: an optimised build without a sanitizer gates on it, the
+# other builds report the rate only (decision D-57).
+set(busy_gate 0)
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$"
+    AND SCADA_SANITIZER STREQUAL "")
+  set(busy_gate 1)
+endif()
+scada_add_test(scada-tag-false-trip-root-test KIND integration
+  SOURCES false_trip_root_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
+    "SCADA_TAG_RT_READER_COMMAND=${rt_reader_command}"
+    "SCADA_TAG_BUSY_GATE=${busy_gate}")
+set_tests_properties(scada-tag-false-trip-root-test PROPERTIES LABELS root)
+add_dependencies(scada-tag-false-trip-root-test
+  scada-tagd scada-sim scada-tag-rt-reader)
+
 # Conformance test 22: the real-time safe functions make no system call and
 # no allocation. The probe is traced as a child process. That shows nothing
 # in a sanitizer build, whose runtime makes system calls of its own, and

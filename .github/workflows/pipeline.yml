@@ -21,6 +21,11 @@ jobs:
     name: build and test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # Conformance test 3 puts the writer and the readers on separate
+    # processors; on a runner with one processor it fails instead of
+    # skipping (decision D-57).
+    env:
+      SCADA_REQUIRE_SEPARATE_CORES: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +66,14 @@ jobs:
           cmake --build --preset release
       - name: Test (release)
         run: ctest --preset release
+      # Conformance test 26 on the build that ships: the release build gates
+      # on the criterion for SCADA_E_BUSY, which the dev run above only
+      # reports (decision D-57). SCHED_FIFO needs root.
+      - name: False trips as root (release)
+        run: >-
+          sudo "$(command -v ctest)" --test-dir build/release -L '^root$'
+          -R '^scada-tag-false-trip-root-test$' --output-on-failure
+          --no-tests=error
 
       # Issue P1-07 asks for the wake-up latency of a change ring consumer
       # on both targets, and this runner is the only ARM64 machine the
@@ -197,6 +210,8 @@ jobs:
     name: sanitizers (${{ matrix.preset }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      SCADA_REQUIRE_SEPARATE_CORES: "1"
     strategy:
       fail-fast: false
       matrix:
