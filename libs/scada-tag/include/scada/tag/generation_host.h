@@ -111,6 +111,8 @@ struct RetainProblem {
 // queue's `write_seq` and the consumer's cursor, which those processes
 // write: input.
 struct UnconsumedQueue {
+    // Empty for the one entry of a generation whose header cannot be read:
+    // its queues are not known.
     std::string queue;
     // An events queue: its records are audit records.
     bool events = false;

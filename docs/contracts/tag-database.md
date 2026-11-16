@@ -979,7 +979,9 @@ Decision D-54 (issue #65).
   queue's `write_seq` and the consumer's cursor: a WARNING with a fixed
   `MESSAGE_ID`, the count and the positions `[cursor, write_seq)`, named
   audit records for an events queue, and "unknown" when the pair cannot be
-  read or is not valid, or the generation was abandoned. After the 30-s
+  read or is not valid, or the generation was abandoned. A generation
+  whose header cannot be read gives one such record, its queue and count
+  "unknown". After the 30-s
   timeout the count is an upper bound: a consumer may still have been
   draining.
 

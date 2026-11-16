@@ -616,6 +616,9 @@ std::vector<UnconsumedQueue> RetainKeeper::unconsumed_records(
     Watched& watched, std::int64_t now_mono_ns) {
     std::vector<UnconsumedQueue> found;
     if (watched.header == nullptr) {
+        // Its queues cannot be told, so neither whether one held audit
+        // records: one record for the generation, as for an events queue.
+        found.push_back({.queue = {}, .events = true});
         return found;
     }
     const HeaderContents& contents = watched.header->contents();

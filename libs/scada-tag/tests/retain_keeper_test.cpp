@@ -842,6 +842,24 @@ TEST_F(Keeper, RecordsLeftInARemovedGenerationAreCountedPerQueue) {
     EXPECT_EQ(left.records, POSTED);
 }
 
+// Review of PR #82 (T5): a retired generation whose header cannot be read
+// is reported with one entry, its queues and their records unknown.
+TEST_F(Keeper, AGenerationWithoutAReadableHeaderIsReportedUnknown) {
+    start_host(retained_set());
+    drop_host();
+    std::filesystem::remove(generation_dir(1) / "header");
+    start_host(changed_set());
+    const CheckReport report = two_rounds(scada::monotonic_ns());
+    ASSERT_EQ(report.retired.size(), 1U);
+    const RetiredGeneration& retired = report.retired.at(0);
+    ASSERT_TRUE(retired.removed);
+    ASSERT_EQ(retired.unconsumed.size(), 1U);
+    const UnconsumedQueue& left = retired.unconsumed.at(0);
+    EXPECT_TRUE(left.queue.empty());
+    EXPECT_TRUE(left.events);
+    EXPECT_FALSE(left.known);
+}
+
 // Issue #65 (decision D-54): nothing of a queue is carried into the next
 // generation. Through two changes in a row, a consumer that attaches first
 // creates its region with the producer's `write_seq` 0, and event ids start

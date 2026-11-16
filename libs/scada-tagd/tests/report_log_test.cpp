@@ -439,4 +439,24 @@ TEST_F(ReportLog, UnconsumedRecordsCarryTheirMessageIdRangeOrUnknown) {
     EXPECT_FALSE(has(records[1], "FIRST_SEQ="));
 }
 
+// Review of PR #82 (T5): a generation whose header cannot be read gives one
+// record, with its queue unknown, as one that may hold audit records.
+TEST_F(ReportLog, AGenerationWithoutAHeaderGivesOneUnknownRecord) {
+    scada::tag::RetiredGeneration retired;
+    retired.generation = 4;
+    retired.removed = true;
+    scada::tag::UnconsumedQueue unknown;
+    unknown.events = true;
+    retired.unconsumed.push_back(unknown);
+    scada::tagd::log_unconsumed(logger(), retired);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=audit records left unconsumed in a removed "
+                    "generation"));
+    EXPECT_TRUE(has(records[0], "QUEUE=unknown"));
+    EXPECT_TRUE(has(records[0], "RECORDS=unknown"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=42c8e35948cb467eb6d894d3bb0476a8"));
+}
+
 }  // namespace

@@ -36,8 +36,11 @@ the order of the accesses in two parts:
    drain's state load give "Sometimes", so each is needed; the RETIRING
    store, the drain's load of `write_seq` and the post's first load give
    "Never" on Armv8 (a lone store, a load already ordered by the acquire
-   load before it, a load before the publication). C++ needs all six
-   seq_cst, and part 2 keeps them `LDAR` and `STLR`.
+   load before it, a load before the publication). In C++20 the cycle
+   that forbids the loss is the post's store of `write_seq` and second
+   load and the drain's two loads; the post's first load and the RETIRING
+   store are outside it and are kept seq_cst out of caution, not because
+   they are needed. Part 2 keeps all six `LDAR` and `STLR`.
 2. **The code.** `code_shape.py` disassembles the seven protocol functions
    (`write_record`, `write_string_record`, `read_record`,
    `read_string_record`, `append_change`, `read_change`,
@@ -124,6 +127,12 @@ Known limits (D-37, D-39):
   `Queue::next`, the drain of `drain_queue`) is in the C++, which reviewers
   check; the tests of `Queues.*` and the conformance test of 21 exercise
   them.
+- A queue file created anew during the retirement (D-49, D-54): the litmus
+  test covers `write_seq` only. A drain that maps the new file after its
+  state load must also see its name and the release store of the header's
+  `ready` field, which C++ does not order there. On Armv8 the hardware
+  forbids the bad outcome, and system calls (`openat`, `mmap`) come in
+  between; neither part checks it.
 
 ## Tests
 

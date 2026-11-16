@@ -144,7 +144,8 @@ void log_unconsumed(scada::Logger& logger,
         if (!queue.known) {
             logger.log(LogLevel::WARNING, message,
                        {{"GENERATION", generation},
-                        {"QUEUE", queue.queue},
+                        {"QUEUE", queue.queue.empty() ? std::string("unknown")
+                                                      : queue.queue},
                         {"RECORDS", "unknown"},
                         {"MESSAGE_ID", MESSAGE_ID_RECORDS_UNCONSUMED}});
             continue;
