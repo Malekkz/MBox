@@ -917,15 +917,35 @@ TEST_F(TagAccess, ARestartedOwnerKeepsItsValuesAndReadersTheirHandles) {
     EXPECT_EQ(value.change_count, 2U);
 }
 
-// What one reader of a race found.
+// What one reader of a race found. A read while the owner is judged down
+// carries BAD and OWNER_DOWN over the fields of a write (contract 10.1),
+// or no value at all; it is counted apart, so that only reads of a live
+// owner count as torn or backwards (issue #62, D-50).
 struct RaceCounts {
     std::uint64_t reads = 0;
     std::uint64_t busy = 0;
     std::uint64_t errors = 0;     // a return code neither OK nor BUSY
+    std::uint64_t down = 0;       // read with OWNER_DOWN
     std::uint64_t torn = 0;       // fields that do not belong to one write
     std::uint64_t backwards = 0;  // a value older than one read before
     bool saw_last = false;        // the last read gave the last write
+    // The first torn and the first backwards read, for the failure message.
+    std::optional<scada_value> first_torn;
+    std::optional<scada_value> first_backwards;
+    std::uint64_t first_torn_length = 0;  // of a string read
 };
+
+// Every field of `value`, for a failure message.
+std::string fields_of(const scada_value& value) {
+    return "type=" + std::to_string(value.type) +
+           " quality=" + std::to_string(value.quality) +
+           " flags=" + std::to_string(value.quality_flags) +
+           " value=" + std::to_string(value.value) +
+           " change_count=" + std::to_string(value.change_count) +
+           " source_time_ns=" + std::to_string(value.source_time_ns) +
+           " update_time_ns=" + std::to_string(value.update_time_ns) +
+           " update_mono_ns=" + std::to_string(value.update_mono_ns);
+}
 
 // The fields a racing writer derives from the number `count` of its write.
 scada_value derived_value(std::uint64_t count) {
@@ -969,11 +989,21 @@ void read_values_until(Attachment& reader, std::uint32_t handle,
             ++(code == SCADA_E_BUSY ? counts.busy : counts.errors);
             continue;
         }
+        if ((value.quality_flags & SCADA_FLAG_OWNER_DOWN) != 0) {
+            ++counts.down;
+            continue;
+        }
         if (!is_one_write(value)) {
             ++counts.torn;
+            if (!counts.first_torn.has_value()) {
+                counts.first_torn = value;
+            }
         }
         if (value.value < last || value.update_mono_ns < last_mono) {
             ++counts.backwards;
+            if (!counts.first_backwards.has_value()) {
+                counts.first_backwards = value;
+            }
         }
         last = value.value;
         last_mono = value.update_mono_ns;
@@ -1020,21 +1050,42 @@ void read_texts_until(Attachment& reader, std::uint32_t handle,
             ++(code == SCADA_E_BUSY ? counts.busy : counts.errors);
             continue;
         }
+        if ((meta.quality_flags & SCADA_FLAG_OWNER_DOWN) != 0) {
+            ++counts.down;
+            continue;
+        }
         if (!is_one_string_write(std::string_view(buffer.data(), length),
                                  meta)) {
             ++counts.torn;
+            if (!counts.first_torn.has_value()) {
+                counts.first_torn = meta;
+                counts.first_torn_length = length;
+            }
         }
     }
 }
 
-// No reader of a race saw anything but whole writes.
+// No reader of a race saw anything but whole writes of a live owner.
+// Reads while the owner was judged down are not counted against it, but
+// recorded.
 void expect_whole_writes(std::span<const RaceCounts> counts) {
+    std::uint64_t down = 0;
     for (const RaceCounts& count : counts) {
         EXPECT_GT(count.reads, 0U);
-        EXPECT_EQ(count.torn, 0U);
-        EXPECT_EQ(count.backwards, 0U);
+        EXPECT_EQ(count.torn, 0U)
+            << "first torn read: "
+            << (count.first_torn.has_value() ? fields_of(*count.first_torn)
+                                             : "")
+            << " length=" << count.first_torn_length;
+        EXPECT_EQ(count.backwards, 0U)
+            << "first backwards read: "
+            << (count.first_backwards.has_value()
+                    ? fields_of(*count.first_backwards)
+                    : "");
         EXPECT_EQ(count.errors, 0U);
+        down += count.down;
     }
+    ::testing::Test::RecordProperty("down", std::to_string(down));
 }
 
 // Conformance test 3: values whose fields are derived from one another, a
