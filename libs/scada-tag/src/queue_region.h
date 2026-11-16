@@ -19,6 +19,8 @@
 
 namespace scada::tag {
 
+class HeaderView;
+
 // The largest record of layout version 1 (EventRecord), in bytes and in
 // 64-bit words.
 inline constexpr std::size_t MAX_RECORD_SIZE = sizeof(EventRecord);
@@ -87,12 +89,26 @@ SCADA_RT [[nodiscard]] constexpr bool queue_pair_broken(
 SCADA_RT [[nodiscard]] QueueHeader& queue_header(
     std::span<std::byte> region) noexcept;
 
-// `write_seq` of the queue in `region`, loaded with `order`: acquire, or
-// seq_cst where the load takes part in the handshake with a RETIRING
-// generation (decision D-54).
+// `write_seq` of the queue in `region`, loaded with acquire.
 SCADA_RT [[nodiscard]] std::uint64_t queue_write_seq(
-    std::span<std::byte> region,
-    std::memory_order order = std::memory_order_acquire) noexcept;
+    std::span<std::byte> region) noexcept;
+
+// The handshake with a RETIRING generation (decision D-54; contract 9.5).
+// Each access of it is in one of these functions, which the model check
+// finds in the disassembly (tests/model, code_shape.py), and in
+// HeaderView::retiring and set_retiring. Do not inline them by hand.
+
+// `write_seq` of the queue in `region`, loaded seq_cst: the load of a
+// drain after it saw RETIRING.
+SCADA_RT [[nodiscard]] std::uint64_t queue_write_seq_sc(
+    std::span<std::byte> region) noexcept;
+
+// Publishes the records before `value`: stores `value` into `write_seq` of
+// the queue in `region` seq_cst, then loads the state of `header` seq_cst.
+// True if the generation is RETIRING at that second load.
+SCADA_RT [[nodiscard]] bool publish_write_seq(
+    std::span<std::byte> region, std::uint64_t value,
+    const HeaderView& header) noexcept;
 
 // The cursor of queue `queue_id` in the mapped `proc` region `region`, or
 // null if the region is too small to hold it (an empty span too). The

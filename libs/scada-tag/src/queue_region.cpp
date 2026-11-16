@@ -1,5 +1,7 @@
 #include "queue_region.h"
 
+#include "header_view.h"
+
 #include "layout.h"
 #include "shared_memory.h"
 
@@ -62,9 +64,25 @@ QueueHeader& queue_header(std::span<std::byte> region) noexcept {
     return shared_at<QueueHeader>(region, sizeof(RegionHeader));
 }
 
-std::uint64_t queue_write_seq(std::span<std::byte> region,
-                              std::memory_order order) noexcept {
-    return load_shared(queue_header(region).write_seq, order);
+std::uint64_t queue_write_seq(std::span<std::byte> region) noexcept {
+    return load_shared(queue_header(region).write_seq,
+                       std::memory_order_acquire);
+}
+
+std::uint64_t queue_write_seq_sc(std::span<std::byte> region) noexcept {
+    // seq_cst: after the seq_cst load of the state that saw RETIRING, every
+    // event post that returned SCADA_OK is seen (decision D-54).
+    return load_shared(queue_header(region).write_seq,
+                       std::memory_order_seq_cst);
+}
+
+bool publish_write_seq(std::span<std::byte> region, std::uint64_t value,
+                       const HeaderView& header) noexcept {
+    // seq_cst: publishes the record, and orders the store before the second
+    // load of the state (decision D-54).
+    store_shared(queue_header(region).write_seq, value,
+                 std::memory_order_seq_cst);
+    return header.retiring();
 }
 
 std::uint64_t* cursor_field(std::span<std::byte> region,

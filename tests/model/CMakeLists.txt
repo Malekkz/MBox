@@ -49,10 +49,11 @@ if(SCADA_HERD7)
   add_test(NAME scada-model-check
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/model_check.py"
       --herd7 "${SCADA_HERD7}" --timeout 300)
-  # herd7 runs 15 times, three tests with four weakened copies each: about
-  # 275 s on the pipeline's x86-64 runner, most of it the seqlock test
-  # (44 s to 48 s a run; the repair test takes under a second). The limits
-  # leave room for a slower machine.
+  # herd7 runs 22 times, three tests with four weakened copies each and the
+  # handshake (D-54) with six: about 275 s on the pipeline's x86-64 runner,
+  # most of it the seqlock test (44 s to 48 s a run; the repair and the
+  # handshake take about a second each). The limits leave room for a slower
+  # machine.
   set_tests_properties(scada-model-check PROPERTIES LABELS model TIMEOUT 900)
 elseif(SCADA_REQUIRE_HERD7)
   message(FATAL_ERROR

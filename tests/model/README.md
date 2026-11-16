@@ -1,9 +1,10 @@
 # tests/model
 
 Conformance test 4 of the tag database contract: the sequence lock
-(sections 6.1, 6.2 and 7), the change ring (sections 8.1 and 8.2) and the
-repair after an owner restart (section 6.3) checked against the Armv8
-memory model. Decisions: `docs/decisions.md`, D-37 and D-39.
+(sections 6.1, 6.2 and 7), the change ring (sections 8.1 and 8.2), the
+repair after an owner restart (section 6.3) and the handshake of a post
+with a RETIRING generation (section 9.5) checked against the Armv8 memory
+model. Decisions: `docs/decisions.md`, D-37, D-39 and D-54.
 
 x86-64 hides ordering mistakes, the ThreadSanitizer build leaves the fences
 out, and the tests with derived values only sample. This directory checks
@@ -25,6 +26,18 @@ the order of the accesses in two parts:
    a write that stops after its fence, then the repair, against one read
    (repair); herd7 explores every execution of those under the model, not
    longer runs.
+
+   `handshake.litmus` (D-54) is a post on an event queue (state load,
+   `STLR` of `write_seq`, second state load) against `scada-tagd`'s
+   RETIRING store and a drain (state load, then `write_seq`). Its condition
+   is the loss the handshake forbids: the post returned `SCADA_OK` and the
+   drain that saw RETIRING missed the record. Its six copies each make one
+   access plain: the store of `write_seq`, the post's second load and the
+   drain's state load give "Sometimes", so each is needed; the RETIRING
+   store, the drain's load of `write_seq` and the post's first load give
+   "Never" on Armv8 (a lone store, a load already ordered by the acquire
+   load before it, a load before the publication). C++ needs all six
+   seq_cst, and part 2 keeps them `LDAR` and `STLR`.
 2. **The code.** `code_shape.py` disassembles the seven protocol functions
    (`write_record`, `write_string_record`, `read_record`,
    `read_string_record`, `append_change`, `read_change`,
@@ -57,15 +70,25 @@ the order of the accesses in two parts:
    publishes nothing. Each branch is taken at most twice (once in the
    repair, a loop over all records), so a retry loop runs once or twice.
    Without this part an edit that drops a fence would leave the model
-   passing. When it fails it prints the disassembly of the functions
+   passing.
+
+   The handshake (D-54): each of its accesses is in a function of its own
+   in another translation unit than its callers, so that it stays one
+   function in the library (`HANDSHAKE_CHECKS`): `HeaderView::retiring` and
+   `queue_write_seq_sc` must be one `LDAR` on every path,
+   `HeaderView::set_retiring` one `STLR`, and `publish_write_seq` an `STLR`
+   followed by the `LDAR` of `HeaderView::retiring` (a call or tail call
+   it follows) with no store after the `STLR`. When it fails it prints the disassembly of the functions
    concerned.
 
-   `code_shape_mutants.py` compiles 22 edited copies of the three sources
+   `code_shape_mutants.py` compiles 28 edited copies of the five sources
    with the commands of the build (`compile_commands.json`), so with its
    compiler and flags, and expects the check to reject each: each fence
    dropped or moved, each acquire or release access made relaxed, a second
    load of another field, a load after the second load, a store after the
-   end of a write or of the repair, a fence in the repair. Only a finding
+   end of a write or of the repair, a fence in the repair; and each access
+   of the handshake made relaxed, the post's second load left out or moved
+   before the store. Only a finding
    about the order counts, not a function the check cannot find or walk.
    It also compiles each source unchanged and expects it to pass.
 
@@ -84,6 +107,14 @@ Known limits (D-37, D-39):
   against one read, one repair against one read.
 - The store of the ring's `epoch` at reattach (`src/attachment.cpp`) is in
   neither part: it is one counter that publishes nothing else (D-39).
+- The handshake (D-54): on Armv8.0 seq_cst and acquire loads are both
+  `LDAR`, seq_cst and release stores both `STLR`, so part 2 tells a
+  relaxed access from a seq_cst one, not an acquire one from a seq_cst one.
+  That the callers use these functions at the right places (the first and
+  second load of `post_record`, the state load before the drain in
+  `Queue::next`, the drain of `drain_queue`) is in the C++, which reviewers
+  check; the tests of `Queues.*` and the conformance test of 21 exercise
+  them.
 
 ## Tests
 
@@ -125,9 +156,9 @@ linked or shipped.
 
 ## Changing the protocol
 
-A change of the order of accesses in `tag_record.cpp`, `change_ring.cpp`
-or the repair in `attachment.cpp` changes the litmus test in the same pull
-request, the fixture `fixtures/clang18-aarch64-O2.txt` if the self-test no
+A change of the order of accesses in `tag_record.cpp`, `change_ring.cpp`,
+the repair in `attachment.cpp` or the handshake (`header_view.cpp`,
+`queue_region.cpp`) changes the litmus test in the same pull request, the fixture `fixtures/clang18-aarch64-O2.txt` if the self-test no
 longer matches, and the edits of `code_shape_mutants.py` if their text is
 no longer in the source (the test says so). The fixture is the output of
 `llvm-objdump -d -r -C --no-show-raw-insn` for the three files compiled by

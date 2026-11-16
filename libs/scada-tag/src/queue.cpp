@@ -142,8 +142,7 @@ int Queue::post(std::span<const std::byte> record) noexcept {
     return attachment_.post_record(id_, words);
 }
 
-Queue::Look Queue::poll(std::span<std::byte> out,
-                        std::memory_order order) noexcept {
+Queue::Look Queue::poll(std::span<std::byte> out, bool retiring) noexcept {
     const QueueAccess& access = attachment_.queue(id_);
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (attachment_.queue_dead(id_, bytes)) {
@@ -158,7 +157,8 @@ Queue::Look Queue::poll(std::span<std::byte> out,
     std::uint64_t& cursor = attachment_.own_cursor(id_);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
-    const std::uint64_t written = queue_write_seq(bytes, order);
+    const std::uint64_t written =
+        retiring ? queue_write_seq_sc(bytes) : queue_write_seq(bytes);
     if (read == written) {
         pending_ = false;
         return Look::NOTHING;
@@ -238,7 +238,7 @@ int Queue::drain_retiring(std::span<std::byte> out) {
     }
     // seq_cst, after the seq_cst load of the state that saw RETIRING: every
     // event post that returned SCADA_OK is seen (decision D-54).
-    switch (poll(out, std::memory_order_seq_cst)) {
+    switch (poll(out, true)) {
         case Look::DELIVERED:
             return SCADA_OK;
         case Look::INVALID:

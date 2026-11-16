@@ -363,12 +363,7 @@ void retire(int base_fd, std::uint64_t generation, std::uint32_t tagd_uid,
         notes.push_back(name + " could not be set to RETIRING: another layout");
         return;
     }
-    store_shared(
-        shared_at<GlobalHeader>(memory.value().bytes(), GLOBAL_HEADER_OFFSET)
-            .state,
-        // seq_cst: the store of the handshake with posts and drains
-        // (decision D-54).
-        to_raw(GenerationState::RETIRING), std::memory_order_seq_cst);
+    HeaderView::set_retiring(memory.value().bytes());
     notes.push_back(name + " is set to RETIRING");
 }
 

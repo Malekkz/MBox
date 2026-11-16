@@ -247,8 +247,7 @@ bool Attachment::drain_queue(const QueueAccess& access) noexcept {
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
     // seq_cst: after a seq_cst load of the state that saw RETIRING, every
     // request a post refused nothing for is seen (decision D-54).
-    const std::uint64_t written =
-        queue_write_seq(bytes, std::memory_order_seq_cst);
+    const std::uint64_t written = queue_write_seq_sc(bytes);
     if (out_of_range(read, written, access.capacity)) {
         // Not followed (section 9.2): the queue stays stopped. Setting the
         // cursor to `write_seq` could give ids that were given before in
@@ -452,11 +451,12 @@ int Attachment::post_record(std::size_t queue_id,
     }
     store_record(access.own_region, access.capacity, access.record_size,
                  written, record);
-    // seq_cst: publishes the record, and orders the store before the second
-    // load of the state (decision D-54).
-    store_shared(header.write_seq, written + 1, std::memory_order_seq_cst);
+    // Publishes the record, then the second load of the state (decision
+    // D-54).
+    const bool retiring_after =
+        publish_write_seq(access.own_region, written + 1, header_);
     count_one(counters(queue_id).posted);
-    if (access.kind == QueueKind::EVENTS && header_.retiring()) {
+    if (access.kind == QueueKind::EVENTS && retiring_after) {
         // RETIRING came while the record was published: the drain may or
         // may not see it. Refused, so that no action depends on it; if it
         // is delivered, the journal holds a record of an action that was

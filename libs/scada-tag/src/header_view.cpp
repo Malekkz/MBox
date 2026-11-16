@@ -455,6 +455,13 @@ bool HeaderView::retiring() const noexcept {
            to_raw(GenerationState::RETIRING);
 }
 
+void HeaderView::set_retiring(std::span<std::byte> header) noexcept {
+    // seq_cst: the store of the handshake with posts and drains (decision
+    // D-54).
+    store_shared(shared_at<GlobalHeader>(header, GLOBAL_HEADER_OFFSET).state,
+                 to_raw(GenerationState::RETIRING), std::memory_order_seq_cst);
+}
+
 bool HeaderView::marked_down(std::size_t process_index) const noexcept {
     if (process_index >= contents_.processes.size()) {
         return true;
