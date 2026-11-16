@@ -13,6 +13,7 @@
 #include "scada/sim/pattern.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/test/child_process.h"
+#include "scada/test/cpu_affinity.h"
 
 #include <gtest/gtest.h>
 
@@ -26,6 +27,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -38,6 +41,7 @@ namespace {
 
 using namespace scada::test::tagd;
 using scada::test::ChildProcess;
+using scada::test::PinnedThread;
 using Clock = std::chrono::steady_clock;
 
 // How long after the kill of an owner a reader may still not see it down:
@@ -107,6 +111,51 @@ std::uint64_t load_seconds() {
         return DEFAULT_LOAD_SECONDS;
     }
     return *seconds;
+}
+
+// The processors the writer and the readers of a load run on (conformance
+// test 3: writers and readers on separate cores).
+struct Placement {
+    std::vector<int> writer;
+    std::vector<int> readers;
+};
+
+// The writer on the first processor this thread may use, the readers on
+// all the others; nothing with fewer than two.
+std::optional<Placement> separate_cores(const std::vector<int>& cpus) {
+    if (cpus.size() < 2) {
+        return std::nullopt;
+    }
+    return Placement{.writer = {cpus.front()},
+                     .readers = {std::next(cpus.begin()), cpus.end()}};
+}
+
+// Moves the thread of `pinned` to the processors of the readers of
+// `placement`, if there is one, and checks that the simulator `writer`
+// runs on those of the writer.
+::testing::AssertionResult readers_placed(PinnedThread& pinned,
+                                          const Placement* placement,
+                                          int writer) {
+    if (placement == nullptr) {
+        return ::testing::AssertionSuccess();
+    }
+    if (!pinned.move_to(placement->readers)) {
+        return ::testing::AssertionFailure() << "cannot pin the readers";
+    }
+    if (scada::test::cpus_of(writer) != placement->writer) {
+        return ::testing::AssertionFailure()
+               << "the simulator does not run on the writer's processor";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// True if the environment says that this machine must have the processors
+// for separate cores: the pipeline sets SCADA_REQUIRE_SEPARATE_CORES=1, so
+// that a runner with one processor fails the test instead of skipping it.
+bool separate_cores_required() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
+    const char* const text = std::getenv("SCADA_REQUIRE_SEPARATE_CORES");
+    return text != nullptr && std::string_view(text) == "1";
 }
 
 // What one reader thread found.
@@ -347,21 +396,32 @@ protected:
     // done and each has read every tag in a pass that began after its
     // release, so that no machine speed lets the writer finish before the
     // readers begin (issue #62). Returns the time the simulator took in
-    // ms; nothing if something failed before the end.
+    // ms; nothing if something failed before the end. With `placement`,
+    // the simulator and all its threads run on `placement->writer` and the
+    // readers on `placement->readers`; scada-tagd runs anywhere.
     [[nodiscard]] std::optional<std::uint64_t> run_load(
         std::uint64_t per_second, std::uint64_t rounds,
-        std::chrono::seconds limit) {
+        std::chrono::seconds limit, const Placement* placement = nullptr) {
         write_load_tag_set();
         std::optional<RunningTagd> tagd = ready_tagd();
         if (!tagd.has_value()) {
             return std::nullopt;
         }
+        // The simulator inherits the processors of this thread, and the
+        // readers, started by this thread later, the ones it has then. Put
+        // back when the load is done.
+        PinnedThread pinned(
+            placement != nullptr
+                ? std::span<const int>(placement->writer)
+                : std::span<const int>(scada::test::allowed_cpus()));
+        EXPECT_TRUE(pinned.pinned());
         std::optional<ChildProcess> writer = start_sim(
             load_layout(), {"--hold", "--rate", std::to_string(per_second),
                             "--rounds", std::to_string(rounds)});
         if (!writer.has_value() || !prints(*writer, "ready\n")) {
             return std::nullopt;
         }
+        EXPECT_TRUE(readers_placed(pinned, placement, writer->pid()));
         // After the simulator attached: its regions are there to be mapped.
         const Attached reader(base(), "reader");
         const std::vector<std::uint32_t> handles = load_handles(reader);
@@ -498,10 +558,27 @@ TEST_F(TagAccessProcesses, Conformance02ReferenceLoadWithFourReaders) {
         << updates << " updates in " << *elapsed_ms << " ms";
 }
 
-// Conformance test 3 with real processes: the simulator at its maximum rate.
+// Conformance test 3 with real processes: the simulator at its maximum
+// rate, with the writer and the readers on separate processors. A machine
+// with one processor skips it, unless SCADA_REQUIRE_SEPARATE_CORES=1 (the
+// pipeline), which makes that a failure.
 TEST_F(TagAccessProcesses, Conformance03MaximumWriteRateWithFourReaders) {
+    const std::vector<int> cpus = scada::test::allowed_cpus();
+    std::cout << "cpus=" << cpus.size() << "\n";
+    RecordProperty("cpus", std::to_string(cpus.size()));
+    const std::optional<Placement> placement = separate_cores(cpus);
+    if (!placement.has_value()) {
+        if (separate_cores_required()) {
+            FAIL() << "SCADA_REQUIRE_SEPARATE_CORES=1, but this thread may "
+                      "use "
+                   << cpus.size() << " processor(s)";
+        }
+        GTEST_SKIP() << "writer and readers need separate processors; this "
+                        "thread may use "
+                     << cpus.size();
+    }
     const std::optional<std::uint64_t> elapsed_ms =
-        run_load(0, MAX_RATE_ROUNDS, WAIT_LIMIT * 4);
+        run_load(0, MAX_RATE_ROUNDS, WAIT_LIMIT * 4, &placement.value());
     if (!elapsed_ms.has_value()) {
         FAIL() << "the writer did not report its time";
     }
