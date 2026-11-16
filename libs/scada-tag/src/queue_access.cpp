@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -344,10 +345,77 @@ void Attachment::drain_requests() {
     }
 }
 
-bool Attachment::drain_queue(const QueueAccess& access) noexcept {
-    if (!follow_queue(access.id)) {
-        return false;  // dead
+void Attachment::drain_retiring_requests() noexcept {
+    if (!header_.retiring()) {
+        return;
     }
+    for (const QueueAccess& access : queue_access_) {
+        if (access.consumed && access.kind == QueueKind::CMD) {
+            // A requester that created its queue after this process last
+            // looked may have posted to it (review of PR #82, B2).
+            static_cast<void>(look_for_queue_now(access.id));
+        }
+        if (access.consumed && access.kind == QueueKind::CMD &&
+            drain_queue(access) && access.answer_queue.has_value()) {
+            // As in drain_requests: a failed wake delays the answers by one
+            // wait slice of their requester.
+            static_cast<void>(futex_wake_all(
+                &queue_header(queue_access_.at(*access.answer_queue).own_region)
+                     .write_seq));
+        }
+    }
+}
+
+bool Attachment::look_for_queue_now(std::size_t queue_id) noexcept {
+    const QueueAccess& access = queue(queue_id);
+    // Also when a file is mapped: its producer may have created it anew
+    // under the name since the last look (review of PR #82, after #77).
+    if (access.produced) {
+        return true;
+    }
+    try {
+        static_cast<void>(peers_.look_now(directory_.get(), access.queue_slot));
+    } catch (const std::exception&) {
+        // A failed allocation: the region stays unmapped, as if missing.
+        return false;
+    }
+    return true;
+}
+
+void Attachment::drain_request_queue(std::size_t queue_id) noexcept {
+    const QueueAccess& access = queue(queue_id);
+    if (access.consumed && access.kind == QueueKind::CMD &&
+        drain_queue(access) && access.answer_queue.has_value()) {
+        static_cast<void>(futex_wake_all(
+            &queue_header(queue_access_.at(*access.answer_queue).own_region)
+                 .write_seq));
+    }
+}
+
+bool Attachment::drain_queue(const QueueAccess& access) noexcept {
+    // The file in use, then a file created anew under the name, which
+    // `follow_queue` moves to once the one in use is drained (issue #53):
+    // a drain must not end on the old file (review of PR #82, after #77).
+    bool posted = false;
+    for (int file = 0; file < 2; ++file) {
+        // Relaxed: see `queue_in_use_`.
+        const PeerMapping* const before =
+            queue_in_use_[access.id].load(std::memory_order_relaxed);
+        if (!follow_queue(access.id)) {
+            return posted;  // dead
+        }
+        if (file > 0 && queue_in_use_[access.id].load(
+                            std::memory_order_relaxed) == before) {
+            break;  // no newer file
+        }
+        if (!drain_file(access, posted)) {
+            break;
+        }
+    }
+    return posted;
+}
+
+bool Attachment::drain_file(const QueueAccess& access, bool& posted) noexcept {
     const std::span<std::byte> bytes = queue_bytes(access.id);
     if (bytes.empty()) {
         return false;  // no region, no request
@@ -356,7 +424,9 @@ bool Attachment::drain_queue(const QueueAccess& access) noexcept {
     std::uint64_t& cursor = own_cursor(access.id);
     // Relaxed: this process is the only writer of its cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
-    const std::uint64_t written = queue_write_seq(bytes);
+    // seq_cst: after a seq_cst load of the state that saw RETIRING, every
+    // request a post refused nothing for is seen (decision D-54).
+    const std::uint64_t written = queue_write_seq_sc(bytes);
     if (out_of_range(read, written, access.capacity)) {
         // Not followed (section 9.2): the queue stays stopped. Setting the
         // cursor to `write_seq` could give ids that were given before in
@@ -364,7 +434,6 @@ bool Attachment::drain_queue(const QueueAccess& access) noexcept {
         count_one(counts.out_of_range);
         return false;
     }
-    bool posted = false;
     for (std::uint64_t position = read; position < written; ++position) {
         RecordWords words;
         load_record(bytes, access.capacity, access.record_size, position,
@@ -383,7 +452,7 @@ bool Attachment::drain_queue(const QueueAccess& access) noexcept {
     }
     // Release: the producer loads the cursor with acquire.
     store_shared(cursor, written, std::memory_order_release);
-    return posted;
+    return true;
 }
 
 std::optional<std::size_t> Attachment::find_queue(
@@ -509,6 +578,14 @@ int Attachment::post_record(std::size_t queue_id,
             break;
     }
 
+    // Decision D-54: nothing new is posted in a RETIRING generation, but
+    // answers are, the library's own ABORTED and EXPIRED ones and a
+    // driver's result for a request it already took. The first load of the
+    // handshake.
+    if (access.kind != QueueKind::RESULT && header_.retiring()) {
+        return SCADA_E_RETIRING;
+    }
+
     // The tag-set builder refuses a queue with one process at both ends,
     // and `scada_queue_open` refuses one from a header (decision D-40):
     // the cursor slot of a queue this process produces holds its
@@ -574,9 +651,20 @@ int Attachment::post_record(std::size_t queue_id,
     store_shared(own_cursor(queue_id), written + 1, std::memory_order_relaxed);
     store_record(access.own_region, access.capacity, access.record_size,
                  written, record);
-    // Release: publishes the record.
-    store_shared(header.write_seq, written + 1, std::memory_order_release);
+    // Publishes the record, then the second load of the state (decision
+    // D-54).
+    const bool retiring_after =
+        publish_write_seq(access.own_region, written + 1, header_);
     count_one(counters(queue_id).posted);
+    if (access.kind == QueueKind::EVENTS && retiring_after) {
+        // RETIRING came while the record was published: the drain may or
+        // may not see it. Refused, so that no action depends on it; if it
+        // is delivered, the journal holds a record of an action that was
+        // not taken, which is the safe side. A request is not checked
+        // again: its requester must never be told "refused" for a request
+        // a driver may execute.
+        return SCADA_E_RETIRING;
+    }
     return SCADA_OK;
 }
 

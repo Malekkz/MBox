@@ -795,6 +795,15 @@ ctest --preset perf -R scada-tag-wake-perf-test
   reordering. The other end is `scada-tag-test-queue` (in
   `tests/queue_peer/`), which posts, consumes, holds a record without its
   ack, or drives a `cmd` queue.
+- `scada-tag-retiring-queue-integration-test` is the queue part of
+  conformance test 21 (decision D-54): across a real restart of
+  `scada-tagd` with another tag set, every event a post accepted is
+  delivered, and no request of the old generation is executed in the new
+  one. Its processes are `scada-tag-test-crosser` (in `tests/crosser/`),
+  which reattaches when a queue call returns `SCADA_E_RETIRING`. The queue
+  rules of a RETIRING generation are in `Queues.*` (refusal, drains, the
+  handshake stress) and `Keeper.*` (ids after a change, unconsumed records
+  counted at removal).
 - `scada-tag-rt-integration-test` is conformance test 22: it traces the
   helper `scada-tag-rt-probe` (in `tests/probe/`) and fails if a real-time
   safe function makes a system call, calls a C++ allocation function or

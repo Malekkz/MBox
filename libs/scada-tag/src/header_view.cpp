@@ -445,6 +445,23 @@ std::optional<GenerationState> HeaderView::state() const noexcept {
         load_shared(global.state, std::memory_order_acquire));
 }
 
+bool HeaderView::retiring() const noexcept {
+    auto& global =
+        shared_at<GlobalHeader>(memory_.bytes(), GLOBAL_HEADER_OFFSET);
+    // seq_cst: with the seq_cst store of `write_seq` in a post and of the
+    // state in scada-tagd, a post that sees RUNNING after it published is
+    // seen by a drain that saw RETIRING first (decision D-54).
+    return load_shared(global.state, std::memory_order_seq_cst) ==
+           to_raw(GenerationState::RETIRING);
+}
+
+void HeaderView::set_retiring(std::span<std::byte> header) noexcept {
+    // seq_cst: the store of the handshake with posts and drains (decision
+    // D-54).
+    store_shared(shared_at<GlobalHeader>(header, GLOBAL_HEADER_OFFSET).state,
+                 to_raw(GenerationState::RETIRING), std::memory_order_seq_cst);
+}
+
 bool HeaderView::marked_down(std::size_t process_index) const noexcept {
     if (process_index >= contents_.processes.size()) {
         return true;

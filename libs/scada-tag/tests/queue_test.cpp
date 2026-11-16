@@ -208,6 +208,85 @@ enum class Ack : std::uint8_t { YES, NO };
     return gives<scada_event_record>(queue, SCADA_E_TIMEOUT);
 }
 
+// `queue` gives the events 0 to `count - 1`, each acknowledged, and then,
+// at once although the call may wait 5 s, SCADA_E_RETIRING.
+::testing::AssertionResult takes_events_then_retiring(Queue& queue,
+                                                      std::uint64_t count) {
+    for (std::uint64_t seq = 0; seq < count; ++seq) {
+        if (const ::testing::AssertionResult taken = takes_event(queue, seq);
+            !taken) {
+            return taken;
+        }
+    }
+    constexpr int LONG_WAIT_MS = 5000;
+    constexpr std::int64_t AT_ONCE_NS = 1'000'000'000;
+    const std::int64_t start = scada::monotonic_ns();
+    scada_event_record record{};
+    const int code = next(queue, record, LONG_WAIT_MS);
+    if (code != SCADA_E_RETIRING) {
+        return ::testing::AssertionFailure() << "next returned " << code;
+    }
+    if (scada::monotonic_ns() - start >= AT_ONCE_NS) {
+        return ::testing::AssertionFailure() << "next waited";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Posts events to `queue` until a post returns SCADA_E_RETIRING; how many
+// returned SCADA_OK.
+std::uint64_t post_until_retiring(Queue& queue) {
+    std::uint64_t accepted = 0;
+    for (;;) {
+        const int code = post(queue, event());
+        if (code == SCADA_E_RETIRING) {
+            return accepted;
+        }
+        accepted += code == SCADA_OK ? 1 : 0;
+    }
+}
+
+// Consumes `queue`, counting into `delivered`; after a few records sets
+// `state` to RETIRING, as scada-tagd would, and drains until
+// SCADA_E_RETIRING. Gives up after LIMIT (review of PR #82, N3): sets
+// `state` to RETIRING then, so that the poster stops too, and the counts
+// show the failure.
+void consume_retire_and_drain(Queue& queue, std::uint32_t& state,
+                              std::atomic<std::uint64_t>& delivered) {
+    constexpr std::uint64_t RETIRE_AFTER = 5;
+    // Far longer than a round takes on a loaded machine.
+    constexpr std::int64_t ROUND_LIMIT_NS = 10'000'000'000;
+    const std::int64_t deadline = scada::monotonic_ns() + ROUND_LIMIT_NS;
+    scada_event_record record{};
+    for (;;) {
+        const int code = next(queue, record);
+        if (code == SCADA_E_RETIRING) {
+            return;
+        }
+        if (scada::monotonic_ns() >= deadline) {
+            ADD_FAILURE() << "the consumer did not finish, last code " << code;
+            store_shared(state, to_raw(GenerationState::RETIRING),
+                         std::memory_order_seq_cst);
+            return;
+        }
+        if (code != SCADA_OK) {
+            continue;
+        }
+        static_cast<void>(queue.ack());
+        if (delivered.fetch_add(1) + 1 == RETIRE_AFTER) {
+            store_shared(state, to_raw(GenerationState::RETIRING),
+                         std::memory_order_seq_cst);
+        }
+    }
+}
+
+// Takes and acknowledges every record `queue` has now.
+void drain_all(Queue& queue) {
+    scada_event_record record{};
+    while (next(queue, record) == SCADA_OK) {
+        static_cast<void>(queue.ack());
+    }
+}
+
 // `count` results posted to `queue` are accepted.
 ::testing::AssertionResult posts_results(Queue& queue, std::uint64_t count) {
     for (std::uint64_t i = 0; i < count; ++i) {
@@ -234,10 +313,10 @@ enum class Ack : std::uint8_t { YES, NO };
 }
 
 // `queue` gives the answers `status` to the requests of `cmd.io.web` at
-// `positions`, in order, each acknowledged, and then nothing.
+// `positions`, in order, each acknowledged, and then `then` (nothing).
 ::testing::AssertionResult takes_answers(
     Queue& queue, std::uint8_t status,
-    const std::vector<std::uint64_t>& positions) {
+    const std::vector<std::uint64_t>& positions, int then = SCADA_E_TIMEOUT) {
     for (const std::uint64_t position : positions) {
         scada_write_result record{};
         if (const int code = next(queue, record); code != SCADA_OK) {
@@ -251,7 +330,7 @@ enum class Ack : std::uint8_t { YES, NO };
                    << record.request_id << " for " << position;
         }
     }
-    return gives<scada_write_result>(queue, SCADA_E_TIMEOUT);
+    return gives<scada_write_result>(queue, then);
 }
 
 using RequestChange = std::function<void(scada_write_request&)>;
@@ -2238,6 +2317,140 @@ TEST(QueueRecords, ACursorFieldOutsideTheRegionIsNone) {
     EXPECT_EQ(cursor_field(bytes, 1), nullptr);
     EXPECT_EQ(cursor_field(bytes, std::size_t{1} << 62U), nullptr);
     EXPECT_EQ(cursor_field({}, 0), nullptr);
+}
+
+// Issue #65 (decision D-54): queues in a RETIRING generation.
+
+TEST_F(Queues, InARetiringGenerationOnlyAnswersArePosted) {
+    const QueuePtr events = open(*io(), "events.io");
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr results = open(*io(), "result.io.web");
+    ASSERT_NE(events, nullptr);
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(results, nullptr);
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(posts(*events, event(), SCADA_E_RETIRING));
+    EXPECT_TRUE(posts(*requests, request(), SCADA_E_RETIRING));
+    // A driver's result for a request it already took is still accepted.
+    EXPECT_TRUE(posts(*results, result(0)));
+    EXPECT_EQ(events->stats().posted, 0U);
+}
+
+TEST_F(Queues, AConsumerDrainsARetiringQueueWithoutWaiting) {
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    constexpr std::uint64_t POSTED = 3;
+    ASSERT_TRUE(posts_events(*writer, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
+}
+
+TEST_F(Queues, RequestsLeftInARetiringGenerationAreAnsweredAborted) {
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr taken = open(*io(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(taken, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    scada_write_request record{};
+    EXPECT_EQ(next(*taken, record), SCADA_E_RETIRING);
+    EXPECT_EQ(taken->stats().aborted, 2U);
+    look_again(*web());
+    EXPECT_TRUE(takes_answers(*answers, SCADA_RESULT_ABORTED, {0, 1},
+                              SCADA_E_RETIRING));
+}
+
+TEST_F(Queues, ADetachInARetiringGenerationAnswersItsRequestsAborted) {
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    io().reset();
+    look_again(*web());
+    EXPECT_TRUE(
+        takes_answers(*answers, SCADA_RESULT_ABORTED, {0}, SCADA_E_RETIRING));
+}
+
+// Review of PR #82, B2: a driver that attached before its requester
+// created the request queue has not mapped it when the generation retires;
+// its detach still answers the request ABORTED.
+TEST_F(Queues, ADetachAnswersRequestsOfAQueueItHadNotSeen) {
+    io().reset();
+    web().reset();
+    std::filesystem::remove(generation_dir() / "cmd.io.web");
+    io() = attached("io");
+    web() = attached("web");
+    ASSERT_NE(io(), nullptr);
+    ASSERT_NE(web(), nullptr);
+    const QueuePtr requests = open(*web(), "cmd.io.web");
+    const QueuePtr answers = open(*web(), "result.io.web");
+    ASSERT_NE(requests, nullptr);
+    ASSERT_NE(answers, nullptr);
+    ASSERT_TRUE(posts(*requests, request()));
+    set_generation_state(GenerationState::RETIRING);
+    io().reset();
+    look_again(*web());
+    EXPECT_TRUE(
+        takes_answers(*answers, SCADA_RESULT_ABORTED, {0}, SCADA_E_RETIRING));
+}
+
+// Review of PR #82 (after #77): the producer creates its queue file anew in
+// the last moments of a generation and posts to it; the consumer still has
+// the old file mapped when the generation retires. The drain looks at the
+// name again and delivers what the new file holds.
+TEST_F(Queues, ADrainFollowsAQueueFileCreatedAnewBeforeTheRetirement) {
+    // A consumer cursor of 0 gives the new file the base 0, so the
+    // producer can post to it before the consumer has looked at it.
+    ASSERT_NE(open(*web(), "events.io"), nullptr);
+    io().reset();
+    std::filesystem::remove(generation_dir() / "events.io");
+    io() = attached("io");
+    ASSERT_NE(io(), nullptr);
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    constexpr std::uint64_t POSTED = 2;
+    ASSERT_TRUE(posts_events(*writer, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
+}
+
+// The handshake of decision D-54: a post that returned SCADA_OK is always
+// delivered by a consumer that drains after it saw RETIRING; a post refused
+// after it published may be delivered too, at most one per round.
+TEST_F(Queues, EveryPostThatReturnedOkIsDrainedAfterRetire) {
+    const QueuePtr writer = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_NE(writer, nullptr);
+    ASSERT_NE(reader, nullptr);
+    const MappedRegion header = map_file("header");
+    auto& state =
+        shared_at<GlobalHeader>(header.bytes(), sizeof(RegionHeader)).state;
+    constexpr int ROUNDS = 200;
+    for (int round = 0; round < ROUNDS; ++round) {
+        store_shared(state, to_raw(GenerationState::RUNNING),
+                     std::memory_order_seq_cst);
+        std::atomic<std::uint64_t> delivered{0};
+        std::jthread consumer(
+            [&] { consume_retire_and_drain(*reader, state, delivered); });
+        const std::uint64_t accepted = post_until_retiring(*writer);
+        consumer.join();
+        ASSERT_GE(delivered.load(), accepted) << "round " << round;
+        ASSERT_LE(delivered.load(), accepted + 1) << "round " << round;
+        store_shared(state, to_raw(GenerationState::RUNNING),
+                     std::memory_order_seq_cst);
+        drain_all(*reader);
+        static_cast<void>(io()->heartbeat());
+        static_cast<void>(web()->heartbeat());
+    }
 }
 
 }  // namespace

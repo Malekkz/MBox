@@ -141,7 +141,7 @@ int Queue::post(std::span<const std::byte> record) noexcept {
     return attachment_.post_record(id_, words);
 }
 
-Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
+Queue::Look Queue::poll(std::span<std::byte> out, bool retiring) noexcept {
     const QueueAccess& access = attachment_.queue(id_);
     if (!attachment_.follow_queue(id_)) {
         pending_ = false;
@@ -156,7 +156,8 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     std::uint64_t& cursor = attachment_.own_cursor(id_);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
-    const std::uint64_t written = queue_write_seq(bytes);
+    const std::uint64_t written =
+        retiring ? queue_write_seq_sc(bytes) : queue_write_seq(bytes);
     if (read == written) {
         pending_ = false;
         return Look::NOTHING;
@@ -225,6 +226,31 @@ Queue::Look Queue::poll(std::span<std::byte> out) noexcept {
     return Look::DELIVERED;
 }
 
+int Queue::drain_retiring(std::span<std::byte> out) {
+    // A producer that created its region after this process last looked
+    // may have posted to it: look now, before the drain can end.
+    static_cast<void>(attachment_.look_for_queue_now(id_));
+    if (attachment_.queue(id_).kind == QueueKind::CMD) {
+        // No request is executed there: each is answered ABORTED.
+        attachment_.drain_request_queue(id_);
+        return SCADA_E_RETIRING;
+    }
+    // seq_cst, after the seq_cst load of the state that saw RETIRING: every
+    // event post that returned SCADA_OK is seen (decision D-54).
+    switch (poll(out, true)) {
+        case Look::DELIVERED:
+            return SCADA_OK;
+        case Look::INVALID:
+            return SCADA_E_LAYOUT;  // one record passed over: progress
+        case Look::NOTHING:
+        case Look::BAD_RANGE:
+        case Look::ANSWERED:
+            break;
+    }
+    // Drained, or stopped with nothing that can be drained.
+    return SCADA_E_RETIRING;
+}
+
 int Queue::next(std::span<std::byte> out, int timeout_ms) {
     if (producer_ || timeout_ms < 0 || out.size() != record_size() ||
         out.size() > MAX_RECORD_SIZE) {
@@ -245,6 +271,11 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     std::uint32_t answered = 0;
     bool stopped = false;
     for (;;) {
+        // Decision D-54: in a RETIRING generation a queue is drained and
+        // never waited on.
+        if (attachment_.generation_retiring()) {
+            return drain_retiring(out);
+        }
         switch (poll(out)) {
             case Look::DELIVERED:
                 return SCADA_OK;

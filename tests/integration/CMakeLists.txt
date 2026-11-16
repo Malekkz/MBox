@@ -154,6 +154,19 @@ target_include_directories(scada-tag-retain-integration-test
 add_dependencies(scada-tag-retain-integration-test
   scada-tagd scada-tag-test-retainer)
 
+# The queue part of conformance test 21: across a generation change no
+# event a post accepted is lost and no request of the old generation is
+# executed (issue #65; decision D-54).
+scada_test_command(crosser_command scada-tag-test-crosser)
+scada_add_test(scada-tag-retiring-queue-integration-test KIND integration
+  SOURCES retiring_queue_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_CROSSER_COMMAND=${crosser_command}")
+add_dependencies(scada-tag-retiring-queue-integration-test
+  scada-tagd scada-tag-test-crosser)
+
 # A killed test binary leaves no process and no directory behind (issue
 # #64): the helper scada-test-killed-runner is a test binary that starts
 # scada-tagd and two simulator processes and waits; the test kills it with

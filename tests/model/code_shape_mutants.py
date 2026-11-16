@@ -29,7 +29,8 @@ sys.path.insert(0, str(HERE))
 
 import code_shape  # noqa: E402  (after the path is set)
 
-FILES = ("tag_record.cpp", "change_ring.cpp", "attachment.cpp")
+FILES = ("tag_record.cpp", "change_ring.cpp", "attachment.cpp",
+         "header_view.cpp", "queue_region.cpp")
 WRITERS = ("write_record", "write_string_record")
 READERS = ("read_record", "read_string_record")
 
@@ -52,6 +53,14 @@ READ_CHANGE_COPY = """\
     const ChangeEntry copy = load_entry(entry_at(region, cursor, capacity));
     // The copy must complete before the second load.
     fence_acquire();
+"""
+PUBLISH_STORE = """\
+    store_shared(queue_header(region).write_seq, value,
+                 std::memory_order_seq_cst);
+"""
+DRAIN_LOAD = """\
+    return load_shared(queue_header(region).write_seq,
+                       std::memory_order_seq_cst);
 """
 # The start of the retry loop of both record reads (issue #63: a load
 # hoisted above it).
@@ -159,6 +168,30 @@ MUTANTS = (
     ("the repair with a fence", "attachment.cpp",
      REPAIR_END, "std::atomic_thread_fence(std::memory_order_seq_cst);\n"
      "            " + REPAIR_END, 0, ("repair_tag_records",)),
+    # The handshake of a RETIRING generation (decision D-54).
+    ("the state load of the handshake relaxed", "header_view.cpp",
+     "return load_shared(global.state, std::memory_order_seq_cst) ==",
+     "return load_shared(global.state, std::memory_order_relaxed) ==", 0,
+     ("HeaderView::retiring",)),
+    ("the RETIRING store relaxed", "header_view.cpp",
+     "to_raw(GenerationState::RETIRING), std::memory_order_seq_cst);",
+     "to_raw(GenerationState::RETIRING), std::memory_order_relaxed);", 0,
+     ("HeaderView::set_retiring",)),
+    ("the store of write_seq of a post relaxed", "queue_region.cpp",
+     PUBLISH_STORE, PUBLISH_STORE.replace("std::memory_order_seq_cst",
+                                          "std::memory_order_relaxed"), 0,
+     ("publish_write_seq",)),
+    ("a post without its second state load", "queue_region.cpp",
+     "    return header.retiring();\n",
+     "    return false && header.retiring();\n", 0, ("publish_write_seq",)),
+    ("a post whose second state load comes before the store",
+     "queue_region.cpp", PUBLISH_STORE + "    return header.retiring();\n",
+     "    const bool retiring = header.retiring();\n" + PUBLISH_STORE
+     + "    return retiring;\n", 0, ("publish_write_seq",)),
+    ("the write_seq load of a drain relaxed", "queue_region.cpp",
+     DRAIN_LOAD, DRAIN_LOAD.replace("std::memory_order_seq_cst",
+                                    "std::memory_order_relaxed"), 0,
+     ("queue_write_seq_sc",)),
 )
 
 
@@ -249,6 +282,7 @@ def run(commands, objdump, name, text, expected):
                    for file in FILES]
         findings = []
         failures = code_shape.check(code_shape.disassemble(objdump, objects),
+                                    checks=code_shape.ALL_CHECKS,
                                     findings=findings)
     if not expected:
         return None if not failures else "\n".join(failures)

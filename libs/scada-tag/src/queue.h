@@ -82,8 +82,15 @@ private:
         ANSWERED,   // an expired request was answered and passed over
     };
 
-    // One look at the queue without waiting.
-    [[nodiscard]] Look poll(std::span<std::byte> out) noexcept;
+    // `next` in a RETIRING generation (decision D-54): a record that is
+    // left, or SCADA_E_RETIRING once the queue is drained; a `cmd` queue
+    // answered ABORTED. Never waits.
+    [[nodiscard]] int drain_retiring(std::span<std::byte> out);
+    // One look at the queue without waiting. With `retiring`, the caller
+    // saw RETIRING with a seq_cst load and `write_seq` is loaded seq_cst
+    // (decision D-54); otherwise with acquire.
+    [[nodiscard]] Look poll(std::span<std::byte> out,
+                            bool retiring = false) noexcept;
 
     Attachment& attachment_;
     std::size_t id_ = 0;

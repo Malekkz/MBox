@@ -39,10 +39,20 @@ inline constexpr std::string_view MESSAGE_ID_QUEUE_RECREATED =
     "330f9ce1bb0547c098562d406ce2f774";
 inline constexpr std::string_view MESSAGE_ID_PROCESS_NOT_ATTACHED =
     "0f57ce3d6dbc4891abd0e55e240f04f9";
+inline constexpr std::string_view MESSAGE_ID_RECORDS_UNCONSUMED =
+    "42c8e35948cb467eb6d894d3bb0476a8";
 
 // Logs records of late heartbeats: `heartbeat late` at WARNING, or, for a
 // baseline, `heartbeat late before this check` at INFO.
 void log_late(scada::Logger& logger, std::span<const LateRecord> records);
+
+// Logs, for a retired generation removed or abandoned, each queue that
+// still held records (decision D-54): WARNING, `audit records left
+// unconsumed in a removed generation` for an events queue, `records left
+// unconsumed ...` for the others, with GENERATION, QUEUE, RECORDS (a count
+// or "unknown") and, for a known count, FIRST_SEQ and END_SEQ.
+void log_unconsumed(scada::Logger& logger,
+                    const scada::tag::RetiredGeneration& retired);
 
 // Logs what one liveness check made at `now_mono_ns` found: each process
 // not attached at the first check of a new generation, every change

@@ -4,6 +4,7 @@
 #include "layout.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
@@ -11,6 +12,7 @@
 
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
+#include "scada/common/mapped_region.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/tag/generation_host.h"
@@ -21,6 +23,7 @@
 #include <fcntl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -609,6 +612,78 @@ bool RetainKeeper::newer_region_exists(int base_fd, std::uint64_t generation,
     return false;
 }
 
+std::vector<UnconsumedQueue> RetainKeeper::unconsumed_records(
+    Watched& watched, std::int64_t now_mono_ns) {
+    std::vector<UnconsumedQueue> found;
+    if (watched.header == nullptr) {
+        // Its queues cannot be told, so neither whether one held audit
+        // records: one record for the generation, as for an events queue.
+        found.push_back({.queue = {}, .events = true});
+        return found;
+    }
+    const HeaderContents& contents = watched.header->contents();
+    for (std::size_t queue_id = 0; queue_id < contents.queues.size();
+         ++queue_id) {
+        const QueueInfo& queue = contents.queues[queue_id];
+        UnconsumedQueue entry{.queue = queue.name,
+                              .events = queue.kind == QueueKind::EVENTS};
+        const std::optional<std::pair<std::uint64_t, std::uint64_t>> pair =
+            queue_pair(watched, queue_id, now_mono_ns);
+        if (!pair.has_value()) {
+            found.push_back(std::move(entry));  // unknown
+            continue;
+        }
+        const auto [read, written] = *pair;
+        if (read == written) {
+            continue;  // empty
+        }
+        // A pair that is no valid one says nothing about the count.
+        if (read < written && written - read <= queue.capacity) {
+            entry.known = true;
+            entry.first = read;
+            entry.end = written;
+            entry.records = written - read;
+        }
+        found.push_back(std::move(entry));
+    }
+    return found;
+}
+
+std::optional<std::pair<std::uint64_t, std::uint64_t>> RetainKeeper::queue_pair(
+    Watched& watched, std::size_t queue_id, std::int64_t now_mono_ns) {
+    const HeaderContents& contents = watched.header->contents();
+    const QueueInfo& queue = contents.queues[queue_id];
+    if (queue.producer_process >= contents.processes.size() ||
+        queue.consumer_process >= watched.processes.size()) {
+        return std::nullopt;
+    }
+    RegionIdentity identity;
+    identity.kind = queue_region_kind(queue.kind);
+    identity.generation = contents.generation;
+    identity.size_bytes = queue_region_size(queue.capacity, queue.record_size);
+    identity.owner_index = queue.producer_process;
+    // Below MAX_QUEUES, which fits 16 bits.
+    identity.queue_id = static_cast<std::uint16_t>(queue_id);
+    identity.uid = contents.processes[queue.producer_process].uid;
+    std::string ignored;
+    const Result<OpenedRegion> region = open_region(
+        watched.dir_fd, queue.name, identity, MapAccess::READ_ONLY, ignored);
+    WatchedProcess& consumer = watched.processes[queue.consumer_process];
+    if (consumer.probe.bytes().empty()) {
+        // A consumer that owns no tags has not been looked at yet.
+        static_cast<void>(
+            consumer.probe.observe(watched.dir_fd, consumer.region,
+                                   consumer.heartbeat_timeout_ms, now_mono_ns));
+    }
+    const std::uint64_t* const cursor =
+        cursor_field(consumer.probe.bytes(), queue_id);
+    if (!region.ok() || cursor == nullptr) {
+        return std::nullopt;
+    }
+    return std::pair{load_shared(*cursor, std::memory_order_acquire),
+                     queue_write_seq(region.value().memory.bytes())};
+}
+
 bool RetainKeeper::has_left(Watched& watched, const WatchedOwner& owner,
                             std::int64_t now_mono_ns) {
     // Left: the owner stored a state other than RUNNING after its last
@@ -674,6 +749,35 @@ void RetainKeeper::finish(int base_fd, Watched& watched,
     }
 }
 
+std::vector<std::string> RetainKeeper::still_attached(
+    Watched& watched, std::int64_t now_mono_ns) {
+    std::vector<std::string> attached;
+    for (WatchedProcess& process : watched.processes) {
+        if (!proc_lock_held(watched.dir_fd,
+                            proc_region_name(process.region.process))) {
+            continue;
+        }
+        static_cast<void>(process.probe.observe(watched.dir_fd, process.region,
+                                                process.heartbeat_timeout_ms,
+                                                now_mono_ns));
+        const std::optional<ProcFields> fields =
+            read_proc_fields(process.probe.bytes());
+        attached.push_back(
+            process.region.process + " (pid " +
+            std::to_string(fields.has_value() ? fields->pid : 0) + ")");
+    }
+    return attached;
+}
+
+void RetainKeeper::forget_counts(std::vector<UnconsumedQueue>& queues) {
+    for (UnconsumedQueue& queue : queues) {
+        queue.known = false;
+        queue.first = 0;
+        queue.end = 0;
+        queue.records = 0;
+    }
+}
+
 void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
                                CheckReport& report) {
     std::erase_if(retired_, [&](const std::unique_ptr<Watched>& watched) {
@@ -691,28 +795,27 @@ void RetainKeeper::remove_done(int base_fd, std::int64_t now_mono_ns,
         const bool give_up =
             now_mono_ns - watched->retired_mono_ns >= 2 * RETIRED_TIMEOUT_NS;
         RetiredGeneration retired{
-            watched->generation, false, timed_out, {}, false};
+            watched->generation, false, timed_out, {}, false, {}};
         if (timed_out) {
-            for (WatchedProcess& process : watched->processes) {
-                if (!proc_lock_held(watched->dir_fd,
-                                    proc_region_name(process.region.process))) {
-                    continue;
-                }
-                static_cast<void>(process.probe.observe(
-                    watched->dir_fd, process.region,
-                    process.heartbeat_timeout_ms, now_mono_ns));
-                const std::optional<ProcFields> fields =
-                    read_proc_fields(process.probe.bytes());
-                retired.still_attached.push_back(
-                    process.region.process + " (pid " +
-                    std::to_string(fields.has_value() ? fields->pid : 0) + ")");
-            }
+            retired.still_attached = still_attached(*watched, now_mono_ns);
         }
         // Unlinked, never truncated: mappings that processes and observers
         // still hold stay valid, and go with them.
+        // Counted before the files go; reported once, with the removal or
+        // the abandonment.
+        std::vector<UnconsumedQueue> unconsumed =
+            unconsumed_records(*watched, now_mono_ns);
         retired.removed = remove_generation(base_fd, name);
         const bool removed = retired.removed;
         retired.abandoned = !removed && give_up;
+        if (retired.abandoned) {
+            // The records stay with the files, until the next boot: what is
+            // left of them then cannot be told.
+            forget_counts(unconsumed);
+        }
+        if (removed || retired.abandoned) {
+            retired.unconsumed = std::move(unconsumed);
+        }
         if (removed || retired.abandoned || !watched->removal_reported) {
             watched->removal_reported = true;
             report.retired.push_back(std::move(retired));
