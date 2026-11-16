@@ -51,6 +51,27 @@ does this for the real-time safe functions of the tag library. It works in
 a native build without a sanitizer only; register such a test as that file
 is registered.
 
+### Load
+
+The integration tests wait on conditions, but some check a time bound of
+the contract or a heartbeat timeout, and these assume a machine that gives
+each process the CPU within about a second. `ctest -j8` on 4 cores with a
+busy loop on every core is within that: 11 of 11 full runs passed before
+decision D-50, and the tests it fixed passed 200 of 200 loaded runs. With
+eight more test binaries in parallel on the same 4 cores (load average 18
+to 40) the machine stalls for 3 s and more, and the following fail now and
+then without a fault in the code: the 2,000 ms limit for a killed owner to
+read as down in `TagAccessProcesses.Conformance05A*`, the 95 % rate of
+`Conformance02ReferenceLoadWithFourReaders`, and tests with a short
+heartbeat timeout. The tag sets of the load tests use a heartbeat timeout
+of 30 s (`LOAD_HEARTBEAT_TIMEOUT_MS`), so that such a stall does not make a
+running owner read as down. `SimProcesses.AnOverloadedRunStopsPromptly`
+keeps the default of 3,000 ms under load.
+
+A test whose writer could finish before its readers start holds the writer
+until they run: `scada-sim run --hold` writes only after SIGUSR1
+(`tag_access_integration_test.cpp`, `run_load`).
+
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
 least one seed input in `corpus/<name>/` next to it. Copy the entry point
 from `fuzz-sample/fuzz/toy_parser_fuzz.cpp`; the suppression on it is needed

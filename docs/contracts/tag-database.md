@@ -831,7 +831,8 @@ struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
   int64_t  longest_gap_ns;       // A; longest gap between two published heartbeats
   int64_t  last_late_mono_ns;    // A; end of the latest late gap, CLOCK_MONOTONIC
-  uint8_t  reserved[16];
+  uint32_t starts;               // A; lives that reached RUNNING (10.1); wraps; diagnosis only
+  uint8_t  reserved[12];
 };
 // followed by: uint64_t cursors[queue_count];  A; indexed by queue_id
 ```
@@ -891,10 +892,41 @@ The process records such gaps itself, so that they can be traced:
   nothing; `scada-tagd` reports it down.
 - `scada-tagd` reads `late_beats` (acquire) and the gap fields at every check
   and logs `heartbeat late` at WARNING when the count grew, at most once per
-  process and check. A count that is not 0 at its first look at a region is
-  logged once at INFO as `heartbeat late before this check`.
+  process in 10 s: growth within that time is summed into the next record,
+  which is logged at the first check after it, or when `scada-tagd` stops.
+  `LATE_BEATS_TOTAL` in the record lets a reader of the log see records
+  that were lost. A count that is not 0 at its first look at a region is
+  logged once at INFO as `heartbeat late before this check`. `process down`
+  and `process up` are never held back.
 - The three fields are for diagnosis only and are never used to judge
   whether a process is down. They are input to their readers.
+
+A process that restarts into its reused region between two checks is down
+for readers and never down for a check. `starts` counts it:
+
+- Attach increments `starts` (relaxed) at step 6 of 11.2, just before the
+  state is RUNNING, whose release store publishes it; a failed attach counts
+  nothing. `starts` is the number of lives that reached RUNNING in the
+  region. It is never reset within a region; a new region starts at 0.
+  `scada-tagd` counts its own lives the same way.
+- `scada-tagd` reads `starts` of every other process at every check at
+  which the process is up, after loading `state` with acquire and finding
+  it RUNNING, so that a RUNNING of a new life implies its count. The first
+  sample of a mapping is a baseline and is not logged. When the count grew
+  by n since the previous sample (modulo 2^32), it logs `process restarted`
+  with n lives. Each check since the previous sample that found the
+  process up after it was down accounts for one of them, a life seen as
+  down and up; the others, n minus those checks and at least 0, came and
+  went unseen. A check that finds the process up but no longer RUNNING when
+  it reads `starts` keeps its credit for the next sample. The unseen count
+  is a lower bound: a heartbeat that comes back without a restart also
+  makes such a check. The record is a
+  WARNING when an unseen life is in it, else a NOTICE. It is not rate
+  limited: the service manager's restart limit bounds it.
+- `starts` is for diagnosis only and is a lower bound: a life of a library
+  before 0.14 does not count itself. It is never used to judge liveness
+  and never limits restarts; the service manager's restart limit stays the
+  only one.
 
 - The heartbeat is written by `scada_tag_heartbeat()`, called from the
   process's own main loop or cycle, never from a helper thread inside the
@@ -1489,12 +1521,21 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.10 | 2026-11-15 | Reliable queues (P1-08, D-40). Section 11.4: `scada_queue_open` of an observer. Section 9: two different processes per queue; the library answers expired requests in the answer queue, judged on the consumer's clock, one answerer per request; one posting thread in every build; records are input, checked at post and when taken, and passed over when not valid; a cursor out of range stops the queue; redelivery until the ack; the counts in `scada_queue_stats`. Section 9.4: the numbers of `EventRecord.kind`, `posted_mono_ns` set by the library and not a security boundary, the checks, the 48-bit position of a request id. Section 13: `scada_queue_stats`. Section 16: two open points. Section 17: item 19. |
 | 0.11 | 2026-11-15 | Issue #58 (D-44). Section 9.4: an OPERATOR request carries a user (`user_id` not 0), checked at post and when taken; 0 means no user; a non-zero id is opaque; the audit identity is in the event record, and the check is not authentication. Section 9.2: a request passed over is not answered. |
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
+| 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 
 Migration, 0.16 to 0.17: none for data; the layout version stays 1 and no
 structure in shared memory changed. A tag set with a `cmd.<x>` queue and no
 `result.<x>` queue from its consumer to its producer, which 0.16 accepted,
 is now refused; add the result queue. Such a queue lost every answer before.
+
+Migration, 0.13 to 0.14: none for data. The layout version stays 1: `starts`
+takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay
+reserved, and the size stays 64. A region written by a library before 0.14 holds 0
+there and a life of such a library leaves the count unchanged, which reads as
+"no restart recorded"; a `scada-tagd` before 0.14 ignores it. The log record
+`heartbeat late` gives the time as `LAST_LATE_MONO_US` (µs) in place of
+`LAST_LATE_MONO_NS`; the shared-memory field `last_late_mono_ns` stays in ns.
 
 Migration, 0.12 to 0.13: none for data; the layout version stays 1 and no
 structure in shared memory changed. `scada-tagd` now maps every queue

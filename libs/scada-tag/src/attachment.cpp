@@ -591,6 +591,7 @@ Status Attachment::attach_regions(std::string& detail) {
     // Section 11.2, step 6. From here the caller writes the heartbeat.
     const std::int64_t now = monotonic_ns();
     check_clock(now);
+    proc_.count_start();
     proc_.first_heartbeat(now);
     proc_.set_state(ProcessState::RUNNING);
     if (tagd_index_.has_value() && *tagd_index_ != process_index_) {
