@@ -801,7 +801,8 @@ ready while its next look changes the file in use: a first file has
 appeared since the consumer opened the queue, another file is under its
 name, or a look found the file in use changed in size. The consumer's next
 `scada_queue_next` then adopts the file, follows it or stops the queue; a
-queue stopped this way returns `SCADA_E_LAYOUT` (at once with timeout 0).
+queue stopped this way returns `SCADA_E_LAYOUT` (at once with timeout 0),
+or `SCADA_E_RETIRING` in a RETIRING generation (section 9.5).
 No thread reads a file that a look found changed in size, nor the file of
 a stopped queue. `scada_tag_notify` does
 not wait for a look of another thread, which may be mapping a region: it

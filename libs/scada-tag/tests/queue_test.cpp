@@ -2219,9 +2219,10 @@ TEST_F(Queues, TheDescriptorOfAWaitSetFindsAFirstFileCreatedAfterTheOpen) {
     EXPECT_TRUE(takes_events(*reader, 0, 1));
 }
 
-// The steps of `AWaitSetDoesNotReadAFileThatChangedSize`, in the child:
-// the number of the first step that failed, 0 if none.
-int steps_after_a_size_change(Attachment& process, Queue& reader) {
+// The steps after a look found the file in use changed in size, in a
+// child: the number of the first step that failed, 0 if none. `stopped`
+// is what next returns for the queue it stops.
+int steps_after_a_size_change(Attachment& process, Queue& reader, int stopped) {
     int step = 0;
     WaitSet set(process);
     if (++step; set.add_queue(reader) != SCADA_OK) {
@@ -2231,13 +2232,39 @@ int steps_after_a_size_change(Attachment& process, Queue& reader) {
         return step;  // without the fix: SIGBUS here
     }
     scada_event_record record{};
-    if (++step; next(reader, record, 0) != SCADA_E_LAYOUT) {
+    if (++step; next(reader, record, 0) != stopped) {
         return step;
     }
     if (++step; set.wait(0) != SCADA_E_TIMEOUT) {
         return step;
     }
     return 0;
+}
+
+// Runs `steps_after_a_size_change` in a child. A plain fork, not a death
+// test: the child shares the mappings and never returns to the test.
+::testing::AssertionResult survives_a_size_change(Attachment& process,
+                                                  Queue& reader, int stopped) {
+    const pid_t child = ::fork();
+    if (child < 0) {
+        return ::testing::AssertionFailure() << "fork failed";
+    }
+    if (child == 0) {
+        ::_exit(steps_after_a_size_change(process, reader, stopped));
+    }
+    int status = 0;
+    if (::waitpid(child, &status, 0) != child) {
+        return ::testing::AssertionFailure() << "waitpid failed";
+    }
+    if (!WIFEXITED(status)) {
+        return ::testing::AssertionFailure()
+               << "the child was killed by signal " << WTERMSIG(status);
+    }
+    if (WEXITSTATUS(status) != 0) {
+        return ::testing::AssertionFailure()
+               << "step " << WEXITSTATUS(status) << " failed";
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // B1 in the order of the rt probe (#73): the driver opens its request
@@ -2269,19 +2296,34 @@ TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSize) {
     // To nothing: a read of the header page then faults.
     std::filesystem::resize_file(generation_dir() / "events.io", 0);
     look_again(*web());
-    // A plain fork, not a death test: the child shares the mappings and
-    // never returns to the test. Its exit status is the first step that
-    // failed, 0 if none.
-    const pid_t child = ::fork();
-    ASSERT_GE(child, 0);
-    if (child == 0) {
-        ::_exit(steps_after_a_size_change(*web(), *reader));
-    }
-    int status = 0;
-    ASSERT_EQ(::waitpid(child, &status, 0), child);
-    ASSERT_TRUE(WIFEXITED(status))
-        << "the child was killed by signal " << WTERMSIG(status);
-    EXPECT_EQ(WEXITSTATUS(status), 0) << "the step that failed";
+    EXPECT_TRUE(survives_a_size_change(*web(), *reader, SCADA_E_LAYOUT));
+}
+
+// The same in a RETIRING generation (decision D-54): the drain stops the
+// queue and next returns SCADA_E_RETIRING; the file is never read.
+TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSizeWhileRetiring) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    ASSERT_TRUE(takes_events(*reader, 0, 1));
+    std::filesystem::resize_file(generation_dir() / "events.io", 0);
+    look_again(*web());
+    set_generation_state(GenerationState::RETIRING);
+    EXPECT_TRUE(survives_a_size_change(*web(), *reader, SCADA_E_RETIRING));
+}
+
+// In a RETIRING generation a wait set reports a queue ready while records
+// are left in it (decision D-54).
+TEST_F(Queues, AWaitSetReportsARetiringQueueWithRecordsLeft) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    constexpr std::uint64_t POSTED = 2;
+    ASSERT_TRUE(posts_events(*out, POSTED));
+    set_generation_state(GenerationState::RETIRING);
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(0), SCADA_OK);
+    EXPECT_TRUE(takes_events_then_retiring(*reader, POSTED));
 }
 
 // Decision D-51: scada_tag_notify does not wait for a look of another
