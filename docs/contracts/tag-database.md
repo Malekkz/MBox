@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.20 (draft) |
+| Contract version | 0.24 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -1291,9 +1291,18 @@ know they are there, and any number may run.
   was created, for example because its restore failed) says nothing about
   the value and keeps it on file, as does a record that cannot be read
   consistently (mid-write at every attempt).
-- A tag that also has RETAIN_NOW (modes, control authority) is written at
-  the first liveness check after its change, so within 1 second; a power
-  loss cannot revert it by more than that.
+- A tag that also has RETAIN_NOW (modes, control authority) is on disk
+  within 1 second of its change; a power loss cannot revert it by more than
+  that. Two writes of one owner's file are at least M = 1 s minus the
+  period of the checks apart, never less than 250 ms; the first change
+  after a quiet time is written at the next check. A change that comes
+  just after a write is so written within M plus one period, 1 s. A tag
+  that flaps (BAD with COMM_FAIL and back, every change) writes its
+  owner's file at most 60 s / M times a minute: 80 at the default check of
+  250 ms. A tag set with a RETAIN_NOW tag has a `heartbeat_check_ms` of at
+  most 750 ms, and the tag-set builder refuses a larger one; the loop of
+  `scada-tagd` checks at most every `heartbeat_check_ms`. A record the
+  owner marks BAD still leaves the file at the next write (D-45).
 - A STRING tag cannot have RETAIN: the file holds 64-bit values only, and
   the tag-set builder refuses the flag.
 - The directory is `scada-tagd:scada`, mode `2750`; files are `0640`.
@@ -1986,6 +1995,14 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
 | 0.20 | 2026-11-16 | Gaps in retained values (issue #72, D-59). Section 12: retain file format version 2 with quality and flags in the record and `boot_id`, `written_boottime_ns` and CLOCK_SYNCED in the header; version 1 still read; the checks of a version 2 file; a change of quality or flags is written; a restored value keeps the flags that describe it; the age rule, attach never refuses on age; per-tag restore information. Section 13: `scada_tag_retain_info`, `scada_tag_retain_info_t`, `scada_retain_status_t` grows to 24 bytes with `ages_unknown`. Section 12, second part: the stop that cannot wait for the writer exits with status 3; at the 30-s timeout no values over those of a newer generation; the values of a tag that moved go to the file of its new owner before the former owner's file is removed, and the start reads the own files only. Review: the exact restore, the stamp of a rewritten file, the ADOPTED and SOURCE_NOT_FINAL record flags, STALE and COMM_FAIL not kept, an incomplete look kept from removing files. |
+| 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: two writes of one owner's retain file at least 1 s minus the check period apart, at least 250 ms, also for RETAIN_NOW, with the 1 s bound of RETAIN_NOW kept; `heartbeat_check_ms` at most 750 ms in a tag set with a RETAIN_NOW tag. |
+
+Migration, 0.20 to 0.24: none for data; the layout version stays 1 and the
+retain file format stays 2. A tag set with a `retain_now` tag and a
+`heartbeat_check_ms` above 750, which 0.20 accepted although it broke the
+1 s bound of RETAIN_NOW, is now refused; set it to 750 or less. A retain
+file is written at most once per 1 s minus the check period (750 ms by
+default); a change of a RETAIN_NOW tag is still on disk within 1 s.
 
 Migration, 0.19 to 0.20: none for data in shared memory; the layout version
 stays 1 and no structure in shared memory changed. The retain file is now
