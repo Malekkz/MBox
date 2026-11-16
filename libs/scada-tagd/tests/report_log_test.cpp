@@ -42,6 +42,8 @@ using scada::tag::CheckReport;
 using scada::tag::DownReason;
 using scada::tag::LateHeartbeats;
 using scada::tag::ProcessChange;
+using scada::tag::QueueChange;
+using scada::tag::QueueEvent;
 using scada::tag::Restarts;
 using scada::tagd::LateLog;
 using scada::tagd::log_late;
@@ -253,6 +255,82 @@ TEST_F(ReportLog, EachRecordKindCarriesItsMessageIdAndFields) {
     EXPECT_TRUE(has(records[4], "LONGEST_GAP_MS=1234"));
     EXPECT_TRUE(has(records[4], "LAST_LATE_MONO_US=5000123"));
     EXPECT_TRUE(has(records[4], "CHECKS=1"));
+}
+
+// Issue #53 (decision D-49, review of PR #77, B1 and N1): the record of a
+// queue file created anew. With a base, the lost ids run from the cursor of
+// the last check of the old file to the base, a true upper bound.
+TEST_F(ReportLog, AQueueFileCreatedAnewBoundsTheLostIds) {
+    constexpr std::uint64_t BASE = 5;
+    CheckReport report;
+    QueueChange change;
+    change.queue = "events.io";
+    change.event = QueueEvent::RECREATED;
+    change.base_seq = BASE;
+    change.old_write_seq = 3;
+    change.cursor = 1;
+    change.cursor_known = true;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=queue file created anew; audit "
+                    "records may be lost"));
+    EXPECT_TRUE(has(records[0], "PRIORITY=4"));
+    EXPECT_TRUE(has(records[0], "MESSAGE_ID=330f9ce1bb0547c098562d406ce2f774"));
+    EXPECT_TRUE(has(records[0], "BASE_SEQ=5"));
+    EXPECT_TRUE(has(records[0], "OLD_WRITE_SEQ=3"));
+    EXPECT_TRUE(has(records[0], "CURSOR=1"));
+    EXPECT_TRUE(has(records[0], "LOST_AT_MOST=4"));
+    EXPECT_TRUE(has(records[0], "LOST_IDS=[1, 5)"));
+}
+
+// Without a base the bound is unknown, and the range is never inverted.
+TEST_F(ReportLog, AQueueFileCreatedAnewWithoutABaseHasNoBound) {
+    constexpr std::uint64_t CURSOR_AFTER = 5;
+    CheckReport report;
+    QueueChange change;
+    change.queue = "cmd.io.web";
+    change.event = QueueEvent::RECREATED;
+    change.old_write_seq = 3;
+    change.cursor = CURSOR_AFTER;
+    change.cursor_known = true;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0],
+                    "MESSAGE=queue file created anew; records "
+                    "may be lost"));
+    EXPECT_TRUE(has(records[0], "LOST_AT_MOST=unknown"));
+    EXPECT_TRUE(has(records[0], "LOST_IDS=[5, ?)"));
+    EXPECT_TRUE(has(records[0], "REASON=no base: the queue stops"));
+}
+
+// Review of PR #77, F1: a base below the old `write_seq` (the queue stops)
+// bounds nothing; the range is not shown as empty.
+TEST_F(ReportLog, AQueueFileCreatedAnewWithABaseBelowTheOldWriteSeqHasNoBound) {
+    constexpr std::uint64_t OLD_WRITTEN = 5;
+    CheckReport report;
+    QueueChange change;
+    change.queue = "events.io";
+    change.event = QueueEvent::RECREATED;
+    change.base_seq = 0;
+    change.old_write_seq = OLD_WRITTEN;
+    change.cursor = 0;
+    change.cursor_known = true;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0], "LOST_AT_MOST=unknown"));
+    EXPECT_TRUE(has(records[0], "LOST_IDS=[0, ?)"));
+    EXPECT_TRUE(has(records[0],
+                    "REASON=base below the old write_seq: the queue stops"));
 }
 
 TEST_F(ReportLog, ARestartSeenAsDownAndUpIsANotice) {

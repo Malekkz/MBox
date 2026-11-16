@@ -27,7 +27,10 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <map>
+#include <memory>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -360,6 +363,217 @@ TEST_F(QueueProcesses, TagdLogsABrokenAndAMissingQueue) {
                             "events.feed");
     EXPECT_TRUE(logs(*tagd, R"(queue file missing QUEUE="events.feed")"));
     EXPECT_TRUE(stops_cleanly(*feed));
+    stop(*tagd);
+}
+
+// What the consumer of the stress test below has seen of `events.feed`.
+struct FeedBooks {
+    // The content of each id delivered: the helper's record number in its
+    // life, which its payload is derived from.
+    std::map<std::uint64_t, std::int64_t> content;
+    std::uint64_t deliveries = 0;  // with redeliveries
+    std::uint64_t skipped = 0;     // summed over the contexts
+    std::uint64_t last_cursor = 0;
+    std::string failure;
+};
+
+// Takes events from `queue` for `slice`, acknowledging each unless `hold`
+// (then the first is held, as by a consumer that dies before its ack).
+// Notifies and beats in between, as a consumer's main loop does.
+void take_for(const Attached& web, scada_queue* queue,
+              std::chrono::milliseconds slice, bool hold, FeedBooks& books) {
+    constexpr int NEXT_SLICE_MS = 20;
+    const Clock::time_point end = Clock::now() + slice;
+    while (Clock::now() < end && books.failure.empty()) {
+        static_cast<void>(scada_tag_notify(web.ctx()));
+        static_cast<void>(scada_tag_heartbeat(web.ctx()));
+        scada_event_record record{};
+        const int code =
+            scada_queue_next(queue, &record, sizeof(record), NEXT_SLICE_MS);
+        if (code == SCADA_E_TIMEOUT) {
+            continue;
+        }
+        if (code != SCADA_OK) {
+            books.failure = "next returned " + std::to_string(code);
+            return;
+        }
+        std::uint64_t payload = 0;
+        for (std::size_t byte = 0; byte < PAYLOAD_BYTES; ++byte) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): byte is below PAYLOAD_BYTES, inside the array
+            payload |= std::uint64_t{record.payload[byte]}
+                       << (byte * BITS_PER_BYTE);
+        }
+        if (payload !=
+            static_cast<std::uint64_t>(record.time_ns) * PAYLOAD_FACTOR) {
+            books.failure = "record " + std::to_string(record.seq) +
+                            " has a payload that does not match";
+            return;
+        }
+        const auto [entry, fresh] =
+            books.content.try_emplace(record.seq, record.time_ns);
+        if (!fresh && entry->second != record.time_ns) {
+            books.failure = "id " + std::to_string(record.seq) +
+                            " delivered twice with different content";
+            return;
+        }
+        ++books.deliveries;
+        if (hold) {
+            return;
+        }
+        if (scada_queue_ack(queue) != SCADA_OK) {
+            books.failure = "ack refused";
+            return;
+        }
+    }
+}
+
+// The cursor of `events.feed` in `proc.web`: after the RegionHeader and the
+// ProcHeader (64 bytes each), at queue id 1 (contract 9, 10).
+std::uint64_t feed_cursor(const std::string& base) {
+    constexpr std::streamoff CURSOR_OFFSET = 128 + sizeof(std::uint64_t);
+    std::ifstream proc(std::filesystem::path(base) / "current" / "proc.web",
+                       std::ios::binary);
+    proc.seekg(CURSOR_OFFSET);
+    std::array<char, sizeof(std::uint64_t)> bytes{};
+    proc.read(bytes.data(), bytes.size());
+    return std::bit_cast<std::uint64_t>(bytes);
+}
+
+// Issue #53 (decision D-49), stress with real processes: the producer is
+// killed with SIGKILL at random points, its queue file is unlinked before
+// or after some of the kills, and it starts again and creates the file
+// anew; the consumer, this process, now and then detaches with a record
+// it has not acknowledged and attaches again. The seed is fixed, so a
+// failure can be run again. Asserted: no id is delivered twice with
+// different content; every record's content is whole; the cursor never
+// moves back; every position the cursor passed was delivered or counted
+// skipped; and the queue never dies. A SIGKILL exactly between the
+// producer's high-water mark and its `write_seq` cannot be aimed at from
+// outside; the unit test Queues.AnIdBurnedByACrashIsNotGivenAgain shows it.
+// How a round of the stress test ends for the producer.
+enum class Ending : std::uint8_t { KILL, UNLINK_THEN_KILL, KILL_THEN_UNLINK };
+
+// The assertions of the stress test on the books at the end, with the
+// final cursor `cursor`.
+::testing::AssertionResult books_close(const FeedBooks& books,
+                                       std::uint64_t cursor) {
+    constexpr std::uint64_t FLOWED = 1000;
+    if (!books.failure.empty()) {
+        return ::testing::AssertionFailure() << books.failure;
+    }
+    if (cursor == ~std::uint64_t{0}) {
+        return ::testing::AssertionFailure() << "the queue died";
+    }
+    if (cursor < books.last_cursor) {
+        return ::testing::AssertionFailure() << "the cursor moved back";
+    }
+    // Every position the cursor passed was delivered or counted skipped.
+    // The skip is an upper bound: it includes positions never given, and a
+    // record delivered but not acknowledged before a jump is in both.
+    if (books.content.size() + books.skipped < cursor) {
+        return ::testing::AssertionFailure()
+               << "positions passed silently: " << books.content.size()
+               << " delivered, " << books.skipped << " skipped, cursor "
+               << cursor;
+    }
+    if (!books.content.empty() && books.content.rbegin()->first >= cursor) {
+        return ::testing::AssertionFailure()
+               << "an id beyond the cursor was delivered";
+    }
+    if (books.content.size() <= FLOWED) {
+        return ::testing::AssertionFailure()
+               << "the records did not flow: " << books.deliveries;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+class QueueStress : public QueueProcesses {
+protected:
+    // One round of the stress test: the helper posts while this process
+    // takes for a slice, then it ends as `ending` says; with `hold`, the
+    // consumer detaches with a record it has not acknowledged and attaches
+    // again. Returns false if the helper could not be started.
+    bool stress_round(Ending ending, bool hold, std::unique_ptr<Attached>& web,
+                      std::unique_ptr<OpenQueue>& reader, FeedBooks& books);
+};
+
+bool QueueStress::stress_round(Ending ending, bool hold,
+                               std::unique_ptr<Attached>& web,
+                               std::unique_ptr<OpenQueue>& reader,
+                               FeedBooks& books) {
+    constexpr std::chrono::milliseconds SLICE{1200};
+    constexpr std::uint64_t ENDLESS = 10'000'000;
+    std::optional<ChildProcess> feed = start_queue_helper(
+        "feed", "post", "events.feed", std::to_string(ENDLESS));
+    if (!feed.has_value()) {
+        return false;
+    }
+    const std::filesystem::path file =
+        std::filesystem::path(base()) / "current" / "events.feed";
+    take_for(*web, reader->get(), SLICE, hold, books);
+    if (ending == Ending::UNLINK_THEN_KILL) {
+        std::filesystem::remove(file);  // unlinked under a running producer
+    }
+    kill(*feed);
+    if (ending == Ending::KILL_THEN_UNLINK) {
+        std::filesystem::remove(file);
+    }
+    const std::uint64_t cursor = feed_cursor(base());
+    if (cursor < books.last_cursor) {
+        books.failure = "the cursor moved back";
+    }
+    books.last_cursor = cursor;
+    if (hold) {
+        // A consumer that dies before its ack: its region stays.
+        scada_queue_stats_t stats{};
+        static_cast<void>(scada_queue_stats(reader->get(), &stats));
+        books.skipped += stats.skipped;
+        reader.reset();
+        web.reset();
+        web = std::make_unique<Attached>(base(), "web");
+        reader = std::make_unique<OpenQueue>(web->ctx(), "events.feed");
+    }
+    return true;
+}
+
+TEST_F(QueueStress, RandomKillsAndRecreationsLoseNothingSilently) {
+    // Each round is longer than the second in which a consumer looks again
+    // for a file it does not have (contract 11.2), so records flow in it.
+    constexpr int ROUNDS = 8;
+    constexpr std::uint32_t SEED = 53;
+    constexpr std::uint32_t ENDINGS = 3;
+    constexpr std::uint32_t HOLD_ONE_IN = 4;
+    constexpr std::chrono::milliseconds LAST_SLICE{2400};
+    write_queue_tag_set();
+    std::optional<RunningTagd> tagd = ready_tagd();
+    if (!tagd.has_value()) {
+        return;
+    }
+    // A fixed seed on purpose: a failure must be repeatable.
+    // NOLINTNEXTLINE(cert-msc32-c,cert-msc51-cpp): reproducible on purpose
+    std::mt19937 random(SEED);
+    FeedBooks books;
+    auto web = std::make_unique<Attached>(base(), "web");
+    auto reader = std::make_unique<OpenQueue>(web->ctx(), "events.feed");
+    for (int round = 0; round < ROUNDS && books.failure.empty(); ++round) {
+        const auto ending = static_cast<Ending>(random() % ENDINGS);
+        const bool hold = random() % HOLD_ONE_IN == 0;
+        ASSERT_TRUE(stress_round(ending, hold, web, reader, books));
+    }
+    // One last life, drained: the books must close.
+    std::optional<ChildProcess> feed =
+        start_queue_helper("feed", "post", "events.feed", "100");
+    if (!feed.has_value()) {
+        return;
+    }
+    take_for(*web, reader->get(), LAST_SLICE, false, books);
+    scada_queue_stats_t stats{};
+    ASSERT_EQ(scada_queue_stats(reader->get(), &stats), SCADA_OK);
+    books.skipped += stats.skipped;
+    EXPECT_TRUE(books_close(books, feed_cursor(base())));
+    EXPECT_TRUE(stops_cleanly(*feed));
+    reader.reset();
+    web.reset();
     stop(*tagd);
 }
 

@@ -157,6 +157,11 @@ enum class QueueEvent : std::uint8_t {
     MISSING,
     // A queue reported MISSING has a usable file again.
     FOUND,
+    // The queue's file is another one than at the previous check: its
+    // producer created it anew inside the generation (issue #53).
+    // Records that were in the old file and that its consumer had not
+    // taken are lost unless the consumer still holds the old file.
+    RECREATED,
 };
 
 // A reliable queue whose state changed at a liveness check. The values are
@@ -171,7 +176,28 @@ struct QueueChange {
     // BROKEN: the cursor is the all-ones value a consumer stores when it
     // found the queue file replaced inside the generation (decision D-40).
     bool replaced = false;
+    // RECREATED: the new file's base, if its creator set one; the
+    // `write_seq` scada-tagd saw in the old file at its last check of it
+    // (`old_write_seq`), and the consumer's cursor at that check, if it was
+    // readable then (`cursor_known`, `cursor`); `write_seq` is the new
+    // file's.
+    std::optional<std::uint64_t> base_seq = std::nullopt;
+    std::uint64_t old_write_seq = 0;
+    bool cursor_known = false;
 };
+
+// The ids of the old file that a RECREATED change may have lost: from the
+// consumer's cursor at the last check of the old file up to the new base,
+// which is above every id the old file gave (decision D-49). `bounded` is
+// false without a base or with a base below the old `write_seq` (the queue
+// then stops): nothing bounds the posts after that check, and `until` is
+// the largest of base, old `write_seq` and `from`. Never inverted.
+struct LostIds {
+    std::uint64_t from = 0;
+    std::uint64_t until = 0;
+    bool bounded = false;
+};
+[[nodiscard]] LostIds lost_ids(const QueueChange& change) noexcept;
 
 // What one liveness check changed.
 struct CheckReport {

@@ -67,6 +67,38 @@ std::uint64_t queue_write_seq(std::span<std::byte> region) noexcept {
                        std::memory_order_acquire);
 }
 
+std::optional<std::uint64_t> queue_base(std::span<std::byte> region) noexcept {
+    QueueHeader& header = queue_header(region);
+    // Acquire, although the fields are written before `ready` and never
+    // again: the region is input, and this costs nothing on x86-64.
+    if ((load_shared(header.flags, std::memory_order_acquire) &
+         QUEUE_BASE_SET) == 0) {
+        return std::nullopt;
+    }
+    return load_shared(header.base_seq, std::memory_order_acquire);
+}
+
+QueueBase queue_base_of(std::span<std::byte> region,
+                        std::uint64_t& base) noexcept {
+    QueueHeader& header = queue_header(region);
+    // Acquire, although the fields are written before `ready` and never
+    // again: the region is input.
+    const std::uint32_t flags =
+        load_shared(header.flags, std::memory_order_acquire);
+    if ((flags & ~QUEUE_BASE_SET) != 0 ||
+        load_shared(header.reserved0, std::memory_order_acquire) != 0) {
+        return QueueBase::BROKEN;  // refused, not ignored (decision D-49)
+    }
+    if ((flags & QUEUE_BASE_SET) == 0) {
+        return QueueBase::NONE;
+    }
+    base = load_shared(header.base_seq, std::memory_order_acquire);
+    if (base == DEAD_CURSOR || base > queue_write_seq(region)) {
+        return QueueBase::BROKEN;
+    }
+    return QueueBase::SET;
+}
+
 std::uint64_t* cursor_field(std::span<std::byte> region,
                             std::size_t queue_id) noexcept {
     const std::size_t first = sizeof(RegionHeader) + sizeof(ProcHeader);

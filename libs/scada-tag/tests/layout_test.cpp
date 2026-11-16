@@ -254,7 +254,10 @@ TEST(Conformance01Layout, QueueHeader) {
         field(object, &QueueHeader::capacity, "capacity", 4),
         field(object, &QueueHeader::record_size, "record_size", 4),
         field(object, &QueueHeader::write_seq, "write_seq", 8),
-        field(object, &QueueHeader::reserved, "reserved", 48),
+        field(object, &QueueHeader::base_seq, "base_seq", 8),
+        field(object, &QueueHeader::flags, "flags", 4),
+        field(object, &QueueHeader::reserved0, "reserved0", 4),
+        field(object, &QueueHeader::reserved, "reserved", 32),
     };
     const Documented documented{.size = 64, .alignment = 64};
     expect_layout<QueueHeader>(fields, documented);
@@ -377,6 +380,8 @@ TEST(SharedAtomics, EveryAtomicFieldIsLockFree) {
     EXPECT_TRUE(lock_free(change_ring_header, &ChangeRingHeader::write_seq));
     const QueueHeader queue_header;
     EXPECT_TRUE(lock_free(queue_header, &QueueHeader::write_seq));
+    EXPECT_TRUE(lock_free(queue_header, &QueueHeader::base_seq));
+    EXPECT_TRUE(lock_free(queue_header, &QueueHeader::flags));
     const ProcHeader proc_header;
     EXPECT_TRUE(lock_free(proc_header, &ProcHeader::heartbeat));
     EXPECT_TRUE(lock_free(proc_header, &ProcHeader::heartbeat_mono_ns));

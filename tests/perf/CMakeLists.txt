@@ -35,3 +35,15 @@ scada_add_test(scada-sim-rate-perf-test KIND perf
 target_include_directories(scada-sim-rate-perf-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
 add_dependencies(scada-sim-rate-perf-test scada-tagd scada-sim)
+
+# The post of a queue with the high-water mark of the base sequence beside
+# a cursor another producer reads (issue #53, condition C9): two contexts,
+# four threads, one million records each way.
+scada_add_test(scada-tag-queue-post-perf-test KIND perf
+  SOURCES queue_post_perf_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}")
+target_include_directories(scada-tag-queue-post-perf-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../integration")
+add_dependencies(scada-tag-queue-post-perf-test scada-tagd)
