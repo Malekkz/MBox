@@ -787,9 +787,18 @@ ctest --preset perf -R scada-tag-wake-perf-test
   processes: `Conformance02*` writes 50,000 tags of 10 owner threads at
   50,000 updates per second against 4 readers, for 3 s, or for
   `SCADA_CONFORMANCE_SECONDS` seconds (600 for the 10 minutes of the
-  contract); `Conformance03*` does the same at the maximum rate;
+  contract); `Conformance03*` does the same at the maximum rate, with the
+  writer and the readers on separate processors;
   `Conformance05*` kills an owner in the middle of a write, with and
   without `scada-tagd`; `Conformance06*` stops one cleanly.
+- `OwnerThreads.*` is conformance test 15: one process with 4 owner
+  threads, each writing its own tags and posting to its own queue, beside
+  readers, ring consumers and queue consumers in the same test process; it
+  is meant for the thread sanitizer build (decision D-57).
+- `scada-tag-full-shm-root-test` and `scada-tag-false-trip-root-test` (in
+  `tests/integration/`, label `root`) are conformance tests 11 (attach to
+  a full file system) and 26 (real-time readers under SCHED_FIFO beside
+  the reference load; no false trip, and the rate of `SCADA_E_BUSY`).
 - `Queues.*` covers the reliable queues in one process: order, ids, FULL,
   PEER_DOWN, redelivery before the ack and after a restart, the drain of
   the `cmd` queues at attach, expiry, the record checks at post and when a

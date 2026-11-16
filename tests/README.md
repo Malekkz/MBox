@@ -13,7 +13,7 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
 | `tests/perf/` | Performance tests against stated budgets | `perf` |
 | `tests/model/` | Model check of the sequence lock and the change ring for the Armv8 memory model, and the check that the ARM64 code matches it | `model`, `unit` |
-| `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process, a temporary directory a killed test does not leave behind) and its cleaner `scada-test-cleaner`, and the corpus replay driver | |
+| `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process, a temporary directory a killed test does not leave behind, the processors a thread runs on) and its cleaner `scada-test-cleaner`, and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
 | `tests/fuzz-sample/` | Toy parser with a planted bug, and its fuzz target | `fuzz`, `unit` |
 
@@ -71,6 +71,31 @@ keeps the default of 3,000 ms under load.
 A test whose writer could finish before its readers start holds the writer
 until they run: `scada-sim run --hold` writes only after SIGUSR1
 (`tag_access_integration_test.cpp`, `run_load`).
+
+### Processors and root
+
+To put a process or a thread on chosen processors, pin the main thread of
+the test with `scada::test::PinnedThread`
+(`support/include/scada/test/cpu_affinity.h`) before it starts them: a
+process and a thread inherit the set of the thread that starts them.
+`TagAccessProcesses.Conformance03*` runs the writer on one processor and
+the readers on the others. It skips with fewer than 2 processors, unless
+`SCADA_REQUIRE_SEPARATE_CORES=1`, which the pipeline sets: then it fails.
+It is the CTest test `scada-tag-separate-cores-integration-test` of its
+own, whose SKIP_REGULAR_EXPRESSION makes a skip show as skipped;
+`scada-tag-access-integration-test` leaves it out with GTEST_FILTER.
+
+Tests that need root have the label `root` instead of `integration`, and
+`sudo ctest --preset root` runs them (decision D-42):
+`scada-tag-observer-users-test` becomes other users;
+`scada-tag-full-shm-root-test` (conformance test 11) mounts a small tmpfs
+in a mount namespace of its own and never touches `/dev/shm`;
+`scada-tag-false-trip-root-test` (conformance test 26) runs the readers of
+`scada-tag-rt-reader` under SCHED_FIFO beside the reference load. Its
+criterion for `SCADA_E_BUSY` gates only in a Release or RelWithDebInfo
+build without a sanitizer (`SCADA_TAG_BUSY_GATE=1`, set by CMake); the dev
+build prints the rate (decision D-57). It runs 10 s, or
+`SCADA_CONFORMANCE_SECONDS`.
 
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
 least one seed input in `corpus/<name>/` next to it. Copy the entry point
