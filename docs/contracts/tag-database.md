@@ -1345,9 +1345,18 @@ know they are there, and any number may run.
   encoder refuses the same.
 - The quality and flags the owner stored are kept with the value; a change
   of quality or flags alone is a change and is written (a change of
-  SUBSTITUTED, for example). A record read with RESTORED that holds the
-  value and source time on file is no change: the file keeps the quality
-  the owner stored. RESTORED is never stored, and OWNER_DOWN and NOT_INIT
+  SUBSTITUTED, for example). A record that is exactly what the restore of
+  the value on file wrote (UNCERTAIN, RESTORED plus the carried flags of
+  the file, the value and source time on file) is no change: the file
+  keeps the quality the owner stored. Any other record, also one in which
+  the owner kept RESTORED, is the owner's write.
+- A file written again holds the stamp of its oldest value the owner has
+  not written since it was loaded or restored: in one boot the earliest
+  times of their source files; across boots no `boot_id`, the earliest
+  `written_time_ns`, and CLOCK_SYNCED only if every source had it. A
+  restored value whose source is not known has an unknown age. Only a
+  file whose values the owner has all written since gets the stamp of the
+  write, so a rewrite never makes an old value look new. RESTORED is never stored, and OWNER_DOWN and NOT_INIT
   are never read into the file.
 - FINAL with a generation (number and `created_time_ns`, since numbers
   start again at 1 after a boot) means: the file holds what the owner wrote
