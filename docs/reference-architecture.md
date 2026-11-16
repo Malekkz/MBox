@@ -112,7 +112,7 @@ The process names below are proposals; the builder may rename them but must keep
 
 | Process | Responsibility | Section |
 | --- | --- | --- |
-| `scada-tagd` | Creates the shared-memory segment from configuration, owns its layout, marks stale tags, persists retained values | 5 |
+| `scada-tagd` | Creates the generation directory and `header` from configuration (each process creates its own regions), owns the layout, reports processes that are down, persists retained values | 5 |
 | `scada-drv-<protocol>` | One process per protocol: polls devices, writes input tags, executes write requests | 6 |
 | `scada-io` | Local I/O hardware abstraction; behaves as a driver | 6 |
 | `scada-control` | Cyclic control tasks: function blocks and structured text | 7 |
@@ -157,7 +157,7 @@ The system targets 64-bit Linux on x86-64 and ARM64, with each process running a
 
 - Each process is a systemd unit of type `notify` with `WatchdogSec` set, so systemd restarts a hung process as well as a crashed one.
 - Start order: `scada-tagd`, then `scada-conf` and `scada-audit`, then drivers and `scada-io`, then `scada-control` and `scada-cmd`, then the remaining services.
-- Each service runs as its own system user. All belong to a `scada` group that grants access to the shared-memory segment; per-region access is narrowed further (section 5.4).
+- Each service runs as its own system user. All belong to a `scada` group that grants access to the shared-memory segment; per-region access is narrowed further (section 5.1).
 - Services must use systemd sandboxing: `ProtectSystem=strict`, `NoNewPrivileges=yes`, `PrivateTmp=yes`, and capabilities limited to what each needs (for example serial port access for the Modbus driver).
 
 ### 4.3 Real-time tier and fallback
@@ -312,7 +312,7 @@ Each protocol is a separate process built on one driver framework, so a new prot
 
 ### 6.1 Driver framework
 
-A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command queue handling, statistics, heartbeat and reload. A protocol implements this interface:
+A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command handling on top of the command queues (the tag library drains them at attach and answers expired requests, section 5.3), statistics, heartbeat and reload. A protocol implements this interface:
 
 ```cpp
 class ProtocolDriver {
@@ -1046,7 +1046,7 @@ The following constraints are in force now so the later move is a packaging chan
 | --- | --- | --- |
 | A service crashes or hangs | systemd exit status or missed watchdog | Restart with backoff; system alarm; its tags read `BAD` with `OWNER_DOWN` until it returns |
 | A service restarts repeatedly | Restart counter | Stop restarting after a limit, keep the alarm, leave the rest running |
-| `scada-control` stops | Heartbeat in the process table | `scada-io` and drivers apply each affected output's configured behaviour: hold, or go to safe state after a timeout |
+| `scada-control` stops | Heartbeat in its `proc` region (section 5.4) | `scada-io` and drivers apply each affected output's configured behaviour: hold, or go to safe state after a timeout |
 | A driver loses a device | Timeouts | Tags `BAD` with `COMM_FAIL`; device demoted; control blocks apply bad-input behaviour |
 | Whole system hangs | Hardware watchdog not refreshed | Reboot; onboard outputs go to their hardware default state |
 | Command path broken | Request expiry or missing feedback | Command fails visibly; no automatic retry of operator commands |
@@ -1392,4 +1392,4 @@ The design leaves room for each of these without rework of the core.
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0 | 13 November 2026 | Baseline frozen by the product owner. Includes per-tag logging granularity with configurable aggregate tiers, virtual tags, master and slave units over a direct node link, and distribution-agnostic packaging. |
-| 1.1 | 16 November 2026 | Section 5 updated to match the tag database contract 1.0 (issue #21, P1-13); approved by the product owner. Changed: 5 (intro, pointer to the contract), 5.1 (`proc` regions, who creates what, owners are threads, base directory, minimum kernel), 5.2 (record layout, quality flags, atomic access, `SCADA_E_BUSY`), 5.3 (change entry, gaps, full queues, at-most-once commands, wake mechanism, queue limits, request and result fields), 5.4 (heartbeat, liveness judged by readers, timeouts, no suspend), 5.5 (generation change, restart of `scada-tagd`), 5.6 (retain file, retain-now, final files, no strings), 5.7 (C interface, observer, wait sets, real-time-safe functions) and 5.8 (measured size). No other section changed. |
+| 1.1 | 16 November 2026 | Section 5 updated to match the tag database contract 1.0 (issue #21, P1-13); approved by the product owner. Changed: section 5 and the lines in 3.1, 4.2, 6.1 and 14.4 that refer to it. In section 5: 5 (intro, pointer to the contract), 5.1 (`proc` regions, who creates what, owners are threads, base directory, minimum kernel), 5.2 (record layout, quality flags, atomic access, `SCADA_E_BUSY`), 5.3 (change entry, gaps, full queues, at-most-once commands, wake mechanism, queue limits, request and result fields), 5.4 (heartbeat, liveness judged by readers, timeouts, no suspend), 5.5 (generation change, restart of `scada-tagd`), 5.6 (retain file, retain-now, final files, no strings), 5.7 (C interface, observer, wait sets, real-time-safe functions) and 5.8 (measured size). In 3.1, the row of `scada-tagd`; in 4.2, the pointer for per-region access; in 6.1, command handling of `libscada-driver`; in 14.4, where the heartbeat of `scada-control` is. No other section changed; 10.4 does not yet list system alarms for lost audit records or a broken queue (phase 5, #75). |
