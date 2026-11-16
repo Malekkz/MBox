@@ -8,7 +8,9 @@
 //   5 s of the new scada-tagd being ready. The parts on queues are issue
 //   #65.
 // - Conformance test 25: a damaged retain file is ignored and reported;
-//   attach succeeds. A RETAIN_NOW tag is on disk within 1 s.
+//   attach succeeds. A RETAIN_NOW tag is on disk within 1 s, provided its
+//   write, with the writes queued before it, takes at most 200 ms and no
+//   check runs longer than its period (section 12, decision D-62).
 // - The acceptance of issue #17: SIGKILL of every process at random points
 //   never leaves an unreadable retain file. A kill keeps the page cache, so
 //   this shows the atomic rename, not durability; the power-loss model of

@@ -120,6 +120,10 @@ enum class RetainProblemKind : std::uint8_t {
     // Not every retain file could be read for the tags that moved to owners
     // that have not attached; files of gone owners are kept (review B5).
     ADOPTION_INCOMPLETE,
+    // A change of a RETAIN_NOW tag took longer than 1 s to reach the disk
+    // (decision D-62): the writes took longer than their budget of 200 ms.
+    // Once per owner until a later one is within the bound.
+    RETAIN_NOW_LATE,
 };
 
 // A retain file that was ignored because it failed its checks, or one that
@@ -406,6 +410,12 @@ public:
     // Marks scada-tagd as stopping in `proc.tagd` (a clean stop is seen at
     // once, section 10.1). The generation keeps running.
     void stop() noexcept;
+
+    // The period at which `check` is called, in ns: the shortest time
+    // between two writes of one owner's retain file is one second minus it
+    // (decision D-62), so that a RETAIN_NOW change is on disk within 1 s.
+    // Until it is called, the `heartbeat_check_ms` of the tag set.
+    void set_check_period(std::int64_t period_ns) noexcept;
 
 private:
     class Impl;

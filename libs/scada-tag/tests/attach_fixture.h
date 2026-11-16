@@ -105,15 +105,18 @@ protected:
         return set;
     }
 
-    // Starts the side of scada-tagd; generation 1 on a new database.
-    void start_host(const TagSet& set = tag_set()) {
+    // Starts the side of scada-tagd; generation 1 on a new database. `ops`:
+    // the file system calls of the retain writer, null for the system's.
+    void start_host(const TagSet& set = tag_set(),
+                    RetainFileOps* ops = nullptr) {
         std::string detail;
         Result<GenerationHost> host = GenerationHost::start(
             set,
             {.base_dir = base().string(),
              .tagd_uid = uid(),
              .retain_dir = host_retain_dir_,
-             .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS},
+             .retain_interval_ms = DEFAULT_RETAIN_INTERVAL_MS,
+             .retain_file_ops = ops},
             detail);
         ASSERT_TRUE(host.ok()) << host.status().message() << ": " << detail;
         host_ = std::make_unique<GenerationHost>(std::move(host).value());

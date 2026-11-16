@@ -208,6 +208,10 @@ void log_retain_problem(scada::Logger& logger,
             message = "retain files not all read for moved tags";
             message_id = MESSAGE_ID_MOVED_VALUES_INCOMPLETE;
             break;
+        case RetainProblemKind::RETAIN_NOW_LATE:
+            message = "retain_now change reached the disk late";
+            message_id = MESSAGE_ID_RETAIN_NOW_LATE;
+            break;
     }
     if (problem.kind == RetainProblemKind::UNSAVED_AT_EXIT) {
         // KEPT_WRITTEN_TIME_NS: the file of SUBJECT that survives the write

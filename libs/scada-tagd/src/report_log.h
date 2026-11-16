@@ -59,6 +59,8 @@ inline constexpr std::string_view MESSAGE_ID_VALUES_UNSAVED_AT_EXIT =
     "7cf5c1c8535f44f6a297db538666d7a3";
 inline constexpr std::string_view MESSAGE_ID_MOVED_VALUES_INCOMPLETE =
     "624f9b58ba224d5eadd528279c0f8e7d";
+inline constexpr std::string_view MESSAGE_ID_RETAIN_NOW_LATE =
+    "51a87b54784a4a21bd45dfb59069996d";
 
 // Logs records of late heartbeats: `heartbeat late` at WARNING, or, for a
 // baseline, `heartbeat late before this check` at INFO.
