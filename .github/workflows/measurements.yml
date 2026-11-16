@@ -51,6 +51,16 @@ jobs:
     env:
       SECONDS_OF_LOAD: ${{ inputs.seconds || '600' }}
     steps:
+      # tests 2 and 26 each run for SECONDS_OF_LOAD; more than 1,500 s
+      # would not fit in the time limit of the job.
+      - name: Check the inputs
+        shell: bash
+        run: |
+          if ! [[ "${SECONDS_OF_LOAD}" =~ ^[0-9]+$ ]] ||
+             (( SECONDS_OF_LOAD < 1 || SECONDS_OF_LOAD > 1500 )); then
+            echo "seconds must be an integer from 1 to 1500" >&2
+            exit 1
+          fi
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -58,6 +68,7 @@ jobs:
       - name: Check the architecture
         run: test "$(uname -m)" = "${{ matrix.machine }}"
       - name: Describe the machine
+        shell: bash
         run: |
           {
             echo "commit=${GITHUB_SHA}"
@@ -86,7 +97,10 @@ jobs:
             build/measure scada-tag-false-trip-root-test \
             "SCADA_CONFORMANCE_SECONDS=${SECONDS_OF_LOAD}" | tee conformance26.txt
       - name: Performance tests
-        run: ctest --test-dir build/measure -L '^perf$' --verbose | tee perf.txt
+        shell: bash
+        run: |
+          ctest --test-dir build/measure -L '^perf$' --verbose \
+            --no-tests=error | tee perf.txt
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -115,6 +129,15 @@ jobs:
           - arch: ARM64
             runner: ubuntu-24.04-arm
     steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+        run: |
+          if [[ "${RUNS}" != 5 && "${RUNS}" != 10 ]]; then
+            echo "runs must be 5 or 10" >&2
+            exit 1
+          fi
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -125,12 +148,14 @@ jobs:
           cmake --build --preset perf --target \
             scada-tag-latency-perf-test scada-tagd scada-sim
       - name: Latency (conformance test 27)
+        shell: bash
         run: |
           {
             uname -m
             nproc
             lscpu | grep -E 'Model name|^CPU\(s\)'
-            ctest --preset perf -R '^scada-tag-latency-perf-test$' --verbose
+            ctest --preset perf -R '^scada-tag-latency-perf-test$' --verbose \
+              --no-tests=error
           } | tee latency.txt
       - uses: actions/upload-artifact@v6
         with:

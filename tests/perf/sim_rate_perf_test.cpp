@@ -148,7 +148,7 @@ protected:
         write_sim_tag_set(layout);
         std::optional<RunningTagd> tagd = ready_tagd();
         if (!tagd.has_value()) {
-            return;
+            FAIL() << "no tagd";
         }
         const std::optional<RunFigures> figures =
             run(layout, REFERENCE_RATE, ROUNDS);
@@ -190,7 +190,7 @@ TEST_F(SimRate, MaximumRateOfOneProcess) {
     write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
-        return;
+        FAIL() << "no tagd";
     }
     const std::optional<RunFigures> figures = run(layout, 0, FAST_ROUNDS);
     stop(*tagd);

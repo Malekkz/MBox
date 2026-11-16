@@ -181,7 +181,7 @@ TEST_F(QueuePostPerf, TwoWaysWithTheMarkBesideTheCursor) {
     write_pair_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
-        return;
+        FAIL() << "no tagd";
     }
     const Attached first(base(), "a");
     const Attached second(base(), "b");

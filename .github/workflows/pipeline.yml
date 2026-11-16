@@ -87,7 +87,7 @@ jobs:
           cmake --preset perf
           cmake --build --preset perf
       - name: Perf gate (perf)
-        run: ctest --preset perf --verbose
+        run: ctest --preset perf --verbose --no-tests=error
 
       - name: Staged install tree
         run: cmake --install build/release --prefix stage

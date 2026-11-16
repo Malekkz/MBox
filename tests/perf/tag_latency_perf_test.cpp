@@ -17,8 +17,11 @@
 //   cost of clock reads in `write`). The median gates on shared machines;
 //   the 99.9th percentile is printed beside it, and the target board (issue
 //   #41) decides the worst case;
-// - the database below 64 MB (contract section 16, the default capacity of
-//   a change ring);
+// - the database below 64 MB: the size half of contract section 16, "default
+//   change ring capacity". Its other half, no gap for a consumer that keeps
+//   up with the reference load, is not gated here: conformance tests 13 and
+//   14 check it at smaller loads, and the reference load itself is not
+//   checked for gaps yet (decision D-57);
 // - scada-tagd, scada-sim and this process together below 1.5 GB: a sanity
 //   bound chosen in D-57, not a requirement. Reference 15.2 sets 1.5 GB for
 //   all services, of which these are only a part;
@@ -83,7 +86,7 @@ constexpr std::size_t CLOCK_SAMPLES = 100'000;
 constexpr std::size_t CALLS_PER_BEAT = 2'000;
 // Contract section 16, the cost of clock reads in `write`.
 constexpr std::int64_t SCAN_LIMIT_NS = 500'000;
-// Contract section 16, the default capacity of a change ring.
+// The size half of contract section 16, "default change ring capacity".
 constexpr std::uint64_t DATABASE_LIMIT_BYTES = 64ULL << 20U;
 // A sanity bound chosen in D-57, not a requirement (see above).
 constexpr std::uint64_t SANITY_MEMORY_BOUND_KB = 1536ULL << 10U;
@@ -178,62 +181,108 @@ scada_value bench_value(std::size_t round, std::size_t slot) {
     return value;
 }
 
-// One field of /proc/<pid>/smaps_rollup or /proc/<pid>/status, in kB; 0
-// if it is missing.
-std::uint64_t proc_kb(int pid, const char* file, std::string_view key) {
-    std::ifstream input("/proc/" + std::to_string(pid) + "/" + file);
+// One field of /proc/<pid>/smaps_rollup or /proc/<pid>/status, in kB;
+// nothing, with a failed expectation, if the file or the field is missing,
+// so that a missing figure cannot pass as 0.
+std::optional<std::uint64_t> proc_kb(int pid, const char* file,
+                                     std::string_view key) {
+    const std::string path = "/proc/" + std::to_string(pid) + "/" + file;
+    std::ifstream input(path);
     std::string line;
     while (std::getline(input, line)) {
         if (line.starts_with(key)) {
             std::istringstream fields(line.substr(key.size()));
             std::uint64_t value_kb = 0;
-            fields >> value_kb;
-            return value_kb;
+            if (fields >> value_kb) {
+                return value_kb;
+            }
         }
     }
-    return 0;
+    ADD_FAILURE() << "no " << key << " in " << path;
+    return std::nullopt;
 }
 
 // Prints and records the memory of the process `pid`, named `name`, and
-// returns its proportional set size in kB.
-std::uint64_t report_memory(const std::string& name, int pid) {
-    const std::uint64_t rss = proc_kb(pid, "smaps_rollup", "Rss:");
-    const std::uint64_t pss = proc_kb(pid, "smaps_rollup", "Pss:");
-    const std::uint64_t hwm = proc_kb(pid, "status", "VmHWM:");
-    std::cout << "memory process=" << name << " rss_kb=" << rss
-              << " pss_kb=" << pss << " hwm_kb=" << hwm << "\n";
-    ::testing::Test::RecordProperty(name + "_pss_kb", std::to_string(pss));
-    ::testing::Test::RecordProperty(name + "_hwm_kb", std::to_string(hwm));
+// returns its proportional set size in kB; nothing if a figure is missing.
+std::optional<std::uint64_t> report_memory(const std::string& name, int pid) {
+    const std::optional<std::uint64_t> rss =
+        proc_kb(pid, "smaps_rollup", "Rss:");
+    const std::optional<std::uint64_t> pss =
+        proc_kb(pid, "smaps_rollup", "Pss:");
+    const std::optional<std::uint64_t> hwm = proc_kb(pid, "status", "VmHWM:");
+    if (!rss.has_value() || !pss.has_value() || !hwm.has_value()) {
+        return std::nullopt;
+    }
+    std::cout << "memory process=" << name << " rss_kb=" << *rss
+              << " pss_kb=" << *pss << " hwm_kb=" << *hwm << "\n";
+    ::testing::Test::RecordProperty(name + "_pss_kb", std::to_string(*pss));
+    ::testing::Test::RecordProperty(name + "_hwm_kb", std::to_string(*hwm));
     return pss;
 }
 
-// The bytes of every file under `directory`.
-std::uint64_t bytes_under(const std::filesystem::path& directory) {
+// The bytes of every file under `directory`; nothing, with a failed
+// expectation, if it cannot be walked.
+std::optional<std::uint64_t> bytes_under(
+    const std::filesystem::path& directory) {
     std::uint64_t bytes = 0;
     std::error_code error;
-    for (const auto& entry :
-         std::filesystem::recursive_directory_iterator(directory, error)) {
-        if (entry.is_regular_file(error)) {
-            bytes += entry.file_size(error);
+    std::filesystem::recursive_directory_iterator entries(directory, error);
+    for (; !error && entries != std::filesystem::recursive_directory_iterator();
+         entries.increment(error)) {
+        if (entries->is_regular_file(error)) {
+            bytes += entries->file_size(error);
         }
+    }
+    if (error) {
+        ADD_FAILURE() << "cannot measure " << directory << ": "
+                      << error.message();
+        return std::nullopt;
     }
     return bytes;
 }
 
-// The medians of the baseline file `path`: lines `<call> <median ns>`;
-// `#` starts a comment. Empty if there is no file.
+// The calls test 27 measures; a baseline may name only these.
+const std::array<std::string_view, 5> CALLS = {
+    "read", "read_many_500", "write", "write_many_500", "write_many_5000"};
+
+// The medians of the baseline `path`: lines `<call> <median ns>`, `#`
+// starts a comment, empty lines are skipped. Report only, with an empty
+// result, when the baseline directory holds no baseline at all (until part
+// three of issue #20 adds them). A failed expectation, so that gating
+// cannot switch itself off unseen, when the directory holds baselines but
+// none for this processor, or the file has a line that is not a known call
+// with a positive median.
 std::map<std::string, std::int64_t> read_baseline(const std::string& path) {
     std::map<std::string, std::int64_t> medians;
-    std::ifstream input(path);
+    const std::filesystem::path file(path);
+    std::error_code error;
+    if (!std::filesystem::exists(file, error)) {
+        bool others = false;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(file.parent_path(), error)) {
+            others = others || entry.path().extension() == ".txt";
+        }
+        EXPECT_FALSE(others) << "baselines in " << file.parent_path()
+                             << ", but none for this processor: " << path;
+        return medians;
+    }
+    std::ifstream input(file);
     std::string line;
     while (std::getline(input, line)) {
+        if (line.empty() || line.starts_with('#')) {
+            continue;
+        }
         std::istringstream fields(line);
         std::string call;
         std::int64_t median = 0;
-        if (line.starts_with('#') || !(fields >> call >> median)) {
-            continue;
+        std::string rest;
+        const bool parsed = static_cast<bool>(fields >> call >> median) &&
+                            !(fields >> rest) && median > 0 &&
+                            std::ranges::find(CALLS, call) != CALLS.end();
+        EXPECT_TRUE(parsed) << path << ": not '<call> <median ns>': " << line;
+        if (parsed) {
+            medians[call] = median;
         }
-        medians[call] = median;
     }
     return medians;
 }
@@ -383,29 +432,41 @@ private:
 // database, and expects both below their targets.
 void report_footprint(const RunningTagd& tagd, const ChildProcess& sim,
                       const std::filesystem::path& base) {
-    const std::uint64_t pss = report_memory("scada-tagd", tagd.child.pid()) +
-                              report_memory("scada-sim", sim.pid()) +
-                              report_memory("bench", ::getpid());
-    EXPECT_LT(pss, SANITY_MEMORY_BOUND_KB) << pss << " kB in all";
-    const std::uint64_t database = bytes_under(base);
-    std::cout << "database bytes=" << database << "\n";
-    ::testing::Test::RecordProperty("database_bytes", std::to_string(database));
-    EXPECT_LT(database, DATABASE_LIMIT_BYTES);
+    const std::optional<std::uint64_t> tagd_kb =
+        report_memory("scada-tagd", tagd.child.pid());
+    const std::optional<std::uint64_t> sim_kb =
+        report_memory("scada-sim", sim.pid());
+    const std::optional<std::uint64_t> bench_kb =
+        report_memory("bench", ::getpid());
+    if (tagd_kb.has_value() && sim_kb.has_value() && bench_kb.has_value()) {
+        const std::uint64_t pss = *tagd_kb + *sim_kb + *bench_kb;
+        EXPECT_LT(pss, SANITY_MEMORY_BOUND_KB) << pss << " kB in all";
+    }
+    const std::optional<std::uint64_t> database = bytes_under(base);
+    if (!database.has_value()) {
+        return;
+    }
+    std::cout << "database bytes=" << *database << "\n";
+    ::testing::Test::RecordProperty("database_bytes",
+                                    std::to_string(*database));
+    EXPECT_GT(*database, 0U);
+    EXPECT_LT(*database, DATABASE_LIMIT_BYTES);
 }
 
 TEST_F(Latency, Conformance27ReadAndWriteLatencyUnderTheReferenceLoad) {
     write_tag_set();
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
-        return;
+        FAIL() << "no tagd";
     }
     std::optional<ChildProcess> sim =
         start_sim(load_layout(), {"--rate", std::to_string(REFERENCE_RATE),
                                   "--rounds", std::to_string(LOAD_ROUNDS)});
-    // Measured only once the owner threads write.
-    if (!sim.has_value() || !prints(*sim, "writing\n")) {
-        return;
+    if (!sim.has_value()) {
+        FAIL() << "no sim";
     }
+    // Measured only once the owner threads write.
+    ASSERT_TRUE(prints(*sim, "writing\n"));
     const Attached bench(base(), BENCH);
     resolve(bench);
     report("clock", clock_floor());

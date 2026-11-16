@@ -136,13 +136,13 @@ TEST_F(WakeLatency, ABlockedConsumerWakesWithinOneMillisecond) {
     write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
-        return;
+        FAIL() << "no tagd";
     }
     std::optional<ChildProcess> writer =
         start_sim(layout, {"--rate", std::to_string(WRITE_RATE), "--rounds",
                            std::to_string(WRITES), "--notify", "each"});
     if (!writer.has_value()) {
-        return;
+        FAIL() << "no writer";
     }
     const Attached reader(base(), "reader");
     scada_sub* sub = nullptr;
@@ -224,13 +224,13 @@ TEST_F(WakeLatency, EightWaitingObserversEachWakeWithinOneMillisecond) {
     write_sim_tag_set(layout);
     std::optional<RunningTagd> tagd = ready_tagd();
     if (!tagd.has_value()) {
-        return;
+        FAIL() << "no tagd";
     }
     std::optional<ChildProcess> writer =
         start_sim(layout, {"--rate", std::to_string(WRITE_RATE), "--rounds",
                            std::to_string(WRITES), "--notify", "each"});
     if (!writer.has_value()) {
-        return;
+        FAIL() << "no writer";
     }
     {
         // Subscribed once the writer has its ring, as in the case above, so
