@@ -85,6 +85,11 @@ private:
     // One look at the queue without waiting.
     [[nodiscard]] Look poll(std::span<std::byte> out) noexcept;
 
+    // Waits on the queue's `write_seq` until `slice_end` (monotonic ns), or
+    // sleeps until then while it has no word (`waiter`). False if the wait
+    // failed. Not real-time.
+    [[nodiscard]] bool wait_slice(std::int64_t slice_end) const noexcept;
+
     Attachment& attachment_;
     std::size_t id_ = 0;
     bool producer_ = false;

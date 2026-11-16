@@ -2140,6 +2140,27 @@ TEST_F(Queues, TheDescriptorOfAWaitSetFindsAFirstFileCreatedAfterTheOpen) {
     EXPECT_TRUE(takes_events(*reader, 0, 1));
 }
 
+// The steps of `AWaitSetDoesNotReadAFileThatChangedSize`, in the child:
+// the number of the first step that failed, 0 if none.
+int steps_after_a_size_change(Attachment& process, Queue& reader) {
+    int step = 0;
+    WaitSet set(process);
+    if (++step; set.add_queue(reader) != SCADA_OK) {
+        return step;
+    }
+    if (++step; set.wait(0) != SCADA_OK) {
+        return step;  // without the fix: SIGBUS here
+    }
+    scada_event_record record{};
+    if (++step; next(reader, record, 0) != SCADA_E_LAYOUT) {
+        return step;
+    }
+    if (++step; set.wait(0) != SCADA_E_TIMEOUT) {
+        return step;
+    }
+    return 0;
+}
+
 // Review of PR #86 (B2): once a look found the file in use changed in
 // size, a wait set does not read it (SIGBUS) but reports the queue ready;
 // next then stops it, and the stopped queue is not ready again. In a
@@ -2158,25 +2179,7 @@ TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSize) {
     const pid_t child = ::fork();
     ASSERT_GE(child, 0);
     if (child == 0) {
-        const auto steps = [&]() -> int {
-            int step = 0;
-            WaitSet set(*web());
-            if (++step; set.add_queue(*reader) != SCADA_OK) {
-                return step;
-            }
-            if (++step; set.wait(0) != SCADA_OK) {
-                return step;
-            }
-            scada_event_record record{};
-            if (++step; next(*reader, record, 0) != SCADA_E_LAYOUT) {
-                return step;
-            }
-            if (++step; set.wait(0) != SCADA_E_TIMEOUT) {
-                return step;
-            }
-            return 0;
-        };
-        ::_exit(steps());
+        ::_exit(steps_after_a_size_change(*web(), *reader));
     }
     int status = 0;
     ASSERT_EQ(::waitpid(child, &status, 0), child);

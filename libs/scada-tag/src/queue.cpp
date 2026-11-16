@@ -290,18 +290,22 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
             continue;
         }
         switch_looked = false;
-        const std::optional<FutexWaiter> word = waiter();
-        if (!word.has_value()) {
-            // The producer has not created the queue yet, or the queue is
-            // stopped: wait a slice.
-            sleep_until(slice_end);
-            continue;
-        }
-        if (futex_wait(word->word, word->expected, slice_end) ==
-            FutexWait::FAILED) {
+        if (!wait_slice(slice_end)) {
             return SCADA_E_IO;
         }
     }
+}
+
+bool Queue::wait_slice(std::int64_t slice_end) const noexcept {
+    const std::optional<FutexWaiter> word = waiter();
+    if (!word.has_value()) {
+        // The producer has not created the queue yet, or the queue is
+        // stopped: wait a slice.
+        sleep_until(slice_end);
+        return true;
+    }
+    return futex_wait(word->word, word->expected, slice_end) !=
+           FutexWait::FAILED;
 }
 
 int Queue::ack() noexcept {
