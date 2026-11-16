@@ -189,6 +189,9 @@
         "include": {
           "label": "perf"
         }
+      },
+      "execution": {
+        "noTestsAction": "error"
       }
     },
     {

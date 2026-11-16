@@ -35,6 +35,7 @@ liveness (`scada-tagd`), and the simulator writer (`scada-sim`).
 | `.github/issues-seed/` | The phase 0 and phase 1 issues, ready to create. |
 | `scripts/create-issues.sh` | Creates those issues on GitHub. |
 | `scripts/measure-seqlock.sh` | Measures the read retry window and the rate of `SCADA_E_BUSY` on this machine (decision D-31). |
+| `scripts/run-ctest-test.sh` | Runs one CTest test directly, without its time limit, for the 10-minute runs (decision D-57). |
 | `docs/reports/` | Phase reports: the figures a phase is accepted on. |
 
 ## Building
@@ -117,7 +118,7 @@ commands above and nothing else:
 
 | Check | Runs | Machine |
 | --- | --- | --- |
-| `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree; the `root` tests of `dev` with sudo | x86-64 |
+| `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree; the `root` tests of `dev` with sudo, conformance test 26 of `release` with sudo; `perf`: the performance gate | x86-64 |
 | `build and test (ARM64)` | The same, built and run natively | ARM64 |
 | `check` | The `check` target | x86-64 |
 | `sanitizers (asan-ubsan)` | Build and tests of the `asan-ubsan` preset | x86-64 |
@@ -127,15 +128,17 @@ commands above and nothing else:
 
 A failing command fails its check: a compiler warning, a failing test, a
 finding of the `check` target, a sanitizer report or a fuzzing crash. Nothing
-is skipped or allowed to fail. Performance tests are not part of the pipeline
-(`docs/decisions.md`, D-13), with two exceptions on the `release` build of
-both `build and test` jobs: `scada-tag-wake-perf-test` prints the wake-up
-latency of a change ring consumer, without gating on it, because the ARM64
-runner is the only ARM64 machine of the project (D-32); and
-`scada-sim-rate-perf-test` checks on x86-64 that the simulator writer
-sustains 50,000 updates per second across 10 owners: every update of a
-10 s run written within 10.1 s, none more than 250 ms late; on ARM64 it
-prints the figures (D-41).
+is skipped or allowed to fail. The step "Perf gate (perf)" of both `build
+and test` jobs runs `ctest --preset perf` (decision D-57, which replaces the
+line of D-13 that kept performance tests out of the pipeline). It fails on a
+target of reference 15.2 or contract 16 on either architecture: the
+simulator rate of 50,000 updates per second (D-41), a wake-up 99th
+percentile below 1 ms (D-32), the scan of 5,000 tags below 0.5 ms, the
+database below 64 MB, all phase 1 processes below 1.5 GB, a queue post
+below 10 us per record; and on a median of conformance test 27 more than
+2.0 times its baseline in `tests/perf/baseline/<processor>.txt`, for the
+calls the baseline names. The runners are shared virtual machines: the
+tolerance catches a regression of a multiple, not of 10 %.
 
 - The staged install tree of the `release` build is kept for 14 days as the
   artifacts `stage-x86-64` and `stage-ARM64` of the run.
@@ -150,11 +153,16 @@ prints the figures (D-41).
   builds herd7 from source, at the version and commit listed in
   `third-party/dependencies.json`, and keeps the build in the Actions cache
   under that commit and the runner image.
-- The job `measurements` runs only when started by hand (`workflow_dispatch`)
-  and is not a check: on ARM64 with `isb` and with `yield`, and on x86-64, it
-  runs `scripts/measure-seqlock.sh` in the `perf` build for about 20 minutes
-  and keeps the output for 30 days as the artifacts `measurements-<arch>-<pause>`
-  (decision D-31).
+- The workflow `measurements` (`.github/workflows/measurements.yml`) is not
+  a check. Started by hand, on x86-64 and on ARM64 with `isb` and with
+  `yield`, and every Monday at 03:17 UTC on x86-64 and ARM64 with `isb`, it
+  runs in the `perf` build `scripts/measure-seqlock.sh`, conformance tests 2
+  and 26 for 600 s each, and every `perf` test, and keeps the output for 90
+  days as the artifacts `measurements-<arch>-<pause>` (decisions D-31,
+  D-57). Started by hand with `latency_spread`, it also runs conformance
+  test 27 on 10 fresh runners per architecture. The weekly run costs
+  Actions minutes; to stop it, delete its `schedule` or disable the
+  workflow on the Actions page.
 - `build and test (ARM64)` also checks, in `ctest --preset release`, that the
   ARM64 tag library compiles to the order of accesses the model check
   describes, and that edited copies of the sources, compiled with the
