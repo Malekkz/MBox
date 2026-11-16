@@ -1,8 +1,10 @@
 #include "scada/test/child_process.h"
 
+#include "exec.h"
+
 #include <fcntl.h>
-#include <spawn.h>
 #include <sys/poll.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -20,13 +22,16 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace scada::test {
 
 namespace {
 
 constexpr std::size_t READ_CHUNK_SIZE = 4096;
+
+// The exit code of a child that could not start its program, as a shell
+// gives it.
+constexpr int EXIT_NOT_STARTED = 127;
 
 struct Pipe {
     UniqueFd read_end;
@@ -52,29 +57,46 @@ bool set_non_blocking(const UniqueFd& descriptor) {
            ::fcntl(descriptor.get(), F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
-// Destroys the spawn file actions on every path out of start().
-class FileActions {
-public:
-    FileActions() : ok_(::posix_spawn_file_actions_init(&actions_) == 0) {}
-    ~FileActions() {
-        if (ok_) {
-            ::posix_spawn_file_actions_destroy(&actions_);
+// In the child, between fork and exec: only async-signal-safe calls.
+// Never returns. If the program could not be started, writes one byte to
+// `status` and exits with code 127.
+[[noreturn]] void become_command(const char* program, char* const* argv,
+                                 pid_t parent, int out, int err, int status) {
+    // The child gets SIGKILL when the test process ends, however it ends
+    // (decision D-48). The setting outlives exec. If the test process ended
+    // before it was set, the child has another parent by now and must not
+    // run at all.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,misc-include-cleaner): prctl has no other form; PR_SET_PDEATHSIG and SIGKILL are from <sys/prctl.h> and <csignal>, which the check does not map
+    if (::prctl(PR_SET_PDEATHSIG, static_cast<unsigned long>(SIGKILL)) == 0 &&
+        ::getppid() == parent) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+        const int input = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+        // dup2 clears close-on-exec on the copies.
+        if (input >= 0 && ::dup2(input, STDIN_FILENO) >= 0 &&
+            ::dup2(out, STDOUT_FILENO) >= 0 &&
+            ::dup2(err, STDERR_FILENO) >= 0) {
+            ::execve(program, argv, environ);
         }
     }
-    FileActions(const FileActions&) = delete;
-    FileActions& operator=(const FileActions&) = delete;
-    FileActions(FileActions&&) = delete;
-    FileActions& operator=(FileActions&&) = delete;
+    const char failed = 1;
+    // Nothing is left to do if the parent is gone; the result is kept only
+    // because the release build checks that it is used.
+    const ssize_t written = ::write(status, &failed, 1);
+    static_cast<void>(written);
+    ::_exit(EXIT_NOT_STARTED);
+}
 
-    [[nodiscard]] bool ok() const noexcept { return ok_; }
-    [[nodiscard]] posix_spawn_file_actions_t* get() noexcept {
-        return &actions_;
+// Reads from `descriptor` until a byte arrives or end of file. True if a
+// byte arrived.
+bool read_byte(const UniqueFd& descriptor) {
+    char byte = 0;
+    while (true) {
+        const ssize_t count = ::read(descriptor.get(), &byte, 1);
+        if (count >= 0 || errno != EINTR) {
+            return count == 1;
+        }
     }
-
-private:
-    posix_spawn_file_actions_t actions_{};
-    bool ok_;
-};
+}
 
 // Moves everything that can be read without blocking from `fd` to `sink`,
 // and closes `fd` at end of file.
@@ -121,48 +143,51 @@ std::optional<ChildProcess> ChildProcess::start(
     if (command.empty()) {
         return std::nullopt;
     }
+    const std::optional<std::string> program =
+        detail::find_program(command.front());
+    if (!program.has_value()) {
+        return std::nullopt;
+    }
 
     std::optional<Pipe> out_pipe = make_pipe();
     std::optional<Pipe> err_pipe = make_pipe();
-    if (!out_pipe || !err_pipe || !set_non_blocking(out_pipe->read_end) ||
+    // Closes on a successful exec; a byte in it means the child could not
+    // start the program.
+    std::optional<Pipe> status_pipe = make_pipe();
+    if (!out_pipe || !err_pipe || !status_pipe ||
+        !set_non_blocking(out_pipe->read_end) ||
         !set_non_blocking(err_pipe->read_end)) {
         return std::nullopt;
     }
 
-    FileActions actions;
-    if (!actions.ok() ||
-        ::posix_spawn_file_actions_addopen(actions.get(), STDIN_FILENO,
-                                           "/dev/null", O_RDONLY, 0) != 0 ||
-        ::posix_spawn_file_actions_adddup2(
-            actions.get(), out_pipe->write_end.get(), STDOUT_FILENO) != 0 ||
-        ::posix_spawn_file_actions_adddup2(
-            actions.get(), err_pipe->write_end.get(), STDERR_FILENO) != 0) {
-        return std::nullopt;
-    }
-
-    // posix_spawn wants writable, null-terminated strings.
-    std::vector<std::string> arguments(command.begin(), command.end());
-    std::vector<char*> argv;
-    argv.reserve(arguments.size() + 1);
-    for (std::string& argument : arguments) {
-        argv.push_back(argument.data());
-    }
-    argv.push_back(nullptr);
-
+    // Not posix_spawn: the child has to set its parent-death signal between
+    // fork and exec, which posix_spawn offers no way to do.
+    const detail::ArgumentVector arguments(command);
     // NOLINTNEXTLINE(misc-include-cleaner): from <sys/types.h>, which the check does not map
-    pid_t pid = -1;
-    if (::posix_spawnp(&pid, argv.front(), actions.get(), nullptr, argv.data(),
-                       environ) != 0) {
+    const pid_t parent = ::getpid();
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/types.h>, which the check does not map
+    const pid_t pid = ::fork();
+    if (pid < 0) {
         return std::nullopt;
     }
+    if (pid == 0) {
+        become_command(program->c_str(), arguments.get(), parent,
+                       out_pipe->write_end.get(), err_pipe->write_end.get(),
+                       status_pipe->write_end.get());
+    }
 
+    // From here on a failure destroys `child`, which kills and reaps the
+    // process.
     ChildProcess child;
     child.pid_ = pid;
     child.out_fd_ = std::move(out_pipe->read_end);
     child.err_fd_ = std::move(err_pipe->read_end);
+    status_pipe->write_end.reset();
+    if (read_byte(status_pipe->read_end)) {
+        return std::nullopt;
+    }
     // Called through syscall() because the C library wrapper is newer than
-    // some of the toolchains this builds with. On failure `child` is
-    // destroyed here, which kills and reaps the process.
+    // some of the toolchains this builds with.
     const auto pidfd =
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): syscall has no other form
         ::syscall(SYS_pidfd_open, pid, 0U);
@@ -304,6 +329,22 @@ std::optional<int> ChildProcess::wait_for_signal_exit(
     }
     // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
     return WTERMSIG(status);
+}
+
+std::optional<ChildEnding> ChildProcess::wait_for_ending(
+    std::chrono::milliseconds timeout) {
+    const std::optional<int> ended = wait_for_end(timeout);
+    if (!ended.has_value()) {
+        return std::nullopt;
+    }
+    const int status = *ended;
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    if (WIFEXITED(status)) {
+        // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+        return ChildEnding{.by_signal = false, .number = WEXITSTATUS(status)};
+    }
+    // NOLINTNEXTLINE(misc-include-cleaner): from <sys/wait.h>, which the check does not map
+    return ChildEnding{.by_signal = true, .number = WTERMSIG(status)};
 }
 
 bool ChildProcess::send_signal(int signal_number) noexcept {
