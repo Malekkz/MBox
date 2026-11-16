@@ -11,7 +11,8 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `<component>/fuzz/` | Fuzz targets of one library, seed corpus in `corpus/<target>/` | `fuzz`, `unit` |
 | `tests/integration/` | Tests that start real processes | `integration` |
 | `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
-| `tests/perf/` | Performance tests against stated budgets | `perf` |
+| `tests/perf/` | Performance tests against stated budgets; the baseline medians of the gate in `baseline/` | `perf` |
+| `tests/conformance.md` | Where each conformance test of the tag database contract is automated; checked by `scada-conformance-index` | `unit` |
 | `tests/model/` | Model check of the sequence lock and the change ring for the Armv8 memory model, and the check that the ARM64 code matches it | `model`, `unit` |
 | `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process, a temporary directory a killed test does not leave behind, the processors a thread runs on) and its cleaner `scada-test-cleaner`, and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
@@ -96,6 +97,23 @@ criterion for `SCADA_E_BUSY` gates only in a Release or RelWithDebInfo
 build without a sanitizer (`SCADA_TAG_BUSY_GATE=1`, set by CMake); the dev
 build prints the rate (decision D-57). It runs 10 s, or
 `SCADA_CONFORMANCE_SECONDS`.
+
+### Performance gate
+
+`ctest --preset perf` is the gate of the pipeline (decision D-57). A
+performance test fails on a target, on every architecture; the pipeline
+runs it in the step "Perf gate (perf)". `scada-tag-latency-perf-test`
+(conformance test 27) also compares the median of each call with
+`baseline/<processor>.txt` (lines `<call> <median ns>`, as the test prints
+the calls) and fails above `SCADA_PERF_TOLERANCE` times it (2.0). A call the
+baseline does not name is reported only. Change a baseline only in a pull
+request that says why, with the figures of the runs it comes from.
+
+A conformance test of the contract (section 15) is listed in
+`conformance.md` with the tests that automate it. The unit test
+`scada-conformance-index` fails if a test of section 15 has none, if a test
+named there does not exist, or if a test named `Conformance<NN>...` is not in
+row NN.
 
 Fuzz target: a source file that defines `LLVMFuzzerTestOneInput`, with at
 least one seed input in `corpus/<name>/` next to it. Copy the entry point

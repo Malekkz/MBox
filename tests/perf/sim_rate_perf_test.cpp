@@ -6,13 +6,12 @@
 //
 // The simulator is paced and never writes ahead: if it keeps up, a run of
 // ROUNDS writes of every tag takes ROUNDS seconds, plus the 1 ms tick of
-// its last write. On x86-64, the machine of the acceptance of issue #18, a
-// run passes if every update was written, it took at most ROUNDS seconds
-// plus ELAPSED_MARGIN, and no update was more than BEHIND_LIMIT late; and
-// one process writing as fast as it can must reach the reference rate. On
-// ARM64, and with SCADA_PERF_REPORT_ONLY=1 in the environment, the figures
-// are only printed; the count of updates is checked everywhere
-// (decision D-41).
+// its last write. A run passes if every update was written, it took at
+// most ROUNDS seconds plus ELAPSED_MARGIN, and no update was more than
+// BEHIND_LIMIT late; and one process writing as fast as it can must reach
+// the reference rate. These hold on x86-64 and ARM64 (decisions D-41,
+// D-57). With SCADA_PERF_REPORT_ONLY=1 in the environment the figures are
+// only printed; the count of updates is checked always.
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
@@ -47,24 +46,19 @@ constexpr std::uint64_t TAGS = 50'000;
 // Every tag once a second: a run of ROUNDS seconds.
 constexpr std::uint64_t ROUNDS = 10;
 constexpr std::uint64_t MILLISECONDS_PER_SECOND = 1000;
-// The limits of a paced run on x86-64.
+// The limits of a paced run, set for the rate of reference 15.2 (50,000
+// updates per second) in decision D-41.
 constexpr std::uint64_t ELAPSED_MARGIN_MS = 100;
 constexpr std::uint64_t BEHIND_LIMIT_MS = 250;
 // Writes of every tag at the maximum rate.
 constexpr std::uint64_t FAST_ROUNDS = 40;
 
-#if defined(__x86_64__)
-constexpr bool IS_X86_64 = true;
-#else
-constexpr bool IS_X86_64 = false;
-#endif
-
-// True if the figures are only reported: not on x86-64, or
-// SCADA_PERF_REPORT_ONLY is 1.
+// True if the figures are only reported: SCADA_PERF_REPORT_ONLY is 1. The
+// limits hold on x86-64 and ARM64 (decision D-57).
 bool report_only() {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
     const char* const text = std::getenv("SCADA_PERF_REPORT_ONLY");
-    return !IS_X86_64 || (text != nullptr && std::string_view(text) == "1");
+    return text != nullptr && std::string_view(text) == "1";
 }
 
 // The number after `key` in `text`, or nothing.
@@ -190,7 +184,7 @@ TEST_F(SimRate, TenProcessesSustainTheReferenceRate) {
 }
 
 // The maximum rate of one process with 10 owner threads: at least the
-// reference rate on x86-64.
+// reference rate.
 TEST_F(SimRate, MaximumRateOfOneProcess) {
     const Layout layout = reference(1);
     write_sim_tag_set(layout);

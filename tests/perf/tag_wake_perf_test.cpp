@@ -3,7 +3,7 @@
 // calls scada_tag_notify; this process is blocked in scada_sub_next and
 // measures, for each change, the time from the write (`update_mono_ns`,
 // CLOCK_MONOTONIC of the same machine) to its return. Acceptance: the
-// 99th percentile is below 1 ms on x86-64; on ARM64 it is reported.
+// 99th percentile is below 1 ms, on x86-64 and ARM64 (decision D-57).
 //
 // With SCADA_PERF_REPORT_ONLY=1 in the environment it only prints the
 // figures: the pipeline runs it so on shared runners, whose timing is not
@@ -47,14 +47,11 @@ constexpr std::uint64_t WRITES = 3000;
 constexpr std::size_t SAMPLES = 2500;
 constexpr int WAIT_MS = 5000;
 constexpr std::int64_t NANOSECONDS_PER_MICROSECOND = 1000;
+// The target of issue P1-07 (decision D-32) for a consumer that keeps up:
+// it receives within one producer cycle (contract section 15, test 24).
 constexpr std::int64_t P99_LIMIT_NS = 1'000'000;
 constexpr std::size_t PERCENT = 100;
 constexpr std::size_t P99 = 99;
-#if defined(__x86_64__)
-constexpr bool IS_X86_64 = true;
-#else
-constexpr bool IS_X86_64 = false;
-#endif
 
 std::int64_t monotonic_now_ns() {
     timespec now{};
@@ -113,11 +110,10 @@ std::int64_t report(std::span<const std::int64_t> latencies) {
     return p99;
 }
 
-// The 99th percentile `p99` is below 1 ms. Checked on x86-64 only: the
-// issue asks for the figure of ARM64, not a limit; and not with
-// SCADA_PERF_REPORT_ONLY.
+// The 99th percentile `p99` is below 1 ms, on every architecture (decision
+// D-57); not checked with SCADA_PERF_REPORT_ONLY.
 ::testing::AssertionResult meets_target(std::int64_t p99) {
-    if (!IS_X86_64 || report_only() || p99 < P99_LIMIT_NS) {
+    if (report_only() || p99 < P99_LIMIT_NS) {
         return ::testing::AssertionSuccess();
     }
     return ::testing::AssertionFailure()

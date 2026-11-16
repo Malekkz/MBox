@@ -7,9 +7,9 @@
 // other producer reads the cursor beside it. Four threads pass one million
 // records each way and the test reports the time per record.
 //
-// The gate is loose (10 microseconds per record on x86-64); the figures
-// before and after the mark are compared in the pull request. With
-// SCADA_PERF_REPORT_ONLY=1 it only prints them (decisions D-13, D-32).
+// The gate is loose (10 microseconds per record, on x86-64 and ARM64,
+// decision D-57); the figures before and after the mark are compared in the
+// pull request. With SCADA_PERF_REPORT_ONLY=1 it only prints them.
 
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
@@ -40,15 +40,12 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::uint64_t RECORDS = 1'000'000;
 constexpr std::uint32_t CAPACITY = 1024;
+// A loose regression bound set in decision D-49 (condition C9), not a
+// requirement of the reference or the contract.
 constexpr double LIMIT_NS_PER_RECORD = 10'000.0;
 // Every loop gives up after this, so that a failure cannot hang the test.
 constexpr std::chrono::seconds DEADLINE{60};
 constexpr std::chrono::milliseconds BEAT_PERIOD{100};
-#if defined(__x86_64__)
-constexpr bool IS_X86_64 = true;
-#else
-constexpr bool IS_X86_64 = false;
-#endif
 
 bool report_only() {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing changes the environment while the tests run
@@ -207,7 +204,7 @@ TEST_F(QueuePostPerf, TwoWaysWithTheMarkBesideTheCursor) {
     std::cout << "queue post, two ways, mark beside the cursor: " << per_record
               << " ns per record\n";
     RecordProperty("ns_per_record", std::to_string(per_record));
-    EXPECT_TRUE(!IS_X86_64 || report_only() || per_record < LIMIT_NS_PER_RECORD)
+    EXPECT_TRUE(report_only() || per_record < LIMIT_NS_PER_RECORD)
         << per_record << " ns per record";
     for (scada_queue* queue : {a_out, a_in, b_out, b_in}) {
         scada_queue_close(queue);
