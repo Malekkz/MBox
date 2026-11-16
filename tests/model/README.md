@@ -4,7 +4,7 @@ Conformance test 4 of the tag database contract: the sequence lock
 (sections 6.1, 6.2 and 7), the change ring (sections 8.1 and 8.2), the
 repair after an owner restart (section 6.3) and the handshake of a post
 with a RETIRING generation (section 9.5) checked against the Armv8 memory
-model. Decisions: `docs/decisions.md`, D-37, D-39 and D-54.
+model. Decisions: `docs/decisions.md`, D-37, D-39, D-54 and D-55.
 
 x86-64 hides ordering mistakes, the ThreadSanitizer build leaves the fences
 out, and the tests with derived values only sample. This directory checks
@@ -50,8 +50,9 @@ the order of the accesses in two parts:
    - a read attempt: the acquire load, the copy, `DMB ISHLD`, then a first
      load of the address of the acquire load (the second load), and no
      load of shared memory after that; an attempt that loads any shared
-     memory without reaching the fence fails, and loads of the caller's
-     own memory (the cursor) may come anywhere;
+     memory without reaching the fence fails, so does a load of shared
+     memory before the first acquire load (hoisted above the retry loop),
+     and loads of the caller's own memory (the cursor) may come anywhere;
    - the repair: at least two stores (quality and flags) before each
      release store, no store after the last, no fence.
 
@@ -64,8 +65,9 @@ the order of the accesses in two parts:
    `x29` or a copy of either, are left out. A minimum count of loads or
    stores of shared memory stands for the copy, since compilers do not
    merge atomic accesses. Calls of helpers the compiler did not inline
-   (GCC 13 at -O2 inlines few of them) and jumps into a part GCC split off
-   (`[clone .cold]`) are followed; a path that ends in `panic`, a failed
+   (GCC 13 at -O2 inlines few of them) are followed; a jump into a part
+   GCC split off (`[clone .cold]`) and back continues the same walk, with
+   the same count of branches taken; a path that ends in `panic`, a failed
    library assertion or the stack protector is left out, since it
    publishes nothing. Each branch is taken at most twice (once in the
    repair, a loop over all records), so a retry loop runs once or twice.
@@ -81,16 +83,21 @@ the order of the accesses in two parts:
    it follows) with no store after the `STLR`. When it fails it prints the disassembly of the functions
    concerned.
 
-   `code_shape_mutants.py` compiles 28 edited copies of the five sources
+   `code_shape_mutants.py` compiles 31 edited copies of the five sources
    with the commands of the build (`compile_commands.json`), so with its
    compiler and flags, and expects the check to reject each: each fence
    dropped or moved, each acquire or release access made relaxed, a second
-   load of another field, a load after the second load, a store after the
-   end of a write or of the repair, a fence in the repair; and each access
-   of the handshake made relaxed, the post's second load left out or moved
-   before the store. Only a finding
+   load of another field, a load before the acquire load or after the
+   second load, a store after the end of a write or of the repair, a fence
+   in the repair; and each access of the handshake made relaxed, the post's
+   second load left out or moved before the store. Only a finding
    about the order counts, not a function the check cannot find or walk.
-   It also compiles each source unchanged and expects it to pass.
+   It also compiles each source unchanged and expects it to pass. The
+   options it adds go at the end of the command, so a compiler launcher
+   (`ccache`) stays first, and it drops the options that would write the
+   build's object or dependency file (`-o`, `-MD`, `-MMD`, `-MF`, `-MT`,
+   `-MQ`, `-MP`). It runs at most 4 compilations at a time (`--jobs`,
+   test property `PROCESSORS 4`).
 
 Known limits (D-37, D-39):
 
@@ -102,7 +109,9 @@ Known limits (D-37, D-39):
   `change_ring.cpp` and `attachment.cpp` against the contract, as the
   comments there ask.
 - A stronger ordering fails part 2 too (an acquire second load, `DMB ISH`
-  in a reader): change the litmus tests and the check with it.
+  in a reader, a fence in the repair): it is safe, but it is no longer the
+  code the litmus tests model, so change the litmus tests and the check
+  with it (D-55). The self-test holds this.
 - The model is bounded: two writes against one read attempt, three appends
   against one read, one repair against one read.
 - The store of the ring's `epoch` at reattach (`src/attachment.cpp`) is in
@@ -123,7 +132,7 @@ Known limits (D-37, D-39):
 | `scada-model-check` | `model` | herd7 is found (`SCADA_HERD7`); only `ctest --preset model` runs it |
 | `scada-model-code-shape-test` | `unit` | ARM64 build of type `Release`, `RelWithDebInfo` or `MinSizeRel` without a sanitizer (`release`, `perf`, `release-arm64`) |
 | `scada-model-code-shape-mutants-test` | `unit` | as `scada-model-code-shape-test` |
-| `scada-model-code-shape-self-test` | `unit` | always: `code_shape.py` on a disassembly of Clang 18 output, as compiled and with each ordering edited out, and on short pieces in the shapes GCC gives |
+| `scada-model-code-shape-self-test` | `unit` | always: `code_shape.py` on a disassembly of Clang 18 output, as compiled and with each ordering edited out, on GCC 13.3 output with a `[clone .cold]` part, and on short pieces in the shapes GCC gives; the command `code_shape_mutants.py` builds |
 
 The pipeline job `model check` configures `dev` with
 `-DSCADA_REQUIRE_HERD7=ON`, which stops if herd7 is missing, and runs
@@ -150,8 +159,10 @@ commit listed in `third-party/dependencies.json`. It needs OCaml 4.08 or
 newer, dune, menhir and zarith. `opam install herdtools7` installs it;
 `.github/actions/setup-build-machine/action.yml` (input `herd7`) builds it
 from the tag instead, with the OCaml packages of the runner, checks the
-commit, and keeps the build in the Actions cache under the commit and the
-runner image. herd7 only runs on the build machine; nothing of it is
+commit, and keeps the build in the Actions cache under the commit, the
+runner image and a hash of `action.yml`, which holds the recipe. Built or
+restored, the binary must report the version and commit of the list
+(`herd7 -version`: `7.58, Rev: <commit>`). herd7 only runs on the build machine; nothing of it is
 linked or shipped.
 
 ## Changing the protocol
@@ -165,3 +176,10 @@ no longer in the source (the test says so). The fixture is the output of
 Clang 18 for `aarch64-linux-gnu` with `-std=c++20 -O2 -DNDEBUG
 -mbranch-protection=standard` and the include directories of the tag
 library, cut to the seven functions and the helpers they call.
+
+`fixtures/gcc13-aarch64-O2-cold.txt` is the output of `objdump -d -r -C
+--no-show-raw-insn` (GNU binutils 2.42) for `fixtures/gcc13-cold.cpp`
+compiled by GCC 13.3 (`aarch64-linux-gnu-g++ -std=c++20 -O2
+-freorder-blocks-and-partition -mbranch-protection=standard -c`). It is not
+the library: GCC 13.3 does not split the protocol functions, and this read
+attempt of the same shape gives a real split-off part.

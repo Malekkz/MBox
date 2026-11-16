@@ -18,6 +18,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import code_shape  # noqa: E402  (after the path is set)
+import code_shape_mutants  # noqa: E402
 
 FIXTURE = HERE / "fixtures" / "clang18-aarch64-O2.txt"
 
@@ -156,6 +157,38 @@ def release_store_to(operand):
     return change
 
 
+def at_entry(line):
+    """Inserts `line` after the first instruction of the function."""
+    def change(lines):
+        index = next(i for i, l in enumerate(lines)
+                     if code_shape.INSTRUCTION.match(l))
+        lines.insert(index + 1, line)
+        return lines
+    return change
+
+
+def second_load_acquire(lines):
+    """Makes the first load after DMB ISHLD an acquire load (LDAR)."""
+    fence = next(i for i, l in enumerate(lines)
+                 if is_instruction(l, "dmb", "ishld"))
+    index = next(i for i in range(fence + 1, len(lines))
+                 if code_shape.INSTRUCTION.match(lines[i]) and
+                 code_shape.INSTRUCTION.match(lines[i]).group(
+                     2).startswith("ldr"))
+    lines[index] = re.sub(r"\tldr\t(.*), \[([^\]]*)\]$", r"\tldar\t\1, [\2]",
+                          lines[index])
+    assert "ldar" in lines[index], lines[index]
+    return lines
+
+
+def rename_operand(old, new):
+    def change(lines):
+        result = [re.sub(rf"\t{old}$", f"\t{new}", l) for l in lines]
+        assert result != lines
+        return result
+    return change
+
+
 class CodeShapeTest(unittest.TestCase):
 
     def setUp(self):
@@ -279,6 +312,36 @@ class CodeShapeTest(unittest.TestCase):
         self.assert_caught("read_string_record", insert_after(
             "17c:", "     17e:      \tldrh\tw9, [x1]"))
 
+    def test_a_reader_with_a_shared_load_before_the_acquire_load_fails(self):
+        # Issue #63: a load hoisted above the retry loop is outside every
+        # attempt, also where it is the first load of a new field.
+        for function, operand in (("read_record", "[x0, #0x8]"),
+                                  ("read_string_record", "[x1]"),
+                                  ("read_change", "[x0, #0x40]")):
+            with self.subTest(function):
+                failures = code_shape.check(edit(
+                    self.text, function,
+                    at_entry(f"       2:      \tldr\tx9, {operand}")))
+                self.assertTrue(any(
+                    f.startswith(f"scada::tag::{function}(") and
+                    "before the acquire load" in f for f in failures),
+                    failures)
+
+    def test_a_reader_may_load_the_cursor_before_the_acquire_load(self):
+        text = edit(self.text, "read_change",
+                    at_entry("       2:      \tldr\tx9, [x3]"))
+        self.assertEqual(code_shape.check(text), [])
+
+    def test_a_stronger_ordering_in_a_reader_fails(self):
+        # Issue #63, kept as D-37 has it: an acquire second load or DMB ISH
+        # for fence_acquire is safe, but it is not the code the litmus tests
+        # model, so it fails until the tests and the check change with it.
+        for function in READERS:
+            with self.subTest(function, change="acquire second load"):
+                self.assert_caught(function, second_load_acquire)
+            with self.subTest(function, change="DMB ISH"):
+                self.assert_caught(function, rename_operand("ishld", "ish"))
+
     def test_a_writer_whose_release_store_misses_the_sequence_fails(self):
         for function in ("write_record", "write_string_record"):
             with self.subTest(function):
@@ -384,6 +447,48 @@ class GccColdTest(unittest.TestCase):
             "int)>\n\t\t\t8: R_AARCH64_JUMP26\t.text+0x28\n")
         (failure,) = code_shape.check(text, checks=WRITE_RECORD_ONLY)
         self.assertIn("fewer than 6 stores", failure)
+
+
+COLD_FIXTURE = HERE / "fixtures" / "gcc13-aarch64-O2-cold.txt"
+READ_PAIR = (("scada::model_fixture::read_pair(", "reader", {0}, 2),)
+
+
+class GccColdFixtureTest(unittest.TestCase):
+    """Issue #63: a part GCC 13.3 really split off, from
+    fixtures/gcc13-cold.cpp: a jump to `.text.unlikely+0x8`, a call of a
+    function of that section, and a jump back to `.text+0x4c`."""
+
+    def setUp(self):
+        self.text = COLD_FIXTURE.read_text(encoding="utf-8")
+
+    def test_the_fixture_as_compiled_has_the_shape(self):
+        self.assertEqual(code_shape.check(self.text, checks=READ_PAIR), [])
+
+    def test_the_cold_part_is_one_definition_with_its_function(self):
+        program = code_shape.Program(self.text)
+        self.assertEqual(len(program.find(READ_PAIR[0][0])), 2)
+        self.assertEqual(len([f for f in program.find(READ_PAIR[0][0])
+                              if "[clone" not in f.name]), 1)
+
+    def test_a_load_in_the_cold_part_is_checked_with_the_registers(self):
+        # x19 holds the record in the cold part too: a load of it there,
+        # before the attempt that went there retries, is a load without the
+        # fence.
+        text = self.text.replace(
+            "  14:\tldp\tx1, x2, [sp, #48]\n",
+            "  14:\tldp\tx1, x2, [sp, #48]\n  16:\tldr\tx9, [x19, #8]\n")
+        self.assertNotEqual(text, self.text)
+        (failure,) = code_shape.check(text, checks=READ_PAIR)
+        self.assertIn("ends without DMB ISHLD", failure)
+
+    def test_a_cold_part_that_jumps_past_the_check_fails(self):
+        # Back to the second load's comparison instead of the retry: the
+        # attempt reads its second load without the copy before the fence.
+        text = self.text.replace("R_AARCH64_JUMP26\t.text+0x4c",
+                                 "R_AARCH64_JUMP26\t.text+0x3c")
+        self.assertNotEqual(text, self.text)
+        (failure,) = code_shape.check(text, checks=READ_PAIR)
+        self.assertIn("fewer than 2 loads", failure)
 
 
 class FrameTest(unittest.TestCase):
@@ -498,6 +603,38 @@ class HandshakeTest(unittest.TestCase):
             "  64:\tadd\tx1, x1, #0x48\n  68:\tstlr\tx2, [x1]\n"
             "  6c:\tret\n")
         self.assertEqual(self.rejected(text), {"publish_write_seq"})
+
+
+class MutantCommandTest(unittest.TestCase):
+    """The command that compiles an edited source (issue #63)."""
+
+    SOURCE = pathlib.Path("/src/libs/scada-tag/src/tag_record.cpp")
+
+    def command(self, arguments):
+        return code_shape_mutants.mutant_command(
+            arguments, self.SOURCE, pathlib.Path("/tmp/w/tag_record.cpp"),
+            pathlib.Path("/tmp/w/tag_record.o"))
+
+    def test_a_compiler_launcher_stays_first(self):
+        command = self.command(["ccache", "g++", "-O2", "-o", "x.o", "-c",
+                                str(self.SOURCE)])
+        self.assertEqual(command[:3], ["ccache", "g++", "-O2"])
+        self.assertEqual(command[3:], [
+            "-iquote", "/src/libs/scada-tag/src", "-Wno-error",
+            "-o", "/tmp/w/tag_record.o", "-c", "/tmp/w/tag_record.cpp"])
+
+    def test_no_file_of_the_build_is_written(self):
+        command = self.command([
+            "g++", "-MD", "-MT", "obj.o", "-MF", "obj.o.d", "-MMD", "-MP",
+            "-MQ", "q", "-MFjoined.d", "-O2", "-o", "obj.o", "-c",
+            str(self.SOURCE)])
+        self.assertEqual(command[:2], ["g++", "-O2"])
+        for flag in ("-MD", "-MMD", "-MP", "-MT", "-MF", "-MQ", "obj.o",
+                     "obj.o.d", "q", "-MFjoined.d", str(self.SOURCE)):
+            self.assertNotIn(flag, command)
+        self.assertEqual(command.count("-o"), 1)
+        self.assertEqual(command.count("-c"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

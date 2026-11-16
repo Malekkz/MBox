@@ -62,6 +62,15 @@ DRAIN_LOAD = """\
     return load_shared(queue_header(region).write_seq,
                        std::memory_order_seq_cst);
 """
+# The start of the retry loop of both record reads (issue #63: a load
+# hoisted above it).
+READ_LOOP = """\
+    for (int attempt = 0; attempt < READ_ATTEMPTS; ++attempt) {
+        // Acquire: pairs with the release store that ends a write.
+"""
+READ_CHANGE_START = """\
+    ChangeRingHeader& header = ring_header(region);
+"""
 REPAIR_END = \
     "store_shared(record.seq, seq + 1, std::memory_order_release);"
 
@@ -98,6 +107,13 @@ MUTANTS = (
     ("read_string_record with a relaxed first load", "tag_record.cpp",
      FIRST_LOAD, "load_shared(record.seq, RELAXED)", 1,
      ("read_string_record",)),
+    ("read_record with a load before the acquire load", "tag_record.cpp",
+     READ_LOOP, "    out.change_count = load_shared(record.change_count, "
+     "RELAXED);\n" + READ_LOOP, 0, ("read_record",)),
+    ("read_string_record with a slot load before the acquire load",
+     "tag_record.cpp", READ_LOOP,
+     "    text.len = load_shared(slot.len, RELAXED);\n" + READ_LOOP, 1,
+     ("read_string_record",)),
     ("read_record with a load after the second load", "tag_record.cpp",
      "            out = copy;\n            return true;",
      "            copy.change_count = load_shared(record.change_count, "
@@ -131,6 +147,11 @@ MUTANTS = (
     ("read_change whose second load loads the epoch", "change_ring.cpp",
      "const std::uint64_t second = load_shared(header.write_seq, RELAXED);",
      "const std::uint64_t second = load_shared(header.epoch, RELAXED);", 0,
+     ("read_change",)),
+    ("read_change with a load of the region before the acquire load",
+     "change_ring.cpp", READ_CHANGE_START,
+     READ_CHANGE_START + "    out.handle = load_shared("
+     "entry_at(region, cursor, capacity).handle, RELAXED);\n", 1,
      ("read_change",)),
     ("read_change with a load of the region after the second load",
      "change_ring.cpp", "    out = copy;\n",
@@ -203,29 +224,48 @@ def compile_commands(path):
     return found
 
 
-def build(commands, name, text, work):
-    """Compiles `text` as the source `name` and returns the object."""
-    directory, arguments, source, _ = commands[name]
-    copy = pathlib.Path(work) / name
-    copy.write_text(text, encoding="utf-8")
-    obj = copy.with_suffix(".o")
+# Options that name a file of the build: the object, and the dependency file
+# a generator may ask for (issue #63). The edited copy must not write either.
+WITH_FILE = ("-o", "-MF", "-MT", "-MQ")
+DEPENDENCY = ("-MD", "-MMD", "-MP")
+
+
+def mutant_command(arguments, source, copy, obj):
+    """The build's command for `source`, changed to compile `copy` to `obj`
+    and to write nothing else.
+
+    The new options go at the end, so a compiler launcher in front of the
+    compiler (`ccache g++ ...`) stays where it is. `-iquote` of the source
+    directory comes after the copy's own directory for quoted includes, as
+    for the source itself, and before any `-I` directory, wherever it is on
+    the line. An edit may leave a variable unused; that is not what the test
+    is about, so `-Wno-error`."""
     command = []
     skip = False
     for argument in arguments:
         if skip:
             skip = False
             continue
-        if argument == "-o":
+        if argument in WITH_FILE:
             skip = True
+            continue
+        if argument.startswith(WITH_FILE) or argument in DEPENDENCY or \
+                argument == "-c":
             continue
         if pathlib.Path(argument) == source or argument == str(source):
             continue
         command.append(argument)
-    # The copy is elsewhere: its own directory stays first for its quoted
-    # includes. An edit may leave a variable unused; that is not what the
-    # test is about.
-    command[1:1] = ["-iquote", str(source.parent)]
-    command += ["-Wno-error", "-o", str(obj), "-c", str(copy)]
+    return command + ["-iquote", str(source.parent), "-Wno-error",
+                      "-o", str(obj), "-c", str(copy)]
+
+
+def build(commands, name, text, work):
+    """Compiles `text` as the source `name` and returns the object."""
+    directory, arguments, source, _ = commands[name]
+    copy = pathlib.Path(work) / name
+    copy.write_text(text, encoding="utf-8")
+    obj = copy.with_suffix(".o")
+    command = mutant_command(arguments, source, copy, obj)
     result = subprocess.run(command, cwd=directory, capture_output=True,
                             text=True, check=False)
     if result.returncode != 0:
@@ -265,6 +305,10 @@ def main():
     parser.add_argument("--objdump", required=True, help="path of objdump")
     parser.add_argument("--compile-commands", required=True,
                         help="compile_commands.json of the build")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                        help="most compilations at a time, at most the "
+                        "number of processors (the test's PROCESSORS "
+                        "property)")
     args = parser.parse_args()
     try:
         commands = compile_commands(args.compile_commands)
@@ -286,7 +330,7 @@ def main():
 
     failures = 0
     with concurrent.futures.ThreadPoolExecutor(
-            max_workers=os.cpu_count() or 1) as pool:
+            max_workers=max(1, min(args.jobs, os.cpu_count() or 1))) as pool:
         futures = [pool.submit(run, commands, args.objdump, file, text,
                                expected)
                    for _, file, text, expected in jobs]
