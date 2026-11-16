@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.19 (draft) |
+| Contract version | 0.23 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -658,6 +658,13 @@ write_seq.store(w + 1, release)
 "Down" here uses the test of section 10.1, which the producer evaluates itself
 from the consumer's heartbeat; it does not wait for `scada-tagd`.
 
+A producer that attached before its consumer finds the consumer's region
+missing and gets `SCADA_E_PEER_DOWN` until its next look at that region,
+at most once a second (11.2), even after the consumer has attached: a
+refusal, never a loss; nothing was put in the queue. A requester that
+consumes the answer queue of its driver also sees the driver once a look
+maps that queue's file (section 9.2, D-61).
+
 The producer also keeps a high-water mark `H`, the position after the last
 id it gave, in the cursor slot of the queue in its own `proc` region (the
 slot of a queue a process produces is no cursor; section 10). It stores
@@ -737,6 +744,16 @@ A command is never executed twice and never executed late:
   answer queue in a header the tag-set builder did not make) it is dropped
   and counted; the requester sees the request
   expire. `scada_queue_next` never blocks or fails on the answer queue.
+- A process that can see a record of a queue can also see the region of
+  the process at its other end, unless that process is down (D-61). A
+  look that maps a file of a queue the process consumes, its first file or
+  one created anew, looks at the producer's `proc` region in the same
+  look, outside every real-time function; attach creates that region
+  before the queue file (11.2, step 3). So "requester down" above means
+  down by section 10.1 (stopped, crashed, its heartbeat stale), never a
+  region the consumer has not looked for yet. A driver's own post of an
+  answer is judged the same way (section 9.1). When the requester really
+  is down, the answer is refused or dropped and counted, as above.
 
 A record is outside input to the consumer. One that fails the checks of
 section 9.4 is passed over with `SCADA_E_LAYOUT`; a request passed over,
@@ -1165,12 +1182,15 @@ for readers and never down for a check. `starts` counts it:
 1. Check the base directory (section 3.1). Open `current/header`. Fail with
    `SCADA_E_LAYOUT` unless magic and layout version match the library's.
 2. Find the calling process in the process table by name, and check its uid.
-3. For each of the process's own regions: if it exists with the right owner,
+3. For each of the process's own regions, the `proc` region first and the
+   queue regions after it (D-61, relied on by section 9.2: a peer that can
+   see a queue file can then see the `proc` region): if it exists with the right owner,
    size and generation and is `ready`, reuse and repair it (section 6.3);
    queue positions and cursors in a reused region are kept. If it exists, is
    owned by the caller's uid, and is unready or has the wrong size, remove it.
-   If it is absent, create it (section 3.2) and load retained values (section
-   12) into a new `tags` region. If it exists with another owner, attach fails
+   If it is absent, create it (section 3.2), complete before its rename
+   publishes it, and load retained values (section 12) into a new `tags`
+   region. If it exists with another owner, attach fails
    with `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
 4. Take the lock on `proc.<process>`. Map and pre-fault the process's own
    regions. A process with the REALTIME flag is expected to run under
@@ -1188,7 +1208,8 @@ Other processes' regions are mapped read-only and pre-faulted in
 `scada_proc_resolve`, never inside an RT-safe function. A region that is
 missing or not ready is not an error: its tags read as BAD with OWNER_DOWN.
 The library tries the mapping again inside `scada_tag_notify()`, at most once
-a second for each missing region.
+a second for each missing region, and at once for the `proc` region of the
+producer of a queue whose file a look maps (section 9.2, D-61).
 
 ### 11.3 Generation change
 
@@ -1859,6 +1880,15 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
+| 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
+
+Migration, 0.22 to 0.23: none for data; the layout version stays 1 and no
+structure in shared memory changed. A consumer no longer drops, or has
+refused, an answer to a request taken within about 1 s of its requester's
+attach as "requester down": it looks at the requester's `proc` region with
+the queue's file. Answers to a requester that is down are dropped and
+counted as before. An implementation of attach must create the `proc`
+region before the queue regions.
 
 Migration, 0.18 to 0.19: none for data; the layout version stays 1 and no
 structure in shared memory changed. A producer that posted events or requests

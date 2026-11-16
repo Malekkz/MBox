@@ -166,7 +166,7 @@ void PeerRegions::check_kept(const Slot& slot) noexcept {
     }
 }
 
-bool PeerRegions::look(int dir_fd, Slot& slot) {
+bool PeerRegions::look_slot(int dir_fd, Slot& slot) {
     // Relaxed: only this function writes it, under the mutex.
     const PeerMapping* const before =
         slot.current.load(std::memory_order_relaxed);
@@ -215,11 +215,7 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
             // Release: publishes the mapping to readers, which load with
             // acquire.
             slot.current.store(kept.get(), std::memory_order_release);
-            if (before != kept.get()) {
-                look_at_producer(dir_fd, slot);
-                return true;
-            }
-            return false;
+            return before != kept.get();
         }
     }
     if (slot.mappings >= MAX_MAPPINGS_PER_REGION) {
@@ -249,8 +245,17 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
     ++slot.mappings;
     // Release: publishes the mapping to readers, which load with acquire.
     slot.current.store(mappings_.back().get(), std::memory_order_release);
-    look_at_producer(dir_fd, slot);
     return true;
+}
+
+bool PeerRegions::look(int dir_fd, Slot& slot) {
+    const bool changed = look_slot(dir_fd, slot);
+    // Relaxed: only `look_slot` writes it, under the mutex, which this
+    // thread holds.
+    if (changed && slot.current.load(std::memory_order_relaxed) != nullptr) {
+        look_at_producer(dir_fd, slot);
+    }
+    return changed;
 }
 
 void PeerRegions::look_at_producer(int dir_fd, const Slot& slot) {
@@ -271,7 +276,7 @@ void PeerRegions::look_at_producer(int dir_fd, const Slot& slot) {
         producer.wanted = true;
         wanted_.push_back(index);
     }
-    static_cast<void>(look(dir_fd, producer));
+    static_cast<void>(look_slot(dir_fd, producer));
     // Release, after the look: as in `want`.
     producer.asked.store(true, std::memory_order_release);
 }
@@ -332,6 +337,7 @@ std::size_t PeerRegions::refresh_locked(int dir_fd, std::int64_t now_mono_ns) {
     std::size_t changed = 0;
     // By position: a look can ask for a slot (`look_at_producer`), which
     // appends to `wanted_`.
+    // NOLINTNEXTLINE(modernize-loop-convert): the body can append to `wanted_` (look_at_producer), which a range-based loop must not see
     for (std::size_t i = 0; i < wanted_.size(); ++i) {
         Slot& slot = slots_.at(wanted_[i]);
         if (now_mono_ns < slot.next_look_mono_ns) {

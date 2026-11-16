@@ -2437,28 +2437,28 @@ TEST_F(Queues, AQueueWhoseProducerNeverAttachedIsEmpty) {
     EXPECT_FALSE(reader->waiter().has_value());
 }
 
-// Decision D-61 (issue #92): opening a queue asks for its producer's
-// `proc` region too, and the look that finds the queue's file maps that
-// region in the same look. Here the producer attaches after the open.
+// The liveness of process `index` as `attachment` sees it now.
+DownReason liveness_of(const Attachment& attachment, std::uint16_t index) {
+    return proc_liveness(attachment.proc_of(index),
+                         DEFAULT_HEARTBEAT_TIMEOUT_MS, scada::monotonic_ns());
+}
+
+// Decision D-61 (issue #92): the look that finds the file of a queue maps
+// its producer's `proc` region in the same look, also for a producer the
+// consumer never resolved. Here the producer attaches after the open.
 TEST_F(Queues, AConsumerThatSeesAQueueSeesItsProducer) {
     // `late` in the process table sorted by name: guest, io, late, tagd,
     // web. Not resolved before the look: resolving asks for the region.
     constexpr std::uint16_t LATE = 2;
     const QueuePtr reader = open(*web(), "events.late");
-    const std::optional<std::size_t> queue_id =
-        web()->find_queue("events.late");
-    ASSERT_TRUE(queue_id.has_value());
-    EXPECT_EQ(proc_liveness(web()->proc_of(LATE), DEFAULT_HEARTBEAT_TIMEOUT_MS,
-                            scada::monotonic_ns()),
-              DownReason::REGION_MISSING);
+    const std::size_t queue_id = reader->id();
+    EXPECT_EQ(liveness_of(*web(), LATE), DownReason::REGION_MISSING);
     const Attached late = attached("late");
     ASSERT_NE(late, nullptr);
-    ASSERT_TRUE(web()->look_for_queue_now(*queue_id));
+    ASSERT_TRUE(web()->look_for_queue_now(queue_id));
     // The consumer can see the queue's file: its next look adopts it.
-    EXPECT_TRUE(web()->queue_switch_pending(*queue_id));
-    EXPECT_EQ(proc_liveness(web()->proc_of(LATE), DEFAULT_HEARTBEAT_TIMEOUT_MS,
-                            scada::monotonic_ns()),
-              DownReason::NONE);
+    EXPECT_TRUE(web()->queue_switch_pending(queue_id));
+    EXPECT_EQ(liveness_of(*web(), LATE), DownReason::NONE);
     std::uint16_t index = 0;
     EXPECT_EQ(web()->proc_resolve("late", index), SCADA_OK);
     EXPECT_EQ(index, LATE);

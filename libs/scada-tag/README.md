@@ -293,7 +293,10 @@ again at most once a second, from `scada_tag_notify`, `scada_tag_status`,
 and a subscription, queue or wait set that waits on it. Two processes that
 start together therefore find each other within about a second: a post
 gets `SCADA_E_PEER_DOWN` until the producer has looked again for the
-`proc` region of a consumer that attached after it. A
+`proc` region of a consumer that attached after it. The other way round
+there is no such window: a look that maps a queue file also looks at the
+producer's `proc` region, which attach creates first, so a consumer that
+sees a request also sees its requester (contract 9.2, D-61). A
 mapping is never removed while the process is attached, so a reader that
 holds it keeps a valid view; a region whose file is replaced more than 16
 times reads as missing until the reader attaches again.

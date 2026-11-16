@@ -146,6 +146,8 @@ private:
     // slot that gets a new mapping also looks at its producer's `proc`
     // slot (`look_at_producer`).
     bool look(int dir_fd, Slot& slot);
+    // `look` without the look at the producer.
+    bool look_slot(int dir_fd, Slot& slot);
     // Asks for the `proc` slot of the producer of the queue slot `slot`, if
     // nobody has, and looks at it now; nothing for another slot. Under
     // `mutex_`.
