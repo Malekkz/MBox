@@ -189,8 +189,9 @@ struct QueueChange {
 // The ids of the old file that a RECREATED change may have lost: from the
 // consumer's cursor at the last check of the old file up to the new base,
 // which is above every id the old file gave (decision D-49). `bounded` is
-// false without a base: then nothing bounds the posts after that check,
-// and `until` is the old `write_seq` seen then. Never inverted.
+// false without a base or with a base below the old `write_seq` (the queue
+// then stops): nothing bounds the posts after that check, and `until` is
+// the largest of base, old `write_seq` and `from`. Never inverted.
 struct LostIds {
     std::uint64_t from = 0;
     std::uint64_t until = 0;

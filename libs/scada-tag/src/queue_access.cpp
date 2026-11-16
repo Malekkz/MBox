@@ -181,14 +181,16 @@ bool Attachment::follow_queue(std::size_t queue_id) noexcept {
     // Relaxed: see `queue_in_use_`.
     const PeerMapping* const used =
         queue_in_use_[queue_id].load(std::memory_order_relaxed);
-    // Acquire: pairs with the release store of the look that marked it.
+    // `current` first, then `whole` (review of PR #77, F3): a look marks an
+    // old mapping before it publishes a newer one, so a `whole` loaded
+    // after `current` (both acquire) is at least as new as that look.
+    const PeerMapping* const current = peers_.mapping(access.queue_slot);
     if (used != nullptr && !used->whole.load(std::memory_order_acquire)) {
         // The file in use changed size: its mapping must not be read again
         // (section 3.3).
         kill_queue(queue_id);
         return false;
     }
-    const PeerMapping* const current = peers_.mapping(access.queue_slot);
     std::uint64_t& cursor = own_cursor(queue_id);
     // Relaxed: this thread is the only writer of the cursor.
     const std::uint64_t read = load_shared(cursor, std::memory_order_relaxed);
@@ -532,8 +534,12 @@ int Attachment::post_record(std::size_t queue_id,
     // Relaxed: this thread is the only writer of `write_seq`.
     const std::uint64_t written =
         load_shared(header.write_seq, std::memory_order_relaxed);
-    if (out_of_range(read, written, access.capacity)) {
-        return SCADA_E_PEER_DOWN;  // the cursor is not valid
+    // A file created dead has `write_seq` all-ones; with an all-ones cursor
+    // the pair is in range, and a post would wrap `write_seq` to 0 (review
+    // of PR #77, F2). Such a queue takes no post.
+    if (written == DEAD_CURSOR ||
+        out_of_range(read, written, access.capacity)) {
+        return SCADA_E_PEER_DOWN;  // the cursor or the queue is not valid
     }
     if (written - read == access.capacity) {
         return SCADA_E_FULL;

@@ -310,6 +310,29 @@ TEST_F(ReportLog, AQueueFileCreatedAnewWithoutABaseHasNoBound) {
     EXPECT_TRUE(has(records[0], "REASON=no base: the queue stops"));
 }
 
+// Review of PR #77, F1: a base below the old `write_seq` (the queue stops)
+// bounds nothing; the range is not shown as empty.
+TEST_F(ReportLog, AQueueFileCreatedAnewWithABaseBelowTheOldWriteSeqHasNoBound) {
+    constexpr std::uint64_t OLD_WRITTEN = 5;
+    CheckReport report;
+    QueueChange change;
+    change.queue = "events.io";
+    change.event = QueueEvent::RECREATED;
+    change.base_seq = 0;
+    change.old_write_seq = OLD_WRITTEN;
+    change.cursor = 0;
+    change.cursor_known = true;
+    report.queues.push_back(change);
+    LateLog late_log(INTERVAL_NS);
+    log_report(logger(), report, late_log, START_NS);
+    const std::vector<std::string> records = delivered();
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_TRUE(has(records[0], "LOST_AT_MOST=unknown"));
+    EXPECT_TRUE(has(records[0], "LOST_IDS=[0, ?)"));
+    EXPECT_TRUE(has(records[0],
+                    "REASON=base below the old write_seq: the queue stops"));
+}
+
 TEST_F(ReportLog, ARestartSeenAsDownAndUpIsANotice) {
     CheckReport report;
     report.restarts.push_back(

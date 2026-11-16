@@ -1958,6 +1958,23 @@ TEST_F(Queues, AFileWithoutRoomForIdsIsCreatedDead) {
     EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
 }
 
+// Review of PR #77, F2: a file created dead takes no post, also when the
+// consumer's cursor is all-ones (the pair is then in range by arithmetic).
+TEST_F(Queues, AFileCreatedDeadTakesNoPostWithAnAllOnesCursor) {
+    {
+        const QueuePtr reader = open(*web(), "events.io");
+        look_again(*web());
+    }
+    set_cursor("web", EVENTS_IO, DEAD_CURSOR);
+    set_cursor("io", EVENTS_IO, DEAD_CURSOR - 1);  // the producer's mark
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(io(), "io");
+    ASSERT_EQ(queue_write_seq(map_file("events.io").bytes()), DEAD_CURSOR);
+    const QueuePtr out = open(*io(), "events.io");
+    EXPECT_TRUE(posts(*out, event(), SCADA_E_PEER_DOWN));
+    EXPECT_EQ(queue_write_seq(map_file("events.io").bytes()), DEAD_CURSOR);
+}
+
 // N2: the 17th file under one name is not mapped (MAX_MAPPINGS_PER_REGION);
 // the consumer stops the queue.
 TEST_F(Queues, TheSeventeenthFileUnderANameStopsTheQueue) {

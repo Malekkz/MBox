@@ -1102,9 +1102,13 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
 scada::tag::LostIds scada::tag::lost_ids(const QueueChange& change) noexcept {
     LostIds lost;
     lost.from = change.cursor_known ? change.cursor : 0;
-    lost.bounded = change.base_seq.has_value();
-    lost.until = lost.bounded ? *change.base_seq : change.old_write_seq;
-    lost.until = std::max(lost.until, lost.from);
+    // A base bounds the ids of the old file only when it is not below the
+    // old `write_seq`; below it the queue stops and nothing bounds the
+    // posts after the last check (review of PR #77, F1).
+    lost.bounded =
+        change.base_seq.has_value() && *change.base_seq >= change.old_write_seq;
+    lost.until = std::max(
+        {change.base_seq.value_or(0), change.old_write_seq, lost.from});
     return lost;
 }
 
