@@ -480,6 +480,49 @@ TEST(RetainAge, AnUnknownBootIdIsNeverTheSameBoot) {
     EXPECT_EQ(retained_age_ns(stamp, now), A_SECOND);
 }
 
+// Committee review of PR #91, B2: the stamp of a file that holds values of
+// several sources.
+TEST(RetainAge, TheOldestStampOfOneBootTakesTheEarliestTimes) {
+    RetainStamp first;
+    first.boot_id.fill(1);
+    first.written_time_ns = WRITTEN_TIME;
+    first.written_boottime_ns = AN_HOUR;
+    first.clock_synced = true;
+    RetainStamp second = first;
+    second.written_time_ns = WRITTEN_TIME + A_SECOND;
+    second.written_boottime_ns = A_SECOND;
+    second.clock_synced = false;
+    const std::array stamps{first, second};
+    const RetainStamp oldest = oldest_stamp(stamps);
+    EXPECT_EQ(oldest.boot_id, first.boot_id);
+    EXPECT_EQ(oldest.written_time_ns, WRITTEN_TIME);
+    EXPECT_EQ(oldest.written_boottime_ns, A_SECOND);
+    EXPECT_FALSE(oldest.clock_synced);
+}
+
+TEST(RetainAge, TheOldestStampOfTwoBootsLeavesOnlyTheWallClock) {
+    RetainStamp first;
+    first.boot_id.fill(1);
+    first.written_time_ns = WRITTEN_TIME + A_SECOND;
+    first.clock_synced = true;
+    RetainStamp second = first;
+    second.boot_id.fill(2);
+    second.written_time_ns = WRITTEN_TIME;
+    std::array stamps{first, second};
+    RetainStamp oldest = oldest_stamp(stamps);
+    EXPECT_EQ(oldest.boot_id, BootId{});
+    EXPECT_EQ(oldest.written_boottime_ns, 0);
+    EXPECT_EQ(oldest.written_time_ns, WRITTEN_TIME);
+    EXPECT_TRUE(oldest.clock_synced);
+    // One of them not synchronised: no age at all.
+    stamps.at(1).clock_synced = false;
+    oldest = oldest_stamp(stamps);
+    RetainClockSample now;
+    now.realtime_ns = WRITTEN_TIME + AN_HOUR;
+    now.clock_synced = true;
+    EXPECT_FALSE(retained_age_ns(oldest, now).has_value());
+}
+
 TEST(RetainAge, TheClockOfThisBootIsRead) {
     const RetainClockSample first = retain_clock_now();
     const RetainClockSample second = retain_clock_now();

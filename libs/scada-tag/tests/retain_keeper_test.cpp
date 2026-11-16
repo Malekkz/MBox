@@ -964,3 +964,112 @@ TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
 }
 
 }  // namespace
+
+// Committee review of PR #91: B1, a write of the owner that keeps value,
+// source time and RESTORED is a change unless it is exactly the restore;
+// B2, a rewrite never makes a value the owner has not written look new.
+namespace {
+
+class KeeperAfterRestore : public Keeper {
+protected:
+    // io.bin with plant.mode = VALUE_7 at FIXED_SOURCE_TIME, UNCERTAIN, no
+    // flag, and `more` values, written in this boot half the time since the
+    // boot ago (`old_age`): an age the boot clock can tell.
+    void old_file(std::vector<RetainedValue> more = {}) {
+        RetainFile file;
+        file.values = {{"plant.mode", TagType::INT64, VALUE_7,
+                        FIXED_SOURCE_TIME, Quality::UNCERTAIN, 0}};
+        file.values.insert(file.values.end(), more.begin(), more.end());
+        std::ranges::sort(file.values, {}, &RetainedValue::name);
+        const RetainClockSample now = retain_clock_now();
+        age_ = now.boottime_ns / 2;
+        file.written_time_ns = now.realtime_ns - age_;
+        file.written_boottime_ns = now.boottime_ns - age_;
+        file.boot_id = now.boot_id;
+        stamp_ = stamp_of(file);
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        ASSERT_TRUE(write_retain_file(directory.get(), "io", file, detail).ok())
+            << detail;
+    }
+
+    [[nodiscard]] const RetainStamp& old_stamp() const { return stamp_; }
+    [[nodiscard]] std::int64_t old_age() const { return age_; }
+
+private:
+    RetainStamp stamp_;
+    std::int64_t age_ = 0;
+};
+
+TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsGoodIsAChange) {
+    old_file();
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    EXPECT_TRUE(round(now).retain_written.empty());  // exactly the restore
+    write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_GOOD,
+                  SCADA_FLAG_RESTORED);
+    ASSERT_EQ(round(now + 1).retain_written.size(), 1U);
+    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(mode->quality, Quality::GOOD);
+    EXPECT_EQ(mode->quality_flags, 0U);
+}
+
+TEST_F(KeeperAfterRestore, AWriteThatKeepsRestoredButSetsAFlagIsAChange) {
+    old_file();
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    write_flagged(*feeder, "plant.mode", VALUE_7, SCADA_QUALITY_UNCERTAIN,
+                  SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
+    ASSERT_EQ(round(now).retain_written.size(), 1U);
+    const RetainedValue* mode = find_retained(file_of("io"), "plant.mode");
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(mode->quality_flags, SCADA_FLAG_SUBSTITUTED);
+}
+
+TEST_F(KeeperAfterRestore, TheRewriteAtStartKeepsTheStampOfTheValues) {
+    // A name io no longer has: the file is written again at the first
+    // check, without that name.
+    old_file({{"plant.gone", TagType::INT64, 1, 0}});
+    start_host(retained_set());
+    ASSERT_EQ(round(scada::monotonic_ns()).retain_written.size(), 1U);
+    const RetainFile file = file_of("io");
+    EXPECT_EQ(find_retained(file, "plant.gone"), nullptr);
+    EXPECT_EQ(stamp_of(file), old_stamp());
+    // Restored, the value has the age of the old file, not of the rewrite.
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(feeder->resolve("plant.mode", handle), SCADA_OK);
+    scada_tag_retain_info_t info{};
+    ASSERT_EQ(feeder->retain_info(handle, info), SCADA_OK);
+    EXPECT_EQ(info.age_known, 1);
+    EXPECT_GE(info.age_ns, old_age());
+}
+
+TEST_F(KeeperAfterRestore,
+       ALaterFileKeepsTheStampUntilTheOwnerWroteEveryValue) {
+    old_file({{"plant.level", TagType::FLOAT64, VALUE_5, 0}});
+    start_host(retained_set());
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    ASSERT_EQ(feeder->status().values_restored, 2U);
+    const std::int64_t now = scada::monotonic_ns();
+    // plant.level written, plant.mode not: the periodic file keeps the old
+    // stamp.
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_6);
+    ASSERT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
+    EXPECT_EQ(stamp_of(file_of("io")), old_stamp());
+    // plant.mode written too: the next file has the stamp of its write.
+    write(*feeder, "plant.mode", SCADA_TYPE_INT64, VALUE_8);
+    ASSERT_EQ(round(now + INTERVAL_NS + 1).retain_written.size(), 1U);
+    const RetainFile file = file_of("io");
+    EXPECT_GT(file.written_boottime_ns, old_stamp().written_boottime_ns);
+    EXPECT_GT(file.written_time_ns, old_stamp().written_time_ns);
+}
+
+}  // namespace
