@@ -1596,6 +1596,46 @@ know they are there, and any number may run.
   for at most 60 s (twice the 30 s timeout) after it retired; then it is
   logged as abandoned and left until the next boot clears `/dev/shm`.
 
+Layout of a retain file, version 2 (`libs/scada-tag/src/retain_file.h`).
+All integers are little-endian; offsets and widths are in bytes.
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | 8 | Magic "SCADARTN" (0x4E54524144414353) |
+| 8 | 4 | Format version, 2 |
+| 12 | 4 | Record count, at most 4,194,303 |
+| 16 | 8 | Source generation |
+| 24 | 8 | `created_time_ns` of the source generation's header |
+| 32 | 8 | `written_time_ns`, CLOCK_REALTIME |
+| 40 | 4 | Flags: bit 0 FINAL, bit 1 CLOCK_SYNCED |
+| 44 | 4 | Reserved, 0 |
+| 48 | 32 | `config_hash` |
+| 80 | 16 | `boot_id` of the writing boot |
+| 96 | 8 | `written_boottime_ns`, CLOCK_BOOTTIME |
+| 104 | | Records, sorted by name, byte-wise, each name once |
+| end - 4 | 4 | CRC-32 (IEEE, as zlib) of every byte before it |
+
+Each record:
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | 1 | Type: BOOL, INT64, UINT64 or FLOAT64 |
+| 1 | 1 | Name length, 1 to 127 |
+| 2 | 1 | Quality: GOOD or UNCERTAIN |
+| 3 | 1 | Record flags: bit 0 ADOPTED, bit 1 SOURCE_NOT_FINAL (only with ADOPTED) |
+| 4 | 2 | `quality_flags` |
+| 6 | 2 | Reserved, 0 |
+| 8 | 8 | Value |
+| 16 | 8 | `source_time_ns` |
+| 24 | name length | Name, then zero bytes to the next multiple of 8 |
+
+A version 1 file has the header of the first 80 bytes, and 6 bytes of 0 at
+record offsets 2 to 7. The decoder checks the exact length: the file must
+hold at least a version 1 header and the CRC, the CRC must match, the
+record count must fit the bytes there, and no byte may follow the last
+record. A file the decoder accepts encodes back to exactly its bytes in the
+version it was read in; the fuzz target `retain_file_fuzz` checks this.
+
 ## 13. Library interface
 
 The C interface is the stable one; the C++ interface is a thin wrapper.
