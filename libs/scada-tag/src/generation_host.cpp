@@ -104,6 +104,16 @@ struct WatchedQueue {
     // down, and whether that was reported.
     std::uint32_t missing_checks = 0;
     bool missing_reported = false;
+    // The file seen at the latest check that found one, and its
+    // `write_seq` then; kept while the name is missing, so that a file
+    // created anew is told from the old one (issue #53).
+    bool file_seen = false;
+    dev_t last_device = 0;
+    ino_t last_inode = 0;
+    std::uint64_t last_written = 0;
+    // The consumer's cursor at that check, if it was readable.
+    bool last_cursor_known = false;
+    std::uint64_t last_cursor = 0;
 };
 
 // Checks in a row without a queue file after which it is reported.
@@ -1034,6 +1044,30 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
     const std::span<std::byte> proc =
         consumer.self ? proc_.bytes() : consumer.probe.bytes();
     const std::uint64_t* const cursor = cursor_field(proc, queue.queue_id);
+    const std::span<std::byte> file = queue.region->memory.bytes();
+    if (queue.file_seen && (queue.region->device != queue.last_device ||
+                            queue.region->inode != queue.last_inode)) {
+        QueueChange change{.queue = queue.name,
+                           .event = QueueEvent::RECREATED,
+                           .write_seq = queue_write_seq(file),
+                           .capacity = queue.capacity};
+        change.base_seq = queue_base(file);
+        change.old_write_seq = queue.last_written;
+        // The cursor at the last check of the old file, not now: the
+        // consumer may have jumped to the new base since (review of PR
+        // #77, B1).
+        change.cursor = queue.last_cursor;
+        change.cursor_known = queue.last_cursor_known;
+        report.queues.push_back(change);
+    }
+    queue.file_seen = true;
+    queue.last_device = queue.region->device;
+    queue.last_inode = queue.region->inode;
+    queue.last_written = queue_write_seq(file);
+    queue.last_cursor_known = cursor != nullptr;
+    if (cursor != nullptr) {
+        queue.last_cursor = load_shared(*cursor, std::memory_order_acquire);
+    }
     if (cursor == nullptr) {
         return;  // the consumer's region is missing
     }
@@ -1067,6 +1101,23 @@ void GenerationHost::Impl::judge_queue(WatchedQueue& queue,
         .replaced = read == DEAD_CURSOR,
     });
 }
+
+}  // namespace scada::tag
+
+scada::tag::LostIds scada::tag::lost_ids(const QueueChange& change) noexcept {
+    LostIds lost;
+    lost.from = change.cursor_known ? change.cursor : 0;
+    // A base bounds the ids of the old file only when it is not below the
+    // old `write_seq`; below it the queue stops and nothing bounds the
+    // posts after the last check (review of PR #77, F1).
+    lost.bounded =
+        change.base_seq.has_value() && *change.base_seq >= change.old_write_seq;
+    lost.until = std::max(
+        {change.base_seq.value_or(0), change.old_write_seq, lost.from});
+    return lost;
+}
+
+namespace scada::tag {
 
 void GenerationHost::Impl::note_late_beats(Peer& peer,
                                            CheckReport& report) const {

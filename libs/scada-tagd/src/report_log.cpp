@@ -49,6 +49,49 @@ void log_restarts(scada::Logger& logger, std::span<const Restarts> restarts) {
     }
 }
 
+// Logs a queue file created anew inside the generation (issue #53,
+// condition C13): the system log keeps what `scada_queue_stats`, which is
+// per process and lost at a restart, cannot. The records of the old file
+// from the consumer's cursor up to its last `write_seq` are lost unless
+// the consumer still holds the old file and takes them; hence "at most".
+// On an events queue they are audit records.
+void log_recreated(scada::Logger& logger, const QueueChange& queue) {
+    const scada::tag::LostIds lost = scada::tag::lost_ids(queue);
+    std::string reason = "followed by the consumer";
+    if (!queue.base_seq.has_value()) {
+        reason = "no base: the queue stops";
+    } else if (*queue.base_seq < queue.old_write_seq) {
+        reason = "base below the old write_seq: the queue stops";
+    }
+    const std::string base =
+        queue.base_seq.has_value() ? std::to_string(*queue.base_seq) : "none";
+    const std::string old_written = std::to_string(queue.old_write_seq);
+    const std::string cursor =
+        queue.cursor_known ? std::to_string(queue.cursor) : "unknown";
+    // A true upper bound only with a base: every id of the old file is
+    // below it. Without one, posts after the last check are not bounded.
+    const std::string lost_at_most =
+        lost.bounded ? std::to_string(lost.until - lost.from) : "unknown";
+    const std::string range =
+        "[" + std::to_string(lost.from) + ", " +
+        (lost.bounded ? std::to_string(lost.until) : std::string("?")) + ")";
+    const std::array<LogField, 8> fields{{
+        {"QUEUE", queue.queue},
+        {"BASE_SEQ", base},
+        {"OLD_WRITE_SEQ", old_written},
+        {"CURSOR", cursor},
+        {"LOST_AT_MOST", lost_at_most},
+        {"LOST_IDS", range},
+        {"REASON", reason},
+        {"MESSAGE_ID", MESSAGE_ID_QUEUE_RECREATED},
+    }};
+    const bool events = queue.queue.starts_with("events.");
+    logger.log(LogLevel::WARNING,
+               events ? "queue file created anew; audit records may be lost"
+                      : "queue file created anew; records may be lost",
+               fields);
+}
+
 }  // namespace
 
 void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
@@ -171,6 +214,9 @@ void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
             case QueueEvent::FOUND:
                 logger.log(LogLevel::NOTICE, "queue file found again",
                            std::span(fields).first(1));
+                break;
+            case QueueEvent::RECREATED:
+                log_recreated(logger, queue);
                 break;
         }
     }

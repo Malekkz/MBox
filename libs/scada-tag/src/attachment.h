@@ -469,19 +469,32 @@ public:
     // The counts of `queue_id` in this context.
     [[nodiscard]] QueueCounters& counters(std::size_t queue_id) noexcept;
 
-    // For a queue this process consumes and does not produce: true if the
-    // queue is dead because its region was replaced inside the generation
-    // (decision D-40). `bytes` is what `queue_bytes` gives now. The first
-    // mapping this context sees is the queue's; another one later, or none,
-    // means the file was removed, shrunk or created anew, and the records
-    // and ids of the two files cannot be told apart. The first time, the
-    // own cursor is set out of range, so that the producer gets
-    // SCADA_E_PEER_DOWN by the rule of section 9.1, also after a restart of
-    // either process, and `replaced` is counted. Sticky until detach.
-    [[nodiscard]] bool queue_dead(std::size_t queue_id,
-                                  std::span<std::byte> bytes) noexcept;
+    // For a queue this process consumes and does not produce: follows its
+    // file (contract 9.2, issue #53). Called by the consumer's thread before
+    // each look, and by attach. `queue_bytes` gives the file in use, which
+    // this decides:
+    // - The first file seen is used. If its creator set a base and the
+    //   cursor is below it, the cursor jumps to the base.
+    // - While the name is missing, or a different file there fails the
+    //   checks of section 3.1, the file in use stays (its mapping stays
+    //   valid memory).
+    // - A different file under the name is used once the cursor has
+    //   reached the `write_seq` of the file in use (read again now), so
+    //   that nothing accepted into it is lost; then the cursor jumps to
+    //   the new file's base if it is below it, `skipped` counts the
+    //   positions passed over, and `replaced` counts the change.
+    // - The queue dies (sticky until detach; the own cursor is set to the
+    //   all-ones value so that the producer gets SCADA_E_PEER_DOWN, and
+    //   `replaced` is counted) when the new file has no base (made by an
+    //   older build, decision D-40), when its base is below the
+    //   `write_seq` of the file in use (ids would repeat), when the file
+    //   in use changed size in place (SIGBUS, section 3.3), or when the
+    //   name reached MAX_MAPPINGS_PER_REGION.
+    // The cursor never moves back, except to the all-ones value. Returns
+    // false if the queue is dead.
+    bool follow_queue(std::size_t queue_id) noexcept;
 
-    // True if `queue_dead` found the queue dead. Changes nothing.
+    // True if `follow_queue` found the queue dead. Changes nothing.
     [[nodiscard]] bool queue_is_dead(std::size_t queue_id) const noexcept;
 
     // Answers the request `request_id` of the CMD queue `queue_id`, which
@@ -668,10 +681,35 @@ private:
     // their queues; every request still in a `cmd` queue of the process is
     // answered ABORTED and passed over.
     void start_cursors();
+    // Follows the file of every queue the process consumes, for a reused
+    // `proc` region whose cursors are kept (`follow_queue`).
+    void follow_queues();
+    // Uses `bytes` as the file of `queue_id` from now on.
+    void use_queue_file(std::size_t queue_id,
+                        const PeerMapping* mapping) noexcept;
+    // Moves the own cursor of `queue_id` from `read` up to `base`, counting
+    // the positions in `skipped`.
+    void jump_cursor(std::size_t queue_id, std::uint64_t read,
+                     std::uint64_t base) noexcept;
+    // Makes `queue_id` dead (`follow_queue`).
+    void kill_queue(std::size_t queue_id) noexcept;
+    // The base the producer of `queue_id` gives the file it creates now
+    // (decision D-49): the largest of its own high-water mark, if its
+    // `proc` region was reused and the mark is plausible, and the
+    // consumer's cursor plus the capacity, if that cursor is readable, not
+    // 0 and not the all-ones value; 0 if neither. Nothing if the base
+    // leaves no room for a capacity of ids.
+    [[nodiscard]] std::optional<std::uint64_t> base_for_new_queue(
+        std::size_t queue_id) noexcept;
     void drain_requests();
     // The drain of one `cmd` queue the process consumes, every request
     // answered ABORTED. True if an answer was posted.
     [[nodiscard]] bool drain_queue(const QueueAccess& access) noexcept;
+    // Answers ABORTED every request of the file of `access` in use, setting
+    // `posted` if an answer was posted. False if there is none or it is
+    // stopped.
+    [[nodiscard]] bool drain_file(const QueueAccess& access,
+                                  bool& posted) noexcept;
     // For an observer: true if `current` names another generation now,
     // looked at no more than every CURRENT_RECHECK_INTERVAL_NS.
     [[nodiscard]] bool current_moved(std::int64_t now_mono_ns);
@@ -739,9 +777,11 @@ private:
     std::mutex queue_sides_mutex_;
     std::vector<std::uint8_t> queue_open_;  // guarded by queue_sides_mutex_
     std::vector<QueueCounters> queue_counters_;
-    // The first mapping seen of each queue, and whether it died (see
-    // `queue_dead`).
-    std::vector<std::atomic<const std::byte*>> queue_mappings_;
+    // For each queue this process consumes: the file in use, as its
+    // mapping in `peers_` (null before the first), and whether the queue
+    // died (see `follow_queue`). Written by the consumer's thread, or by attach
+    // before any other thread can use the context; relaxed.
+    std::vector<std::atomic<const PeerMapping*>> queue_in_use_;
     std::vector<std::atomic<bool>> queue_dead_;
     // For every process, whether its `proc` region was asked for by
     // `want_proc` (scada_proc_resolve, a wait set, scada-tagd at attach),

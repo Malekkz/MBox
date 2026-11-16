@@ -5,6 +5,7 @@
 #include "own_region.h"
 #include "peer_regions.h"
 #include "proc_region.h"
+#include "queue_region.h"
 #include "region_file.h"
 #include "retain_file.h"
 #include "shared_memory.h"
@@ -655,10 +656,20 @@ Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
     // Below MAX_QUEUES, which fits 16 bits.
     spec.identity.queue_id = static_cast<std::uint16_t>(queue_id);
     spec.identity.uid = contents.processes.at(process_index_).uid;
-    spec.initialise = [capacity, record_size](std::span<std::byte> bytes) {
+    // Used only if the file is created now (decision D-49). A base that
+    // leaves no room for a capacity of ids creates the queue dead: base and
+    // `write_seq` all-ones, which a consumer refuses and by which the
+    // producer gets SCADA_E_PEER_DOWN (sections 9.1, 9.2).
+    const std::uint64_t base =
+        base_for_new_queue(queue_id).value_or(DEAD_CURSOR);
+    spec.initialise = [capacity, record_size,
+                       base](std::span<std::byte> bytes) {
         auto& header = shared_at<QueueHeader>(bytes, sizeof(RegionHeader));
         header.capacity = capacity;
         header.record_size = record_size;
+        header.write_seq = base;
+        header.base_seq = base;
+        header.flags = QUEUE_BASE_SET;
     };
     spec.usable = [capacity, record_size](std::span<std::byte> bytes) {
         const auto& header =
@@ -738,7 +749,9 @@ Status Attachment::attach_regions(std::string& detail) {
     // Section 9.2 and section 11.2, step 5: before the process is RUNNING,
     // so that no producer sees its cursors before they are set.
     prepare_queues();
-    if (!proc_.reused()) {
+    if (proc_.reused()) {
+        follow_queues();
+    } else {
         start_cursors();
     }
     drain_requests();

@@ -33,6 +33,10 @@ inline constexpr std::string_view MESSAGE_ID_HEARTBEAT_LATE_BEFORE =
     "c4de2438d3574ca38f45771de9254e3a";
 inline constexpr std::string_view MESSAGE_ID_PROCESS_RESTARTED =
     "f35dfeb8e8124cc88b219cabf6947b00";
+// A queue file created anew inside a generation: on an events queue, the
+// record of possibly lost audit records (issue #53, decision D-49).
+inline constexpr std::string_view MESSAGE_ID_QUEUE_RECREATED =
+    "330f9ce1bb0547c098562d406ce2f774";
 inline constexpr std::string_view MESSAGE_ID_PROCESS_NOT_ATTACHED =
     "0f57ce3d6dbc4891abd0e55e240f04f9";
 inline constexpr std::string_view MESSAGE_ID_RECORDS_UNCONSUMED =

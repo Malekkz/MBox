@@ -110,6 +110,25 @@ SCADA_RT [[nodiscard]] bool publish_write_seq(
     std::span<std::byte> region, std::uint64_t value,
     const HeaderView& header) noexcept;
 
+// What the QueueHeader of a queue file says about its base (issue #53).
+// The header is outside input.
+enum class QueueBase : std::uint8_t {
+    NONE,    // no QUEUE_BASE_SET: made by an older build
+    SET,     // a base that can be followed
+    BROKEN,  // a flag bit that is none, `reserved0` not 0, or a base that is
+             // all-ones or beyond `write_seq`: the queue must stop
+};
+
+// Classifies the QueueHeader of `region`; with SET, `base` is the base.
+SCADA_RT [[nodiscard]] QueueBase queue_base_of(std::span<std::byte> region,
+                                               std::uint64_t& base) noexcept;
+
+// The base of the queue in `region` if its creator set one
+// (QUEUE_BASE_SET), else nothing (a file made by an older build). The
+// fields never change once the region is ready.
+SCADA_RT [[nodiscard]] std::optional<std::uint64_t> queue_base(
+    std::span<std::byte> region) noexcept;
+
 // The cursor of queue `queue_id` in the mapped `proc` region `region`, or
 // null if the region is too small to hold it (an empty span too). The
 // pointer is valid as long as the mapping is; the field is accessed with

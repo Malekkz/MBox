@@ -75,9 +75,8 @@ int Queue::open(Attachment& attachment, std::string_view name,
     // Mapped and brought into memory here (section 11.2), if attach did not.
     attachment.want_queue(*queue_id);
     if (access.consumed) {
-        // The mapping the queue has from here on (decision D-40).
-        static_cast<void>(attachment.queue_dead(
-            *queue_id, attachment.queue_bytes(*queue_id)));
+        // The file the queue uses from here on (issue #53).
+        static_cast<void>(attachment.follow_queue(*queue_id));
     }
     out = std::move(queue);
     return SCADA_OK;
@@ -144,12 +143,12 @@ int Queue::post(std::span<const std::byte> record) noexcept {
 
 Queue::Look Queue::poll(std::span<std::byte> out, bool retiring) noexcept {
     const QueueAccess& access = attachment_.queue(id_);
-    const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
-    if (attachment_.queue_dead(id_, bytes)) {
+    if (!attachment_.follow_queue(id_)) {
         pending_ = false;
         count_one(attachment_.counters(id_).out_of_range);
-        return Look::BAD_RANGE;  // replaced inside the generation (D-40)
+        return Look::BAD_RANGE;  // dead (follow_queue)
     }
+    const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (bytes.empty()) {
         pending_ = false;
         return Look::NOTHING;  // the producer has not created it yet
@@ -329,6 +328,13 @@ int Queue::ack() noexcept {
         return SCADA_E_INVALID;
     }
     pending_ = false;
+    // The cursor may have jumped to a new file's base since the record was
+    // delivered (issue #53): an ack then must not move it back (condition
+    // C1). Relaxed: this thread is the only writer of the cursor.
+    if (load_shared(attachment_.own_cursor(id_), std::memory_order_relaxed) !=
+        pending_position_) {
+        return SCADA_E_INVALID;
+    }
     // Release: the producer may reuse the slot once it sees the cursor.
     store_shared(attachment_.own_cursor(id_), pending_position_ + 1,
                  std::memory_order_release);

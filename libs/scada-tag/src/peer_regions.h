@@ -34,6 +34,17 @@ inline constexpr std::int64_t PEER_RETRY_INTERVAL_NS = 1'000'000'000;
 // reads as missing until the reader attaches again.
 inline constexpr std::uint32_t MAX_MAPPINGS_PER_REGION = 16;
 
+// One mapping of a region. For a queue region its descriptor is kept, and
+// `whole` turns false, for good, once a look found the file changed in size
+// (by name, or for a file no longer under the name by `fstat` on that
+// descriptor): reading such a mapping can end the process with SIGBUS
+// (section 3.3). Set before any newer mapping of the slot is published.
+struct PeerMapping {
+    OpenedRegion region;
+    const void* slot = nullptr;  // the slot it belongs to
+    mutable std::atomic<bool> whole{true};
+};
+
 // One slot for every region the header of a generation lists. Safe to use
 // from several threads: `bytes` from any thread at any time, `want` and
 // `refresh` from threads that may block.
@@ -76,6 +87,18 @@ public:
     SCADA_RT [[nodiscard]] std::span<std::byte> bytes(
         std::size_t slot) const noexcept;
 
+    // The mapping of `slot` that `bytes` gives, or null while the region is
+    // missing (and for a slot that is none). Valid until this object is
+    // destroyed, also when the region is mapped anew meanwhile.
+    SCADA_RT [[nodiscard]] const PeerMapping* mapping(
+        std::size_t slot) const noexcept;
+
+    // True once `slot` reached MAX_MAPPINGS_PER_REGION and a further file
+    // under its name was not mapped. Never cleared. False for a slot that is
+    // none.
+    SCADA_RT [[nodiscard]] bool at_mapping_limit(
+        std::size_t slot) const noexcept;
+
     // Looks again at every region that was asked for and not looked at for
     // PEER_RETRY_INTERVAL_NS: a missing one is mapped if it is there now, a
     // mapped one whose file is gone or was replaced is dropped or mapped
@@ -102,15 +125,21 @@ private:
         std::uint32_t mappings = 0;
         // Points into `mappings_`, or null while the region is missing.
         // Written under `mutex_`, read without it.
-        std::atomic<const OpenedRegion*> current{nullptr};
+        std::atomic<const PeerMapping*> current{nullptr};
         // Set by `want` under `mutex_`, read without it; never cleared.
         std::atomic<bool> asked{false};
+        // Written by `look` under `mutex_`, read without it.
+        std::atomic<bool> at_limit{false};
     };
 
     [[nodiscard]] std::size_t checked(std::size_t slot) const;
 
     // Looks at one slot. True if what `bytes` returns changed.
     bool look(int dir_fd, Slot& slot);
+    [[nodiscard]] static bool is_queue(const Slot& slot) noexcept;
+    // Marks every kept mapping of the queue slot `slot` whose file changed
+    // size (`PeerMapping::whole`). Under `mutex_`.
+    void check_kept(const Slot& slot) noexcept;
 
     std::size_t process_count_ = 0;
     std::size_t owner_count_ = 0;
@@ -119,7 +148,7 @@ private:
     std::mutex mutex_;
     std::vector<std::size_t> wanted_;  // guarded by mutex_
     // Every mapping ever made, kept until destruction. Guarded by mutex_.
-    std::vector<std::unique_ptr<const OpenedRegion>> mappings_;
+    std::vector<std::unique_ptr<PeerMapping>> mappings_;
 };
 
 }  // namespace scada::tag
