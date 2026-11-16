@@ -1335,8 +1335,9 @@ know they are there, and any number may run.
   `boot_id` of the writing boot (16 bytes, from
   `/proc/sys/kernel/random/boot_id`), `written_boottime_ns`
   (CLOCK_BOOTTIME)), then the records sorted by name, each `(type, name
-  length, quality, reserved 0, quality_flags (2 bytes), reserved 0 (2
-  bytes), value, source_time_ns, name, padding to 8)`, then a CRC-32 (IEEE,
+  length, quality, record flags (bit 0 ADOPTED, bit 1 SOURCE_NOT_FINAL),
+  quality_flags (2 bytes), reserved 0 (2 bytes), value, source_time_ns,
+  name, padding to 8)`, then a CRC-32 (IEEE,
   as zlib) over everything before it. The record keeps 24 fixed bytes and
   the offsets of version 1. CLOCK_SYNCED is set when `adjtimex` with modes 0
   reports neither TIME_ERROR nor STA_UNSYNC at the write. The layout is in
@@ -1349,10 +1350,19 @@ know they are there, and any number may run.
   reads as UNCERTAIN with flags 0, of unknown age. A version 2 file is
   rejected as a whole, as a damaged file is, when a record's quality is not
   GOOD or UNCERTAIN, its flags have a bit that is no flag or one of
-  NOT_INIT, OWNER_DOWN and RESTORED, or a reserved byte is not 0; the
+  NOT_INIT, OWNER_DOWN and RESTORED, its record flags have another bit
+  or SOURCE_NOT_FINAL without ADOPTED, or a reserved byte is not 0; the
   encoder refuses the same.
-- The quality and flags the owner stored are kept with the value; a change
-  of quality or flags alone is a change and is written (a change of
+- ADOPTED marks a value `scada-tagd` took for the owner from another
+  owner's file (a tag that moved), or that the owner restored from one,
+  and that the owner has not written since; SOURCE_NOT_FINAL, that the
+  file it came from was not marked FINAL, or is not known. Attach reports
+  such a value with origin "other owner", and with SOURCE_NOT_FINAL as a
+  FINAL wait that ran out; a write of the owner clears both.
+- The quality and the flags that describe the value (those a restore
+  carries) are kept with it; STALE and COMM_FAIL, which describe the live
+  link, are not, so a link that comes and goes writes nothing. A change of
+  quality or of those flags alone is a change and is written (a change of
   SUBSTITUTED, for example). A record that is exactly what the restore of
   the value on file wrote (UNCERTAIN, RESTORED plus the carried flags of
   the file, the value and source time on file) is no change: the file
@@ -1431,7 +1441,9 @@ know they are there, and any number may run.
   file is written; it then restores them when it attaches, however late.
   This runs once per start of `scada-tagd`, which is enough: a generation
   changes only at a start of `scada-tagd`, so no tag moves while it
-  runs. At start,
+  runs. If the retain directory cannot be listed, or holds more than 1,023
+  other owners' files, it is not done: it is tried again at every check,
+  no file of a gone owner is removed, and it is logged. At start,
   `scada-tagd` reads the values of the owners of `current` from their own
   files only: a former owner's file may still be replaced by its FINAL
   file.
@@ -1818,8 +1830,9 @@ ARM64:
     wait set over 10 rings wakes for any of them; the file descriptor of a
     wait set works with `poll`; a waiter on `cycle_seq` wakes on a cycle with
     no tag change.
-25. A corrupt or truncated retain file is ignored and reported; attach
-    succeeds. A RETAIN_NOW tag is on disk within 1 second.
+25. A corrupt or truncated retain file is ignored and reported (the record
+    `retain file ignored`, MESSAGE_ID `586ec48106f748609721eef8957c56d5`);
+    attach succeeds. A RETAIN_NOW tag is on disk within 1 second.
 26. False trips: the reference load runs for 10 minutes with real-time readers
     sharing cores with non-real-time owners; no process is reported down and
     the count of `SCADA_E_BUSY` is reported.
@@ -1959,7 +1972,7 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.17 | 2026-11-16 | Issue #52 (D-52). Section 9: every `cmd.<x>` queue needs its answer queue `result.<x>` with producer and consumer swapped; the tag-set builder refuses a `cmd` queue without it. |
 | 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
 | 0.19 | 2026-11-16 | Queues in a RETIRING generation (issue #65, D-54). Section 9.5, new: posts of events and requests refused with `SCADA_E_RETIRING`, results accepted; the seq_cst handshake of a post, the RETIRING store and the drain; `scada_queue_next` drains event and result queues and answers requests ABORTED, then returns `SCADA_E_RETIRING` at once; detach answers what is left ABORTED. Section 9.3: the limit of a generation change. Section 9.5 also: what a poster and a driver do on `SCADA_E_RETIRING`, the two consequences of the handshake, the system calls of a drain, and a drain that looks at the producer's region by name and follows a file created anew (section 9.2). Section 11.3, step 2: what the library does, and the 1 s drain against conformance test 21 and reference 5.5. Section 15: test 21, its queue part. |
-| 0.20 | 2026-11-16 | Gaps in retained values (issue #72, D-59). Section 12: retain file format version 2 with quality and flags in the record and `boot_id`, `written_boottime_ns` and CLOCK_SYNCED in the header; version 1 still read; the checks of a version 2 file; a change of quality or flags is written; a restored value keeps the flags that describe it; the age rule, attach never refuses on age; per-tag restore information. Section 13: `scada_tag_retain_info`, `scada_tag_retain_info_t`, `scada_retain_status_t` grows to 24 bytes with `ages_unknown`. Section 12, second part: the stop that cannot wait for the writer exits with status 3; at the 30-s timeout no values over those of a newer generation; the values of a tag that moved go to the file of its new owner before the former owner's file is removed, and the start reads the own files only. |
+| 0.20 | 2026-11-16 | Gaps in retained values (issue #72, D-59). Section 12: retain file format version 2 with quality and flags in the record and `boot_id`, `written_boottime_ns` and CLOCK_SYNCED in the header; version 1 still read; the checks of a version 2 file; a change of quality or flags is written; a restored value keeps the flags that describe it; the age rule, attach never refuses on age; per-tag restore information. Section 13: `scada_tag_retain_info`, `scada_tag_retain_info_t`, `scada_retain_status_t` grows to 24 bytes with `ages_unknown`. Section 12, second part: the stop that cannot wait for the writer exits with status 3; at the 30-s timeout no values over those of a newer generation; the values of a tag that moved go to the file of its new owner before the former owner's file is removed, and the start reads the own files only. Review: the exact restore, the stamp of a rewritten file, the ADOPTED and SOURCE_NOT_FINAL record flags, STALE and COMM_FAIL not kept, an incomplete look kept from removing files. |
 
 Migration, 0.19 to 0.20: none for data in shared memory; the layout version
 stays 1 and no structure in shared memory changed. The retain file is now
