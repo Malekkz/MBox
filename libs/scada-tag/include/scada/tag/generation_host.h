@@ -188,6 +188,12 @@ struct CheckReport {
     std::vector<std::string> retain_files_removed;
     std::vector<Restarts> restarts;
     std::vector<QueueChange> queues;
+    // Only at the first check of a new generation: the processes that have
+    // no usable region yet (DownReason::REGION_MISSING), in process index
+    // order. Their `down` flag starts at 1 and stays, so they are not in
+    // `changes`; this is their one trace (issue #60). Empty at every later
+    // check and in a reused generation.
+    std::vector<std::string> not_attached;
 };
 
 // One running generation, as scada-tagd holds it. Move-only. Destroying it
@@ -263,7 +269,8 @@ public:
     // changed. A queue is reported when it becomes broken, when it is no
     // longer broken, when an events or command queue file has been missing
     // at two checks in a row while its producer was not down, and when it
-    // is there again; not at every check.
+    // is there again; not at every check. The first check of a new
+    // generation also lists the processes that have not attached yet.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.

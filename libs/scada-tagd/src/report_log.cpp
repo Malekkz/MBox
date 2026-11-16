@@ -90,6 +90,13 @@ void log_late(scada::Logger& logger, std::span<const LateRecord> records) {
 
 void log_report(scada::Logger& logger, const scada::tag::CheckReport& report,
                 LateLog& late_log, std::int64_t now_mono_ns) {
+    // One record each, not one list: a field holds at most
+    // LOG_MAX_VALUE_BYTES, too few for the names of a large tag set.
+    for (const std::string& process : report.not_attached) {
+        logger.log(LogLevel::INFO, "process not attached",
+                   {{"PROCESS", process},
+                    {"MESSAGE_ID", MESSAGE_ID_PROCESS_NOT_ATTACHED}});
+    }
     for (const ProcessChange& change : report.changes) {
         if (change.reason == DownReason::NONE) {
             logger.log(LogLevel::NOTICE, "process up",

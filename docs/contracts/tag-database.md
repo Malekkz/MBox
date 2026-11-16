@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.14 (draft) |
+| Contract version | 0.18 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -285,6 +285,10 @@ struct DirectoryEntry {          // 24 bytes
   process table.
 - Everything in `header` except `GlobalHeader.state` and
   `ProcessEntry.down` is immutable for the life of the generation.
+- In a new generation `ProcessEntry.down` is 1 for every process but `tagd`
+  and 0 for `tagd` from the moment the header is published, before `current`
+  points to it: a process that has not attached has no region and is down by
+  section 10.1. A reused generation keeps the flags it holds (section 11.1).
 
 ### 5.1 Handles
 
@@ -934,7 +938,12 @@ for readers and never down for a check. `starts` counts it:
 - `scada-tagd` checks every `heartbeat_check_ms` (default 250 ms), sets `down`
   when a process is down by the rules above and clears it when the heartbeat
   is fresh again and `state` is RUNNING. The flag is what `scada-tagd` reports
-  and alarms on.
+  and alarms on. A new generation starts with the flag at 1 for every
+  process but `tagd` (section 5), so a process that has attached is
+  reported up at the first check that finds it up. At the first check of a
+  new generation `scada-tagd` also reports, once each, the processes whose
+  region is missing or not ready: they have not attached, and their flag
+  does not change.
 - `scada-tagd` has its own `proc.tagd` region. If its heartbeat stops, the
   library reports `SCADA_E_TAGD_DOWN` from `scada_tag_status()`, but existing
   mappings keep working.
@@ -1620,6 +1629,11 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.12 | 2026-11-15 | Retained values and the removal of retired generations (P1-09, D-45). Section 11.2, step 7: a lock failure in a RETIRING generation counts as RETIRING. Section 11.3: tag writes stay allowed in a retiring generation; step 3, when an owner has left, its FINAL retain file, removal after the FINAL files or after 30 s, unlink only. Section 12: what counts as a value, the writer thread and the exact write sequence, the format, FINAL, the checks of the loader, the precedence for a moved tag, the bounded wait at attach, restored update times and the RESTORED flag, no STRING, removal of files of owners that are gone, records the owner marked BAD removed from the file, NOT_INIT records keeping the value on file, no FINAL over newer values, the checks of the retain directory, the bounded waits for the writer, the give-up on a generation that cannot be removed. Section 1: an owner name does not start with `.`. Section 13: `scada_tag_retain_status`. Section 16: retained values across a generation change settled. Section 17: item 21. |
 | 0.13 | 2026-11-15 | Issue #53, points 1 and 5 (D-46). Section 9.2: `scada-tagd` applies the range rule to every queue at each check and logs a broken queue, and an events or command queue file missing for more than one check. Section 3.4: no suspend, hibernate or hybrid sleep, and how `scada-tagd` detects one. Section 3.3: the `SIGBUS` risk of its queue mappings. Section 16: retiring the generation on a detected suspend. Section 17: item 20. |
 | 0.14 | 2026-11-15 | Issue #61 (D-47). Section 10: `starts` takes 4 of the reserved bytes of `ProcHeader`. Section 10.1: attach counts the lives of a process, `scada-tagd` logs restarts that no check saw; the `heartbeat late` record is limited to one per process in 10 s, with the growth summed. |
+| 0.18 | 2026-11-15 | Issue #60 (D-53). Section 5: the start value of `ProcessEntry.down` in a new generation, as D-38 set it. Section 10.1: `scada-tagd` reports the processes not attached at the first check of a new generation. |
+
+Migration, 0.17 to 0.18: none. The layout version stays 1, no structure in
+shared memory changed, and `scada-tagd` has written these start values
+since D-38; the text now states them.
 
 Migration, 0.13 to 0.14: none for data. The layout version stays 1: `starts`
 takes 4 of the 16 reserved bytes of `ProcHeader` (offset 48), 12 stay
