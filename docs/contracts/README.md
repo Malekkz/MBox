@@ -8,7 +8,10 @@ boundary.
 ## Rules
 
 - Code follows the contract. If the code needs something the contract does not
-  allow, change the contract first, in its own pull request.
+  allow, change the contract in the same pull request as the code, in its own
+  commit, with a version bump and a migration note. The change is reviewed
+  against the code that implements it. A change that needs a decision is
+  raised as a question first (`CLAUDE.md`, "When to stop and ask").
 - Every contract has a version. A draft is `0.x` and may change freely within
   its phase. From `1.0`, an incompatible change needs a new major version and a
   migration note.
