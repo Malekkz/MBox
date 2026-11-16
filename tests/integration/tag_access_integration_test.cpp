@@ -117,7 +117,10 @@ struct ReaderCounts {
     std::uint64_t torn = 0;       // fields that do not belong to one write
     std::uint64_t down = 0;       // read as OWNER_DOWN while the owner ran
     std::uint64_t backwards = 0;  // a value older than one read before
-    std::uint64_t passes = 0;     // times it read every tag
+    // Times it read every tag, all of them and those it began after the
+    // writer was released; the test waits on both while the reader runs.
+    std::atomic<std::uint64_t> passes{0};
+    std::atomic<std::uint64_t> passes_released{0};
 };
 
 // True if the fields of `value` belong to one write of the simulator, or
@@ -149,14 +152,17 @@ void judge(int status, const scada_value& value, std::uint64_t& last,
 }
 
 // One reader: reads all of `handles`, READ_BATCH at a time, again and
-// again until `stop` is set, and checks every value.
+// again until `stop` is set, and checks every value. A pass that begins
+// once `released` is set counts in `passes_released` too.
 void read_all_until(scada_ctx* ctx, std::span<const std::uint32_t> handles,
+                    const std::atomic<bool>& released,
                     const std::atomic<bool>& stop, ReaderCounts& counts) {
     std::vector<std::uint64_t> last(handles.size(), 0);
     std::array<scada_value, READ_BATCH> values{};
     std::array<int, READ_BATCH> status{};
-    // Acquire: pairs with the release store of the test.
+    // Acquire: pairs with the release stores of the test.
     while (!stop.load(std::memory_order_acquire)) {
+        const bool after_release = released.load(std::memory_order_acquire);
         for (std::size_t first = 0; first < handles.size();
              first += READ_BATCH) {
             const std::size_t count =
@@ -168,31 +174,103 @@ void read_all_until(scada_ctx* ctx, std::span<const std::uint32_t> handles,
                 judge(status.at(i), values.at(i), last[first + i], counts);
             }
         }
-        ++counts.passes;
+        // Release: the test loads with acquire, and reads the other counts
+        // only after the thread is joined.
+        counts.passes.fetch_add(1, std::memory_order_release);
+        if (after_release) {
+            counts.passes_released.fetch_add(1, std::memory_order_release);
+        }
     }
 }
 
-// No reader saw anything but whole writes of a running owner, and each
-// read every tag at least once. Records the reads of all readers.
-void expect_whole_writes(std::span<const ReaderCounts> counts) {
-    ReaderCounts all;
-    all.passes = counts.empty() ? 0 : counts.front().passes;
-    for (const ReaderCounts& count : counts) {
-        all.reads += count.reads;
-        all.busy += count.busy;
-        all.errors += count.errors;
-        all.torn += count.torn;
-        all.down += count.down;
-        all.backwards += count.backwards;
-        all.passes = std::min(all.passes, count.passes);
+// True once every reader of `counts` has `wanted(count)` at least 1, false
+// if WAIT_LIMIT passes first.
+bool every_reader_has(std::span<const ReaderCounts> counts,
+                      const std::atomic<std::uint64_t> ReaderCounts::*wanted) {
+    const Clock::time_point deadline = Clock::now() + WAIT_LIMIT;
+    while (!std::ranges::all_of(counts, [&](const ReaderCounts& count) {
+        // Acquire: pairs with the release increment of the reader.
+        return (count.*wanted).load(std::memory_order_acquire) != 0;
+    })) {
+        if (Clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::yield();
     }
-    EXPECT_EQ(all.torn, 0U);
-    EXPECT_EQ(all.backwards, 0U);
-    EXPECT_EQ(all.errors, 0U);
-    EXPECT_EQ(all.down, 0U);
-    EXPECT_GE(all.passes, 1U) << "a reader did not read every tag once";
-    ::testing::Test::RecordProperty("reads", std::to_string(all.reads));
-    ::testing::Test::RecordProperty("busy", std::to_string(all.busy));
+    return true;
+}
+
+// One reader saw only whole writes of a running owner, and read every tag
+// at least once after the writer was released. Called once it is joined.
+void expect_whole_writes_of(const ReaderCounts& count) {
+    const std::uint64_t passes =
+        count.passes_released.load(std::memory_order_relaxed);
+    // With every failure, so that the failing case can be told from the
+    // output alone (issue #62).
+    SCOPED_TRACE(::testing::Message()
+                 << "reader: reads=" << count.reads << " busy=" << count.busy
+                 << " passes=" << count.passes.load(std::memory_order_relaxed)
+                 << " passes_released=" << passes);
+    EXPECT_EQ(count.torn, 0U);
+    EXPECT_EQ(count.backwards, 0U);
+    EXPECT_EQ(count.errors, 0U);
+    EXPECT_EQ(count.down, 0U);
+    EXPECT_GE(passes, 1U)
+        << "a reader did not read every tag after the release";
+}
+
+// No reader saw anything but whole writes of a running owner, and each
+// read every tag at least once after the writer was released. Records the
+// reads of all readers. Called once the readers are joined.
+void expect_whole_writes(std::span<const ReaderCounts> counts) {
+    std::uint64_t reads = 0;
+    std::uint64_t busy = 0;
+    for (const ReaderCounts& count : counts) {
+        expect_whole_writes_of(count);
+        reads += count.reads;
+        busy += count.busy;
+    }
+    ::testing::Test::RecordProperty("reads", std::to_string(reads));
+    ::testing::Test::RecordProperty("busy", std::to_string(busy));
+}
+
+// Runs one reader thread for each of `counts` on `handles` while `writer`,
+// a simulator started with --hold, writes: releases it once every reader
+// has read every tag, and stops the readers once it has printed "done"
+// within `limit` and every reader has read every tag in a pass that began
+// after the release. True if the writer printed "done".
+bool read_while_writing(scada_ctx* ctx, std::span<const std::uint32_t> handles,
+                        ChildProcess& writer, std::chrono::seconds limit,
+                        std::span<ReaderCounts> counts) {
+    std::atomic<bool> released{false};
+    std::atomic<bool> readers_stop{false};
+    bool done = false;
+    {
+        std::vector<std::jthread> readers;
+        readers.reserve(counts.size());
+        for (ReaderCounts& count : counts) {
+            readers.emplace_back(
+                [ctx, handles, &released, &readers_stop, &count] {
+                    read_all_until(ctx, handles, released, readers_stop, count);
+                });
+        }
+        EXPECT_TRUE(every_reader_has(counts, &ReaderCounts::passes))
+            << "a reader did not read every tag before the release";
+        // Release: the readers load with acquire. Set before the signal, so
+        // that a pass that counts began after it.
+        released.store(true, std::memory_order_release);
+        EXPECT_TRUE(writer.send_signal(SIGUSR1));
+        done = writer.wait_for_output(
+            [](std::string_view out) {
+                return out.find("done ") != std::string_view::npos;
+            },
+            limit);
+        EXPECT_TRUE(every_reader_has(counts, &ReaderCounts::passes_released))
+            << "a reader did not read every tag after the release";
+        // Release: the readers load with acquire.
+        readers_stop.store(true, std::memory_order_release);
+    }
+    return done;
 }
 
 // How many of the tags `handles` do not hold write number `rounds`.
@@ -264,7 +342,11 @@ protected:
     // Runs scada-sim on the large tag set with `per_second` updates per
     // second (0: as fast as it can) until it has written every tag `rounds`
     // times, with READER_THREADS readers in this process, and checks that
-    // no reader saw a torn record. Returns the time the simulator took in
+    // no reader saw a torn record. The simulator holds (--hold) until every
+    // reader has read every tag once, and the readers stop only once it is
+    // done and each has read every tag in a pass that began after its
+    // release, so that no machine speed lets the writer finish before the
+    // readers begin (issue #62). Returns the time the simulator took in
     // ms; nothing if something failed before the end.
     [[nodiscard]] std::optional<std::uint64_t> run_load(
         std::uint64_t per_second, std::uint64_t rounds,
@@ -274,36 +356,19 @@ protected:
         if (!tagd.has_value()) {
             return std::nullopt;
         }
-        std::optional<ChildProcess> writer =
-            start_sim(load_layout(), {"--rate", std::to_string(per_second),
-                                      "--rounds", std::to_string(rounds)});
-        if (!writer.has_value()) {
+        std::optional<ChildProcess> writer = start_sim(
+            load_layout(), {"--hold", "--rate", std::to_string(per_second),
+                            "--rounds", std::to_string(rounds)});
+        if (!writer.has_value() || !prints(*writer, "ready\n")) {
             return std::nullopt;
         }
         // After the simulator attached: its regions are there to be mapped.
         const Attached reader(base(), "reader");
         const std::vector<std::uint32_t> handles = load_handles(reader);
 
-        std::atomic<bool> readers_stop{false};
         std::array<ReaderCounts, READER_THREADS> counts{};
-        bool done = false;
-        {
-            std::vector<std::jthread> readers;
-            readers.reserve(counts.size());
-            for (ReaderCounts& count : counts) {
-                readers.emplace_back([&reader, &handles, &readers_stop,
-                                      &count] {
-                    read_all_until(reader.ctx(), handles, readers_stop, count);
-                });
-            }
-            done = writer->wait_for_output(
-                [](std::string_view out) {
-                    return out.find("done ") != std::string_view::npos;
-                },
-                limit);
-            // Release: the readers load with acquire.
-            readers_stop.store(true, std::memory_order_release);
-        }
+        const bool done =
+            read_while_writing(reader.ctx(), handles, *writer, limit, counts);
         EXPECT_TRUE(done) << writer->out() << writer->err();
         expect_whole_writes(counts);
         EXPECT_EQ(tags_without_last_write(reader.ctx(), handles, rounds), 0U);

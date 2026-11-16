@@ -69,6 +69,9 @@ struct Options {
                                            // often
     std::optional<std::uint64_t> seconds;  // stop after this long
     Notify notify = Notify::BATCH;
+    // Wait after attaching and resolving, with "ready" printed, until
+    // SIGUSR1 before the first write.
+    bool hold = false;
     Waveform waveform;
     std::string base_dir{DEFAULT_BASE_DIR};
     std::optional<std::uint32_t> attach_tagd_uid;  // default: user scada-tagd

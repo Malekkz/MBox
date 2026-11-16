@@ -40,10 +40,18 @@ inline constexpr std::string_view DEFAULT_TAG_SET_PATH =
 //   new generation also logs each process that has not attached; from the
 //   same loop it feeds the service manager's watchdog four times in its
 //   interval (WATCHDOG_USEC);
-// - on SIGTERM or SIGINT it marks itself as stopping, leaves the generation
-//   in place and returns EXIT_OK;
-// - it returns EXIT_ERROR if the tag-set file, the base directory or the
-//   environment is not usable, or if another instance is running.
+// - from the same loop it writes the retained values of the tags marked
+//   retain to the retain directory (`--retain-dir <directory>`, default
+//   /var/lib/scada/retain) when they changed, at most every
+//   `--retain-interval-ms` (default 5000), and within 1 s for a tag marked
+//   retain_now; it finishes the generations it retired: once an owner's
+//   process has left one, it writes that owner's values there marked FINAL,
+//   and once every process has left, or after 30 s, it removes it;
+// - on SIGTERM or SIGINT it writes the retained values that changed, marks
+//   itself as stopping, leaves the generation in place and returns EXIT_OK;
+// - it returns EXIT_ERROR if the tag-set file, the base directory, the
+//   retain directory or the environment is not usable, or if another
+//   instance is running.
 // Without a service manager it runs the same way and sends nothing. Log
 // records go to the journal under a service manager and to the standard
 // error stream otherwise.

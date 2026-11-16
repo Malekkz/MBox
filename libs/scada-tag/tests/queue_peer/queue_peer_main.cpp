@@ -67,6 +67,9 @@ constexpr std::uint64_t PAYLOAD_FACTOR = 0x9E37'79B9'7F4A'7C15U;
 constexpr std::size_t PAYLOAD_BYTES = 8;
 constexpr unsigned BITS_PER_BYTE = 8;
 constexpr long REQUEST_LIFETIME_NS = 1'000'000;
+// Posts of a request that expired before the library looked, after which
+// the feeder gives up: far more than a loaded machine needs (issue #62).
+constexpr std::uint64_t MAX_LATE_POSTS = 1000;
 
 std::int64_t monotonic_now() noexcept {
     timespec now{};
@@ -146,8 +149,9 @@ public:
         return 0;
     }
 
-    // Posts one request that expires 1 ms after it is posted.
+    // Posts one request that expires 1 ms after it is stamped.
     int request(scada_queue* queue) {
+        std::uint64_t late = 0;
         for (;;) {
             scada_write_request record{};
             record.target_handle = 0;
@@ -159,6 +163,21 @@ public:
                 static_cast<void>(scada_tag_notify(context_));
                 std::cout << "posted\n" << std::flush;
                 return 0;
+            }
+            if (code == SCADA_E_INVALID &&
+                monotonic_now() >= record.expiry_mono_ns) {
+                // The library refuses a request that has expired when it
+                // is posted (contract 9.4), and on a loaded machine 1 ms
+                // can pass between the stamp and the post (issue #62).
+                // Stamped again, up to MAX_LATE_POSTS times; any other
+                // refusal still fails.
+                if (++late >= MAX_LATE_POSTS) {
+                    std::cerr << "post failed: the request expired before "
+                                 "the post "
+                              << late << " times\n";
+                    return EXIT_FAILED;
+                }
+                continue;
             }
             if (code != SCADA_E_PEER_DOWN) {
                 std::cerr << "post failed with code " << code << "\n";

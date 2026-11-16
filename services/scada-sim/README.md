@@ -43,6 +43,7 @@ Give both commands the same `<layout>`; the processes, owners and tags of
 | `--rate <n>` | tags / 10 | Updates per second of the whole simulation, shared out by tag count; 0: as fast as possible |
 | `--rounds <n>` | none | Stop writing once every tag is written n times |
 | `--seconds <n>` | none | Stop writing after n seconds |
+| `--hold` | off | After attaching and resolving, print `ready` and wait for SIGUSR1 before the first write |
 | `--notify batch\|each` | `batch` | Wake consumers after each 1 ms tick's writes, or after every write |
 | `--amplitude <x>` | 100 | Amplitude of the waveforms, above 0 and at most 10^12 |
 | `--period <n>` | 100 | Writes of one tag per cycle of a waveform, at least 2 |
@@ -52,17 +53,21 @@ Give both commands the same `<layout>`; the processes, owners and tags of
 
 `run` prints:
 
-- `attached` once attached, and `writing` when the owner threads start;
+- `attached` once attached; with `--hold`, `ready` once every tag is
+  resolved, before it waits for SIGUSR1; `writing` when the owner threads
+  start;
 - `done updates=<n> elapsed_ms=<n> behind_max_ms=<n>` when a run bounded
   by `--rounds` or `--seconds` has ended. `elapsed_ms` is the time of the
   slowest owner; `behind_max_ms` the worst lateness of an update.
 - `stopped updates=<n> elapsed_ms=<n>` if SIGTERM, SIGINT or SIGHUP came
-  before.
+  before; `stopped updates=0 elapsed_ms=0` if it came while held.
 
 It stays attached and writes its heartbeat until SIGTERM, SIGINT or SIGHUP.
 It stops by itself once `scada-tagd` has been down for 5 s (a shorter
 outage, such as a restart of `scada-tagd`, does not stop it) or the
-generation retires. A standard output whose reader is gone does not stop
+generation retires, while held by `--hold` too, so that a simulator whose
+test died does not wait for ever. A held simulator writes its heartbeat; a
+SIGUSR1 after the release does nothing. A standard output whose reader is gone does not stop
 it: the writes to it fail and are ignored.
 
 `scada-sim run` starts no processes. A layout with `--processes n` needs n

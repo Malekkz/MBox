@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>  // NOLINT(modernize-deprecated-headers): renameat2 and RENAME_NOREPLACE are declared here, not in <cstdio>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -250,6 +251,33 @@ Result<Fd> open_base_directory(const std::string& path, std::uint32_t tagd_uid,
         detail = "the base directory " + path + " does not have mode 2750";
         return Status(StatusCode::PERMISSION_DENIED,
                       "the base directory has the wrong mode");
+    }
+    return directory;
+}
+
+Result<Fd> open_retain_directory(const std::string& path,
+                                 std::uint32_t tagd_uid, int base_fd,
+                                 std::string& detail) {
+    Result<Fd> directory = open_base_directory(path, tagd_uid, detail);
+    if (!directory.ok()) {
+        detail = "retain directory: " + detail;
+        return directory;
+    }
+    struct stat retain {};
+    struct stat base {};
+    if (::fstat(directory.value().get(), &retain) != 0 ||
+        ::fstat(base_fd, &base) != 0) {
+        detail = describe("cannot examine the retain directory", path, errno);
+        return Status(StatusCode::IO_ERROR,
+                      "cannot examine the retain directory");
+    }
+    if (retain.st_gid != base.st_gid) {
+        detail = "the retain directory " + path + " has group " +
+                 std::to_string(retain.st_gid) +
+                 ", not the group of the base directory, " +
+                 std::to_string(base.st_gid);
+        return Status(StatusCode::PERMISSION_DENIED,
+                      "the retain directory has the wrong group");
     }
     return directory;
 }
@@ -519,6 +547,58 @@ void remove_stale_temporaries(int dir_fd, std::string_view name,
             static_cast<void>(::unlinkat(dir_fd, entry.c_str(), 0));
         }
     }
+}
+
+bool proc_lock_held(int dir_fd, const std::string& name) noexcept {
+    const Fd file =
+        open_at(dir_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (!file.valid()) {
+        // Only a region that is not there is known to have no process.
+        // Any other error (EMFILE, EACCES, ...) leaves it unknown, which
+        // counts as held: a live process must never be taken as gone.
+        return errno != ENOENT;
+    }
+    // The lock taken here, if any, ends when `file` is closed. EWOULDBLOCK
+    // means held; any other failure is unknown, and counts as held too.
+    return ::flock(file.get(), LOCK_EX | LOCK_NB) != 0;
+}
+
+bool has_live_process(int base_fd, const std::string& name) {
+    const Fd directory =
+        open_at(base_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (!directory.valid()) {
+        return false;
+    }
+    std::string ignored;
+    const Result<std::vector<std::string>> entries =
+        list_directory(directory.get(), ignored);
+    if (!entries.ok()) {
+        return false;
+    }
+    return std::ranges::any_of(entries.value(), [&](const std::string& entry) {
+        return entry.starts_with("proc.") &&
+               proc_lock_held(directory.get(), entry);
+    });
+}
+
+bool remove_generation(int base_fd, const std::string& name) {
+    const Fd directory =
+        open_at(base_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory.valid()) {
+        std::string ignored;
+        const Result<std::vector<std::string>> entries =
+            list_directory(directory.get(), ignored);
+        if (entries.ok()) {
+            for (const std::string& entry : entries.value()) {
+                if (::unlinkat(directory.get(), entry.c_str(), 0) != 0 &&
+                    errno == EISDIR) {
+                    static_cast<void>(::unlinkat(directory.get(), entry.c_str(),
+                                                 AT_REMOVEDIR));
+                }
+            }
+        }
+    }
+    return ::unlinkat(base_fd, name.c_str(), AT_REMOVEDIR) == 0;
 }
 
 }  // namespace scada::tag

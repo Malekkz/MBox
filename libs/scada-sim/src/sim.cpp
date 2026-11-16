@@ -99,6 +99,11 @@ constexpr std::string_view USAGE =
     "                       fast as possible (a tenth of the tags).\n"
     "  --rounds <n>         Stop writing once every tag is written n times.\n"
     "  --seconds <n>        Stop writing after n seconds.\n"
+    "  --hold               After attaching and resolving, print \"ready\" "
+    "and\n"
+    "                       wait for SIGUSR1 before the first write; the\n"
+    "                       heartbeat goes on, and the stop rules below "
+    "apply.\n"
     "  --notify batch|each  Wake consumers after the writes of each 1 ms tick\n"
     "                       (batch) or after every write (each) (batch).\n"
     "  --amplitude <x>      Amplitude of the waveforms (100).\n"
@@ -108,13 +113,13 @@ constexpr std::string_view USAGE =
     "  --tagd-uid <n>       User id of scada-tagd (that of the user\n"
     "                       scada-tagd).\n"
     "\n"
-    "run prints \"attached\", then \"writing\"; when a run bounded by "
-    "--rounds\n"
-    "or --seconds has ended, \"done updates=<n> elapsed_ms=<n>\n"
-    "behind_max_ms=<n>\". It stays attached and writes its heartbeat until\n"
-    "SIGTERM, SIGINT or SIGHUP; stopped earlier, it prints \"stopped\n"
-    "updates=<n> elapsed_ms=<n>\". It exits with code 1 if scada-tagd has\n"
-    "been down for 5 s or the generation retires. A closed standard output\n"
+    "run prints \"attached\", with --hold \"ready\", then \"writing\"; when a\n"
+    "run bounded by --rounds or --seconds has ended, \"done updates=<n>\n"
+    "elapsed_ms=<n> behind_max_ms=<n>\". It stays attached and writes its\n"
+    "heartbeat until SIGTERM, SIGINT or SIGHUP; stopped earlier, it prints\n"
+    "\"stopped updates=<n> elapsed_ms=<n>\", while held \"stopped updates=0\n"
+    "elapsed_ms=0\". It exits with code 1 if scada-tagd has been down for\n"
+    "5 s or the generation retires, while held too. A closed standard output\n"
     "does not stop it. It starts no processes: run one instance for each\n"
     "simulator process of the layout.\n"
     "\n"
@@ -172,13 +177,15 @@ std::optional<std::vector<Pattern>> parse_patterns(std::string_view text) {
 }
 
 // The options of each command, and what each does with its value. A setter
-// returns false if the value is not valid.
+// returns false if the value is not valid. A flag takes no value; its
+// setter gets an empty one.
 struct OptionSpec {
     std::string_view name;
     bool tag_set = false;  // allowed with `tag-set`
     bool run = false;      // allowed with `run`
     bool repeatable = false;
     std::function<bool(Options&, std::string_view)> set;
+    bool flag = false;
 };
 
 // Sets `field` to the number in `text` if it is at most `limit`.
@@ -302,6 +309,12 @@ const std::vector<OptionSpec>& option_specs() {
              return set_optional(options.seconds, value, MAX_SECONDS) &&
                     *options.seconds != 0;
          }},
+        {"--hold", false, true, false,
+         [](Options& options, std::string_view /*value*/) {
+             options.hold = true;
+             return true;
+         },
+         true},
         {"--notify", false, true, false,
          [](Options& options, std::string_view value) {
              if (value == "batch") {
@@ -354,11 +367,12 @@ const OptionSpec* find_option(std::string_view name) {
     return nullptr;
 }
 
-// Applies the option at `args[index]` and its value to `options`;
-// `seen` holds the options applied before.
+// Applies the option at `args[index]` and its value, if it takes one, to
+// `options`, and sets `used` to the number of arguments it took; `seen`
+// holds the options applied before.
 Status apply_option(Options& options, std::span<const std::string_view> args,
                     std::size_t index, std::vector<std::string_view>& seen,
-                    std::string& detail) {
+                    std::size_t& used, std::string& detail) {
     const std::string_view name = args[index];
     const OptionSpec* const spec = find_option(name);
     const bool allowed =
@@ -381,6 +395,13 @@ Status apply_option(Options& options, std::span<const std::string_view> args,
         return USAGE_ERROR;
     }
     seen.push_back(name);
+    if (spec->flag) {
+        used = 1;
+        // The setter of a flag does not fail.
+        static_cast<void>(spec->set(options, {}));
+        return {};
+    }
+    used = 2;
     if (index + 1 >= args.size()) {
         detail = "option without a value: " + std::string(name);
         return USAGE_ERROR;
@@ -580,6 +601,9 @@ Totals add_up(std::span<const OwnerProgress> progress) {
 
 enum class Ending : std::uint8_t { SIGNALLED, FAILED };
 
+// How a hold of --hold ended.
+enum class HoldEnd : std::uint8_t { RELEASED, SIGNALLED, FAILED };
+
 // Watches scada-tagd from the main loop. A process must tolerate a restart
 // of scada-tagd (reference 3.3), so a simulator goes on while scada-tagd is
 // down for a short time; one left behind by a test that stopped scada-tagd
@@ -666,6 +690,42 @@ Ending beat_until_stopped(scada_ctx* ctx, const sigset_t& signals,
     }
 }
 
+// The main thread of a simulator started with --hold, before the first
+// write: the heartbeat every HEARTBEAT_PERIOD_NS until SIGUSR1 releases it
+// or a signal in `stop_signals` stops it. The rule for a simulator left
+// behind (TagdWatch) applies here too, so that one whose test died does not
+// wait for ever.
+HoldEnd hold_until_released(scada_ctx* ctx, const sigset_t& stop_signals,
+                            std::ostream& err) {
+    sigset_t signals = stop_signals;
+    if (::sigaddset(&signals, SIGUSR1) != 0) {
+        err << "scada-sim: cannot wait for SIGUSR1\n";
+        return HoldEnd::FAILED;
+    }
+    const timespec wait{.tv_sec = 0, .tv_nsec = HEARTBEAT_PERIOD_NS};
+    TagdWatch tagd;
+    for (;;) {
+        const int taken = ::sigtimedwait(&signals, nullptr, &wait);
+        if (taken == SIGUSR1) {
+            return HoldEnd::RELEASED;
+        }
+        if (taken >= 0) {
+            return HoldEnd::SIGNALLED;
+        }
+        if (errno != EAGAIN && errno != EINTR) {
+            err << "scada-sim: waiting for a signal failed\n";
+            return HoldEnd::FAILED;
+        }
+        if (scada_tag_heartbeat(ctx) == SCADA_E_RETIRING) {
+            err << "scada-sim: the generation is retiring\n";
+            return HoldEnd::FAILED;
+        }
+        if (!tagd.still_running(ctx, err)) {
+            return HoldEnd::FAILED;
+        }
+    }
+}
+
 // Attaches, writes and detaches. Returns the exit code.
 int run_simulator(const Options& options, std::ostream& out,
                   std::ostream& err) {
@@ -682,6 +742,9 @@ int run_simulator(const Options& options, std::ostream& out,
         ::sigaddset(&blocked, SIGINT) != 0 ||
         ::sigaddset(&blocked, SIGHUP) != 0 ||
         ::sigaddset(&blocked, SIGPIPE) != 0 ||
+        // With --hold, SIGUSR1 is the release, taken by sigtimedwait; one
+        // that comes later stays pending and does nothing.
+        (options.hold && ::sigaddset(&blocked, SIGUSR1) != 0) ||
         ::pthread_sigmask(SIG_BLOCK, &blocked, nullptr) != 0) {
         err << "scada-sim: cannot block signals\n";
         return EXIT_ERROR;
@@ -713,6 +776,17 @@ int run_simulator(const Options& options, std::ostream& out,
     if (!plans.has_value()) {
         scada_tag_detach(ctx);
         return EXIT_ERROR;
+    }
+    if (options.hold) {
+        out << "ready\n" << std::flush;
+        const HoldEnd held = hold_until_released(ctx, signals, err);
+        if (held != HoldEnd::RELEASED) {
+            if (held == HoldEnd::SIGNALLED) {
+                out << "stopped updates=0 elapsed_ms=0\n" << std::flush;
+            }
+            scada_tag_detach(ctx);
+            return held == HoldEnd::SIGNALLED ? EXIT_OK : EXIT_ERROR;
+        }
     }
     std::vector<OwnerProgress> progress(plans->size());
     std::atomic<bool> stop{false};
@@ -782,11 +856,14 @@ Result<Options> parse_options(std::span<const std::string_view> args,
         return USAGE_ERROR;
     }
     std::vector<std::string_view> seen;
-    for (std::size_t i = 1; i < args.size(); i += 2) {
-        if (const Status applied = apply_option(options, args, i, seen, detail);
+    for (std::size_t i = 1; i < args.size();) {
+        std::size_t used = 0;
+        if (const Status applied =
+                apply_option(options, args, i, seen, used, detail);
             !applied.ok()) {
             return applied;
         }
+        i += used;
     }
     if (const Status combined = check_combination(options, detail);
         !combined.ok()) {

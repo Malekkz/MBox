@@ -7,3 +7,8 @@ scada_install_service(scada-tagd
 # database contract, section 3.1); scada-tagd does not.
 install(FILES "${PROJECT_SOURCE_DIR}/deploy/tmpfiles.d/scada-tagd.conf"
   DESTINATION "${SCADA_INSTALL_TMPFILESDIR}")
+
+# Section 12: scada-tagd writes the retained values, in a file system the
+# unit makes read-only otherwise.
+install(FILES "${PROJECT_SOURCE_DIR}/deploy/systemd/scada-tagd.service.d/retain.conf"
+  DESTINATION "${SCADA_INSTALL_SYSTEMD_UNITDIR}/scada-tagd.service.d")
