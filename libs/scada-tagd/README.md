@@ -44,12 +44,43 @@ process. The executable in `services/scada-tagd` only calls it.
   retired, then logged as abandoned and left to the next boot. When it
   removes or abandons one, it logs per queue the records the consumer did
   not take (decision D-54; see the log records below).
-- Once no generation is retired and every owner has its file, files of
-  owners the tag set no longer has are removed.
+- Once no generation is retired, an owner that has no region yet gets, in
+  its own file, the values of its tags that moved to it from the files of
+  their former owners (decision D-59), so that it restores them when it
+  attaches late. Then, once every owner has its file, files of owners the
+  tag set no longer has are removed.
 - On `SIGTERM` or `SIGINT`: writes the retained values that changed,
-  waiting for the writer at most 5 s (logged if values stay unsaved), marks
-  itself as stopping and exits. The generation stays, so that the other
-  services keep running.
+  waiting for the writer at most 5 s, marks itself as stopping and exits
+  with code 0. The generation stays, so that the other services keep
+  running. If the writer is still busy after 5 s (a hung `fsync`), it logs
+  `values unsaved at exit` at ERROR, flushes the log and exits at once with
+  code 3, without joining the writer (decision D-59). The file is safe: the
+  old or the new one survives, and the next start removes the temporary
+  file. The writer thread keeps the lock of the base directory while it is
+  in the kernel, so a restarted `scada-tagd` cannot become a second writer.
+  The worst case of a stop is 12 s: a stop during the 5-s wait of the
+  start for its finished generations, the 5-s bound of the stop, 2 s for
+  the log; the unit allows 15 s.
+- A write stuck in the kernel (an `fsync` of failing storage) keeps the
+  process after `_Exit` as a zombie until the thread leaves the kernel. It
+  keeps the lock of the base directory, `SIGKILL` of systemd does not end
+  it, a restart fails on the lock and `Restart=on-failure` runs into the
+  start limit, so `scada-tagd` stays down after the storage recovers. The
+  stuck process cannot become a second writer. Recovery: repair the
+  storage, then `systemctl reset-failed scada-tagd.service` and
+  `systemctl start scada-tagd.service`. A process stuck in the kernel in
+  state D can never be reaped: systemd never sees the exit code 3, and only
+  a reboot clears it.
+- `retain files not all read for moved tags` stays until the look
+  succeeds. With more than 1,023 other owners' files it never does: remove
+  from the retain directory the files of owners that are in no tag set any
+  more (`<owner>.bin` for an owner no `tag-set.json` lists); a damaged file
+  that is logged as `retain file ignored` blocks it too and is removed the
+  same way.
+- The age of a retained value across a reboot needs `adjtimex(2)` (the
+  `@clock` system-call set of systemd). A unit with `ProtectClock=yes` or
+  `SystemCallFilter=~@clock` would make every such age unknown, or end the
+  process with `SIGSYS`; neither may be set for `scada-tagd`.
 
 It does not touch the shared memory itself; that is in `libscada-tag`.
 
@@ -81,19 +112,25 @@ the standard error stream.
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
 | `retained values written` | DEBUG | `OWNER`, `VALUES` |
 | `retained values written after the owner left a retired generation` | INFO | `OWNER`, `VALUES` |
-| `retained values` | WARNING, once until the problem is gone: a file that failed its checks and was ignored, or a file that could not be written | `SUBJECT` (file or owner), `DETAIL` |
+| `retain file ignored` | WARNING, once for each file: it failed its checks | `SUBJECT` (the file; outside input), `DETAIL` |
+| `retain file not written` | WARNING, once until a write succeeds: a retain file, or the directory after removals, could not be written | `SUBJECT` (owner, or `retain directory`), `DETAIL` |
+| `retain writer did not finish within its bound` | ERROR: a wait for the writer thread reached 5 s | `SUBJECT` (`retain writer`), `DETAIL` |
+| `values unsaved at exit` | ERROR, once at the stop when values of owners are not on disk; when the writer is still busy (exit with code 3), `SUBJECT` is the owner whose file is being written | `SUBJECT`, `DETAIL`, `UNSAVED_COUNT`, `UNSAVED_OWNERS` (as many names as fit, then `...`), `KEPT_WRITTEN_TIME_NS` (the `written_time_ns` of the file of `SUBJECT` that stays, as `scada-tagd` last wrote or read it, not read at the stop; it is the oldest stamp of its values, which can be older than the write; `none` if none is known; `-` if no file was being written) |
+| `the retain directory is not usable` | CRITICAL, at the start, which then fails | `DIRECTORY`, `STATUS`, `DETAIL` |
+| `retain files not all read for moved tags` | ERROR, once per start: the retain directory could not be listed, or holds more than 1,023 other owners' files, so the values of tags that moved to an owner that has not attached cannot all be found. Files of owners that are gone are kept, and it is tried again at every check | `SUBJECT`, `DETAIL` |
 | `removed the retain file of an owner that is gone` | NOTICE | `FILE` |
 | `retired generation removed` | NOTICE | `GENERATION` |
 | `retired generation removed after the timeout, with processes still attached` | WARNING | `GENERATION` |
-| `process still attached to a retired generation` | WARNING, before such a removal | `GENERATION`, `PROCESS` (`<name> (pid <pid>)`) |
+| `process still attached to a retired generation` | WARNING, before such a removal at the 30-s timeout | `GENERATION`, `PROCESS` (`<name> (pid <pid>)`) |
 | `cannot remove a retired generation` | ERROR, once | `GENERATION` |
 | `audit records left unconsumed in a removed generation` (an events queue), `records left unconsumed in a removed generation` (a request or result queue) | WARNING, once for each such queue when a retired generation is removed or abandoned (decision D-54). Records a post accepted that the consumer never took; for an events queue, actions whose records the journal lacks. After the 30-s timeout a consumer may still have been draining, so `RECORDS` is then an upper bound | `GENERATION`, `QUEUE`, `RECORDS` (a count, or `unknown` when the queue file or the consumer's cursor cannot be read, the pair is not valid, or the generation was abandoned; a generation whose header cannot be read gives one record, `audit records ...`, with `QUEUE` and `RECORDS` `unknown`), and for a count `FIRST_SEQ` and `END_SEQ`: the positions `[FIRST_SEQ, END_SEQ)` not taken, an event's `seq` and the low part of a request id |
 | `stopped on request` | NOTICE | |
 
 ### Message IDs
 
-The liveness records carry a fixed journald `MESSAGE_ID` as their last field
-(decision D-47), so that they can be found without matching the text:
+The liveness and retain records carry a fixed journald `MESSAGE_ID` as their
+last field (decisions D-47, D-59), so that they can be found without matching
+the text:
 
 | Message | `MESSAGE_ID` |
 | --- | --- |
@@ -104,6 +141,15 @@ The liveness records carry a fixed journald `MESSAGE_ID` as their last field
 | `audit records left unconsumed in a removed generation`, `records left unconsumed in a removed generation` | `42c8e35948cb467eb6d894d3bb0476a8` |
 | `heartbeat late` | `31aad0d613b645d39a83e7978c4531ec` |
 | `heartbeat late before this check` | `c4de2438d3574ca38f45771de9254e3a` |
+| `retain file ignored` | `586ec48106f748609721eef8957c56d5` |
+| `retain file not written` | `974151cda6fa452a998a576b2bb09bce` |
+| `the retain directory is not usable` | `8df1e064b8464d59ad5fa42e9a3070e4` |
+| `process still attached to a retired generation` | `349b6814c6cc4a2fafa5d3d1af16e7a7` |
+| `retain writer did not finish within its bound` | `0031dfe3391142b0b9fa995b07115e10` |
+| `values unsaved at exit` | `7cf5c1c8535f44f6a297db538666d7a3` |
+| `retain files not all read for moved tags` | `624f9b58ba224d5eadd528279c0f8e7d` |
+| `queue file created anew; audit records may be lost`, `queue file created anew; records may be lost` | `330f9ce1bb0547c098562d406ce2f774` |
+| `queue write_seq fell; ids may repeat` | `d673f795274a49d1882153ae03003b15` |
 
 ```
 journalctl MESSAGE_ID=31aad0d613b645d39a83e7978c4531ec -o verbose
@@ -129,9 +175,9 @@ before the first check. A reused generation keeps what the previous
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.19, sections 3, 5,
-  9.2, 9.5, 10, 11.1 and 11.3; decisions D-27, D-36, D-38, D-46, D-47, D-49,
-  D-51, D-53 and D-54 in
+- Contract: `docs/contracts/tag-database.md`, version 0.20, sections 3, 5,
+  9.2, 9.5, 10, 11.1, 11.3 and 12; decisions D-27, D-36, D-38, D-46, D-47,
+  D-49, D-51, D-53, D-54 and D-59 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.

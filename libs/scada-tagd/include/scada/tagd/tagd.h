@@ -9,12 +9,34 @@
 #include <span>
 #include <string_view>
 
+namespace scada::tag {
+class RetainFileOps;
+}  // namespace scada::tag
+
 namespace scada::tagd {
 
 // Process exit codes of `scada-tagd`.
 inline constexpr int EXIT_OK = 0;
 inline constexpr int EXIT_ERROR = 1;
 inline constexpr int EXIT_USAGE = 2;
+// The stop could not wait for a retain file still being written, for
+// example in a hung fsync (decision D-59): retained values may be unsaved.
+inline constexpr int EXIT_UNSAVED = 3;
+
+// What `run` takes from `main`.
+struct RunHooks {
+    // Ends the process at once with `status`, without destructors, joins or
+    // exit handlers; must not return. `main` passes a call of std::_Exit
+    // (coding standard, section 7). Called only when a stop reached the
+    // 5-s bound of the retain writer (EXIT_UNSAVED), after the log was
+    // flushed: joining the writer could then wait for as long as the
+    // kernel holds it. Null: `run` returns EXIT_UNSAVED and the writer is
+    // joined on the way out.
+    void (*exit_now)(int status) = nullptr;
+    // Tests only: the file system calls of the retain writer, borrowed for
+    // the call. Null: the operating system's.
+    scada::tag::RetainFileOps* retain_file_ops = nullptr;
+};
 
 // Where the tag-set file is read from unless `--tag-set` names another.
 inline constexpr std::string_view DEFAULT_TAG_SET_PATH =
@@ -49,6 +71,9 @@ inline constexpr std::string_view DEFAULT_TAG_SET_PATH =
 //   and once every process has left, or after 30 s, it removes it;
 // - on SIGTERM or SIGINT it writes the retained values that changed, marks
 //   itself as stopping, leaves the generation in place and returns EXIT_OK;
+//   if the retain writer does not finish within 5 s it logs `values unsaved
+//   at exit` at ERROR, flushes the log and ends through `hooks.exit_now`
+//   with EXIT_UNSAVED;
 // - it returns EXIT_ERROR if the tag-set file, the base directory, the
 //   retain directory or the environment is not usable, or if another
 //   instance is running.
@@ -58,6 +83,10 @@ inline constexpr std::string_view DEFAULT_TAG_SET_PATH =
 //
 // It blocks SIGTERM and SIGINT for the calling thread and leaves them
 // blocked. Call it from the main thread before starting any other.
+[[nodiscard]] int run(std::span<const std::string_view> args, std::ostream& out,
+                      std::ostream& err, const RunHooks& hooks);
+
+// `run` with no hooks.
 [[nodiscard]] int run(std::span<const std::string_view> args, std::ostream& out,
                       std::ostream& err);
 

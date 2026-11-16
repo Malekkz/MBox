@@ -18,6 +18,7 @@
 #include "scada/common/fd.h"
 #include "scada/common/realtime.h"
 #include "scada/common/result.h"
+#include "scada/tag/handle.h"
 #include "scada/tag/liveness.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/types.h"
@@ -95,6 +96,8 @@ struct AttachmentStatus {
     // scada_status, which keeps its size.
     std::uint32_t values_restored = 0;
     std::uint32_t final_waits_expired = 0;
+    // Values restored whose age is unknown (decision D-59).
+    std::uint32_t ages_unknown = 0;
     // Retain files that failed their checks and were ignored.
     std::uint32_t files_rejected = 0;
     // Owners whose retained values were not restored because the retain
@@ -104,6 +107,25 @@ struct AttachmentStatus {
     // True if reading the clocks was found to be a system call on this
     // machine (section 13.1).
     bool clock_syscall = false;
+};
+
+// Where a restored value came from (decision D-59); the values of
+// `scada_tag_retain_info_t.origin`.
+enum class RetainOrigin : std::uint8_t {
+    NONE = 0,          // not restored
+    OWN_FINAL = 1,     // the owner's own file, marked FINAL
+    OWN_PERIODIC = 2,  // the owner's own file, not marked FINAL
+    OTHER_OWNER = 3,   // another owner's file: a tag that moved
+};
+
+// What the restore did for one RETAIN tag (`Attachment::retain_info`).
+struct RetainInfo {
+    std::uint32_t handle = INVALID_HANDLE;
+    RetainOrigin origin = RetainOrigin::NONE;
+    std::int64_t written_time_ns = 0;       // of the file; 0 if not restored
+    std::optional<std::int64_t> age_ns;     // nothing: unknown
+    Quality stored_quality = Quality::BAD;  // as on file; BAD if not restored
+    bool final_wait_expired = false;
 };
 
 // The tag regions of one owner of the attached process, mapped read-write.
@@ -277,6 +299,15 @@ public:
 
     // Name, type, flags and owner of the tag `handle`. Not real-time.
     [[nodiscard]] int info(std::uint32_t handle, scada_tag_info_t& out) const;
+
+    // What the restore of this attach did for the tag `handle` (section 12,
+    // decision D-59). SCADA_E_INVALID for a handle that is none of this
+    // generation, SCADA_E_NOT_OWNER for a tag of another process (and every
+    // tag of an observer). A tag of the process that was not restored at
+    // this attach (no RETAIN, a region reused, no value on file) gives
+    // origin none. Not real-time.
+    [[nodiscard]] int retain_info(std::uint32_t handle,
+                                  scada_tag_retain_info_t& out) const;
 
     // Name, tag count, ring capacity and process of the owner
     // `owner_index`. Not real-time.
@@ -675,12 +706,25 @@ private:
     // time of the restore as update time. Nothing is restored when the
     // retain directory or the file cannot be read.
     void restore_retained(std::span<std::byte> tags, std::size_t owner_index);
+    // The wait of `restore_retained` for FINAL files, `retain_fd` the
+    // retain directory: for each tag of `wanted`, true if the wait ran out
+    // before a FINAL file it needed came.
+    [[nodiscard]] std::vector<bool> wait_for_finals(
+        int retain_fd, std::span<const WantedValue> wanted);
+    // Writes the values of `loaded` into the records `slots` of `tags`, as
+    // `restore_retained` says, and records what it did in `retain_infos_`.
+    void apply_retained(std::span<std::byte> tags, std::size_t owner_index,
+                        std::span<const std::uint32_t> slots,
+                        const LoadedValues& loaded,
+                        const std::vector<bool>& wait_expired);
     // A FINAL retain file an attach waits for: that of `owner` for the
     // RETIRING generation `generation`, whose directory is `directory`.
     struct FinalWanted {
         std::string owner;
         GenerationIdentity generation;
         std::string directory;
+        // Indexes of the tags asked for that this owner held there.
+        std::vector<std::size_t> tags;
     };
     // For each owner that holds one of the tags `names` in a RETIRING
     // generation older than this one, the newest such generation.
@@ -750,7 +794,11 @@ private:
     std::uint32_t tagd_uid_ = 0;
     std::string retain_dir_;  // for a process: where retained values are
     std::uint32_t values_restored_ = 0;
+    std::uint32_t ages_unknown_ = 0;
     std::uint32_t final_waits_expired_ = 0;
+    // What the restore did for each RETAIN tag of a `tags` region this
+    // attach created (decision D-59), sorted by handle.
+    std::vector<RetainInfo> retain_infos_;
     std::uint32_t files_rejected_ = 0;
     std::uint32_t directory_unusable_ = 0;
     // When the waits for FINAL files of this attach end (one deadline for
