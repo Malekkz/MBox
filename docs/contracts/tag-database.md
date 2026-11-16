@@ -1423,10 +1423,15 @@ know they are there, and any number may run.
   the value and keeps it on file, as does a record that cannot be read
   consistently (mid-write at every attempt).
 - A tag that also has RETAIN_NOW (modes, control authority) is on disk
-  within 1 second of its change, provided each retain write completes
-  within its budget W = 200 ms; a power loss cannot revert it by more than
-  that. The writer is one thread for all owners, so the bound also needs
-  the writes queued before it, of all owners, to finish within W.
+  within 1 second of its change, provided that, from its hand-over to the
+  end of its own write, including the writes of all owners queued before
+  it (the writer is one thread for all owners), at most W = 200 ms pass; a
+  power loss cannot revert it by more than that. The bound has two more
+  conditions: no check runs longer than its period (a check that does
+  moves the schedule of the ones after it), and the time from the start of
+  a check to its hand-over of the file is part of the check, not measured
+  apart. A check never comes early: the loop waits again after a wait that
+  another signal interrupted.
 - A file of an owner is handed to the writer again only once K checks have
   passed since the last one, K = max(1, floor((1000 ms − W) / P) − 1) for
   a check period P: 2 at the default 250 ms (a write at most every
@@ -1447,7 +1452,8 @@ know they are there, and any number may run.
   change: a power loss in that time restores the value the owner
   disowned.
 - `scada-tagd` measures, for each RETAIN_NOW change, the time from the
-  check before the one that saw it to the end of its write, and logs
+  check before the one that saw it to the end of the write that carried it
+  (each file on its own result), and logs
   `retain_now change reached the disk late` (WARNING, MESSAGE_ID
   `51a87b54784a4a21bd45dfb59069996d`) when it exceeds 1 s, once per owner
   until a later change is on disk within 1 s.
