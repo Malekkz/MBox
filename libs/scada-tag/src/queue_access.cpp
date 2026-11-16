@@ -143,8 +143,9 @@ void Attachment::kill_queue(std::size_t queue_id) noexcept {
 
 void Attachment::use_queue_file(std::size_t queue_id,
                                 const PeerMapping* mapping) noexcept {
-    // Relaxed: see `queue_in_use_`.
-    queue_in_use_[queue_id].store(mapping, std::memory_order_relaxed);
+    // Release: a wait-set or descriptor thread loads the pointer with
+    // acquire and then reads the mapping it names (review of PR #86, N1).
+    queue_in_use_[queue_id].store(mapping, std::memory_order_release);
 }
 
 void Attachment::jump_cursor(std::size_t queue_id, std::uint64_t read,
@@ -178,7 +179,7 @@ bool Attachment::follow_queue(std::size_t queue_id) noexcept {
         kill_queue(queue_id);  // decision D-49, Q2
         return false;
     }
-    // Relaxed: see `queue_in_use_`.
+    // Relaxed: this thread is the only writer of the pointer.
     const PeerMapping* const used =
         queue_in_use_[queue_id].load(std::memory_order_relaxed);
     // `current` first, then `whole` (review of PR #77, F3): a look marks an
@@ -296,13 +297,21 @@ bool Attachment::queue_switch_pending(std::size_t queue_id) const noexcept {
     if (!access.consumed || access.produced || queue_is_dead(queue_id)) {
         return false;
     }
-    // Relaxed: see `queue_in_use_`; a stale value only delays the wake by
-    // one look.
+    // Acquire: pairs with the release store of `use_queue_file` (N1).
     const PeerMapping* const used =
-        queue_in_use_[queue_id].load(std::memory_order_relaxed);
+        queue_in_use_[queue_id].load(std::memory_order_acquire);
     const PeerMapping* const current = peers_.mapping(access.queue_slot);
-    return used != nullptr && current != nullptr && current != used &&
-           !same_file(*current, *used);
+    if (used == nullptr) {
+        // The first file appeared after the consumer opened the queue: the
+        // next look adopts it (review of PR #86, B1).
+        return current != nullptr;
+    }
+    if (!used->whole.load(std::memory_order_acquire)) {
+        // The file in use changed size: the next look stops the queue, and
+        // scada_queue_next reports it (review of PR #86, B2).
+        return true;
+    }
+    return current != nullptr && current != used && !same_file(*current, *used);
 }
 
 void Attachment::follow_queues() {
@@ -476,11 +485,18 @@ std::span<std::byte> Attachment::queue_bytes(
         return access.own_region;
     }
     // The file in use (`follow_queue`), which stays mapped as long as the
-    // context. Relaxed: see `queue_in_use_`.
+    // context. Acquire: pairs with the release store of `use_queue_file`
+    // (review of PR #86, N1).
     const PeerMapping* const used =
-        queue_in_use_[queue_id].load(std::memory_order_relaxed);
-    return used == nullptr ? std::span<std::byte>{}
-                           : used->region.memory.bytes();
+        queue_in_use_[queue_id].load(std::memory_order_acquire);
+    // A dead queue, or a file the look found changed in size, is not read
+    // again (section 3.3; review of PR #86, B2): a read past its end would
+    // raise SIGBUS.
+    if (used == nullptr || queue_is_dead(queue_id) ||
+        !used->whole.load(std::memory_order_acquire)) {
+        return {};
+    }
+    return used->region.memory.bytes();
 }
 
 std::uint64_t& Attachment::own_cursor(std::size_t queue_id) const noexcept {

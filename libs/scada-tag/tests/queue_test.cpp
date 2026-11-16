@@ -2104,6 +2104,88 @@ TEST_F(Queues, AWaitSetFindsAFileCreatedAnewWithoutNotify) {
     EXPECT_EQ(slot_of(map_file("proc.web"), EVENTS_IO), 2 + CAPACITY);
 }
 
+// Review of PR #86 (B1): the first file of a queue appears after the
+// consumer opened it. A wait set reports the queue ready, without notify,
+// and the next look adopts the file.
+TEST_F(Queues, AWaitSetFindsAFirstFileCreatedAfterTheOpen) {
+    constexpr int WAIT_MS = 2500;
+    std::filesystem::remove(generation_dir() / "events.io");
+    // A fresh context, which finds no file and looks again a second later.
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
+    restart(io(), "io");  // creates the file
+    const QueuePtr out = open(*io(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    EXPECT_EQ(set.wait(WAIT_MS), SCADA_OK);
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// The same for the descriptor of a wait set (B1).
+TEST_F(Queues, TheDescriptorOfAWaitSetFindsAFirstFileCreatedAfterTheOpen) {
+    std::filesystem::remove(generation_dir() / "events.io");
+    restart(web(), "web");
+    const QueuePtr reader = open(*web(), "events.io");
+    WaitSet set(*web());
+    ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
+    int descriptor = -1;
+    ASSERT_EQ(set.fd(descriptor), SCADA_OK);
+    restart(io(), "io");
+    const QueuePtr out = open(*io(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    pollfd ready{.fd = descriptor, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&ready, 1, WAIT_LIMIT_MS), 1);
+    EXPECT_TRUE(takes_events(*reader, 0, 1));
+}
+
+// Review of PR #86 (B2): once a look found the file in use changed in
+// size, a wait set does not read it (SIGBUS) but reports the queue ready;
+// next then stops it, and the stopped queue is not ready again. In a
+// child: without the fix the wait faults.
+TEST_F(Queues, AWaitSetDoesNotReadAFileThatChangedSize) {
+    const QueuePtr out = open(*io(), "events.io");
+    const QueuePtr reader = open(*web(), "events.io");
+    ASSERT_TRUE(posts_events(*out, 1));
+    ASSERT_TRUE(takes_events(*reader, 0, 1));
+    // To nothing: a read of the header page then faults.
+    std::filesystem::resize_file(generation_dir() / "events.io", 0);
+    look_again(*web());
+    // A plain fork, not a death test: the child shares the mappings and
+    // never returns to the test. Its exit status is the first step that
+    // failed, 0 if none.
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        const auto steps = [&]() -> int {
+            int step = 0;
+            WaitSet set(*web());
+            if (++step; set.add_queue(*reader) != SCADA_OK) {
+                return step;
+            }
+            if (++step; set.wait(0) != SCADA_OK) {
+                return step;
+            }
+            scada_event_record record{};
+            if (++step; next(*reader, record, 0) != SCADA_E_LAYOUT) {
+                return step;
+            }
+            if (++step; set.wait(0) != SCADA_E_TIMEOUT) {
+                return step;
+            }
+            return 0;
+        };
+        ::_exit(steps());
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status)) << "the child was killed by signal "
+                                   << (WIFSIGNALED(status) ? WTERMSIG(status)
+                                                           : 0);
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "the step that failed";
+}
+
 // Decision D-51: scada_tag_notify does not wait for a look of another
 // thread, which may be mapping and prefaulting a region; it skips its own.
 TEST_F(Queues, NotifyDoesNotWaitForALookOfAnotherThread) {

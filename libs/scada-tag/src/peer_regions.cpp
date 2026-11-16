@@ -200,7 +200,12 @@ bool PeerRegions::look(int dir_fd, Slot& slot) {
     // The same file as one mapped before, after a look that failed (for
     // example a transient fstatat error) or while it was under another
     // name: its kept mapping is used again, and no mapping slot is spent
-    // (decision D-51). Only a mapping that is still whole.
+    // (decision D-51). Only a mapping that is still whole. It skips the
+    // header checks of section 3.1 that a fresh open makes: they passed
+    // when it was first mapped, and the checks that matter for a queue
+    // reused this way are the consumer's range rule and base (`follow_queue`),
+    // which stop a queue whose file was shrunk and grown again to its size
+    // between two looks (review of PR #86, N4).
     for (const std::unique_ptr<PeerMapping>& kept : mappings_) {
         if (kept->slot == &slot && kept->region.device == info.st_dev &&
             kept->region.inode == info.st_ino && info.st_size >= 0 &&

@@ -244,6 +244,7 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
     // queue's worth, then the deadline is looked at.
     std::uint32_t answered = 0;
     bool stopped = false;
+    bool switch_looked = false;
     for (;;) {
         switch (poll(out)) {
             case Look::DELIVERED:
@@ -280,6 +281,15 @@ int Queue::next(std::span<std::byte> out, int timeout_ms) {
         // scada_tag_notify finds a file created anew, or one changed in
         // size, within about a second (decision D-51).
         attachment_.refresh_peers();
+        if (!switch_looked && attachment_.queue_switch_pending(id_)) {
+            // The look found a file to adopt, move to or stop at: look
+            // again now rather than wait a slice on the old `write_seq`
+            // (review of PR #86, N2). Once per slice, so that a switch
+            // that cannot happen yet never spins.
+            switch_looked = true;
+            continue;
+        }
+        switch_looked = false;
         const std::optional<FutexWaiter> word = waiter();
         if (!word.has_value()) {
             // The producer has not created the queue yet, or the queue is
@@ -318,7 +328,9 @@ bool Queue::ready() const noexcept {
         return false;
     }
     if (attachment_.queue_switch_pending(id_)) {
-        return true;  // the next look moves on or stops (decision D-51)
+        // The next look adopts a file, moves on or stops the queue; a
+        // stopped queue is reported once, by next (decision D-51).
+        return true;
     }
     const std::span<std::byte> bytes = attachment_.queue_bytes(id_);
     if (bytes.empty()) {

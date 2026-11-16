@@ -167,7 +167,9 @@ accepted for layout version 1:
   A consumer that reads the file before that look, or one that only polls
   with timeout 0 and never calls `scada_tag_notify`, can be stopped by
   `SIGBUS`. A shrink in place of the file under the name is seen the same
-  way, by name.
+  way, by name. A consumer blocked in `scada_queue_next` or a wait set
+  reads `write_seq` at every slice (at most 100 ms), while the look runs at
+  most once a second, so it usually meets `SIGBUS` before the look does.
 - A consumer keeps every mapping of a queue name it has seen, up to 16
   (D-28), so locked memory can reach 16 times the queue's size for a
   process under `mlockall`. The same file mapped again after a failed look
@@ -795,13 +797,19 @@ A consumer looks for its queue's file again, at most once a second, in
 `scada_queue_next` or of a wait set, also while the file is mapped, so that
 one that never calls `scada_tag_notify` finds a file created anew, or one
 changed in size, within about a second (D-51). A wait set reports a queue
-ready while another file is under its name; the consumer's next
-`scada_queue_next` follows it or stops the queue. `scada_tag_notify` does
+ready while its next look changes the file in use: a first file has
+appeared since the consumer opened the queue, another file is under its
+name, or a look found the file in use changed in size. The consumer's next
+`scada_queue_next` then adopts the file, follows it or stops the queue; a
+queue stopped this way returns `SCADA_E_LAYOUT` (at once with timeout 0).
+No thread reads a file that a look found changed in size, nor the file of
+a stopped queue. `scada_tag_notify` does
 not wait for a look of another thread, which may be mapping a region: it
 skips its own and the next call looks. `scada_queue_next` with timeout 0
 makes no system call for any of this.
 On a stopped queue `scada_queue_next` waits out its timeout before it
-reports it, and a wait set never reports a stopped queue as ready, so
+reports it, and a wait set does not report a stopped queue as ready after
+the call that stopped it, so
 neither spins; a consumer that calls `scada_queue_next` only after a wake
 learns of the stop from `scada_queue_stats` or from a timed call.
 
