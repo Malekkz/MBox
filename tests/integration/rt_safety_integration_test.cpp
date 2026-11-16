@@ -15,6 +15,8 @@
 #include "tag_processes_fixture.h"
 #include "tagd_fixture.h"
 
+#include "scada/tag/scada_tag.h"
+#include "scada/tag/tag_set.h"
 #include "scada/test/child_process.h"
 #include "scada/test/syscall_trace.h"
 
@@ -24,9 +26,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -42,13 +48,69 @@ constexpr std::string_view ALL_CALLS_PASSED = "calls=13 failed=0 ";
 // answer was posted.
 constexpr std::string_view EXPIRED_ANSWERED = " expired=1 dropped=0\n";
 
+using Clock = std::chrono::steady_clock;
+
+// The heartbeat timeout of `probe` in the small tag set: the default.
+constexpr std::chrono::milliseconds PROBE_TIMEOUT{
+    scada::tag::DEFAULT_HEARTBEAT_TIMEOUT_MS};
+// How much longer than PROBE_TIMEOUT a late feeder is held after the
+// probe has attached.
+constexpr std::chrono::seconds LATE_MARGIN{1};
+
+// The heartbeat count of process `index` as `ctx` sees it; 0 if it cannot
+// be read (the process has not attached).
+std::uint64_t heartbeat_of(scada_ctx* ctx, std::uint16_t index) {
+    scada_proc_status_t status{};
+    if (scada_proc_status(ctx, index, &status) != SCADA_OK) {
+        return 0;
+    }
+    return status.heartbeat;
+}
+
+// Holds the stopped `feeder` until the probe has attached and then waited
+// for longer than its heartbeat timeout, and lets it go on. Fails if the
+// probe wrote no heartbeat meanwhile: the feeder would then see it down
+// and never post (issue #73). Runs on its own thread while the probe is
+// traced; the feeder goes on in every case, so that it can stop.
+void release_late(const std::string& base_dir, ChildProcess& feeder) {
+    {
+        const Attached reader(base_dir, "reader");
+        std::uint16_t index = 0;
+        if (scada_proc_resolve(reader.ctx(), "probe", &index) != SCADA_OK) {
+            ADD_FAILURE() << "probe not resolved";
+        } else {
+            const Clock::time_point limit = Clock::now() + WAIT_LIMIT;
+            std::uint64_t first = 0;
+            while (first == 0 && Clock::now() < limit) {
+                // The region of the probe appeared after the reader asked
+                // for it: notify looks again, at most once a second.
+                static_cast<void>(scada_tag_notify(reader.ctx()));
+                first = heartbeat_of(reader.ctx(), index);
+                std::this_thread::yield();
+            }
+            // The clock is the condition: the property is a time.
+            const Clock::time_point late =
+                Clock::now() + PROBE_TIMEOUT + LATE_MARGIN;
+            while (Clock::now() < late) {
+                std::this_thread::yield();
+            }
+            EXPECT_NE(first, 0U) << "the probe did not attach";
+            EXPECT_GT(heartbeat_of(reader.ctx(), index), first)
+                << "the probe wrote no heartbeat while it waited";
+        }
+    }
+    EXPECT_TRUE(feeder.send_signal(SIGCONT));
+}
+
 class RealTimeSafety : public TagProcesses {
 protected:
     // Runs the probe as the process `probe` against a running scada-tagd,
     // a running owner `io` and `feeder`, which posts one request to the
     // probe that expires 1 ms later, with `fault` as its last argument
-    // unless empty.
-    [[nodiscard]] TraceResult traced_probe(const std::string& fault) {
+    // unless empty. With `late_feeder` the feeder is stopped until the
+    // probe has waited for longer than its heartbeat timeout.
+    [[nodiscard]] TraceResult traced_probe(const std::string& fault,
+                                           bool late_feeder = false) {
         write_small_tag_set();
         std::optional<RunningTagd> tagd = ready_tagd();
         std::optional<ChildProcess> owner = attached_io();
@@ -65,10 +127,24 @@ protected:
         if (!fault.empty()) {
             arguments.push_back(fault);
         }
+        std::optional<std::jthread> releaser;
+        if (late_feeder) {
+            // Attached, it handles SIGTERM; it cannot have posted, since
+            // the probe has not attached yet.
+            EXPECT_TRUE(feeder->wait_for_output(
+                [](std::string_view out) {
+                    return out.find("attached") != std::string_view::npos;
+                },
+                WAIT_LIMIT));
+            EXPECT_TRUE(feeder->send_signal(SIGSTOP));
+            releaser.emplace(release_late, base(), std::ref(*feeder));
+        }
         const TraceResult result = scada::test::trace_marked_syscalls(
             command_from("SCADA_TAG_RT_PROBE_COMMAND", arguments), PROBE_LIMIT);
-        EXPECT_TRUE(ran_every_call(result));
+        releaser.reset();  // joins
+        const ::testing::AssertionResult ran = ran_every_call(result);
         EXPECT_TRUE(stops_cleanly(*feeder));
+        EXPECT_TRUE(ran) << "feeder: " << feeder->out() << feeder->err();
         EXPECT_TRUE(stops_cleanly(*owner));
         stop(*tagd);
         return result;
@@ -114,6 +190,14 @@ TEST_F(RealTimeSafety, Conformance22NoSystemCallAllocationOrPageFault) {
         << "the library reports that clock reads are system calls here: "
         << result.out;
     RecordProperty("probe", result.out);
+}
+
+// A feeder that posts only after the probe has waited for longer than the
+// probe's heartbeat timeout still reaches it: the probe writes its
+// heartbeat while it waits (issue #73).
+TEST_F(RealTimeSafety, AProbeThatWaitsLongStaysLiveForTheFeeder) {
+    const TraceResult result = traced_probe("", true);
+    EXPECT_EQ(result.syscalls, std::vector<long>{});
 }
 
 // The instrumentation itself: a system call between the markers is found.

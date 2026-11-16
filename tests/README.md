@@ -53,20 +53,34 @@ is registered.
 
 ### Load
 
-The integration tests wait on conditions, but some check a time bound of
-the contract or a heartbeat timeout, and these assume a machine that gives
-each process the CPU within about a second. `ctest -j8` on 4 cores with a
-busy loop on every core is within that: 11 of 11 full runs passed before
-decision D-50, and the tests it fixed passed 200 of 200 loaded runs. With
-eight more test binaries in parallel on the same 4 cores (load average 18
-to 40) the machine stalls for 3 s and more, and the following fail now and
-then without a fault in the code: the 2,000 ms limit for a killed owner to
-read as down in `TagAccessProcesses.Conformance05A*`, the 95 % rate of
-`Conformance02ReferenceLoadWithFourReaders`, and tests with a short
-heartbeat timeout. The tag sets of the load tests use a heartbeat timeout
-of 30 s (`LOAD_HEARTBEAT_TIMEOUT_MS`), so that such a stall does not make a
-running owner read as down. `SimProcesses.AnOverloadedRunStopsPromptly`
-keeps the default of 3,000 ms under load.
+The suite is expected to pass on 4 cores with a busy loop on every core,
+`ctest -j8` in a loop and up to eight more test binaries in parallel
+(load average up to about 20; decision D-56, issue #73). Tests wait on
+conditions with a limit (WAIT_LIMIT, 30 s), and a test process that waits
+for long writes its heartbeat or has a heartbeat timeout of 30 s
+(`LOAD_HEARTBEAT_TIMEOUT_MS`), so that a stall of the machine does not
+make a running process read as down.
+
+Some tests check a time that is the subject of the test, and assume a
+machine that gives each process the CPU within about a second:
+
+- the contract's bounds: the 2,000 ms for a killed owner to read as down
+  in `TagAccessProcesses.Conformance05A*`, the 95 % rate of
+  `Conformance02ReferenceLoadWithFourReaders`, the gap within the heartbeat
+  timeout of `ChangeRingProcesses.AKilledOwnerGivesAGapWithinItsHeartbeatTimeout`;
+- tests with a short heartbeat timeout of a running process, such as
+  `TagdService.Conformance20RestartLeavesTheOtherProcessRunning` (1,000 ms);
+  `SimProcesses.AnOverloadedRunStopsPromptly` keeps the default of 3,000 ms;
+- the unit tests of the fixture `AttachFixture`, whose processes write a
+  heartbeat only when a test asks and have the default timeout of
+  3,000 ms.
+
+Beyond the stated load (load average 18 to 40, stalls of 3 s and more)
+these fail now and then without a fault in the code, and the ctest limit
+of 60 s of `scada-tag-unit-test` (25 s unloaded) and
+`scada-model-code-shape-self-test` (10 s of CPU) can be exceeded. The
+tag sets of the load tests use a heartbeat timeout of 30 s, so that such
+a stall does not make a running owner read as down.
 
 A test whose writer could finish before its readers start holds the writer
 until they run: `scada-sim run --hold` writes only after SIGUSR1

@@ -352,17 +352,28 @@ std::int64_t monotonic_now() noexcept {
 
 // Waits until the request queue holds a record, without taking it, and
 // then until the 1 ms lifetime of that record has passed: it was posted
-// before the wait returned.
+// before the wait returned. It writes its heartbeat between slices of the
+// wait: the feeder posts only to a consumer it sees live (contract 9.1),
+// and a probe that waited longer than its heartbeat timeout without one
+// would never get the request (issue #73).
 bool wait_for_expired_request(Prepared& prepared) {
-    constexpr int WAIT_LIMIT_MS = 30'000;
+    constexpr std::int64_t WAIT_LIMIT_NS = 30'000'000'000;
+    constexpr int SLICE_MS = 100;
     constexpr std::int64_t LIFETIME_NS = 1'000'000;
     scada_waitset* set = nullptr;
     if (scada_waitset_create(prepared.ctx, &set) != SCADA_OK) {
         return false;
     }
-    const bool arrived =
-        scada_waitset_add_queue(set, prepared.requests) == SCADA_OK &&
-        scada_waitset_wait(set, WAIT_LIMIT_MS) == SCADA_OK;
+    bool arrived = false;
+    if (scada_waitset_add_queue(set, prepared.requests) == SCADA_OK) {
+        const std::int64_t deadline = monotonic_now() + WAIT_LIMIT_NS;
+        int code = SCADA_E_TIMEOUT;
+        while (code == SCADA_E_TIMEOUT && monotonic_now() < deadline) {
+            static_cast<void>(scada_tag_heartbeat(prepared.ctx));
+            code = scada_waitset_wait(set, SLICE_MS);
+        }
+        arrived = code == SCADA_OK;
+    }
     scada_waitset_destroy(set);
     const std::int64_t expired_after = monotonic_now() + LIFETIME_NS;
     while (monotonic_now() <= expired_after) {

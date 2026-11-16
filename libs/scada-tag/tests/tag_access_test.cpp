@@ -18,6 +18,7 @@
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
 
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -81,6 +82,11 @@ constexpr std::uint64_t RACE_WRITES = 100'000;
 constexpr std::uint64_t STRING_RACE_WRITES = 20'000;
 constexpr std::size_t READER_THREADS = 3;
 constexpr std::uint64_t HEARTBEAT_WRITES = 256;
+// How long a reader of a race keeps reading after the last write until it
+// reads the owner live, in ns. The owner writes its heartbeat meanwhile;
+// only a machine stalled for longer than the owner's heartbeat timeout
+// at every read needs more than one read (issue #73).
+constexpr std::int64_t LIVE_READ_LIMIT_NS = 30 * NANOSECONDS_PER_SECOND;
 // The quality flags a racing writer derives from its counter: every flag
 // but OWNER_DOWN, which a read adds.
 constexpr std::uint64_t RACE_FLAGS = 0x0FDF;
@@ -926,14 +932,46 @@ struct RaceCounts {
     std::uint64_t busy = 0;
     std::uint64_t errors = 0;     // a return code neither OK nor BUSY
     std::uint64_t down = 0;       // read with OWNER_DOWN
+    std::uint64_t live = 0;       // read OK of a live owner
     std::uint64_t torn = 0;       // fields that do not belong to one write
     std::uint64_t backwards = 0;  // a value older than one read before
-    bool saw_last = false;        // the last read gave the last write
+    // The read of the live owner after the last write gave that write.
+    bool saw_last = false;
     // The first torn and the first backwards read, for the failure message.
     std::optional<scada_value> first_torn;
     std::optional<scada_value> first_backwards;
     std::uint64_t first_torn_length = 0;  // of a string read
 };
+
+// What the writer of a race tells its readers. Once `done` is set, each
+// reader reads until it reads the owner live, then adds itself to
+// `finished`; the writer writes its heartbeat until every reader has
+// (issue #73).
+struct RaceControl {
+    std::atomic<bool> done{false};
+    std::atomic<std::size_t> finished{0};
+};
+
+// True once a reader that has seen `done` at `done_mono_ns` may stop: it
+// has read the owner live since, or LIVE_READ_LIMIT_NS has passed. A
+// reader that stops at the limit has no read of the live owner after the
+// last write, which the test reports.
+bool reader_may_stop(bool live_since_done, std::int64_t done_mono_ns) {
+    return live_since_done ||
+           scada::monotonic_ns() - done_mono_ns >= LIVE_READ_LIMIT_NS;
+}
+
+// The writer of a race, after its last write: sets `done` and writes the
+// heartbeat of `owner` until `readers` readers have finished.
+void finish_race(Attachment& owner, RaceControl& control, std::size_t readers) {
+    // Release: the readers load with acquire.
+    control.done.store(true, std::memory_order_release);
+    // Acquire: pairs with the release add of each reader.
+    while (control.finished.load(std::memory_order_acquire) < readers) {
+        static_cast<void>(owner.heartbeat());
+        std::this_thread::yield();
+    }
+}
 
 // Every field of `value`, for a failure message.
 std::string fields_of(const scada_value& value) {
@@ -973,15 +1011,21 @@ bool is_one_write(const scada_value& value) {
             value.type == SCADA_TYPE_FLOAT64);
 }
 
-// A reader of the value race: reads `handle` through `reader` until `done`
-// is set, and once more after that.
+// A reader of the value race: reads `handle` through `reader` until
+// `done` is set, then until it reads the live owner (`reader_may_stop`).
 void read_values_until(Attachment& reader, std::uint32_t handle,
-                       const std::atomic<bool>& done, RaceCounts& counts) {
+                       RaceControl& control, RaceCounts& counts) {
     std::uint64_t last = 0;
     std::int64_t last_mono = 0;
-    for (bool last_round = false; !last_round;) {
+    std::optional<std::int64_t> done_mono_ns;
+    bool live_since_done = false;
+    while (!done_mono_ns.has_value() ||
+           !reader_may_stop(live_since_done, *done_mono_ns)) {
         // Acquire: pairs with the release store of the writer.
-        last_round = done.load(std::memory_order_acquire);
+        if (!done_mono_ns.has_value() &&
+            control.done.load(std::memory_order_acquire)) {
+            done_mono_ns = scada::monotonic_ns();
+        }
         scada_value value{};
         const int code = reader.read(handle, value);
         ++counts.reads;
@@ -993,6 +1037,8 @@ void read_values_until(Attachment& reader, std::uint32_t handle,
             ++counts.down;
             continue;
         }
+        ++counts.live;
+        live_since_done = done_mono_ns.has_value();
         if (!is_one_write(value)) {
             ++counts.torn;
             if (!counts.first_torn.has_value()) {
@@ -1008,7 +1054,10 @@ void read_values_until(Attachment& reader, std::uint32_t handle,
         last = value.value;
         last_mono = value.update_mono_ns;
     }
-    counts.saw_last = last == RACE_WRITES;
+    // The last read of the live owner came after the last write.
+    counts.saw_last = live_since_done && last == RACE_WRITES;
+    // Release: the writer loads with acquire.
+    control.finished.fetch_add(1, std::memory_order_release);
 }
 
 // The text a racing writer derives from the number `count` of its write:
@@ -1034,14 +1083,22 @@ bool is_one_string_write(std::string_view text, const scada_value& meta) {
            meta.quality == count % QUALITIES;
 }
 
-// A reader of the string race: reads the text of `handle` through `reader`
-// until `done` is set, and once more after that.
+// A reader of the string race: reads the text of `handle` through
+// `reader` until `done` is set, then until it reads the live owner
+// (`reader_may_stop`).
 void read_texts_until(Attachment& reader, std::uint32_t handle,
-                      const std::atomic<bool>& done, RaceCounts& counts) {
+                      RaceControl& control, RaceCounts& counts) {
     std::array<char, SCADA_STRING_MAX> buffer{};
-    for (bool last_round = false; !last_round;) {
+    std::int64_t last_count = 0;  // the number of the last write read
+    std::optional<std::int64_t> done_mono_ns;
+    bool live_since_done = false;
+    while (!done_mono_ns.has_value() ||
+           !reader_may_stop(live_since_done, *done_mono_ns)) {
         // Acquire: pairs with the release store of the writer.
-        last_round = done.load(std::memory_order_acquire);
+        if (!done_mono_ns.has_value() &&
+            control.done.load(std::memory_order_acquire)) {
+            done_mono_ns = scada::monotonic_ns();
+        }
         std::size_t length = 0;
         scada_value meta{};
         const int code = reader.read_string(handle, buffer, length, &meta);
@@ -1054,6 +1111,9 @@ void read_texts_until(Attachment& reader, std::uint32_t handle,
             ++counts.down;
             continue;
         }
+        ++counts.live;
+        live_since_done = done_mono_ns.has_value();
+        last_count = meta.source_time_ns - DEVICE_TIME;
         if (!is_one_string_write(std::string_view(buffer.data(), length),
                                  meta)) {
             ++counts.torn;
@@ -1063,6 +1123,11 @@ void read_texts_until(Attachment& reader, std::uint32_t handle,
             }
         }
     }
+    counts.saw_last =
+        live_since_done &&
+        last_count == static_cast<std::int64_t>(STRING_RACE_WRITES);
+    // Release: the writer loads with acquire.
+    control.finished.fetch_add(1, std::memory_order_release);
 }
 
 // The fields of `value`, if there is one, for a failure message.
@@ -1070,9 +1135,17 @@ std::string fields_or_none(const std::optional<scada_value>& value) {
     return value.has_value() ? fields_of(*value) : "none";
 }
 
-// One reader of a race saw only whole writes of a live owner.
+// One reader of a race read the live owner at least once, after the last
+// write too, and saw only whole writes of it.
 void expect_whole_writes_of(const RaceCounts& count) {
-    EXPECT_GT(count.reads, 0U);
+    if (count.live == 0) {
+        ADD_FAILURE() << "no read of a live owner: reads=" << count.reads
+                      << " down=" << count.down << " busy=" << count.busy;
+    } else {
+        EXPECT_TRUE(count.saw_last)
+            << "no read of the live owner after the last write: reads="
+            << count.reads << " down=" << count.down;
+    }
     EXPECT_EQ(count.torn, 0U)
         << "first torn read: " << fields_or_none(count.first_torn)
         << " length=" << count.first_torn_length;
@@ -1093,23 +1166,48 @@ void expect_whole_writes(std::span<const RaceCounts> counts) {
     ::testing::Test::RecordProperty("down", std::to_string(down));
 }
 
+// The counts of a reader that made `reads` reads, `live` of them of the
+// live owner and the rest with OWNER_DOWN.
+RaceCounts counts_of(std::uint64_t reads, std::uint64_t live, bool saw_last) {
+    RaceCounts counts;
+    counts.reads = reads;
+    counts.live = live;
+    counts.down = reads - live;
+    counts.saw_last = saw_last;
+    return counts;
+}
+
+// The checker itself: a reader whose every read found the owner down, or
+// that read it live only before the last write, fails the race (issue
+// #73).
+TEST(RaceChecker, AReaderThatNeverReadTheLiveOwnerFails) {
+    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(5, 0, false)),
+                            "no read of a live owner");
+    EXPECT_NONFATAL_FAILURE(expect_whole_writes_of(counts_of(5, 1, false)),
+                            "no read of the live owner after the last write");
+}
+
+TEST(RaceChecker, AReaderThatReadTheLastWriteLivePasses) {
+    expect_whole_writes_of(counts_of(5, 1, true));
+}
+
 // Conformance test 3: values whose fields are derived from one another, a
 // writer at the maximum rate, readers in other threads through the
 // read-only mapping of another process and through the owner's own.
 TEST_F(TagAccess, Conformance03AReaderNeverSeesFieldsOfTwoWrites) {
     const std::uint32_t own = handle_of(*io(), "plant.level");
     const std::uint32_t other = handle_of(*web(), "plant.level");
-    std::atomic<bool> done{false};
+    RaceControl control;
     std::array<RaceCounts, READER_THREADS + 1> counts{};
     {
         std::vector<std::jthread> readers;
         readers.reserve(counts.size());
         for (std::size_t i = 0; i < READER_THREADS; ++i) {
             readers.emplace_back(read_values_until, std::ref(*web()), other,
-                                 std::cref(done), std::ref(counts.at(i)));
+                                 std::ref(control), std::ref(counts.at(i)));
         }
         readers.emplace_back(read_values_until, std::ref(*io()), own,
-                             std::cref(done),
+                             std::ref(control),
                              std::ref(counts.at(READER_THREADS)));
         // The owner thread.
         std::uint64_t failed = 0;
@@ -1120,14 +1218,12 @@ TEST_F(TagAccess, Conformance03AReaderNeverSeesFieldsOfTwoWrites) {
             beat_now_and_then(count);
         }
         EXPECT_EQ(failed, 0U);
-        // Release: the readers load with acquire.
-        done.store(true, std::memory_order_release);
+        finish_race(*io(), control, counts.size());
     }
     expect_whole_writes(counts);
     std::uint64_t reads = 0;
     std::uint64_t busy = 0;
     for (const RaceCounts& count : counts) {
-        EXPECT_TRUE(count.saw_last);
         reads += count.reads;
         busy += count.busy;
     }
@@ -1140,14 +1236,14 @@ TEST_F(TagAccess, Conformance03AReaderNeverSeesFieldsOfTwoWrites) {
 TEST_F(TagAccess, Conformance23AStringIsReadWithTheQualityOfItsWrite) {
     const std::uint32_t own = handle_of(*io(), "plant.note");
     const std::uint32_t other = handle_of(*web(), "plant.note");
-    std::atomic<bool> done{false};
+    RaceControl control;
     std::array<RaceCounts, READER_THREADS> counts{};
     {
         std::vector<std::jthread> readers;
         readers.reserve(counts.size());
         for (RaceCounts& count : counts) {
             readers.emplace_back(read_texts_until, std::ref(*web()), other,
-                                 std::cref(done), std::ref(count));
+                                 std::ref(control), std::ref(count));
         }
         std::uint64_t failed = 0;
         for (std::uint64_t count = 1; count <= STRING_RACE_WRITES; ++count) {
@@ -1160,8 +1256,7 @@ TEST_F(TagAccess, Conformance23AStringIsReadWithTheQualityOfItsWrite) {
             beat_now_and_then(count);
         }
         EXPECT_EQ(failed, 0U);
-        // Release: the readers load with acquire.
-        done.store(true, std::memory_order_release);
+        finish_race(*io(), control, counts.size());
     }
     expect_whole_writes(counts);
 }

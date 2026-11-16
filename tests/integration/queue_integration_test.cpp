@@ -49,6 +49,10 @@ constexpr int HIST_TIMEOUT_MS = 1000;
 // Long against the helper's heartbeat period of 50 ms, so that a busy
 // machine does not make the running driver look down.
 constexpr int IO_DRIVER_TIMEOUT_MS = 10'000;
+// `web` is the test process, which writes no heartbeat: it must not read
+// as down to a driver that attaches after a stall, which would drop the
+// ABORTED answer of conformance test 17 (contract 9.2; issue #73).
+constexpr std::uint32_t WEB_TIMEOUT_MS = LOAD_HEARTBEAT_TIMEOUT_MS;
 // The pause between two looks at a condition that has no event to wait
 // on (whether a post is accepted), in ms.
 constexpr std::chrono::milliseconds RETRY_PAUSE{10};
@@ -138,6 +142,7 @@ protected:
              << R"(}, {"name": "io", "uid": )" << uid
              << R"(, "heartbeat_timeout_ms": )" << IO_DRIVER_TIMEOUT_MS
              << R"(}, {"name": "web", "uid": )" << uid
+             << R"(, "heartbeat_timeout_ms": )" << WEB_TIMEOUT_MS
              << R"(}], "owners": [], "tags": [], "queues": [)"
              << R"({"name": "events.feed", "producer": "feed", )"
              << R"("consumer": "web"}, )"
@@ -277,8 +282,11 @@ std::vector<std::uint64_t> first_numbers(std::uint64_t count) {
 ::testing::AssertionResult answers(scada_queue* queue, std::uint64_t request_id,
                                    std::uint8_t status) {
     scada_write_result answer{};
-    const int code =
-        scada_queue_next(queue, &answer, sizeof(answer), NEXT_WAIT_MS * 10);
+    const int code = scada_queue_next(
+        queue, &answer, sizeof(answer),
+        static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(WAIT_LIMIT)
+                .count()));
     if (code != SCADA_OK) {
         return ::testing::AssertionFailure() << "next returned " << code;
     }
@@ -680,7 +688,8 @@ TEST_F(QueueProcesses, Conformance16RedeliveryAfterAConsumerIsKilled) {
                                                     scada_queue* requests,
                                                     scada_queue* results,
                                                     ChildProcess& driver) {
-    if (driver.out().find("attached aborted=1 ") == std::string::npos) {
+    if (driver.out().find("attached aborted=1 dropped=0 ") ==
+        std::string::npos) {
         return ::testing::AssertionFailure() << driver.out();
     }
     if (const ::testing::AssertionResult aborted =

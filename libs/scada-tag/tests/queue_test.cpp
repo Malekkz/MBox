@@ -827,18 +827,21 @@ std::int64_t wait_deadline() {
 }
 
 // Posts `count` events to `out`, retrying while it is full, for at most
-// WAIT_LIMIT_MS. Adds a failure and stops at any other refusal.
+// WAIT_LIMIT_MS without a post accepted: the whole run is not limited,
+// since an overloaded machine makes it many times slower (issue #73).
+// Adds a failure and stops at any other refusal.
 void post_all(Queue& out, std::uint64_t count) {
-    const std::int64_t deadline = wait_deadline();
+    std::int64_t deadline = wait_deadline();
     std::uint64_t posted = 0;
     while (posted < count) {
         if (scada::monotonic_ns() > deadline) {
-            ADD_FAILURE() << "posted " << posted << " in the time";
+            ADD_FAILURE() << "posted " << posted << ", then none in the time";
             return;
         }
         const int code = post(out, event());
         if (code == SCADA_OK) {
             ++posted;
+            deadline = wait_deadline();
         } else if (code != SCADA_E_FULL) {
             ADD_FAILURE() << "post returned " << code;
             return;
@@ -847,14 +850,14 @@ void post_all(Queue& out, std::uint64_t count) {
 }
 
 // Takes and acknowledges the events 0 to `count - 1` from `reader`, in
-// order, for at most WAIT_LIMIT_MS, then sets `done`. Adds a failure and
-// stops at anything else.
+// order, for at most WAIT_LIMIT_MS without a record taken, then sets
+// `done`. Adds a failure and stops at anything else.
 void take_all(Queue& reader, std::uint64_t count, std::atomic<bool>& done) {
-    const std::int64_t deadline = wait_deadline();
+    std::int64_t deadline = wait_deadline();
     std::uint64_t taken = 0;
     while (taken < count) {
         if (scada::monotonic_ns() > deadline) {
-            ADD_FAILURE() << "took " << taken << " in the time";
+            ADD_FAILURE() << "took " << taken << ", then none in the time";
             break;
         }
         scada_event_record record{};
@@ -868,7 +871,10 @@ void take_all(Queue& reader, std::uint64_t count, std::atomic<bool>& done) {
             ADD_FAILURE() << "next returned " << code;
             break;
         }
-        taken += code == SCADA_OK ? 1 : 0;
+        if (code == SCADA_OK) {
+            ++taken;
+            deadline = wait_deadline();
+        }
     }
     done.store(true, std::memory_order_release);
 }
@@ -2100,6 +2106,34 @@ TEST_F(Queues, ABlockedConsumerIsWokenByNotify) {
     EXPECT_EQ(code.load(), SCADA_OK);
 }
 
+// The post of `record` to `queue` right after its consumer `consumer`
+// wrote its heartbeat returns SCADA_OK. The processes of the fixture
+// write it only when a test asks, so a machine stalled for longer than
+// the consumer's heartbeat timeout between the two refuses the post with
+// PEER_DOWN, as the contract says it should (section 9.1). Such a post is
+// tried again, within WAIT_LIMIT_MS (issue #73).
+template <typename Record>
+::testing::AssertionResult posts_to_a_live_consumer(Attachment& consumer,
+                                                    Queue& queue,
+                                                    const Record& record) {
+    constexpr std::int64_t TIMEOUT_NS =
+        std::int64_t{DEFAULT_HEARTBEAT_TIMEOUT_MS} *
+        NANOSECONDS_PER_MILLISECOND;
+    const std::int64_t deadline = wait_deadline();
+    for (;;) {
+        const std::int64_t beat = scada::monotonic_ns();
+        static_cast<void>(consumer.heartbeat());
+        const int code = post(queue, record);
+        if (code != SCADA_E_PEER_DOWN ||
+            scada::monotonic_ns() - beat < TIMEOUT_NS ||
+            scada::monotonic_ns() > deadline) {
+            return code == SCADA_OK ? ::testing::AssertionSuccess()
+                                    : ::testing::AssertionFailure()
+                                          << "post returned " << code;
+        }
+    }
+}
+
 TEST_F(Queues, AWaitSetWakesForAQueue) {
     const QueuePtr out = open(*io(), "events.io");
     const QueuePtr reader = open(*web(), "events.io");
@@ -2108,7 +2142,7 @@ TEST_F(Queues, AWaitSetWakesForAQueue) {
     ASSERT_EQ(set.add_queue(*reader), SCADA_OK);
     EXPECT_EQ(set.add_queue(*reader), SCADA_E_INVALID);  // in a set already
     EXPECT_EQ(set.wait(0), SCADA_E_TIMEOUT);
-    ASSERT_TRUE(posts(*out, event()));
+    ASSERT_TRUE(posts_to_a_live_consumer(*web(), *out, event()));
     EXPECT_EQ(set.wait(0), SCADA_OK);
 }
 
