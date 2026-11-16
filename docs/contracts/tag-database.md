@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.24 (draft) |
+| Contract version | 0.25 (draft) |
 | Layout version | 1 |
 | Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
 | Implements | Reference architecture, section 5 |
@@ -37,8 +37,14 @@ that, any change needs a layout version bump and a migration note.
 - Names are ASCII, lower case, `[a-z0-9_.-]`, at most 127 bytes for tags and
   31 bytes for owners, processes and queues. An owner name does not start
   with `.` (section 12).
-- Every offset in a region is a multiple of 8 and is validated against the
-  mapped size before use.
+- "Sorted by name" means sorted by the bytes of the name, compared as
+  unsigned values. This order is the rule of the tag-set builder for layout
+  version 1 (section 5), not a promise to consumers: a consumer finds
+  processes, owners, queues and tags by name, not by position.
+- Every offset in a region is a multiple of 8, except
+  `DirectoryEntry.name_offset`, which is a byte offset into the name pool.
+  Every offset is validated against the mapped size before use. An offset
+  may equal the file size when the part it points to is empty.
 - The minimum kernel is Linux 5.16 (`futex_waitv`, section 8.4).
 
 ## 2. Terms
@@ -92,6 +98,12 @@ parallel and without the service users.
   the uid of the user `scada-tagd` with exactly that mode. The client looks the
   uid up by name at attach. With a replaced base directory (tests), the
   expected uid is given in the options.
+- `scada-tagd` takes its own effective uid as the uid of the user
+  `scada-tagd`; it looks up no user name. The tag set must hold a process
+  named `tagd` with that uid, or `scada-tagd` does not start.
+- `scada-tagd` holds an exclusive `flock` on the base directory for its
+  whole life, besides the lock on `proc.tagd`. A second instance fails
+  before it reads `current` or changes anything.
 - `gen-<generation>/` is owned by `scada-tagd:scada`, mode `3770` (setgid and
   sticky): group members can create files; a file can be removed only by its
   owner or by `scada-tagd` as owner of the directory.
@@ -118,7 +130,11 @@ parallel and without the service users.
   to that directory, so a switch of `current` cannot mix two generations.
 - `scada-tagd` removes, at each liveness check, any entry in the generation
   directory that the header does not list or whose owner uid is wrong, and
-  reports it.
+  reports it. Two kinds of entry are left: an entry under a listed name
+  whose owner uid is right, whatever its type; and a file
+  `.tmp.<region>.<digits>` of a listed region owned by that region's user,
+  which is a region being created (section 3.2). An entry it cannot remove
+  is reported once.
 
 ### 3.2 Who creates what
 
@@ -130,7 +146,8 @@ never needs to create files on behalf of another user.
 A region is created under a temporary name (`.tmp.<name>.<pid>`): create with
 `O_CREAT | O_EXCL`, `fchmod`, `ftruncate`, `posix_fallocate` (so a full
 `/dev/shm` fails here with an error, not later with a signal), initialise, set
-`ready`, then rename into place. A crash therefore never leaves a half-built
+`ready`, then rename into place with `renameat2` and `RENAME_NOREPLACE`, so
+that a file already under the name is never replaced. A crash therefore never leaves a half-built
 region under its real name. At attach a process removes its own stale
 temporary files.
 
@@ -232,6 +249,10 @@ enum RegionKind : uint32_t {
 A reader must not use a region until `ready` is 1. The creator writes `ready`
 last.
 
+`owner_index` is the process index in a `proc` region, the owner index in a
+`tags`, `strings` or `changes` region, the process index of the producer in
+a queue region, and 0 in `header`.
+
 ## 5. The `header` region
 
 Layout, in order: `RegionHeader`, `GlobalHeader`, owner table, process table,
@@ -315,6 +336,43 @@ struct DirectoryEntry {          // 24 bytes
   and 0 for `tagd` from the moment the header is published, before `current`
   points to it: a process that has not attached has no region and is down by
   section 10.1. A reused generation keeps the flags it holds (section 11.1).
+
+How the tag-set builder fills the header in layout version 1 (D-26):
+
+- Processes, owners and queues are sorted by name (section 1). The position
+  of a process in the process table is its process index, of an owner in
+  the owner table its owner index, of a queue in the queue table its queue
+  id. The slots of an owner are its tags sorted by name.
+- `OwnerEntry.uid` is the uid of the owner's process. A queue's kind comes
+  from the prefix of its name (`events.`, `cmd.`, `result.`), and its
+  `record_size` from the kind (section 9.4).
+- Each slot table is padded with zero bytes to a multiple of 8 bytes. An
+  owner without tags has an empty slot table. The name pool holds the tag
+  names in directory order, without terminators; `name_pool_size` is the
+  number of name bytes. The file ends at the next multiple of 8 bytes after
+  the name pool.
+- In the `RegionHeader` of `header`, `owner_index` is 0 and `queue_id` is
+  0xFFFF.
+- `config_hash` is the SHA-256 of the canonical encoding of the tag set,
+  defined in `libs/scada-tag/README.md` ("Order independence"). The encoding
+  starts with a name (`scada-tag-set`) and an encoding version (1), and
+  holds every setting of the tag set in name order. The generation number
+  and `created_time_ns` are not hashed. The encoding version changes
+  whenever the canonical encoding changes, and a changed version always
+  gives a new generation, never a reuse (section 11.1).
+
+Besides the rules stated elsewhere in this contract, the tag-set builder
+refuses:
+
+- `retain_now` without `retain`;
+- a STRING tag that is `writable_by_command` (section 9.4);
+- a process uid of 4,294,967,295;
+- a heartbeat timeout or `heartbeat_check_ms` below 1 ms;
+- a queue capacity that is not a power of two (at most 2,147,483,648;
+  default 1,024 records);
+- a change ring capacity below twice the owner's tag count (section 8.3).
+  The default of 65,536 entries is not raised automatically: an owner with
+  more than 32,768 tags must state its capacity.
 
 ### 5.1 Handles
 
@@ -455,7 +513,10 @@ resynchronise after an owner restart; the epoch tells it to.
 ## 7. String values (`strings.<owner>`)
 
 Layout: `RegionHeader`, then `string_slots` slots. A STRING tag's value is its
-slot number, fixed for the generation.
+slot number, fixed for the generation: the tag's rank among the owner's
+STRING tags in slot order (the first STRING tag has slot 0). It is written
+when the `tags` region is created; the repair of section 6.3 finds the slot
+by the same count, not from the record.
 
 ```cpp
 struct StringSlot {              // 256 bytes
@@ -512,7 +573,7 @@ reported with `SCADA_E_LAYOUT` and skipped.
 ```
 w = write_seq.load(relaxed)
 atomic_thread_fence(release)       // the entry stores must not pass the previous write_seq
-write entries[w & (capacity - 1)], word-wise, relaxed
+write entries[w & (capacity - 1)], field by field, relaxed atomic stores
 write_seq.store(w + 1, release)
 ```
 
@@ -522,7 +583,7 @@ write_seq.store(w + 1, release)
 w1 = write_seq.load(acquire)
 if cursor == w1: nothing new
 if w1 - cursor >= capacity: GAP
-copy entries[cursor & (capacity - 1)], word-wise, relaxed
+copy entries[cursor & (capacity - 1)], field by field, relaxed atomic loads
 atomic_thread_fence(acquire)
 w2 = write_seq.load(relaxed)
 if w2 - cursor >= capacity: GAP        // the slot may have been overwritten
@@ -1085,6 +1146,9 @@ the reader spent between the two, which is far below the timeout. A time
 further ahead comes from a corrupt region or a process on another clock, and
 counts as down so that it cannot keep a dead process alive for readers.
 
+The rules are tested in the order listed, and the first that holds is the
+reason (`down_reason` of `scada_proc_status_t`, section 13).
+
 The library evaluates these three rules itself on every use (the read
 overlay, `scada_proc_status`, `post`), so detection does not depend on
 `scada-tagd` being alive and a clean stop is seen at once.
@@ -1179,36 +1243,61 @@ for readers and never down for a check. `starts` counts it:
 1. Compute the tag-set definition and its `config_hash`.
 2. If `current` points to a generation with the same layout version and
    `config_hash`, reuse it: restarting `scada-tagd` does not disturb the data
-   plane.
+   plane. The generation is reused only if all of these hold: its directory
+   has the owner and mode of section 3.1; its `header` passes the checks of
+   section 3.1 (a regular file of the uid of `scada-tagd`, the size the tag
+   set builds, `ready`, and a matching `RegionHeader`); its state is
+   RUNNING; its `config_hash` equals the one computed in step 1; and it
+   equals byte for byte the header the library builds for the tag set,
+   apart from `ready`, `state`, `created_time_ns` and the `down` flags.
 3. Otherwise remove every `gen-*` directory that `current` does not point to
    and that has no live process (left by a crash while building), create
    `gen-<n+1>/`, write `header` with state BUILDING, set `ready`, set state
    RUNNING, then switch `current`: create a symlink under a temporary name and
-   rename it over `current`.
+   rename it over `current`. A live process is a `proc.*` file in the
+   directory whose lock (section 10) is held; a lock that cannot be tested
+   counts as held. `n` is the highest generation number among the `gen-*`
+   entries of the base directory and the target of `current`, also when
+   that directory is then removed.
 
 ### 11.2 Attach (`scada_tag_attach`)
 
-1. Check the base directory (section 3.1). Open `current/header`. Fail with
-   `SCADA_E_LAYOUT` unless magic and layout version match the library's.
+1. Check the base directory (section 3.1). Read `current` once. Check the
+   generation directory as the base directory is checked: owned by the uid
+   of `scada-tagd`, mode `3770` (`SCADA_E_PERMISSION` otherwise). Open
+   `current/header`. Fail with `SCADA_E_LAYOUT` unless magic and layout
+   version match the library's.
 2. Find the calling process in the process table by name, and check its uid.
-3. For each of the process's own regions, the `proc` region first and the
-   queue regions after it (D-61, relied on by section 9.2: a peer that can
-   see a queue file can then see the `proc` region): if it exists with the right owner,
-   size and generation and is `ready`, reuse and repair it (section 6.3);
-   queue positions and cursors in a reused region are kept. If it exists, is
-   owned by the caller's uid, and is unready or has the wrong size, remove it.
-   If it is absent, create it (section 3.2), complete before its rename
-   publishes it, and load retained values (section 12) into a new `tags`
-   region. If it exists with another owner, attach fails
-   with `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
-4. Take the lock on `proc.<process>`. Map and pre-fault the process's own
-   regions. A process with the REALTIME flag is expected to run under
+3. Take the lock on `proc.<process>` before any other own region is looked
+   at, so that a second process of the same name fails before it can remove
+   or repair a region the first one uses. A `proc` region that can be
+   reused is locked before it is used; a new one is locked before it gets
+   its name; an unusable one of the caller is removed only if its lock is
+   free. Then the other own regions, owner by owner (`tags`, `strings`,
+   `changes`), then the queues the process produces: the `proc` region is
+   always there before the queue files (D-61, relied on by section 9.2: a
+   peer that can see a queue file can then see the `proc` region). For each
+   own region:
+   if it exists with the right owner, size and generation and is `ready`,
+   reuse and repair it (section 6.3); queue positions and cursors in a
+   reused region are kept. A reused region must also hold what the header
+   gives: a `tags` region the type of the tag directory in every record, a
+   ring the capacity of the owner table, a queue the capacity and record
+   size of the queue table; otherwise it is removed and created again, like
+   a region of the wrong size. If it exists, is owned by the caller's uid,
+   and is unready or has the wrong size, remove it. If it is absent, create
+   it (section 3.2), complete before its rename publishes it, and load
+   retained values (section 12) into a new `tags`
+   region. If it exists with another owner, attach fails with
+   `SCADA_E_PERMISSION` and the file is left for `scada-tagd` to remove.
+4. Each own region is mapped and pre-faulted as it is attached. A process
+   with the REALTIME flag is expected to run under
    `mlockall(MCL_CURRENT | MCL_FUTURE)`.
 5. Drain the process's `cmd` queues (section 9.2).
 6. Set `state` RUNNING and write the first heartbeat. From here the caller
    must call `scada_tag_heartbeat()`.
 7. Read `GlobalHeader.state` again. If it is RETIRING, detach and start again
-   from step 1. The lock of step 4 failing in a RETIRING generation counts as
+   from step 1. The lock of step 3 failing in a RETIRING generation counts as
    RETIRING too, not as a second process of the name: `scada-tagd` takes such
    a lock for a moment to learn whether its process left (section 11.3).
 
@@ -1216,9 +1305,21 @@ Other processes' regions are mapped read-only and pre-faulted in
 `scada_tag_resolve`, `scada_sub_open`, `scada_queue_open` and
 `scada_proc_resolve`, never inside an RT-safe function. A region that is
 missing or not ready is not an error: its tags read as BAD with OWNER_DOWN.
-The library tries the mapping again inside `scada_tag_notify()`, at most once
-a second for each missing region, and at once for the `proc` region of the
-producer of a queue whose file a look maps (section 9.2, D-61).
+The library looks at each region it was asked for again inside
+`scada_tag_notify()`, at most once a second, also while it is mapped, and
+at once the `proc` region of the producer of a queue whose file a look maps
+(section 9.2, D-61): a
+missing region is mapped once it is there, and a mapped region whose file
+is gone, was replaced or changed in size is dropped or mapped anew. A
+mapping is kept until detach, because a reader may still hold it. A region
+is mapped at most 16 times in one context: when a further file is under its
+name, it reads as missing; a file mapped before is used again without
+spending a mapping.
+
+Pre-faulting uses `madvise` with `MADV_POPULATE_WRITE` for a read-write
+mapping and `MADV_POPULATE_READ` for a read-only one (Linux 5.14, below the
+minimum of section 1). It returns an error where touching the pages would
+end the process with a signal.
 
 ### 11.3 Generation change
 
@@ -1504,6 +1605,46 @@ know they are there, and any number may run.
   for at most 60 s (twice the 30 s timeout) after it retired; then it is
   logged as abandoned and left until the next boot clears `/dev/shm`.
 
+Layout of a retain file, version 2 (`libs/scada-tag/src/retain_file.h`).
+All integers are little-endian; offsets and widths are in bytes.
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | 8 | Magic "SCADARTN" (0x4E54524144414353) |
+| 8 | 4 | Format version, 2 |
+| 12 | 4 | Record count, at most 4,194,303 |
+| 16 | 8 | Source generation |
+| 24 | 8 | `created_time_ns` of the source generation's header |
+| 32 | 8 | `written_time_ns`, CLOCK_REALTIME |
+| 40 | 4 | Flags: bit 0 FINAL, bit 1 CLOCK_SYNCED |
+| 44 | 4 | Reserved, 0 |
+| 48 | 32 | `config_hash` |
+| 80 | 16 | `boot_id` of the writing boot |
+| 96 | 8 | `written_boottime_ns`, CLOCK_BOOTTIME |
+| 104 | | Records, sorted by name, byte-wise, each name once |
+| end - 4 | 4 | CRC-32 (IEEE, as zlib) of every byte before it |
+
+Each record:
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | 1 | Type: BOOL, INT64, UINT64 or FLOAT64 |
+| 1 | 1 | Name length, 1 to 127 |
+| 2 | 1 | Quality: GOOD or UNCERTAIN |
+| 3 | 1 | Record flags: bit 0 ADOPTED, bit 1 SOURCE_NOT_FINAL (only with ADOPTED) |
+| 4 | 2 | `quality_flags` |
+| 6 | 2 | Reserved, 0 |
+| 8 | 8 | Value |
+| 16 | 8 | `source_time_ns` |
+| 24 | name length | Name, then zero bytes to the next multiple of 8 |
+
+A version 1 file has the header of the first 80 bytes, and 6 bytes of 0 at
+record offsets 2 to 7. The decoder checks the exact length: the file must
+hold at least a version 1 header and the CRC, the CRC must match, the
+record count must fit the bytes there, and no byte may follow the last
+record. A file the decoder accepts encodes back to exactly its bytes in the
+version it was read in; the fuzz target `retain_file_fuzz` checks this.
+
 ## 13. Library interface
 
 The C interface is the stable one; the C++ interface is a thin wrapper.
@@ -1584,7 +1725,21 @@ void scada_waitset_destroy(scada_waitset *ws);
 - `scada_tag_write` uses `type`, `value`, `quality`, `quality_flags` and
   `source_time_ns` of its argument; the library sets the update times.
 - `read_many` and `write_many` read the clocks once for the whole call.
-  `read_many` returns a status for each handle.
+  `read_many` returns a status for each handle in `status`, which may be
+  NULL; it returns `SCADA_OK` or the code of the first tag that was not
+  read.
+- `scada_tag_write` checks in this order: `SCADA_E_INVALID` for a handle
+  that is none of this generation; `SCADA_E_NOT_OWNER` before the value is
+  looked at; `SCADA_E_TYPE` for another type, and for any value of a
+  STRING tag; `SCADA_E_INVALID` for a quality or quality flag that is none
+  or may not be stored, and a BOOL that is neither 0 nor 1.
+  `scada_tag_write_many` checks every pair this way before it writes the
+  first, and writes all or nothing.
+- `scada_tag_write_string` refuses with `SCADA_E_INVALID` text longer than
+  250 bytes or not well-formed UTF-8. `scada_tag_read_string` returns the
+  bytes the owner stored, not NUL-terminated, and does not check UTF-8;
+  with a buffer that is too small it returns `SCADA_E_INVALID` and stores
+  the length in `len`. The string functions are not RT-safe.
 - `size` in the queue calls must equal the queue's `record_size`.
 - `scada_tag_read_string` with `buf` NULL and `cap` 0 returns the length and
   `meta` alone, as a large enough buffer would; `buf` NULL with `cap` above 0
@@ -1593,6 +1748,19 @@ void scada_waitset_destroy(scada_waitset *ws);
   reference section 5.7 is applied by the caller on `scada_change.handle`.
 - Every timeout is in ms and at least 0; 0 does not wait. There is no wait
   without a timeout.
+
+```c
+typedef struct {                 /* what scada_tag_info reports */
+  uint8_t  type;                 /* TagType */
+  uint8_t  flags;                /* DirectoryEntry.flags */
+  uint8_t  owned;                /* 1 if the caller owns the tag and may write it */
+  uint8_t  reserved0;            /* 0 */
+  uint16_t owner_index;
+  uint16_t process_index;        /* of the owner's process */
+  char     name[128];            /* tag name, NUL-terminated */
+  char     owner[32];            /* owner name, NUL-terminated */
+} scada_tag_info_t;              /* 168 bytes */
+```
 
 ```c
 typedef struct {
@@ -1713,6 +1881,29 @@ typedef struct {
 } scada_proc_status_t;           /* 88 bytes */
 ```
 
+`scada_tag_status` fills `scada_status` and returns `SCADA_E_RETIRING`
+when the generation is RETIRING (for an observer also in the cases of
+section 11.4, step 5), otherwise `SCADA_E_TAGD_DOWN` when `scada-tagd` is
+down by the three rules of section 10.1, otherwise `SCADA_OK`.
+`scada_tag_heartbeat` returns `SCADA_E_RETIRING` when the generation is
+RETIRING; the heartbeat is written all the same.
+
+Return codes of `scada_tag_attach`:
+
+- `SCADA_E_NOT_FOUND` only for a process that is not in the process table.
+- `SCADA_E_LAYOUT` for another magic or layout version, a header that is
+  not valid, and a `current` that is not a symbolic link to a generation
+  name.
+- `SCADA_E_IO` with `errno` `ENOENT` for a missing base directory,
+  `current` or header; `ENOSPC` when the file system has no room for a
+  region; `EAGAIN` for a generation that is BUILDING.
+- `SCADA_E_INVALID` for a NULL argument, a name that is no process name,
+  or a `tagd_uid` that is neither -1 nor a uid.
+
+`errno` with `SCADA_E_IO` is the error number the library recorded where
+the failing system call was made, kept per thread, not the value the last
+clean-up call left.
+
 `scada_tag_handle` packs a handle as section 5.1 says, so that callers do
 not depend on the bit split; it returns `SCADA_INVALID_HANDLE` for an owner
 index or slot beyond it. `scada_owner_info` with `scada_tag_handle` and
@@ -1759,8 +1950,19 @@ the time of a raw `clock_gettime` system call. The read counts as a system
 call when the source is not one the vDSO reads, or when the read takes more
 than half the time of the system call (a vDSO that falls back to the system
 call keeps the source name, for example with an ARM timer erratum
-workaround). If the raw system call is refused, only the name decides. On
-failure attach still succeeds:
+workaround). If the raw system call is refused, only the name decides.
+
+- The name is read from
+  `/sys/devices/system/clocksource/clocksource0/current_clocksource`. The
+  sources the vDSO reads are `tsc`, `tsc-early`, `kvm-clock`,
+  `hyperv_clocksource_tsc_page` and `arch_sys_counter`. A name that cannot
+  be read (a container may hide the file) decides nothing: only the timing
+  does.
+- Each time is the mean of the fastest of 4 batches: batches of 256 library
+  reads, and of 64 raw system calls. A batch that was interrupted says
+  nothing about the clock.
+
+On failure attach still succeeds:
 `scada_tag_status()` reports it, and the process raises a system alarm,
 because the real-time rule no longer holds on that unit.
 
@@ -1809,6 +2011,7 @@ because the real-time rule no longer holds on that unit.
 | Tag name length | 127 bytes |
 | String value length | 250 bytes |
 | Change ring capacity | 1,024 to 1,048,576 entries (32 MB); default 65,536; at least twice the owner's tag count |
+| Reliable queue capacity | A power of two up to 2,147,483,648 records; default 1,024 |
 | Event payload | 232 bytes |
 | Write request lifetime | 60 seconds |
 
@@ -1926,7 +2129,7 @@ the decisions log, and then written into this contract before it becomes 1.0
 | Heartbeat timeout defaults | Settled in P1-12 (D-57): confirmed at 3,000 ms general and 500 ms for real-time processes. Conformance test 5 passes on both architectures in the pipeline (for example run 43870993972); conformance test 26, 600 s, with real-time readers under SCHED_FIFO beside the owners, reported no process down and no late heartbeat on x86-64 and ARM64 (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-04, P1-12 | Conformance tests 5 and 26 |
 | Retained values across a generation change | Settled in P1-09 (D-45): FINAL retain files and the bounded wait of sections 11.3 and 12 | P1-09 | Conformance test 21, with a value changed immediately before the change (retained values; the queue part is #65) |
 | Cost of clock reads in `write` | Settled in P1-12 (D-57): kept at two reads per `write`, one pair per `write_many`. A scan writing 5,000 tags (`scada_tag_write_many`, conformance test 27, 2,000 scans per run, 10 runs per architecture on fresh runners and the 3 measurement jobs) took a median of 98 us on x86-64 and 197 us on ARM64 (the median of the 10 runs), and at most 296 us at the 99.9th percentile in any of the 23 runs, below 0.5 ms (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
-| Queue counts per process | `scada_queue_stats` per queue only; process-wide counts in `scada_status` are not added, since it stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
+| Queue counts per process | Settled in P1-13 (D-63): not added; `scada_queue_stats` per queue only, `scada_status` stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
 | A queue region recreated inside a generation | Settled: the base sequence (9.1, 9.2, D-49), the periodic look while waiting, the try-lock in `scada_tag_notify`, the kept mapping used again, and the report of a falling `write_seq` (D-51) | #53 | Conformance test 29 |
 | Commands after lost audit records (does not block 1.0) | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
 | Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
@@ -2028,6 +2231,9 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.22 | 2026-11-16 | Issue #20 (P1-12, D-57). Section 16: the read retry limit (64), the heartbeat timeout defaults (3,000 ms, 500 ms) and two clock reads per `write` confirmed by measurement; the database size half of the change ring capacity confirmed, its gap half still open; huge pages still open. Each row names the run and the hardware. |
 | 0.23 | 2026-11-16 | Issue #92 (D-61). Section 9.2: a process that can see a record of a queue can see the process at its other end unless it is down; a look that maps a queue file also looks at the producer's `proc` region. Section 9.2 also: the exception of a `proc` region created anew while the queue file is kept. Section 9.1: the window of a producer that attached before its consumer, a refusal. Section 11.2, step 3: the `proc` region is created before the queue regions, each complete before its rename, and this is relied on. |
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: two writes of one owner's retain file at least 1 s minus the check period apart, at least 250 ms, also for RETAIN_NOW, with the 1 s bound of RETAIN_NOW kept; `heartbeat_check_ms` at most 750 ms in a tag set with a RETAIN_NOW tag. |
+| 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
+
+Migration, 0.24 to 0.25: none. No structure, default or behaviour changed; the contract now states what libscada-tag and scada-tagd already do.
 
 Migration, 0.23 to 0.24: none for data; the layout version stays 1 and the
 retain file format stays 2. A tag set with a `retain_now` tag and a

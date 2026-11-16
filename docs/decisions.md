@@ -1355,6 +1355,17 @@ Consequences:
 - Tests: `MinRewrite.IsTheBoundMinusTheCheckPeriodAndNeverBelowTheFloor`; `Rewrite.AFlappingRetainNowTagWritesAtMostSixtySecondsOverMFilesAMinute` (a flap at every check for a simulated minute: at most 80 files, 240 without the rule); `Rewrite.ARetainNowChangeIsOnDiskWithinASecondAtChecksOf250Ms` and `...Of50Ms` (a change just after a write is on disk within 1 s and not before M); `Rewrite.ARestartAfterAFlapThatEndsBadRestoresNothing` and `...EndsGoodRestoresTheValue`; `TagSetValidate.RefusesASlowCheckWhenATagIsRetainNow`. Four Keeper tests that wrote twice 1 ns apart now step by M (750 ms), as the rule requires.
 - Contract 0.24 (section 12 and the change log; migration note).
 
+## D-63: No process-wide queue counts in `scada_status`
+Date: 2026-11-16
+Phase / issue: 1, #21
+Status: accepted by the committee of the lead session on 2026-11-16
+
+Context: D-40 left open for contract 1.0 (P1-13) whether `scada_status` gets process-wide queue counts. Contract section 16 lists it as an open point to settle before 1.0.
+Options: add process-wide counts to `scada_status`; keep counts per queue in `scada_queue_stats` only.
+Decision: the choice of D-40 is kept. No process-wide queue counts are added; `scada_queue_stats` reports the counts of one side of one queue, and `scada_status` stays 32 bytes. Contract 0.25 marks the point of section 16 settled.
+Reason: `scada_status` is allocated by the caller without a size field, so growing it overruns callers built against the old size (D-40). A process that wants totals adds up the counts of its queues.
+Consequences: no change to code or to any structure. A later wish for process-wide counts needs a new function, not a larger `scada_status`.
+
 ## D-64: The two open measurements of contract 16: the ring gap at the reference load, and huge pages
 Date: 2026-11-16
 Phase / issue: 1, #21 (P1-13)
