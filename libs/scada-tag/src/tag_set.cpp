@@ -193,6 +193,13 @@ Status check_owner_names(const TagSet& tag_set, const ResolvedTagSet& resolved,
         const OwnerDefinition& definition = tag_set.owners.at(owner.definition);
         const std::string_view name = definition.name;
         const std::string_view process = definition.process;
+        // The retain file "<owner>.bin" must never look like a temporary
+        // file ".tmp.<...>" of the retain directory, which is removed at
+        // start (section 12). Not empty: checked before.
+        if (name.starts_with('.')) {
+            detail = about(OWNER, name, "an owner name cannot start with '.'");
+            return INVALID_NAME;
+        }
         if (owners_of_process.at(owner.process_index) == 1) {
             if (name != process) {
                 detail = about(OWNER, name,
@@ -375,6 +382,11 @@ Result<std::uint8_t> tag_flags(const TagDefinition& tag, std::string& detail) {
     }
     if (tag.retain_now && !tag.retain) {
         detail = about(TAG, tag.name, "retain_now needs retain");
+        return INVALID_VALUE;
+    }
+    if (tag.retain && tag.type == TagType::STRING) {
+        // A retain file holds 64-bit values only (decision D-45).
+        detail = about(TAG, tag.name, "a string tag cannot be retained");
         return INVALID_VALUE;
     }
     if (tag.writable_by_command && tag.type == TagType::STRING) {

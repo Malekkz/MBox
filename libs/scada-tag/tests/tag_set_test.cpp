@@ -356,6 +356,16 @@ TEST(TagSetValidate, RejectsInvalidValuesAndFlagCombinations) {
                         "process 'p': uid 4294967295 is not a user id");
     }
     {
+        // Its retain file would look like a temporary one (section 12).
+        TagSet tag_set = samples::one_owner();
+        tag_set.processes.front().name = ".tmp";
+        tag_set.owners.front().name = ".tmp";
+        tag_set.owners.front().process = ".tmp";
+        tag_set.tags.clear();
+        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
+                        "owner '.tmp': an owner name cannot start with '.'");
+    }
+    {
         TagSet tag_set = samples::one_owner();
         tag_set.tags.push_back({.name = "t", .owner = "p", .retain_now = true});
         expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
@@ -369,6 +379,15 @@ TEST(TagSetValidate, RejectsInvalidValuesAndFlagCombinations) {
                                 .writable_by_command = true});
         expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
                         "tag 't': a string tag cannot be writable_by_command");
+    }
+    {
+        TagSet tag_set = samples::one_owner();
+        tag_set.tags.push_back({.name = "t",
+                                .owner = "p",
+                                .type = TagType::STRING,
+                                .retain = true});
+        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
+                        "tag 't': a string tag cannot be retained");
     }
     {
         constexpr std::uint8_t NOT_A_TYPE = 6;

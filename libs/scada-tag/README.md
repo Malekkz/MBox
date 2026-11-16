@@ -98,6 +98,7 @@ and a sentence that names the entry, when:
 | Rule | Status code |
 | --- | --- |
 | A name is empty, too long (127 bytes for tags, 31 bytes for processes, owners and queues) or has a character outside `[a-z0-9_.-]` | `INVALID_ARGUMENT` |
+| An owner name starts with `.` (its retain file would look like a temporary one) | `INVALID_ARGUMENT` |
 | Two processes, two owners, two queues or two tags have the same name | `ALREADY_EXISTS` |
 | A tag names an owner, or an owner or queue names a process, that the tag set does not have | `NOT_FOUND` |
 | More than 1,024 processes, 1,023 owners, 4,096 queues or 1,000,000 tags | `OUT_OF_RANGE` |
@@ -106,7 +107,7 @@ and a sentence that names the entry, when:
 | A queue name does not start with `events.`, `cmd.` or `result.`, or its capacity is not a power of two | `INVALID_ARGUMENT` |
 | A queue has one process as producer and consumer | `INVALID_ARGUMENT` |
 | A `cmd.<x>` queue has no `result.<x>` queue, or that queue does not go from the consumer of `cmd.<x>` to its producer (D-52) | `INVALID_ARGUMENT` |
-| `retain_now` without `retain`; `writable_by_command` on a string tag; a uid of 4,294,967,295; a heartbeat time of 0 ms | `INVALID_ARGUMENT` |
+| `retain_now` without `retain`; `writable_by_command` or `retain` on a string tag; a uid of 4,294,967,295; a heartbeat time of 0 ms | `INVALID_ARGUMENT` |
 
 The limit of 4,194,303 tags per owner cannot be reached within 1,000,000
 tags.
@@ -302,7 +303,28 @@ and keeps the type of every tag, 1 byte each; a slot without a valid entry
 fails attach with `SCADA_E_LAYOUT`. And it checks the clocks, see "Tag read
 and write".
 
-Not part of attach yet: retained values (issue P1-09).
+Retained values (contract, section 12; decision D-45): a `tags` region that
+attach creates gets the values of its owner's `retain` tags before it is
+published, with quality UNCERTAIN, flag RESTORED, the stored source time and
+the time of the restore as update time. RESTORED stays, with no time
+limit, until the owner writes the tag; tell a restored value by that flag,
+since `age_ns` counts from the restore. A value is taken from
+`<owner>.bin` in the retain directory (`scada_attach_opts.retain_dir`),
+otherwise, for a tag that moved, from the most recently written other file
+that has it with the same type; at most 1,023 files of at most 64 MiB are
+read. The retain directory must pass the checks of `scada-tagd` (opened
+with `O_NOFOLLOW`; owner, mode 2750, group of the base directory);
+otherwise nothing is restored and it is counted. A file is used only if it
+is a regular file with one name, owned by
+`scada-tagd`, and passes every check of its format (`src/retain_file.h`,
+fuzz target `retain_file_fuzz`); otherwise it is ignored and counted. If a
+RETIRING generation still in the base directory has an owner that held one
+of these tags, attach first waits, at most 2 s, looking every 20 ms, for
+that owner's file to be marked FINAL for that generation, or for the
+generation's directory to be gone. A reused region keeps its values.
+`scada_tag_retain_status` reports the values restored, the files rejected,
+the waits that ran out (one deadline per attach) and the restores not done
+because the retain directory was unusable. String tags cannot be retained.
 
 ## Tag read and write
 
@@ -779,7 +801,17 @@ ctest --preset perf -R scada-tag-wake-perf-test
   takes a page fault, or if the library reports that the clocks of the
   machine cannot be read without a system call. It does not see a direct
   call of `malloc`; the banned-function check keeps those out of the
-  library. It exists only in a native build without a sanitizer.
+  library. It exists only in a native build without a sanitizer. The
+  probe locks its own memory before attach (`mlockall(MCL_CURRENT)`, or,
+  where that is refused, it touches its code and data pages), as contract
+  11.2 expects of a REALTIME process: a first touch of the probe's own code
+  inside the markers depends only on the linker's layout (seen once on
+  ARM64). It never uses `MCL_FUTURE`, so the shared regions mapped at
+  attach must still be pre-faulted by the library, and a fault in one is a
+  failure (shown by dropping a region's pages after its pre-fault). What
+  it cannot catch: a pre-fault removed from the library for a region whose
+  pages attach or the probe touches anyway before the markers; the test
+  then passes without it, as it did before the probe locked its memory.
 - `TagAccessProcesses.ASecondWritingThreadStopsADebugBuild` shows the
   one-thread check of contract 13.2 with a real process.
 - The writing side of the load tests is `scada-sim` (`libs/scada-sim`):

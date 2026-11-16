@@ -137,6 +137,23 @@ if(NOT SCADA_SANITIZER AND NOT CMAKE_CROSSCOMPILING)
     scada-tagd scada-tag-test-peer scada-tag-rt-probe scada-tag-test-queue)
 endif()
 
+# Retained values and the generation change with real processes: the
+# retained-value part of conformance test 21, test 25, and SIGKILL at random
+# points (issue #17; decision D-45).
+scada_test_command(retainer_command scada-tag-test-retainer)
+scada_add_test(scada-tag-retain-integration-test KIND integration
+  SOURCES retain_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_RETAINER_COMMAND=${retainer_command}")
+# retain_file.h is private to the library: the test reads the files as
+# attach does.
+target_include_directories(scada-tag-retain-integration-test
+  PRIVATE "${PROJECT_SOURCE_DIR}/libs/scada-tag/src")
+add_dependencies(scada-tag-retain-integration-test
+  scada-tagd scada-tag-test-retainer)
+
 # A killed test binary leaves no process and no directory behind (issue
 # #64): the helper scada-test-killed-runner is a test binary that starts
 # scada-tagd and two simulator processes and waits; the test kills it with
