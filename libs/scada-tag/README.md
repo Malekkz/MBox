@@ -54,7 +54,7 @@ and write with the sequence lock; change rings; and reliable queues.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.10, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 0.13, layout version 1.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -525,7 +525,7 @@ consumer reads it from another process:
 | Record | Checks |
 | --- | --- |
 | Event | `kind` 1 ALARM, 2 COMMAND, 3 AUDIT or 4 SYSTEM; `payload_len` at most 232 |
-| Write request | `operation` and `source` of their enumerations; `value_type` BOOL, INT64, UINT64 or FLOAT64, or 0 with value 0 for CANCEL and READ_NOW; a BOOL value 0 or 1; `user_id` 0 for AUTO and REMOTE; `select_request_id` set for OPERATE and CANCEL only; reserved fields 0; not expired (below) |
+| Write request | `operation` and `source` of their enumerations; `value_type` BOOL, INT64, UINT64 or FLOAT64, or 0 with value 0 for CANCEL and READ_NOW; a BOOL value 0 or 1; `user_id` not 0 for OPERATOR (the commanding user) and 0 for AUTO and REMOTE; `select_request_id` set for OPERATE and CANCEL only; reserved fields 0; not expired (below) |
 | Write result | `status` 1 to 7; reserved fields 0 |
 
 When a record is taken its id must also be its position. A record that

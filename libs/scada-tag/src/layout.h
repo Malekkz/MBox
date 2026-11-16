@@ -494,7 +494,7 @@ struct WriteRequest {
     std::uint8_t value_type = 0;  // TagType
     std::uint8_t reserved0 = 0;
     std::uint64_t value = 0;
-    std::uint32_t user_id = 0;  // 0 for AUTO and REMOTE
+    std::uint32_t user_id = 0;  // the user for OPERATOR, 0 for AUTO and REMOTE
     std::uint32_t reserved1 = 0;
     std::int64_t expiry_mono_ns = 0;  // the driver must not execute after this
     std::int64_t posted_mono_ns = 0;
@@ -559,8 +559,9 @@ struct alignas(REGION_ALIGNMENT) ProcHeader {
     std::uint32_t late_beats = 0;        // A; heartbeats later than the timeout
     std::int64_t longest_gap_ns = 0;     // A; between two published times
     std::int64_t last_late_mono_ns = 0;  // A; end of the latest late gap
+    std::uint32_t starts = 0;            // A; lives that reached RUNNING
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): size of a reserved field, fixed by the contract
-    std::array<std::uint8_t, 16> reserved{};
+    std::array<std::uint8_t, 12> reserved{};
 };
 inline constexpr std::array PROC_HEADER_CHECKS{
     LayoutCheck{sizeof(ProcHeader), 64},
@@ -573,7 +574,8 @@ inline constexpr std::array PROC_HEADER_CHECKS{
     LayoutCheck{offsetof(ProcHeader, late_beats), 28},
     LayoutCheck{offsetof(ProcHeader, longest_gap_ns), 32},
     LayoutCheck{offsetof(ProcHeader, last_late_mono_ns), 40},
-    LayoutCheck{offsetof(ProcHeader, reserved), 48},
+    LayoutCheck{offsetof(ProcHeader, starts), 48},
+    LayoutCheck{offsetof(ProcHeader, reserved), 52},
 };
 static_assert(IS_SHARED_STRUCT<ProcHeader>);
 static_assert(all_hold(PROC_HEADER_CHECKS));

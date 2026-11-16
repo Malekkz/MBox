@@ -30,18 +30,6 @@ constexpr std::size_t TAGS_PART = 0;
 constexpr std::size_t STRINGS_PART = 1;
 constexpr std::size_t CHANGES_PART = 2;
 
-RegionKind region_kind_of(QueueKind kind) noexcept {
-    switch (kind) {
-        case QueueKind::EVENTS:
-            return RegionKind::EVENTS;
-        case QueueKind::CMD:
-            return RegionKind::CMD;
-        case QueueKind::RESULT:
-            return RegionKind::RESULT;
-    }
-    return RegionKind::EVENTS;
-}
-
 }  // namespace
 
 PeerRegions::PeerRegions(const HeaderContents& contents)
@@ -94,7 +82,7 @@ PeerRegions::PeerRegions(const HeaderContents& contents)
         // `owner_index` is the producer's process index. A queue id is
         // below MAX_QUEUES, which fits 16 bits.
         describe(process_count_ + (owner_count_ * SLOTS_PER_OWNER) + i,
-                 queue.name, region_kind_of(queue.kind),
+                 queue.name, queue_region_kind(queue.kind),
                  queue_region_size(queue.capacity, queue.record_size),
                  queue.producer_process, static_cast<std::uint16_t>(i),
                  contents.processes.at(queue.producer_process).uid);

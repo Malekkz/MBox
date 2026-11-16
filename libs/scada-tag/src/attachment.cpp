@@ -58,18 +58,6 @@ constexpr std::size_t CURRENT_TARGET_BUFFER = 25;
 constexpr std::size_t USER_BUFFER_START = 1024;
 constexpr std::size_t USER_BUFFER_LIMIT = std::size_t{1024} * 1024;
 
-RegionKind region_kind_of(QueueKind kind) noexcept {
-    switch (kind) {
-        case QueueKind::EVENTS:
-            return RegionKind::EVENTS;
-        case QueueKind::CMD:
-            return RegionKind::CMD;
-        case QueueKind::RESULT:
-            return RegionKind::RESULT;
-    }
-    return RegionKind::EVENTS;
-}
-
 // The uid of the user `scada-tagd` (section 3.1: looked up by name at
 // attach).
 Result<std::uint32_t> lookup_tagd_uid(std::string& detail) {
@@ -505,7 +493,7 @@ Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
 
     OwnRegionSpec spec;
     spec.name = queue.name;
-    spec.identity.kind = region_kind_of(queue.kind);
+    spec.identity.kind = queue_region_kind(queue.kind);
     spec.identity.generation = contents.generation;
     spec.identity.size_bytes = queue_region_size(capacity, record_size);
     spec.identity.owner_index = process_index_;
@@ -603,6 +591,7 @@ Status Attachment::attach_regions(std::string& detail) {
     // Section 11.2, step 6. From here the caller writes the heartbeat.
     const std::int64_t now = monotonic_ns();
     check_clock(now);
+    proc_.count_start();
     proc_.first_heartbeat(now);
     proc_.set_state(ProcessState::RUNNING);
     if (tagd_index_.has_value() && *tagd_index_ != process_index_) {
@@ -733,12 +722,17 @@ bool Attachment::current_moved(std::int64_t now_mono_ns) {
     if (moved_.load(std::memory_order_relaxed)) {
         return true;
     }
-    if (now_mono_ns <
-        next_current_check_mono_ns_.load(std::memory_order_relaxed)) {
+    // One look per interval, also when several threads call status at the
+    // same instant: only the thread that moves the time on looks, so that
+    // one unreadable `current` is not counted twice.
+    std::int64_t due =
+        next_current_check_mono_ns_.load(std::memory_order_relaxed);
+    if (now_mono_ns < due ||
+        !next_current_check_mono_ns_.compare_exchange_strong(
+            due, now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
+            std::memory_order_relaxed)) {
         return false;
     }
-    next_current_check_mono_ns_.store(now_mono_ns + CURRENT_RECHECK_INTERVAL_NS,
-                                      std::memory_order_relaxed);
     if (current_names_another_generation()) {
         moved_.store(true, std::memory_order_relaxed);
         return true;

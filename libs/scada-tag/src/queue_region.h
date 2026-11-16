@@ -68,6 +68,21 @@ SCADA_RT [[nodiscard]] constexpr std::uint64_t request_id_of(
     return (std::uint64_t{queue_id} << REQUEST_ID_SEQ_BITS) | position;
 }
 
+// True if a queue of `capacity` records is broken by the range rule of
+// section 9.2, judged by a reader that is neither of its two sides while
+// both may run (scada-tagd, issue #53): `written_before` is `write_seq`
+// loaded before the cursor `read`, and `written_after` loaded after it.
+// The consumer never moves the cursor past `write_seq` and the producer
+// never moves `write_seq` more than `capacity` past the cursor, which only
+// grows; so a pair in range at every moment is never judged broken, and a
+// pair that does not move is judged exactly by the range rule.
+SCADA_RT [[nodiscard]] constexpr bool queue_pair_broken(
+    std::uint64_t written_before, std::uint64_t read,
+    std::uint64_t written_after, std::uint32_t capacity) noexcept {
+    return read > written_after ||
+           (written_before > read && written_before - read > capacity);
+}
+
 // The queue header of the mapped queue region `region`.
 SCADA_RT [[nodiscard]] QueueHeader& queue_header(
     std::span<std::byte> region) noexcept;
@@ -117,9 +132,9 @@ SCADA_RT [[nodiscard]] bool event_valid(const EventRecord& record) noexcept;
 // A write request: an operation and a source of their enumerations; a
 // value type of BOOL, INT64, UINT64 or FLOAT64 (STRING cannot be commanded),
 // or 0 for CANCEL and READ_NOW, which carry no value, and then value 0; a
-// BOOL value of 0 or 1; user id 0 for AUTO and REMOTE; select_request_id
-// not 0 for OPERATE and CANCEL and 0 otherwise. The times are not checked
-// here.
+// BOOL value of 0 or 1; a user id not 0 for OPERATOR and 0 for AUTO and
+// REMOTE; select_request_id not 0 for OPERATE and CANCEL and 0 otherwise.
+// The times are not checked here.
 SCADA_RT [[nodiscard]] bool request_valid(const WriteRequest& record) noexcept;
 
 // A write result: a status of WriteStatus.

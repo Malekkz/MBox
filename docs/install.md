@@ -121,6 +121,38 @@ line.
 
 ## 7. Start the tag database daemon
 
+### Disable system sleep first
+
+The unit must never suspend, hibernate or hybrid-sleep (contract 3.4,
+decision D-46): the monotonic clock stops meanwhile, so a write request
+could be executed after a resume, later than its requester allowed. These
+lines are for the test machine, run as root; they use only systemd, which
+this guide requires, and a package will ship the same settings later. Mask
+the sleep targets, and tell systemd's sleep configuration to refuse every
+form of sleep:
+
+```
+systemctl mask sleep.target suspend.target hibernate.target \
+    hybrid-sleep.target suspend-then-hibernate.target
+mkdir -p /etc/systemd/sleep.conf.d
+cat > /etc/systemd/sleep.conf.d/scada.conf <<END
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
+END
+```
+
+`scada-tagd` cannot see this setting. At start it logs, once at INFO, the
+sleep states the kernel offers (`/sys/power/state`); that line is expected,
+since most kernels offer them even with the targets masked. It logs a
+WARNING `the system was suspended` (or `... since boot` at start) with
+`SUSPENDED_MS` when it measures that the system slept. A virtual machine that is paused is not seen: its clocks stop
+too. Do not pause a virtual machine that runs the unit.
+
+### Start it
+
 `scada-tagd` creates the shared-memory tag database from a tag-set file. In
 phase 1 that file is written by hand and names users by number
 (`libs/scada-tag/README.md`). The smallest one holds only `scada-tagd`
@@ -162,7 +194,30 @@ still points to `gen-1`. After a change to the tag-set file, a restart shows
 The service needs no capability: `systemctl show -p CapabilityBoundingSet
 scada-tagd.service` prints an empty value.
 
-## 8. Remove it again
+## 8. Look at the tag database with scadactl
+
+`scadactl` reads the tag database directly and only reads
+(`tools/scadactl/README.md`). It runs as root, or as a user in the group
+`scada`:
+
+```
+scadactl status
+scadactl tag list
+scadactl tag watch 'plant.*'      # Ctrl-C stops it
+```
+
+`status` shows generation 1, `scada-tagd up`, and the process `tagd`
+RUNNING. A user outside the group gets `no permission to read the tag
+database`.
+
+Membership of the group `scada` means unaudited read access to every tag:
+`scadactl` records nothing, and neither does the library. It also allows
+creating files in the generation directory and locking the `proc` region
+of a process, which can keep that process from attaching. That is a power
+the group already has for the services; `scadactl` uses neither. Add only
+accounts to `scada` that are trusted that far (decision D-42).
+
+## 9. Remove it again
 
 ```
 systemctl stop scada-hello.service scada-tagd.service

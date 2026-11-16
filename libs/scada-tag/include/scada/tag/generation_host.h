@@ -72,11 +72,61 @@ struct LateHeartbeats {
     bool baseline = false;
 };
 
+// Lives a process started in its region since the previous sample, from
+// the `starts` count of its `proc` region (section 10.1). A process that
+// restarts into its reused region between two checks is otherwise not seen
+// by them. For diagnosis only. The figures are input: the process writes
+// them, and a life of a library before contract 0.14 counts nothing, so
+// they are a lower bound.
+struct Restarts {
+    std::string process;
+    // Lives started since the previous sample, at least 1.
+    std::uint32_t added = 0;
+    // Of those, the lives no check saw as down and up again: `added` minus
+    // the checks since the previous sample that found the process up after
+    // it was down, at least 0. A lower bound: a heartbeat that came back
+    // without a restart is such a check too.
+    std::uint32_t unseen = 0;
+    std::uint32_t total = 0;  // since the region was created; wraps
+};
+
+// What changed about a reliable queue at a liveness check (issue #53).
+enum class QueueEvent : std::uint8_t {
+    // Its consumer's cursor and its `write_seq` became a pair out of range
+    // (section 9.2). Such a queue is stopped: its consumer gets
+    // SCADA_E_LAYOUT and its producer SCADA_E_PEER_DOWN.
+    BROKEN,
+    // A broken queue's pair is in range again.
+    NO_LONGER_BROKEN,
+    // An events or command queue has had no usable file at two checks in a
+    // row while its producer was not down. A producer creates its queue
+    // files when it attaches, so the file was removed or damaged.
+    MISSING,
+    // A queue reported MISSING has a usable file again.
+    FOUND,
+};
+
+// A reliable queue whose state changed at a liveness check. The values are
+// input: the producer and the consumer write them.
+struct QueueChange {
+    std::string queue;
+    QueueEvent event = QueueEvent::BROKEN;
+    // BROKEN and NO_LONGER_BROKEN: the values that were judged.
+    std::uint64_t cursor = 0;
+    std::uint64_t write_seq = 0;
+    std::uint32_t capacity = 0;
+    // BROKEN: the cursor is the all-ones value a consumer stores when it
+    // found the queue file replaced inside the generation (decision D-40).
+    bool replaced = false;
+};
+
 // What one liveness check changed.
 struct CheckReport {
     std::vector<ProcessChange> changes;
     std::vector<SweptEntry> swept;
     std::vector<LateHeartbeats> late;
+    std::vector<Restarts> restarts;
+    std::vector<QueueChange> queues;
     // Only at the first check of a new generation: the processes that have
     // no usable region yet (DownReason::REGION_MISSING), in process index
     // order. Their `down` flag starts at 1 and stays, so they are not in
@@ -150,10 +200,16 @@ public:
     // One liveness check at `now_mono_ns` (CLOCK_MONOTONIC), section 10.1:
     // sets `down` in the process table for every process that is down and
     // clears it for every process that is not, reads the late heartbeats
-    // every process recorded, then removes every entry of the generation
-    // directory that the header does not list or whose owner is wrong
-    // (section 3.1). Returns what changed, and at the first check of a new
-    // generation the processes that have not attached yet.
+    // every process recorded and the lives every other process started
+    // since the previous check, applies the range rule of section 9.2 to
+    // every queue whose region and consumer's `proc` region are both there,
+    // then removes every entry of the generation directory that the header
+    // does not list or whose owner is wrong (section 3.1). Returns what
+    // changed. A queue is reported when it becomes broken, when it is no
+    // longer broken, when an events or command queue file has been missing
+    // at two checks in a row while its producer was not down, and when it
+    // is there again; not at every check. The first check of a new
+    // generation also lists the processes that have not attached yet.
     //
     // A temporary file `.tmp.<region>.<pid>` of a listed region, owned by
     // the user of that region, is a region being created and stays.

@@ -199,6 +199,18 @@ std::uint64_t queue_region_size(std::uint64_t capacity,
            (capacity * record_size);
 }
 
+RegionKind queue_region_kind(QueueKind kind) noexcept {
+    switch (kind) {
+        case QueueKind::EVENTS:
+            return RegionKind::EVENTS;
+        case QueueKind::CMD:
+            return RegionKind::CMD;
+        case QueueKind::RESULT:
+            return RegionKind::RESULT;
+    }
+    return RegionKind::EVENTS;
+}
+
 Result<Fd> open_base_directory(const std::string& path, std::uint32_t tagd_uid,
                                std::string& detail) {
     Fd directory = open_at(AT_FDCWD, path,

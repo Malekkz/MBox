@@ -13,7 +13,7 @@ that prove the test tooling works. Decisions: `docs/decisions.md`, D-10 to D-12.
 | `tests/install/` | Tests of the staged install tree and the systemd units | `integration` |
 | `tests/perf/` | Performance tests against stated budgets | `perf` |
 | `tests/model/` | Model check of the sequence lock and the change ring for the Armv8 memory model, and the check that the ARM64 code matches it | `model`, `unit` |
-| `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process) and the corpus replay driver | |
+| `tests/support/` | `scada::test-support` (start a process, wait on a condition, trace the system calls of a process, a temporary directory a killed test does not leave behind) and its cleaner `scada-test-cleaner`, and the corpus replay driver | |
 | `tests/sanitizer-fixtures/` | Deliberate bugs, one per sanitizer finding | `sanitizer` |
 | `tests/fuzz-sample/` | Toy parser with a planted bug, and its fuzz target | `fuzz`, `unit` |
 
@@ -35,7 +35,12 @@ An integration test starts its processes with `scada::test::ChildProcess`
 `wait_for_output`, `wait_for_error` or `wait_for_exit`, each with a timeout.
 Do not sleep. Pass the command to start through `ENVIRONMENT`, as
 `integration/CMakeLists.txt`
-does, so that a cross build can run it through the emulator.
+does, so that a cross build can run it through the emulator. Start processes
+from the main thread of the test: a child of `ChildProcess` is killed when
+the thread that started it ends, which is how it dies with a killed test
+binary (decision D-48). Make temporary directories with
+`scada::test::TempDirectory` (`support/include/scada/test/temp_directory.h`),
+whose cleaner removes the directory if the test binary is killed.
 
 To show that code makes no system call, the program under test calls
 `scada::test::mark_trace_begin()` and `mark_trace_end()` around it, and the

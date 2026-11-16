@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +28,7 @@
 namespace scada::test::tagd {
 
 using scada::service::NotifyListener;
+using scada::test::ChildEnding;
 using scada::test::ChildProcess;
 
 // Upper bound for one wait. It only matters when something is broken; a
@@ -145,20 +147,48 @@ inline void stop(RunningTagd& tagd) {
         << tagd.child.err();
 }
 
-// Kills `process` with SIGKILL and waits until it is gone.
-inline void kill(ChildProcess& process) {
-    EXPECT_TRUE(process.send_signal(SIGKILL));
-    EXPECT_EQ(process.wait_for_signal_exit(WAIT_LIMIT), SIGKILL);
+// How `ending` reads in a test log.
+inline std::string describe(const ChildEnding& ending) {
+    return (ending.by_signal ? "ended by signal " : "exited with code ") +
+           std::to_string(ending.number);
 }
 
-// Asks `process` to stop and expects it to exit with code 0.
-inline ::testing::AssertionResult stops_cleanly(ChildProcess& process) {
-    if (!process.send_signal(SIGTERM)) {
-        return ::testing::AssertionFailure() << "the process is gone";
+// Kills `process` with SIGKILL and waits until it is gone. A process that
+// had already ended by itself counts as gone, not as a failure (issue #64):
+// how it ended is written to the log of the test and returned, so that a
+// test to which that matters can check it. Nothing, with a failed
+// expectation, if it was not gone within WAIT_LIMIT.
+inline std::optional<ChildEnding> kill(ChildProcess& process) {
+    // False if the process has already been reaped; the wait below then
+    // returns at once.
+    static_cast<void>(process.send_signal(SIGKILL));
+    const std::optional<ChildEnding> ending =
+        process.wait_for_ending(WAIT_LIMIT);
+    if (!ending.has_value()) {
+        ADD_FAILURE() << "the process did not end after SIGKILL";
+    } else if (!ending->by_signal || ending->number != SIGKILL) {
+        std::cerr << "note: the process had already " << describe(*ending)
+                  << " before SIGKILL: " << process.err() << "\n";
     }
-    if (process.wait_for_exit(WAIT_LIMIT) != 0) {
+    return ending;
+}
+
+// Asks `process` to stop and expects it to exit with code 0. A process
+// that had already ended by itself is judged by how it ended.
+inline ::testing::AssertionResult stops_cleanly(ChildProcess& process) {
+    // False if the process has already been reaped; the wait below then
+    // returns at once.
+    static_cast<void>(process.send_signal(SIGTERM));
+    const std::optional<ChildEnding> ending =
+        process.wait_for_ending(WAIT_LIMIT);
+    if (!ending.has_value()) {
         return ::testing::AssertionFailure()
-               << "no clean exit: " << process.err();
+               << "did not end after SIGTERM: " << process.err();
+    }
+    if (ending->by_signal || ending->number != 0) {
+        return ::testing::AssertionFailure()
+               << "no clean exit, " << describe(*ending) << ": "
+               << process.err();
     }
     return ::testing::AssertionSuccess();
 }

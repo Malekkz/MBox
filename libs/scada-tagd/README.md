@@ -37,12 +37,49 @@ the standard error stream.
 | `process down` | WARNING | `PROCESS`, `REASON`: `region missing`, `not running` or `heartbeat stale` |
 | `process up` | NOTICE | `PROCESS` |
 | `process not attached` | INFO, once for each process, only at the first check of a new generation: the process has no usable region yet | `PROCESS` |
-| `heartbeat late` | WARNING, at most once per process and check. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous check), `LATE_BEATS_TOTAL`, `LONGEST_GAP_MS`, `LAST_LATE_MONO_NS` (CLOCK_MONOTONIC) |
+| `process restarted` | WARNING if a life came and went between two checks, else NOTICE. Never rate limited | `PROCESS`, `RESTARTS` (lives since the previous sample), `RESTARTS_UNSEEN` (of those, the lives no check saw as down and up), `STARTS_TOTAL` (since the region was created; wraps) |
+| `heartbeat late` | WARNING, at most once per process in 10 s; growth in between is summed into the next record. Readers saw the process down for a moment, also when no check fell into it. The figures are reported by the process itself and are a lower bound; a hung process records nothing | `PROCESS`, `LATE_BEATS` (since the previous record of this process), `LATE_BEATS_TOTAL` (since the region was created; wraps), `LONGEST_GAP_MS` (ms), `LAST_LATE_MONO_US` (µs, CLOCK_MONOTONIC, as journald's `__MONOTONIC_TIMESTAMP`), `CHECKS` (checks the record sums) |
 | `heartbeat late before this check` | INFO, once, at the first look at a region that holds late heartbeats already | as `heartbeat late` |
+| `queue broken` | WARNING, once when a queue's cursor and `write_seq` become a pair out of range (contract 9.2). The queue refuses posts and delivers nothing until the next generation | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY`, `REASON`: `replaced` (the consumer found the queue file replaced) or `out of range` |
+| `queue no longer broken` | NOTICE, once | `QUEUE`, `CURSOR`, `WRITE_SEQ`, `CAPACITY` |
+| `queue file missing` | WARNING, once, when an events or command queue has had no usable file at two checks in a row while its producer was up | `QUEUE` |
+| `queue file found again` | NOTICE, once | `QUEUE` |
+| `the kernel offers sleep states; the unit must not suspend` | INFO, once at start, when `/sys/power/state` is not empty (contract 3.4). Expected on most kernels, also with sleep disabled | `STATES` |
+| `the system was suspended since boot`, `the system was suspended` | WARNING, at start and when it happens: `CLOCK_BOOTTIME` ran ahead of `CLOCK_MONOTONIC` | `SUSPENDED_MS`, a lower bound, rounded up to whole ms |
 | `removed an entry that does not belong in the generation directory` | WARNING | `ENTRY` |
 | `cannot remove an entry that does not belong in the generation directory` | ERROR, once for each entry | `ENTRY` |
 | `cannot start the tag database` and other errors of the start | CRITICAL | `STATUS`, `DETAIL` |
 | `stopped on request` | NOTICE | |
+
+### Message IDs
+
+The liveness records carry a fixed journald `MESSAGE_ID` as their last field
+(decision D-47), so that they can be found without matching the text:
+
+| Message | `MESSAGE_ID` |
+| --- | --- |
+| `process down` | `51ad850aac4848fab6eade0000eaa868` |
+| `process up` | `3e293a9e793b4fa08fafb02b5f16ae7f` |
+| `process restarted` | `f35dfeb8e8124cc88b219cabf6947b00` |
+| `process not attached` | `0f57ce3d6dbc4891abd0e55e240f04f9` |
+| `heartbeat late` | `31aad0d613b645d39a83e7978c4531ec` |
+| `heartbeat late before this check` | `c4de2438d3574ca38f45771de9254e3a` |
+
+```
+journalctl MESSAGE_ID=31aad0d613b645d39a83e7978c4531ec -o verbose
+```
+
+- The IDs and fields are a provisional diagnostic input for the alarm service
+  of a later phase, which is expected to read `scada_proc_status` or system
+  tags instead. They are not an authority: any local process can write a
+  journal record with the same fields.
+- When the journal does not take a datagram, the record goes to the standard
+  error stream as one line; the ID and the fields are then text in the
+  message, not journal fields.
+- journald limits records per unit (default 10,000 in 30 s; the unit template
+  sets no `LogRateLimit*`) and drops beyond it while the sender sees success.
+  The 10 s limit of `heartbeat late` keeps `scada-tagd` below it;
+  `LATE_BEATS_TOTAL` lets a reader see records that were lost.
 
 A new generation starts with every other process down. The first check logs
 `process not attached` for each process that has no region yet. Each process
@@ -53,7 +90,8 @@ before the first check. A reused generation keeps what the previous
 ## Interfaces
 
 - Contract: `docs/contracts/tag-database.md`, version 0.18, sections 3, 5,
-  10 and 11.1; decisions D-27, D-38 and D-53 in `docs/decisions.md`.
+  9.2, 10 and 11.1; decisions D-27, D-36, D-38, D-46, D-47 and D-53 in
+  `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:
   `run(args, out, err)` is the whole command.
 - Uses `libscada-tag` (`generation_host.h`, `tag_set_json.h`),
@@ -81,8 +119,11 @@ return scada::tagd::run(args, std::cout, std::cerr);
 ctest --preset dev -R scada-tagd
 ```
 
-- `scada-tagd-unit-test` (`tests/tagd_test.cpp`): the command line and the
-  errors found before the service starts.
+- `scada-tagd-unit-test`: the command line and the errors found before the
+  service starts (`tests/tagd_test.cpp`), the rate limit of `heartbeat late`
+  (`tests/late_log_test.cpp`), and every liveness record with its ID and
+  fields, sent to a datagram socket that stands in for the journal
+  (`tests/report_log_test.cpp`).
 - `scada-tagd-integration-test`
   (`tests/integration/tagd_integration_test.cpp`): the running service; see
   `services/scada-tagd/README.md`.

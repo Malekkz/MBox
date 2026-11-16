@@ -150,7 +150,9 @@ bool request_valid(const WriteRequest& record) noexcept {
             return false;
         }
     }
-    if (*source != WriteSource::OPERATOR && record.user_id != 0) {
+    // An operator command names its user (reference 8.2, step 1, and 13.4);
+    // automatic and remote ones have none. 0 means no user (decision D-44).
+    if ((*source == WriteSource::OPERATOR) != (record.user_id != 0)) {
         return false;
     }
     const bool needs_select = *operation == WriteOperation::OPERATE ||

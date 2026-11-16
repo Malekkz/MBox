@@ -96,6 +96,19 @@ scada_add_test(scada-tag-observer-integration-test KIND integration
 add_dependencies(scada-tag-observer-integration-test
   scada-tagd scada-tag-test-peer scada-sim)
 
+# scadactl against real processes (issue #19).
+scada_test_command(scadactl_command scadactl)
+scada_add_test(scadactl-integration-test KIND integration
+  SOURCES scadactl_integration_test.cpp
+  DEPENDS scada::tag scada::tagd scada::sim scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_TAG_PEER_COMMAND=${peer_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
+    "SCADACTL_COMMAND=${scadactl_command}")
+add_dependencies(scadactl-integration-test
+  scadactl scada-tagd scada-tag-test-peer scada-sim)
+
 # Who may observe, with real users (contract, sections 3.1 and 11.4). It
 # must run as root to become other users, so it has the label `root`
 # instead of `integration`: the presets that run unprivileged leave it out,
@@ -123,3 +136,23 @@ if(NOT SCADA_SANITIZER AND NOT CMAKE_CROSSCOMPILING)
   add_dependencies(scada-tag-rt-integration-test
     scada-tagd scada-tag-test-peer scada-tag-rt-probe scada-tag-test-queue)
 endif()
+
+# A killed test binary leaves no process and no directory behind (issue
+# #64): the helper scada-test-killed-runner is a test binary that starts
+# scada-tagd and two simulator processes and waits; the test kills it with
+# SIGKILL and looks for what is left. The helper is not a CTest test.
+add_executable(scada-test-killed-runner killed_runner.cpp)
+target_link_libraries(scada-test-killed-runner PRIVATE
+  scada::tag scada::tagd scada::sim scada::service scada::test-support
+  GTest::gtest_main)
+scada_target_defaults(scada-test-killed-runner)
+scada_test_command(killed_runner_command scada-test-killed-runner)
+scada_add_test(scada-test-cleanup-integration-test KIND integration
+  SOURCES cleanup_integration_test.cpp
+  DEPENDS scada::tagd scada::service scada::test-support
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_SIM_COMMAND=${sim_command}"
+    "SCADA_KILLED_RUNNER_COMMAND=${killed_runner_command}")
+add_dependencies(scada-test-cleanup-integration-test
+  scada-tagd scada-sim scada-test-killed-runner)

@@ -9,6 +9,7 @@
 
 #include "scada/tagd/tagd.h"
 #include "scada/test/child_process.h"
+#include "scada/test/temp_directory.h"
 
 #include <gtest/gtest.h>
 
@@ -25,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -84,11 +86,15 @@ constexpr std::string_view IO_NOT_RUNNING =
 class TagdService : public ::testing::Test {
 protected:
     void SetUp() override {
-        std::string pattern =
-            (std::filesystem::temp_directory_path() / "scada-tagd-it-XXXXXX")
-                .string();
-        ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
-        root_ = pattern;
+        // Removed by a cleaner process even if the test binary is killed
+        // (decision D-48).
+        std::optional<scada::test::TempDirectory> temp =
+            scada::test::TempDirectory::create("scada-tagd-it-");
+        if (!temp.has_value()) {
+            FAIL() << "no temporary directory";
+        }
+        temp_.emplace(std::move(*temp));
+        root_ = temp_->path();
         base_ = root_ / "base";
         std::filesystem::create_directory(base_);
         // The owner and mode the platform gives /dev/shm/scada.
@@ -96,10 +102,7 @@ protected:
         write_tag_set(false);
     }
 
-    void TearDown() override {
-        std::error_code ignored;
-        std::filesystem::remove_all(root_, ignored);
-    }
+    void TearDown() override { temp_.reset(); }
 
     // scada-tagd and a process `io` with one tag, both as the user of the
     // test. With `more_tags` it is another tag set. In name order `io` is
@@ -186,6 +189,7 @@ protected:
     }
 
 private:
+    std::optional<scada::test::TempDirectory> temp_;
     std::filesystem::path root_;
     std::filesystem::path base_;
 };
