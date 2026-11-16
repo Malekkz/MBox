@@ -1335,3 +1335,24 @@ Consequences:
 - `libs/scada-tag/src/peer_regions.cpp`: `look_at_producer`; `refresh_locked` walks the asked slots by position, since a look can ask for one.
 - Tests: `Peers.AQueueFoundLaterIsSeenWithItsProducer` (the producer's slot asked for first and looked at, missing, a second before the queue's, so that only the queue's slot is due), `Peers.AQueueCreatedAnewIsSeenWithItsNewProducer` (both files created anew, the path of D-49), `Queues.AConsumerThatSeesAQueueSeesItsProducer` (the producer attaches after the open; the look of the queue maps its `proc` region). Each fails without the change. From the review: `Peers.AnAskForARegionStillMissingLooksAgainAtOnce` (fails without the look of an ask of a missing slot) and `Peers.AProducerRegionMissingAtTheCoupledLookIsFoundLater` (the coupled look finds no `proc` file; the next `refresh` finds it).
 - The rt probe no longer waits until it sees the feeder live before its markers (D-56 added that wait): without the wait it passed 1,273 loaded runs of `scada-tag-rt-integration-test` (6 loops of it and 2 of unit tests, busy loops and `ctest -j8`, load average up to 22.7), where it had failed 2 of 1,074 without the coupling.
+
+## D-65: `scada_tag_write_string` checks ownership before the text
+Date: 2026-11-16
+Phase / issue: 1, #112
+Status: accepted. The lead session ruled on 2026-11-16 that the code follows D-29.
+
+Context: D-29 says "`SCADA_E_NOT_OWNER` before the value is looked at". `scada_tag_write` follows it. `scada_tag_write_string` returned `SCADA_E_INVALID` for text longer than `SCADA_STRING_MAX` (250 bytes) before it checked ownership, so a process that does not own the tag got `SCADA_E_INVALID` for a long text and `SCADA_E_NOT_OWNER` for a short one. This was found while writing contract 0.25 (#21).
+Options: change the code to follow D-29; or write the order the code had into the contract.
+Decision: the code follows D-29. `scada_tag_write_string` checks in this order:
+1. `SCADA_E_INVALID` for a NULL context, or a NULL `text` with `len` above 0. These are argument errors: no tag is looked at.
+2. `SCADA_E_INVALID` for a handle that is none of this generation.
+3. `SCADA_E_NOT_OWNER`.
+4. `SCADA_E_TYPE` for a tag that is not a STRING.
+5. `SCADA_E_INVALID` for a length above 250 bytes, text that is not well-formed UTF-8, or a quality or flag that may not be stored.
+
+No byte of the text is read before the length check.
+Reason: one rule for every write function. A process that is not the owner learns nothing about the value checks, and the answer does not depend on the text it passed.
+Consequences:
+- `libs/scada-tag/src/c_api.cpp` drops its own length check. The check in `Attachment::write_string` is now the only one, and it already ran after ownership.
+- Test: `CApi.WriteStringOfAnotherOwnersTagIsNotOwnerWhateverTheText`. It fails without the change.
+- Contract section 13 states the order for `scada_tag_write_string` (version 0.26).

@@ -659,12 +659,13 @@ int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
  * to the STRING tag `handle` (section 7). `source_time_ns` 0 is treated as
  * by scada_tag_write.
  *
- * SCADA_E_NOT_OWNER: the calling process does not own the tag.
- * SCADA_E_TYPE: the tag is not a STRING. SCADA_E_INVALID: `ctx` is NULL,
- * `text` is NULL and `len` is not 0, `len` is more than SCADA_STRING_MAX, the
- * text is not valid UTF-8, `handle` is not a handle of this generation, or
- * the quality or a quality flag is none, or SCADA_FLAG_OWNER_DOWN is set.
- * On an error nothing is written.
+ * Checked in this order: SCADA_E_INVALID if `ctx` is NULL, if `text` is NULL
+ * and `len` is not 0, or if `handle` is not a handle of this generation;
+ * SCADA_E_NOT_OWNER if the calling process does not own the tag, before the
+ * text is looked at; SCADA_E_TYPE if the tag is not a STRING;
+ * SCADA_E_INVALID if `len` is more than SCADA_STRING_MAX, the text is not
+ * valid UTF-8, or the quality or a quality flag is none, or
+ * SCADA_FLAG_OWNER_DOWN is set. On an error nothing is written.
  *
  * Not real-time. All writes to the tags of one owner come from one thread.
  */
