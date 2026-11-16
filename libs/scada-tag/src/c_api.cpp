@@ -472,11 +472,12 @@ int scada_tag_read_string(scada_ctx* ctx, uint32_t handle, char* buf,
 int scada_tag_write_string(scada_ctx* ctx, uint32_t handle, const char* text,
                            size_t len, uint8_t quality, uint16_t flags,
                            int64_t source_time_ns) {
-    if (ctx == nullptr || (text == nullptr && len != 0) ||
-        len > SCADA_STRING_MAX) {
+    if (ctx == nullptr || (text == nullptr && len != 0)) {
         return SCADA_E_INVALID;
     }
-    // The caller states that `text` holds `len` bytes.
+    // The caller states that `text` holds `len` bytes. The length is part of
+    // the value, so the library checks it after ownership (D-29, D-65); no
+    // byte is read before that check.
     return ctx->attachment->write_string(
         handle, len == 0 ? std::string_view() : std::string_view(text, len),
         quality, flags, source_time_ns);

@@ -1383,3 +1383,24 @@ Decision:
 - Both run in the workflow `measurements` (steps "Ring gap at the reference load" and "Huge pages (as root)"); the job's time limit goes from 75 to 100 minutes.
 Reason: a test of the reference load itself is the criterion the contract names; a gap at smaller loads (tests 13 and 14) says nothing about the capacity. Huge pages need a region of at least 2 MB; measuring them on a layout where they cannot apply would show nothing.
 Consequences: the root preset runs the huge-page test in the dev build too (a few seconds, figures only). Locally, on a 4-processor container: the ring-gap test received 500,000 changes with 0 gaps in 10 s; the huge-page test mapped 2,048 kB of the 3.2 MB region with huge pages, and two runs gave read 99.9th percentiles of 497 and 459 ns on huge=never and 478 and 452 ns on huge=always.
+
+## D-65: `scada_tag_write_string` checks ownership before the text
+Date: 2026-11-16
+Phase / issue: 1, #112
+Status: accepted. The lead session ruled on 2026-11-16 that the code follows D-29.
+
+Context: D-29 says "`SCADA_E_NOT_OWNER` before the value is looked at". `scada_tag_write` follows it. `scada_tag_write_string` returned `SCADA_E_INVALID` for text longer than `SCADA_STRING_MAX` (250 bytes) before it checked ownership, so a process that does not own the tag got `SCADA_E_INVALID` for a long text and `SCADA_E_NOT_OWNER` for a short one. This was found while writing contract 0.25 (#21).
+Options: change the code to follow D-29; or write the order the code had into the contract.
+Decision: the code follows D-29. `scada_tag_write_string` checks in this order:
+1. `SCADA_E_INVALID` for a NULL context, or a NULL `text` with `len` above 0. These are argument errors: no tag is looked at.
+2. `SCADA_E_INVALID` for a handle that is none of this generation.
+3. `SCADA_E_NOT_OWNER`.
+4. `SCADA_E_TYPE` for a tag that is not a STRING.
+5. `SCADA_E_INVALID` for a length above 250 bytes, text that is not well-formed UTF-8, or a quality or flag that may not be stored.
+
+No byte of the text is read before the length check.
+Reason: one rule for every write function. A process that is not the owner learns nothing about the value checks, and the answer does not depend on the text it passed.
+Consequences:
+- `libs/scada-tag/src/c_api.cpp` drops its own length check. The check in `Attachment::write_string` is now the only one, and it already ran after ownership.
+- Test: `CApi.WriteStringOfAnotherOwnersTagIsNotOwnerWhateverTheText`. It fails without the change.
+- Contract section 13 states the order for `scada_tag_write_string` (version 0.26).
