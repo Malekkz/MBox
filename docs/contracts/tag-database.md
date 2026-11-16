@@ -2229,10 +2229,11 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
 
-Migration, 0.25 to 0.26: none for data; the layout version stays 1 and no
-structure changed. A process that calls `scada_tag_write_string` on a tag it
-does not own with text longer than 250 bytes now gets `SCADA_E_NOT_OWNER`
-instead of `SCADA_E_INVALID`. Every other call returns what it returned.
+Migration, 0.25 to 0.26 (0.24 is reserved for #96, PR #111): none for data;
+the layout version stays 1 and no structure changed. A process that calls
+`scada_tag_write_string` on a tag it does not own with text longer than 250
+bytes now gets `SCADA_E_NOT_OWNER` instead of `SCADA_E_INVALID`. Every other
+call returns what it returned.
 
 Migration, 0.23 to 0.25 (0.24 is reserved for #96): none. No structure, default or behaviour changed; the contract now states what libscada-tag and scada-tagd already do.
 
