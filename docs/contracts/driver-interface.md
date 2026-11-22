@@ -2,1423 +2,1375 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.1 (draft) |
+| Contract version | 0.2 (draft) |
 | Status | Draft for review by a person (issue #99, P2-02). No code for P2-07 to P2-10 (#104 to #107) starts before that review |
 | Implements | Reference architecture 1.1, sections 6, 8.1 and 14.4; tag database contract 1.0, sections 6.3, 9 and 9.5 |
 | Owners of this contract | `libscada-driver`; every `scada-drv-<protocol>` and `scada-io` |
-| Meets | Configuration schemas contract (#98, `config-schemas.md`), at the points of section 15 |
+| Meets | Configuration schemas contract (`config-schemas.md`, #98), at the points of section 17 |
 
 This contract fixes the boundary between `libscada-driver` (the framework)
-and a protocol implementation, exactly enough that a protocol can be written
-and tested against the framework, and the framework against a test protocol,
-each on its own.
+and a protocol implementation, and the behaviour of every driver process,
+exactly enough that a protocol can be written and tested against the
+framework, and the framework against a test protocol, each on its own.
 
 Version 0.x may change freely within phase 2 (contracts `README.md`). The
-places marked **open: needs the product owner's ruling (X-n)** carry a
-conflict with the reference document or a choice the reference leaves to a
-person; the draft is written with the option proposed in each, and section
-16 lists them all. The places marked **review by a person** touch command
-handling, select-before-operate, fail-safe or restart behaviour, or secrets
-(`CLAUDE.md`, "Safety and security rules").
+places marked **open: needs the product owner's ruling** carry a conflict
+with the reference document or a choice the reference leaves to a person;
+the draft is written with the option proposed in each, and section 18 lists
+them all with the committee's recommendation. The places marked **review by
+a person** touch command handling, select before operate, fail-safe or
+restart behaviour, or secrets (`CLAUDE.md`, "Safety and security rules").
 
 Input from the field: the device survey of 2026-11-22 (not in the
 repository). It reviewed manuals of protection relays, inverters, plant
 loggers and controllers, meters and serial sensors over several protocols.
-Its findings are described here generically; every example in this contract
-is invented.
+Its findings are described here generically; every example is invented.
 
 ## 1. Conventions
 
-- The words **must**, **should** and **may** are used as in the reference
-  document (section 1).
+- **must**, **should** and **may** as in the reference document (section 1).
 - **Phase 2** marks what `libscada-driver` (#104), the Modbus driver (#105,
-  #106) and `scada-io` (#107) must implement. **Room** marks a part whose
-  shape this contract fixes now and which a later phase implements; a
-  phase 2 protocol inherits a default for it and need not know it exists.
-  Section 14 lists every part with its phase.
+  #106) and `scada-io` (#107) implement. **Room** marks a part whose shape
+  this contract fixes now and which a later phase implements; a phase 2
+  protocol inherits a default for it. Section 16 lists every part with its
+  phase.
+- **CS** is the configuration schemas contract (`config-schemas.md`). CS owns
+  every configuration key: its name, type, default, range and validation
+  code (CF-, CW-), in its table of shared keys (CS 4.10) and its section 10.
+  This contract cites keys by name and defines behaviour only. Where this contract names a default, it is CS's default restated,
+  and CS wins if the two differ.
+- **TD** is the tag database contract (`tag-database.md`), version 1.0. Its
+  layout version 1 is frozen (TD 14.1): nothing here changes a shared
+  structure, a stored enumeration, a quality flag or a limit that readers
+  validate. Where the survey asked for one, this contract gives the
+  workaround.
 - C++ below shows the interface of `libscada-driver`. Names follow
-  `CLAUDE.md`. Every fallible call returns `scada::Status` or
-  `scada::Result<T>`; no exception crosses the interface, in either
-  direction. A protocol that wraps a throwing library catches at its own
-  call site (coding standard, section 7).
-- "The tag database contract" is `docs/contracts/tag-database.md`, version
-  1.0. Its layout version 1 is frozen (its section 14.1): nothing in this
-  contract changes a shared structure, a stored enumeration, a quality flag
-  or a limit that readers validate. Where the survey asked for one, this
-  contract gives the workaround and says so.
-- Times are as in the tag database contract: `*_time_ns` is
-  `CLOCK_REALTIME` (UTC), `*_mono_ns` is `CLOCK_MONOTONIC`. Every timeout,
-  age, deadline and period in the framework uses monotonic time.
-- A **deadline** is a monotonic time after which a blocking call must have
-  returned. Every call that may block takes one, and the framework enforces
-  it as the bound of section 2.3.
+  `CLAUDE.md`. Every function of the interface is `noexcept`, and every
+  `Status` and `Result<T>` is `[[nodiscard]]` (coding standard 7): no
+  exception crosses the interface in either direction. A protocol that wraps
+  a throwing library catches at its own call site.
+- Times are as in TD: `*_time_ns` is `CLOCK_REALTIME` (UTC), `*_mono_ns` is
+  `CLOCK_MONOTONIC`. Every timeout, age, deadline and period uses monotonic
+  time.
+- A **request** is one exchange with a device: one frame sent, its answer
+  received or its timeout passed. A **transaction boundary** is the moment
+  between two requests of a channel. It is the only point at which a worker
+  serves orders, applies pacing, marks STALE, takes a reload, pauses for
+  detach or stop, and moves its progress counter. Wherever this contract
+  says "at the next boundary", that is at most the end of the current
+  request.
 
-## 2. Scope, threads and the `ProtocolDriver` calls
+## 2. Scope, threads and the protocol interface
 
 ### 2.1 What the framework does and what the protocol does
 
 | Concern | Framework (`libscada-driver`) | Protocol |
 | --- | --- | --- |
-| Configuration | Loads the validated driver files, expands templates, resolves tag handles, owns the common part of each point (section 4) | Validates and compiles its own binding blocks (`configure`) |
-| Tag database | Attach, heartbeat, notify, every tag write, the restart rewrite (section 9.1), the generation change | Never calls `libscada-tag`; never sees a handle |
-| Scheduling | Poll groups, priorities, write-before-read, pacing, keep-alive, back-off, scan groups (section 6) | Plans blocks inside the framework's rules; runs one transaction when called |
-| Samples | Applies scaling to engineering units, invalid markers, quality rules, STALE, writes tags (section 5) | Decodes frames into raw values and per-point outcomes |
-| Failure | Counts failures, demotes and recovers devices, startup grace (section 7) | Classifies each outcome (timeout, exception, refusal) |
-| Commands | Takes requests, every check of section 8.2, selections without native support, expiry, rate limits, results | Encodes and sends a write, a native select, operate or cancel; classifies the answer |
-| Diagnostics | Publishes every diagnostic tag (section 10) | Reports counts and states through the framework |
-| Reload | Decides live, per device, or generation change (section 11) | Accepts a new compiled binding for one device or refuses it |
+| Configuration | Loads the expanded configuration of its generation (17, B-12), owns the common keys of each point | Validates and compiles its binding (`configure`) |
+| Tag database | Attach, heartbeat, notify, every tag write, the restart rewrite (9.1), the generation change | Never calls `libscada-tag`; never sees a handle |
+| Transport | Opens, watches and closes the connection; sends; receives; deadlines; frame time; abortive close (7) | Nothing in phase 2. Room: a session protocol owns its transport (2.7) |
+| Requests | Schedules every request: orders first, poll groups, pacing, keep-alive, probes, retries, split (6) | Plans the requests of a device; encodes a request; finds the end of an answer; decodes it |
+| Samples | Invalid markers, scaling, bits, enumerations, counters, quality rules, STALE, tag writes (5) | Decodes an answer into raw samples with one outcome each |
+| Failure | Counts failures, demotes and recovers devices, startup grace (7) | Classifies each answer (value, exception, refusal) |
+| Commands | Every check of 8.2, selections, expiry, rate limits, value conversion, results | Encodes the writes of an order; classifies the answer |
+| Diagnostics | Publishes every diagnostic tag (11) | Reports counts and codes |
+| Reload | Builds the new compiled configuration aside, swaps it at a boundary (12) | Compiles a binding |
 
 Protocol specifics do not pass the framework (reference 3.3): above the
 driver there are only tags and write requests. No type of a protocol library
-appears in this interface (reference 16.3); a protocol wraps its stack.
+appears in this interface (reference 16.3).
 
-### 2.2 Threads
+### 2.2 The unit of the interface is one request
 
-A driver process has these threads. Decision D-82 records the threading
-model; reference 6.1 fixes one worker per channel.
-
-| Thread | Count | Runs | Tag owner | Real-time |
-| --- | --- | --- | --- | --- |
-| Main | 1 | Attach, heartbeat, the generation change, reload, the channel watchdog (2.5), process-level diagnostics | `drv-<protocol>` (its diagnostic tags) | No |
-| Command | 1 | Takes every request from the `cmd` queues the process consumes (`scada_queue_next`), the checks of 8.2 that need no device, dispatch to the channel workers, and every answer (`result` queues) | None | No |
-| Channel worker | 1 per channel | Connect, poll, activities, writes, report handling for that channel; every tag write of the channel's devices; `scada_tag_notify` after each scan | `drv-<protocol>.<C>` | Yes, for a channel with a fast poll group (2.4) |
-| Protocol helper | 0 or more per channel, only where a third-party stack owns its own thread (2.6) | The stack's receive loop | None; hands samples to its worker (2.6) | No |
-
-- One owner per channel worker matches the tag database: an owner is one
-  writing thread (its section 2), and one channel is one owner (reference
-  5.1, "one per driver channel").
-- A `cmd` queue has exactly one consuming thread (tag database contract,
-  section 9), and the answers are posted by the thread that takes the
-  requests (its section 9.2). The command thread is that thread for every
-  `cmd` queue of the process: one thread may consume many queues. The tag
-  set gives one request queue per channel and requester thread,
-  `cmd.<C>.<source>` with its answer queue `result.<C>.<source>`, where
-  `<C>` is the channel's short name and `<source>` is `cmd` or the short
-  name `<T>` of a control task (configuration schemas contract, 12.3):
-  a queue has one producing thread, and `scada-control` has one per task.
-  A full queue of one channel then refuses only that channel's requests.
-  Reference 5.1 names the queues `cmd.<driver>.<source>`; the naming is
-  the only difference (section 16.2).
-- Process and owner names are those of the tag set (configuration schemas
-  contract, 12.3): the process `drv-<protocol>` (service user
-  `scada-drv-<protocol>`), the main thread's owner `drv-<protocol>`, one
-  owner per channel `drv-<protocol>.<C>`. `<C>` is a short name generated
-  from the channel's name alone (the first 10 hex digits of SHA-256 of
-  `channel:` and the name), so that owner and queue names stay within
-  31 bytes while channel names may have 31; `scada-conf` keeps the map of
-  generated names. `scada-io` follows the same rule (owner `io`, queues
-  `cmd.io.<source>`). Tag names use the full channel name (section 10).
-- Between the command thread and each worker there are two pre-allocated
-  single-producer, single-consumer lock-free queues of the framework: orders
-  to the worker, outcomes back. Their capacity is the channel's
-  `max_pending_writes` (default 16). A full order queue is answered at once
-  `REJECTED` with reason `BUSY` (section 8.7): it is never waited on.
-- The worker never calls `scada_queue_next`, which is not real-time safe in
-  tag database 1.0 in any state (its section 9.5, #116). Only the command
-  thread does. This answers #116 point 5 for drivers.
-
-### 2.3 The interface
+Decision D-93. The framework owns the device exchange; the protocol
+supplies its planning, encoding and decoding as pure functions. Pacing,
+writes first, retries, the split of a refused block, keep-alive, the
+exclusive sequence of a select and operate, and the counts per request are
+then written once, in the framework, and every protocol gets them.
 
 ```cpp
 namespace scada::driver {
 
-class ProtocolDriver {
+// A frame protocol: request and answer over a transport the framework owns
+// (TCP, serial, RTU framing over TCP). Phase 2: Modbus TCP and RTU.
+// The object holds no mutable state. It is called from the main thread and
+// from every channel worker at once; all mutable state lives in the
+// compiled objects it builds (DeviceState) and in the framework's objects.
+class FrameProtocol {
 public:
-  virtual ~ProtocolDriver() = default;
+  virtual ~FrameProtocol() = default;
 
-  // Main thread, before attach and at reload. May allocate; no I/O.
-  // Validates every binding block and compiles it into the protocol's own
-  // form, kept in Device and Point (section 4). Errors go to `errors`,
-  // each with file, line and a code of section 4.3.
-  virtual Status configure(const DriverConfig& config, ConfigErrors& errors) = 0;
+  // Main thread, or scada-conf at validation (17, B-12). Allocates; no I/O.
+  // Validates every binding and compiles it into a new CompiledConfig,
+  // built aside: the running configuration is not touched. Errors go to
+  // `errors`, each with file, line and a CS code.
+  [[nodiscard]] virtual Status configure(const DriverConfig& config,
+                                         CompiledConfig& out,
+                                         ConfigErrors& errors) const noexcept = 0;
 
-  // Main thread, after configure. Static facts per device and point that
-  // the framework schedules and checks by (section 2.7).
-  virtual Capabilities capabilities(const Device& device) const = 0;
+  // Main thread. Static facts of a device and of each of its points (2.8).
+  [[nodiscard]] virtual DeviceCaps device_caps(const CompiledDevice& d) const noexcept = 0;
+  [[nodiscard]] virtual PointCaps  point_caps(const CompiledPoint& p) const noexcept = 0;
 
-  // Main thread, after configure. Groups the points of one poll group or
-  // activity into requests within the framework's read rules (section 6.3).
-  virtual Status plan(Device& device, const ReadRules& rules, ReadPlan& out) = 0;
+  // Main thread. Groups the points of each poll group into requests within
+  // the read rules (6.3). Each request carries its split form: the requests
+  // it becomes if the device refuses it as a whole. Also names the device's
+  // keep-alive and probe requests (6.5, 7.4). Allocates.
+  [[nodiscard]] virtual Status plan(const CompiledDevice& d, const ReadRules& rules,
+                                    ReadPlan& out) const noexcept = 0;
 
-  // Channel worker. Opens the port or session. Blocks at most until
-  // `deadline`. One call per connection attempt.
-  virtual Status connect(Channel& channel, Deadline deadline) = 0;
-  virtual void   disconnect(Channel& channel) noexcept = 0;
+  // Channel worker. Encodes one request (a planned read, or one write of an
+  // order) into `out`, a buffer of the framework sized at configure.
+  SCADA_RT [[nodiscard]] virtual EncodeResult encode(const CompiledDevice& d,
+                                                     const Request& r,
+                                                     TxBuffer& out) const noexcept = 0;
 
-  // Channel worker, after connect and before the first poll of a device
-  // (section 3.4). Each has a default that does nothing and succeeds.
-  virtual Status resolve(Device& device, Deadline deadline);            // room: symbolic addresses
-  virtual Result<Identity> identify(Device& device, Deadline deadline); // protocol identity objects
-  virtual Status session_step(Device& device, SessionEvent event,
-                              Deadline deadline);                       // room: login, interrogation
+  // Channel worker. Given the bytes received so far for `r`, says whether
+  // the answer is complete (and its length), needs more bytes, or is not
+  // valid. Never reads beyond `received`.
+  SCADA_RT [[nodiscard]] virtual FrameState frame_state(const Request& r,
+                                                        std::span<const std::byte> received) const noexcept = 0;
 
-  // Channel worker. One scheduled read: a poll group, or a registered
-  // activity (section 6.1). Delivers through `out`; blocks at most until
-  // `deadline`.
-  virtual Status poll(Device& device, PollGroup& group, SampleSink& out,
-                      Deadline deadline) = 0;
-  virtual Status run_activity(Device& device, Activity& activity,
-                              SampleSink& out, Deadline deadline);      // default: NOT_SUPPORTED
+  // Channel worker. Decodes a complete answer into raw samples (5.1), or
+  // into the outcome of a write. `state` is the device's mutable protocol
+  // state (a transaction id), owned by the framework's Device.
+  SCADA_RT [[nodiscard]] virtual DecodeResult decode(const CompiledDevice& d,
+                                                     DeviceState& state,
+                                                     const Request& r,
+                                                     std::span<const std::byte> frame,
+                                                     SampleSink& out) const noexcept = 0;
 
-  // Channel worker, report-driven protocols only (section 2.6). Called
-  // when a descriptor the protocol registered is ready or a timer it set
-  // is due. Must not block.
-  virtual void on_event(Channel& channel, ChannelEvent event, SampleSink& out); // default: none
-
-  // Channel worker. Starts one order (DIRECT, SELECT, OPERATE, CANCEL) on
-  // the device. Completes through `done`, at once or later (section 8.6).
-  virtual void write(Device& device, const WriteOrder& order,
-                     WriteCompletion& done, Deadline deadline) = 0;
-
-  // Channel worker. One read of one point outside its poll group.
-  virtual Status read_now(Device& device, PointRef point, SampleSink& out,
-                          Deadline deadline) = 0;
+  // Channel worker. Bytes that arrive with no request outstanding (an
+  // unsolicited frame of a later protocol). Default: discarded and counted.
+  SCADA_RT virtual void unsolicited(const CompiledDevice& d, DeviceState& state,
+                                    std::span<const std::byte> frame,
+                                    SampleSink& out) const noexcept;
 };
 
 }  // namespace scada::driver
 ```
 
-**open: needs the product owner's ruling (X-10).** Reference 6.1 shows seven
-calls: `poll` is the only scheduled one, `connect` returns a `Status` and
-`write` one `Result`. Adding `resolve`, `session_step`, `run_activity`,
-`on_event` and a completion for `write` in phase 9 would change every
-driver. This draft makes the change now, with defaults, so a phase 2
-protocol implements the seven calls of the reference plus `capabilities` and
-`plan`, and inherits the rest. The reference names are kept, and the
-reference's `on_unsolicited` is `on_event`.
+**open: needs the product owner's ruling (X-10).** Reference 6.1 shows a
+`ProtocolDriver` with `connect`, `disconnect`, `poll(Device&, PollGroup&,
+Samples&)`, `on_unsolicited`, `write` and `read_now`, in which the protocol
+does its own I/O and a poll group is one call. That shape lets the
+framework act only between poll groups, so every protocol would implement
+pacing, retries and writes-first itself (committee review). This draft
+replaces it in phase 2 with the frame protocol above, in which the
+reference's calls become framework functions (`connect` and `disconnect`
+of the transport, the scheduled poll, `read_now`, the writes of an order)
+built on `encode`, `frame_state` and `decode`. Committee recommendation:
+accept.
 
-Every call, its thread, what it may block on, and whether it is real-time:
+The interface of `scada-io` is the HAL of reference 6.5 (section 13), not
+a frame protocol.
 
-| Call | Thread | May block on | Bound | Real-time | Phase 2 protocol |
+### 2.3 Calls, threads and bounds
+
+| Call | Thread | May block on | Bound | `SCADA_RT` | Phase 2 Modbus |
 | --- | --- | --- | --- | --- | --- |
-| `configure` | Main | Nothing; allocates | None (not in a cycle) | No | Must |
-| `capabilities` | Main | Nothing | None | No | Must |
+| `configure` | Main, or `scada-conf` | Nothing; allocates | None (outside every cycle) | No | Must |
+| `device_caps`, `point_caps` | Main | Nothing | None | No | Must |
 | `plan` | Main | Nothing; allocates | None | No | Must |
-| `connect` | Worker | The connection or port open | `deadline`: the channel's `connect_timeout` (default 3 s) | No; a fast channel connects outside its cycle | Must |
-| `disconnect` | Worker | Nothing beyond a close | 100 ms | No | Must |
-| `resolve`, `identify`, `session_step` | Worker | Transactions on the device | `deadline`: per call, from the device's `timeout` and retries | No | Default (identify: may) |
-| `poll`, `run_activity`, `read_now` | Worker | One transaction or a planned sequence of them, on its channel only | `deadline`: the device's `timeout` per transaction, times the transactions planned | Its decode and delivery parts are (2.4) | `poll`, `read_now`: must |
-| `on_event` | Worker | Nothing | Returns before the next ready descriptor is served | Its decode and delivery parts are (2.4) | Default |
-| `write` | Worker | The transactions of the order, or nothing when it completes later | `deadline`: the earlier of the request's expiry and the device's `write_timeout` | Its encode part is (2.4) | Must; completes at once |
+| `encode` | Worker | Nothing | Pure computation over one request | Yes | Must |
+| `frame_state` | Worker | Nothing | Linear in the bytes received, at most the largest legal frame | Yes | Must |
+| `decode` | Worker | Nothing | Linear in the frame | Yes | Must |
+| `unsolicited` | Worker | Nothing | Linear in the frame | Yes | Default |
 
-- No call may block on a lock that another thread can hold for longer than
-  a copy of a small structure, on a `libscada-tag` call, on the command
-  thread, or on another channel.
-- A call that passes its deadline is a protocol fault: the framework counts
-  it (`deadline_overruns`, section 10) and, at three times the deadline,
-  the channel watchdog of 2.5 applies.
-- `configure`, `capabilities` and `plan` are called again for the devices a
-  reload changes (section 11), on the main thread, while the worker of that
-  channel is paused at a scan boundary.
+No call of the protocol makes a system call, takes a lock, allocates or
+logs. A protocol reports through return values and the sink, and the
+framework logs (11.3).
 
-### 2.4 Real-time rules for a fast poll group
+### 2.4 Threads
 
-A driver with a fast poll group is part of the 10 ms tier (reference 4.3).
-Its worker runs under `SCHED_FIFO` with locked, pre-faulted memory when the
-tier is available, and under the normal scheduler at the same period when
-it is not (reference 4.3, point 3; the fallback alarm is the process's own
-system tag `sys.proc.<process>.realtime`, section 10).
+| Thread | Count | Runs | Tag owner (CS 12.3) | Scheduler |
+| --- | --- | --- | --- | --- |
+| Main | 1 | Attach, heartbeat and the service manager's watchdog, the generation change, reload, the channel watchdog (2.6), process-level diagnostics, logging (11.3), signals, and from phase 5 the one producer of the process's events queue (8.13) | `drv-<protocol>` | Normal |
+| Command | 1 | Takes every request from the `cmd` queues of the process (`scada_queue_next`), the checks of 8.2 that need no device, dispatch to the workers, every answer, the fail-safe triggers of 8.13 | None | Normal |
+| Channel worker | 1 per channel | Every request of its channel: connect, sends, receives, writes; every tag write of the channel's devices; `scada_tag_notify` after each delivery | `drv-<protocol>.<C>` | Normal in phase 2 (2.5) |
 
-**open: needs the product owner's ruling (R-3).** `CLAUDE.md` says that code
-running in "the I/O scan" must not "make system calls ... or do file or
-network I/O". An I/O scan cannot exchange a frame with a device without the
-system calls of that exchange, so the rule cannot hold for the scan as a
-whole. This draft proposes the reading below (decision D-83). `CLAUDE.md`
-and the coding standard are not changed by this contract.
+- One owner per channel worker: an owner is one writing thread (TD 2), one
+  channel one owner (reference 5.1). A device's point tags and its
+  `sys.dev.<device>.*` tags, and the channel's `sys.drv.<channel>.*` tags,
+  are written by the channel's worker; `sys.proc.<process>.*` by the main
+  thread.
+- **Request queues** are per driver process and source, as reference 5.1
+  names them: `cmd.<protocol>.<S>` with its answer queue
+  `result.<protocol>.<S>`, where `<S>` is `cmd` for `scada-cmd` or the
+  short name `<T>` of a control task (CS 12.3). One queue per source keeps
+  one producing thread per queue (TD 9). The command thread consumes them
+  all with one wait set; a wait set holds at most 127 sources (TD 8.4), so
+  a driver may have at most 126 sources, and CS refuses more. The command
+  thread routes each request to its channel by the target handle.
+- **In-process queues.** Between the command thread and each worker there
+  are two pre-allocated single-producer, single-consumer lock-free queues:
+  orders to the worker, outcomes back. Both have the capacity
+  `max_pending_writes` of the channel (CS). A full order queue is answered
+  at once REJECTED with reason `BUSY` (8.6): the command thread never waits
+  on it. The worker posts exactly one outcome per order, so the outcome
+  queue can never be full when the worker posts (proof: an order occupies
+  an order slot until its outcome is posted, and both queues have the same
+  capacity). Everything else the command thread needs from a worker is
+  published in atomics, not queued: the device state of 3.4, and a
+  connection epoch per channel, incremented at every connect, which a
+  native selection records (8.4, rule 3).
+- **Command thread wake.** The command thread waits on its wait set and on
+  an eventfd that every worker signals after posting an outcome; it uses
+  the wait set's descriptor (`scada_waitset_fd`, TD 13) and the eventfd in
+  one `poll`.
+- **Signals.** Every thread but the main thread blocks all signals; the main
+  thread takes them synchronously (`signalfd`). A stop or reload signal
+  never interrupts a worker's wait.
+- **Stacks and memory.** A worker's stack is 256 KiB, set at thread
+  creation. A driver process locks its memory (`mlockall`) only when it has
+  a real-time thread; in phase 2 only `scada-io` does (2.5).
+- **Limits a driver unit needs**, as a function of its channel count N and
+  its source count S: descriptors about 2N + 4S + 32 (a socket or port and
+  an eventfd per worker, the queue mappings of TD 9.2), threads N + 2. CS
+  computes them and the install tree sets them in the unit (#105).
 
-A scan of a fast channel is a sequence of parts:
+Decision D-82.
 
-1. **Take orders** from the in-process order queue (lock-free, no system
-   call). `SCADA_RT`.
-2. **Transactions:** the protocol's send and receive through its port, on a
-   descriptor opened outside the cycle, each bounded by its deadline, with
-   no allocation, no logging and no lock. Not `SCADA_RT`.
-3. **Decode and deliver:** the protocol's decode into the `SampleSink`, the
-   framework's scaling, quality rules and `scada_tag_write_many`. `SCADA_RT`.
-4. **Outcomes** to the command thread through the lock-free outcome queue.
-   `SCADA_RT`.
-5. **Notify:** `scada_tag_notify` once per scan, after the parts above
-   (reference 5.3). Not `SCADA_RT`.
+### 2.5 Real-time tier in phase 2
 
-The calls that enter the kernel on a real-time worker, and nothing else:
+**open: needs the product owner's ruling (R-3).** Committee recommendation:
+accept.
 
-| Call | Part | Why | Bound |
-| --- | --- | --- | --- |
-| `send`/`write` on the device descriptor (non-blocking) | 2 | The request frame | One call per frame; returns at once (`EAGAIN` is a protocol fault, counted) |
-| `ppoll` on the device descriptor and the worker's eventfd | 2 | Wait for the answer | The transaction's deadline: the device's `timeout`, at most the scan period of the fast group |
-| `recv`/`read` on the device descriptor | 2 | The answer frame | One call per readiness, non-blocking |
-| `ioctl` of the serial line (RTU only: drain, line control) | 2 | Turnaround on a half-duplex line | The frame time at the baud rate plus the configured turnaround |
-| `read` of the eventfd | 1 | Clear the order signal | Non-blocking, one call per scan |
-| `clock_gettime` | All | Deadlines and times | vDSO; a real system call only on the clock sources of tag database contract 13.1, which reports it |
-| `scada_tag_notify` (futex wake; once a second a look with `fstatat`, and possibly `open`, `mmap` and a populate; once a minute the clock check) | 5 | Wake consumers | Bounded but not real-time safe (tag database contract, section 13; #116 point 3) |
+`CLAUDE.md` says that code running in "the I/O scan" must not "make system
+calls ... or do file or network I/O". An I/O scan cannot exchange anything
+with hardware without the system calls of that exchange. This draft
+proposes, decision D-83:
 
-No other system call is made on the worker after its first scan: connect,
-reconnect, configure, reload and detach run outside the cycle (2.3, 9.2).
+- **Phase 2: the real-time tier is `scada-io` only** (reference 4.3 names it).
+  Modbus workers run under the normal scheduler. Reference 7.5 already gives
+  Modbus a realistic control period of 50 ms to several seconds, and a
+  10 ms scan over RTU is not reachable at common rates (15 bytes take
+  8.6 ms at 19,200 bit/s). Real-time protocol drivers and synchronous scan
+  groups are room, added by a later minor version of this contract and of
+  CS together (6.7).
+- In a real-time thread, the functions that are not exchanges with
+  hardware are `SCADA_RT`: in `scada-io`, the HAL backend's decode, scaling
+  and filtering, the sample delivery and the tag writes, the take of
+  orders from the in-process queue, the outcome hand-over. The exchange
+  itself (the HAL's `read_inputs` and `write_outputs` system calls of 13.3)
+  sits between them, unannotated, with its bound stated per backend and
+  channel.
+- `CLAUDE.md` and the coding standard are not changed by this contract.
 
-What the `SCADA_RT` check catches under this reading, and what it does not:
+What enforces the rules, honestly stated:
 
-- **Caught:** allocation, locks, logging, exceptions, `std::function`,
-  string construction and calls to non-RT-safe functions inside parts 1, 3
-  and 4 and every function they call.
-- **Not caught:** anything in parts 2 and 5, which are not annotated. The
-  bound of part 2 is checked by the deadline at run time
-  (`deadline_overruns`, section 10) and by review of each protocol's
-  transaction code; the scan's total time is measured by the cycle
-  statistics of reference 4.3, point 4. That no other system call is made
-  is checked by conformance test 29 (a system-call trace of the worker),
-  not by the annotation.
-- So the annotation's placement shows where the gap is: the transaction
-  functions of every protocol are a reviewed, unannotated list
-  (`DRIVER_IO_FUNCTIONS` in the protocol's README), not code the check has
-  passed.
+- **The `SCADA_RT` check** on `main` finds direct calls, inside a function
+  marked `SCADA_RT`, to a deny-list: allocation functions, C stream
+  output, standard mutexes. It does not follow calls into other functions,
+  and does not know exceptions, `std::function`, `std::string`,
+  `Logger::log`, blocking calls or system calls. A marked function that
+  calls an unmarked helper which allocates passes the check. The annotation
+  is therefore a marker for review and for the two tests below, not a
+  proof.
+- **Allocation test** (conformance test 3): an allocation counter per
+  thread, at the level of `malloc` and of `operator new`, over the whole
+  real-time thread for 10,000 cycles, including its error paths (a HAL
+  read error, a full outcome queue, a stop). Expected: 0.
+- **System-call trace** (conformance test 29): a trace of the real-time
+  thread's system calls over the same cycles and error paths; the allowed
+  set is the table of 13.3 for that backend. The test proves which calls
+  were made on the paths it drove, and records the longest time spent in
+  each under load; it proves nothing about paths it did not drive.
+- Both tests are exempt from the sanitizer builds (the sanitizers allocate
+  and make system calls on every thread) and run on the native runners of
+  both architectures, never under user-mode emulation, where `ptrace` and
+  `seccomp` do not work.
+- `scada_tag_notify` makes system calls once a second and once a minute on
+  the calling thread (#116, point 3). On a real-time thread it is **open:
+  depends on #116 point 3**: until a wake-only form exists (an interface
+  addition, TD 1.1), the real-time thread of `scada-io` calls
+  `scada_tag_notify` once per cycle after its writes, and the trace lists
+  its calls as allowed, so the test cannot tell them from a stray call.
 
-`SampleSink`, `WriteCompletion` and every buffer a fast scan uses are
-allocated at configure and sized from the plan: delivery never grows a
-container (coding standard, section 11). A protocol that cannot meet this
-declares `realtime_capable = false` in its capabilities, and the
-configuration is refused when it is given a fast poll group (code
-`DRV-RT-01`).
+In a Modbus worker (normal scheduler) `encode`, `frame_state` and `decode`
+are still `SCADA_RT`: they run in any later real-time worker unchanged, and
+the allocation test runs on the test protocol's worker too.
 
-Phase 2: the Modbus RTU and TCP protocols and `scada-io` must be real-time
-capable. The rule above is checked by the `SCADA_RT` check on parts 1, 3
-and 4.
+### 2.6 Channel watchdog
 
-### 2.5 Channel watchdog
-
-The heartbeat is per process (tag database contract, section 10.1). A
-worker that stalls while the main thread beats would leave its tags with
-their last values and real age, never OWNER_DOWN (#116, comment point 1).
-The framework closes that gap for drivers:
+The heartbeat is per process (TD 10.1). A worker that stalls while the main
+thread beats would leave its tags with their last values and real age,
+never OWNER_DOWN (#116, comment point 1). Decision D-84:
 
 - Each worker increments a progress counter (an atomic in process memory)
-  at every scan boundary and at every return from a protocol call.
-- The main thread checks every counter at each heartbeat. A worker whose
-  counter has not moved for `stall_limit` (default: three times the longest
-  deadline the worker can be inside, at least 1 s) is stalled.
-- On a stall the main thread logs the channel, stops calling
-  `scada_tag_heartbeat`, and lets the process be seen down (every tag of the
-  process reads BAD with OWNER_DOWN within the heartbeat timeout) and
-  restarted by systemd. It never kills or cancels a thread.
+  at every transaction boundary, and at every wake of its wait with
+  nothing due, so that an idle channel is not taken for a stalled one.
+- The main thread checks every counter at each heartbeat. A counter that
+  has not moved for three times the longest single request deadline of the
+  channel (the largest device `timeout` plus frame time, at least 1 s) is a
+  stall.
+- On a stall the main thread logs it (11.3, with the channel name), stops
+  the command thread and the other workers at their next boundary (bounded
+  by their request deadlines, at most 1 s beyond), stops both
+  `scada_tag_heartbeat` and the service manager's watchdog notification,
+  and ends the process with `std::_Exit` and a distinct exit status (coding
+  standard 7, D-59). It never kills or cancels a thread. The service
+  manager restarts the process.
 
-Decision D-84. Phase 2.
+**open: needs the product owner's ruling (O-3).** One stalled channel
+restarts every channel of its protocol: only the stalled thread may write
+its tags, so the process must end for them to read OWNER_DOWN. With 300
+Modbus devices in one process, one hung serial adapter sets every Modbus
+tag OWNER_DOWN and ends every selection and refresh; a stall that repeats
+runs the unit into the restart limit of reference 14.4, after which no
+Modbus device is polled. The real fix is per-owner liveness (#116). Room:
+a channel key that puts channels in separate processes of one protocol
+(`drv-<protocol>-<group>`), CS reserved. Committee recommendation: accept
+for phase 2, with the room.
 
-### 2.6 Report-driven protocols
+### 2.7 Session protocols and report-driven protocols (room)
 
-Decision D-82 (D-40 of the survey, an open decision of the outline).
+Phase 9 protocols built on a third-party stack own their transport and may
+own threads (OPC UA, IEC 61850 MMS). They implement a second interface,
+`SessionProtocol`, with the shape below; no phase 2 code implements it.
+Decision D-82.
 
-- **Default: the worker is an event loop.** A report-driven protocol
-  registers its descriptors and timers with its `Channel` at `connect`. The
-  worker waits on them, on the order queue (an eventfd the command thread
-  signals) and on the next scheduled poll, and calls `on_event`, `poll`,
-  `run_activity` or `write` for whichever is due. So the protocol receives
-  while a write awaits its termination, without a second thread.
-- **A stack with its own thread** (some third-party stacks run their own
-  receive loop) runs it as a protocol helper thread. The helper never
-  writes tags and never calls the framework except through the channel's
-  `SampleSink` in its thread-safe form (`Channel::remote_sink()`): a
-  bounded single-producer queue, drained by the worker in `on_event`. A
-  full queue drops the samples and counts them (`samples_dropped`), and the
-  framework treats the drop as a buffer overflow (section 5.7). The helper
-  completes writes through the same queue.
-- A worker of a report-driven channel is not real-time capable unless its
-  protocol declares it and passes the rules of 2.4.
+- The worker is an event loop over the session's descriptors and timers,
+  the order queue's eventfd and the next scheduled activity. It calls the
+  protocol's `on_ready`, `run_activity` and `start_write`, none of which
+  blocks.
+- A stack with its own threads runs them as protocol helper threads. A
+  helper never writes tags. It hands samples to the worker through one
+  bounded single-producer queue per helper thread
+  (`Channel::remote_sink(helper_index)`), and signals the worker's
+  eventfd. A full sample queue drops the samples and counts them
+  (`samples_dropped`), and the framework treats the drop as a buffer
+  overflow (5.7). Write completions go through reserved slots, one per
+  pending order, which can never be dropped.
+- A write completes through a `CompletionToken` passed by value (the order
+  slot and its sequence number). The framework honours exactly one
+  completion per token; a completion for a slot that has moved on (the
+  order timed out, the generation retired) is discarded and counted. No
+  reference to a framework object outlives the call that passed it.
+- Frame protocols that receive unsolicited frames (IEC 104, DNP3) stay
+  frame protocols and use `unsolicited` and activities (6.1).
 
-Reason: one writer per owner keeps the tag database's single-producer rule
-without a lock; the event loop is the one model that serves a polled
-protocol and a report-driven one with the same worker, and the helper form
-admits stacks that insist on a thread without letting them touch the tag
-database.
+### 2.8 Capabilities
 
-Phase 2: the worker of the Modbus channels runs the loop with no protocol
-descriptors (polled only). The event-loop part of the interface is room.
+Static facts the framework schedules and checks by. Each has a default, so
+a phase 2 protocol sets only what applies.
 
-### 2.7 Capabilities
-
-`capabilities(device)` returns static facts the framework relies on. A
-default exists for each so a phase 2 protocol sets only what applies.
-
-| Fact | Per | Values | Default | Used by |
+| Fact | Per | Values | Default | Used in |
 | --- | --- | --- | --- | --- |
-| `realtime_capable` | Protocol | bool | false | 2.4 |
-| `acquisition` | Point | `poll`, `report`, `both` | `poll` | 6.1, 7.4 |
+| `max_read_units`, `max_write_units` | Device | Count of protocol units in one request | The protocol's limit | 6.3 |
+| `max_frame_bytes` | Device | Largest legal answer | Protocol limit (Modbus TCP 260, RTU 256) | 7.1 |
 | `select` | Point | `gateway`, `native` | `gateway` | 8.4 |
-| `native_select_window` | Point with native select | duration | none | 8.4 |
+| `native_select_window` | Point with native select | Duration | None | 8.4 |
 | `write_completion` | Point | `immediate`, `two_phase` | `immediate` | 8.6 |
-| `idempotent_write` | Point | bool | false | 8.7 |
-| `max_read_size`, `max_write_size` | Device | count of protocol units | protocol limit | 6.3 |
-| `needs_resolve` | Device | bool | false | 3.4 |
-| `activities` | Device | list of activity kinds with default periods | none | 6.1 |
-| `time_sync` | Device | none, or the clock forms the protocol can set | none | 6.8 |
-
-A point the protocol marks `native` must also give its window. The
-framework refuses (code `DRV-SBO-01`) an output configured `sbo` on a point
-whose select is `native` but whose window the configuration cannot honour
-(section 8.4).
+| `writable_shape` | Point | Whether the point's raw shape can be written (8.3) | From the binding | 8.3 |
+| `acquisition` | Point | `poll`, `report` | `poll` | 6.1 |
+| `activities` | Device | Kinds with default periods | None | 6.1 |
+| `time_sync` | Device | None, or the clock forms the protocol can set | None | 6.8 |
 
 ## 3. Object model
 
 ### 3.1 Objects
 
-| Object | What it is | Created | Destroyed | Owned by |
+| Object | What it is | Built | Replaced or destroyed | Owned by |
 | --- | --- | --- | --- | --- |
-| `Driver` | The process's framework instance and its `ProtocolDriver` | Process start | Process exit | `main` |
-| `Channel` | One connection or port: a serial line, a TCP connection, a session; its worker | `configure` | Reload that removes it, or exit | `Driver` |
-| `Device` | One addressable device on a channel, with its own timeout, retries, demotion state, identity and session state | `configure` | Reload that removes it, or exit | Its `Channel` |
-| `Point` | One configured signal of a device, bound to one tag (or, for a command-only point, to none) | `configure` | With its device | Its `Device` |
-| `PollGroup` | A named period and priority on a channel, with the points assigned to it | `configure` | With its channel | Its `Channel` |
-| `Activity` | A scheduled non-poll task of a device (section 6.1) | `configure` | With its device | Its `Device` |
-| `Output` | The write side of a point: kind, encoding, select model, limits, refresh, shutdown behaviour (section 8) | `configure` | With its point | Its `Point` |
+| `Driver` | The process's framework instance and its protocol | Process start | Process exit | `main` |
+| `CompiledConfig` | Every compiled channel, device, point, poll group and output of one configuration version | `configure`, on the main thread | By the next one at reload (12); the old one destroyed on the main thread | `Driver` |
+| `Channel` | One connection or port and its worker | With its `CompiledConfig` | Reload, exit | `Driver` |
+| `Device` | One addressable device on a channel: timeout, retries, demotion state, identity, its `DeviceState` | With its channel | Reload, exit | Its `Channel` |
+| `Point` | One configured signal of a device, bound to one tag (or none, for a point that only feeds others) | With its device | Reload, exit | Its `Device` |
+| `PollGroup`, `Request` | A period and priority with its points; the planned requests | `plan` | Reload | Its `Channel`, its `Device` |
+| `Output` | The write side of a point (section 8) | With its point | Reload | Its `Point`; read by the command thread (3.2) |
 
-- Every object is created on the main thread and used afterwards by the
-  worker of its channel only, except for the read-only parts the command
-  thread uses for its checks (the `Output` configuration, published to it
-  at configure and replaced only at reload).
-- A protocol keeps its compiled form of a device or point in a slot the
-  framework gives it (`Device::protocol_state<T>()`, a `std::unique_ptr`
-  owned by the object). It never keeps a pointer to a framework object
-  beyond the call that passed it, except to the `Channel`, `Device` and
-  `Point` objects themselves, which live until reload or exit.
+- A protocol's compiled form of a device or point derives from a framework
+  base class with a virtual destructor (`ProtocolData`), held by the
+  framework object in a `std::unique_ptr`. Its mutable part
+  (`DeviceState`: a transaction counter, a session flag) is a separate
+  object of the device, written only by the channel's worker.
+- A protocol keeps no pointer or reference to a framework object beyond the
+  call that passed it.
 
-### 3.2 One point is not one address
+### 3.2 Configuration in use, and its replacement
 
-The survey's devices break "one point, one address, one scalar" (survey
-D-1). The model allows:
+- The worker and the command thread each read the configuration through an
+  atomic pointer to the current `CompiledConfig`, loaded with acquire at
+  each boundary (worker) and at each request (command thread).
+- A reload builds a new `CompiledConfig` aside on the main thread (12). The
+  main thread publishes it with a release store; each worker and the
+  command thread take it at their next boundary and acknowledge with an
+  epoch counter. When all have acknowledged, the main thread destroys the
+  old one. No real-time or worker thread ever frees configuration memory.
 
-- one read delivering samples for many points (block reads, section 6.3);
-- one point needing several protocol units, in a stated order, possibly not
-  adjacent (a 32-bit value from two separate registers);
-- one point with companions it depends on: an exponent, a status or
-  validity source, a time source (section 5.5). The planner never separates
-  a point from its companions (section 6.3);
-- one read delivering several bit or field points from one word (section
-  5.6);
-- one command writing several protocol units, as an ordered list of writes
-  (section 8.3).
+### 3.3 One point is not one address
 
-### 3.3 Devices on a channel
+The model allows (survey D-1): one read delivering many points; one point
+from several protocol units in a stated order, possibly not adjacent; a
+point with companions (an exponent, a status, a time source, 5.5); several
+bit or field points from one word; one command writing an ordered list of
+protocol writes (8.3).
 
-- Several devices share one channel. Each has its own timeout, retries,
-  demotion state, health and diagnostics. The worker serialises their
-  transactions: a timeout on one device delays the others by one
-  transaction at most (survey D-3).
-- A lost connection fails every device of the channel at once (section
-  7.2), without spending each device's retries.
-- A channel is one connection per device group, never one per poll group.
-- **open: needs the product owner's ruling (X-3).** A device that expects a
-  main and a backup connection, or one that has two addresses: this draft
-  proposes that a channel owns a list of endpoints (option (a)), one of
-  them active, and that a device stays under one channel. Phase 2 accepts
-  one endpoint. Room.
-- **open: needs the product owner's ruling (X-4).** Address rules on a
-  channel: this draft proposes that a device has a default protocol address
-  (a Modbus unit id), that a point's binding may name another (one device
-  answering on several unit ids, option (c)), and that several devices may
-  share a unit id when their point addresses do not overlap (slices of one
-  gateway unit, option (a) for slices). The overlap rule of reference 12.5
-  then applies to points, not to devices. Phase 2.
-- **open: needs the product owner's ruling (X-2).** Direction and role: the
-  channel has `role: connect | listen` (who opens the connection); phase 2
-  accepts only `connect`,
-  and listening channels are room. Every driver stays client or master
-  (reference 6.4); a server role is out of scope (reference 1).
-- Other masters may share a device (the survey found two to seven clients
-  on relays): shared selectors and event lists, blocks locked by another
-  client, commands of another master arriving as feedback. The framework
-  takes the feedback tag as the truth and never assumes it is the only
-  writer (section 8.9).
+### 3.4 Devices on a channel
 
-### 3.4 Device state
+- Several devices share one channel, each with its own timeout, retries,
+  demotion state and diagnostics. The worker serialises their requests: a
+  timeout of one device delays the others by one request at most (survey
+  D-3).
+- A lost connection fails every device of the channel at once (7.3).
+- **open: needs the product owner's ruling (X-3).** Main and backup
+  connections: a channel owns a list of endpoints, one active (room; phase 2
+  one endpoint). A device stays under one channel.
+- **open: needs the product owner's ruling (X-4).** A device has a default
+  unit id; a point's address may name another (one device answering on
+  several unit ids); several devices may share a unit id when their points
+  do not overlap (slices of one gateway unit). The overlap rule of reference
+  12.5 then applies to (unit id, table, register) (CS). Devices that share a
+  unit id also share its failure count (7.4).
+- **open: needs the product owner's ruling (X-2).** Channel `role: connect |
+  listen` (CS); phase 2 `connect` only. Every driver stays client or master
+  (reference 6.4).
+- Other masters may share a device. The framework takes the feedback tag as
+  the truth and never assumes it is the only writer (8.9).
+- One owner per channel caps a unit at 1,023 channel owners (TD 14). Room:
+  several connections per worker, for sites of many single-connection TCP
+  devices.
 
-Each device has a state, published as `sys.dev.<device>.state` (INT64,
-section 10):
+### 3.5 Device state
+
+Published as `sys.dev.<device>.state` (INT64):
 
 | Value | State | Meaning | Tags of the device |
 | --- | --- | --- | --- |
-| 0 | `DISABLED` | Disabled in configuration | Its tags exist (the tag set is the same enabled or not): points BAD with NOT_INIT, diagnostics written, `state` 0; nothing is sent to the device |
-| 1 | `CONNECTING` | Channel not connected | BAD, COMM_FAIL (after the first attempt) or NOT_INIT (before) |
-| 2 | `INITIALISING` | Connected; resolve, identify and session steps running, or inside `startup_grace` | Kept; BAD with NOT_INIT if never read |
-| 3 | `RUNNING` | Polled or reporting | From samples (section 5) |
-| 4 | `DEMOTED` | Consecutive failures reached the limit; retried at back-off (section 7.3) | BAD, COMM_FAIL |
-| 5 | `MISMATCH` | Identity check failed with `on_mismatch: refuse` (section 3.5) | BAD, no COMM_FAIL; writes refused |
-| 6 | `REFUSING` | Reachable but refusing: answers that say the server function is off, a login failed, or the device is not started | BAD, no COMM_FAIL |
+| 0 | `DISABLED` | Disabled in configuration (CS) | Exist; points BAD with NOT_INIT; nothing is sent |
+| 1 | `CONNECTING` | Channel not connected, or the connection was refused | BAD, COMM_FAIL after the first failed attempt, NOT_INIT before |
+| 2 | `INITIALISING` | Connected; identity check, session steps (room) or `startup_grace` running | Kept; BAD with NOT_INIT if never read |
+| 3 | `RUNNING` | Polled | From samples (5) |
+| 4 | `DEMOTED` | Failures reached `demote_after` (7.4) | BAD, COMM_FAIL |
+| 5 | `MISMATCH` | Identity check failed with `on_mismatch: refuse` (3.6) | BAD, no COMM_FAIL; writes refused |
+| 6 | `REFUSING` | Answers on an open connection that refuse service: a gateway that has no route, a server function off, a device not started (annex A) | BAD, no COMM_FAIL |
 
-Transitions are made by the framework only. `INITIALISING` runs, in order,
-`resolve` (if `needs_resolve`), the identity check (section 3.5),
-`session_step(CONNECTED)` and, for report-driven protocols,
-`session_step(INTERROGATE)` until the protocol reports the end of the
-interrogation; points stay NOT_INIT until their first sample. A detected
-device restart (section 7.5) goes back to `INITIALISING`.
+Only the framework changes the state; the worker publishes it in the tag
+and in an atomic the command thread reads (2.4). A refused TCP connection
+is `CONNECTING` with COMM_FAIL and is counted apart
+(`sys.drv.<channel>.refused_connects`): a rebooting device refuses
+connections too, and its tags must keep COMM_FAIL.
 
-Phase 2: states 0 to 5. `REFUSING` is entered by a Modbus device only
-through the refusals of annex A, row "gateway target".
+### 3.6 Identity
 
-### 3.5 Identity
-
-- Configured identity (survey C-45, D-7): a list of points or protocol
-  identity objects with an expected value, list, range or pattern, and
-  `on_mismatch: warn | refuse` (default `warn`).
-- The framework reads configured identity points with `read_now`, and
-  calls `identify` for protocol identity objects, after every connect and
-  after a detected device restart. It compares, publishes
-  `sys.dev.<device>.identity` (STRING, at most 250 bytes, the values read) and
-  `sys.dev.<device>.identity_ok` (BOOL), and on a mismatch with `refuse` sets
-  the device `MISMATCH`.
-- `MISMATCH` is left only by a reload of that device or a later check that
-  matches. A device in `MISMATCH` answers every write `REJECTED` with
-  reason `CONFIG_MISMATCH` and is polled only for its identity points, at
-  the back-off rate.
+- Configured identity (CS 4.8): points or protocol identity objects with an
+  expected value, list, range or pattern, and `on_mismatch` (CS default).
+- The framework reads the identity points after every connect and after a
+  detected device restart (7.6), compares, publishes
+  `sys.dev.<device>.identity` (STRING) and `sys.dev.<device>.identity_ok`
+  (BOOL), and on a mismatch with `refuse` sets `MISMATCH`.
+- A `pattern` is the pattern form of CS (linear matching time, no general
+  regular expression): the text compared comes from the device.
+- `MISMATCH` is left by a reload of the device or a later check that
+  matches. A device in `MISMATCH` answers every write REJECTED with
+  `CONFIG_MISMATCH` and is read only for its identity points, at
+  `backoff`.
 
 Phase 2.
 
 ## 4. Point addressing
 
-### 4.1 The binding block
-
-A point has common keys, defined by the configuration schemas (#98) and
-processed by the framework, and one protocol key, `address`, opaque to
-the framework. Channels and devices follow the same rule: framework keys
-and protocol keys sit side by side in one object, the two sets are
-disjoint, and an unknown key is an error. In this contract the protocol
-part of a point, device or channel is called its **binding**.
-
-| Part | Contents | Validated by |
-| --- | --- | --- |
-| Common keys | Tag name, tag type, kind (plain, bit, enumeration, double point, counter), unit, label, `scale`, `invalid_values`, `on_invalid`, `quality_from`, companions (`exponent_from`, status, time source), `bits`, `enum`, counter rules, `max_age`, `poll_group`, `access` (`ro`, `rw`, `wo`), `side_effect`, `acquisition`; alarms and logging, which the driver does not use | The schema (#98), then the framework |
-| Binding (`address`, and the protocol keys of devices and channels) | Address, raw encoding (raw type, byte and word order, bit or field, register count), write encoding (8.3), protocol status mapping, read rules (`read:`), protocol options | The protocol's schema fragment (#98, annex A there for Modbus), then the protocol at `configure` |
-
-- Each protocol ships its schema fragments: channel, device, address and
-  read rules. The configuration schemas contract says how they are merged
-  into the file schemas; this contract says that `configure` validates the
-  binding again (4.2).
-- **open: needs the product owner's ruling (X-8).** Reference 12.3 puts
-  `protocol: modbus` at the top of a template with addresses inline. One
-  device type can have four address maps and four raw scalings, one per
-  protocol. Both drafts propose option (b) for phase 2: a template carries
-  one `protocol:` and may `extends:` a protocol-free base that has common
-  keys only. Option (a), one template with a binding per protocol, is room.
-  The driver side is the same under both: the framework hands the protocol
-  its own binding only (section 15, B-2).
-- The protocol receives each binding as a typed configuration tree
-  (`ConfigNode`) that carries file and line for every value, never as text
-  to parse.
-- An instance may supply address data: a map from label to position,
-  parameters used in address expressions, or a generated point list. The
-  framework expands it before `configure` (#98); the protocol sees concrete
-  bindings. Every enabled point is placed, and no position is used twice
-  within a device's address space unless the binding says the two points
-  read the same unit (bit points of one word).
-
-### 4.2 What `configure` does with a binding
-
-- Checks every field against the protocol's limits and the device's
-  declared sizes, and compiles the binding into its own form, kept in the
-  point's protocol slot.
-- Refuses with a located error, never by a default: an unknown field, a
-  value out of range, a raw type that cannot hold the tag type, a byte
-  order the raw type does not have, a bit beyond the raw width, overlapping
-  addresses that are not declared as one unit.
-- Reports, for each point, its dependencies on other points (section 5.5)
-  and the raw unit count it reads.
-- A symbolic address that needs the device (an address found by browsing,
-  a model chain) compiles to "unresolved"; `resolve` turns it into a
-  concrete one after connect (room, survey D-6). A point still unresolved
-  after `resolve` is "absent" (section 5.2, outcome 3).
-
-### 4.3 Error codes
-
-Codes of the driver side, cited by the validation chapter of #98. Each
-error names file, line, the device and the point.
-
-| Code | Meaning |
-| --- | --- |
-| `DRV-CFG-01` | A binding field the protocol does not know |
-| `DRV-CFG-02` | A value out of the protocol's range |
-| `DRV-CFG-03` | Raw type and tag type do not fit (section 5.4) |
-| `DRV-CFG-04` | Overlapping addresses not declared as one unit |
-| `DRV-CFG-05` | A companion (exponent, status, time) on another device, table or poll group (section 6.3) |
-| `DRV-CFG-06` | A read rule the protocol cannot honour (block size above its limit, an atomic group above the block size) |
-| `DRV-CFG-07` | A write encoding the protocol cannot send, or a function the device's `supported_functions` excludes |
-| `DRV-CFG-08` | A `wo` point in a poll group, or a `side_effect` point in more than one poll group or answerable by `READ_NOW` |
-| `DRV-RT-01` | A fast poll group on a protocol or channel that is not real-time capable |
-| `DRV-SBO-01` | A select model the point cannot honour, or an `at_operate` output whose device window is below twice the device timeout (section 8.4) |
-| `DRV-SBO-02` | A select timeout longer than the device window with `native_select: at_select`, or than the 60 s request lifetime |
-| `DRV-PACE-01` | A poll group that cannot be served at the channel's pacing (section 6.4): a warning (X-13) |
-| `DRV-PACE-02` | Slowest poll period and back-off above the device's idle timeout, with no keep-alive: a warning |
-| `DRV-NVM-01` | An output with `storage: nvm` and a cyclic source (`refresh`, or a control block) |
+- A point has common keys (CS 4.7), processed by the framework, and one
+  protocol key, `address`, opaque to the framework. Channels and devices
+  have framework keys and protocol keys side by side (CS 4.6); in this
+  contract the protocol part is the **binding**.
+- **open: needs the product owner's ruling (X-8).** Both drafts propose
+  option (b) for phase 2: a template carries one `protocol:` and may
+  `extends:` a protocol-free base (CS 4.1). Option (a), one template with a
+  binding per protocol, is room. The driver side is the same under both.
+- The protocol receives each binding as a typed configuration tree that
+  carries file and line for every value.
+- `configure` checks every field against the protocol's limits and refuses
+  with a located CS code (CF-650 to CF-699, listed per protocol in CS); it never falls back to a default the
+  configuration did not give. It reports each point's companions and the
+  raw units it reads.
+- The same `configure` runs in `scada-conf` at validation and in the driver
+  when it loads its configuration (17, B-12), so the two cannot disagree.
+- A symbolic address that needs the device compiles to "unresolved"; a
+  resolution step after connect is room (survey D-6). An unresolved point
+  is `ABSENT` (5.2).
 
 ## 5. Samples and quality
 
-### 5.1 What a protocol delivers
+### 5.1 Raw samples and the processing after decode
 
-A protocol delivers **raw samples** to the `SampleSink`. A raw sample
-names a point and carries:
+`decode` delivers **raw samples** to the `SampleSink`. A raw sample names a
+point and carries:
 
 - one outcome (5.2);
-- the raw bit pattern as received, up to 64 bits (for invalid markers,
-  5.3), and the raw number the protocol decoded from it with the binding's
-  raw type and byte and word order (an integer or a float), or a byte
-  string for a string point;
-- an optional device time and its kind (5.8);
-- an optional protocol status code (an `int32`);
-- an optional cause (5.9) and a replay mark (5.9).
+- the raw pattern: the value's bits after the binding's byte order, word
+  order and parts are applied, before any numeric interpretation, up to 64
+  bits (CS 4.7, annex A); and the raw number the protocol read from it with
+  the binding's raw type, or a byte string for a string point;
+- an optional device time (5.8);
+- an optional protocol status code (`int32`);
+- room: a cause and a replay mark (5.9).
 
-The framework turns a raw sample into a tag value:
+Bit and field extraction named in the `address` (`bit`, `field`) is part of
+the protocol's decode. Everything after decode is the framework's, in this
+order (CS owns the keys):
 
-1. Invalid markers on the raw pattern, before any decoding (5.3).
-2. The protocol's raw scaling and exponent, then the common engineering
-   scaling (reference 5.2: scaling is applied before writing). Decimal
-   gains are applied as configured, and the result type follows 5.4.
-3. Bit and field extraction, enumeration and double-point mapping (5.6).
-4. Quality from the outcome, the protocol status mapping, companions and
-   the raw range (5.2, 5.5).
-5. `source_time_ns` and the time flags (5.8).
-6. The write, one `scada_tag_write` per sample, or one
-   `scada_tag_write_many` per delivery.
+1. **Invalid markers** (`invalid_values`, CS 4.7) on the raw pattern. A
+   marker of an integer raw type is the pattern of the raw width; a
+   negative decimal marker is its two's complement in that width; a float
+   marker is an exact pattern or "any NaN". The match applies its
+   `on_invalid` action.
+2. **Non-finite values.** A float raw value that is NaN or infinite and
+   matched no marker is written BAD with no flag and counted
+   (`sys.dev.<device>.invalid`). A non-finite value is never written GOOD.
+3. **Exponent** (`exponent_from`): the companion's integer e, checked
+   against its range (CS); a value outside it gives BAD. For e ≥ 0 the
+   value is multiplied by 10^e; for e < 0 it is divided by the exact
+   binary64 value of 10^|e| (exact up to 10^22; CS bounds e). Exponent
+   before scale.
+4. **Scale** (`scale`): `raw x gain + offset`, or `raw / divide_by + offset`.
+   - With an integer gain and offset the tag is INT64 or UINT64 (CS 4.7),
+     and the arithmetic is checked: CS refuses a configuration whose raw
+     range times the gain cannot fit; a result that still does not fit
+     (an offset at the edge) gives BAD with OVERFLOW.
+   - Otherwise the tag is FLOAT64, and the computation is in binary64 with
+     floating-point contraction off (decision D-98), so that both
+     architectures give the same bits.
+5. **Bits, enumerations, double points, counters** (5.4, 5.6).
+6. **Quality** from the outcome, `quality_from`, health rules and
+   `raw_range` (5.2, 5.5).
+7. **Time** (5.8).
+8. **The write**, one `scada_tag_write` per sample. Several samples of one
+   point in one delivery are written one by one, in the order given, so
+   the change ring, alarms and the historian see each (survey D-11).
 
-The sink accepts several samples of one point in one delivery, in the order
-given. Each is written in turn, so the change ring, alarms and the
-historian see each of them (a trip pulse shorter than a poll; survey D-11).
-The owner's change ring must hold the largest burst a device can send: the
-ring is at least twice the owner's tag count (tag database contract,
-section 8); a channel whose devices can send larger bursts asks for a larger
-ring in configuration (#98).
+The bounds of the sink are set at configure from the plan: a delivery never
+grows a container.
+
+Golden vectors (conformance test 5) fix this arithmetic: raw bytes plus a
+binding give value bits, quality and flags, bit-identical on both
+architectures. The vectors are shared by #104, #105 and the simulators.
 
 ### 5.2 Outcomes
 
-Every raw sample has one of these outcomes. They are distinct in the
-interface, so that the framework can count and act on each.
-
-| # | Outcome | Meaning | Quality | Flags set | Demotion |
+| # | Outcome | Meaning | Quality | Flags | Demotion |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `VALUE` | The device answered with a value | GOOD, unless 5.3, 5.5 or the protocol status mapping lower it | As those rules give | Clears the failure count |
-| 2 | `NO_VALUE` | The device answered, but the value is a "no value" marker (an invalid marker of 5.3 with `quality: bad`) | BAD | The marker's flags (default none) | No |
-| 3 | `ABSENT` | The point is not on this device: the device refused the address (a Modbus exception "illegal address" on a configured point), or `resolve` did not find it | BAD | NOT_INIT if never read, else none | No |
-| 4 | `DEVICE_INVALID` | The device reported the value invalid: a status code, a validity bit, a health rule, a protocol quality | BAD or UNCERTAIN, from the mapping | The mapping's flags: BLOCKED for out of service or blocked, TEST for test or simulation, OUT_OF_RANGE, OVERFLOW, SUBSTITUTED for a value forced at the device | No |
-| 5 | `COMM_FAIL` | No usable answer: timeout, broken frame, lost connection, a gateway that cannot reach its device | BAD | COMM_FAIL | Counts (section 7.3) |
+| 1 | `VALUE` | The device answered with a value | GOOD, unless steps 1, 2 or 6 of 5.1 lower it | As those steps give | Clears the failure count |
+| 2 | `NO_VALUE` | The device answered, but with a "no value" marker | BAD | The marker's flags | No |
+| 3 | `ABSENT` | The point is not on this device: the device refused the address, or it is unresolved | BAD | NOT_INIT if never read | No |
+| 4 | `DEVICE_INVALID` | The device reported the value invalid: a status, a validity bit, a health rule | BAD or UNCERTAIN by the mapping | The mapping's flags: BLOCKED (out of service), TEST (test or simulation), OUT_OF_RANGE, OVERFLOW, SUBSTITUTED (forced at the device) | No |
+| 5 | `COMM_FAIL` | No usable answer: timeout, broken frame, lost connection, a gateway that cannot reach its device | BAD | COMM_FAIL | Counts (7.4) |
 
-- The value of a tag whose sample is not `VALUE` is the last good value
-  when there was one, otherwise 0. Readers must not use the value of a BAD
-  tag (tag database contract, section 6.2).
-- An `ABSENT` point is counted in `sys.dev.<device>.points_absent`, gets a
-  configuration diagnostic (logged once per point and connection), and is
-  requested again only at the back-off rate, not at its poll rate.
-- `NO_VALUE` and `DEVICE_INVALID` are counted per device
-  (`sys.dev.<device>.sentinels`, `sys.dev.<device>.invalid`).
-- The protocol status code travels with the sample to the counts and to
-  `sys.dev.<device>.last_status`; it is not stored in the tag.
+- A tag whose sample is not `VALUE` keeps its last value, or 0 if it never
+  had one. Readers must not use the value of a BAD tag (TD 6.2).
+- An `ABSENT` point is counted in `sys.dev.<device>.points_absent`, logged
+  once per connection in a summary (11.3), and requested again only at
+  `backoff`.
+- SUBSTITUTED: TD 6 defines it as "value entered by a person in place of
+  the source". This contract also sets it for a value forced at the device
+  and for a substitute from configuration (`on_invalid: substitute`). That
+  widens a frozen flag's meaning: **open: needs the product owner's ruling
+  (R-6)**, with R-4. Committee recommendation: accept, with HMI text that
+  says "substituted", never "entered by an operator".
 
-What does not fit the frozen tag database (tag database contract, section
-14.1), and how this contract carries it:
+What does not fit the frozen tag database, and how it is carried:
 
 | Detail | Carried as |
 | --- | --- |
-| Protocol quality detail without a flag (oscillatory, inaccurate, inconsistent, failure, time accuracy) | Folded into GOOD, UNCERTAIN or BAD by the protocol's status mapping; the raw quality is available as a companion tag (UINT64) when the binding asks for one (room; #119) |
-| "Not implemented", "not on this variant" | No tag where configuration knows it (a disabled point); otherwise `ABSENT` |
-| Device disabled, failed, in local mode | `DEVICE_INVALID` with BAD and no COMM_FAIL, plus the device's health tags (5.5) |
-| Configuration or permission fault | `REFUSING` device state (3.4) and `sys.dev.<device>.last_status` |
+| Protocol quality detail without a flag | Folded into GOOD, UNCERTAIN or BAD; a raw-quality companion tag (UINT64) is room (#119) |
+| "Not on this variant" | No tag where configuration knows it (`when`, `disable`, CS); otherwise `ABSENT` |
+| Device disabled, failed, in local mode | `DEVICE_INVALID`, BAD, no COMM_FAIL, plus the device's health points |
+| Configuration or permission fault | `REFUSING` (3.5) and `sys.dev.<device>.last_status` |
 | Strings over 250 bytes | Truncated to 250 bytes at a UTF-8 boundary, with OVERFLOW |
 
-### 5.3 Invalid markers
+### 5.3 Invalid markers and raw range
 
-- A binding may list invalid markers: raw patterns compared before
-  decoding, each with quality, flags and a reason. A float marker may be an
-  exact pattern or "any NaN".
-- The default is none. A template may set defaults per raw type; a point
-  may override them.
-- `on_invalid: bad | uncertain | keep_last | { substitute: <value> }`
-  chooses what a marker does; `bad` is the default. `keep_last` keeps the
-  last value with UNCERTAIN; `substitute` writes the value with
-  SUBSTITUTED and UNCERTAIN.
-- A raw range (`raw_range`) sets OUT_OF_RANGE with UNCERTAIN, for devices
-  that saturate silently.
-
-Phase 2.
+As step 1 of 5.1, with the keys and actions of CS 4.7 (`invalid_values`,
+`on_invalid`, `raw_range`). The flags each action sets are CS's.
 
 ### 5.4 Tag types
 
-- A raw integer with an integer gain and offset stays INT64 or UINT64; any
-  other scaling gives FLOAT64 (exact for integers up to 2^53).
-- Bits are BOOL. Enumerations are INT64 with the table in configuration.
-- Double points are INT64 with one coding for every driver (survey section
-  7): 0 intermediate, 1 open or off, 2 closed or on, 3 bad state. 3 gives
-  BAD with no flag; 0 stays GOOD, so that a travelling switch is not
-  mistaken for a failure. A protocol maps its own coding onto this.
-- Times decoded from the device (an epoch, a field set) are INT64
-  nanoseconds UTC.
-- Counters: `kind: counter` with `limit`, `at_limit: wrap | saturate` and
-  `on_decrease: reset | hold | accept`. A wrap or a saturation sets
-  OVERFLOW on that sample.
-- Strings are STRING tags, at most 250 bytes (tag database contract,
-  section 7).
+- Raw integers with an integer gain and offset stay INT64 or UINT64;
+  anything else is FLOAT64 (5.1, step 4).
+- Bits are BOOL; enumerations INT64 with the table of CS.
+- **Double points** are INT64 with one coding for every driver: 0
+  intermediate, 1 open or off, 2 closed or on, 3 bad state. Value 3 is
+  written as 3 with BAD (so the HMI shows "faulty", not "no data"); 0 stays
+  GOOD. The address shapes (two bits, three bits, two coils, a 2-bit field,
+  an integer) are CS's; the protocol maps them onto this coding.
+- Device times are INT64 nanoseconds UTC.
+- **Counters** (`kind: counter`, CS 5.3). The tag holds the device's counter
+  value, scaled; never a total continued across wraps or restarts (no
+  durable state in phase 2). A value at `limit` with `at_limit: saturate`
+  sets OVERFLOW. Under `at_limit: wrap` a decrease from at least `limit`/2
+  to below `limit`/2 is a wrap: the restarted value is written with no flag.
+  Any other decrease applies `on_decrease` (CS): `accept` writes it; `hold`
+  keeps the previous value with UNCERTAIN until the counter passes it;
+  `reset` writes it and counts a reset.
+- Strings are STRING tags, at most 250 bytes (TD 7). `scada_tag_write_string`
+  is not RT-safe (TD 13): no STRING point on a real-time thread.
 
 ### 5.5 Companions and health
 
-- A point may depend on companions: an exponent from another raw unit, a
-  status word or validity bit, a time source. The binding declares them;
-  `configure` reports them (4.2). The planner reads a point and its
-  companions in one request (6.3). A companion read with any outcome but
-  `VALUE` makes the dependent sample BAD with that outcome's flags.
-- `quality_from` maps a companion's bit, field or value to the quality of
-  a point.
-- A device `health` rule applies to all its points or a named group, and
-  states whether it sets COMM_FAIL (a device lost behind a gateway: yes; a
-  device that reports itself disabled: no).
+- A point may depend on companions (CS 4.7): an exponent, a status word or
+  validity bit, a time source. The planner reads a point and its companions
+  in one poll of one poll group, back to back with no other request to that
+  device between them (one request when they fit in one). A companion with
+  any outcome but `VALUE` makes the dependent sample BAD with that outcome's
+  flags.
+- `quality_from` maps a companion's bit, field or value to a point's
+  quality; a device `health` rule applies to all or a named group and states
+  whether it sets COMM_FAIL (CS 4.7). A health point read in a slower poll
+  group applies its last value; a health point that is itself BAD makes the
+  points it governs UNCERTAIN.
 
 Phase 2.
 
-### 5.6 Bits, fields and enumerations
+### 5.6 Bits, fields and change latches
 
-- One raw unit may deliver several bit or field points (`bits: [lo, hi]`);
-  only named bits create tags.
-- The bit numbering of a binding is stated (`bit_order: lsb0 | msb0`, per
-  template); there is no default the protocol may assume.
+- One raw unit may deliver several bit or field points; only named bits
+  create tags. The numbering is CS's `bit_order`, which has no default and is required wherever a bit or field is used.
 - A change latch (a bit that records "changed since last read", cleared on
-  read): this contract exposes it as its own BOOL tag, written each poll
-  (decision D-87, survey D-21). The framework does not synthesise an
-  on-then-off event from a latch and a state that has returned: the time of
-  such an event would be invented. Synthesis is room for a later protocol
-  option, and would carry LOCAL_TIME (5.8). The latch point is a
-  `side_effect` read (6.6).
+  read) is its own BOOL tag, read like any bit of a `side_effect` range
+  (6.6). The framework never synthesises an on-then-off event from a latch
+  and a state that has returned: the time of such an event would be
+  invented. Decision D-87.
 
-### 5.7 Buffer overflow and lost events
+### 5.7 Lost events
 
-A protocol that learns that the device dropped events or that its own
-buffer overflowed (a report overflow, an overflow indication, a full helper
-queue) calls `SampleSink::events_lost(device, count_or_unknown)`. The
-framework counts it in `sys.dev.<device>.events_lost`, logs it, and runs the
-device's integrity read (an interrogation, or one full poll) so that the
-current state is read again. Room; phase 2 calls it only for a full helper
-queue, which Modbus does not have.
+A protocol that learns that the device dropped events, or that its own
+buffer overflowed, reports it through the sink (`events_lost`). The
+framework counts it, logs it and runs the device's integrity read. Room;
+phase 2 Modbus has no event buffers.
 
 ### 5.8 Time of a sample
 
 | Case | `source_time_ns` | Flags |
 | --- | --- | --- |
-| Polled point, no device time (every Modbus point in phase 2) | The receive time of the answer | LOCAL_TIME |
-| Device time of the change, device clock synchronised | The device time, converted to UTC | None |
-| Device time with the device clock unsynchronised, or of a device configured `device_time: { zone: local }` whose zone the unit cannot confirm | The device time, converted | TIME_UNCERTAIN |
+| No device time (every polled Modbus point without a time companion) | The receive time of the answer | LOCAL_TIME |
+| Device time from a companion (CS `source_time_from`, `epoch`, `datetime`), `device_time.trust: synced` | The device time, converted to UTC | None |
+| The same with `trust: unknown` (the CS default), or a local time in the repeated hour at the end of daylight saving time, or in the skipped hour | Converted; the repeated hour takes the earlier offset; the skipped hour is moved forward by the gap | TIME_UNCERTAIN |
 | An event whose device gave no time, stamped by the driver | The receive time | LOCAL_TIME |
-| The unit's own clock is not synchronised (reference 14.4) | As above | TIME_UNCERTAIN added |
+| The unit's own clock is not synchronised (reference 14.4) | As above | TIME_UNCERTAIN added (room: the time service's tag, phase 7) |
 
-- **Driver-stamped event time** (the reports differed): LOCAL_TIME, because
-  that is the flag's meaning in the tag database ("`source_time_ns` was set
-  by the owner, not a device", its section 6). TIME_UNCERTAIN keeps its one
-  meaning: a clock that may be wrong. Decision D-86.
-- A device configured with local time (`device_time: { zone, tz }`, #98) is
-  converted by the framework with the configured zone.
-- The unit's synchronisation state is read from the system tag that the time
-  service will publish (reference 10.4, phase 7). Until it exists the
-  framework does not add TIME_UNCERTAIN for the unit's clock. Room.
-- For a polled point an unchanged value read again is a fresh sample: the
-  write refreshes `update_time_ns` and the age, and clears STALE.
+- Driver-stamped event time is marked LOCAL_TIME: that is the flag's
+  meaning in TD 6 ("`source_time_ns` was set by the owner, not a device").
+  TIME_UNCERTAIN keeps one meaning: a clock that may be wrong. Decision
+  D-86 (R-1). Committee recommendation: accept.
+- Device times from companions are phase 2. Event records and their device
+  times are room (annex A).
+- A polled value read again unchanged is a fresh sample: it refreshes the
+  age and clears STALE.
 
-### 5.9 Replayed events and cause
+### 5.9 Replayed events and cause (room)
 
-**open: needs the product owner's ruling (X-6).** After a reconnect a
-device may replay buffered events; then an interrogation gives the current
-state. The reports differed. This draft proposes option (a), with a marking
-that uses an existing flag, decision D-88:
+**open: needs the product owner's ruling (X-6), deferred.** Phase 2 has no
+protocol that replays events. The raw sample keeps room for a cause and a
+replay mark (5.1). The choice is deferred to the historian contract (phase
+3) and the alarm contract (phase 7). Decision D-88. The options and what
+they cost:
 
-- A protocol marks each sample it knows to be replayed (a buffered report
-  sent again, an event older than the connection). Every replayed sample is
-  written to its tag, in device-time order within the delivery, with its
-  device time, and with **STALE added** to its quality flags.
-- The device stays `INITIALISING` (3.4) until the protocol reports the end
-  of the interrogation. The interrogation writes the current state last,
-  without STALE, so the live tag is current once the device is `RUNNING`.
-  A point the interrogation does not cover keeps STALE until its next
-  confirmation (7.4).
-- STALE is the honest mark: a replayed value is not proven current, which
-  is what STALE says for every tag (7.4, X-11). No new flag is needed, and
-  RESTORED (a retained value, tag database contract section 12) is not
-  used.
-- Reason: the historian, alarms and the journal learn values only through
-  change rings (tag database contract, section 8). Option (b), "historian
-  only, live tag only when newer", needs a path that bypasses the tag, or
-  a quality bit: a new path, or a layout version. Option (a) needs
-  neither.
-
-Consequences for consumers, which the reviewers are asked to test:
-
-| Consumer | What it sees | What stops a replayed trip from acting |
+| Option | What consumers see | Cost |
 | --- | --- | --- |
-| Any reader | `source_time_ns` of one tag can go backwards between two writes; `update_time_ns` and `update_mono_ns` never do | Nothing needed; age uses `update_mono_ns` (reference 5.2) |
-| Control blocks (phase 6) | A replayed transition is in the tag for at least the time until the next write, so a task may snapshot it | The sample carries STALE. Every block applies its bad-or-stale behaviour (reference 7.3: `hold`, `safe_value` or `propagate`) to a STALE input, so an edge block does not fire and an output block holds. The phase 6 block library must treat STALE as stale on every input; a block that ignored it would act on an old trip. This is a requirement on phase 6 |
-| Alarms (phase 7) | Replayed transitions with old source times, then the current state | The alarm engine must not raise a new alarm from a sample with STALE; it may journal the replayed transition as a past event with its source time. A requirement on phase 7, to be written into its contract |
-| Historian (phase 3) | Samples with source times older than ones already stored, flagged STALE | The historian contract must state how it orders and stores them (by source time, with the flags kept) |
-| Journal | Nothing from the driver | The cause and the replay mark go to the counts only, until a later contract gives them a path |
+| (a) Write each replayed event to its tag in device-time order, interrogation last; add STALE to replayed samples | A tag's `source_time_ns` may go backwards; a control block sees STALE and applies its bad-or-stale behaviour, so an old trip drives no logic | If the alarm engine raises no alarm from a STALE sample, a trip that happened during the outage raises none either: hidden. If it does, an old trip raises an alarm late, with its source time |
+| (a') As (a) without STALE | An old trip is in the live tag for at least one control cycle | A replayed trip can drive logic once |
+| (b) Mark replayed samples for the historian only; the live tag only when newer | The live tag never goes back in time | Needs a path to the historian that bypasses the tag, or a quality bit: a new path or a layout version |
 
-Without STALE on replayed samples, nothing would stop a replayed trip from
-driving logic for one cycle: that is why the mark is part of the proposal,
-not an option of it.
-- The cause of a sample (spontaneous, cyclic, interrogated, requested,
-  return information, test) is carried in the raw sample for the journal
-  and the counts, not in the tag. Room: a later contract may give it a
-  path to the journal.
-
-Phase 2: Modbus has no replay; the rule applies from phase 9.
+Committee recommendation: defer, as drafted.
 
 ## 6. Scheduling
 
 ### 6.1 Poll groups and activities
 
-- A channel has poll groups, each with a period and a priority (reference
-  6.2). A point is in one poll group, or in none (a `wo` point, a
-  report-only point).
-- Besides poll groups a protocol may register activities per device in its
-  capabilities (survey D-16): integrity and class polls, record readers,
-  keep-alive, time sync, refresh. The framework schedules each by its
-  period and calls `run_activity`. Room, except the framework's own
-  activities of phase 2: keep-alive (6.5), identity (3.5) and back-off
-  probes (7.3).
-- Reported points (`acquisition: report`, room) are delivered by
-  `on_event`; a reported point may also be in a poll group for an
-  integrity read.
+- A channel has poll groups with a period and a priority (CS 4.6). A point
+  is in one poll group, or in none (`access: wo`, a report-only point).
+- Room: activities a protocol registers per device (integrity and class
+  polls, record readers, time sync, session steps), scheduled by the
+  framework like poll groups.
 
-### 6.2 Order of service on a channel
+### 6.2 Order of service
 
-At each scan boundary the worker serves, in order (reference 6.2):
+At each transaction boundary the worker chooses the next request:
 
-1. Pending orders (writes, selects, operates, cancels, `READ_NOW`), in
-   arrival order, within the device's write pacing (6.4).
-2. Due poll groups and activities by priority, then by due time.
-3. Back-off probes of demoted devices (7.3).
+1. The next step of an order in progress (a list of writes, select then
+   operate) when its sequence is exclusive (6.6).
+2. A new order (write, select, operate, cancel, `READ_NOW`), in arrival
+   order, when the device's write spacing allows (6.4).
+3. The next request of a due poll group, by priority, then by due time,
+   when the device's request spacing allows.
+4. A keep-alive request (6.5).
+5. A probe of a demoted device, within the probe budget (7.4).
 
-An order arriving while a poll group's planned sequence of transactions is
-running waits for the end of the current transaction, not of the group.
+When nothing is allowed yet the worker waits for the earliest of: the next
+spacing end, the next due time, an order (its eventfd), the connection
+becoming readable (7.3).
 
 ### 6.3 Block planning
 
-The framework gives `plan` the rules; the protocol builds the requests.
-
-- Rules (survey C-37, D-17): `max_registers` (or the protocol's unit) per
-  request, at most the device's `max_read_size`; `max_gap`, the largest
-  unconfigured run the plan may read across (default 0); forbidden ranges
-  (`no_read`) the plan never touches; `atomic` groups always in one
-  request; exact-shape blocks read only as configured.
+- Rules (CS `read:`, annex A): the largest request (`max_registers`, at most
+  `max_read_units`), the largest gap the plan may read across (`max_gap`),
+  and ranges per table and unit id: `no_read` (never touched),
+  `atomic` (always in one request), `exclusive` (read alone, by one poll
+  group), `side_effect` (6.6).
 - The plan never splits a multi-unit value, never separates a point from
-  its companions (5.5), never merges across tables or address spaces, and
-  never merges a `side_effect` point with another.
-- What a bridged gap returns is never decoded.
-- The plan is published: `sys.dev.<device>.requests_per_scan` per poll group
-  (UINT64) and, in the debug log at configure, each request's range.
-- When a merged request fails with "illegal address" (annex A), the
-  framework asks the protocol to split it once into its points' own
-  requests; the points that fail again are `ABSENT` (5.2); the rest keep
-  the split plan until reconnect.
+  its companions (5.5), never merges across tables, unit ids or address
+  spaces. What a bridged gap returns is never decoded.
+- Each planned request carries its split form. When the device refuses the
+  whole request as an illegal address (annex A), the framework uses the
+  split form once: the points refused again are `ABSENT`; the rest keep the
+  split plan until reconnect.
+- The plan is published (`sys.dev.<device>.requests_per_scan`, the requests
+  of one period of every poll group of the device) and logged at configure.
 
 Phase 2.
 
 ### 6.4 Pacing
 
-- Per device and per channel: `min_request_interval`, `min_write_interval`
-  and `max_values_per_request` (survey C-5). The worker never sends two
-  requests to a device closer than its interval, and "writes first" keeps
-  the write interval.
+- Per device and channel: `min_request_interval`, `min_write_interval` and
+  `max_values_per_request` (CS 4.6). The worker never sends two requests to
+  one device, or two writes through one channel, closer than its interval.
+  "Writes first" keeps the write interval.
 - A device paced at 10 s does not delay its neighbours: the worker serves
-  other devices while one waits for its interval.
+  other devices while one waits.
 - The framework publishes the achieved period per poll group
-  (`sys.drv.<channel>.period.<group>`, ms), requests per second per
-  channel, and `sys.dev.<device>.pacing_limited` (BOOL), true while a group of
-  the device misses its period because of pacing.
-- **open: needs the product owner's ruling (X-13).** Whether an unservable
-  poll group is a validation error or a warning is #98's to fix. This draft
-  proposes a warning (`DRV-PACE-01`): the runtime comparison of measured
-  and configured periods already raises an alarm (reference 7.5).
-
-Phase 2.
+  (`sys.drv.<channel>.period.<group>`, ms) and `sys.dev.<device>.pacing_limited`.
+- **open: needs the product owner's ruling (X-13).** An unservable poll
+  group is a warning (CS code), not an error: the runtime comparison of
+  measured and configured periods already alarms (reference 7.5). CS owns
+  the severity. Committee: the reviewers differ; the draft keeps warning.
 
 ### 6.5 Keep-alive
 
-A device that closes an idle connection (survey C-6) gets `keepalive:
-<period>`: when no request has been sent to it for the period, the worker
-sends one, the protocol's cheapest read (for Modbus, the first request of
-its slowest poll group). The back-off of a demoted device respects it.
-Phase 2.
+A device or channel with `keepalive` (CS) that has sent no request for that
+period gets one: the keep-alive request of its plan, which `plan` picks
+outside every `side_effect`, `exclusive` and `no_read` range. It is a
+protocol request; TCP keep-alive probes are not used in its place (a device
+that counts protocol requests for its idle timer ignores them). Phase 2.
 
 ### 6.6 Side effects and exclusive sequences
 
-- A `side_effect` point (a read that clears a flag, moves a pointer or
-  restarts a statistic) is read by one poll group only, never merged, never
-  retried transparently, and never read by `READ_NOW` (`DRV-CFG-08`).
-- An exclusive sequence (write a selector, read, restore) runs on one
-  device with no other transaction to that device between its steps. Room:
-  record readers are activities (6.1) that run such sequences; phase 2
-  marks the registers `no_read` or `side_effect` so that nothing else
-  touches them (survey M-13).
-- A second master on the same device can break either. The framework does
-  not detect it; the template documents it.
+- A `side_effect` range (CS `read:`: a read clears flags, moves a pointer or
+  restarts a statistic) is read once per poll of its poll group. Every point
+  decoded from it, a value, a status word that qualifies other points, a
+  latch, is served from that one read, and must be in that poll group (CS).
+  Merging it with other points of the same poll group is allowed.
+- A request that touches a `side_effect` range is never retried, never sent
+  by `READ_NOW`, keep-alive, identity or probe. A timeout on it loses that
+  poll's flags; the next poll reads again.
+- An `exclusive` range is read alone, by one poll group (record pointers).
+- An exclusive sequence (a list of writes, a select and operate) runs on one
+  device with no other request to that device between its steps.
+- A second master on the same device can still break either. The framework
+  cannot detect it.
 
-### 6.7 Synchronous scan groups
+### 6.7 Synchronous scan groups (room)
 
-A scan group (reference 6.2) is a set of devices on one channel. At the end
-of each scan of the group the worker writes the group's scan counter, a
-system tag `sys.drv.<channel>.scan.<group>` (UINT64, +1 per scan),
-then calls `scada_tag_notify`. A control task bound to the group waits for
-the driver's `cycle_seq` and then checks the counter. `cycle_seq` counts the
-notify calls of the whole process (tag database contract, section 10), so
-the counter is what tells the task that its own group has finished (#116,
-comment point 4). No layout change. Phase 2.
+Reference 6.2's synchronous scan group (the driver signals the end of a
+scan and a control task runs once per scan) needs a real-time driver
+(2.5). Room in both contracts (CS reserves `scan_group`). The shape kept
+for the later minor version: the worker writes a scan counter tag at the
+end of each scan of the group, then notifies; a task waits on that owner's
+change ring, not on the process's `cycle_seq`, which counts every notify of
+every channel (TD 10; #116, point 4).
 
-### 6.8 Time sync of devices
+### 6.8 Time sync of devices (room)
 
-**open: needs the product owner's ruling (X-12).** Who sets device clocks is
-not in the reference. This draft proposes option (b) in shape and (a) in
-phase 2: time sync is a framework activity per device, default off; it
-writes the clock forms the protocol declares, in UTC or the device's zone,
-and never while the unit's own clock is not synchronised. Phase 2 has none.
-Room.
+**open: needs the product owner's ruling (X-12).** A framework activity per
+device, default off, never while the unit's own clock is not synchronised.
+CS reserves `time_sync`, `none` only in phase 2. Committee recommendation:
+accept.
 
-## 7. Failure handling
+## 7. Transport and failure handling
 
-### 7.1 Timeouts and retries
+### 7.1 Timeouts and the frame time
 
-- Each device has `timeout` (per transaction), `retries` (reads only) and
-  `startup_grace` (#98, survey C-4).
-- A read that times out is retried up to `retries` times within its poll
-  group's turn. A write is never retried (section 8.7).
-- A `write_timeout` may scale with the count of values written.
+Decision D-96.
 
-### 7.2 Connection loss
+- A device's `timeout` (CS) is the time from the **end of the request on
+  the wire** to the **first byte of the answer**.
+- The framework adds the frame time: the request's length and the longest
+  answer the request allows, at the channel's bit rate and character format
+  (start, data, parity and stop bits), plus a margin of 2 characters. On
+  TCP the frame time is 0. A request's deadline is its send time plus its
+  frame time plus `timeout`. Example: a read of 125 registers at 1,200 bit/s
+  in 8E1 is 8 bytes out and 255 back, 0.07 s and 2.34 s: with `timeout:
+  1s` the deadline is 3.4 s after the send.
+- CS warns when the requests of a poll group cannot fit its period at the
+  channel's bit rate.
+- A read that times out is retried up to `retries` times, within its poll
+  group's turn, unless it touches a `side_effect` range (6.6). A write is
+  never retried (8.7).
+- The bytes accepted for one answer are bounded by `max_frame_bytes`; more
+  bytes close the connection (a TCP channel) or discard input and wait the
+  quiet time (a serial channel), and count as `COMM_FAIL`.
 
-When the channel's connection is lost, every device of the channel goes
-`CONNECTING` at once: its tags BAD with COMM_FAIL, no device spends its
-retries. The worker reconnects with a back-off from 1 s doubling to
-`reconnect_max` (default 30 s), within the keep-alive of any device. A
-connection that succeeds while the devices refuse (a server function off)
-puts them `REFUSING`, not `RUNNING`.
+### 7.2 Serial lines
 
-### 7.3 Demotion and recovery
+- The worker never drains the line and never toggles a modem line inside
+  an exchange: user space cannot meet the RS-485 turnaround that way. It
+  computes the end of transmission from the frame length and the bit rate.
+  Direction control is the adapter's (`rs485.direction: auto`) or the
+  kernel's RS-485 mode set once at open (CS reserves the `rs485` keys).
+- The end of an answer is found by `frame_state` from the function code,
+  the length field and the CRC, never from a gap: user space does not see
+  1.5-character gaps (a UART delivers in bursts, a USB adapter in slices of
+  its latency timer, which the framework asks to be low at open).
+- The 3.5-character silence is kept as the least gap before the next
+  request, measured from the last byte received.
+- After a timeout or a broken answer the worker discards input and waits a
+  quiet time (the 3.5-character silence, at least 20 ms) before the next
+  request to any device on the line: a late answer has no transaction id on
+  RTU and would otherwise be read as the answer to the next request.
+- The port is opened exclusively. A port that disappears (an error or end
+  of file on read) is closed at once and reopened by its configured path
+  (`device`, CS; it allows stable names such as `/dev/serial/by-id/...`), so that a
+  replugged USB adapter is found again. Before close, pending output is
+  flushed (`tcflush`), so that `close` does not wait.
+- A bit rate the port refuses is a connect error with its own diagnostic,
+  never a silent nearest rate.
+- A pseudo-terminal has no bit rate, no parity errors and no RS-485 mode:
+  tests against the RTU simulator check framing and gaps between requests
+  only. Serial timing is checked on the target board (#41).
 
-- A device is demoted after `demote_after` consecutive failed transactions
-  (default 3), counted across poll groups (reference 6.2).
-- What counts: a timeout and a "gateway cannot reach its device" answer
-  (annex A). What does not: "busy", a `NO_VALUE` or `ABSENT` answer, and
-  any failure within `startup_grace` after connect or a detected restart.
-- A demoted device: tags BAD with COMM_FAIL; polled no more; probed with
-  one request every `backoff` (default 10 s, at most `backoff_max`); a
-  probe that succeeds recovers it to `INITIALISING` and then `RUNNING`.
-  A demoted device no longer spends its timeout every scan, so it stops
-  stalling the channel.
-- Demotion is per device. Several devices that share one address (3.3)
-  each demote on their own failures.
+### 7.3 TCP connections
+
+Decision D-95. **Review by a person** (the first two points are command
+safety).
+
+- **A write that times out closes the connection.** On `tcp` and
+  `rtu_over_tcp`, a write whose deadline passes without a complete answer
+  closes the connection abortively (`SO_LINGER` 0, so that unsent and
+  unacknowledged bytes are discarded) before the result is posted. Without
+  it the kernel retransmits the frame for minutes, and the device may
+  operate long after the command was answered TIMEOUT and expired. TIMEOUT
+  with `NO_RESPONSE` stays right: bytes already acknowledged cannot be
+  recalled.
+- **Consecutive timeouts are a lost connection.** On a TCP channel, n
+  consecutive requests that timed out with no valid answer from any device
+  between them (`lost_after_timeouts`, CS, default 3) close the
+  connection abortively and reconnect.
+- The socket's user timeout (`TCP_USER_TIMEOUT`) is set to the largest
+  request deadline of the channel, so that the kernel gives up when the
+  driver does.
+- What remains: a serial server or gateway behind `rtu_over_tcp` buffers
+  on its own, and may execute a write after our timeout. "Never executed
+  late" holds up to our last byte. CS warns when a device's `timeout` is
+  below the gateway's own forwarding time, where configured.
+- **Idle close.** While idle the worker waits on its socket too
+  (`POLLRDHUP`) and reconnects when the peer has closed. Before a write it
+  checks the socket once more. A write that cannot be sent because the
+  connection is gone, before any byte left, is REJECTED with `COMM_FAIL`
+  (nothing sent): the requester may repeat it.
+- **Back-off.** A lost connection fails every device of the channel at
+  once (`CONNECTING`, COMM_FAIL), without spending retries. The worker
+  reconnects with a back-off from `reconnect.min` doubling to
+  `reconnect.max` (CS), reset after the first valid answer, not after the
+  connect: a device that accepts and closes at once must not be retried
+  every second.
+- **Addresses.** Phase 2 accepts literal IPv4 and IPv6 addresses only (CS);
+  a host name would mean a resolver call on the worker, which has no
+  deadline the driver can enforce and allocates. Connect has its own
+  deadline, `connect_timeout` (CS).
+- The bytes of one answer are bounded (7.1).
+
+### 7.4 Demotion and recovery
+
+- A device is demoted after `demote_after` consecutive failed requests
+  (CS), counted across poll groups. A request is one failure after its
+  retries, not one per attempt.
+- What counts: a timeout, a broken answer, a gateway that cannot reach its
+  device (annex A). What does not: busy, `NO_VALUE`, `ABSENT`, and any
+  failure within `startup_grace` after connect or a detected restart.
+- Devices that share a unit id (3.4) share one failure count: a dead unit
+  costs `demote_after` requests once, not once per slice.
+- A demoted device: tags BAD with COMM_FAIL; no polls; one probe request
+  every `backoff`, doubling to `backoff_max` (CS); a probe that succeeds recovers it to
+  `INITIALISING`, then `RUNNING`.
+- **Probe budget.** Probes are sent only in time no due request needs, at
+  most one probe in flight per channel, with the device's timeout but at
+  most 1 s, so that 200 dead devices behind one gateway at night do not
+  starve the live ones (CS may lower the bound).
 
 Phase 2.
 
-### 7.4 Staleness
+### 7.5 Staleness
 
 **open: needs the product owner's ruling (X-11).** Reference 6.2: "If a
 point is not refreshed within its `max_age`, its tag gets the `STALE`
-flag." This draft reads "refreshed" as "confirmed":
+flag." This draft reads "refreshed" as "confirmed".
 
 - A polled point is STALE when no read of it has succeeded within its
-  `max_age`.
-- A reported point (room) is STALE when, within its `max_age`, there was
-  neither a report of it, nor an integrity answer that includes it, nor
-  link supervision that proves the session alive (a point that does not
-  change sends nothing, and is not stale while the session is proven).
-- An event-only point (it has no state the device reports in an
-  interrogation) stays NOT_INIT until its first event, or takes a rest
-  value from configuration; it is never STALE.
-- STALE is added to the tag's last quality and value; the framework writes
-  it once when the age passes `max_age`, checked at every scan boundary,
-  and clears it with the next confirmation. A replayed sample is written
-  with STALE (5.9). Marking staleness is the
-  driver's job for its own tags (reference 6.2; tag database contract,
-  section 6).
+  `max_age` (CS). STALE is added to its last value and quality, once, and
+  cleared by the next good read. It is checked at every transaction
+  boundary, so a healthy device's points are not marked late by their
+  neighbours' timeouts.
+- Room: a reported point is STALE when, within `max_age`, there was no
+  report of it, no integrity answer that includes it, and no link
+  supervision that proves the session alive.
 
-Phase 2: polled points.
+Committee recommendation: accept.
 
-### 7.5 Device restart
+### 7.6 Device restart
 
-The framework or the protocol detects a device restart from a configured
-indication (a run-time counter going backwards, a power-up flag, an
-identity change, a protocol's restart indication). On a restart the device
-goes back to `INITIALISING` (3.4): identity check, session steps, points
-NOT_INIT until read, and device-side settings sent again (room). Phase 2:
-the configured indications only.
+A device's restart is detected from a configured indication (CS
+`restart_indication`: a run-time counter going backwards, a power-up flag, an
+identity change). The device goes back to `INITIALISING`: identity check,
+points NOT_INIT until read, selections end, refreshes stop. Re-sending
+device-side settings is room. Phase 2.
+
 ## 8. Write requests
 
-**Review by a person:** this whole section is command handling,
-select-before-operate and fail-safe behaviour (`CLAUDE.md`, "Safety and
-security rules").
+**Review by a person:** this whole section is command handling, select
+before operate and fail-safe behaviour.
 
-Nothing in this section relaxes the tag database contract: requests are
-delivered at most once, requests still queued at attach are answered ABORTED
-by the library, expired and over-long requests are answered EXPIRED by the
-library and never reach the driver, and every request needs its event
-record accepted before it is posted (tag database contract, sections 9.2
-and 9.3). The requester posts that record; the library does not check the
-pairing, and neither does the driver, which cannot see the journal.
+Nothing here relaxes TD: requests are delivered at most once; requests still
+queued at attach are answered ABORTED by the library; expired and
+over-long requests are answered EXPIRED by the library and never reach the
+driver; every request needs its event record accepted before it is posted
+(TD 9.2, 9.3). The requester posts that record; neither the library nor
+the driver can check the pairing. The one place where this contract
+qualifies "no audit, no action" is a fail-safe action (8.13), and it is an
+open ruling.
 
 ### 8.1 Requests and orders
 
-The command thread takes a `WriteRequest` (tag database contract, section
-9.4) and, once the checks of 8.2 that need no device pass, hands the worker
-a `WriteOrder`: the request, the generation it was taken in, the output's
-configuration, and the action the worker must take. Operations:
-
-| Operation | What the driver does |
-| --- | --- |
-| `DIRECT` | Writes the value |
-| `SELECT` | Selects the output for this request (8.4) |
-| `OPERATE` | Writes the value of a live selection (8.4) |
-| `CANCEL` | Ends a selection (8.4) |
-| `READ_NOW` | Reads the target's point at once (8.12) |
+The command thread takes a `WriteRequest` (TD 9.4) and, once the checks of
+8.2 that need no device pass, hands the worker an order: the request, the
+generation it was taken in, the output's compiled configuration, and the
+action. Operations: `DIRECT` writes; `SELECT`, `OPERATE` and `CANCEL` as in
+8.6; `READ_NOW` as in 8.14.
 
 ### 8.2 Checks, in order
 
-The checks run in this order. The first that fails answers the request and
-stops it; nothing is sent to the device. Every check runs for every source,
-AUTO included.
+The first check that fails answers the request and stops it; nothing is
+sent to the device. Every check runs for every source.
 
 | # | Check | Thread | Fails with |
 | --- | --- | --- | --- |
-| 1 | The library's: not expired, lifetime within 60 s, the record valid (tag database contract, 9.2, 9.4) | Library | EXPIRED, or passed over |
-| 2 | The target handle is a point of this driver with an output, or a readable point for `READ_NOW` | Command | REJECTED, `UNKNOWN_TARGET` |
-| 3 | The operation is allowed for the output: `SELECT`, `OPERATE` and `CANCEL` only on an output configured `sbo`; `DIRECT` from OPERATOR only on an output configured `direct` (an operator command to an `sbo` output must select); `DIRECT` from AUTO or REMOTE on either | Command | REJECTED, `WRONG_CONTROL_MODEL` |
-| 4 | Value: `value_type` is the tag's type; the value is within the output's configured limits (a union of intervals, a release value, an on-only command that has no off value) | Command | REJECTED, `INVALID_VALUE` |
-| 5 | Source against mode (reference 8.1): AUTO only while the output's mode tag reads AUTO, OPERATOR only while it reads MANUAL, REMOTE only while it reads REMOTE. The mode tag is read at this check; a read that is not `SCADA_OK` with GOOD quality fails the check (fail closed) | Command | NOT_AUTHORISED |
-| 6 | Selection rules (8.4) | Command | REJECTED, `NOT_SELECTED`, `ALREADY_SELECTED`, `SELECTION_MISMATCH` |
-| 7 | Device state: `MISMATCH` or `DISABLED` | Command | REJECTED, `CONFIG_MISMATCH` |
-| 8 | Write rate limit of the point (8.7) | Command | REJECTED, `RATE_LIMITED` |
-| 9 | The order queue to the worker has room | Command | REJECTED, `BUSY` |
-| 10 | Device connected and not `DEMOTED` or `REFUSING` at the moment the worker starts the order; a demoted device is attempted once with its timeout, because a command is an explicit intent | Worker | REJECTED, `COMM_FAIL` (nothing sent) |
-| 11 | `expiry_mono_ns` checked again on the worker's clock right before the first byte goes to the device (tag database contract, 9.2) | Worker | EXPIRED (sent by the command thread, from the worker's outcome) |
+| 1 | The library's: not expired, lifetime within 60 s, the record valid (TD 9.2, 9.4) | Library | EXPIRED, or passed over |
+| 2 | The target is a point of this driver with an output, or a readable point for `READ_NOW` | Command | REJECTED, `UNKNOWN_TARGET` |
+| 3 | The operation is allowed for the output's kind (8.3) and control model: `SELECT`, `OPERATE`, `CANCEL` only on an `sbo` output; `DIRECT` from OPERATOR only on a direct output; `DIRECT` from AUTO or REMOTE on either | Command | REJECTED, `WRONG_CONTROL_MODEL` |
+| 4 | The value: of the tag's type; finite (NaN and infinity are refused before any limit is compared); one of the kind's values (8.3); within the output's limits (CS 7.2); convertible to the raw type (8.4) | Command | REJECTED, `INVALID_VALUE` |
+| 5 | Source against mode (reference 8.1, below) | Command | NOT_AUTHORISED |
+| 6 | For AUTO, on an output whose area is `local_blocks_auto` (CS 7.1): the area's local-panel tag reads GOOD and false | Command | NOT_AUTHORISED, `LOCAL_AUTHORITY` |
+| 7 | Selection rules (8.6) | Command | REJECTED, `NOT_SELECTED`, `ALREADY_SELECTED`, `SELECTION_MISMATCH`, `SELECTED` |
+| 8 | Device state (3.5): `DISABLED`, `MISMATCH`, `DEMOTED`, `REFUSING` | Command | REJECTED, `CONFIG_MISMATCH` (disabled, mismatch) or `DEVICE_UNAVAILABLE` (demoted, refusing) |
+| 9 | Write rate limits (8.9) | Command | REJECTED, `RATE_LIMITED` |
+| 10 | The order queue to the worker has room | Command | REJECTED, `BUSY` |
+| 11 | When the worker starts the order: the connection is up; `expiry_mono_ns` checked on the worker's clock right before the first byte (TD 9.2) | Worker | REJECTED, `COMM_FAIL` (nothing sent); EXPIRED |
 
-- Decision D-92 records these checks.
-- Check 5 is the driver's part of the output model (reference 8.1). The
-  mode tag is owned by `scada-cmd`; while `scada-cmd` is down the tag reads
-  BAD with OWNER_DOWN and every source is refused. In phase 2, before
-  `scada-cmd` exists, tests own the mode tag. Mode values (INT64): 1 AUTO,
-  2 MANUAL, 3 REMOTE; any other value fails the check. The coding is
-  agreed with #98 (section 15, B-5).
-- Checks 2 to 9 make no device I/O and no system call on the worker; they
-  run on the command thread, which may read tags (`scada_tag_read` is safe
-  from any thread, tag database contract section 13.2).
-- `scada-cmd` checks value limits, interlocks, authority and mode itself
-  (reference 8.2). The driver checks them again because AUTO and REMOTE
-  requests do not pass through `scada-cmd` (reference 8.4), and because
-  the driver is the last place before the device. The driver does not
-  evaluate interlocks: they are in the logic for AUTO (reference 8.4) and
-  in `scada-cmd` for OPERATOR.
+**Check 5, source against mode** (decision D-92). The mode tag of the
+output (owned by `scada-cmd`; coding 1 AUTO, 2 MANUAL, 3 REMOTE, agreed with
+CS) is read at the check.
 
-### 8.3 Write encodings
+- OPERATOR: only while the mode reads MANUAL with GOOD quality.
+- REMOTE: only while it reads REMOTE with GOOD quality.
+- AUTO: while it reads AUTO with GOOD quality; and, **open: needs the
+  product owner's ruling (O-2)**, while it reads BAD with OWNER_DOWN as its
+  only flag and a stored value of AUTO. Only `scada-cmd` changes the mode,
+  so while it is down the stored mode cannot change, and automatic control
+  continues. Reference 14.4 keeps `scada-cmd` out of the watchdog chain, so
+  the reference does not make control depend on it. NOT_INIT, any other
+  flag, a value that is not 1, 2 or 3, and a read that is not `SCADA_OK`
+  fail the check for every source (fail closed). Committee recommendation:
+  accept.
+- In phase 2, before `scada-cmd` exists, tests own the mode tag.
+
+`scada-cmd` checks value limits, interlocks, authority and mode itself
+(reference 8.2). The driver checks again because AUTO and REMOTE requests do
+not pass through `scada-cmd` (reference 8.4), and because the driver is the
+last place before the device. The driver does not evaluate interlocks: they
+are in the logic for AUTO (reference 8.4) and in `scada-cmd` for OPERATOR.
+
+### 8.3 Command kinds
+
+The output's `kind` (CS 7.2) decides what a request may carry and what is
+sent. Decision D-99. CS cites this table.
+
+| Kind | Request value | What is sent | Phase 2 |
+| --- | --- | --- | --- |
+| `single` | BOOL 0 or 1 | The address's `off` or `on` encoding, or the value converted (8.4) | Yes |
+| `double` | INT64 1 (open, off) or 2 (closed, on); 0 and 3 refused | The `off` or `on` encoding | Yes |
+| `pulse` | BOOL 1 only | The `on` encoding, once. The device makes the pulse (a coil the device resets itself, a register that triggers a timed output) | Yes, device-timed only |
+| `trigger` | BOOL 1 only | The configured value, once (a reset, a setting-group switch, an acknowledge). `on_only` | Yes |
+| `setpoint` | The tag's type | The value converted to raw (8.4), with the address's write encoding | Yes |
+| `step` | INT64 +1 or -1 | The `on` (raise) or `off` (lower) encoding, once | Yes |
+| `latch` | BOOL 0 or 1 | The `off` or `on` encoding; the device holds the state until commanded otherwise | Yes |
+
+- A **framework-timed pulse** (write on, wait, write off) is not in phase 2:
+  an off write that times out would leave the output energised, and no
+  write is retried (8.9). Room: if it is added, its trailing edge is the
+  one write repeated until it succeeds or the output is reported failed
+  with an alarm, and it runs as an exclusive sequence (6.6) timed by the
+  worker at transaction boundaries, never by a blocking wait.
+- `pulse` and `trigger` are never refreshed (8.12) and never a safe or
+  release action (8.13).
+- X-16: a setting-group switch is a `trigger`; settings edits are out of
+  scope. **open: needs the product owner's ruling (X-16).** Committee
+  recommendation: accept.
+
+### 8.4 Engineering value to raw value
+
+Decision D-94. **Review by a person.**
+
+- A request carries the engineering value in the tag's type (TD 9.4). The
+  raw value is the inverse of the point's scaling (5.1, step 4), computed
+  in binary64 with contraction off:
+  - `scale: { gain, offset }`: raw = (value − offset) / gain;
+  - `scale: { divide_by, offset }`: raw = (value − offset) × divide_by;
+  - then, for an integer raw type, rounded half away from zero; for
+    `float32`, rounded to nearest, ties to even.
+- The result is refused with `INVALID_VALUE` when it is not finite, or
+  outside the raw type's range (for `float32`, when it overflows to
+  infinity).
+- A point with `enum`: the value must be a defined code, written as the
+  code. A double point: by its `on` and `off` encodings.
+- Not writable (refused at configure, CS code): a point with
+  `exponent_from` (the exponent is the device's), `mod10k`, `datetime`,
+  `epoch`, `string`, and a `bit` or `field` without a `write.mask` (the
+  framework never reads, changes and writes back a word).
+- `safe_state` and `limits.release` state their domain (CS 7.2): `{ raw:
+  <pattern> }` is written as the pattern, without conversion; `{ value:
+  <engineering> }` is converted like a request.
+- Golden vectors (conformance test 5) cover the conversion: 12.5 kW with
+  `gain: 0.1` on `int16` is raw 125; 75.0 % with `divide_by: 10` is raw
+  750; a value that rounds outside `int16` is refused.
+
+### 8.5 Write encodings
 
 An output's encoding is an ordered list of protocol writes per value, from
-configuration (#98): fixed values, separate addresses for on and off,
-inverted polarity, a mask written as a whole word (no read-modify-write),
-exactly the units a device demands, a write type other than the read type.
-The protocol compiles it at `configure` and refuses what it cannot send
-(`DRV-CFG-07`).
+the point's `address` (CS annex A.5): fixed values, separate addresses for
+on and off, inverted polarity, a whole word with a mask, exactly the
+quantity a device demands, a write type other than the read type. The
+protocol compiles it at `configure` and refuses what it cannot send.
 
-- A list of several writes is sent in order, on one connection, with no
-  other transaction to that device in between (an exclusive sequence,
-  6.6). If a write of the list fails after an earlier one succeeded, the
-  result is DEVICE_ERROR with reason `PARTIAL`, the remaining writes are
-  not sent, and the framework reads back every member (8.8).
+- A list is sent in order as an exclusive sequence (6.6). If a write of the
+  list fails after an earlier one succeeded, the result is DEVICE_ERROR
+  with reason `PARTIAL`, the rest is not sent, and the framework reads back
+  every member that has a read-back point (8.10).
 - The framework never reads a word, changes bits and writes it back, and
-  never resends a stored image of a word. A whole-word command is written
-  from the configured value and mask only.
+  never resends a stored image of a word.
 - Writes of several tags in one request (a curve, a table) are not in
-  phase 2 (survey C-47): one request carries one target (tag database
-  contract, section 9.4). A curve is written point by point, or with the
-  vendor's tool. Room: a later contract may add write groups as one output
-  whose encoding writes many units from several request tags.
+  phase 2: a request has one target (TD 9.4). Room: a write group as one
+  output.
 
-### 8.4 Select before operate
+### 8.6 Select before operate
 
-**open: needs the product owner's ruling (X-1 and X-7).** **Review by a
-person.**
+**open: needs the product owner's ruling (X-1 and X-7).** Committee
+recommendation: accept both as drafted. **Review by a person.**
 
 Reference 6.4: "Where a protocol has a native select-before-operate
 procedure, the driver must use it for `SELECT` and `OPERATE` requests.
 Where it does not (Modbus), the driver accepts `OPERATE` after a `SELECT`
-held by the command gateway (section 8.2)." The survey found a relay whose
-Modbus map has a device-side select, and protocols that have no select for
-some points. This draft makes native select a property of the device and
-point, declared by the protocol in its capabilities (X-1, option (b)), and
-keeps the gateway's select for every point without it. Phase 2 implements
-the gateway select; a native select over Modbus, where a device has one, is
-room until the device's procedure is documented (annex A, M-12).
+held by the command gateway (section 8.2)." Native select is a property of
+the device and point, declared by the protocol (X-1, option (b)). Phase 2
+implements the gateway select; a native select over Modbus, where a device
+has one, is room until its procedure is documented (annex A).
 
-**Selections.** The driver keeps one selection table per output, owned by
-the command thread. A selection is created by a SELECT that passed every
-check and was executed, and holds: the SELECT's request id, the source, the
-`user_id`, the value, the time it was made, and whether a native selection
-is outstanding on the device.
+**Selections.** The command thread keeps one selection per output. It holds
+the SELECT's request id, source, `user_id`, value, time, the mode it was
+made in, and, for a native one, the channel's connection epoch (2.4).
 
 **Rules:**
 
 1. A SELECT on an output with a live selection is refused
-   (`ALREADY_SELECTED`), whoever sends it (survey D-29 (6)). `scada-cmd`
-   already refuses a second user (reference 8.2, step 6).
+   (`ALREADY_SELECTED`), whoever sends it.
 2. An OPERATE or CANCEL must name, in `select_request_id`, the request id
-   of the live selection of its target; the same source, the same
-   `user_id`; and, for OPERATE, the same value (survey D-29 (4)).
-   Otherwise: `NOT_SELECTED` (no live selection with that id) or
-   `SELECTION_MISMATCH`.
-3. A selection ends at the first of: its OPERATE (whatever the result);
-   its CANCEL; its timeout; the loss of the connection while a native
-   selection is outstanding (counted in `sys.dev.<device>.selections_lost`);
-   a reload of the output; a generation change; a driver restart (tag
-   database contract, section 9.2). An OPERATE or CANCEL for an ended
-   selection is `NOT_SELECTED`.
-4. The driver times its selections itself (tag database contract, section
-   17, item 19: a driver never sees an expired OPERATE or CANCEL). The
-   selection timeout is the output's `select_timeout` (reference 8.2 step 6,
-   default 30 s), at most 60 s, the request lifetime.
-5. A CANCEL with no live selection is answered OK with reason
-   `NOTHING_TO_CANCEL`; nothing is sent. A CANCEL of a live native
-   selection, and the timeout of one, send the device's cancel when the
-   protocol has one (survey D-29 (2)).
-6. SELECT and OPERATE of one selection go over one connection, serialised
-   by the worker. A selection whose connection was lost cannot be operated
-   (rule 3).
+   of the live selection of its target, with the same source and
+   `user_id`; an OPERATE also the same value. Otherwise `NOT_SELECTED` (no
+   live selection with that id) or `SELECTION_MISMATCH`.
+3. A selection ends at the first of: its OPERATE (whatever the result); its
+   CANCEL; its timeout; a change of the output's mode tag; a change of the
+   channel's connection epoch while a native selection is outstanding
+   (counted in `sys.dev.<device>.selections_lost`); a reload of the output;
+   a generation change; a driver restart (TD 9.2).
+4. A DIRECT on an output with a live selection is refused (`SELECTED`): an
+   AUTO write must not act on an output an operator holds.
+5. The driver times its selections itself (TD 17, item 19). The timeout is
+   the output's `select_timeout` (CS, at most 60 s).
+6. A CANCEL with no live selection is answered OK with `NOTHING_TO_CANCEL`;
+   nothing is sent. A CANCEL of a live native selection, and its timeout,
+   send the device's cancel when the protocol has one.
+7. A native selection is shown in `<output>.device_selected` (BOOL, owned
+   by the target's channel worker, generated by CS only where the protocol
+   declares a native select; never in phase 2), so that `scada-cmd` sees a
+   selection the device lost.
 
-**Without native select** (the gateway select; every point in phase 2): a
-SELECT that passes the checks makes the selection and is answered OK; no
-device I/O. Its OPERATE writes the value as a DIRECT would.
+**Gateway select** (every point in phase 2): a SELECT that passes the
+checks makes the selection and is answered OK, with no device I/O. Its
+OPERATE writes the value as a DIRECT would.
 
-**With native select** the device has a window W, declared by the protocol
-per point (`native_select_window`), and possibly a configured shorter one.
-The device windows the survey found range from about 1 s to over 60 s. The
-gateway's select must suit an operator (reference 8.2, step 6, default
-30 s), which a 1 s window does not. The output chooses with `native_select:
-at_select | at_operate` (#98, B-5); this draft proposes, decision D-89
-(X-7):
+**Native select** (room), per output `native_select` (CS 7.2), decision
+D-89 (X-7):
 
-- **`at_select`** (the default): SELECT makes the device's select at once;
-  the device's own checks (its interlock, its synchrocheck) answer at
-  select time, where the operator sees them; OPERATE makes the device's
-  operate; CANCEL and the selection timeout make the device's cancel. The
-  output's `select_timeout` must be at most W: otherwise the configuration
-  is refused (`DRV-SBO-02`).
-- **`at_operate`**: the gateway holds the operator's selection, and the
-  driver runs the device's select and operate back to back at OPERATE. The
-  sequence is fixed below.
+- `at_select` (the default): SELECT makes the device's select at once; the
+  device's checks answer at select time; OPERATE makes the device's
+  operate; CANCEL and the timeout make the device's cancel. CS refuses a
+  `select_timeout` above the device window.
+- `at_operate`: the gateway holds the operator's selection, and the driver
+  runs the device's select and operate back to back at OPERATE:
+  1. SELECT: checks 2 to 10 run, the driver makes a gateway selection and
+     answers OK. **Nothing on the device is verified** (not that it is
+     reachable, not its local state, not its interlocks).
+  2. OPERATE within `select_timeout`: checks 2 to 10, with rule 2.
+  3. The worker starts it at the next boundary, before any due poll (6.2),
+     with check 11.
+  4. It sends the device's select; deadline the earlier of the expiry and
+     the device's request deadline (7.1).
+  5. On a positive answer at `t_sel` it checks the expiry and sends the
+     operate at once, with no other request to that device between (6.6).
+     If `t_sel` plus the device window would pass first, it sends the
+     device's cancel and answers REJECTED with `SELECT_EXPIRED`.
+  6. It waits for the operate's answer, to the earlier of the expiry and
+     its deadline.
+  7. Results: select refused, REJECTED `SELECT_FAILED` with the device's
+     cause; select unanswered, the device's cancel and REJECTED
+     `SELECT_FAILED` (no operate was sent); operate refused, REJECTED with
+     the mapped reason; operate unanswered, TIMEOUT `NO_RESPONSE` (and 7.3);
+     operate accepted, OK. The selection ends in every case.
+
+  Steps 3 to 7 take at most one boundary wait, two requests and one step
+  between them: about 2 s at a device timeout of 1 s, within the expiry
+  `scada-cmd` sets. CS refuses an `at_operate` output whose device window
+  is below twice the device's request deadline.
 - A `DIRECT` from AUTO or REMOTE on a point whose device requires a select
-  (its control model has no direct operate) runs the `at_operate` sequence,
-  steps 3 to 7.
+  runs steps 3 to 7.
 
-The `at_operate` sequence:
+### 8.7 Expiry
 
-1. **SELECT** (from `scada-cmd`, at reference 8.2 step 6). Checks 2 to 9 of
-   8.2 run. The driver makes a gateway selection and answers OK. Nothing
-   goes to the device: the SELECT verifies the request, the mode and that
-   the output is not selected, and **nothing on the device** (not that it
-   is reachable, not its local or remote state, not its interlocks). The
-   operator's confirmation follows within `select_timeout`.
-2. **OPERATE** arrives within `select_timeout`. Checks 2 to 9 run, with
-   rule 2 of the selection rules.
-3. The worker takes the order at the next scan boundary, before any due
-   poll (6.2), and makes checks 10 and 11.
-4. It sends the device's select. Deadline: the earlier of the request's
-   expiry and the device's `timeout`.
-5. On a positive select answer, at time `t_sel`, it checks the expiry
-   again and sends the device's operate at once: no other transaction to
-   that device, and no other order of the channel, between steps 4 and 6.
-   If `t_sel + W` would pass before the operate can be sent (a slow answer
-   that used up the window), it sends the device's cancel instead and
-   answers REJECTED with `SELECT_EXPIRED`.
-6. It waits for the operate's answer. Deadline: the earlier of the expiry
-   and `write_timeout`.
-7. The result:
-   - select refused by the device: REJECTED, `SELECT_FAILED`, the
-     device's cause as the raw code; nothing more is sent;
-   - select unanswered at its deadline: the device's cancel is sent when
-     the protocol has one; REJECTED, `SELECT_FAILED`, raw 0. No operate was
-     sent, so the command was not executed;
-   - operate refused: REJECTED with the reason the protocol maps (for
-     example `REJECTED_INTERLOCK`);
-   - operate unanswered: TIMEOUT, `NO_RESPONSE` (outcome unknown);
-   - operate accepted: OK, or the two-phase rule of 8.6.
+- The library answers EXPIRED what expired before the driver takes it (TD
+  9.2). The worker checks the expiry again right before the first byte
+  (check 11) and before each write of a list. A list interrupted by expiry
+  is DEVICE_ERROR `PARTIAL` when something was sent, EXPIRED when nothing
+  was.
+- A request deadline is never later than the request's expiry. A write
+  whose answer has not arrived by its deadline is TIMEOUT `NO_RESPONSE`,
+  and on TCP its connection is closed abortively first (7.3).
+- A request is never executed after its expiry (up to our last byte, 7.3),
+  never twice, and never after the driver detached from the generation it
+  was taken in (9).
 
-   In every case the selection ends (selection rule 3).
+### 8.8 Results
 
-Timing: steps 3 to 7 take at most one scan wait, plus two transactions on
-the device, plus one scheduling step between them. On a channel with a
-device timeout of 1 s that is about 2 s worst case after the OPERATE was
-taken, within the expiry `scada-cmd` sets (reference 8.2, step 9). A device
-whose window W is shorter than the time between two of its transactions
-cannot be operated this way. Its outputs are configured `direct`, or the
-device's window is raised; `DRV-SBO-01` refuses an `at_operate` output
-whose W is below twice the device's `timeout`.
-
-Reason: `at_select` keeps the device's checks at select time whenever the
-device's window allows it; `at_operate` keeps the operator's 30 s with a
-device whose window is too short for a person, and still uses the device's
-select procedure, as reference 6.4 requires. The cost of `at_operate` is
-that a refusal by the device comes at OPERATE, after the operator
-confirmed; the operator then sees a failed command with the device's
-cause.
-
-### 8.5 Expiry
-
-- The library answers EXPIRED what has expired before the driver takes it
-  (tag database contract, section 9.2).
-- The worker checks `expiry_mono_ns` again right before it acts on the
-  device (check 11) and before each write of a list (8.3). A request that
-  expires between two writes of a list stops there: DEVICE_ERROR with
-  reason `PARTIAL` when something was sent, EXPIRED when nothing was.
-- A transaction's deadline is never later than the request's expiry. A
-  write whose answer has not arrived by the expiry is answered TIMEOUT
-  (outcome unknown).
-- A request is never executed after its expiry, never twice, and never
-  after the driver detached from the generation it was taken in (section
-  9).
-
-### 8.6 Results
-
-One result per request taken, posted by the command thread (tag database
-contract, section 9.2), at the request's final outcome. Status values are
-the seven of the tag database (frozen). The driver adds a reason and the
-raw protocol code in `WriteResult.protocol_error` (decision D-85):
+One result per request taken, posted by the command thread (TD 9.2) at the
+request's final outcome. A result the queue refuses (`SCADA_E_FULL`) is
+posted again at each wake of the command thread until the request's expiry,
+then counted in `sys.proc.<process>.answers_dropped`. Status values are the
+seven of TD (frozen); the driver adds a reason and the raw protocol code
+in `WriteResult.protocol_error` (decision D-85):
 
 ```
 protocol_error = (reason << 16) | raw        // reason 0 .. 32767, raw 0 .. 65535
 ```
 
-- `raw` is the protocol's own code (a Modbus exception code, a protocol's
-  cause), or 0. A raw code wider than 16 bits is given as 0xFFFF here, and
-  in full in `sys.dev.<device>.last_status`.
-- `reason` is from the table below; 0 is "no reason".
+- `raw` is the protocol's own code (a Modbus exception code), or 0. A raw
+  code wider than 16 bits is given as 0xFFFF here and in full in
+  `sys.dev.<device>.last_status`.
+- What the field means today: TD 9.4, `int32_t protocol_error; //
+  driver-specific, 0 if none`; reference 5.3 lists "protocol error code".
+  The library checks only `status` and the reserved fields (TD 14.1), and
+  no consumer reads `protocol_error` before phase 5. The packing keeps the
+  field driver-specific for the library and 0 when there is nothing to
+  say. **open: needs the product owner's ruling (R-4)**: if "protocol error
+  code" is read as the raw code alone, the alternative is the raw code here
+  and the reason in a diagnostic tag. Committee recommendation: accept the
+  packing.
 
-What the field means today: tag database contract 1.0, section 9.4,
-`int32_t protocol_error; // driver-specific, 0 if none`; reference 5.3
-lists "protocol error code" among the result's fields. The library
-checks only the reserved fields and `status` of a result (tag database
-contract, section 14.1), and no consumer reads `protocol_error` before
-phase 5. The packing keeps the field driver-specific for the library and
-keeps 0 when there is nothing to say; it only fixes, for every driver, what
-"driver-specific" holds, so `scada-cmd` reads one form. This draft holds
-that this changes no meaning of the tag database contract: no reader of
-1.0 is affected and no layout version is needed. If the owner reads
-"protocol error code" in reference 5.3 as the raw code alone, the packing
-is a change to the result's meaning, and the alternative is the raw code in
-`protocol_error` and the reason in a device diagnostic tag. **open: needs
-the product owner's ruling (R-4).**
-- The mapping from protocol codes to reasons is the protocol's, and may be
-  overridden per device type in configuration (a device that uses a
-  protocol's code with another meaning).
-
-| Reason | Value | Status | Meaning | May the requester retry |
+| Reason | Value | Status | Meaning | Requester may retry |
 | --- | --- | --- | --- | --- |
 | (none) | 0 | OK | Accepted by the device | |
 | `ALREADY_IN_POSITION` | 1 | OK | The device reports nothing to do | |
 | `NOTHING_TO_CANCEL` | 2 | OK | CANCEL with no live selection | |
 | `UNKNOWN_TARGET` | 10 | REJECTED | Not an output of this driver | No |
-| `WRONG_CONTROL_MODEL` | 11 | REJECTED | Operation not allowed for the output, or the device refused it for its control model | No |
-| `INVALID_VALUE` | 12 | REJECTED | Type or limits, or the device refused the value | No |
-| `NOT_SELECTED` | 13 | REJECTED | No live selection with that id | No; select again |
+| `WRONG_CONTROL_MODEL` | 11 | REJECTED | Operation not allowed for the output, or refused by the device for its control model | No |
+| `INVALID_VALUE` | 12 | REJECTED | Type, finiteness, kind, limits, raw range, or refused by the device | No |
+| `NOT_SELECTED` | 13 | REJECTED | No live selection with that id | Select again |
 | `ALREADY_SELECTED` | 14 | REJECTED | A live selection exists | No |
 | `SELECTION_MISMATCH` | 15 | REJECTED | Source, user or value differ from the SELECT | No |
-| `SELECT_FAILED` | 16 | REJECTED | The device refused its select | No |
-| `SELECT_EXPIRED` | 26 | REJECTED | The device's window passed before the operate could be sent (8.4, `at_operate` step 5); cancel sent | No; give the command again |
-| `CONFIG_MISMATCH` | 17 | REJECTED | Device in `MISMATCH` or disabled | No |
-| `RATE_LIMITED` | 18 | REJECTED | The point's write rate limit (8.7) | Later |
-| `BUSY` | 19 | REJECTED | The driver's order queue was full, or the device answered busy and did not execute | Yes |
+| `SELECT_FAILED` | 16 | REJECTED | The device refused or did not answer its select; no operate sent | No |
+| `CONFIG_MISMATCH` | 17 | REJECTED | Device disabled or in `MISMATCH` | No |
+| `RATE_LIMITED` | 18 | REJECTED | A write rate limit (8.9) | Later |
+| `BUSY` | 19 | REJECTED | The order queue was full, or the device answered busy and did not execute | Yes |
 | `REJECTED_INTERLOCK` | 20 | REJECTED | The device's interlock refused | No |
 | `REJECTED_SYNCHROCHECK` | 21 | REJECTED | The device's synchrocheck refused | No |
 | `REJECTED_LOCAL` | 22 | REJECTED | The device is in local control | No |
-| `REJECTED_MODE` | 23 | REJECTED | The device's own mode or a missing enable refused (a permanent state refusal) | No |
+| `REJECTED_MODE` | 23 | REJECTED | A permanent state refusal of the device | No |
 | `NOT_SUPPORTED` | 24 | REJECTED | The device does not have the function | No |
 | `COMM_FAIL` | 25 | REJECTED | Not connected; nothing was sent | Yes |
+| `SELECT_EXPIRED` | 26 | REJECTED | The device window passed before the operate (8.6); cancel sent | Give it again |
+| `DEVICE_UNAVAILABLE` | 27 | REJECTED | Device demoted or refusing (check 8) | Later |
+| `SELECTED` | 28 | REJECTED | DIRECT on an output with a live selection | No |
 | `PARTIAL` | 30 | DEVICE_ERROR | Part of a list of writes was applied | Read the feedback first |
 | `DEVICE_FAULT` | 31 | DEVICE_ERROR | Any other error answer | No |
-| `NO_RESPONSE` | 40 | TIMEOUT | Sent, no answer: whether it was executed is unknown | Read the feedback first |
-| `TIMEOUT_CONFIRM` | 41 | TIMEOUT | No confirmation of a two-phase write | Read the feedback first |
-| `TIMEOUT_TERMINATION` | 42 | TIMEOUT | Confirmed, but no termination in time | Read the feedback first |
+| `NO_RESPONSE` | 40 | TIMEOUT | Sent, no answer: executed or not is unknown | Read the feedback first |
+| `TIMEOUT_CONFIRM` | 41 | TIMEOUT | No confirmation of a two-phase write (room) | Read the feedback first |
+| `TIMEOUT_TERMINATION` | 42 | TIMEOUT | Confirmed, no termination in time (room) | Read the feedback first |
 | `EXPIRED_BEFORE_SEND` | 50 | EXPIRED | Check 11 | No |
-| `NOT_STARTED` | 60 | ABORTED | Taken, not started, and the generation retired or the driver stopped (section 9) | No |
-| (any) | | NOT_AUTHORISED | Check 5; reason 0 | No |
+| `NOT_STARTED` | 60 | ABORTED | Taken, not started, and the generation retired or the driver stopped (9) | No |
+| `LOCAL_AUTHORITY` | 70 | NOT_AUTHORISED | Check 6 | No |
+| (none) | 0 | NOT_AUTHORISED | Check 5 | No |
 
-- "May the requester retry" is guidance for `scada-cmd` and `scada-control`;
-  the driver itself never retries a write (8.7).
-- **Two-phase writes** (room; survey D-30): a protocol whose write is
-  confirmed and later terminated (`write_completion: two_phase`) calls
-  `WriteCompletion::accepted()` and later `completed(outcome)`. The one
-  result is posted at completion. The termination must arrive within the
-  output's `termination_timeout` (default: the request's expiry), otherwise
-  TIMEOUT with `TIMEOUT_TERMINATION`. A negative confirmation completes at
-  once with its refusal.
-
-  Checked against the command gateway (reference 8.2). After `scada-cmd`
-  posts the request (step 9) its status tag reads `EXECUTING` (reference
-  8.1) until the result arrives; then it waits for the feedback within
-  `feedback_timeout` (step 10). With one result at completion:
-  - a refusal at confirmation (local mode, interlock, wrong control model)
-    reaches `scada-cmd` as fast as with a one-phase write;
-  - a long run (a breaker travelling, a termination tens of seconds later)
-    shows as `EXECUTING` for the whole run. That is what an operator needs
-    to see: the command is with the device and has not failed. The
-    feedback tag changes during the run and is on the operator's screen
-    meanwhile;
-  - the time limits are the request's expiry, set by `scada-cmd` (at most
-    60 s, tag database contract 14), and the output's
-    `termination_timeout` within it; `feedback_timeout` starts after the
-    result, when the device says it has finished.
-
-  So `scada-cmd` need not learn "accepted" to do its steps. It could not
-  learn it from a second result anyway: a requester drops a second result
-  for an id it already holds (tag database contract, section 9.2, "the
-  consumer ignores an id it has already stored"), so two results per
-  request would be a change to that contract. The stage is published for
-  people in `sys.dev.<device>.last_command_stage` (INT64: 1 sent, 2 accepted, 3
-  completed) with its time. If the owner wants the stage per command on the
-  HMI, the room is a driver-owned stage tag per output (INT64), with no
-  layout change; this draft does not add it.
+- "Requester may retry" is guidance for `scada-cmd` and `scada-control`;
+  the driver never retries a write (8.9).
+- The mapping from protocol codes to reasons is the protocol's, overridable
+  per device type in configuration (CS).
+- **Two-phase writes** (room). A protocol whose write is confirmed and
+  later terminated completes once, at termination, within the output's
+  `termination_timeout` (CS; default the request's expiry), so a two-phase
+  command is bounded by the 60 s request lifetime (TD 14): a drive that
+  travels longer ends as `TIMEOUT_TERMINATION` although it works. Checked
+  against reference 8.2: `scada-cmd` shows EXECUTING from its post to the
+  result; a refusal at confirmation arrives as fast as a one-phase one; its
+  `feedback_timeout` starts at the result. A second result per request
+  would be dropped by the requester as a duplicate id (TD 9.2), so it would
+  be a change to TD. The stage is published for people in
+  `sys.dev.<device>.last_command_stage`; a per-output stage tag is room.
 - Static protocol options of a command (a qualifier, check bits, an
-  originator, a pulse qualifier, a protocol's control code per state) come
-  from the output's configuration, looked up by the target. The frozen
-  `WriteRequest` has no room for them and needs none: they do not change
-  per request. A test flag per request is not supported.
+  originator) come from the target point's `address` (CS annex A.5). The
+  frozen `WriteRequest` needs no room for them.
 
-### 8.7 No retry, rate limits
+### 8.9 No retry, rate limits, storage
 
 **Review by a person.**
 
-- The framework never resends a write once any byte of it was sent. A
-  write that timed out is TIMEOUT with `NO_RESPONSE` (outcome unknown;
-  survey D-36). A trigger is sent once. This holds for every source
-  (reference 14.4: "no automatic retry of operator commands"; for AUTO the
-  next cycle of `scada-control` decides).
-- A device's "busy, not executed" is answered REJECTED with `BUSY`; the
-  requester decides. Room: a protocol may declare a write `idempotent` and
-  a busy answer definite, and configuration may then allow `busy_retries`
-  (default 0) within the expiry. Phase 2 has none.
-- Write rate limits per point (survey C-48, D-35): `min_interval` and, for
-  `storage: nvm`, `max_per_day`. A request that would exceed either is
-  refused (`RATE_LIMITED`) whatever its source; nothing bypasses it but a
-  reload with a new limit. An `nvm` output cannot have a cyclic source
-  (`DRV-NVM-01`). Phase 2: the counts are kept in memory, so a driver
-  restart starts a new day count; durable counts are room (with D-26 of the
-  survey, per-device durable state).
+- The framework never resends a write once any byte of it was sent, for any
+  source (reference 14.4: "no automatic retry of operator commands"; for AUTO
+  the next cycle of `scada-control` decides). A write that timed out is
+  TIMEOUT `NO_RESPONSE`. A trigger and a pulse are sent once.
+- A device's "busy, not executed" answer to a write is REJECTED `BUSY`; the
+  requester decides. `busy_retries` (CS) applies to reads only.
+- Rate limits (CS `write_limits`: `min_interval`, `max_per_day`, on any writable point, required with `storage: nvm`) are checked
+  at check 9 and counted when the first byte of the write is sent, so a
+  request refused later uses nothing. Nothing bypasses them but a reload
+  with a new limit. Phase 2 keeps the counts in memory: a driver restart
+  starts a new day count, so n restarts allow n times the daily writes.
+  Durable counts are room.
+- `storage` is required on every writable point (CS); `nvm` points have no
+  cyclic source (no `refresh`, no control block, CS).
 
-### 8.8 Accepted is not done
+### 8.10 Accepted is not done
 
-- OK means the device accepted the write by its protocol, and nothing more
-  (survey D-32): devices accept writes they ignore (a command bit that
-  acts only through site logic, a value outside a range the device
-  silently discards, a reset ignored in a locked mode). Whether the plant
-  followed is decided by `scada-cmd` from the feedback tag within the
-  output's `feedback_timeout` (reference 8.2, step 10). The driver never
-  reports a command as having reached its feedback.
-- Read-back: after an OK, PARTIAL or TIMEOUT write the framework schedules
-  a `READ_NOW` of the output's feedback or read-back point after its
-  `settle` time (default 0: at the next scan boundary), and after an edge
-  command (a pulse, a trigger), so that the feedback tag is fresh when
-  `scada-cmd` compares it. The read-back is not part of the result.
-- An output without read-back (`no_feedback: true`, reference 12.5) whose
-  point has a tag: the framework writes the value last written to it with
-  UNCERTAIN and LOCAL_TIME, the source time the time of the OK. UNCERTAIN
-  is the mark "written, not confirmed"; no new flag is needed. A `wo` point
-  is never polled.
+- OK means the device accepted the write by its protocol, nothing more.
+  Devices accept writes they ignore (a command bit that acts only through
+  site logic, a value outside a range the device discards, a reset ignored
+  in a locked mode). Whether the plant followed is decided by `scada-cmd`
+  from the feedback within `feedback_timeout` (reference 8.2, step 10). The
+  driver never reports a command as having reached its feedback.
+- Read-back: after an OK, PARTIAL or TIMEOUT write, when the output's
+  feedback point is on the same channel, the framework schedules a
+  `READ_NOW` of it after its `settle` time (CS), and after an edge command,
+  so that the feedback is fresh when `scada-cmd` compares it. A feedback on
+  another channel or driver is read by its own poll. The read-back is not
+  part of the result.
+- A write-only point with a tag and no read-back: the framework writes the
+  value last written with UNCERTAIN and LOCAL_TIME, the source time the time
+  of the OK. UNCERTAIN marks "written, not confirmed". A `wo` point is never
+  polled.
 
-### 8.9 Other masters
+### 8.11 Other masters
 
-Another master may command the same device. Its commands show only as
-changes of the feedback tag, which the driver reports like any change. The
-driver keeps no image of the device's outputs beyond its selections, and
-takes nothing it wrote as still true.
+Another master's commands show only as changes of the feedback, which the
+driver reports like any change. A refreshed setpoint (8.12) overwrites
+another master's value at every period: the template says so where a
+device has a second setpoint source.
 
-### 8.10 Refresh of setpoints
+### 8.12 Refresh of setpoints
 
 **open: needs the product owner's ruling (X-5).** **Review by a person.**
-Phase 5; room in phase 2.
+Phase 5; room in phase 2. Decision D-90.
 
 Some devices drop a setpoint after a validity time, or fall back when
-setpoints stop arriving. Such outputs need the value written again
-cyclically without a new operator action. "No audit, no action" (reference
-5.3, 8.2 step 8; tag database contract 9.3) must hold. This draft proposes
-option (a), decision D-90:
+setpoints stop. This draft proposes option (a):
 
-- An output configured `refresh: <period>` is written again by the
-  framework with the value of the last request executed with OK, every
-  period, as part of that request: its event record covers the refreshes,
-  and no new record is posted for them. The record must say that the
-  output refreshes (the journal schema of phase 5 carries it).
-- A refresh is a write of the same value to the same target from the same
-  source; it is made only while all of these hold, checked before each
-  refresh:
-  - the output's mode tag reads the mode of that request's source, GOOD
-    (as check 5);
-  - the request tag of that mode (reference 8.1: the auto or the manual
-    request tag) reads GOOD, not STALE, not OWNER_DOWN, and holds the
-    refreshed value;
-  - the generation is the one the request was taken in, and the driver
-    has not restarted;
-  - the device is connected and not `MISMATCH`.
-- When any condition fails, refreshing stops for good; it starts again only
-  with a new request. The device's own fallback then acts (reference 14.4:
-  the device's communication-loss behaviour is the barrier when the unit
-  is gone).
-- Refreshes obey the rate limits (8.7) and the pacing (6.4), and are never
-  retried; a failed refresh is counted (`sys.dev.<device>.refresh_failures`)
+- Only a `setpoint` output may have `refresh` (CS); never one that is
+  `dangerous`, `sbo` or `nvm` (CS refuses them).
+- The framework writes again the value of the last request executed with
+  OK, every period, as part of that request: its event record covers the
+  refreshes, and says that the output refreshes (the journal schema of phase
+  5). No new record is posted per refresh.
+- A refresh is made only while all hold, checked before each: the mode tag
+  reads the mode of that request's source, GOOD (as check 5); the request
+  tag of that mode (reference 8.1) reads GOOD, not STALE, not OWNER_DOWN,
+  and holds the refreshed value; the generation is the request's; the
+  driver has not restarted; the device is usable.
+- When one fails, refreshing ends. The end is visible: `<output>.refresh`
+  (INT64, owned by the target's channel worker, CS 12.5: 0 none, 1 active,
+  2 ended other than by a new request) is set to 2, and the main thread posts a best-effort
+  event record of the end (8.13 rules). An alarm on value 2 is phase 7's.
+  The device's own fallback then acts (reference 14.4).
+- What ends a refresh unplanned: a restart of `scada-cmd` (its request tags
+  read OWNER_DOWN), any tag-set commit (a generation change), a new request
+  the driver refuses (the request tag no longer holds the refreshed value).
+  For a curtailment limit ordered by a grid operator, the device then falls
+  back after its own time.
+- Who re-establishes a standing MANUAL setpoint after such an end: in this
+  draft nobody automatically; the operator gives it again, alerted by the
+  tag. The alternative, `scada-cmd` posting it again from the retained
+  manual request tag, needs a journalled request with a system user id
+  (TD 9.4 requires a non-zero `user_id` for OPERATOR) and is for the
+  owner.
+- Refreshes obey rate limits and pacing, are never retried, and never
+  select. A failed refresh is counted (`sys.dev.<device>.refresh_failures`)
   and the next period tries again.
-- A refresh is not a command: it never selects, and it is not offered to
-  outputs configured `sbo`.
+- For AUTO, `scada-control` already posts again "whose refresh interval
+  expired" (reference 7.2, step 3); an AUTO output uses one of the two (CS).
 
-For AUTO outputs `scada-control` already posts again "whose refresh
-interval expired" (reference 7.2, step 3); an AUTO output may use either,
-not both (`DRV-CFG-09`, to be added with phase 5).
+Committee recommendation: accept (a), with the end made visible.
 
-### 8.11 Shutdown and loss of the source
+### 8.13 Fail-safe behaviour
 
-**open: needs the product owner's ruling (X-9).** **Review by a person.**
-Phase 5 for protocol drivers; phase 2 for the local outputs of `scada-io`
-(#107).
+**Review by a person.** Decision D-91.
 
-Reference 14.4: on orderly shutdown outputs follow `on_shutdown: hold |
-safe`; when `scada-control` stops, `scada-io` and drivers apply each
-affected output's configured behaviour, hold or safe after a timeout.
-Reference 6.5 gives `scada-io` its safe states. For a remote device "safe"
-means writing a value: a safe value, or a release value that hands control
-back to the device's own settings. This draft proposes, decision D-91:
+One table for every case. Keys and their defaults are CS's (4.10, 7.2):
+`on_shutdown: hold | safe | release` and `on_control_loss: { action, after
+}`; the defaults below are the ones this contract asks CS to fix.
 
-- The framework can do both (survey D-34, X-9 option (b)): stop refreshing
-  only (`hold`), or write once the output's configured release value
-  (`release`, the output's `limits.release`) or safe value (`safe`, the
-  output's `safe_state`). The keys are `on_shutdown` and `on_source_loss`
-  (configuration schemas contract, 7.2), each `hold | safe | release`;
-  `hold` and `safe` are the words of reference 14.4.
-- When: `on_shutdown` at an orderly stop of the driver, for each connected
-  device, before disconnect; `on_source_loss` for an output in AUTO mode,
-  when the process that owns its auto request tag (`scada-control`) has
-  been down for the output's `source_lost_after` (reference 14.4, "after a
-  timeout").
-- "No audit, no action" holds for these writes too: before a safe or
-  release write the driver posts its own event record to its event queue
-  (`events.drv-<protocol>`, a queue the tag set gives from phase 5 to every
-  driver with an output whose `on_shutdown` or `on_source_loss` is not
-  `hold`; section 15, B-8). If the post is refused, the driver
-  does not write: it stops refreshing (as `hold`) and relies on the
-  device's own fallback, and counts the case
-  (`sys.proc.<process>.safe_writes_unjournalled`). Reason: the device's fallback
-  is the barrier the reference names for a unit that cannot act (14.4); a
-  fail-safe write without its record would be the first action without
-  audit.
-- The safe write is a DIRECT write, never retried, bounded by the stop
-  time of the service manager; its outcome is logged.
-- After a driver restart or a generation change, no output is written
-  until a new request arrives (reference 14.4: outputs are not driven until
-  the control runtime has run a cycle).
+| Case | Key | Delay | Default, local output (`scada-io`) | Default, remote output (driver) | Who acts |
+| --- | --- | --- | --- | --- | --- |
+| Orderly stop of the driver or `scada-io` | `on_shutdown` | None | `safe` (reference 6.5: "on shutdown") | `hold` (reference 14.4: "hold (default for most process outputs)") | The stopping process, before it disconnects |
+| `scada-control` down while the output is in AUTO | `on_control_loss` | `after` (local default 0: at its heartbeat timeout) | `safe` (reference 6.5: "when the control runtime's heartbeat stops") | `hold` (reference 14.4: "hold, or go to safe state after a timeout") | The command thread (remote), the scan thread (local) |
+| `scada-cmd` down while the output is in MANUAL | None | | `hold` | `hold`; a refreshed setpoint stops refreshing and the device falls back (8.12) | The worker |
+| Generation change | CS's per-output generation-change behaviour (reference 19.2) | The restart | `hold`; `safe` when the limit of reference 5.5 is exceeded | The same | `scada-conf` decides; the driver acts (9.2) |
+| Connection to the device lost | None | | n/a | Nothing can be written; the device's own fallback (reference 14.4) | The device |
+| `scada-io` crashes | `on_shutdown` | None | As the hardware leaves the line, then `safe` by the stop step (13.4) | n/a | The service manager's stop step |
+| The whole system hangs | None | | Hardware default (reference 14.4) | The device's fallback | Hardware watchdog |
 
-`scada-io` in phase 2 (#107) applies `set_safe_state` of its HAL to local
-outputs on stop and on the loss of `scada-control`'s heartbeat (reference
-6.5), journalled the same way once the events consumer exists (phase 5);
-until then its tests check the hardware state, and the journal half is
-phase 5.
+Where CS's defaults differ from this table (a draft of CS gives `hold` for
+`on_shutdown` of local outputs, applies `on_control_loss` in MANUAL to the
+loss of `scada-cmd`, and fixes the generation-change behaviour), the
+difference is listed in section 18 until the two agree.
 
-### 8.12 `READ_NOW`
+- `safe` writes the output's `safe_state`; `release` writes `limits.release`
+  (both raw or engineering as declared, 8.4); `hold` writes nothing.
+- A safe or release write is a DIRECT write, sent once, never retried,
+  bounded by the stop time of the service manager.
+- CS refuses `safe` and `release` on a `pulse`, `trigger` or `dangerous`
+  output unless the output names its safe action explicitly.
+- After a driver restart or a generation change no output is written until
+  a request of the new generation arrives (reference 14.4), except a local
+  output's `at_start` (13.4).
 
-`READ_NOW` reads the target's point outside its poll group, at the head of
-the channel's order queue. It changes nothing on the device: it is refused
-(REJECTED, `NOT_SUPPORTED`) for a `side_effect` or `wo` point. It is
-answered OK when the read returned outcome `VALUE`, `NO_VALUE`, `ABSENT` or
-`DEVICE_INVALID` (the device answered; the tag says how), and TIMEOUT when
-it was `COMM_FAIL`. It needs no mode check and no selection; it is still a
-request and needs its event record (tag database contract 9.3). Phase 2.
+**A fail-safe action never waits for an audit record.** **open: needs the
+product owner's ruling (R-5)**, because it qualifies "no audit, no action"
+for fail-safe actions only. The action is taken; then an event record is
+posted best-effort by the main thread, the one producer of the process's
+events queue (`events.drv-<protocol>`, or `scada-io`'s, CS 12.3; from phase
+5), to which the command thread and the workers hand their records
+in-process; a refused post is counted (`sys.proc.<process>.safe_unjournalled`) and
+logged. Reason: a safe state on loss of control is the configured answer to
+a failure, and the audit service being down is likely part of the same
+failure; reference 6.5 requires `scada-io` to apply it "when the control
+runtime's heartbeat stops", and the phase 5 acceptance requires that
+"outputs reach safe state when `scada-control` is killed". "No audit, no
+action" stays whole for commands. Committee recommendation: accept, for
+local and remote outputs alike.
+
+### 8.14 `READ_NOW`
+
+Reads the target's point at the head of the channel's orders. It changes
+nothing on the device: refused (`NOT_SUPPORTED`) for a point in a
+`side_effect` or `exclusive` range or a `wo` point. Answered OK when the
+device answered (outcomes `VALUE`, `NO_VALUE`, `ABSENT`, `DEVICE_INVALID`;
+the tag says which), TIMEOUT when it was `COMM_FAIL`. It needs no mode check
+and no selection; it is a request and needs its event record (TD 9.3).
+Phase 2.
 
 ## 9. Generation change and restart
 
@@ -1426,17 +1378,14 @@ This section answers #84. **Review by a person** (restart behaviour).
 
 ### 9.1 After every attach
 
-- The framework writes every tag of each of its owners before the
-  worker's first scan, on the worker's thread (tag database contract,
-  section 6.3: a reused record may read GOOD with an old value): value as
-  stored, quality BAD, flag NOT_INIT, `source_time_ns` 0 ("no device
-  time"), except a tag restored from a retain file (RESTORED), which keeps
-  its restored value until the device is read. Diagnostic tags are written
-  with their current values. Phase 2.
-- Handles are resolved again; the plan is kept unless the configuration
-  changed (section 11).
-- No output is written by the driver until a request of this generation
-  asks for it (8.11).
+- Before a worker's first request, the framework writes every tag of each
+  of its owners: value as stored, quality BAD, flag NOT_INIT,
+  `source_time_ns` 0, except a tag restored from a retain file (RESTORED),
+  which keeps its restored value until the device is read (TD 6.3).
+  Diagnostic tags are written with their current values.
+- Handles are resolved again.
+- No output is written until a request of this generation asks for it
+  (8.13).
 
 ### 9.2 Duties in a RETIRING generation
 
@@ -1445,476 +1394,631 @@ When the main thread learns that the generation is RETIRING
 
 1. **New requests.** The command thread calls `scada_queue_next` on every
    `cmd` queue until it returns `SCADA_E_RETIRING`; the library answers
-   ABORTED what is still queued (tag database contract, section 9.5). The
-   command thread dispatches nothing new.
-2. **Requests taken and not started.** An order in a worker's order queue
-   that the worker has not started is returned unstarted; the command
-   thread answers it ABORTED with reason `NOT_STARTED`. It was not executed,
-   so ABORTED is true, and results are accepted in a RETIRING generation
-   (tag database contract, 9.5).
-3. **Requests in flight.** An order the worker has started completes, and
-   its answer is posted, before the process detaches. Its bound is its
-   deadline (at most its expiry). A two-phase order whose termination has
-   not arrived when the drain budget of the process (1 s, tag database
-   contract, section 11.3) ends is answered TIMEOUT with
-   `TIMEOUT_TERMINATION`, and a termination arriving later is ignored. The
-   driver never acts on a request after it detached: otherwise the
+   ABORTED what is still queued (TD 9.5). Nothing new is dispatched.
+2. **Taken and not started.** An order a worker has not started is returned
+   unstarted and answered ABORTED with `NOT_STARTED`: it was not executed,
+   and results are accepted in a RETIRING generation (TD 9.5).
+3. **In flight.** An order the worker has started completes and is answered
+   before detach, bounded by its deadline. A read in flight is abandoned at
+   once (its points keep their values; on a serial line the worker then
+   waits the quiet time, 7.2). A write in flight is never abandoned. A
+   two-phase order (room) whose termination has not come when the drain
+   budget (1 s, TD 11.3) ends is answered TIMEOUT `TIMEOUT_TERMINATION`.
+   The driver never acts on a request after it detached: otherwise the
    operator gives the command again in the new generation and the output
    operates twice.
-4. **Selections** end (8.4, rule 3). A live native selection gets the
-   device's cancel, when the device is connected and the protocol has one,
-   before detach.
-5. **Refreshes** stop (8.10): they belong to requests of the old
-   generation.
-6. **Polling** goes on, and the workers write tags until the main thread
-   pauses them at a scan boundary to detach (tag writes stay allowed until
-   detach, tag database contract 11.3).
-7. **Detach** runs on the main thread, outside every cycle: a real-time
-   worker never calls `scada_queue_next` and is paused, not detached, so no
-   system call of the RETIRING path (tag database contract, 9.5) runs on a
-   real-time thread.
-8. **No answer across the change.** Every outcome a worker returns carries
-   the generation of its order. After the reattach the command thread
-   drops, logs and counts (`sys.proc.<process>.stale_outcomes`) any outcome of
-   an older generation; it never posts it: ids restart at 0 and could name
-   a request of the new generation.
-9. **Reattach:** attach to `current`, resolve, the writes of 9.1, resume the
-   workers. Connections stay open across the change unless the reload
-   changed the channel (section 11): device sessions do not belong to a
-   generation.
-10. **Outputs** hold, or go to their safe behaviour, until they are written
-    again in the new generation: AUTO values by `scada-control`, operator
-    commands by `scada-cmd` (reference 5.5; #84). The driver writes
-    nothing to them meanwhile, except the configured safe behaviour of
-    8.11 when `scada-conf` asks for it (phase 5).
+4. **Selections** end; a live native one gets the device's cancel when the
+   device is connected.
+5. **Refreshes** end (8.12).
+6. The main thread pauses the workers at their next boundary and detaches,
+   outside every cycle. A real-time thread never calls `scada_queue_next`
+   (2.4).
+7. **No answer across the change.** Every outcome carries the generation of
+   its order. After the reattach the command thread drops, logs and counts
+   (`sys.proc.<process>.stale_outcomes`) any outcome of an older generation;
+   ids restart at 0 and could name a request of the new one.
+8. **Reattach:** attach to `current`, load the expanded configuration of
+   the new generation (B-12), resolve, the writes of 9.1, resume.
+   Connections stay open unless the change altered the channel.
+9. **Outputs** hold, or go to their configured behaviour (8.13), until they
+   are written again in the new generation: AUTO values by `scada-control`,
+   operator commands by `scada-cmd` (reference 5.5; #84).
 
-Steps 1 to 8 fit in the 1 s drain of the tag database contract, section
-11.3, when every write deadline is at most 1 s; a longer deadline delays
-the detach by its excess, and `scada-conf` then applies the limit of
-reference 5.5. Phase 2.
+Steps 1 to 7 fit in the 1 s drain of TD 11.3 when every write deadline is at
+most 1 s; a longer write delays the detach by its excess, and `scada-conf`
+applies the limit of reference 5.5. Phase 2.
 
 ### 9.3 Driver restart
 
-A driver that crashed or stopped has lost every selection and every order
-it held; the library answers ABORTED what is still queued at its next
-attach (tag database contract, section 9.2). A request it took and did not
-answer is reported by its requester as failed with its outcome unknown
-(tag database contract, section 9.5). After the restart, 9.1 applies.
+A driver that stopped has lost every selection and every order it held; the
+library answers ABORTED what is still queued at its next attach (TD 9.2). A
+request it took and did not answer is reported by its requester as failed
+with its outcome unknown (TD 9.5). After the restart, 9.1 applies.
 
-## 10. Diagnostics
+## 10. Process start, configuration and stop
 
-Every driver publishes these system tags (reference 6.3, survey D-39). The
-framework writes them; a protocol only reports counts and states. Owners:
-channel and device tags are written by the channel's worker; process tags
-by the main thread. Counters are UINT64 since the process attached, and
-start at 0 at every attach. Times are INT64 nanoseconds UTC. Names are
-agreed with #98 (section 15, B-8).
+- **Configuration.** A driver loads the expanded configuration of the
+  generation it attached to, as CS defines its delivery (17, B-12): the file
+  carries the `config_hash` of its tag set, and the driver refuses to run
+  on a file whose hash differs from the generation's header. It publishes
+  the `config_id` it loaded in `sys.proc.<process>.config_id` and the
+  outcome in `sys.proc.<process>.config_state`, so that `scada-conf` can
+  see that an apply finished (reference 15.2: 2 s). It never expands
+  templates itself.
+- **No entry.** A driver process that starts and finds no entry for itself
+  in the expanded configuration (no channel of its protocol) logs it once
+  and exits with status 0, so that it does not run into the restart limit
+  (CS, Apply). Who starts a driver whose first channel is committed is
+  CS's (B-12).
+- **Stop.** On a stop signal the main thread stops the command thread
+  (requests still queued stay for the library to drain at the next attach,
+  TD 9.2), applies `on_shutdown` (8.13), pauses the workers at their next
+  boundary (a read in flight is abandoned, a write never), disconnects,
+  detaches and exits, within a stop budget below the service manager's stop
+  time (the unit sets both, #105).
 
-Per process, `sys.proc.<process>.<signal>`:
+## 11. Diagnostics and logging
+
+### 11.1 System tags
+
+The framework writes them; a protocol only reports counts and codes. Names
+and types are generated by CS 12.5 by the rule below. Counters are UINT64
+since attach; times INT64 ns UTC. States are written when they change;
+counters, times and averages at most once a second (300 devices at one
+request a second would otherwise put about 1,000 diagnostic changes a
+second on the change rings). At about 22 tags per device, 300 devices take
+about 6,600 tags; CS counts them against `limits.max_tags`.
+
+Per process, `sys.proc.<process>.<signal>`, owner the main thread:
 
 | Signal | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `realtime` | BOOL | | The real-time tier is in use (reference 4.3) |
+| `realtime` | BOOL | | The process runs a real-time thread on the real-time tier (2.5) |
+| `config_id` | UINT64 | | The first 64 bits of the `config_id` loaded (10) |
+| `config_state` | INT64 | | 0 loading, 1 applied, 2 refused (10, 12) |
 | `stale_outcomes` | UINT64 | count | Outcomes of an older generation dropped (9.2) |
-| `answers_dropped` | UINT64 | count | Answers the command thread could not post |
-| `safe_writes_unjournalled` | UINT64 | count | Safe writes not made for lack of a journal record (8.11) |
-| `config_errors` | UINT64 | count | Errors at the last configure or reload |
+| `answers_dropped` | UINT64 | count | Results not posted by the request's expiry (8.8) |
+| `safe_unjournalled` | UINT64 | count | Fail-safe actions whose event record was refused (8.13; phase 5) |
+| `log_dropped` | UINT64 | count | Log records the workers' log queues dropped (11.3) |
 
-Per channel, `sys.drv.<channel>.<signal>`:
+Per channel, `sys.drv.<channel>.<signal>`, owner the channel's worker:
 
 | Signal | Type | Unit | Meaning |
 | --- | --- | --- | --- |
 | `state` | INT64 | | 0 disconnected, 1 connecting, 2 connected |
 | `connects` | UINT64 | count | Successful connects |
-| `period.<group>` | FLOAT64 | ms | Achieved period of each poll group, averaged over its last 10 scans |
-| `requests_per_s` | FLOAT64 | 1/s | Requests sent, over the last 10 s |
-| `deadline_overruns` | UINT64 | count | Protocol calls that passed their deadline (2.3) |
-| `scan.<group>` | UINT64 | count | Scans of a synchronous scan group (6.7) |
-| `samples_dropped` | UINT64 | count | Samples a helper thread could not hand over (2.6) |
+| `refused_connects` | UINT64 | count | Connections refused by the peer (3.5) |
+| `secured` | BOOL | | The connection is authenticated and encrypted; false for every phase 2 channel (reference 13.3) |
+| `period.<group>` | FLOAT64 | ms | Achieved period of each poll group, over its last 10 periods |
+| `requests_per_s` | FLOAT64 | 1/s | Requests over the last 10 s |
 
-Per device, `sys.dev.<device>.<signal>`:
+Per device, `sys.dev.<device>.<signal>`, owner its channel's worker:
 
 | Signal | Type | Unit | Meaning |
 | --- | --- | --- | --- |
-| `state` | INT64 | | Device state of 3.4 |
-| `last_ok_time` | INT64 | ns UTC | Last successful transaction |
-| `requests` | UINT64 | count | Transactions sent |
-| `errors` | UINT64 | count | Transactions with an error answer |
-| `timeouts` | UINT64 | count | Transactions without an answer |
-| `response_ms` | FLOAT64 | ms | Average response time over the last 100 transactions |
-| `requests_per_scan` | UINT64 | count | Requests of the plan, all groups (6.3) |
-| `pacing_limited` | BOOL | | A group of the device misses its period because of pacing (6.4) |
+| `state` | INT64 | | 3.5 |
+| `last_ok_time` | INT64 | ns UTC | Last valid answer |
+| `requests` | UINT64 | count | Requests sent |
+| `errors` | UINT64 | count | Requests answered with an error |
+| `timeouts` | UINT64 | count | Requests without an answer |
+| `response_ms` | FLOAT64 | ms | Average time to the first byte over the last 100 requests |
+| `requests_per_scan` | UINT64 | count | Planned requests of one period of each poll group (6.3) |
+| `pacing_limited` | BOOL | | A group misses its period because of pacing (6.4) |
 | `last_status` | INT64 | | Last protocol error or exception code, raw |
-| `exceptions` | UINT64 | count | Error answers with a protocol code (per code: in the debug log) |
-| `refusals` | UINT64 | count | Answers that refused, apart from timeouts (busy, gateway, not started) |
-| `sentinels` | UINT64 | count | `NO_VALUE` samples (5.2) |
-| `invalid` | UINT64 | count | `DEVICE_INVALID` samples |
+| `exceptions` | UINT64 | count | Error answers with a protocol code |
+| `refusals` | UINT64 | count | Busy, gateway and not-started answers |
+| `sentinels` | UINT64 | count | `NO_VALUE` samples |
+| `invalid` | UINT64 | count | `DEVICE_INVALID` samples, and non-finite values without a marker |
 | `points_absent` | UINT64 | count | Points currently `ABSENT` |
-| `identity` | STRING | | Identity read (3.5) |
-| `identity_ok` | BOOL | | Identity matched |
-| `restarts` | UINT64 | count | Device restarts detected (7.5) |
-| `selections_lost` | UINT64 | count | Native selections lost on disconnect (8.4) |
-| `last_command_stage` | INT64 | | 8.6 |
-| `refresh_failures` | UINT64 | count | 8.10 (phase 5) |
-| `events_lost` | UINT64 | count | 5.7 (room) |
+| `identity` | STRING | | Identity read (3.6), when the device has `identify` |
+| `identity_ok` | BOOL | | Identity matched, likewise |
+| `restarts` | UINT64 | count | Device restarts detected (7.6) |
+| `selections_lost` | UINT64 | count | Native selections lost (8.6) |
+| `last_command_stage` | INT64 | | 1 sent, 2 accepted, 3 completed (8.8) |
+| `refresh_failures` | UINT64 | count | Phase 5, devices with a refreshed output (8.12) |
 
 The device's "connection state, last successful poll time, actual poll
 period per group, request count, error count, timeout count and average
 response time" of reference 6.3 are `state`, `last_ok_time`,
-`period.<group>` (per channel), `requests`, `errors`, `timeouts` and
-`response_ms`. Room for phase 9: interrogation time, replay counts, key and
-certificate age, last time sync.
+`period.<group>`, `requests`, `errors`, `timeouts` and `response_ms`.
 
-## 11. Reload
+### 11.2 What is not a tag
 
-A configuration commit reaches the driver as a reload signal for changes
-that keep the tag set, or as a generation change for changes that alter it
-(reference 5.5, 12.4).
+The raw quality of a protocol (room, #119), the plan's request ranges (the
+log at configure), counts per exception code (the log).
 
-| Change | Applied | How |
+### 11.3 Logging
+
+- Workers and the command thread never write to the journal: a send to the
+  journal blocks when the journal daemon is slow, and a blocked worker is a
+  stall (2.6). They push fixed-size records into a lock-free bounded queue
+  per thread, drained by the main thread, which writes them. A full queue
+  drops the record and counts it (`log_dropped`). The push allocates
+  nothing and makes no system call; it is the only logging path on a
+  worker, and it is allowed in `SCADA_RT` functions of a real-time thread.
+- Each record has a fixed `MESSAGE_ID`, a level and named fields: device
+  demoted, recovered, connection lost, connection refused, identity
+  mismatch, point absent (summary per connection), stall (with the channel,
+  surviving the restart in the log), deadline overrun, reload refused,
+  configuration loaded, safe action taken, safe action unjournalled.
+- Rate limit, the pattern of TD 10.1: the first record at once, then at
+  most one summary per 10 s with a count, per `MESSAGE_ID` and device. A
+  device that flaps every back-off period writes two records per period at
+  most; absent points give one summary per connection, not one per point.
+
+## 12. Reload
+
+A commit reaches the driver as a reload for changes that keep the tag set,
+or as a generation change for changes that alter it (reference 5.5, 12.4).
+The mechanism (a signal through the service manager or a socket, and the
+report back) is CS's (B-12).
+
+- The main thread runs `configure` and `plan` on the new configuration
+  aside, builds the new `CompiledConfig`, and swaps it as in 3.2. A refusal
+  leaves the running configuration in force and is logged at ERROR; since
+  `scada-conf` ran the same `configure` at validation, it is a fault.
+- Reload completes within 2 s (reference 15.2, conformance test 31).
+
+| Change | Applied | Effect |
 | --- | --- | --- |
-| Poll group period or priority; device timeout, retries, back-off, pacing, keep-alive; scaling; invalid markers; `max_age`; read rules | Live | Worker paused at a scan boundary; `configure` and `plan` for the devices concerned; selections kept |
-| A device's addresses, encoding or identity rules (a changed site map that keeps the tag set; survey D-27) | Live, that device only | The device goes `INITIALISING`; its points NOT_INIT until read; its selections end |
-| An output's encoding, limits, select model, select timeout, refresh, rate limits, shutdown behaviour | Live, that output only | Its selection ends; refreshing stops until a new request (8.10) |
-| A channel's port, host, serial settings, endpoints | Live, that channel only | Its devices disconnect and reconnect; their selections end |
-| A device or channel enabled or disabled | Live, that device or channel only | Disabled: its selections end, it disconnects, its points are written BAD with NOT_INIT and `state` 0. Enabled: it goes `CONNECTING`. Its tags exist either way |
+| Poll period or priority; device timeout, retries, pacing, keep-alive; scaling; markers; `max_age`; read rules | Live | At the next boundary; selections kept |
+| A device's addresses, encoding or identity (a site map that keeps the tag set) | Live, that device | It goes `INITIALISING`; its points NOT_INIT until read; its selections end |
+| An output's encoding, limits, select model, timeout, refresh, rate limits, fail-safe keys | Live, that output | Its selection and refresh end |
+| A channel's address, port, serial settings | Live, that channel | It reconnects; its selections end |
+| A device or channel enabled or disabled | Live, that device or channel | Disabled: selections end, it disconnects, its points are written BAD with NOT_INIT and `state` 0; enabled: `CONNECTING`. Its tags exist either way |
 | Points, devices or channels added or removed; a tag type changed | Generation change | Section 9 |
-| The protocol's own code, the framework's version | Process restart | 9.3 |
+| The protocol's code or the framework's version | Process restart | 9.3 |
 
-`configure` refusing a reload leaves the running configuration in force and
-reports the errors (`sys.proc.<process>.config_errors`). `scada-conf` validated
-the tree before the commit, so this is a fault of one of the two validators
-(section 4) and is logged at ERROR. Live reload completes within 2 s
-(reference 15.2). Phase 2.
-## 12. Simulator requirements
+## 13. Local I/O (`scada-io`)
 
-Every driver ships with a simulator of its protocol (`CLAUDE.md`, "Tests").
-A simulator is a separate process that serves configurable simulated
-devices over the real transport (a TCP port, a pseudo-terminal pair), so
-that integration tests start real driver processes against it. It is
-controlled by a test through a control socket or file, never by the driver
-under test.
+Decision D-97. `scada-io` uses the same framework for threads, tags,
+commands, diagnostics, reload and the generation change; its hardware
+interface is the HAL of reference 6.5, not a frame protocol.
 
-Every simulator, whatever its protocol, must be able to:
+### 13.1 Backends and threads
 
-1. Serve many devices: at least 300 across its instances, on one or many
-   connections (reference 18.2, phase 2; #108), with a configured point map
-   per device and values that follow a pattern or are set by the test.
-2. Answer late by a set delay, not answer, answer with each of the
-   protocol's error answers, close the connection, refuse a connection, and
-   stay silent after a "power-up" for a set time.
-3. Enforce pacing: a minimum interval between requests, and a limit of
-   values per request, refusing or delaying what breaks it.
-4. Close an idle connection after a set time, and limit its connections
-   (refusing the next).
-5. Serve gaps in a map as the protocol's "illegal address", as zeros, or as
-   typed sentinels; refuse a read that splits a multi-unit value.
-6. Treat a point as a side-effect read (clear on read, per client), and as
-   write-only.
-7. For writes: accept and apply; accept and ignore; accept and clamp;
-   refuse with a chosen error; answer busy; leave unanswered; apply a part
-   of a list; apply after a delay visible in a read-back elsewhere. Count
-   the writes per point.
-8. Offer a select procedure where the protocol has one, with a window, and
-   a direct operate where it has one.
-9. Change a device's identity, and signal a device restart.
-10. Report to the test every request it received, in order, with its time,
-    so that tests count requests (block merging, pacing, no retry of
-    writes, writes first).
+- Backends: `simulator`, `gpio` (the GPIO character device), `iio`
+  (industrial I/O), compiled in and chosen per channel (D-81). Keys are
+  CS's (the `io` schema): GPIO lines by chip label and line name or offset,
+  never by `gpiochipN`; IIO channels by device name and channel name, never
+  by `iio:deviceN`; no paths in configuration. The backend resolves names
+  at start.
+- The HAL has four calls (reference 6.5): `describe_channels` (main
+  thread, at configure), `read_inputs` and `write_outputs` (the scan
+  thread), `set_safe_state` (the scan thread, and the stop step of 13.4).
+- Threads: main (owner `io`, CS 12.3), command (consumes `cmd.io.*`),
+  one scan thread (owner `io.scan`), real-time under `SCHED_FIFO` with locked
+  memory when the tier is available (reference 4.3), at the fastest control
+  task period (default 10 ms).
+- A backend declares per channel whether its calls are bounded. A GPIO line
+  on a memory-mapped controller is; a line on an I2C or SPI expander is not
+  (it sleeps on the bus, with the adapter's timeout); an IIO single read is
+  not, unless the backend declares the converter fast. Unbounded channels
+  are read by a helper thread at their own period, which hands samples to
+  the scan thread through the bounded queue of 2.7. The scan thread touches
+  only bounded channels.
+- Phase 2 reads and writes single values: IIO inputs by single reads, IIO
+  analog outputs by single writes. Buffered capture is room.
+- Digital inputs: debounce (CS), in the kernel where the controller
+  supports it, else in the backend's decode. Analog: scaling, clamping and
+  a filter time constant (reference 6.5), in the decode.
 
-Phase 2 (#105, #106): the Modbus TCP and RTU simulators provide 1 to 10
-with the Modbus specifics of annex A (exception codes, unit-id routing with
-a gateway's offline and cached states, function refusal per device). The
-`scada-io` simulator backend (#107) provides 1, 2 (silence only), 6 and 7
-(apply and ignore) for its HAL calls, and reports its outputs' states and
-safe states. The survey's six invented test profiles are inputs to the
-composition of the 300-device test (#108), not part of this contract.
+### 13.2 Commands
 
-## 13. Conformance tests
+Requests reach the scan thread as orders (2.4) and are written by
+`write_outputs` at the next cycle; the checks of 8.2 apply, with check 8
+reading the backend's channel state. A local output is never refreshed.
 
-These tests are protocol-independent. `libscada-driver` passes them with a
-test protocol (an in-process `ProtocolDriver` with a scripted device,
-#104); each phase 2 driver passes them against its simulator (#105, #106,
-#107), with the protocol-specific tests of its own issue. Every test runs on
-x86-64 and ARM64 and under the sanitizer builds; tests wait on conditions
-with timeouts, never on sleeps.
+### 13.3 System calls of the scan thread
 
-Interface and threads
+While the channels are open and inside a cycle, the scan thread makes only:
 
-1. Every call of 2.3 runs on its thread: a debug check in the test protocol
-   stops the process on a call from another thread.
-2. A protocol call that passes three times its deadline stops the
-   heartbeat: the process reads down within its timeout (2.5).
-3. A fast channel's scan parts 1, 3 and 4 allocate nothing: a counting
-   allocator in the test protocol's process sees no allocation in 10,000
-   scans; the `SCADA_RT` check passes on them.
+| Call | Why | Bound |
+| --- | --- | --- |
+| GPIO line request `ioctl`s: get values, set values | `read_inputs`, `write_outputs`, `set_safe_state` | Memory-mapped controller: microseconds; other controllers are not on this thread (13.1) |
+| `pread` of an IIO attribute of a fast converter, `pwrite` of an IIO output | Single values | Declared per channel by the backend |
+| `read` of the order eventfd | Clear the order signal | Non-blocking |
+| `clock_nanosleep` to the next cycle | The cycle | The period |
+| `clock_gettime` | Times | vDSO; a system call only on the clock sources of TD 13.1, which reports it |
+| `scada_tag_notify` (futex wake; once a second a look, `fstatat` and possibly `open`, `mmap`, a populate; once a minute the clock check) | Wake consumers | Not real-time safe (TD 13); open, depends on #116 point 3 (2.5) |
 
-Samples and quality
+Opening lines and IIO attributes, reload and detach run outside the cycle.
 
-4. Each outcome of 5.2 gives the quality and flags of its row, and only
-   `COMM_FAIL` counts toward demotion.
-5. Several samples of one point in one delivery give that many change
+### 13.4 Outputs at start, stop and crash
+
+- **Start.** A GPIO line requested as an output must be given a level in
+  the request. Each output has `at_start: hold | safe` (CS): `hold` reads
+  the level found and requests the line with it; `safe` requests it at its
+  safe state. Reference 14.4's "outputs are not driven until the control
+  runtime has run one full cycle" is met by `hold`: the level is not
+  changed until a request arrives.
+- **Loss of `scada-control`.** After `on_control_loss.after` an output in
+  AUTO goes to its `on_control_loss` action (8.13; default `safe`), applied
+  unconditionally, journalled best-effort. The safe state is the output's
+  `safe_state` (CS 7.2), applied without `scada-cmd` running.
+- **Orderly stop.** `on_shutdown` (default `safe`, 8.13), then the lines
+  are released.
+- **Crash.** The kernel releases a GPIO line when its descriptor closes and
+  promises no level afterwards; most controllers keep the last level, some
+  do not. The process that died cannot apply a safe state. The install tree
+  provides a small stop step (`scada-io-safe`), run by the service manager
+  after every stop of `scada-io`, crash included: it requests the lines of
+  outputs whose `on_shutdown` is `safe`, drives their safe states, and
+  exits. A hung system is the hardware watchdog's, and outputs go to the
+  hardware default (reference 14.4).
+
+Phase 2 (#107).
+
+## 14. Simulator requirements
+
+Every driver ships with a simulator of its protocol (`CLAUDE.md`). A
+simulator is a separate process that serves simulated devices over the real
+transport (a TCP port, a pseudo-terminal pair) and is controlled by the test
+through a control socket, never by the driver under test.
+
+Every simulator must be able to:
+
+1. Serve at least 300 devices across its instances, on one or many
+   connections, each with a configured map and values that follow a pattern
+   or are set by the test.
+2. Answer late, not answer, answer with each of the protocol's error
+   answers, send a broken frame, a bad CRC, an answer with another
+   transaction id or from another unit, more bytes than the largest legal
+   frame; close the connection; refuse a connection; open a connection and
+   then answer nothing; stay silent after a power-up.
+3. Stop reading (not close) for a set time, then resume (7.3, test 24).
+4. Enforce pacing: a minimum interval between requests, a limit of values
+   per request.
+5. Close an idle connection after a set time; limit its connections.
+6. Serve gaps as "illegal address", as zeros or as typed sentinels; refuse a
+   read that splits a value; refuse a write of the wrong quantity.
+7. Treat ranges as side-effect reads (clear on read, per client), and points
+   as write-only.
+8. For writes: apply; ignore; clamp; refuse with a chosen error; answer
+   busy; leave unanswered; apply part of a list; apply after a delay visible
+   in a read-back elsewhere. Count writes per point.
+9. A second master acting on the same device.
+10. Change its identity; signal a restart.
+11. Report every request received, in order, with its time.
+
+Phase 2: the Modbus TCP and RTU simulators (#105, #106) provide 1 to 11
+with the Modbus specifics of annex A (exception codes, unit-id routing
+with a gateway's offline and cached states, function refusal per device).
+A pseudo-terminal has no bit rate, parity errors or RS-485 mode: the RTU
+simulator checks framing and the gaps between requests it can measure, and
+serial timing is tested on the target board (#41). The `scada-io` simulator
+backend (#107) provides 1, 2 (silence) and 8 (apply, ignore) for its HAL
+calls, and reports outputs and safe states.
+
+## 15. Conformance tests
+
+Protocol-independent. `libscada-driver` passes them with a test protocol (a
+scripted frame protocol over a loopback transport, #104); each phase 2
+driver passes them against its simulator (#105 to #107), with the tests of
+its own issue. On x86-64 and ARM64. Tests wait on conditions with timeouts,
+never on sleeps; timing tests assert order and lower bounds, never upper
+bounds on loaded runners (except the timed reload, test 31, with its 2 s).
+
+Interface, threads, real-time
+
+1. Every call runs on its thread (a debug check in the test protocol).
+2. A worker that stops moving its counter ends the process with its exit
+   status within its stall limit plus 1 s (2.6).
+3. Allocation test of 2.5 on the `scada-io` scan thread and on a test
+   protocol worker: 0 allocations per thread (malloc and `operator new`) in
+   10,000 cycles with their error paths. Not under sanitizers; native
+   runners only.
+
+Samples
+
+4. Each outcome of 5.2 gives its quality and flags; only `COMM_FAIL` counts
+   toward demotion.
+5. Golden vectors (5.1, 8.4): raw bytes and a binding give value bits,
+   quality and flags, bit-identical on both architectures: markers on the
+   pattern after word order (one vector with `word_order: little`),
+   non-finite without marker, exponent (negative, invalid), scale (integer,
+   overflow, decimal), `raw_range`, `on_invalid` actions, enumerations
+   (unknown code), double points (codes 0 to 3, a `states` map), counters
+   (wrap, saturate, each `on_decrease`), and the write conversions.
+6. Several samples of one point in one delivery give that many change
    entries, in order.
-6. Invalid markers are compared on the raw pattern before decoding (a NaN
-   marker matches any NaN; an exact marker only its pattern).
-7. A polled sample carries LOCAL_TIME and the receive time; a sample with a
-   device time carries it, converted from a configured local zone.
-8. A dependent point with a failed companion is BAD; a plan never
-   separates them.
+7. Time: LOCAL_TIME and the receive time without a device time; a device
+   time converted from a local zone, in the repeated and the skipped hour
+   (TIME_UNCERTAIN); `trust: unknown` gives TIME_UNCERTAIN; a device time
+   older than the last one is written as received.
+8. A dependent point with a failed companion is BAD; a plan never separates
+   them.
 
 Scheduling
 
-9. Pending orders are served before due poll groups; groups by priority,
-   then by due time.
-10. Block merging: a poll group of N adjacent points within the rules sends
-    the planned number of requests (counted by the scripted device); a
-    forbidden range, an atomic group and a `side_effect` point are honoured.
-11. A merged request refused as "illegal address" is split once; the points
-    refused again are `ABSENT`, the others GOOD, and stay so until
-    reconnect.
-12. Pacing: no two requests to a device closer than its interval; a slow
-    device does not delay a neighbour's group beyond one transaction.
-13. Keep-alive: a device idle for its keep-alive period gets a request.
-14. A synchronous scan group increments its counter once per scan before
-    the notify.
+9. Orders before due polls; groups by priority, then by due time.
+10. Block merging: N adjacent points send the planned number of requests;
+    `no_read`, `atomic`, `exclusive` and `side_effect` ranges are honoured.
+11. A merged request refused as an illegal address uses its split form once.
+12. Pacing: no two requests to a device closer than its interval; write
+    spacing kept with writes first; with N dead devices on a channel a live
+    device keeps its period (probe budget, 7.4).
+13. Keep-alive: an idle device gets a request outside every side-effect
+    range.
+14. Clear-on-read: a `side_effect` range is read once per poll; never
+    retried, never read by keep-alive, probe, identity or `READ_NOW`; a lost
+    answer is not followed by a second read.
 
 Failure handling
 
-15. A device that stops answering is demoted after `demote_after` failures,
-    its tags BAD with COMM_FAIL, probed at the back-off, and recovered when
-    it answers; timeouts within `startup_grace` do not count.
-16. A lost connection sets every device of the channel BAD with COMM_FAIL at
-    once, without spending retries.
-17. A point not read within `max_age` gets STALE, and loses it at the next
-    good read.
-18. An identity mismatch with `refuse` sets `MISMATCH`, tags BAD without
-    COMM_FAIL, and every write `CONFIG_MISMATCH`.
+15. Demotion after `demote_after` failed requests (retries included in one),
+    probing at `backoff`, recovery; timeouts within `startup_grace` do
+    not count; devices sharing a unit id share the count.
+16. A lost connection sets every device of the channel BAD with COMM_FAIL
+    at once; a refused connection is `CONNECTING` with COMM_FAIL; the
+    back-off resets after the first valid answer, not after connect.
+17. STALE after `max_age`, cleared by the next good read, checked at every
+    boundary.
+18. Identity mismatch with `refuse`: `MISMATCH`, tags BAD without COMM_FAIL,
+    writes `CONFIG_MISMATCH`.
+19. A gateway that cannot reach a unit demotes that unit only; a busy answer
+    and a sentinel-only answer do not demote; cached values with a health
+    rule give COMM_FAIL.
+20. Device restart from a configured indication: `INITIALISING`, a new
+    identity check, selections end.
 
 Write requests
 
-19. Each check of 8.2 has a test that fails a request with its status and
-    reason, and the device sees nothing.
-20. Source against mode: AUTO in MANUAL, OPERATOR in AUTO, and any source
-    with the mode tag BAD, OWNER_DOWN or unresolvable, give NOT_AUTHORISED.
-21. Selections: a second SELECT, an OPERATE with a wrong id, source, user or
-    value, an OPERATE after the timeout, after a CANCEL and after a
-    reconnect, each refused with its reason; a CANCEL without selection is
-    OK with `NOTHING_TO_CANCEL`.
-22. Expiry: a request whose expiry passes while queued in the worker is
-    answered EXPIRED and nothing is sent; a list of writes interrupted by
-    expiry is `PARTIAL`.
-23. No retry: a write that times out is sent once and answered TIMEOUT with
-    `NO_RESPONSE`.
-24. A rate-limited point refuses the request over its limit, from every
-    source.
-25. A request taken by a driver that is killed before it answers is never
-    executed twice (tag database conformance test 17, with a driver; #104).
-26. After an OK write the read-back point is read within its settle time
-    plus one scan.
+21. Each check of 8.2 has a test that fails a request with its status and
+    reason, and the device sees nothing. Source against mode includes the
+    O-2 case and every fail-closed case.
+22. Selections: every rule of 8.6, including a mode change ending a
+    selection and a DIRECT refused on a selected output.
+23. Expiry: a request expiring in the worker's queue is EXPIRED and nothing
+    is sent; a list interrupted by expiry is `PARTIAL`.
+24. **A write that times out is never delivered later** (7.3): the simulator
+    stops reading during a write, resumes after the expiry, and never sees
+    the frame; the result is TIMEOUT `NO_RESPONSE`; the connection was
+    closed and reopened; the write is not sent again.
+25. No retry: a write is sent once whatever its outcome; a connection lost
+    during a write gives `NO_RESPONSE`, and nothing is sent again after the
+    reconnect; a write refused before any byte left is `COMM_FAIL`.
+26. A whole-word command: the request log shows no read of the register
+    before the write, and one write.
+27. Rate limits refuse the request over the limit from every source and
+    count at the first byte sent.
+28. A request taken by a driver killed before it answers is never executed
+    twice (TD conformance test 17, with a driver).
 
-Generation change and restart (#84)
+Generation change, reload, traces
 
-27. A generation change with a request queued, one taken and not started,
-    and one in flight: the queued one is ABORTED by the library, the
-    unstarted one ABORTED with `NOT_STARTED`, the one in flight executed
-    once and answered before detach; none is acted on after detach; no
-    answer is posted in the new generation; a selection of the old
-    generation cannot be operated in the new one.
-28. After every attach, every tag of the driver is written BAD with
-    NOT_INIT before the first scan, except restored ones.
-29. A real-time worker, after its first scan, makes only the system calls of
-    the table of 2.4, across polls, writes and a generation change: no
-    `scada_queue_next` and no call of the RETIRING path (traced with a
-    seccomp or ptrace test helper on the worker thread).
+29. **System-call trace** of 2.5 on the `scada-io` scan thread: only the
+    calls of 13.3 over polls, writes, a HAL error and a generation change,
+    with the longest time in each call recorded. Not under sanitizers;
+    native runners only.
+30. A generation change with a request queued, one taken and not started,
+    one in flight: ABORTED by the library, ABORTED `NOT_STARTED`, executed
+    once and answered before detach; none acted on after detach; no answer
+    in the new generation; an old selection cannot be operated. After every
+    attach every tag is written BAD with NOT_INIT before the first request,
+    except restored ones.
+31. Reload: each row of section 12 applies as stated, within 2 s; a refused
+    reload leaves the old configuration running.
 
-Diagnostics and reload
+Configuration and fuzzing
 
-30. Every tag of section 10 exists with its type and changes as its row
-    says.
-31. Each row of the reload table of section 11 applies as stated; a reload
-    that `configure` refuses leaves the old configuration running.
+32. `configure` refuses each error of its binding with its CS code, file and
+    line (the driver half of "invalid configuration is rejected with file
+    and line", reference 18.2).
+33. Fuzz targets, run in the `fuzz` job: each protocol's `frame_state` and
+    `decode` (Modbus TCP, Modbus RTU), and each protocol's `configure` over
+    generated bindings.
 
-Phase 2 drivers pass tests 1 to 31, except where the test protocol is the
-only one that can force a case (2, 3 on a non-fast channel, 29 when the
-driver has no fast channel); those then run with the test protocol only.
-Tests for room parts (two-phase writes, reported points, replay, refresh,
-safe writes of protocol drivers) are added with the phase that implements
-them.
+Diagnostics
 
-## 14. What phase 2 must implement
+34. Every tag of section 11 exists with its type; counters publish at most
+    once a second.
+
+Tests of room parts are added with the phase that implements them.
+
+**The 300-device test (#108), proposed composition:** 300 simulated Modbus
+devices on 30 channels: 20 TCP channels of 10 devices behind one simulated
+gateway each (unit ids 1 to 10, pacing 100 ms on two of them), 8 TCP
+channels of one device each, and 2 RTU channels of 10 devices each over
+pseudo-terminals; three poll groups (1 s, 5 s, 30 s); 10 devices dead for
+the whole run on the gateway channels, and 20 that die and recover. The
+assertion: every live device's achieved `period.<group>` is within its
+group's tolerance, with the database size and the driver's memory reported.
+
+## 16. What phase 2 implements
 
 | Part | Section | `libscada-driver` (#104) | Modbus (#105, #106) | `scada-io` (#107) |
 | --- | --- | --- | --- | --- |
-| `configure`, `capabilities`, `plan`, `connect`, `disconnect`, `poll`, `write` (immediate), `read_now` | 2.3 | Calls them | Implements | Implements |
-| Threads, order and outcome queues, channel watchdog | 2.2, 2.5 | Must | Inherits | Inherits |
-| Real-time scan parts | 2.4 | Must | Real-time capable | Real-time capable |
-| Event loop for report-driven protocols; helper threads | 2.6 | Loop without protocol descriptors | No | No |
-| `resolve`, `session_step`, `run_activity`, `on_event` | 2.3 | Defaults only | No | No |
-| `identify` and the identity check | 3.5 | Must | Configured points only | No |
-| Device states 0 to 5 | 3.4 | Must | Inherits | Inherits |
-| Several devices per channel, shared unit ids, unit id per point | 3.3 | Must | Must | n/a |
-| Endpoint lists, listening channels | 3.3 | Room | No | No |
-| Outcomes, invalid markers, tag types, companions, health, bits, latch tags | 5.2 to 5.6 | Must | Must | Outcomes and types only |
-| Time of a sample | 5.8 | Must (LOCAL_TIME, device time with zone) | Must | Must |
+| Frame protocol calls | 2.2, 2.3 | Calls them | Implements | n/a |
+| HAL calls | 13 | Calls them | n/a | Implements |
+| Threads, in-process queues, signals, logging queue | 2.4, 11.3 | Must | Inherits | Inherits |
+| Channel watchdog | 2.6 | Must | Inherits | Inherits |
+| Real-time tier | 2.5 | Must (for `scada-io`) | No: normal scheduler | Must |
+| Session protocols, report-driven, helper threads | 2.7 | Room (helper queue: for unbounded I/O channels) | No | Helper for unbounded channels |
+| Device states 0 to 6, identity | 3.5, 3.6 | Must | Inherits | States only |
+| Several devices per channel, shared unit ids | 3.4 | Must | Must | n/a |
+| Sample processing, golden vectors | 5.1 to 5.6 | Must | Decode | Decode |
+| Device time from companions | 5.8 | Must | Must | n/a |
 | Replay, cause, events lost | 5.7, 5.9 | Room | No | No |
-| Poll groups, write-before-read, block planning, pacing, keep-alive, side effects, scan groups | 6 | Must | Must | Poll groups and scan groups |
-| Activities, record readers, device time sync | 6.1, 6.6, 6.8 | Room | No | No |
-| Timeouts, connection loss, demotion, STALE, device restart | 7 | Must | Must | STALE, HAL failure |
-| Checks of 8.2, gateway select, expiry, results and reasons, no retry, rate limits, read-back | 8 | Must | Encodes and classifies | Writes outputs |
-| Native select, two-phase results | 8.4, 8.6 | Room | No | No |
-| Refresh | 8.10 | Room (phase 5) | No | No |
-| Safe and release writes | 8.11 | Room (phase 5) | No | Local safe states (#107) |
-| Generation change and restart | 9 | Must | Inherits | Inherits |
-| Diagnostics | 10 | Must, but the rows marked phase 5 or room | Reports | Reports |
-| Reload | 11 | Must | `configure` per device | `configure` per channel |
-| Simulators | 12 | Test protocol | Must | Simulator backend |
+| Scheduling, planning, pacing, keep-alive, side effects | 6.1 to 6.6 | Must | Plans | Poll groups only |
+| Activities, scan groups, time sync | 6.1, 6.7, 6.8 | Room | No | No |
+| Timeouts and frame time, serial lines, TCP rules, demotion, STALE, restart | 7 | Must | Must | STALE, HAL failure |
+| Checks, kinds, value conversion, encodings, gateway select, expiry, results, no retry, rate limits, read-back | 8.1 to 8.11, 8.14 | Must | Encodes and classifies | Writes outputs |
+| Native select, two-phase writes | 8.6, 8.8 | Room | No | No |
+| Refresh; fail-safe writes of protocol drivers | 8.12, 8.13 | Room (phase 5) | No | n/a |
+| Local fail-safe behaviour, start and crash | 8.13, 13.4 | n/a | n/a | Must |
+| Generation change, restart, process start and stop | 9, 10 | Must | Inherits | Inherits |
+| Diagnostics, logging | 11 | Must (rows marked phase 5 or room aside) | Reports | Reports |
+| Reload | 12 | Must | `configure` | `configure` |
+| Simulators | 14 | Test protocol | Must | Simulator backend |
 
-## 15. Boundaries with the configuration schemas contract
+The mandatory part of a phase 2 protocol is seven functions: `configure`,
+`device_caps`, `point_caps`, `plan`, `encode`, `frame_state`, `decode`.
 
-The two contracts were drafted in parallel (#98, #99). They meet at the
-points below; each states who owns what. Sections of the configuration
-schemas contract cited: 4.1 (common part and protocol part, X-8), 4.6
-(channel and device keys), 4.7 (point keys), 4.8 (identify), 7.2 (outputs,
-`native_select`), 12.3 (owners and queues), 12.5 (generated tags), section 10
-(error codes), annex A (Modbus). The agreement with the #98 draft
-is recorded in the pull request of this contract.
+## 17. Boundaries with the configuration schemas contract
 
-| Id | Point | Owned by #98 | Owned here |
+CS owns every key, default and validation code; this contract owns
+behaviour. The sections of CS cited: 4.1 (common part and protocol part,
+X-8), 4.6 (channel and device keys), 4.7 (point keys), 4.8 (identify), 5.3
+(counters), 7.1 (areas), 7.2 (outputs), 10 (codes), 12.3 (owners and
+queues), 12.5 (generated tags), annex A (Modbus), 4.10 (shared keys and
+defaults) and its section "Apply".
+
+| Id | Point | CS | This contract |
 | --- | --- | --- | --- |
-| B-1 | Point address | The common keys; the merge of each protocol's schema fragments (channel, device, `address`, `read:`) into the file schemas; the Modbus fragments for phase 2 (its annex A) | That `configure` validates the binding again; the codes of 4.3; the raw sample and the processing after decode (5.1), which is the framework's |
-| B-2 | Template per-protocol parts (X-8) | Option (b) now: one `protocol:` per template, `extends:` a protocol-free base; (a) room | That the protocol sees only its own binding |
-| B-3 | Acquisition | `poll_groups`, `max_age`, `acquisition: poll \| report` (`poll` only in phase 2), report fields as protocol keys (room) | STALE (7.4), scheduling (6) |
-| B-4 | Read rules | `read:` as a protocol key of template and device; `access`, `side_effect` | Their meaning and the planning (6.3, 6.6) |
-| B-5 | Outputs and commands | Output keys: `sbo`, `select_timeout`, `native_select: at_select \| at_operate`, `termination_timeout`, limits, `refresh`, `write_on_change_only`, `on_shutdown` and `on_source_loss` (`hold \| safe \| release`), `source_lost_after`, safe and release values, `dangerous`, `storage` with `min_interval` and `max_per_day`, read-back with tolerance and `settle`, preconditions; the write encoding inside the point's `address`; the mode tag's coding (1 AUTO, 2 MANUAL, 3 REMOTE) | Checks and behaviour (8); results and reasons (8.6); double-point coding (5.4) |
-| B-6 | Identity | `identify:` envelope, `on_mismatch` | Comparison, tags and the `MISMATCH` state (3.5) |
-| B-7 | Sessions and secrets | `session:` reserved and refused in phase 2; a secret only as `{ secret: <name> }`, refused in phase 2 with its own code | Room for `session_step`; secrets never logged or in tags |
-| B-8 | Tag set | Process `drv-<protocol>`; owners `drv-<protocol>` (main thread) and `drv-<protocol>.<C>`; generated short names `<C>` and `<T>` (its 12.3); queues `cmd.<C>.<source>` and `result.<C>.<source>` (`<source>` `cmd` or `<T>`), and from phase 5 `events.drv-<protocol>`; a disabled device keeps its tags (its 12.5); the diagnostic tags of section 10 by rule; ring sizes | Which thread writes which tag (2.2, 10) |
-| B-9 | Channels | Channel `type` and framing as protocol keys (`tcp`, `rtu`, `rtu_over_tcp` in phase 2); `role: connect \| listen` with `connect` only; endpoint lists as room | 3.3 |
-| B-10 | Addresses on a channel (X-4) | Overlap checked on (unit id, table, register); shared unit ids; `unit_id` per point address | 3.3 |
-| B-11 | Timing and pacing | `timeout`, `retries`, `demote_after`, `backoff`, `startup_grace`, `min_request_interval`, `min_write_interval`, `keepalive`, `write_timeout`, `max_values_per_request`; `device_time`; `time_sync` reserved, `none` only | Their behaviour (6, 7) |
+| B-1 | Point address | Common keys, protocol fragments, the Modbus fragments (annex A) | `configure` as the second validator (the same code in `scada-conf`); the raw sample and the processing after decode (5.1) |
+| B-2 | Templates (X-8) | Option (b) now | The protocol sees only its binding |
+| B-3 | Acquisition | `poll_groups`, `max_age`, `acquisition` (`poll` only in phase 2) | STALE (7.5), scheduling (6) |
+| B-4 | Read rules | `read:` ranges per table and unit id: `no_read`, `atomic`, `exclusive`, `side_effect` | Planning and their meaning (6.3, 6.6) |
+| B-5 | Outputs and commands | Output keys, kinds, `storage` (required), `write_limits`, `refresh` (setpoint only), `on_shutdown`, `on_control_loss`, `release` and `safe_state` with their domain, `native_select`, `termination_timeout`, `feedback`; the write encoding in `address`; the mode coding | Checks, kinds, conversion, results, fail-safe behaviour (8) |
+| B-6 | Identity | `identify:`, `on_mismatch`, the pattern form | Comparison and `MISMATCH` (3.6) |
+| B-7 | Sessions and secrets | `session:` reserved; a secret only as `{ secret: <name> }`, refused in phase 2 | Secrets never logged or in tags; a process may read only the secrets its own files reference |
+| B-8 | Tag set | Process, owner and queue names (`io` and `io.scan`), ring capacity per owner from its tag count, the 126-source and 4,096-queue limits, the generated tags of section 11 | Which thread writes which tag (2.4, 11) |
+| B-9 | Channels | `type`, `role`, endpoints reserved, `rs485` reserved, literal addresses only, `local_address` reserved | 3.4, 7.2, 7.3 |
+| B-10 | Unit ids (X-4) | Overlap on (unit id, table, register); 0 to 255 on TCP and `rtu_over_tcp`, 1 to 247 on RTU | 3.4, 7.4 |
+| B-11 | Timing and pacing | `timeout` (as defined in 7.1), `retries`, `busy_retries` (reads), `demote_after`, `backoff`, `reconnect`, `connect_timeout`, `keepalive`, pacing, `max_pending_writes`, `lost_after_timeouts`; the frame-time warning CW-608 | Their behaviour (6, 7) |
+| B-12 | Apply | CS section "Apply": versions under `/var/lib/scada/conf/versions/<n>/`, the `active` link renamed atomically, `scada-conf` running each protocol's `configure` and `plan` (refusals CF-650 to CF-699), one expanded file per driver stamped with `config_hash` and `config_id`, the watch on the link, who starts a driver | What the driver loads and reports (10, 12) |
 
-Secrets (B-7): **review by a person.** A secret (a password, a login code,
-a key) is referenced by name in configuration and fetched by the framework
-from the secrets store (reference 13.3) at connect. The framework passes it
-to `session_step` in a buffer it zeroes after the call; it is never logged,
-never written to a tag, never in a diagnostic. Session steps with secrets
-are not in phase 2 (no secrets store exists before phase 4, and the steps
-need their own review); the interface leaves room.
+Secrets (B-7): **review by a person.** A secret is referenced by name and
+fetched at connect from the secrets store (reference 13.3) through a
+service that decides by the rule above. The framework passes it to the
+protocol in a buffer it zeroes after the call; never logged, never in a
+tag. Sessions with secrets are not in phase 2: **open: needs the product
+owner's ruling (R-8)**. Committee recommendation: accept.
 
-## 16. Open rulings and differences from the reference document
+## 18. Open rulings
 
-### 16.1 Open rulings
+Each is drafted with the option shown and marked at its place; a person
+decides. The committee's recommendation is from its review of 0.1. Rulings
+on keys, the active tree, the version store and `config_hash` are in CS.
 
-Each is drafted with the option shown; a person decides. Numbers follow the
-device survey (X-n) or this contract (R-n).
+| Id | Section | Question | Drafted | Other options | Committee |
+| --- | --- | --- | --- | --- | --- |
+| X-1 | 8.6 | Native select on a protocol the reference lists without one (6.4) | Native select per device and point; gateway select for the rest; Modbus native select room | Keep 6.4 literally | Accept |
+| X-2 | 3.4 | Channel direction and role | `role: connect \| listen` reserved, `connect` only; client or master only | Listening channels now; a server role | Accept |
+| X-3 | 3.4 | Main and backup connections | A channel owns an endpoint list (room) | A device under two channels; none | Accept |
+| X-4 | 3.4 | Device addresses on a channel (12.5) | Unit id per point; shared unit ids without overlap; shared failure count | Slices as one device; sub-devices | Accept |
+| X-5 | 8.12 | Refresh of setpoints and "no audit, no action" | Covered by the request's record; setpoint only; ends on any failed condition, visibly; no automatic re-establishment | A record per refresh; no refresh; `scada-cmd` re-posts with a system user | Accept, with the end visible |
+| X-6 | 5.9 | Replayed events | Deferred to phases 3 and 7; sample fields kept as room | (a) with STALE; (a'); (b) | Defer |
+| X-7 | 8.6 | Device windows shorter than the operator's select | Per output `at_select` or `at_operate` | Gateway select never longer than the window | Accept |
+| X-8 | 4 | Per-protocol parts of a template | One `protocol:` per template on a protocol-free base; several per template later | Several now; independent templates | Accept |
+| X-9 | 8.13 | Safe or release value for remote outputs | The framework can do `hold`, `safe` and `release` | Stop refreshing only | Accept |
+| X-10 | 2.2 | The protocol interface in phase 2 | A frame protocol: one request per call, the framework owns the exchange | The reference's `ProtocolDriver` | Accept |
+| X-11 | 7.5 | STALE | "Not confirmed within `max_age`" | Literal: not refreshed | Accept |
+| X-12 | 6.8 | Who sets device clocks | A framework activity, off by default, gated on the unit's sync; none in phase 2 | Never | Accept |
+| X-13 | 6.4 | Unservable pacing | Warning | Error | The reviewers differ |
+| X-14 | 5.4 | Enumerated feedback | Double point INT64 0 to 3; `scada-cmd` compares enumerations (phase 5) | Two BOOL tags | Accept |
+| X-15 | 4 | Vendor point lists | Generated files accepted by CS; importers outside the contract | An importer in phase 2 | Accept |
+| X-16 | 8.3 | Settings and setting groups | A setting-group switch is a `trigger`; settings edits out of scope | Both out | Accept |
+| X-17 | Annex A | Modbus functions 1 to 6, 15, 16 | The minimum set, with a per-device function list (CS) | Literal | Accept |
+| R-1 | 5.8 | Marking of a driver-stamped event time | LOCAL_TIME | TIME_UNCERTAIN; both; none | Accept |
+| R-2 | 5.6 | Change latches | The latch as its own tag | Synthesised events | Accept |
+| R-3 | 2.5 | Real-time rules for an I/O scan; real-time tier in phase 2 | `scada-io` only in phase 2; the hardware exchange unannotated between `SCADA_RT` parts; the check and tests as stated | A non-real-time I/O thread feeding the real-time one; a change to `CLAUDE.md` | Accept |
+| R-4 | 8.8 | `WriteResult.protocol_error` packing | `(reason << 16) \| raw`, read as within "driver-specific" | Raw code only; the reason in a tag | Accept |
+| R-5 | 8.13 | A fail-safe action and its audit record | The action never waits; journalled best-effort after | Journal first, else stop refreshing only (0.1) | Accept |
+| R-6 | 5.2 | SUBSTITUTED for values substituted by configuration or forced at the device | Accepted, HMI text "substituted" | A companion tag | Accept |
+| R-7 | 5.1 | Bit-identical scaling on both architectures | Floating-point contraction off for scaling and conversion code (D-98) | A tolerance in the tests | Accept |
+| R-8 | 17 | Sessions with secrets in phase 2 | Out of phase 2; room | In phase 2 | Accept |
+| R-9 | 19 | A device's communication heartbeat register (reference 14.4: "should serve it") | Not in phase 2; a device key reserved (CS) | Serve it in phase 2 | Accept |
+| R-10 | 7.3 | Host names for TCP channels | Literal addresses only in phase 2; names reserved | Names resolved off the worker | Accept |
+| O-2 | 8.2 | AUTO writes while `scada-cmd` is down | Allowed on the stored mode AUTO when the only defect is OWNER_DOWN | Refused (fail closed, 0.1) | Accept |
+| O-3 | 2.6 | A stalled channel restarts every channel of its protocol | Accepted for phase 2; separate processes per channel group room | Per-owner liveness first (#116) | Accept, with the room |
 
-| Id | Section | Question | Drafted with | Other options |
-| --- | --- | --- | --- | --- |
-| X-1 | 8.4 | Native select on a protocol the reference lists as without one | (b) Native select per device and point, declared by the protocol; gateway select for the rest | (a) Keep 6.4 literally: Modbus uses the gateway's select only |
-| X-2 | 3.3 | Direction and role of a channel | `role: connect \| listen` reserved, phase 2 `connect` only; client or master only | (b) Listening channels now; (c) a server role |
-| X-3 | 3.3 | Main and backup connections | (a) A channel owns an endpoint list (room) | (b) A device under two channels; (c) none |
-| X-4 | 3.3 | Device addresses on a channel | Point unit id override, shared unit ids without overlapping points | (b) Slices as one device; (d) sub-devices |
-| X-5 | 8.10 | Refresh of setpoints and "no audit, no action" | (a) Refreshes belong to the request's record; stop on any failed condition | (b) A record per refresh; (c) no refresh service |
-| X-6 | 5.9 | Replayed events | (a) Written in order with STALE, source time may go back, interrogation last; requirements on phases 6 and 7 | (b) Marked, historian only (needs a new path or a layout version) |
-| X-7 | 8.4 | Device windows shorter than the operator's select | Per output: `at_select` (default; `select_timeout` at most the window) or `at_operate` (device select and operate back to back at OPERATE) | (a) Gateway select never longer than the device's window |
-| X-8 | 4.1 | Per-protocol parts of a template | (b) One `protocol:` per template on a protocol-free base, now; (a) later | (a) now; (c) independent templates |
-| X-9 | 8.11 | Safe or release value for remote outputs | (b) The framework can write one, after its own event record; without the record it only stops refreshing | (a) Stop refreshing only |
-| X-10 | 2.3 | Interface change in phase 2 | Change now, with defaults | Redesign in phase 9 |
-| X-11 | 7.4 | STALE for reported points | "No proof of liveness within `max_age`" | Literal: not refreshed |
-| X-12 | 6.8 | Who sets device clocks | Framework activity, default off, gated on the unit's sync; none in phase 2 | (a) Never |
-| X-13 | 6.4 | Unservable pacing | Warning | Error |
-| X-14 | 5.4 | Enumerated feedback | Double points INT64 0 to 3; `scada-cmd` compares enumerations (phase 5) | Two BOOL tags |
-| X-15 | 4.1 | Vendor point lists | Generated files accepted by the schema; importers outside the contract | An importer in phase 2 |
-| X-16 | 8.1 | Settings and setting groups | Group switch as an on-only command (`kind: trigger`); settings edits out of scope | Both out of scope |
-| X-17 | Annex A | Modbus function codes | 1 to 6, 15, 16 as the minimum set, with a per-device policy | Literal |
-| R-1 | 5.8 | Marking of a driver-stamped event time | LOCAL_TIME | TIME_UNCERTAIN; both; none |
-| R-2 | 5.6 | Change latches | Latch as a tag | Synthesised on-then-off events |
-| R-3 | 2.4 | Reading of the real-time rules (`CLAUDE.md`) for an I/O scan | The bounded device transaction sits unannotated between `SCADA_RT` parts; the system calls of a real-time worker are the table of 2.4 | A separate non-real-time I/O thread feeding the real-time worker (one more hop and its latency); or a change to `CLAUDE.md` |
-| R-4 | 8.6 | Reason and raw code packed in `WriteResult.protocol_error` | Packing, read as within "driver-specific" | Raw code only; reason in a diagnostic tag |
+## 19. Differences from the reference document
 
-### 16.2 Differences from the reference document
+1. The protocol interface is a frame protocol, not reference 6.1's
+   `ProtocolDriver` (X-10).
+2. Native select may exist on a protocol the reference lists without one
+   (6.4; X-1).
+3. A device may span unit ids, and devices may share one (12.5; X-4).
+4. STALE means "not confirmed within `max_age`" (6.2; X-11).
+5. Drivers write safe or release values to remote outputs (6.5 and 14.4
+   give safe states to `scada-io`; X-9), and a fail-safe action does not
+   wait for its audit record (5.3, 8.2 step 8; R-5).
+6. Local outputs default to `safe` on shutdown and on loss of control
+   (reference 6.5), remote outputs to `hold` (reference 14.4).
+7. A driver has a command thread besides its workers (6.1 names only
+   workers), and a channel watchdog that ends the process: one stalled
+   channel restarts every channel of its protocol (O-3).
+8. AUTO writes continue on the stored mode while `scada-cmd` is down
+   (8.1 states only the mode comparison; O-2).
+9. Commands to a demoted or refusing device are refused (8.2, check 8).
+10. Reference 4.3 puts "any driver assigned to a fast poll group" in the
+    real-time tier; phase 2 has only `scada-io` there, and synchronous scan
+    groups (6.2) are later (R-3).
+11. A driver may refresh a setpoint (8.12) beside `scada-control`'s refresh
+    of reference 7.2 step 3; an output uses one of them.
+12. The communication heartbeat register of reference 14.4 is not served in
+    phase 2 (R-9).
+13. Host names are not accepted in phase 2 (R-10).
 
-1. The `ProtocolDriver` interface has more calls than reference 6.1 (X-10),
-   with defaults; `on_unsolicited` is `on_event`.
-2. Native select may exist on a protocol the reference lists as without
-   one (6.4; X-1).
-3. A device may span several unit ids, and several devices may share one
-   (12.5; X-4).
-4. STALE of a reported point is "no proof of liveness" (6.2; X-11).
-5. A driver may write a safe or release value to a remote output (6.5 and
-   14.4 give safe states to `scada-io`; X-9).
-6. A driver has a command thread besides its channel workers (6.1 names
-   only workers), and a channel watchdog that stops the heartbeat.
-7. A driver may post event records of its own, for safe writes (phase 5).
-8. Request queues are per channel and requester thread,
-   `cmd.<C>.<source>`, not `cmd.<driver>.<source>` (5.1): a naming
-   difference only, so that each queue keeps one producing thread when
-   `scada-control` runs several tasks.
-
-## 17. Change log
+## 20. Change log
 
 | Version | Date | Change |
 | --- | --- | --- |
-| 0.1 | 2026-11-22 | First draft (issue #99, P2-02), from the outline in `docs/contracts/README.md`, reference sections 6, 8.1 and 14.4, tag database contract 1.0, issue #84, and the device survey of 2026-11-22 (not in the repository). Decisions D-81 to D-92 |
+| 0.1 | 2026-11-22 | First draft (issue #99, P2-02), from the outline in `docs/contracts/README.md`, reference sections 6, 8.1 and 14.4, TD 1.0, issue #84, and the device survey of 2026-11-22 (not in the repository). Decisions D-81 to D-92 |
+| 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA and Linux reviewers). The protocol interface is one request per call, the framework owns the exchange (2.2, D-93). Keys, defaults and codes are CS's; this contract cites them. Real-time tier in phase 2 is `scada-io` only; the `SCADA_RT` check stated as it is; allocation and system-call tests (2.5). Request queues per process and source, as reference 5.1. Watchdog ends the process (2.6). Reload builds aside and swaps (3.2). Raw pattern after byte and word order; non-finite values; exponent and integer arithmetic; counters (5). Side effects on register ranges (6.6). Timeout defined, frame time, serial lines, TCP rules: abortive close on a write timeout, consecutive timeouts, idle close, back-off, literal addresses (7). Command kinds, value conversion, selection on mode change, DIRECT on a selected output, `local_blocks_auto`, demoted devices refused, results retried, rate count at the first byte, refresh setpoint only and visible, one fail-safe table, fail-safe without waiting for audit (8). Process start and stop (10). Logging (11.3). Local I/O (13). Simulators and conformance tests extended; a composition for #108 (14, 15). Replayed events deferred (5.9). Decisions D-82 to D-99. Migration: none; no code depends on 0.1 |
 
-## Annex A. Modbus binding (phase 2)
+## Annex A. Modbus (phase 2)
 
 The protocol-specific rules of the Modbus driver (#105, #106), as far as
-the interface depends on them. The full binding schema is #98's.
+behaviour depends on them. The keys and their schema are CS annex A.
 
-**Addresses (survey C-18, M-2).** Explicit `table` (`coil`, `discrete`,
-`input`, `holding`) and `register` or `bit`, with `address_base: 0 | 1` per
-template and no hidden "4xxxx" arithmetic; the result is 0 to 65,535. Unit
-ids 0 to 255 on TCP (0 is a normal unit), 1 to 247 on RTU; broadcast only as
-an explicit write mode, off by default. Transaction ids are checked, and a
-late answer to an earlier transaction is discarded and counted.
+**Addresses.** Explicit table and register, `address_base` per template, no
+hidden "4xxxx" arithmetic; 0 to 65,535. Unit ids 0 to 255 on TCP and
+`rtu_over_tcp`, 1 to 247 on RTU; unit 0 on TCP is a normal unit. Broadcast
+is not used.
 
-**Functions (X-17, M-1).** Reference 6.4's "function codes 1 to 6, 15, 16"
-is the set the driver supports, not a set every device has. A device
-declares `supported_functions`; the driver substitutes where configured
-(16 for 6, repeated 5 for 15, 3 for the input table when a device maps them
-alike) and never uses a function the device excludes (`DRV-CFG-07`).
-Function 23 only when configured. Not in phase 2 (M-14): ASCII framing,
-UDP, vendor functions.
+**Functions (X-17).** Reference 6.4's "function codes 1 to 6, 15, 16" is the
+set the driver supports, not a set every device has. A device's or
+template's function list and the substitutions it allows are CS's; the
+driver never uses a function the device excludes.
 
-**Types (M-3, M-4).** As C-22 of #98: 16-, 32- and 64-bit integers, 32- and
-64-bit floats, 8-bit halves, strings up to 125 registers, byte and word
-order separate, values at odd addresses and halves from separate
-registers, bit and field points from one register, a value with a validity
-bit.
+**Frame checks** (`frame_state`, `decode`). TCP: protocol id 0; length 2 to
+254 and equal to the bytes received; transaction id equal to the request's
+(an answer to an earlier transaction is discarded and counted); unit id
+and function echoed, or the exception form (function + 0x80, one code
+byte); byte count equal to what the request implies; nothing beyond 260
+bytes. RTU: the same without the header, with the CRC, nothing beyond 256
+bytes. A frame that fails is a broken answer: `COMM_FAIL` (7.1).
 
-**Block planning (M-6, M-7).** At most 125 registers or 2,000 bits per
-read, configurable lower; writes at most 123 registers (some devices
-fewer); no merging across tables, even where a device mirrors one table in
-another; no bridging of undeclared gaps.
+**Types.** As CS annex A: integers and floats of 16, 32 and 64 bits, 8-bit
+halves, strings, separate byte and word order, values at odd addresses,
+halves from separate registers, bit and field points, a value with a
+validity bit.
 
-**Exceptions to outcomes (M-8).**
+**Block planning.** At most 125 registers or 2,000 bits per read, 123
+registers or 1,968 bits per write, configurable lower; no merging across
+tables, even where a device mirrors one table in another.
+
+**Answers to outcomes.**
 
 | Answer | On a read | On a write | Demotion |
 | --- | --- | --- | --- |
-| 01 illegal function | `ABSENT` for the request's points; configuration diagnostic | REJECTED, `NOT_SUPPORTED` | No |
-| 02 illegal address | On a merged read, split once (6.3); points refused again `ABSENT` | REJECTED, `INVALID_VALUE` | No |
-| 03 illegal value | `ABSENT` with a diagnostic (a read that splits an aligned value) | REJECTED, `INVALID_VALUE` | No |
-| 04 server failure | `DEVICE_INVALID`, BAD | REJECTED, `REJECTED_MODE` (a permanent state refusal; not retried) | No |
-| 06 busy | Retried at the next turn; no sample | REJECTED, `BUSY` | No |
-| 0A, 0B gateway | `COMM_FAIL` for that device only | REJECTED, `COMM_FAIL` | Yes |
+| 01 illegal function | `ABSENT` for the request's points | REJECTED, `NOT_SUPPORTED` | No |
+| 02 illegal address | On a merged read, the split form once (6.3); points refused again `ABSENT` | REJECTED, `INVALID_VALUE` | No |
+| 03 illegal value | `ABSENT` (a read that splits an aligned value) | REJECTED, `INVALID_VALUE` | No |
+| 04 server failure | `DEVICE_INVALID`, BAD; if every request of a full poll period after `startup_grace` gets it, the device is `REFUSING` | REJECTED, `REJECTED_MODE` | No |
+| 06 busy | No sample; the next poll reads again | REJECTED, `BUSY` | No |
+| 0A, 0B gateway | `COMM_FAIL` for that unit only | REJECTED, `COMM_FAIL` | Yes, that unit |
 | Other codes | `DEVICE_INVALID`, BAD; counted | DEVICE_ERROR, `DEVICE_FAULT` | No |
-| Timeout, CRC error, broken frame | `COMM_FAIL` | TIMEOUT, `NO_RESPONSE` (after send) | Yes |
+| Timeout, broken frame | `COMM_FAIL` | TIMEOUT, `NO_RESPONSE` (after send; 7.3) | Yes |
 
-**Transport (M-9, M-10).** TCP: port per channel, keep-alive, reconnect
-after an idle close; a refused connection (a connection limit, a device's
-client allow-list) is a refusal (`REFUSING`), not a timeout. RTU: the
-serial settings of #98, the inter-frame gap from the baud rate, turnaround
-time, start-up grace. RTU framing over TCP is a channel `type`
-(`rtu_over_tcp`).
+**Transport.** As 7.2 and 7.3. RTU framing over TCP (`rtu_over_tcp`) has no
+transaction id: the rules of 7.2 for late answers apply, and a gateway that
+forwards with delay may still deliver an answer late; the worker reconnects
+after a timeout on such a channel.
 
-**Writes (M-11, M-12).** Function per point; fixed quantity and values;
-whole-word masks without read-modify-write; clock blocks in one function 16
-request; timeout scaled by the count of values. A device-side select over
-coils (one relay in the survey) is a list of writes with roles; its exact
-sequence is not known from the documents supplied, so it is room (X-1).
+**Writes.** Function per point; fixed quantity and values; whole-word
+masks without read-modify-write; clock blocks in one function 16 request;
+the encodings of CS annex A.5. A device-side select over coils (one relay
+in the survey) is room (X-1): its procedure is not in the documents
+supplied.
 
-**Record readers (M-13).** Not in phase 2. Registers that move a pointer or
-clear on read are marked `side_effect` or `no_read` from the first release,
-so that a poll of them cannot corrupt a device's event pointer. Without
-record readers the Modbus driver gives no device time stamps.
+**Device time.** Time companions (`source_time_from` with `epoch` or
+`datetime`) are phase 2. Event records and record readers are room: a
+register that moves an event pointer or clears on read is marked
+`side_effect` or `no_read` from the first release, so that no poll can
+corrupt a device's event pointer.
+
+**Not in phase 2:** ASCII framing, UDP, vendor functions, broadcast.
