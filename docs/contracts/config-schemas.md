@@ -149,16 +149,17 @@ only can be committed; the warnings are shown and kept with the commit.
 | Point name (in a template) | One or more segments, as a tag name | 1 to 127 bytes; the full tag name is checked | `flow`, `meter.power`, `pv3.voltage` |
 | Device name | As a tag name. It is the prefix of the device's tags | 1 to 126 bytes | `ps1.fm1` |
 | Identifier | `[a-z][a-z0-9_]*` | 1 to 31 bytes | template, policy, area, program, block, alarm, parameter, enumeration and interlock names |
-| Channel name | `[a-z][a-z0-9_]*`, unique across the unit, not `io` | 1 to 12 bytes | `line1` |
-| Task name | `[a-z][a-z0-9_]*`, not `cmd` | 1 to 8 bytes | `fast`, `normal` |
+| Channel name | `[a-z][a-z0-9_]*`, unique across the unit | 1 to 31 bytes | `line1` |
+| Task name | `[a-z][a-z0-9_]*` | 1 to 31 bytes | `fast`, `normal` |
 | Poll group name, tier name | `[a-z0-9][a-z0-9_]*` | 1 to 8 bytes | `fast`, `1m`, `15m` |
 | Unit id | `[a-z0-9][a-z0-9-]*` | 1 to 31 bytes | `site-0042` |
 
 - Tag names are unique across the unit (reference 12.2). A user tag name must
   not start with the segment `sys`, which is kept for generated system tags
   (CF-301).
-- The 12-byte channel and 8-byte task limits come from the 31-byte limit on
-  queue and owner names of the tag database (section 12.3, D-75).
+- Owner and queue names of the tag database are at most 31 bytes; they are
+  generated from channel and task names by the rule of section 12.3, so the
+  names users write are not shortened for them (D-75).
 - Free text (`description`, `message`, `guidance`, `label`, `unit`) is UTF-8
   without control characters, at most 1,024 bytes, `unit` at most 32 bytes.
   A `label` holds a device-side identifier as the device documents it (for
@@ -504,7 +505,7 @@ Framework keys of a channel (the protocol's keys are in its schema):
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | channel name | required | Equals the file name |
-| `enabled` | bool | `true` | A disabled channel keeps its tags (BAD, NOT_INIT) and is not connected; a change is live |
+| `enabled` | bool | `true` | A disabled channel is not connected. Its tags and system tags stay in the tag set (BAD, NOT_INIT), so that enabling or disabling it is a live change and references to its tags stay valid. Open with the driver interface contract, whose draft creates no tags for a disabled device |
 | `role` | `connect`, `listen` | `connect` | Who opens the connection. `listen` is reserved (open: needs the product owner's ruling (X-2)). Both are the client or master role of reference 6.4 |
 | `poll_groups` | map of poll group name to `{ period, priority }` | `fast` 200 ms, `normal` 1 s, `slow` 10 s, priorities 1, 2, 3 | Reference 6.2. `period` 10 ms to 1 d; `priority` 1 (highest) to 16 |
 | `min_request_interval` | duration, `0s` to `60s` | `0s` | Pacing of the channel: least time between two requests on it |
@@ -729,8 +730,12 @@ Keys of one kind only:
   given to the owner's library at attach, which applies it while it restores,
   before the region is set `ready`, so that no reader sees the old value as
   UNCERTAIN first. A change of the bound alone needs no generation change; it
-  applies at the next restore. The library interface for it is added by #89
-  as a minor version of the tag database contract.
+  applies at the next restore.
+- **Depends on tag database 1.1 (#89).** The attach option that carries the
+  bounds and the restore rule are an addition to tag database contract 1.0,
+  a minor version with a migration note (D-66 f), made by #89 and reviewed by
+  a person (restart behaviour). Until 1.1, `retain_max_age` is validated but
+  has no effect, and `scada-conf` warns (CW-510).
 
 ### 5.3 Counters and double points
 
@@ -990,9 +995,9 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `refresh` | duration, `1s` to `1d` | none | The driver writes the accepted value again at this period, for devices whose setpoint lapses or that fall back when writes stop. Open: needs the product owner's ruling (X-5) |
 | `write_on_change_only` | bool | `false` | `scada-control` posts a write only when the requested value changes; with `refresh` the refresh still runs |
 | `safe_state` | `off`, `on`, `hold`, or `{ value }` | required (reference 12.5) | The state the output is driven to when a rule below says "safe" |
-| `on_shutdown` | `hold`, `safe` | `hold` | Reference 14.4 |
+| `on_shutdown` | `hold`, `safe`, `release` | `hold` | Reference 14.4; `release` writes `limits.release` (X-9) |
 | `on_control_loss` | `{ action: hold \| safe, after }` | `{ action: hold }` | When `scada-control` stops while the output is in AUTO (reference 14.4); `after` from `0s` to `10m` |
-| `on_source_loss` | `hold`, `release`, `safe_value` | `hold` | For an output with `refresh`: when the requested value's source has been BAD or stale for `source_lost_after`, stop refreshing (`hold`), write `limits.release` once (`release`), or write the value of `safe_state` (`safe_value`). Open: needs the product owner's ruling (X-9) |
+| `on_source_loss` | `hold`, `release`, `safe` | `hold` | For an output with `refresh`: when the requested value's source has been BAD or stale for `source_lost_after`, stop refreshing (`hold`), write `limits.release` once (`release`), or drive to `safe_state` (`safe`). Open: needs the product owner's ruling (X-9) |
 | `source_lost_after` | duration, `0s` to `10m` | `0s` | |
 | `task` | task reference | the task of the program that drives it, else `normal` | Owner of the AUTO request tag |
 | `termination_timeout` | duration | reserved | For two-phase results of phase 9 (driver interface contract) |
@@ -1337,6 +1342,7 @@ code; a rule that is removed keeps its code unused.
 | CF-507 | A STRING tag retained | `string tags cannot be retained` |
 | CF-508 | `retain_max_age` on a mode, authority, alarm state or counter tag (#89) | `retain_max_age is not allowed on {kind} tags` |
 | CF-509 | `retain_now` on a point tag or virtual tag | `retain_now is allowed on internal and manual tags only` |
+| CW-510 | `retain_max_age` before tag database 1.1 | `retain_max_age has no effect until the tag database supports it (#89)` |
 | CF-520 | Expression syntax | `expression: {reason} at column {col}` |
 | CF-521 | An ambiguous `.quality` or `.age` | `{ref} is both a tag and an attribute; use quality() or age()` |
 | CF-522 | A STRING tag in an expression | `string tag {name} cannot be used in an expression` |
@@ -1427,7 +1433,8 @@ code; a rule that is removed keeps its code unused.
 | CF-1001 | More tags than `limits.max_tags` | `{n} tags, the limit is {limit}` |
 | CF-1002 | More devices than the limits | `{n} devices, the limit is {limit}` |
 | CF-1003 | An owner with more than 524,288 tags, or more than 1,023 owners (tag database contract 14) | `{reason}` |
-| CF-1004 | A queue or owner name longer than 31 bytes | `queue name {name} is longer than 31 bytes` |
+| CF-1004 | A queue or owner name longer than 31 bytes (a protocol name over 12 bytes) | `queue name {name} is longer than 31 bytes` |
+| CF-1006 | Two channels or two tasks with the same short name (section 12.3) | `{kind} {a} and {b} have the same short name {c}; rename one` |
 | CF-1005 | A service user that does not exist on the unit, uid 0, or two processes with one uid | `process {name}: {reason}` |
 | CF-1010 | `heartbeat_check_ms` above 400 with a `retain_now` tag (D-62, #96) | `heartbeat_check_ms must be at most 400 in a tag set with a retain_now tag` |
 | CF-1011 | Any other refusal of `scada::tag::validate` | `tag set: {reason}` |
@@ -1510,11 +1517,10 @@ Decision D-73.
 - **uid.** The tag set holds numeric uids (D-26). `scada-conf` looks up the
   uid of each service user on the unit when it builds the tag set. A user
   that does not exist, uid 0, or two processes with one uid is CF-1005 (the
-  D-26 note for phase 2). Because the uid is in the canonical encoding, two
-  units with different uids for the same users get different `config_hash`
-  values from the same tree; the hash identifies a generation on one unit,
-  and nothing compares it across units. Tests give the lookup a fixed table
-  of users, so that a tree's hash is pinned in a test (#101).
+  D-26 note for phase 2). The uid is in the canonical encoding, so
+  `config_hash` depends on the unit as well as the tree (section 12.8).
+  Tests give the lookup a fixed table of users, so that a tree's hash is
+  pinned in a test (#101).
 - The heartbeat timeout is `data_plane.processes.<process>.heartbeat_timeout_ms`,
   default 3,000 ms, and 500 ms for a REALTIME process (D-26).
 - A driver process is not REALTIME in phase 2. A driver with a fast poll group
@@ -1524,15 +1530,44 @@ Decision D-73.
 
 ### 12.3 Owners and queues
 
-Decision D-75.
+Decision D-75. Owner and queue names are at most 31 bytes (tag database
+contract 1, 3), and the part of a queue name after its prefix is free text
+there. They are therefore generated from the configured names with a **short
+name**, so that channel and task names keep the 31-byte limit of an
+identifier:
+
+```
+C(channel) = the first 10 hexadecimal digits (lower case) of SHA-256("channel:" + channel name)
+T(task)    = the first 10 hexadecimal digits (lower case) of SHA-256("task:" + task name)
+```
+
+For example a channel `line1` gets `C(line1)`, ten digits such as
+`3f9a1c22e0` (the value here is illustrative; the corpus of section 13 pins
+real ones).
+
+- A short name depends on its own name only. Adding, removing, reordering or
+  renaming one channel or task changes the owner and queue names of that
+  channel or task alone; every other name stays as it was.
+- Two channels, or two tasks, whose short names are equal are CF-1006
+  ("channels {a} and {b} have the same short name {c}; rename one"). With 40
+  bits the chance for 1,000 channels is below one in a million.
+- Protocol names (`modbus`, `io`, later ones) are at most 12 bytes, so
+  `drv-<protocol>.<C>` is at most 27 bytes.
+- `scada-conf` writes the map from every generated name to what it stands for
+  (`drv-modbus.3f9a1c22e0` → channel `line1` of protocol `modbus`) to
+  `/var/lib/scada/conf/tag-set-names.json` when it applies a tree, atomically
+  and readable by group `scada`. `scadactl` shows both, for example
+  `cmd.3f9a1c22e0.4b7d1e6a90 (channel line1, task normal)`; `scada-tagd` and
+  the tag database know only the generated names, and their logs show those.
 
 | Owner | Process | Writes |
 | --- | --- | --- |
-| `control.<task>` | `control` | The task's virtual, internal and interlock tags, AUTO request tags, tunable parameter tags |
+| `control.<T(task)>` | `control` | The task's virtual, internal and interlock tags, AUTO request tags, tunable parameter tags |
 | `cmd` | `cmd` | Manual tags, MANUAL request tags, mode and status tags of outputs, authority tags of areas |
 | `alarm` | `alarm` | Alarm state tags |
-| `io` | `io` | The tags of every `scada-io` channel (one scan thread, reference 6.5) |
-| `drv-<protocol>.<channel>` | `drv-<protocol>` | The tags of every device of the channel and the channel's and devices' system tags |
+| `io` | `io` | The tags of every `scada-io` channel, with their system tags (one scan thread, reference 6.5) |
+| `drv-<protocol>` | `drv-<protocol>` | The driver's process-level system tags `sys.proc.drv-<protocol>.*` (its main thread) |
+| `drv-<protocol>.<C(channel)>` | `drv-<protocol>` | Every tag of the channel's devices, their `sys.dev.<device>.*` system tags and the channel's `sys.drv.<channel>.*` system tags (the channel's worker thread) |
 
 - An owner without tags is not created; a process without owners is still in
   the process table.
@@ -1542,20 +1577,23 @@ Decision D-75.
   builder of the tag database does not raise it, so `scada-conf` states it for
   every owner (D-66 a, D-76).
 
-Queues, each with the capacity of section 3:
+Queues, each with the capacity of section 3. `<S>` is `cmd` for `scada-cmd`
+and `<T(task)>` for a control task:
 
 | Queue | Producer, consumer | Exists when |
 | --- | --- | --- |
-| `cmd.<channel>.cmd`, `result.<channel>.cmd` | `cmd`, the channel's driver process | The channel has a point (operator writes and `READ_NOW`) |
-| `cmd.<channel>.<task>`, `result.<channel>.<task>` | `control`, the channel's driver process | A program of the task drives an output whose target is on the channel |
-| `cmd.io.cmd`, `cmd.io.<task>` and their `result.` queues | as above, with `io` | As above, for `scada-io` |
+| `cmd.<C(channel)>.cmd`, `result.<C(channel)>.cmd` | `cmd`, the channel's driver process | The channel has a point (operator writes and `READ_NOW`) |
+| `cmd.<C(channel)>.<T(task)>`, `result.<C(channel)>.<T(task)>` | `control`, the channel's driver process | A program of the task drives an output whose target is on the channel |
+| `cmd.io.<S>`, `result.io.<S>` | `cmd` or `control`, and `io` | As above, for `scada-io` |
 | `events.cmd` | `cmd`, `audit` | Always |
-| `events.<task>` | `control`, `audit` | A program of the task drives an output (no audit, no action applies to AUTO writes, tag database contract 9.3) |
+| `events.control.<T(task)>` | `control`, `audit` | A program of the task drives an output (no audit, no action applies to AUTO writes, tag database contract 9.3) |
 | `events.alarm` | `alarm`, `audit` | Always |
+| `events.drv-<protocol>` | the driver process, `audit` | From phase 5: the driver has an output whose `on_shutdown` or `on_source_loss` is not `hold`, since the safe or release write it makes on its own needs its event record first (driver interface contract) |
 
-- The longest name is `result.<channel>.<task>`: 7 + 12 + 1 + 8 = 28 bytes,
-  within 31 (tag database contract 3). This is why channel names are at most
-  12 bytes and task names at most 8 (section 2.1).
+- The longest name is `result.<C>.<T>`: 7 + 10 + 1 + 10 = 28 bytes, within 31.
+- Inside a driver, one command thread consumes every `cmd` queue of the
+  process and hands requests to the channel workers (driver interface
+  contract); the queue names do not depend on that.
 - The consumer of the event queues is provisional: which service journals
   which record, and whether an AUTO write needs one record per request or
   per change of state, is decided with the command and audit services
@@ -1568,9 +1606,9 @@ Queues, each with the capacity of section 3:
 | --- | --- | --- | --- |
 | Point tag `<device>.<point>` | The channel's owner | `value_type` (section 4.7) | RETAIN if `retain`; WRITABLE_BY_COMMAND if the target of an output |
 | Bit tag of a point | The channel's owner | BOOL | RETAIN if its `retain` |
-| Internal tag | `control.<task>` | `value_type` | RETAIN, RETAIN_NOW as given |
+| Internal tag | `control.<T(task)>` | `value_type` | RETAIN, RETAIN_NOW as given |
 | Manual tag | `cmd` | `value_type` | RETAIN (default true), RETAIN_NOW as given |
-| Virtual tag | `control.<task>` | From `expr` | RETAIN if `retain` |
+| Virtual tag | `control.<T(task)>` | From `expr` | RETAIN if `retain` |
 
 ### 12.5 Generated tags
 
@@ -1582,20 +1620,23 @@ Decision D-79. Every generated tag name is checked against the 127-byte limit
 | `<output>.mode` | `cmd` | INT64 | RETAIN, RETAIN_NOW | 1 AUTO, 2 MANUAL, 3 REMOTE (phase 11) |
 | `<output>.status` | `cmd` | INT64 | none | 0 IDLE, 1 SELECTED, 2 EXECUTING, 3 OK, 4 FAILED, 5 BLOCKED (reference 8.1) |
 | `<output>.req_manual` | `cmd` | the target's type | RETAIN | The value last requested in MANUAL |
-| `<output>.req_auto` | `control.<task>` | the target's type | none | The value last requested by logic |
+| `<output>.req_auto` | `control.<T(task)>` | the target's type | none | The value last requested by logic |
 | `sys.area.<area>.authority` | `cmd` | INT64 | RETAIN, RETAIN_NOW | 1 LOCAL_PANEL, 2 CLI, 3 WEB, 4 API, 5 MASTER (phase 11) |
-| Interlock `<name>` | `control.<task>` | BOOL | none | Section 7.3 |
+| Interlock `<name>` | `control.<T(task)>` | BOOL | none | Section 7.3 |
 | `<tag>.alarm.<id>` | `alarm` | INT64 | RETAIN | 0 normal, 1 unacknowledged, 2 acknowledged, 3 returned unacknowledged, 4 latched unacknowledged, 5 latched acknowledged, 6 shelved, 7 suppressed, 8 out of service (reference 10.2) |
 | `<tag>.alarm.<id>.shelved_until` | `alarm` | INT64 (ns UTC, 0 if not shelved) | RETAIN | |
-| `ctl.<program>.<block>.<param>` | `control.<task>` | The parameter's type | RETAIN | Tunable parameters (reference 7.3) |
-| Driver system tags | The channel's owner | As the driver interface contract lists | As listed | Per channel and per device (reference 6.3) |
+| `ctl.<program>.<block>.<param>` | `control.<T(task)>` | The parameter's type | RETAIN | Tunable parameters (reference 7.3) |
+| `sys.drv.<channel>.<name>`, `sys.dev.<device>.<name>` | `drv-<protocol>.<C(channel)>` (or `io`) | As the driver interface contract lists | none | Per channel and per device (reference 6.3) |
+| `sys.proc.<process>.<name>` | `drv-<protocol>` (or `io`) | As the driver interface contract lists | none | Per driver process |
 
 - For an expression alarm, `<tag>` is its `name`.
 - The output's target is the point tag that write requests name; the
   feedback tag is a point tag of the device (reference 8.1).
-- Driver system tags are named as the driver interface contract fixes them,
-  under `sys.` (proposed: `sys.drv.<channel>.<name>` and
-  `sys.dev.<device>.<name>`). The system tags of the services themselves
+- Driver system tags are listed, with their types, in the driver interface
+  contract (section 10 of its draft 0.1); `scada-conf` builds them by its
+  rule: one set per process, per channel, per poll group of a channel
+  (`period.<group>`), and per device, with the identity tags only for a
+  device with `identify`. None is retained. The system tags of the services themselves
   (task cycle times, the real-time tier, tagd) are added with those services
   (phases 4 to 7), each a minor version of this contract.
 
@@ -1632,6 +1673,34 @@ The tag set is a pure function of the tree and the uid table. The order of
 files, of entries in a file, and of keys in a map has no effect (the library
 sorts, D-26), so `config_hash` is the same on x86-64 and ARM64 and after a
 file is renamed or its entries reordered (#101).
+
+### 12.8 `config_hash` across units, and `config_id`
+
+What this means for an operator: **the same configuration tree gives
+different `config_hash` values on two units whose service users have
+different uids.** Users are created at installation (`systemd-sysusers`), so
+two units installed differently, or a replacement unit, can have other uids.
+`config_hash` says only "this generation of the data plane on this unit was
+built from this tag set"; `scada-tagd` uses it to decide whether a restart can
+reuse a generation, on the same unit (tag database contract 11.1). Two units
+showing different `config_hash` values may run the same tree.
+
+Where configurations are compared across units, `config_hash` is not used:
+
+| Place | What it compares | Identity used |
+| --- | --- | --- |
+| Upstream sync (reference 9.6, phase 10) | Which configuration a historian partition or journal batch was recorded under | `config_id` below, with the unit id |
+| Backup, restore and cloning (reference 12.7) | Whether an imported archive is the tree it claims to be; which version is active on a replacement unit | The archive's signature and the version id it carries (reference 12.7), and `config_id`. The replacement unit computes its own `config_hash` after the import |
+| Node link manifest (reference 17.3, phase 11) | Whether the master's imported tag definitions still match the slave's exports | The manifest hash of the node link contract, over the exported tags (names, types, units), which holds no uid. That contract defines it |
+| `scadactl`, the system page | Which configuration a unit runs | `config_id` and the version id; `config_hash` is shown as a data-plane detail |
+
+**`config_id`** is the unit-independent identity of a tree: the SHA-256 of the
+encoding `text "scada-config-tree", u32 1 (encoding version)`, then for each
+file of the tree in byte order of its path, `text path, u64 length, bytes`
+(integers little-endian, text as a 32-bit length and its bytes, as in the
+canonical encoding of the tag set). It covers every file byte for byte, so a
+change of a comment changes it too: it identifies a tree, not its meaning.
+`scada-conf` stores it with each committed version.
 
 ## 13. Conformance tests
 
@@ -1679,7 +1748,13 @@ ARM64, and the parser runs under its fuzz target (#100).
     both architectures.
 12. A tree of format 0 (a test format) is migrated to format 1 by a test
     migration, keeping the comments of lines it does not change.
-13. Modbus (Annex A): addresses of every type and order, overlaps between
+13. Short names: the corpus pins `C()` and `T()` of a few names; adding,
+    removing, reordering and renaming one channel or task leaves every
+    other owner and queue name unchanged; two names given equal short names
+    by a test hook are CF-1006; the name map file lists every generated name.
+14. `config_id` is the same for one tree on two uid tables, where
+    `config_hash` differs; it changes with any byte of any file.
+15. Modbus (Annex A): addresses of every type and order, overlaps between
     devices with shared unit ids (refused and allowed cases), point-level
     unit ids, functions outside the supported set.
 
