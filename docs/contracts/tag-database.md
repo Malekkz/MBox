@@ -1847,6 +1847,7 @@ typedef struct {                 /* one side of a queue in one context, since at
 } scada_queue_stats_t;           /* 80 bytes */
 ```
 
+```c
 #define SCADA_NO_PROCESS 0xFFFF  /* process_index of an observer (11.4) */
 
 typedef struct {                 /* what scada_tag_status reports */
