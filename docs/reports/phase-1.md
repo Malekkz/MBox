@@ -134,9 +134,10 @@ tags per cycle (2,000,000 reads per second in all); this load is fixed
 | Longest reader cycle | 1,190 us | 374 us | 773 us |
 
 Criterion of contract section 16: fewer than 1 `SCADA_E_BUSY` in 1,000,000
-reads. With the shipped code it is met on both runners: 0 in 1.2 billion
-reads puts the rate below about 0.006 per million at 99.9 % confidence. The
-limit of 64 attempts and the heartbeat defaults are confirmed (contract
+reads. With the shipped code it is met on both runners in this run. The
+second run (issue #21, below) gave 0.35 per million on ARM64 with `isb`:
+two runs, 0 and 0.35 per million, are the evidence, not a bound from one
+run. The limit of 64 attempts and the heartbeat defaults are confirmed (contract
 0.22). In the pipeline, the 10 s run of the release build gates the same
 criterion statistically (bound 35 for 20.24 million reads, D-57); in the dev
 build, whose write path is not optimised, it is reported only: 0 to 31 in
@@ -223,6 +224,8 @@ fails the test. 600 s.
 The 10 s form, in the same jobs and in the pipeline's perf gate, received
 500,000 changes with 0 gaps on each runner. This settles the gap half of
 the ring capacity in contract 16; the size half is 28.8 MB (issue #20).
+The default is settled for the reference load of 10 owners. The capacity
+is per owner in the tag set, and phase 2 sizes each owner's ring.
 
 ### Huge pages
 
@@ -241,7 +244,8 @@ written at 50,000 updates per second, read 1,000,000 times with `read` and
 | ARM64, `yield` | never | 144 | 416 | 18,342 | 32,878 | 0 |
 | ARM64, `yield` | always | 104 | 384 | 18,343 | 27,302 | 2,048 |
 
-Huge pages are not used (D-66). There is no gain on x86-64: the read
+Huge pages are not used (D-66), a judgement on single runs of about
+0.6 s, one per mode and runner. There is no gain on x86-64: the read
 medians are equal at 80 ns, and the read 99.9th percentile is 261 ns
 without and 270 ns with huge pages. On ARM64 the read median was up to
 about 40 ns lower (`isb` 120 to 104 ns, `yield` 144 to 104 ns), within the
@@ -281,7 +285,10 @@ Every job passed. The rate varies between runs on shared virtual machines:
 ARM64 with the shipped `isb` gave 0 in 1.20 billion reads in the first run
 and 424 in the second. Both are below the criterion of 1 per million; the
 margin in the second run was about 3 times. The limit of 64 attempts stays
-(D-66). The target board (#41) is to measure it again.
+(D-66). The target board (#41) is to measure it again. The test measures
+real-time readers on processors they share with non-real-time owners. The
+limit of 64 is a constant of the library, not of the layout: a worse figure
+on the board changes core placement (#116), not the layout.
 
 ### Conformance test 27, medians against the baselines
 
