@@ -82,7 +82,10 @@ named `<process>.<writer>`.
 `<producer>`, `<driver>` and `<source>` are owner names when the process posts
 from more than one thread, so that every queue has exactly one producing
 thread. The full queue name is at most 31 bytes; the tag-set builder rejects a
-longer one.
+longer one. The builder checks the prefix (`events.`, `cmd.`, `result.`),
+that something follows it, the name rules of section 1, and the `result.`
+queue of each `cmd.` queue (section 9). The rest of the name is free text;
+the forms above are a convention.
 
 The base directory and the retain directory (section 12) are the defaults.
 `scada_tag_attach_opts` (section 13) can replace both, so tests can run in
@@ -1116,9 +1119,10 @@ Decision D-54 (issue #65).
 - `scada_queue_next` in a RETIRING generation makes system calls, also
   with timeout 0: it looks for a producer region it has not mapped
   (`fstatat`, and `open`, `mmap` and the pre-fault when the region is
-  there) and wakes the requester after answering ABORTED (`futex`). A
-  real-time driver that polls in its cycle stops polling there and
-  detaches outside the cycle.
+  there) and wakes the requester after answering ABORTED (`futex`).
+  `scada_queue_next` is not real-time safe in 1.0 in any state of the
+  generation (section 13); how a real-time task takes requests is #116.
+  A driver detaches outside its cycle.
 - Nothing is carried over: every region of the new generation is new, so
   `write_seq`, cursors and ids start at 0 (section 9.4). The processes do
   their part: a driver never answers in the new generation a request it took
@@ -1772,7 +1776,7 @@ void scada_sub_close(scada_sub *sub);
 /* Reliable queues */
 int  scada_queue_open(scada_ctx *ctx, const char *queue_name, scada_queue **out);
 int  scada_queue_post(scada_queue *q, const void *record, size_t size);   /* RT-safe */
-int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);
+int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);   /* not RT-safe in 1.0 (#116) */
 int  scada_queue_ack(scada_queue *q);                  /* EVENTS and RESULT only */
 int  scada_queue_stats(scada_queue *q, scada_queue_stats_t *out);   /* counts of one side */
 void scada_queue_close(scada_queue *q);
