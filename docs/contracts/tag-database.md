@@ -995,6 +995,14 @@ If the consumer's region is missing or its process is down, `post` returns
 - This applies to write requests of every source, AUTO included. While the
   consumer of its event queue is down, `scada-control` cannot post write
   requests, and outputs follow their configured hold or safe behaviour.
+  REMOTE writes (reference 17.4) are the same.
+- Open for phase 5 (#83, deferred by the owner, section 16): whether "its
+  event record" means one record per request, or one per change of state,
+  for AUTO and REMOTE writes. An output written every 10 ms gives 100
+  records a second into an events queue of the default 1,024 records
+  (section 14). The library does not enforce the pairing: `scada_queue_post`
+  of a request does not look for an event record, and the requester must
+  post it first. Neither answer changes the layout.
 - The only bypass is emergency direct mode (reference section 11.6).
 - Residual window: a consumer that has just died is seen as down only after
   its heartbeat timeout. Records accepted in that window are in shared memory
@@ -2310,6 +2318,12 @@ Deferred by the owner, does not block 1.0:
   It is safety-relevant, and the library has no such latch. It is for the
   command service in phase 5 (D-49, C14; issues #74, #75 and #83). The
   product owner approved the deferral (D-66).
+- One event record per request, or per change of state, for AUTO and
+  REMOTE writes (section 9.3). At 100 writes a second the first fills an
+  events queue of 1,024 records in about 10 s while its consumer takes
+  none. The library does not enforce the pairing. Neither answer changes
+  the layout. For the command service's journalling in phase 5 (#83). The
+  product owner deferred it on 2026-11-22 (D-66).
 
 ## 17. Differences from the reference document
 
@@ -2318,8 +2332,8 @@ the reference document 1.1 matches this contract 1.0, except for the
 differences listed below (reference change log, version 1.1, issue #21). The list below is kept as the record of the
 differences that update resolved; the numbers are cited elsewhere.
 
-Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1 and 14.4
-that refer to section 5. The differences that remain:
+Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1, 14.4
+and 17.4 that refer to section 5. The differences that remain:
 
 - Reference 10.4 has no system alarm for lost audit records or a broken
   queue (item 22). It is a phase 5 gap (#75).
@@ -2430,7 +2444,7 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: a file of an owner is written again only K checks after the last, K = max(1, floor((1000 ms − 200 ms) / P) − 1), also for RETAIN_NOW; FINAL, the timeout write and the flush are not held back; the 1 s bound of RETAIN_NOW holds while a retain write, with those queued before it, takes at most 200 ms, and a later write is logged (`retain_now change reached the disk late`); `heartbeat_check_ms` at most 400 ms in a tag set with a RETAIN_NOW tag; the D-45 window is up to K · P. Section 18, tests 16 and 25: the 200 ms condition. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
-| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen. Rulings of the product owner, 2026-11-22 (D-66): later changes are of three levels, layout version, minor version with a migration note, or editorial revision, each with a change-log row (introduction); what 1.0 freezes, the reserved fields and unknown values with their place in the code, and the constants that are not frozen (14.1); a worse figure on the target board changes no layout (16). Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1 and 14.4 that refer to it; reference 10.4 remains a phase 5 gap (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
+| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen. Rulings of the product owner, 2026-11-22 (D-66): later changes are of three levels, layout version, minor version with a migration note, or editorial revision, each with a change-log row (introduction); what 1.0 freezes, the reserved fields and unknown values with their place in the code, and the constants that are not frozen (14.1); a worse figure on the target board changes no layout (16). Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to it (17.4: REMOTE writes need their event record, as in 9.3; ruling of 2026-11-22, D-66); 9.3 and 16: one event record per request or per change of state for AUTO and REMOTE, deferred to phase 5 (#83); reference 10.4 remains a phase 5 gap (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
 
 Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
 structure or behaviour changed: section 16 records settled points, section
