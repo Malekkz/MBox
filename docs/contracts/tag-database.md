@@ -12,8 +12,40 @@ This contract defines the shared-memory data plane exactly enough that two
 independent implementations would interoperate. All access goes through
 `libscada-tag`; no other code may depend on the binary layout.
 
-This is version 1.0, and layout version 1 is frozen. Any later change needs
-a layout version bump and a migration note.
+This is version 1.0, and layout version 1 is frozen. A later change is one
+of three levels (product owner, 2026-11-22, D-66):
+
+1. Layout version (now 1). `libscada-tag` refuses to attach to a region
+   whose layout version is not its own (section 11.2, step 1). It goes up
+   when a process built to the old contract and one built to the new could
+   not safely share a generation:
+   - a structure's size, a field's offset or a field's meaning;
+   - the first use of a reserved field or bit that readers refuse when it
+     is not 0 (section 14.1);
+   - a new enumeration value or flag stored in shared memory;
+   - a limit that readers validate;
+   - file names, owners and modes (section 3);
+   - the protocol steps and orderings of sections 6, 8 and 9;
+   - the liveness rules (section 10.1);
+   - the clock of `*_mono_ns`.
+
+   The library is static: each service carries its own copy, so services
+   of two builds can run on one generation, and the layout version is the
+   only guard against a partial upgrade.
+2. Contract minor version (1.1, 1.2, ...), with a migration note:
+   - additions to the library interface: a function, an appended return
+     code, a counter;
+   - behaviour local to one process;
+   - the order of checks;
+   - defaults and tunable constants (section 14.1);
+   - a new conformance test;
+   - deployment requirements (section 3.4);
+   - the use of reserved bytes that every reader ignores (section 14.1).
+3. Editorial revision (1.0.1, ...): wording and formatting with no change
+   of meaning. Migration: none.
+
+Every level gets a row in the change log (section 18). The retain file has
+its own format version (now 2, section 12).
 
 ## 1. Conventions
 
@@ -2096,6 +2128,56 @@ The cursor array of a `proc` region has one entry for every queue of the
 generation, 8 bytes each. Cursors of different queues share cache lines; at
 command and event rates this is harmless.
 
+### 14.1 What 1.0 freezes
+
+Reserved fields and unknown values, as `libscada-tag` treats them. Every
+reserved field is written as 0 (section 1). A second implementation must
+ignore the fields this table marks ignored, and refuse those it marks
+refused, in the same way. The first use of an ignored field is a minor
+version; the first use of a refused one is a layout version.
+
+| Field or value | Reader | In the code |
+| --- | --- | --- |
+| `RegionHeader.reserved` | Ignored | `region_file.cpp`: `header_matches`; `header_view.cpp`: `read_header` |
+| `GlobalHeader.reserved0`, `reserved1`, `reserved`; `OwnerEntry.reserved0`, `reserved1`; `ProcessEntry.reserved`; `QueueEntry.reserved`; `DirectoryEntry.reserved` | Ignored | `header_view.cpp`: `read_header`, `read_processes`, `read_owners`, `read_queues`, `directory_entry` |
+| `TagRecord.reserved`, `StringSlot.reserved` | Ignored | `tag_record.cpp`: `copy_fields`, `read_record`, `read_string_record` |
+| `ChangeRingHeader.reserved` | Ignored | `change_ring.cpp`: `read_change`, `ring_write_seq`, `ring_epoch` |
+| `ProcHeader.reserved` | Ignored | `proc_region.cpp`: `read_proc_fields`, `proc_liveness` |
+| `QueueHeader.reserved` (32 bytes) | Ignored | `queue_region.cpp`: `queue_base_of` |
+| `QueueHeader.reserved0`, a bit of `QueueHeader.flags` other than `QUEUE_BASE_SET` | Refused: the consumer stops the queue, and `scada_queue_next` returns `SCADA_E_LAYOUT` (section 9.2) | `queue_region.cpp:106`, `queue_base_of`; `queue_access.cpp:206` and `:223`, `Attachment::follow_queue`; `queue.cpp:305`, `Queue::next` |
+| `WriteRequest.reserved0`, `reserved1`, `reserved`; `WriteResult.reserved0`, `reserved`; an unknown operation, source, value type or status | Refused: `SCADA_E_INVALID` at post; when taken, the record is passed over and counted in `invalid` | `queue_region.cpp:185`, `request_valid`, and `:215`, `result_valid`; `queue_access.cpp:600`, `Attachment::post_record`; `queue.cpp:182`, `Queue::poll`; `queue_access.cpp:466`, `Attachment::drain_file` |
+| An unknown bit of `ProcessEntry.flags` | Refused: the header is not valid, attach and observe return `SCADA_E_LAYOUT` | `header_view.cpp:85`, `read_processes` |
+| An unknown bit of `DirectoryEntry.flags` | Refused: the directory entry is not valid, attach and observe return `SCADA_E_LAYOUT` | `header_view.cpp:267`, `directory_entry`; `attachment.cpp:357`, `Attachment::read_directory` |
+| An unknown quality, quality flag bit (above bit 11) or type in a tag record or change entry; OWNER_DOWN stored | Refused: the read or `scada_sub_next` returns `SCADA_E_LAYOUT` | `tag_access.cpp:94`, `storable`, and `:102`, `record_valid`; `tag_access.cpp:363`, `Attachment::read_at`; `tag_access.cpp:262`, `Attachment::change_valid`; `subscription.cpp:202`, `Subscription::poll` |
+| `ProcHeader.state` other than RUNNING, unknown values included | The process is down (section 10.1) | `proc_region.cpp:266`, `proc_liveness` |
+| The reserved bytes of the retain file header and records; an unknown file flag | Refused: the file is not valid, and no value is taken from it | `retain_file.cpp:338` and `:341`, `decode_header`; `retain_file.cpp:383`, `decode_quality`; `retain_file.cpp:402`, `decode_record` |
+
+Not frozen by layout 1: these are constants or defaults of one side, and
+change by a minor version.
+
+- The read retry limit of 64 (section 6.2), a constant of the reader.
+- The heartbeat timeout defaults of 3,000 ms and 500 ms, and the default
+  `heartbeat_check_ms` of 250 ms: defaults of the tag-set builder. The
+  values in force are those the header holds.
+- The default change ring capacity of 65,536 entries and the default queue
+  capacity of 1,024 records: defaults of the tag-set builder. The limits
+  that readers validate (section 14) are layout.
+- Huge pages: a mount option of the file system, not of the layout.
+- The 100 ms cap of a wait (section 8.4) and the look of at most once a
+  second (section 9.2): constants of the waiting process.
+- W = 200 ms, K and the 400 ms limit on `heartbeat_check_ms` for a tag set
+  with a RETAIN_NOW tag (section 12): constants of `scada-tagd` and of its
+  tag-set builder.
+- The minimum kernel (section 1): a deployment requirement.
+
+The 60 s limit on a write request's lifetime (section 14) is a limit that
+readers validate: the poster's library refuses a longer one at post, and
+the consumer's library answers it EXPIRED when taken (`queue_region.cpp`,
+`request_expired`, called from `Attachment::post_record` and
+`Queue::poll`). It is layout. Two ends that disagree fail safe, since a
+request is never executed after its expiry, but a request one end accepts
+is refused by the other.
+
 ## 15. Conformance tests
 
 Phase 1 is accepted only when automated tests show all of these on x86-64 and
@@ -2204,7 +2286,9 @@ Every figure in the table comes from shared GitHub-hosted virtual machines
 with 4 vCPUs, not the target board. Issue #41, the target board, stays open:
 it is the hardware acceptance before the first release on the board, and
 measures these figures again there. Contract 1.0 does not wait for it (the
-product owner's decision, D-66).
+product owner's decision, D-66). A worse figure on the board changes a
+default, a constant or core placement by a minor version, not the layout
+(section 14.1).
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
@@ -2346,14 +2430,16 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: a file of an owner is written again only K checks after the last, K = max(1, floor((1000 ms − 200 ms) / P) − 1), also for RETAIN_NOW; FINAL, the timeout write and the flush are not held back; the 1 s bound of RETAIN_NOW holds while a retain write, with those queued before it, takes at most 200 ms, and a later write is logged (`retain_now change reached the disk late`); `heartbeat_check_ms` at most 400 ms in a tag set with a RETAIN_NOW tag; the D-45 window is up to K · P. Section 18, tests 16 and 25: the 200 ms condition. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
-| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen; later changes need a layout version bump and a migration note. Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1 and 14.4 that refer to it; reference 10.4 remains a phase 5 gap (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
+| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen. Rulings of the product owner, 2026-11-22 (D-66): later changes are of three levels, layout version, minor version with a migration note, or editorial revision, each with a change-log row (introduction); what 1.0 freezes, the reserved fields and unknown values with their place in the code, and the constants that are not frozen (14.1); a worse figure on the target board changes no layout (16). Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1 and 14.4 that refer to it; reference 10.4 remains a phase 5 gap (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
 
 Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
 structure or behaviour changed: section 16 records settled points, section
 17 the state of the reference, and the header the version. 1.0 is cut on
 top of every phase 1 change, 0.24 (#96, PR #111) included. The changes of
 the committee review of PR #115 are wording that matches the code; no
-structure or behaviour changed.
+structure or behaviour changed. The rulings of 2026-11-22 (D-66) state how
+later versions are numbered and what layout 1 freezes; they change no
+structure, constant, default or behaviour.
 
 Migration, 0.25 to 0.26 (0.24 is used by #96): none for data;
 the layout version stays 1 and no structure changed. A process that calls
