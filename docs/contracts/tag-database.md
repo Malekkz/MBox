@@ -195,6 +195,14 @@ accepted for layout version 1:
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
   stays until reboot; removal of an old generation is best effort.
+- A group member can open the base directory (mode `2750` lets the group
+  read it) and hold an `flock` on it. `scada-tagd` then refuses to start,
+  as for a second instance (section 3.1).
+- A region of another process that cannot be opened, mapped or
+  pre-faulted for lack of a resource (`LimitNOFILE`: `EMFILE`;
+  `LimitMEMLOCK` under `mlockall`, or memory: `ENOMEM`) reads as a missing
+  region: its tags read BAD with OWNER_DOWN, and the library reports no
+  cause (#117). `docs/install.md` sizes the limits.
 
 ### 3.4 Deployment requirements
 
@@ -207,6 +215,13 @@ accepted for layout version 1:
   offset clock would make a process look stale or keep it alive.
 - Real-time processes need a locked-memory limit that covers their mappings;
   `scada-tagd` needs write access to the retain directory.
+- Swap may be on. The library pre-faults every mapping but locks none; a
+  real-time process keeps its mappings resident with `mlockall`.
+- A system call filter (seccomp) must allow every call the library and
+  `scada-tagd` make; `docs/install.md` lists them.
+- `/dev/shm/scada` may be a tmpfs of its own, mounted before `scada-tagd`
+  starts with the owner, group and mode of section 3.1: the checks are of
+  owner and mode, not of the file system.
 - `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
 - A process feeds the service manager's watchdog from the same loop that
   writes its heartbeat.

@@ -121,6 +121,39 @@ line.
 
 ## 7. Start the tag database daemon
 
+### Prerequisites
+
+These follow from the tag database contract (sections 1, 3.4 and 12):
+
+- Linux 5.16 or newer: wait sets use `futex_waitv`.
+- `fs.protected_hardlinks` and `fs.protected_symlinks` are 1
+  (`sysctl fs.protected_hardlinks fs.protected_symlinks`). The check that a
+  retain file has one name relies on `protected_hardlinks` (contract 12).
+  The library opens every region, directory and retain file with
+  `O_NOFOLLOW` and does not rely on `protected_symlinks` itself.
+- Swap may be on. The library pre-faults every mapping but locks none; a
+  real-time service keeps its mappings resident with `mlockall` and a
+  `LimitMEMLOCK` sized as below.
+- A system call filter (`SystemCallFilter=` or another seccomp filter) must
+  allow the calls `libscada-tag` and `scada-tagd` make, by their kernel
+  names: `futex`, `futex_waitv`, `mmap`, `munmap`, `madvise`, `flock`,
+  `openat`, `close`, `read`, `write`, `fstat` and `newfstatat`, `fchmod`,
+  `fchown`, `ftruncate`, `fallocate`, `renameat2` and, on x86-64,
+  `renameat`, `unlinkat`, `mkdirat`, `symlinkat`, `readlinkat`,
+  `getdents64`, `fsync`, `clock_gettime`, `adjtimex`, `eventfd2`,
+  `getpid` and `geteuid`, plus what the C and C++ libraries need for
+  threads, memory and the user lookup at attach. A refused raw
+  `clock_gettime` leaves the clock check to the source name (contract
+  13.1); a refused `adjtimex` makes the age of every retained value
+  unknown across a boot. Test a filter with the units before use.
+- `/dev/shm/scada` may be a tmpfs of its own, for a size limit apart from
+  the rest of `/dev/shm`. Mount it before `scada-tagd` starts, with owner
+  `scada-tagd`, group `scada` and mode 2750, for example:
+
+  ```
+  mount -t tmpfs -o nosuid,nodev,noexec,size=256M,mode=2750,uid=$(id -u scada-tagd),gid=$(getent group scada | cut -d: -f3) tmpfs /dev/shm/scada
+  ```
+
 ### Disable system sleep first
 
 The unit must never suspend, hibernate or hybrid-sleep (contract 3.4,
