@@ -141,14 +141,27 @@ jobs:
     # the job passed 15 minutes when phase 1 added its tests.
     timeout-minutes: 45
     steps:
+      # The whole history, so that the merge base with the target branch
+      # can be found; a shallow clone lints everything.
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: ./.github/actions/setup-build-machine
+      # On a pull request clang-tidy lints only the translation units the
+      # pull request could have affected, and everything if a file that sets
+      # the rules changed or the set cannot be worked out. A push to main
+      # and a manual run lint everything. The formatter, banned-function and
+      # SCADA_RT checks run on every file either way (decision D-67).
+      - name: Configure (dev)
+        env:
+          TIDY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        run: cmake --preset dev -DSCADA_CHECK_TIDY_BASE="${TIDY_BASE}"
+      # The self-test of that selection.
+      - name: Self-test of the lint selection
+        run: ctest --preset dev -R '^scada-check-selection-test$' --output-on-failure --no-tests=error
       - name: Formatter, linter, banned-function and SCADA_RT checks
-        run: |
-          cmake --preset dev
-          cmake --build --preset dev --target check
+        run: cmake --build --preset dev --target check
 
   sanitizers:
     name: sanitizers (${{ matrix.preset }})

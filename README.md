@@ -97,7 +97,9 @@ Each preset has its own build directory, so configure and build it first, for
 example `cmake --preset tsan && cmake --build --preset tsan`. The sanitizer
 presets also run tests that prove each sanitizer catches a deliberate bug.
 Change the fuzzing time with `-DSCADA_FUZZ_SECONDS=<seconds>` at configure
-time. Where tests live and how to add one is in `tests/README.md`.
+time. The `check` target is not a test; how its linter selects files on a
+pull request is described under "Checking" below, and its self-test is
+`ctest --preset dev -R scada-check-selection-test`. Where tests live and how to add one is in `tests/README.md`.
 
 ## Checking
 
@@ -110,6 +112,20 @@ check over all C++ sources and fails on any finding. Needs Python 3.8 or newer
 and clang-format, clang-tidy and clang-query 18 or newer. See
 `tools/check/README.md`.
 
+How clang-tidy selects files: by default it lints every translation unit.
+Configured with `-DSCADA_CHECK_TIDY_BASE=<revision>`, it lints only the
+units that changed since the merge base of that revision and `HEAD`, and the
+units that include a changed file, directly or through other headers, as
+the compiler's dependency output (`-M`) reports it. It lints everything when
+`.clang-tidy`, a CMake file or preset, a toolchain file, the pipeline, the
+setup action, `tools/check/`, `third-party/` or a `*.in` file changed, when a
+header was deleted or renamed, and when the changed set cannot be worked out
+(no merge base, a shallow clone, an error). The first line of its output
+names the mode, the reason and the number of units. The pipeline sets the
+option on a pull request; a push to `main` lints everything. The formatter,
+banned-function and `SCADA_RT` checks always run on every file. Clear the
+option with `-DSCADA_CHECK_TIDY_BASE=` (decision D-67).
+
 ## Pipeline
 
 `.github/workflows/pipeline.yml` runs on every pull request and on every push
@@ -120,7 +136,7 @@ commands above and nothing else:
 | --- | --- | --- |
 | `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree; the `root` tests of `dev` with sudo, conformance test 26 of `release` with sudo; `perf`: the performance gate | x86-64 |
 | `build and test (ARM64)` | The same, built and run natively | ARM64 |
-| `check` | The `check` target | x86-64 |
+| `check` | The `check` target; on a pull request clang-tidy lints only the translation units the pull request could have affected (see "Checking"); the self-test of that selection | x86-64 |
 | `sanitizers (asan-ubsan)` | Build and tests of the `asan-ubsan` preset | x86-64 |
 | `sanitizers (tsan)` | Build and tests of the `tsan` preset | x86-64 |
 | `fuzz` | Every fuzz target for 60 s | x86-64 |
