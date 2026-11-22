@@ -25,7 +25,7 @@ boundary.
 | --- | --- | --- | --- |
 | Tag database | `tag-database.md` | Phase 1 | Draft 0.18, accepted for phase 1 implementation |
 | Configuration schemas | `config-schemas.md` | Phase 2 | Outline below |
-| Driver interface | `driver-interface.md` | Phase 2 | Outline below |
+| Driver interface | `driver-interface.md` | Phase 2 | Draft 0.1, for review by a person (#99); open rulings in its section 16 |
 | Historian file format and upload | `historian-format.md` | Phase 3 | Outline below |
 | REST and WebSocket API | `rest-api.md` | Phase 4 | Outline below |
 | Node link protocol | `node-link.md` | Phase 11 | Outline below |
@@ -73,6 +73,10 @@ tags is the proposal); whether templates may include other templates; exact
 merge order for overrides.
 
 ## Outline: driver interface (phase 2)
+
+Drafted as `driver-interface.md` 0.1 (#99); the outline is kept as the
+record of what the draft had to cover. The two open decisions are D-81 and
+D-82.
 
 Source: reference architecture sections 6 and 8.1.
 

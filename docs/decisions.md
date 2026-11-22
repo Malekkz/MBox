@@ -1482,3 +1482,135 @@ Decision:
 - Locally, `cmake --build --preset dev --target check` is unchanged: the three options are empty and it is one run of every check over every unit.
 Reason: the fixed matrix needs no plan job before the shares start and no list handed from job to job; the record makes the cost of that visible: if two shares ever worked out different selections, `check` fails. The round-robin is the cheapest balance that needs no data kept up to date. A configure costs seconds, less than handing a build directory from job to job.
 Consequences: every run of the pipeline starts four share jobs and the job `check`, also for a pull request of documents only, and each pays the set-up of a runner. A new share is a new entry in the list `share` of the matrix; `strategy.job-total` gives N to the shares, and `check` takes N from the records.
+
+## D-81: A protocol is linked into its driver executable, not loaded as a plugin
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02)
+Status: proposed in the driver interface contract 0.1; review by a person before P2-07 starts
+
+Context: the outline of the driver interface contract leaves open whether a protocol is linked into its driver executable or loaded as a plugin. Reference 4.4 lists `/usr/lib/scada/` for "binaries and driver plugins"; reference 6.5 calls the hardware backends of `scada-io` plugins.
+Options: (A) each protocol linked statically into its own `scada-drv-<protocol>` executable with `libscada-driver` and `libscada-tag`; (B) one generic driver executable that loads a protocol from a shared object at start.
+Decision: (A). A protocol is a library (`lib<protocol>`) and a thin executable, as every service is (`CLAUDE.md`). The hardware backends of `scada-io` are compiled in and selected by configuration in phase 2; loading them at run time is not needed for the three backends of #107.
+Reason: the process boundary already isolates a protocol (reference 6) and lets a driver be replaced, licensed and versioned on its own (reference 16.3); a loader adds an ABI to keep stable, a signing check for loaded code (reference 13.5) and a second way for a broken protocol to fail. `libscada-tag` is static and each service carries its own copy (D-66 f), so a loaded protocol would not share it anyway.
+Consequences: a new protocol is a new executable and package. `/usr/lib/scada/` holds no protocol plugins in phase 2. If a later phase wants run-time loading (vendor I/O cards), it is a decision of that phase.
+
+## D-82: Threading of a driver process: main thread, one command thread, one worker per channel; report-driven protocols run as an event loop on the worker
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey item D-40
+Status: proposed in the driver interface contract 0.1 (sections 2.2, 2.6); review by a person before P2-07 starts
+
+Context: the outline leaves open the threading model for report-driven protocols. The device survey of 2026-11-22 (not in the repository) found that a driver must keep receiving reports while a write waits for its termination. The tag database allows one writing thread per owner and one consuming thread per queue (contract 1.0, sections 2 and 9), and `scada_queue_next` is not real-time safe (its section 9.5, #116).
+Options: (A) the channel worker is an event loop over its descriptors, timers and orders; a stack that owns a thread runs it as a helper that hands samples to the worker through a bounded queue; (B) a protocol receive thread per channel with a thread-safe sample sink that writes tags; (C) worker threads take requests from the `cmd` queues themselves.
+Decision: (A), with one non-real-time command thread that consumes every `cmd` queue of the process and posts every answer, and hands orders to the workers through pre-allocated lock-free queues. The worker is the only writer of its channel's tags. A helper thread never writes tags.
+Reason: (A) keeps one writer per owner without a lock, serves polled and report-driven protocols with one worker loop, and admits stacks with their own threads. (B) would make two writers of one owner, which the tag database forbids. (C) would put `scada_queue_next`, which makes system calls, on a real-time thread.
+Consequences: an order reaches the device one in-process hop after `scada_queue_next`; a full order queue is answered `REJECTED` with `BUSY` at once. Answers are posted by the command thread, the thread that takes the requests (contract 1.0, section 9.2).
+
+## D-83: Real-time rules for an I/O scan: the bounded device transaction sits between `SCADA_RT` parts
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02)
+Status: proposed; open: needs the product owner's ruling (R-3 of the driver interface contract). `CLAUDE.md` and the coding standard are not changed.
+
+Context: `CLAUDE.md` forbids system calls and network I/O in code that runs in "the I/O scan"; a scan of a fast poll group must exchange frames with a device. The lead raised the gap with the product owner.
+Options: (A) the scan is split: taking orders, decoding and delivery, and the hand-over of outcomes are `SCADA_RT`; the device transaction between them is unannotated, bounded by a deadline, and makes only listed system calls; (B) a non-real-time I/O thread does the transactions and feeds the real-time worker; (C) change `CLAUDE.md`.
+Decision: (A) is drafted. The contract lists every system call of a real-time worker with its bound (section 2.4), says what the `SCADA_RT` check catches and what it does not, and adds a conformance test that traces the worker's system calls (test 29).
+Reason: (B) adds a hop and its latency to every frame of the fastest tier and still makes the same system calls, on another thread. (A) keeps the check on everything it can check, and makes the rest visible.
+Consequences: each protocol lists its transaction functions in its README as reviewed, unannotated code.
+
+## D-84: A channel worker that stalls stops the process's heartbeat
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); #116 comment, point 1
+Status: proposed in the driver interface contract 0.1 (section 2.5)
+
+Context: liveness is per process while an owner is a thread (tag database contract 1.0, section 10.1). A stalled channel worker in a process whose main thread beats leaves its tags with their last values, never OWNER_DOWN.
+Options: (A) the main thread watches a progress counter per worker and stops the heartbeat on a stall; (B) per-owner liveness in the tag database (a layout change); (C) accept the gap.
+Decision: (A). A worker increments its counter at every scan boundary and every return from a protocol call; a counter unchanged for `stall_limit` (three times the longest deadline the worker can be inside, at least 1 s) stops the heartbeat. The process is then seen down and restarted by systemd.
+Reason: it closes the gap for drivers without a layout change, and uses the existing response to a hung service (reference 14.4).
+Consequences: a stall of one channel restarts the whole driver, and the other channels' tags read OWNER_DOWN meanwhile. #116 still decides the same question for control tasks.
+
+## D-85: Results of a driver: reason and raw protocol code in `WriteResult.protocol_error`
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey items D-30, D-31
+Status: proposed; open: needs the product owner's ruling (R-4 of the driver interface contract)
+
+Context: the survey asks for about twenty outcomes of a write (interlock, synchrocheck, local, busy, no response and more). The status of `WriteResult` has seven values and is frozen (tag database contract 1.0, section 14.1); `protocol_error` is `int32_t`, "driver-specific, 0 if none".
+Options: (A) `protocol_error = (reason << 16) | raw`, with a reason table common to every driver; (B) the raw code only, and the reason in a diagnostic tag of the device; (C) a layout version with a wider result.
+Decision: (A) is drafted, with one result per request at its final outcome, also for two-phase writes. The "accepted" stage of a two-phase write is published in a device diagnostic tag, not as a second result.
+Reason: (A) gives `scada-cmd` one form to read and keeps the field driver-specific and 0 when there is nothing to say for the library, which checks only `status` and the reserved fields. A second result per request would be dropped by the requester as a duplicate id (contract 1.0, section 9.2).
+Consequences: the reason table is part of the driver interface contract; a new reason is a minor version of it.
+
+## D-86: A driver-stamped event time is marked LOCAL_TIME
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey item D-12
+Status: proposed in the driver interface contract 0.1 (section 5.8; R-1)
+
+Context: the survey's reports differed on how to mark an event whose device gave no time, stamped by the driver: TIME_UNCERTAIN, LOCAL_TIME, both, or none.
+Options: LOCAL_TIME; TIME_UNCERTAIN; both; none.
+Decision: LOCAL_TIME. TIME_UNCERTAIN is set only for a clock that may be wrong (the device's clock unsynchronised, a local zone not confirmed, the unit's own clock unsynchronised).
+Reason: LOCAL_TIME means "`source_time_ns` was set by the owner, not a device" (tag database contract, section 6), exactly this case; using TIME_UNCERTAIN for it as well would give one flag two meanings.
+Consequences: every polled Modbus sample carries LOCAL_TIME, as the tag database contract already requires for a tag without a device time.
+
+## D-87: A change latch is exposed as a tag; no synthesised events in phase 2
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey item D-21
+Status: proposed in the driver interface contract 0.1 (section 5.6; R-2)
+
+Context: a device may report a state bit plus a latch bit that records "changed since last read". A change shorter than the poll leaves the state as it was and the latch set.
+Options: (A) expose the latch as its own BOOL tag; (B) synthesise an on-then-off event at the poll time.
+Decision: (A). The latch point is a `side_effect` read.
+Reason: (B) invents samples and their times. With (A) the transient is visible as the latch set for one poll, and the alarm system can latch on it.
+Consequences: synthesis stays room for a later protocol option, which would carry LOCAL_TIME.
+
+## D-88: Replayed events are written in order with STALE; the interrogation writes the current state last
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey X-6
+Status: proposed; open: needs the product owner's ruling (X-6)
+
+Context: after a reconnect a device may replay buffered events, then an interrogation gives the current state. The reports differed: write every event, or mark them for the historian only.
+Options: (A) write every replayed event in device-time order; (A') the same, with STALE added to each replayed sample; (B) mark replayed samples, historian only, live tag only when newer.
+Decision: (A'). The device stays `INITIALISING` until the interrogation ends.
+Reason: the historian, alarms and the journal learn values only through change rings; (B) needs a new path or a quality bit (a layout version). Without a mark, a replayed trip could drive logic for one cycle; STALE already means "not proven current" and makes control blocks apply their bad-or-stale behaviour.
+Consequences: a tag's `source_time_ns` may go backwards between writes. Requirements on later phases: control blocks treat STALE as stale on every input (phase 6); the alarm engine raises no new alarm from a STALE sample (phase 7); the historian states how it stores samples older than ones it holds (phase 3).
+
+## D-89: Native select with a short device window: per output `at_select` or `at_operate`
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02), agreed with #98 (P2-01); survey X-7
+Status: proposed; open: needs the product owner's ruling (X-1, X-7). Review by a person: select before operate
+
+Context: devices with a native select have windows from about 1 s to over 60 s; the gateway's select must suit an operator (reference 8.2 step 6, 30 s by default).
+Options: (A) the gateway's select never longer than the device's window; (B) per output: `at_select`, the device selects at SELECT and `select_timeout` must not exceed the window, or `at_operate`, the gateway holds the operator's selection and the driver runs the device's select and operate back to back at OPERATE; (C) the driver chooses by comparing the two times.
+Decision: (B), default `at_select`. The contract fixes the `at_operate` sequence, its timing and its results (section 8.4). An `at_operate` output needs a window of at least twice the device's timeout.
+Reason: (A) is unusable for an operator with a 1 s window; (C) would switch behaviour silently when a timeout is edited. (B) keeps the device's checks at select time where the window allows, and the device's select procedure (reference 6.4) where it does not.
+Consequences: with `at_operate` a device's refusal arrives at OPERATE, after the operator's confirmation; the SELECT checks nothing on the device.
+
+## D-90: Refresh of setpoints belongs to the request whose value it repeats
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey X-5; implemented in phase 5
+Status: proposed; open: needs the product owner's ruling (X-5). Review by a person: command handling, "no audit, no action"
+
+Context: some devices drop a setpoint after a validity time, or fall back when setpoints stop. "No audit, no action" (reference 5.3, 8.2 step 8; tag database contract 9.3) must hold.
+Options: (A) refreshes are covered by the event record of the request whose value they repeat, and stop for good when any condition fails; (B) an event record per refresh; (C) no refresh service.
+Decision: (A). A refresh repeats the last value executed with OK, to the same target, from the same source, only while the mode matches, the request tag of that mode is GOOD, fresh and holds the value, the generation is the request's, the driver has not restarted and the device is usable. It is never retried and obeys rate limits and pacing.
+Reason: (B) floods the events queue (one record per period per output) with no added information; (C) leaves devices that need it falling back. (A) ties every refresh to a journalled operator or control action and stops as soon as that action is no longer what the system wants.
+Consequences: the journal record of a refreshed output says that it refreshes (phase 5 schema). An AUTO output uses either this or the refresh of `scada-control` (reference 7.2), not both.
+
+## D-91: Safe and release writes to remote outputs need the driver's own event record first
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey X-9; implemented in phase 5 (protocol drivers)
+Status: proposed; open: needs the product owner's ruling (X-9). Review by a person: fail-safe and shutdown behaviour, "no audit, no action"
+
+Context: references 6.5 and 14.4 give safe states to `scada-io` and say drivers apply hold or safe when `scada-control` stops. For a remote device "safe" means writing a value: a safe value, or a release value that hands control back to the device.
+Options: (A) stop refreshing only; (B) also write a release or safe value, journalled; (B') (B), and without a journal record stop refreshing only.
+Decision: (B'). `on_shutdown` and `on_source_loss` (`hold | release | safe_value`); the driver posts an event record to `events.<process>` before the write; if the post is refused it writes nothing and relies on the device's own fallback.
+Reason: the device's communication-loss behaviour is the barrier the reference names when the unit cannot act (14.4); a fail-safe write without its record would be the first action without audit.
+Consequences: the tag set gives such drivers an events queue from phase 5 (#98). `scada-io` local safe states in phase 2 act through its HAL as reference 6.5 says; their journalling joins in phase 5.
+
+## D-92: Checks a driver makes on every write request, and no retry of writes
+Date: 2026-11-22
+Phase / issue: 2, #99 (P2-02); survey items D-29, D-35, D-36
+Status: proposed in the driver interface contract 0.1 (sections 8.2, 8.4, 8.7). Review by a person: command handling, select before operate
+
+Context: reference 8.1 has the driver accept AUTO requests only in AUTO mode and OPERATOR requests only in MANUAL; tag database contract section 17 item 19 makes drivers time their selections; reference 14.4 forbids automatic retry of operator commands.
+Options for the details left open: the mode read fails open or closed; the selection rules; retry of a write after a timeout or a busy answer.
+Decision: the eleven checks of contract 8.2 in their order, for every source; a mode tag that does not read GOOD refuses every source (fail closed); mode coding 1 AUTO, 2 MANUAL, 3 REMOTE (agreed with #98); one live selection per output, OPERATE and CANCEL bound to it by id, source, user and value; no automatic retry of any write once a byte was sent, for every source; write rate limits that no source bypasses.
+Reason: the driver is the last place before the device and the only check AUTO requests pass besides the logic; failing closed keeps a dead command service from leaving outputs commandable; a retry after a timeout could execute a non-idempotent command twice.
+Consequences: a busy device answers `REJECTED` with `BUSY` and the requester decides. Phase 2 keeps rate-limit counts in memory, so a driver restart starts a new day count.
