@@ -437,23 +437,23 @@ from, so an error names the instance and the template line (section 1.2).
 
 1. **Chain.** The `extends` chain is resolved, from the root template down to
    the instance's template.
-2. **Levels.** For each template of the chain, from the root down:
-   1. `params`: a child adds parameters, or changes the `default`, `min` or
-      `max` of an inherited one, never its `type` (CF-415);
-   2. `defaults`, `read`, `enums` (by name; a child's table replaces the
+2. **Parameters.** The parameter declarations of the chain are collected
+   (a child adds parameters, or changes the `default`, `min` or `max` of an
+   inherited one, never its `type`, CF-415), and the instance's `params`
+   replace the defaults. This comes before the levels, because `when` and
+   `repeat` of every level need the values.
+3. **Levels.** For each template of the chain, from the root down:
+   1. `defaults`, `read`, `enums` (by name; a child's table replaces the
       inherited table of the same name whole): merged into what the levels
       above gave;
-   3. its `repeat` blocks are expanded, with the parameter values of the
-      instance (step 3 is known before expansion starts) and the variables;
-   4. its points, those written and those from `repeat`, are merged by name
+   2. its `repeat` blocks are expanded, with the values of step 2 and the
+      variables;
+   3. its points, those written and those from `repeat`, are merged by name
       into the inherited points: a point of the same name is merged into the
       inherited one, the child's keys winning; a new name is added. Two
       points of one name within one level are CF-416;
-   5. `identify` and `health`: a level that gives the key replaces the
+   4. `identify` and `health`: a level that gives the key replaces the
       inherited list whole.
-3. **Parameters.** The instance's `params` replace the defaults of the
-   template. This step is done first, because `when` and `repeat` of every
-   level need the values.
 4. **Presence.** Every point whose `when` is false is removed, then every
    point the instance's `disable` matches.
 5. **Defaults.** The template's `defaults`, merged with the instance's
@@ -476,7 +476,7 @@ does not depend on positions in two files. An alarm list of a point is
 therefore replaced whole by an override that gives `alarms`.
 
 An instance that names no template gives `points` directly (reference 12.1,
-"or lists its points"); steps 1 to 3 are then empty. An instance may give
+"or lists its points"); steps 1 to 3 are then empty, and its `params` are refused (CF-201). An instance may give
 `points` and a template together: its points are added after step 6 and a
 name that already exists is CF-416.
 
@@ -951,7 +951,7 @@ outputs:
     area: ps1
     kind: setpoint
     target: ps1.vfd2.speed_set
-    feedback: { tag: ps1.vfd2.speed, within: 2.0, after: 5s }
+    feedback: { tag: ps1.vfd2.speed, within: 2.0, settle: 5s }
     limits: { min: 0, max: 100, rate: 10 }
     interlocks: [ps1.pump2.permissive]
     safe_state: { value: 0 }
@@ -978,7 +978,7 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `on_only` | bool | `true` for `trigger`, else `false` | Only "on" is commanded; "off" does nothing on the device (resets, group selection) and is refused |
 | `pulse_length` | duration | `1s` | `pulse` only |
 | `target` | tag reference | required | A point with `access: rw` or `wo` (CF-702), not STRING. The tag that write requests name; its tag gets WRITABLE_BY_COMMAND (section 12.5) |
-| `feedback` | tag reference, `{ on, off }` of two BOOL tags, or `{ tag, within, after }` | required unless `no_feedback` | The state the device reports (reference 8.1): one tag, separate on and off tags, a double point, or a read-back with a tolerance and a settle time |
+| `feedback` | tag reference, `{ on, off }` of two BOOL tags, or `{ tag, within, settle }` | required unless `no_feedback` | The state the device reports (reference 8.1): one tag, separate on and off tags, a double point, or a read-back with a tolerance and a settle time |
 | `no_feedback` | `true` | | Explicit "no feedback" (reference 12.5). The write result is then the only confirmation, and the target's tag shows the last value written, unconfirmed |
 | `feedback_timeout` | duration, `100ms` to `10m` | `10s` | Reference 8.2, step 10 |
 | `sbo` | bool | `false` | Select before operate by `scada-cmd` (reference 8.2, step 6) |
@@ -992,7 +992,8 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `safe_state` | `off`, `on`, `hold`, or `{ value }` | required (reference 12.5) | The state the output is driven to when a rule below says "safe" |
 | `on_shutdown` | `hold`, `safe` | `hold` | Reference 14.4 |
 | `on_control_loss` | `{ action: hold \| safe, after }` | `{ action: hold }` | When `scada-control` stops while the output is in AUTO (reference 14.4); `after` from `0s` to `10m` |
-| `on_source_loss` | `hold`, `release`, `safe` | `hold` | For an output with `refresh`: when the requested value's source is BAD or stale, stop refreshing (`hold`), write `limits.release` once (`release`), or drive to the safe state (`safe`). Open: needs the product owner's ruling (X-9) |
+| `on_source_loss` | `hold`, `release`, `safe_value` | `hold` | For an output with `refresh`: when the requested value's source has been BAD or stale for `source_lost_after`, stop refreshing (`hold`), write `limits.release` once (`release`), or write the value of `safe_state` (`safe_value`). Open: needs the product owner's ruling (X-9) |
+| `source_lost_after` | duration, `0s` to `10m` | `0s` | |
 | `task` | task reference | the task of the program that drives it, else `normal` | Owner of the AUTO request tag |
 | `termination_timeout` | duration | reserved | For two-phase results of phase 9 (driver interface contract) |
 
@@ -1777,8 +1778,9 @@ Raw types: `bool`, `int8`, `uint8`, `int16`, `uint16`, `int32`, `uint32`,
 `int64`, `uint64`, `float32`, `float64`, `string`, `bytes` (as `string`
 without decoding, shown as hex), `mod10k`, `epoch`, `datetime`. A 24-bit value
 in a 32-bit pair is `uint32` with `field: [0, 23]`. A value of more than one
-register may start at any register, odd or even. Strings longer than the
-tag database's 250 bytes are refused (CF-603).
+register may start at any register, odd or even. A string tag holds at most
+250 bytes (tag database contract 14): a longer device string is cut to 250
+bytes and written with OVERFLOW.
 
 Double points (`kind: double_point`, section 5.3) take one of these address
 shapes:
