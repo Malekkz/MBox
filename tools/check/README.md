@@ -64,6 +64,46 @@ check: tidy: everything (tools/check/scada_check.py changed, which sets the rule
 The pipeline sets the option on a pull request only. A push to `main` and a
 manual run lint everything.
 
+## Splitting the lint across jobs
+
+The pipeline lints with clang-tidy in four parallel jobs, the shares, so
+that a full lint fits in its time (decision D-68). Each share runs the
+`check` target configured with
+
+```
+cmake --preset dev -DSCADA_CHECK_ONLY=tidy -DSCADA_CHECK_TIDY_SHARE=2/4 \
+    -DSCADA_CHECK_TIDY_RECORD=record-2.json
+```
+
+which is `scada_check.py --only tidy --tidy-share 2/4 --tidy-record
+record-2.json`. The share works out the selection as above, sorts it by the
+path relative to the source directory, and lints every fourth unit from the
+second on (`lint_shares.py`). A selection of fewer than 40 units
+(`SPLIT_FROM`, `--tidy-split-from`) is not split: share 1 lints all of it,
+the others lint nothing. The output names the share and its units:
+
+```
+check: tidy: everything (no base revision given): 165 of 165 translation units
+check: tidy: share 2 of 4 (round-robin over the sorted list): 41 of 165 selected translation units
+check: tidy: share 2: libs/scada-common/src/clock.cpp
+```
+
+A share runs no other check: `--tidy-share` with `format`, `banned` or `rt`
+is refused, so that those run once, in their own job, on every file.
+
+The record holds the selection, the share and the units it linted, and
+whether it found anything. `lint_shares.py verify <records>` passes only if
+there is a clean record for every share 1 to N, all of the same selection,
+and each share linted exactly its part, so that every selected unit was
+linted once:
+
+```
+check: tidy: 165 translation units in 4 shares: 42 + 41 + 41 + 41 = 165, each linted exactly once, no findings
+```
+
+Without these options, the `check` target is one run of all checks, and
+clang-tidy lints all of its units.
+
 ## Suppressing a finding
 
 Only on the line of the finding, naming the check and giving a reason (coding
@@ -128,4 +168,18 @@ its dependencies from the build's C++ compiler, and a git repository. It
 covers a changed source file, a header with two dependents, a header
 included through another header, a changed `.clang-tidy`, a deleted header,
 documents only, the errors that lint everything, and a fault planted in a
-header that fails an unchanged unit including it. About 5 s.
+header that fails an unchanged unit including it. It also runs the shares of
+`--tidy-share` on that project: each unit once, a fault planted in a unit of
+the last share, a missing share, a small selection that is not split, and
+the options that are refused. About 12 s.
+
+```
+ctest --preset dev -R scada-check-shares-test
+```
+
+The self-test of the split: complete and deterministic for 0 to 59 units
+and 1 to 8 shares, also when the number of units is not a multiple of the
+shares or smaller than it; and the same for the translation units of the
+source tree, found as the `check` target finds them, for 1 to 12 shares. It also
+checks that `lint_shares.py verify` refuses a missing, doubled, unclean or
+short share and records of different selections. Under 1 s.

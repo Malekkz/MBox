@@ -99,7 +99,11 @@ presets also run tests that prove each sanitizer catches a deliberate bug.
 Change the fuzzing time with `-DSCADA_FUZZ_SECONDS=<seconds>` at configure
 time. The `check` target is not a test; how its linter selects files on a
 pull request is described under "Checking" below, and its self-test is
-`ctest --preset dev -R scada-check-selection-test`. Where tests live and how to add one is in `tests/README.md`.
+`ctest --preset dev -R scada-check-selection-test`. The pipeline splits a
+full clang-tidy lint across four jobs; the self-test of that split, on its
+own lists and on the translation units of the source tree, is
+`ctest --preset dev -R scada-check-shares-test` (see "Pipeline"). Where
+tests live and how to add one is in `tests/README.md`.
 
 ## Checking
 
@@ -126,6 +130,14 @@ option on a pull request; a push to `main` lints everything. The formatter,
 banned-function and `SCADA_RT` checks always run on every file. Clear the
 option with `-DSCADA_CHECK_TIDY_BASE=` (decision D-67).
 
+The target is one run of all four checks, also when clang-tidy lints
+everything. The pipeline runs it in parts with three further options, which
+are empty by default: `SCADA_CHECK_ONLY` (a list of `format`, `tidy`,
+`banned`, `rt`), `SCADA_CHECK_TIDY_SHARE` (`K/N`: lint only share K of N of
+the selected units) and `SCADA_CHECK_TIDY_RECORD` (a file the share writes
+what it linted to). See `tools/check/README.md`, "Splitting the lint across
+jobs" (decision D-68).
+
 ## Pipeline
 
 `.github/workflows/pipeline.yml` runs on every pull request and on every push
@@ -136,11 +148,25 @@ commands above and nothing else:
 | --- | --- | --- |
 | `build and test (x86-64)` | `dev` and `release`: build, tests, staged install tree; the `root` tests of `dev` with sudo, conformance test 26 of `release` with sudo; `perf`: the performance gate | x86-64 |
 | `build and test (ARM64)` | The same, built and run natively | ARM64 |
-| `check` | The `check` target; on a pull request clang-tidy lints only the translation units the pull request could have affected (see "Checking"); the self-test of that selection | x86-64 |
+| `check` | Passes only if `check (format, banned, rt)` and every `check (tidy K of 4)` passed and the four shares together linted every selected translation unit exactly once; prints the totals | x86-64 |
 | `sanitizers (asan-ubsan)` | Build and tests of the `asan-ubsan` preset | x86-64 |
 | `sanitizers (tsan)` | Build and tests of the `tsan` preset | x86-64 |
 | `fuzz` | Every fuzz target for 60 s | x86-64 |
 | `model check` | herd7 builds; `ctest --preset model` (conformance test 4) | x86-64 |
+
+The `check` target runs in five further jobs, which `check` sums up
+(decision D-68). `check (format, banned, rt)` runs the formatter, the
+banned-function and the `SCADA_RT` checks on every file, once, and the
+self-tests of the lint selection and of the split. `check (tidy 1 of 4)` to
+`check (tidy 4 of 4)` each configure the `dev` build, work out the same
+selection of translation units (on a pull request only the units it could
+have affected, see "Checking"), and lint their share of it: a round-robin
+over the list sorted by path. A selection of fewer than 40 units is not
+split; share 1 lints all of it. Each share prints its number and its units,
+and keeps a record of them for `check`, which fails if a share failed, timed
+out, was cancelled or skipped, if a record is missing, or if a unit was
+linted twice or not at all. A full lint of 165 units took 7 min 24 s of
+wall time instead of 38 min 17 s (run 45023188297).
 
 A failing command fails its check: a compiler warning, a failing test, a
 finding of the `check` target, a sanitizer report or a fuzzing crash. Nothing
@@ -183,7 +209,9 @@ tolerance catches a regression of a multiple, not of 10 %.
   ARM64 tag library compiles to the order of accesses the model check
   describes, and that edited copies of the sources, compiled with the
   runner's GCC, fail that check (`tests/model/README.md`).
-- All seven checks must be marked as required in the protection rule of `main`.
+- All seven checks of the table must be marked as required in the protection
+  rule of `main`. The jobs `check (format, banned, rt)` and `check (tidy K of
+  4)` need not be: `check` fails when any of them does not pass.
   GitHub cannot read this from the repository; it is a repository setting.
 
 ## Build order

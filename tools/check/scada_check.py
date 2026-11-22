@@ -13,7 +13,9 @@ Runs four checks over the C++ sources and fails on any finding
 
 `tidy` lints every translation unit unless --tidy-base is given; then it
 lints only the units the changes since that revision could have affected
-(lint_selection.py). The other checks always run on every file.
+(lint_selection.py). With --tidy-share K/N it lints only share K of N of
+those units, for a lint split across parallel jobs (lint_shares.py). The
+other checks always run on every file, and not in a share.
 
 Exit status: 0 no findings, 1 findings, 2 the checks could not run.
 """
@@ -31,6 +33,7 @@ import tempfile
 import traceback
 
 import lint_selection
+import lint_shares
 
 MINIMUM_LLVM_MAJOR = 18
 SOURCE_ROOTS = ("libs", "services", "tools", "tests")
@@ -462,6 +465,58 @@ def tidy_selection(options, checker, units):
             f"the selection failed: {type(error).__name__}: {error}")
 
 
+def run_tidy(options, checker, units):
+    """Lints the selected units, or share K of N of them; returns the
+    reports. With --tidy-record, writes the record of the share."""
+    selection = tidy_selection(options, checker, units)
+    tidy_units = units if selection.everything else list(selection.units)
+    mode = "everything" if selection.everything else "changed files"
+    print(f"check: tidy: {mode} ({selection.reason}): "
+          f"{len(tidy_units)} of {len(units)} translation units")
+    if options.tidy_share is None:
+        if not selection.everything:
+            for unit in tidy_units:
+                print(f"check: tidy: {unit}")
+        sys.stdout.flush()
+        return checker.check_tidy(tidy_units)
+
+    share, shares = options.tidy_share
+    by_name = {unit.relative_to(checker.source_dir).as_posix(): unit
+               for unit in tidy_units}
+    linted = lint_shares.split(by_name, shares, options.tidy_split_from)[
+        share - 1]
+    split_note = ("not split: fewer than "
+                  f"{options.tidy_split_from} units, all in share 1"
+                  if len(by_name) < options.tidy_split_from
+                  else "round-robin over the sorted list")
+    print(f"check: tidy: share {share} of {shares} ({split_note}): "
+          f"{len(linted)} of {len(by_name)} selected translation units")
+    for name in linted:
+        print(f"check: tidy: share {share}: {name}")
+    sys.stdout.flush()
+    reports = checker.check_tidy([by_name[name] for name in linted])
+    if options.tidy_record:
+        record = lint_shares.make_record(
+            share, shares, options.tidy_split_from, mode, selection.reason,
+            by_name, linted, clean=not reports)
+        try:
+            options.tidy_record.parent.mkdir(parents=True, exist_ok=True)
+            with open(options.tidy_record, "w", encoding="utf-8") as stream:
+                json.dump(record, stream, indent=1)
+                stream.write("\n")
+        except OSError as error:
+            raise CheckError(f"cannot write the record "
+                             f"'{options.tidy_record}': {error}") from error
+    return reports
+
+
+def parse_share_option(text):
+    try:
+        return lint_shares.parse_share(text)
+    except lint_shares.ShareError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def parse_arguments(arguments):
     parser = argparse.ArgumentParser(
         description="Formatting, lint, banned-function and SCADA_RT checks. "
@@ -491,6 +546,19 @@ def parse_arguments(arguments):
                         "REVISION and HEAD could have affected; everything "
                         "if that cannot be worked out (default: lint every "
                         "unit)")
+    parser.add_argument("--tidy-share", type=parse_share_option,
+                        metavar="K/N", help="lint with clang-tidy only "
+                        "share K of N of the selected translation units, "
+                        "for a lint split across N jobs; needs --only tidy "
+                        "and no other check (default: all of them)")
+    parser.add_argument("--tidy-split-from", type=int,
+                        default=lint_shares.SPLIT_FROM, metavar="UNITS",
+                        help="with --tidy-share: a selection of fewer "
+                        "units is not split, share 1 lints all of it "
+                        f"(default: {lint_shares.SPLIT_FROM})")
+    parser.add_argument("--tidy-record", type=pathlib.Path, metavar="FILE",
+                        help="with --tidy-share: write what the share "
+                        "linted to FILE, for `lint_shares.py verify`")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
                         help="tools run in parallel (default: all "
                         "processors)")
@@ -500,6 +568,17 @@ def parse_arguments(arguments):
     options = parser.parse_args(arguments)
     options.only = options.only or list(ALL_CHECKS)
     options.jobs = max(1, options.jobs)
+    if options.tidy_share is not None:
+        # The other checks run once over every file, not once per share.
+        if set(options.only) != {"tidy"}:
+            parser.error("--tidy-share needs --only tidy and no other check")
+        if options.files or options.compile_flag:
+            parser.error("--tidy-share lints the units of the build: give "
+                         "no files and no --compile-flag")
+        if options.tidy_split_from < 1:
+            parser.error("--tidy-split-from must be at least 1")
+    elif options.tidy_record:
+        parser.error("--tidy-record needs --tidy-share")
     return options
 
 
@@ -512,17 +591,7 @@ def main(arguments):
         if "format" in options.only:
             reports += checker.check_format(files)
         if "tidy" in options.only:
-            selection = tidy_selection(options, checker, units)
-            tidy_units = units if selection.everything else list(
-                selection.units)
-            mode = "everything" if selection.everything else "changed files"
-            print(f"check: tidy: {mode} ({selection.reason}): "
-                  f"{len(tidy_units)} of {len(units)} translation units")
-            if not selection.everything:
-                for unit in tidy_units:
-                    print(f"check: tidy: {unit}")
-            sys.stdout.flush()
-            reports += checker.check_tidy(tidy_units)
+            reports += run_tidy(options, checker, units)
         # One clang-query run per unit for both rule sets: the parse of the
         # unit is most of the time.
         rules = []
