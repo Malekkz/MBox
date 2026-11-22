@@ -2160,13 +2160,15 @@ version; the first use of a refused one is a layout version.
 | `ProcHeader.state` other than RUNNING, unknown values included | The process is down (section 10.1) | `proc_region.cpp:266`, `proc_liveness` |
 | The reserved bytes of the retain file header and records; an unknown file flag | Refused: the file is not valid, and no value is taken from it | `retain_file.cpp:338` and `:341`, `decode_header`; `retain_file.cpp:383`, `decode_quality`; `retain_file.cpp:402`, `decode_record` |
 
-Closed at the freeze: layout 1 has no room left for these, and a change to
-any of them is a layout version. The product owner accepted them on
-2026-11-22 (D-66).
+Closed at the freeze: a change to any of these is a layout version, not a
+minor version. The product owner accepted them on 2026-11-22 (D-66).
 
 - The handle split of 10 and 22 bits (section 5.1): at most 1,023 owners,
   and an owner is one writing thread.
-- 4 free quality-flag bits: bits 12 to 15 of `quality_flags`.
+- Bits 12 to 15 of `quality_flags` are unassigned. Readers refuse a tag
+  record or change entry that has one of them set (the table above,
+  `quality_flags_valid` in `types.h`), so assigning one is a layout
+  version.
 - No spare bytes in `ChangeEntry` (32 bytes), `scada_value` (48 bytes) or
   `scada_status` (32 bytes).
 
