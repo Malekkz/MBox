@@ -85,7 +85,7 @@ the others lint nothing. The output names the share and its units:
 ```
 check: tidy: everything (no base revision given): 165 of 165 translation units
 check: tidy: share 2 of 4 (round-robin over the sorted list): 41 of 165 selected translation units
-check: tidy: share 2: libs/scada-common/fuzz/journal_stream_fuzz.cpp
+check: tidy: share 2: libs/scada-common/src/clock.cpp
 ```
 
 A share runs no other check: `--tidy-share` with `format`, `banned` or `rt`
