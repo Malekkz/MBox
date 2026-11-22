@@ -1600,7 +1600,7 @@ Status: proposed; open: needs the product owner's ruling (X-9). Review by a pers
 
 Context: references 6.5 and 14.4 give safe states to `scada-io` and say drivers apply hold or safe when `scada-control` stops. For a remote device "safe" means writing a value: a safe value, or a release value that hands control back to the device.
 Options: (A) stop refreshing only; (B) also write a release or safe value, journalled; (B') (B), and without a journal record stop refreshing only.
-Decision: (B'). `on_shutdown` and `on_source_loss` (`hold | release | safe_value`); the driver posts an event record to `events.<process>` before the write; if the post is refused it writes nothing and relies on the device's own fallback.
+Decision: (B'). `on_shutdown` and `on_source_loss` (`hold | safe | release`, reference 14.4's words plus `release`); the driver posts an event record to `events.drv-<protocol>` before the write; if the post is refused it writes nothing and relies on the device's own fallback.
 Reason: the device's communication-loss behaviour is the barrier the reference names when the unit cannot act (14.4); a fail-safe write without its record would be the first action without audit.
 Consequences: the tag set gives such drivers an events queue from phase 5 (#98). `scada-io` local safe states in phase 2 act through its HAL as reference 6.5 says; their journalling joins in phase 5.
 

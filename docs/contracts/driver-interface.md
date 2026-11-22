@@ -81,7 +81,7 @@ model; reference 6.1 fixes one worker per channel.
 | --- | --- | --- | --- | --- |
 | Main | 1 | Attach, heartbeat, the generation change, reload, the channel watchdog (2.5), process-level diagnostics | `drv-<protocol>` (its diagnostic tags) | No |
 | Command | 1 | Takes every request from the `cmd` queues the process consumes (`scada_queue_next`), the checks of 8.2 that need no device, dispatch to the channel workers, and every answer (`result` queues) | None | No |
-| Channel worker | 1 per channel | Connect, poll, activities, writes, report handling for that channel; every tag write of the channel's devices; `scada_tag_notify` after each scan | `drv-<protocol>.<channel>` | Yes, for a channel with a fast poll group (2.4) |
+| Channel worker | 1 per channel | Connect, poll, activities, writes, report handling for that channel; every tag write of the channel's devices; `scada_tag_notify` after each scan | `drv-<protocol>.<C>` | Yes, for a channel with a fast poll group (2.4) |
 | Protocol helper | 0 or more per channel, only where a third-party stack owns its own thread (2.6) | The stack's receive loop | None; hands samples to its worker (2.6) | No |
 
 - One owner per channel worker matches the tag database: an owner is one
@@ -92,16 +92,22 @@ model; reference 6.1 fixes one worker per channel.
   requests (its section 9.2). The command thread is that thread for every
   `cmd` queue of the process: one thread may consume many queues. The tag
   set gives one request queue per channel and requester thread,
-  `cmd.<channel>.<source>` with its answer queue `result.<channel>.<source>`,
-  where `<source>` is `cmd` or the name of a control task (section 15, B-8):
+  `cmd.<C>.<source>` with its answer queue `result.<C>.<source>`, where
+  `<C>` is the channel's short name and `<source>` is `cmd` or the short
+  name `<T>` of a control task (configuration schemas contract, 12.3):
   a queue has one producing thread, and `scada-control` has one per task.
   A full queue of one channel then refuses only that channel's requests.
   Reference 5.1 names the queues `cmd.<driver>.<source>`; the naming is
   the only difference (section 16.2).
-- Process and owner names are those of the tag set (#98): the process
-  `drv-<protocol>` (service user `scada-drv-<protocol>`), one owner per
-  channel `drv-<protocol>.<channel>`. `scada-io` follows the same rule with
-  its own name.
+- Process and owner names are those of the tag set (configuration schemas
+  contract, 12.3): the process `drv-<protocol>` (service user
+  `scada-drv-<protocol>`), the main thread's owner `drv-<protocol>`, one
+  owner per channel `drv-<protocol>.<C>`. `<C>` is a short name generated
+  from the channel's name alone (the first 10 hex digits of SHA-256 of
+  `channel:` and the name), so that owner and queue names stay within
+  31 bytes while channel names may have 31; `scada-conf` keeps the map of
+  generated names. `scada-io` follows the same rule (owner `io`, queues
+  `cmd.io.<source>`). Tag names use the full channel name (section 10).
 - Between the command thread and each worker there are two pre-allocated
   single-producer, single-consumer lock-free queues of the framework: orders
   to the worker, outcomes back. Their capacity is the channel's
@@ -428,7 +434,7 @@ section 10):
 
 | Value | State | Meaning | Tags of the device |
 | --- | --- | --- | --- |
-| 0 | `DISABLED` | Disabled in configuration | No tags, its diagnostics included; the value is reserved for a later live disable |
+| 0 | `DISABLED` | Disabled in configuration | Its tags exist (the tag set is the same enabled or not): points BAD with NOT_INIT, diagnostics written, `state` 0; nothing is sent to the device |
 | 1 | `CONNECTING` | Channel not connected | BAD, COMM_FAIL (after the first attempt) or NOT_INIT (before) |
 | 2 | `INITIALISING` | Connected; resolve, identify and session steps running, or inside `startup_grace` | Kept; BAD with NOT_INIT if never read |
 | 3 | `RUNNING` | Polled or reporting | From samples (section 5) |
@@ -1372,8 +1378,10 @@ back to the device's own settings. This draft proposes, decision D-91:
 
 - The framework can do both (survey D-34, X-9 option (b)): stop refreshing
   only (`hold`), or write once the output's configured release value
-  (`release`) or safe value (`safe_value`). The keys are `on_shutdown` and
-  `on_source_loss` (#98, B-5), each `hold | release | safe_value`.
+  (`release`, the output's `limits.release`) or safe value (`safe`, the
+  output's `safe_state`). The keys are `on_shutdown` and `on_source_loss`
+  (configuration schemas contract, 7.2), each `hold | safe | release`;
+  `hold` and `safe` are the words of reference 14.4.
 - When: `on_shutdown` at an orderly stop of the driver, for each connected
   device, before disconnect; `on_source_loss` for an output in AUTO mode,
   when the process that owns its auto request tag (`scada-control`) has
@@ -1381,7 +1389,7 @@ back to the device's own settings. This draft proposes, decision D-91:
   timeout").
 - "No audit, no action" holds for these writes too: before a safe or
   release write the driver posts its own event record to its event queue
-  (`events.<process>`, a queue the tag set gives from phase 5 to every
+  (`events.drv-<protocol>`, a queue the tag set gives from phase 5 to every
   driver with an output whose `on_shutdown` or `on_source_loss` is not
   `hold`; section 15, B-8). If the post is refused, the driver
   does not write: it stops refreshing (as `hold`) and relies on the
@@ -1569,6 +1577,7 @@ that keep the tag set, or as a generation change for changes that alter it
 | A device's addresses, encoding or identity rules (a changed site map that keeps the tag set; survey D-27) | Live, that device only | The device goes `INITIALISING`; its points NOT_INIT until read; its selections end |
 | An output's encoding, limits, select model, select timeout, refresh, rate limits, shutdown behaviour | Live, that output only | Its selection ends; refreshing stops until a new request (8.10) |
 | A channel's port, host, serial settings, endpoints | Live, that channel only | Its devices disconnect and reconnect; their selections end |
+| A device or channel enabled or disabled | Live, that device or channel only | Disabled: its selections end, it disconnects, its points are written BAD with NOT_INIT and `state` 0. Enabled: it goes `CONNECTING`. Its tags exist either way |
 | Points, devices or channels added or removed; a tag type changed | Generation change | Section 9 |
 | The protocol's own code, the framework's version | Process restart | 9.3 |
 
@@ -1763,7 +1772,11 @@ them.
 ## 15. Boundaries with the configuration schemas contract
 
 The two contracts were drafted in parallel (#98, #99). They meet at the
-points below; each states who owns what. The agreement with the #98 draft
+points below; each states who owns what. Sections of the configuration
+schemas contract cited: 4.1 (common part and protocol part, X-8), 4.6
+(channel and device keys), 4.7 (point keys), 4.8 (identify), 7.2 (outputs,
+`native_select`), 12.3 (owners and queues), 12.5 (generated tags), section 10
+(error codes), annex A (Modbus). The agreement with the #98 draft
 is recorded in the pull request of this contract.
 
 | Id | Point | Owned by #98 | Owned here |
@@ -1772,10 +1785,10 @@ is recorded in the pull request of this contract.
 | B-2 | Template per-protocol parts (X-8) | Option (b) now: one `protocol:` per template, `extends:` a protocol-free base; (a) room | That the protocol sees only its own binding |
 | B-3 | Acquisition | `poll_groups`, `max_age`, `acquisition: poll \| report` (`poll` only in phase 2), report fields as protocol keys (room) | STALE (7.4), scheduling (6) |
 | B-4 | Read rules | `read:` as a protocol key of template and device; `access`, `side_effect` | Their meaning and the planning (6.3, 6.6) |
-| B-5 | Outputs and commands | Output keys: `sbo`, `select_timeout`, `native_select: at_select \| at_operate`, `termination_timeout`, limits, `refresh`, `write_on_change_only`, `on_shutdown` and `on_source_loss` (`hold \| release \| safe_value`), `source_lost_after`, safe and release values, `dangerous`, `storage` with `min_interval` and `max_per_day`, read-back with tolerance and `settle`, preconditions; the write encoding inside the point's `address`; the mode tag's coding (1 AUTO, 2 MANUAL, 3 REMOTE) | Checks and behaviour (8); results and reasons (8.6); double-point coding (5.4) |
+| B-5 | Outputs and commands | Output keys: `sbo`, `select_timeout`, `native_select: at_select \| at_operate`, `termination_timeout`, limits, `refresh`, `write_on_change_only`, `on_shutdown` and `on_source_loss` (`hold \| safe \| release`), `source_lost_after`, safe and release values, `dangerous`, `storage` with `min_interval` and `max_per_day`, read-back with tolerance and `settle`, preconditions; the write encoding inside the point's `address`; the mode tag's coding (1 AUTO, 2 MANUAL, 3 REMOTE) | Checks and behaviour (8); results and reasons (8.6); double-point coding (5.4) |
 | B-6 | Identity | `identify:` envelope, `on_mismatch` | Comparison, tags and the `MISMATCH` state (3.5) |
 | B-7 | Sessions and secrets | `session:` reserved and refused in phase 2; a secret only as `{ secret: <name> }`, refused in phase 2 with its own code | Room for `session_step`; secrets never logged or in tags |
-| B-8 | Tag set | Process `drv-<protocol>`; owners `drv-<protocol>` (main thread) and `drv-<protocol>.<channel>`; channel names unique in the unit, at most 12 bytes; queues `cmd.<channel>.<source>` and `result.<channel>.<source>` (`<source>` `cmd` or a control task name of at most 8 bytes), and from phase 5 `events.<process>`; the diagnostic tags of section 10 by rule; ring sizes | Which thread writes which tag (2.2, 10) |
+| B-8 | Tag set | Process `drv-<protocol>`; owners `drv-<protocol>` (main thread) and `drv-<protocol>.<C>`; generated short names `<C>` and `<T>` (its 12.3); queues `cmd.<C>.<source>` and `result.<C>.<source>` (`<source>` `cmd` or `<T>`), and from phase 5 `events.drv-<protocol>`; a disabled device keeps its tags (its 12.5); the diagnostic tags of section 10 by rule; ring sizes | Which thread writes which tag (2.2, 10) |
 | B-9 | Channels | Channel `type` and framing as protocol keys (`tcp`, `rtu`, `rtu_over_tcp` in phase 2); `role: connect \| listen` with `connect` only; endpoint lists as room | 3.3 |
 | B-10 | Addresses on a channel (X-4) | Overlap checked on (unit id, table, register); shared unit ids; `unit_id` per point address | 3.3 |
 | B-11 | Timing and pacing | `timeout`, `retries`, `demote_after`, `backoff`, `startup_grace`, `min_request_interval`, `min_write_interval`, `keepalive`, `write_timeout`, `max_values_per_request`; `device_time`; `time_sync` reserved, `none` only | Their behaviour (6, 7) |
@@ -1834,7 +1847,7 @@ device survey (X-n) or this contract (R-n).
    only workers), and a channel watchdog that stops the heartbeat.
 7. A driver may post event records of its own, for safe writes (phase 5).
 8. Request queues are per channel and requester thread,
-   `cmd.<channel>.<source>`, not `cmd.<driver>.<source>` (5.1): a naming
+   `cmd.<C>.<source>`, not `cmd.<driver>.<source>` (5.1): a naming
    difference only, so that each queue keeps one producing thread when
    `scada-control` runs several tasks.
 
