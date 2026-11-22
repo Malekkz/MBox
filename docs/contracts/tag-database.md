@@ -439,8 +439,12 @@ seq.store(s + 2, release)          // even again
 if changed: append a change entry (section 8)
 ```
 
-The fence is required: on ARM64 a release store does not order the stores that
-follow it. The write wakes nobody (section 8.4).
+The fence is required: the store that makes `seq` odd is relaxed, and no
+store, relaxed or release, orders the stores that follow it, on ARM64 or in
+C++. The release fence orders the odd `seq` before every data store after
+it: a reader whose copy saw one of those stores then loads, after its
+acquire fence, a `seq` other than its first (section 6.2) and tries again.
+The write wakes nobody (section 8.4).
 
 ### 6.2 Read protocol (any thread of any process)
 
@@ -713,7 +717,7 @@ w = write_seq.load(relaxed)
 if r > w or w - r > capacity: return SCADA_E_PEER_DOWN   // cursor is not valid
 if w - r == capacity: return SCADA_E_FULL
 write records[w & (capacity - 1)], with its id set from w (section 9.4)
-write_seq.store(w + 1, release)
+write_seq.store(w + 1, seq_cst)    // publishes the record; seq_cst for 9.5
 ```
 
 "Down" here uses the test of section 10.1, which the producer evaluates itself
@@ -762,7 +766,8 @@ loss.
 
 ```
 r = cursors[queue_id].load(relaxed)
-w = write_seq.load(acquire)
+w = write_seq.load(acquire)        // seq_cst after a load of the state that saw
+                                   // RETIRING, and in every drain of a request queue (9.2, 9.5)
 if r == w: nothing new
 if r > w or w - r > capacity: report, consume nothing
 copy records[r & (capacity - 1)] and validate it
