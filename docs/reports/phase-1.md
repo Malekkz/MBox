@@ -308,6 +308,23 @@ On x86-64 `write_many` reached 1.26 times its baseline for 500 tags and
 1.27 times for 5,000 tags, within the 2.0 times tolerance of the gate (the
 slowest of the 10 runs of issue #20 was 1.47 times). The scan stays below the 0.5 ms of contract 16.
 
+## Phase 1 acceptance (reference 18.2)
+
+Reference 18.1: a phase is complete when its acceptance tests pass in the
+automated pipeline on x86-64 and ARM64. The pipeline run on the head
+commit of PR #115 is run 43932436277 (workflow `pipeline`, commit
+`fbb80d1`): all 7 jobs passed, among them `build and test (x86-64)` and
+`build and test (ARM64)`, which run the tests below in the `dev` and
+`release` builds. The automated tests of each conformance test are those
+of `tests/conformance.md`.
+
+| Criterion of reference 18.2, phase 1 | Conformance test (contract 15) | Automated by | Run 43932436277, both architectures |
+| --- | --- | --- | --- |
+| 50,000 tags; 50,000 updates per second sustained | 2 | `TagAccessProcesses.Conformance02ReferenceLoadWithFourReaders` | Passed, 3 s per run. The 600 s form ran in the workflow `measurements`, runs 43875571560 (`0fd68a2`) and 43905525505 (`5bbfa71`), not on the head commit |
+| Killing a writer yields `OWNER_DOWN` | 5 | the 8 tests of row 5, among them `TagAccessProcesses.Conformance05AKilledOwnerReadsAsDownWithinItsTimeout` and `...WithoutTagd` | Passed |
+| A mismatched layout version is refused | 12 | `Attach.Conformance12AHeaderOfAnotherLayoutVersionIsRefused`, `CApi.Conformance12AnotherLayoutVersionRefusesToAttach`, `ReadHeader.Conformance12AnotherLayoutVersionIsRefused` | Passed |
+| Read-only mappings cannot write | 8 | `TagAccess.Conformance08AProcessThatIsNotTheOwnerCannotWrite` (the library refuses with `SCADA_E_NOT_OWNER`) | Passed. No test checks that a process maps another process's region read-only; `Observer.MapsOnlyReadOnly` (test 28) checks it for an observer |
+
 ## Phase 1 issues at the close
 
 Contract changes merged after the measurements of issue #20, all before 1.0:
