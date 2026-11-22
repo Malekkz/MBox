@@ -1482,3 +1482,135 @@ Decision:
 - Locally, `cmake --build --preset dev --target check` is unchanged: the three options are empty and it is one run of every check over every unit.
 Reason: the fixed matrix needs no plan job before the shares start and no list handed from job to job; the record makes the cost of that visible: if two shares ever worked out different selections, `check` fails. The round-robin is the cheapest balance that needs no data kept up to date. A configure costs seconds, less than handing a build directory from job to job.
 Consequences: every run of the pipeline starts four share jobs and the job `check`, also for a pull request of documents only, and each pays the set-up of a runner. A new share is a new entry in the list `share` of the matrix; `strategy.job-total` gives N to the shares, and `check` takes N from the records.
+
+## D-69: The configuration schemas are normative tables in the contract; the JSON Schema files are written in P2-03
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract `config-schemas.md` 0.1; for review by a person
+
+Context: the outline in `docs/contracts/README.md` says the contract is "the set of JSON Schema files ... plus this document", and reference 12.3 asks the builder to turn the examples into JSON Schema files. Issue #100 (P2-03) puts "the JSON Schema files of the configuration schemas contract, in the repository" in its own scope, next to the validator that uses them.
+Options: write the JSON Schema files in #98 and keep the document for the rest; write the keys as tables in the document and generate or write the files in P2-03.
+Decision: the contract states every key of every file type as a table (type, default, range, meaning) and is normative. P2-03 writes the JSON Schema files under `libs/scada-conf/schemas/` from the tables, with a test that the corpus of contract section 13 passes them. Where a table and a file disagree, the table wins and the file is fixed.
+Reason: the schema files are only useful with the code that loads them, and a review of tables is a review of the format; writing JSON Schema twice, once without a validator to test it, would double the review. The keys a person reviews are the same either way.
+Consequences: the contract is the one place to change a key; a change to a schema file without the table is a defect. The protocol schemas (contract Annex A for Modbus) follow the same rule.
+
+## D-70: The YAML subset of the configuration tree
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 1.1
+
+Context: the outline proposes "no anchors or custom tags" and leaves the subset to be decided.
+Options: full YAML 1.2; YAML 1.2 without anchors and tags; a stricter subset that also refuses `null`, YAML 1.1 booleans, octal numbers and several documents.
+Decision: the stricter subset of contract section 1.1: one UTF-8 document without markers or directives; block and flow collections; string keys only, no duplicates, no complex keys; no anchors, aliases, merge keys or tags; no `null` or empty values; `true` and `false` only; decimal and `0x` integers without leading zeros or separators; `.inf` and `.nan` not as numbers. Size limits: 8 MiB a file, depth 32, 64 KiB a scalar, 64 bytes a key, 20,000 files and 256 MiB a tree. JSON files use the same parser.
+Reason: anchors and merge keys let one line change values far away and make "file and line" of an error ambiguous, and templates are the reuse mechanism (reference 12.2). Refusing `null`, `yes` and `010` removes the values people type by accident. The limits bound the parser's memory, and the parser is fuzzed (#100).
+Consequences: P2-03 needs a parser that reports these constructs rather than silently accepting them, with a line and column for each (dependency choice and licence in #100).
+
+## D-71: Templates extend at most one other template
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 4.3
+
+Context: the outline asks whether templates may include other templates. The device survey of 2026-11-22 (not in the repository) shows device families with a shared core, and devices speaking several protocols for which a protocol-free signal base is useful.
+Options: no inclusion; single inheritance (`extends`); several included templates.
+Decision: `extends`, one parent, at most 4 parents deep, no cycles. A base template (no `protocol`) extends only a base template; a protocol template extends a base template or one of its own protocol. Optional parts of a device are parameters with `when`, not included templates.
+Reason: both cases of the survey are single inheritance; several parents need an order between unrelated parents and give a point two origins, which makes errors harder to locate.
+Consequences: #103 implements `extends` and the merge order of D-72; nested composition stays out.
+
+## D-72: The merge order of template expansion
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 4.5
+
+Context: the outline asks for the exact merge order of overrides; #103 needs it to test each rule.
+Options: lists merged by position or by a key; lists replaced whole; deletion of keys by `null` or a marker.
+Decision: the eight steps of contract section 4.5: chain from the root; per level, parameters, then `defaults`, `read` and `enums`, then the level's `repeat` expansion, then its points merged by name, then `identify` and `health` replaced whole; the instance's parameters bound before any level expands; `when` then `disable`; template and instance `defaults` under every point; instance `overrides` by point name; prefix; validation. Maps merge key by key; scalars and lists replace whole; nothing is deleted except points, by `when` and `disable`. An override or `disable` of an unknown point is an error.
+Reason: replacing lists whole makes a result independent of positions in two files; errors on unknown names catch typing errors that would otherwise leave a point active or an override unused; refusing `null` (D-70) leaves no way to delete a key, which keeps the origin of every value one line.
+Consequences: an override of one alarm of a point gives the whole `alarms` list. Every merged value keeps its origin, so that #103 can report an error with the instance and the template line.
+
+## D-73: Process names, service users and uids in the tag set from configuration
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #101
+Status: proposed, in the draft contract 0.1, section 12.2
+
+Context: the tag set holds a numeric uid per process (D-26), and its canonical encoding hashes it; D-26 says the numeric uid "is replaced by a user name when the real configuration arrives in phase 2", and asks phase 2 to refuse uid 0 and two processes with one uid. The configuration tree must not hold uids, which belong to the unit's installation.
+Options: put user names in the tag set and change the canonical encoding (a change of tag database contract 1.0 and its encoding version); keep uids in the tag set and resolve them in `scada-conf`.
+Decision: the process name is the service name without `scada-`, its user is the service name (one system user per service, `docs/install.md`); `scada-conf` looks the uid up on the unit when it builds the tag set and refuses a missing user, uid 0 and a shared uid (CF-1005). The fixed process list and the REALTIME flags (`control`, `io`) are in contract section 12.2; drivers are not REALTIME in phase 2. The tag set and the encoding of contract 1.0 are unchanged.
+Reason: it agrees with contract 1.0 without a change, and the uid is a fact of the unit the data plane must check anyway (tag database contract 3.1).
+Consequences: the same tree on two units can give two `config_hash` values; nothing compares hashes across units, and `scada-tagd` reuses a generation on one unit only. The #101 test that pins a hash gives the lookup a fixed user table.
+
+## D-74: `retain_max_age` is applied by the owner's library at attach, and is not in the tag set
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #89
+Status: proposed, in the draft contract 0.1, section 5.2
+
+Context: #89 (D-59, point 2) adds an optional per-tag `retain_max_age`: a restored value older than the bound, or of unknown age, is restored as BAD with RESTORED and the value kept; refused on mode, authority, counter and shelving tags. Tag database contract 12 restores a value as UNCERTAIN with RESTORED, at attach, before `ready`. The header has no field for the bound, and a first use of a field that readers refuse is a layout version (contract 14.1).
+Options: a field in the header (`DirectoryEntry.reserved`, ignored by readers, so a minor version, plus an encoding version of `config_hash`); the owner rewrites the tag after attach from `scada_tag_retain_info`; the owner passes the bounds to its own library at attach, which applies them while it restores.
+Decision: the third. The bound is in the configuration only, not in the tag set or `config_hash`. #89 adds the attach option and the restore rule to the library and to contract 12 as a minor version.
+Reason: a rewrite after attach lets readers see the old value as UNCERTAIN until the owner gets to it, which is what the bound is for. A header field puts a policy into the data plane and changes the hash encoding for a setting that matters only at a restore.
+Consequences: a change of the bound alone needs no generation change. Found for #89, reported to the lead: under contract 12 (D-45) a record read BAD without NOT_INIT is removed from the retain file at the next write, so a value restored BAD for an unknown age would be lost even if a later boot had a synchronised clock; #89 should decide whether an unchanged BAD + RESTORED restore counts as "no change", as an unchanged UNCERTAIN restore does (D-59, B1). The draft proposes that it does.
+
+## D-75: Owners, queues and the name limits that follow from 31-byte queue names
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #101
+Status: proposed, in the draft contract 0.1, sections 2.1 and 12.3
+
+Context: the tag set needs owners and queues with names of at most 31 bytes (tag database contract 1, 3). Owners are writing threads: one per control task, one per driver channel (reference 5.1). The form `cmd.<driver>.<source>` with owner names (`cmd.drv-modbus.line1.control.normal`) does not fit.
+Options: numbered queue names; the form of the contract with short owner names; channel and task names short enough that a readable form fits.
+Decision: owners `control.<task>`, `cmd`, `alarm`, `io`, `drv-<protocol>.<channel>`; queues `cmd.<channel>.<source>` and `result.<channel>.<source>`, where source is `cmd` or a task name, `cmd.io.<source>` for `scada-io`, and `events.cmd`, `events.<task>`, `events.alarm`. Channel names are unique across the unit, at most 12 bytes and not `io`; task names at most 8 bytes and not `cmd`. The longest name, `result.<channel>.<task>`, is 28 bytes. The consumer of the event queues (`audit`) is provisional until phases 4 and 5 (#83).
+Reason: names that read as what they are keep the logs of `scada-tagd` useful; numbered names would change with every added channel. 12 and 8 bytes are enough for names like `line1` and `normal`.
+Consequences: a channel or task rename changes queue and owner names and so `config_hash`. The temporary tag-set file of phase 1 used other names; it is test input only (#101).
+
+## D-76: `scada-conf` states every owner's change ring capacity
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #101
+Status: proposed, in the draft contract 0.1, section 12.3
+
+Context: the tag-set builder does not raise the default ring capacity of 65,536 entries; an owner with more than 32,768 tags must state its capacity (contract 5). D-66 a: phase 2 sizes each owner's ring.
+Options: the user states capacities; `scada-conf` computes them.
+Decision: `scada-conf` gives every owner `max(data_plane.change_ring_capacity, the next power of two of at least twice its tags)`, at most 1,048,576 entries, and refuses an owner beyond that (CF-1003).
+Reason: the rule of contract 8.3 can be computed exactly from the tree, and a user would only get it wrong.
+Consequences: adding tags to a channel past a power of two changes the capacity and therefore the hash; it changes the tag set anyway.
+
+## D-77: Validation codes and severities
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 10
+
+Context: reference 12.5 asks for validation rules; the outline asks for each with an error code and a message; reference 12.4 distinguishes errors and warnings.
+Options: free-text messages; codes per rule.
+Decision: codes `CF-<n>` for errors (a commit is refused) and `CW-<n>` for warnings, numbered by contract section (1xx files, 2xx schema, 3xx names, 4xx templates, 5xx tags and expressions, 6xx drivers, 7xx outputs, 8xx alarms and logging, 9xx control, 10xx tag set), with a fixed message and placeholders. A code never changes meaning from 1.0 on; a removed rule leaves its code unused. Every report has file, line, column, code and message, and for an expanded value the template's file and line.
+Reason: stable codes let tests, the web editor and documentation refer to a rule without matching text.
+Consequences: the severity of two rules (pacing, outputs without interlocks) waits for the owner's ruling X-13 of the device survey; the draft makes pacing a warning and a missing `interlocks` key an error.
+
+## D-78: The expression grammar
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 5.6
+
+Context: reference 7.6 says virtual tags use the structured-text expression syntax with conditional selection, aggregates and time functions, and 7.4 gives tag access with `.quality` and `.age`. Tag names may contain `-` and segments that start with a digit, and a tag may be named `x.quality`.
+Options: an operator `?:`; the IEC function `SEL`; a function `if`. Attributes only as `.quality`; also functions.
+Decision: the EBNF of contract section 5.6, with `if(c, a, b)` evaluated lazily; `tag("...")` for names that are not identifiers; `.quality` and `.age`, refused when ambiguous, with `quality(x)` and `age(x)` as the unambiguous forms; TIME literals `T#5s`; INT, REAL, BOOL and TIME as reference 7.4; no mixing of BOOL and numbers; overflow, division by zero and non-finite results give BAD with OVERFLOW. Configuration expressions in templates use the same grammar without tags and time functions.
+Reason: one grammar for virtual tags, alarms, interlocks and structured text means one parser and one set of tests (#100, phase 6); `if` reads better than `SEL` and needs no new operator.
+Consequences: phase 6 implements the same grammar for structured text, with the statements of section 9.3.
+
+## D-79: Generated tags and their names
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #101
+Status: proposed, in the draft contract 0.1, section 12.5
+
+Context: the tag set must contain every tag a service writes: the parts of an output (reference 8.1), area authority (8.3), alarm states (10.2), tunable parameters (7.3), driver system tags (6.3). The reference names none of them.
+Options: names fixed by each service; names fixed by the configuration contract.
+Decision: `<output>.mode`, `.status`, `.req_manual`, `.req_auto`; `sys.area.<area>.authority`; `<tag>.alarm.<id>` and `.shelved_until`; `ctl.<program>.<block>.<param>`; the interlock's own name; driver system tags as the driver interface contract names them, proposed `sys.drv.<channel>.<name>` and `sys.dev.<device>.<name>`. Owners, types, flags and value codes as in contract section 12.5. Mode and authority tags are RETAIN and RETAIN_NOW.
+Reason: the tag set must be computable from the tree before any service runs, and the names must be checked against the 127-byte limit with the user's names (#119).
+Consequences: services of phases 5 to 7 use these names and codes; a change is a minor version of the configuration contract and a tag-set change. Every tree with an output or area has RETAIN_NOW tags, so the 400 ms limit on `heartbeat_check_ms` always applies to it.
+
+## D-80: Tree format and migration
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01)
+Status: proposed, in the draft contract 0.1, section 11
+
+Context: outline item 11 asks how an older configuration tree is upgraded.
+Options: a version per file; one version for the tree.
+Decision: one integer `format` in `system.yaml`. Additions of optional keys or values are contract minor versions and keep the format; a change that invalidates or changes the meaning of a valid tree is a new format with a migration function in `libscada-conf` that rewrites only the lines it must change. After a software update `scada-conf` migrates the active tree and commits it as a new version; `scadactl config migrate` stages a migration for review. Protocol schemas are versioned with the format.
+Reason: templates and instances depend on each other across files, so a per-file version would allow trees whose files have formats that do not fit together.
+Consequences: older software refuses a tree that uses an addition as an unknown or reserved key rather than misreading it.
