@@ -200,7 +200,7 @@ framework logs (11.3).
   short name `<T>` of a control task (CS 12.3). One queue per source keeps
   one producing thread per queue (TD 9). The command thread consumes them
   all with one wait set; a wait set holds at most 127 sources (TD 8.4), so
-  a driver may have at most 126 sources, and CS refuses more. The command
+  a driver may have at most 126 sources, and CS refuses more (CF-1009). The command
   thread routes each request to its channel by the target handle.
 - **In-process queues.** Between the command thread and each worker there
   are two pre-allocated single-producer, single-consumer lock-free queues:
@@ -704,7 +704,7 @@ becoming readable (7.3).
 
 ### 6.3 Block planning
 
-- Rules (CS `read:`, annex A): the largest request (`max_registers`, at most
+- Rules (CS `read:`, annex A.4): the largest request (`max_registers`, at most
   `max_read_units`), the largest gap the plan may read across (`max_gap`),
   and ranges per table and unit id: `no_read` (never touched),
   `atomic` (always in one request), `exclusive` (read alone, by one poll
@@ -783,7 +783,7 @@ accept.
 
 Decision D-96.
 
-- A device's `timeout` (CS) is the time from the **end of the request on
+- A device's `timeout` (CS 4.11) is the time from the **end of the request on
   the wire** to the **first byte of the answer**.
 - The framework adds the frame time: the request's length and the longest
   answer the request allows, at the channel's bit rate and character format
@@ -1318,24 +1318,20 @@ Committee recommendation: accept (a), with the end made visible.
 
 **Review by a person.** Decision D-91.
 
-One table for every case. Keys and their defaults are CS's (4.10, 7.2):
-`on_shutdown: hold | safe | release` and `on_control_loss: { action, after
-}`; the defaults below are the ones this contract asks CS to fix.
+One table for every case. The keys and their defaults are CS's (7.4):
+`on_shutdown: hold | safe | release`, `on_control_loss: { action, after }`
+and `on_generation_change: hold | safe`; the defaults are restated below and
+CS wins if they differ. This section defines the behaviour.
 
 | Case | Key | Delay | Default, local output (`scada-io`) | Default, remote output (driver) | Who acts |
 | --- | --- | --- | --- | --- | --- |
 | Orderly stop of the driver or `scada-io` | `on_shutdown` | None | `safe` (reference 6.5: "on shutdown") | `hold` (reference 14.4: "hold (default for most process outputs)") | The stopping process, before it disconnects |
 | `scada-control` down while the output is in AUTO | `on_control_loss` | `after` (local default 0: at its heartbeat timeout) | `safe` (reference 6.5: "when the control runtime's heartbeat stops") | `hold` (reference 14.4: "hold, or go to safe state after a timeout") | The command thread (remote), the scan thread (local) |
 | `scada-cmd` down while the output is in MANUAL | None | | `hold` | `hold`; a refreshed setpoint stops refreshing and the device falls back (8.12) | The worker |
-| Generation change | CS's per-output generation-change behaviour (reference 19.2) | The restart | `hold`; `safe` when the limit of reference 5.5 is exceeded | The same | `scada-conf` decides; the driver acts (9.2) |
+| Generation change | `on_generation_change` (reference 19.2) | The restart | `hold`; `safe` when the limit of reference 5.5 is exceeded | The same | `scada-conf` decides; the driver acts (9.2) |
 | Connection to the device lost | None | | n/a | Nothing can be written; the device's own fallback (reference 14.4) | The device |
 | `scada-io` crashes | `on_shutdown` | None | As the hardware leaves the line, then `safe` by the stop step (13.4) | n/a | The service manager's stop step |
 | The whole system hangs | None | | Hardware default (reference 14.4) | The device's fallback | Hardware watchdog |
-
-Where CS's defaults differ from this table (a draft of CS gives `hold` for
-`on_shutdown` of local outputs, applies `on_control_loss` in MANUAL to the
-loss of `scada-cmd`, and fixes the generation-change behaviour), the
-difference is listed in section 18 until the two agree.
 
 - `safe` writes the output's `safe_state`; `release` writes `limits.release`
   (both raw or engineering as declared, 8.4); `hold` writes nothing.
@@ -1438,7 +1434,7 @@ with its outcome unknown (TD 9.5). After the restart, 9.1 applies.
 ## 10. Process start, configuration and stop
 
 - **Configuration.** A driver loads the expanded configuration of the
-  generation it attached to, as CS defines its delivery (17, B-12): the file
+  generation it attached to, as CS 13 defines its delivery (17, B-12): the file
   carries the `config_hash` of its tag set, and the driver refuses to run
   on a file whose hash differs from the generation's header. It publishes
   the `config_id` it loaded in `sys.proc.<process>.config_id` and the
@@ -1448,7 +1444,7 @@ with its outcome unknown (TD 9.5). After the restart, 9.1 applies.
 - **No entry.** A driver process that starts and finds no entry for itself
   in the expanded configuration (no channel of its protocol) logs it once
   and exits with status 0, so that it does not run into the restart limit
-  (CS, Apply). Who starts a driver whose first channel is committed is
+  (CS 13). Who starts a driver whose first channel is committed is
   CS's (B-12).
 - **Stop.** On a stop signal the main thread stops the command thread
   (requests still queued stay for the library to drain at the next attach,
@@ -1579,7 +1575,7 @@ interface is the HAL of reference 6.5, not a frame protocol.
 
 - Backends: `simulator`, `gpio` (the GPIO character device), `iio`
   (industrial I/O), compiled in and chosen per channel (D-81). Keys are
-  CS's (the `io` schema): GPIO lines by chip label and line name or offset,
+  CS's (annex B, `io`): GPIO lines by chip label and line name or offset,
   never by `gpiochipN`; IIO channels by device name and channel name, never
   by `iio:deviceN`; no paths in configuration. The backend resolves names
   at start.
@@ -1861,8 +1857,9 @@ CS owns every key, default and validation code; this contract owns
 behaviour. The sections of CS cited: 4.1 (common part and protocol part,
 X-8), 4.6 (channel and device keys), 4.7 (point keys), 4.8 (identify), 5.3
 (counters), 7.1 (areas), 7.2 (outputs), 10 (codes), 12.3 (owners and
-queues), 12.5 (generated tags), annex A (Modbus), 4.10 (shared keys and
-defaults) and its section "Apply".
+queues), 12.5 (generated tags), 4.10 (shared keys and defaults), 4.11
+(timeout), 7.4 (fail-safe keys), 13 (Apply), annex A (Modbus; A.4 read
+ranges, A.5 write encodings), annex B (`io`), annex C (shapes).
 
 | Id | Point | CS | This contract |
 | --- | --- | --- | --- |
@@ -1877,7 +1874,7 @@ defaults) and its section "Apply".
 | B-9 | Channels | `type`, `role`, endpoints reserved, `rs485` reserved, literal addresses only, `local_address` reserved | 3.4, 7.2, 7.3 |
 | B-10 | Unit ids (X-4) | Overlap on (unit id, table, register); 0 to 255 on TCP and `rtu_over_tcp`, 1 to 247 on RTU | 3.4, 7.4 |
 | B-11 | Timing and pacing | `timeout` (as defined in 7.1), `retries`, `busy_retries` (reads), `demote_after`, `backoff`, `reconnect`, `connect_timeout`, `keepalive`, pacing, `max_pending_writes`, `lost_after_timeouts`; the frame-time warning CW-608 | Their behaviour (6, 7) |
-| B-12 | Apply | CS section "Apply": versions under `/var/lib/scada/conf/versions/<n>/`, the `active` link renamed atomically, `scada-conf` running each protocol's `configure` and `plan` (refusals CF-650 to CF-699), one expanded file per driver stamped with `config_hash` and `config_id`, the watch on the link, who starts a driver | What the driver loads and reports (10, 12) |
+| B-12 | Apply | CS 13: versions under `/var/lib/scada/conf/versions/<n>/`, the `active` link renamed atomically, `scada-conf` running each protocol's `configure` and `plan` (refusals CF-650 to CF-699), one expanded file per driver stamped with `config_hash` and `config_id`, the watch on the link, who starts a driver | What the driver loads and reports (10, 12) |
 
 Secrets (B-7): **review by a person.** A secret is referenced by name and
 fetched at connect from the secrets store (reference 13.3) through a

@@ -1603,7 +1603,7 @@ Context: references 6.5 and 14.4 give safe states to `scada-io` and say drivers 
 Options: (A) stop refreshing only; (B) the framework can hold, write the safe state or write the release value, journalled first, else only stop refreshing (0.1); (B') the same, the action taken first and journalled best-effort after.
 Decision: (B'), with one table of cases and defaults (driver interface contract 8.13): local outputs `safe` on shutdown and on loss of `scada-control`, remote outputs `hold`. The main thread is the one producer of the process's events queue.
 Reason: a safe state on loss of control is the configured answer to a failure; "no audit, no action" stays whole for commands.
-Consequences: a refused event record is counted (`sys.proc.<process>.safe_unjournalled`) and logged. The defaults are to be fixed with the configuration contract, which owns the keys.
+Consequences: a refused event record is counted (`sys.proc.<process>.safe_unjournalled`) and logged. The keys and defaults are the configuration contract's (its 7.4, agreed with #98): `on_shutdown` `safe` for local and `hold` for remote outputs; `on_control_loss` for AUTO and `scada-control` only, `safe` locally and `hold` remotely; `on_generation_change` per output, default `hold`, safe when the limit of reference 5.5 is exceeded; in MANUAL a restart of `scada-cmd` drops nothing.
 
 ## D-92: Checks a driver makes on every write request
 Date: 2026-11-22
