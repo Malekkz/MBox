@@ -1405,3 +1405,24 @@ Consequences:
 - `libs/scada-tag/src/c_api.cpp` drops its own length check. The check in `Attachment::write_string` is now the only one, and it already ran after ownership.
 - Test: `CApi.WriteStringOfAnotherOwnersTagIsNotOwnerWhateverTheText`. It fails without the change.
 - Contract section 13 states the order for `scada_tag_write_string` (version 0.26).
+
+## D-66: On a pull request, clang-tidy lints only the translation units the pull request could have affected
+Date: 2026-11-22
+Phase / issue: 1, #120
+Status: accepted
+
+Context: the job `check` lints every translation unit with clang-tidy on every run. It took 28 to 36 minutes against a limit of 45, and a pull request of documents only waited as long as one that changes the library. Issue #120 asks for a lint of what a pull request could have affected, with two safeguards: dependents taken from the build, and a full lint when the rules change or the set cannot be worked out.
+Options:
+- Dependencies from Ninja's `.d` files: needs a full build in the job, minutes the job does not have.
+- Dependencies from `clang-scan-deps`: a further tool, not on `PATH` under its plain name.
+- Dependencies from the compiler of each compile command, run with `-M` (preprocessing only).
+- For a deleted or renamed header: the former dependents from the dependencies of the base revision (a second checkout and configure), or a full lint.
+Decision:
+- `scada_check.py --tidy-base <revision>`, set by the CMake option `SCADA_CHECK_TIDY_BASE` (empty by default: everything). The pipeline sets it to the pull request's base commit on a pull request; a push to `main` and `workflow_dispatch` leave it empty.
+- Changed files: `git diff --name-status --find-renames` from the merge base of the revision and `HEAD` to the work tree, plus untracked files.
+- Dependencies: each unit's compile command from `compile_commands.json`, with its output options (`-o`, `-c`, `-MD`, `-MF` and the like) replaced by `-M`, run with the build's compiler. 165 units take about 5 s on 4 processors.
+- Linted: every changed unit, and every unit whose dependencies contain a changed file.
+- Everything is linted when a changed, deleted or renamed path matches `FULL_LINT_PATTERNS` in `tools/check/lint_selection.py` (`.clang-tidy`, `CMakeLists.txt`, `*.cmake`, the presets, `cmake/`, `third-party/`, `.github/workflows/`, `.github/actions/`, `tools/check/`, `*.in`); when a header is deleted or renamed; and when the changes or the dependencies cannot be worked out (shallow clone, no merge base, a unit that does not preprocess, an unknown git status, any exception of the selection).
+- `banned` and `rt` run in one clang-query run per unit with both rule sets, instead of one run per set. The rules, the matches and the reports are the same; the parse of each unit is done once.
+Reason: `-M` is the compiler's own view of what a unit includes, for the flags the unit is linted with, at a cost of seconds. A full lint for a deleted header is the simplest way to cover its former dependents: a dependent that stopped including it had to change a file it includes and is linted anyway, but `__has_include` and a header of the same name elsewhere on the include path are not visible in the dependencies after the change. The combined clang-query run keeps a pull request of documents only under the 5 minutes the issue asks for: format 2 s, banned 100 s and rt 72 s apart on 4 processors.
+Consequences: a header that no unit includes is not linted, as before. If the selection misses a unit, its finding first shows in the full run on `main` after the merge; the self-test `scada-check-selection-test` and the planted-fault proof of #120 guard against that. A new file that sets the rules of the lint must be added to `FULL_LINT_PATTERNS`.

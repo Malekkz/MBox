@@ -45,6 +45,18 @@ if(scada_check_missing)
   return()
 endif()
 
+# Empty: clang-tidy lints every translation unit. A revision: it lints only
+# the units the changes since its merge base with HEAD could have affected,
+# and everything if that cannot be worked out. The pipeline sets it on a pull
+# request (docs/decisions.md, D-66). The other checks run on every file
+# either way.
+set(SCADA_CHECK_TIDY_BASE "" CACHE STRING
+  "check: lint only what changed since this revision (empty: everything)")
+set(scada_check_tidy_base "")
+if(SCADA_CHECK_TIDY_BASE)
+  set(scada_check_tidy_base --tidy-base "${SCADA_CHECK_TIDY_BASE}")
+endif()
+
 set(scada_check_tools
   --clang-format "${SCADA_CLANG_FORMAT}"
   --clang-tidy "${SCADA_CLANG_TIDY}"
@@ -62,6 +74,7 @@ add_custom_target(check
     --exclude tools/check/tests/fixtures
     --exclude tests/sanitizer-fixtures
     --exclude tests/model/fixtures
+    ${scada_check_tidy_base}
     ${scada_check_tools}
   COMMENT "Checking format, lint, banned functions and SCADA_RT"
   USES_TERMINAL
@@ -76,4 +89,13 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test.py" ${scada_check_tools})
   # About 15 s, most of it in clang-tidy; longer on a loaded machine.
   set_tests_properties(scada-check-test PROPERTIES LABELS unit TIMEOUT 300)
+  # The selection of the units clang-tidy lints on a pull request. It
+  # compiles small files with the C++ compiler of this build to get their
+  # dependencies.
+  add_test(NAME scada-check-selection-test
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/selection_test.py"
+      --compiler "${CMAKE_CXX_COMPILER}" ${scada_check_tools})
+  set_tests_properties(scada-check-selection-test PROPERTIES
+    LABELS unit TIMEOUT 120)
 endif()

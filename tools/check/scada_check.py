@@ -11,6 +11,10 @@ Runs four checks over the C++ sources and fails on any finding
 
 `banned` and `rt` are sets of clang-query matchers, defined below.
 
+`tidy` lints every translation unit unless --tidy-base is given; then it
+lints only the units the changes since that revision could have affected
+(lint_selection.py). The other checks always run on every file.
+
 Exit status: 0 no findings, 1 findings, 2 the checks could not run.
 """
 
@@ -24,6 +28,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
+
+import lint_selection
 
 MINIMUM_LLVM_MAJOR = 18
 SOURCE_ROOTS = ("libs", "services", "tools", "tests")
@@ -416,6 +423,45 @@ def select_files(options, checker):
     return files, units
 
 
+def tidy_selection(options, checker, units):
+    """Returns the lint_selection.Selection of units for clang-tidy.
+
+    Any failure to work out the changed set lints everything: an error must
+    never make the set smaller."""
+    if not options.tidy_base:
+        return lint_selection.everything("no base revision given")
+    if options.compile_flag or options.files:
+        return lint_selection.everything(
+            "files or compile flags given on the command line")
+    try:
+        merge_base, changes = lint_selection.changes_since(
+            checker.source_dir, options.tidy_base)
+        # The rules are looked at first: a full lint needs no dependencies.
+        selection = lint_selection.select_units(changes, {},
+                                                checker.source_dir)
+        if selection.everything:
+            return selection
+        if changes:
+            database = checker.build_dir / "compile_commands.json"
+            with open(database, encoding="utf-8") as stream:
+                entries = json.load(stream)
+            depends = lint_selection.dependencies(entries, units,
+                                                  checker.options.jobs)
+            selection = lint_selection.select_units(changes, depends,
+                                                    checker.source_dir)
+        return dataclasses.replace(
+            selection, reason=f"files changed since {merge_base[:12]} "
+            f"(merge base with {options.tidy_base}): {len(changes)}")
+    except lint_selection.SelectionError as error:
+        return lint_selection.everything(
+            f"the changed files cannot be worked out: {error}")
+    except Exception as error:
+        # A bug here must not leave files unlinted.
+        traceback.print_exc()
+        return lint_selection.everything(
+            f"the selection failed: {type(error).__name__}: {error}")
+
+
 def parse_arguments(arguments):
     parser = argparse.ArgumentParser(
         description="Formatting, lint, banned-function and SCADA_RT checks. "
@@ -439,6 +485,12 @@ def parse_arguments(arguments):
                         metavar="FLAG", help="compile the files with these "
                         "flags instead of the build's commands, for example "
                         "--compile-flag=-std=c++20; may be repeated")
+    parser.add_argument("--tidy-base", metavar="REVISION",
+                        help="lint with clang-tidy only the translation "
+                        "units that the changes since the merge base of "
+                        "REVISION and HEAD could have affected; everything "
+                        "if that cannot be worked out (default: lint every "
+                        "unit)")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
                         help="tools run in parallel (default: all "
                         "processors)")
@@ -460,11 +512,26 @@ def main(arguments):
         if "format" in options.only:
             reports += checker.check_format(files)
         if "tidy" in options.only:
-            reports += checker.check_tidy(units)
+            selection = tidy_selection(options, checker, units)
+            tidy_units = units if selection.everything else list(
+                selection.units)
+            mode = "everything" if selection.everything else "changed files"
+            print(f"check: tidy: {mode} ({selection.reason}): "
+                  f"{len(tidy_units)} of {len(units)} translation units")
+            if not selection.everything:
+                for unit in tidy_units:
+                    print(f"check: tidy: {unit}")
+            sys.stdout.flush()
+            reports += checker.check_tidy(tidy_units)
+        # One clang-query run per unit for both rule sets: the parse of the
+        # unit is most of the time.
+        rules = []
         if "banned" in options.only:
-            reports += checker.check_matchers(units, BANNED_RULES)
+            rules += BANNED_RULES
         if "rt" in options.only:
-            reports += checker.check_matchers(units, RT_RULES)
+            rules += RT_RULES
+        if rules:
+            reports += checker.check_matchers(units, rules)
     except CheckError as error:
         print(f"check: {error}", file=sys.stderr)
         return EXIT_CANNOT_RUN
