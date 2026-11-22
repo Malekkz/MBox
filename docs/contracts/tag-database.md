@@ -1565,7 +1565,7 @@ know they are there, and any number may run.
   as a restore from another file: `scada-tagd` looks up its source in the
   files and records it ADOPTED, with SOURCE_NOT_FINAL and an unknown age if
   none holds it. That is the safe side also for an owner that writes
-  RESTORED itself, for example `scada-link` on a master, which passes the
+  RESTORED itself, for example `scada-drv-link` on a master, which passes the
   quality and flags of a slave's tag through unchanged (reference 17), so
   that a restored value of the slave arrives with RESTORED.
 - A file written again holds the stamp of its oldest value the owner has
@@ -2214,10 +2214,23 @@ version 1.1, issue #21). The list below is kept as the record of the
 differences that update resolved; the numbers are cited elsewhere.
 
 Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1 and 14.4
-that refer to section 5. The difference that remains:
+that refer to section 5. The differences that remain:
 
 - Reference 10.4 has no system alarm for lost audit records or a broken
   queue (item 22). It is a phase 5 gap (#75).
+- String tags cannot be commanded: the tag-set builder refuses a STRING
+  tag that is `writable_by_command` (section 5). The reference does not
+  restrict commands to a type.
+- Adding tags without a restart (reference 5.5 and 19.3) needs a new
+  layout version: everything in `header` but `state` and `down` is
+  immutable for the life of a generation (section 5).
+- Reference 11.6 gives emergency direct mode to the group
+  `scada-emergency` and lists queues among what it inspects. The contract
+  gives read access to the group `scada` only (section 3.1; D-42), and an
+  observer cannot open a queue (section 11.4, step 4).
+- OWNER_DOWN cannot be stored (section 6.2), so the pass-through of
+  quality "unchanged" over the node link (reference 17.3) needs a mapping
+  for a slave tag whose owner is down. It is for phase 11.
 
 Confirmed by the product owner in review P1-01:
 
