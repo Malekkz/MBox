@@ -125,13 +125,12 @@ if(BUILD_TESTING)
   set_tests_properties(scada-check-selection-test PROPERTIES
     LABELS unit TIMEOUT 120)
   # The split of the lint across the jobs of the pipeline (D-68), on its
-  # own lists and on the translation units of this build, found as the
+  # own lists and on the translation units of the source tree, found as the
   # check target finds them. No tools; under a second.
   add_test(NAME scada-check-shares-test
     COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/shares_test.py"
       --source-dir "${PROJECT_SOURCE_DIR}"
-      --build-dir "${PROJECT_BINARY_DIR}"
       ${scada_check_excludes})
   set_tests_properties(scada-check-shares-test PROPERTIES
     LABELS unit TIMEOUT 60)

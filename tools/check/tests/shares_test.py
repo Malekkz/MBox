@@ -2,10 +2,10 @@
 """Self-test of the split of the clang-tidy lint across jobs (D-68).
 
 Tests lint_shares.split and lint_shares.verify on made-up lists, and the
-split of the translation units of a real build, found as the check target
+split of the translation units of the source tree, found as the check target
 finds them.
 
-Usage: shares_test.py --source-dir DIR --build-dir DIR [--exclude DIR ...]
+Usage: shares_test.py --source-dir DIR [--exclude DIR ...]
 """
 
 import argparse
@@ -108,13 +108,12 @@ class BuildUnits(unittest.TestCase):
         cls.units = [
             path.relative_to(source_dir).as_posix() for path in files
             if path.name.endswith(scada_check.UNIT_SUFFIXES)]
-        cls.database = scada_check.units_in_database(BUILD["build_dir"])
 
-    def test_the_build_has_units_and_all_are_in_the_build(self):
+    # Whether each unit is part of the build is the check's own test: it
+    # refuses a unit without a compile command (scada_check.select_files).
+    # Not every preset builds every unit, so this test does not ask.
+    def test_the_build_has_units(self):
         self.assertGreater(len(self.units), 0)
-        for unit in self.units:
-            self.assertIn((BUILD["source_dir"] / unit).resolve(),
-                          self.database)
 
     def test_split_of_the_build_is_complete(self):
         count = len(self.units)
@@ -225,11 +224,9 @@ class Verify(unittest.TestCase):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--build-dir", type=pathlib.Path, required=True)
     parser.add_argument("--exclude", action="append", default=[])
     options, remaining = parser.parse_known_args()
     BUILD.update(source_dir=options.source_dir.resolve(),
-                 build_dir=options.build_dir.resolve(),
                  exclude=options.exclude)
     unittest.main(argv=sys.argv[:1] + remaining, verbosity=2)
 

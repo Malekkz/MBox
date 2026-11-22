@@ -101,7 +101,7 @@ time. The `check` target is not a test; how its linter selects files on a
 pull request is described under "Checking" below, and its self-test is
 `ctest --preset dev -R scada-check-selection-test`. The pipeline splits a
 full clang-tidy lint across four jobs; the self-test of that split, on its
-own lists and on the translation units of the build, is
+own lists and on the translation units of the source tree, is
 `ctest --preset dev -R scada-check-shares-test` (see "Pipeline"). Where
 tests live and how to add one is in `tests/README.md`.
 

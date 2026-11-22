@@ -180,6 +180,6 @@ ctest --preset dev -R scada-check-shares-test
 The self-test of the split: complete and deterministic for 0 to 59 units
 and 1 to 8 shares, also when the number of units is not a multiple of the
 shares or smaller than it; and the same for the translation units of the
-build, found as the `check` target finds them, for 1 to 12 shares. It also
+source tree, found as the `check` target finds them, for 1 to 12 shares. It also
 checks that `lint_shares.py verify` refuses a missing, doubled, unclean or
 short share and records of different selections. Under 1 s.
