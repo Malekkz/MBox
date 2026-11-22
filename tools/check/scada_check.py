@@ -450,8 +450,8 @@ def tidy_selection(options, checker, units):
             selection = lint_selection.select_units(changes, depends,
                                                     checker.source_dir)
         return dataclasses.replace(
-            selection, reason=f"files changed since {merge_base[:12]} "
-            f"(merge base with {options.tidy_base}): {len(changes)}")
+            selection, reason=f"{len(changes)} files changed since the "
+            f"merge base {merge_base[:12]} of {options.tidy_base} and HEAD")
     except lint_selection.SelectionError as error:
         return lint_selection.everything(
             f"the changed files cannot be worked out: {error}")

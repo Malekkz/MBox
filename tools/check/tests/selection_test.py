@@ -265,7 +265,7 @@ class TidyBase(unittest.TestCase):
         result = self.run_check("--tidy-base", "main")
         self.assertEqual(result.returncode, EXIT_CLEAN,
                          result.stdout + result.stderr)
-        self.assertIn("check: tidy: changed files (files changed since",
+        self.assertIn("check: tidy: changed files (1 files changed since the merge base",
                       result.stdout)
         self.assertIn("0 of 4 translation units", result.stdout)
 

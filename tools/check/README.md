@@ -57,7 +57,7 @@ work tree, untracked files included. The first line of the `tidy` output
 names the mode, the reason and the number of units, then the units linted:
 
 ```
-check: tidy: changed files (files changed since 4c22719a1b2c (merge base with origin/main)): 2 of 165 translation units
+check: tidy: changed files (3 files changed since the merge base 4c22719a1b2c of origin/main and HEAD): 2 of 165 translation units
 check: tidy: everything (tools/check/scada_check.py changed, which sets the rules): 165 of 165 translation units
 ```
 
