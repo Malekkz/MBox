@@ -131,9 +131,10 @@ These follow from the tag database contract (sections 1, 3.4 and 12):
   retain file has one name relies on `protected_hardlinks` (contract 12).
   The library opens every region, directory and retain file with
   `O_NOFOLLOW` and does not rely on `protected_symlinks` itself.
-- Swap may be on. The library pre-faults every mapping but locks none; a
-  real-time service keeps its mappings resident with `mlockall` and a
-  `LimitMEMLOCK` sized as below.
+- Swap may be on. The library pre-faults every mapping but locks none, so
+  the pages of a process that does not lock its memory can be swapped out;
+  that delays a read, it does not break one. A real-time service keeps its
+  mappings resident with `mlockall` and a `LimitMEMLOCK` sized as below.
 - A system call filter (`SystemCallFilter=` or another seccomp filter) must
   allow the calls `libscada-tag` and `scada-tagd` make, by their kernel
   names: `futex`, `futex_waitv`, `mmap`, `munmap`, `madvise`, `flock`,

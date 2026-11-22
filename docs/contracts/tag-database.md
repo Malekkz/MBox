@@ -218,8 +218,10 @@ accepted for layout version 1:
   offset clock would make a process look stale or keep it alive.
 - Real-time processes need a locked-memory limit that covers their mappings;
   `scada-tagd` needs write access to the retain directory.
-- Swap may be on. The library pre-faults every mapping but locks none; a
-  real-time process keeps its mappings resident with `mlockall`.
+- Swap may be on. The library pre-faults every mapping but locks none, so
+  the pages of a process that does not lock its memory can be swapped out;
+  that delays a read, it does not break one. A real-time process keeps its
+  mappings resident with `mlockall`.
 - A system call filter (seccomp) must allow every call the library and
   `scada-tagd` make; `docs/install.md` lists them.
 - `/dev/shm/scada` may be a tmpfs of its own, mounted before `scada-tagd`
@@ -2228,8 +2230,8 @@ Deferred by the owner, does not block 1.0:
 ## 17. Differences from the reference document
 
 This contract refines section 5 of the reference architecture. Section 5 of
-the reference document 1.1 matches this contract 1.0 (reference change log,
-version 1.1, issue #21). The list below is kept as the record of the
+the reference document 1.1 matches this contract 1.0, except for the
+differences listed below (reference change log, version 1.1, issue #21). The list below is kept as the record of the
 differences that update resolved; the numbers are cited elsewhere.
 
 Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1 and 14.4
