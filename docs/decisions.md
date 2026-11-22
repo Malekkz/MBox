@@ -1486,62 +1486,67 @@ Consequences: every run of the pipeline starts four share jobs and the job `chec
 ## D-69: The configuration schemas are normative tables in the contract; the JSON Schema files are written in P2-03
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract `config-schemas.md` 0.1; for review by a person
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the outline in `docs/contracts/README.md` says the contract is "the set of JSON Schema files ... plus this document", and reference 12.3 asks the builder to turn the examples into JSON Schema files. Issue #100 (P2-03) puts "the JSON Schema files of the configuration schemas contract, in the repository" in its own scope, next to the validator that uses them.
 Options: write the JSON Schema files in #98 and keep the document for the rest; write the keys as tables in the document and generate or write the files in P2-03.
 Decision: the contract states every key of every file type as a table (type, default, range, meaning) and is normative. P2-03 writes the JSON Schema files under `libs/scada-conf/schemas/` from the tables, with a test that the corpus of contract section 13 passes them. Where a table and a file disagree, the table wins and the file is fixed.
 Reason: the schema files are only useful with the code that loads them, and a review of tables is a review of the format; writing JSON Schema twice, once without a validator to test it, would double the review. The keys a person reviews are the same either way.
 Consequences: the contract is the one place to change a key; a change to a schema file without the table is a defect. The protocol schemas (contract Annex A for Modbus) follow the same rule.
+Revision 0.2: every key that takes several shapes is listed in contract Annex C. The JSON Schema files use the 2020-12 dialect (`unevaluatedProperties` is needed to merge framework and protocol keys into one object). The validator is the project's own, over a parsed tree that keeps file, line and column, with a fixed subset of keywords each mapped to a CF-2xx code; a general validator library would report neither and would be a new dependency. This contract owns every configuration key, default and validation code; the driver interface contract cites them (lead's direction 1, D-95).
 
 ## D-70: The YAML subset of the configuration tree
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 1.1
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the outline proposes "no anchors or custom tags" and leaves the subset to be decided.
 Options: full YAML 1.2; YAML 1.2 without anchors and tags; a stricter subset that also refuses `null`, YAML 1.1 booleans, octal numbers and several documents.
 Decision: the stricter subset of contract section 1.1: one UTF-8 document without markers or directives; block and flow collections; string keys only, no duplicates, no complex keys; no anchors, aliases, merge keys or tags; no `null` or empty values; `true` and `false` only; decimal and `0x` integers without leading zeros or separators; `.inf` and `.nan` not as numbers. Size limits: 8 MiB a file, depth 32, 64 KiB a scalar, 64 bytes a key, 20,000 files and 256 MiB a tree. JSON files use the same parser.
 Reason: anchors and merge keys let one line change values far away and make "file and line" of an error ambiguous, and templates are the reuse mechanism (reference 12.2). Refusing `null`, `yes` and `010` removes the values people type by accident. The limits bound the parser's memory, and the parser is fuzzed (#100).
 Consequences: P2-03 needs a parser that reports these constructs rather than silently accepting them, with a line and column for each (dependency choice and licence in #100).
+Revision 0.2: scalar typing is defined by the key's schema type, not by a YAML schema (contract 1.2): regular expressions for integers and decimals, `true` and `false` only, the written form of a number kept (`10` is an integer, `10.0` a decimal), map keys typed by the map's schema. Limits against hostile input are completed (1.3): nodes per file and tree, entries per map, `.st` files, expressions, `repeat` ranges checked before iteration, expansion stopped at `limits.max_tags`, at most 1,000 errors reported. The tree holds regular files and directories only, with ASCII paths in the name grammar; links, FIFOs and device nodes are refused (section 1).
 
 ## D-71: Templates extend at most one other template
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 4.3
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the outline asks whether templates may include other templates. The device survey of 2026-11-22 (not in the repository) shows device families with a shared core, and devices speaking several protocols for which a protocol-free signal base is useful.
 Options: no inclusion; single inheritance (`extends`); several included templates.
 Decision: `extends`, one parent, at most 4 parents deep, no cycles. A base template (no `protocol`) extends only a base template; a protocol template extends a base template or one of its own protocol. Optional parts of a device are parameters with `when`, not included templates.
 Reason: both cases of the survey are single inheritance; several parents need an order between unrelated parents and give a point two origins, which makes errors harder to locate.
 Consequences: #103 implements `extends` and the merge order of D-72; nested composition stays out.
+Revision 0.2: templates have no subdirectories, so that a reference finds its file without a search (Linux review L-22). A protocol template removes signals of its base with its own `disable` (SCADA review S-10).
 
 ## D-72: The merge order of template expansion
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 4.5
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the outline asks for the exact merge order of overrides; #103 needs it to test each rule.
 Options: lists merged by position or by a key; lists replaced whole; deletion of keys by `null` or a marker.
 Decision: the eight steps of contract section 4.5: chain from the root; per level, parameters, then `defaults`, `read` and `enums`, then the level's `repeat` expansion, then its points merged by name, then `identify` and `health` replaced whole; the instance's parameters bound before any level expands; `when` then `disable`; template and instance `defaults` under every point; instance `overrides` by point name; prefix; validation. Maps merge key by key; scalars and lists replace whole; nothing is deleted except points, by `when` and `disable`. An override or `disable` of an unknown point is an error.
 Reason: replacing lists whole makes a result independent of positions in two files; errors on unknown names catch typing errors that would otherwise leave a point active or an override unused; refusing `null` (D-70) leaves no way to delete a key, which keeps the origin of every value one line.
 Consequences: an override of one alarm of a point gives the whole `alarms` list. Every merged value keeps its origin, so that #103 can report an error with the instance and the template line.
+Revision 0.2: a step 7, evaluation, evaluates every configuration expression of a point after the overrides, with the parameters and the `repeat` variables bound to that point; `when` is refused in `defaults` and `overrides`. Exclusive groups (`gain` or `divide_by`, `bit` or `field`, `register` or `parts`, the write encodings, the feedback forms): giving one key removes the inherited keys of its group. `replace: true` in a map replaces the inherited map whole. Template-level `disable`; instance `only` (keep these points, for large or site-chosen maps); an instance's `identify` entries are appended to the template's. Reason: the review showed overrides that could not be written (C++ S-25 to S-27, SCADA S-10, S-11).
 
 ## D-73: Process names, service users and uids in the tag set from configuration
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #101
-Status: proposed, in the draft contract 0.1, section 12.2
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the tag set holds a numeric uid per process (D-26), and its canonical encoding hashes it; D-26 says the numeric uid "is replaced by a user name when the real configuration arrives in phase 2", and asks phase 2 to refuse uid 0 and two processes with one uid. The configuration tree must not hold uids, which belong to the unit's installation.
 Options: put user names in the tag set and change the canonical encoding (a change of tag database contract 1.0 and its encoding version); keep uids in the tag set and resolve them in `scada-conf`.
 Decision: the process name is the service name without `scada-`, its user is the service name (one system user per service, `docs/install.md`); `scada-conf` looks the uid up on the unit when it builds the tag set and refuses a missing user, uid 0 and a shared uid (CF-1005). The fixed process list and the REALTIME flags (`control`, `io`) are in contract section 12.2; drivers are not REALTIME in phase 2. The tag set and the encoding of contract 1.0 are unchanged.
 Reason: it agrees with contract 1.0 without a change, and the uid is a fact of the unit the data plane must check anyway (tag database contract 3.1).
 Consequences: the same tree on two units whose uids differ gives two `config_hash` values; contract section 12.8 says so for operators. `config_hash` is used only by `scada-tagd` on one unit to reuse a generation. Where configurations are compared across units (upstream sync, backup and restore, the system page), the contract defines `config_id`, a SHA-256 over the paths and bytes of the tree's files, independent of the unit; the node link manifest has its own hash, defined by the node link contract (phase 11), over the exported tags. The #101 test that pins a hash gives the lookup a fixed user table. (Lead's review of the plan, 2026-11-22.)
+Revision 0.2: only `control` and `io` are REALTIME in phase 2 (lead's direction 2, owner's ruling O-4). The install tree creates every service user, also of later services (#102). `--offline` validation runs without the uid table and gives no `config_hash`. At its start `scada-conf` rebuilds the tag set if a uid changed. Section 12.8 of the contract says what a unit-dependent `config_hash` means for an operator and defines `config_id`, also its file set, its line-end rule and what it does not cover (owner's ruling O-6).
 
 ## D-74: `retain_max_age` is applied by the owner's library at attach, and is not in the tag set
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #89
-Status: proposed, in the draft contract 0.1, section 5.2
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: #89 (D-59, point 2) adds an optional per-tag `retain_max_age`: a restored value older than the bound, or of unknown age, is restored as BAD with RESTORED and the value kept; refused on mode, authority, counter and shelving tags. Tag database contract 12 restores a value as UNCERTAIN with RESTORED, at attach, before `ready`. The header has no field for the bound, and a first use of a field that readers refuse is a layout version (contract 14.1).
 Options: a field in the header (`DirectoryEntry.reserved`, ignored by readers, so a minor version, plus an encoding version of `config_hash`); the owner rewrites the tag after attach from `scada_tag_retain_info`; the owner passes the bounds to its own library at attach, which applies them while it restores.
@@ -1552,65 +1557,105 @@ Consequences: a change of the bound alone needs no generation change. Found for 
 ## D-75: Owners and queues, with generated short names for channels and tasks
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #101
-Status: proposed, in the draft contract 0.1, sections 2.1 and 12.3
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the tag set needs owners and queues with names of at most 31 bytes (tag database contract 1, 3). Owners are writing threads: one per control task, one per driver channel, one for a driver's main thread (reference 5.1, driver interface draft). The readable form `cmd.<channel>.<task>` fits only if channel and task names are cut to about 12 and 8 bytes. Contract 3 leaves the part of a queue name after its prefix as free text, so that the generator may shorten it.
 Options: limit the names users write; numbered names (an index); a short stable hash of each name.
 Decision: a short name of 10 lower-case hexadecimal digits, the start of SHA-256 of `channel:<name>` or `task:<name>`, written C() and T(). Owners `control.<T>`, `cmd`, `alarm`, `io`, `drv-<protocol>`, `drv-<protocol>.<C>`. Queues `cmd.<C>.cmd`, `cmd.<C>.<T>` and their `result.` queues, `cmd.io.<S>`, `events.cmd`, `events.control.<T>`, `events.alarm`, and from phase 5 `events.drv-<protocol>`. The longest is 28 bytes. Channel and task names keep the identifier limit of 31 bytes; protocol names are at most 12 bytes. Equal short names of two channels or two tasks are CF-1006. `scada-conf` writes the map of generated names to `/var/lib/scada/conf/tag-set-names.json` at each apply, and `scadactl` shows the configured name beside the generated one. The consumer of the event queues (`audit`) is provisional until phases 4 and 5 (#83).
 Reason: a short name depends only on its own name, so adding, removing, reordering or renaming one channel or task renames only its own owners and queues; an index would rename the others. Users keep readable names of comfortable length (lead's review of the plan, 2026-11-22). 40 bits make a collision among 1,000 channels less likely than one in a million, and a collision is an error, never a silent merge.
 Consequences: logs of `scada-tagd` show generated names; `scadactl` and the map translate them. A rename of a channel or task changes its owner and queue names and therefore `config_hash`. The temporary tag-set file of phase 1 used other names; it is test input only (#101).
+Revision 0.2, replacing the queue scheme above (lead's direction 3; C++ B-3, SCADA S-18, Linux L-14): command queues are per driver process and source, as reference 5.1 names them: `cmd.<protocol>.<S>` and `result.<protocol>.<S>`, S being `cmd` or T(task). A driver's command thread routes requests to its channels' order queues, which answer `BUSY` when full; this keeps the queue count small and within one wait set of 127 sources. Short names are readable: S(kind, name, n) is the name itself when it has at most n bytes, else its first n − 9 bytes, `-`, and 8 hexadecimal digits of SHA-256(kind:name); C = S(channel, 15), T = S(task, 12); protocol names at most 10 bytes. Channel and task names keep the 31-byte limit of an identifier (lead's review of the plan). Every attached process has an owner named like the process for its main thread (`sys.proc` tags), so that no owner has two writing threads; `scada-io` has `io` (main) and `io.scan` (Linux L-4). The name map is kept with every committed version, with its `config_hash` (Linux L-25). Owner's ruling O-8.
 
 ## D-76: `scada-conf` states every owner's change ring capacity
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #101
-Status: proposed, in the draft contract 0.1, section 12.3
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the tag-set builder does not raise the default ring capacity of 65,536 entries; an owner with more than 32,768 tags must state its capacity (contract 5). D-66 a: phase 2 sizes each owner's ring.
 Options: the user states capacities; `scada-conf` computes them.
 Decision: `scada-conf` gives every owner `max(data_plane.change_ring_capacity, the next power of two of at least twice its tags)`, at most 1,048,576 entries, and refuses an owner beyond that (CF-1003).
 Reason: the rule of contract 8.3 can be computed exactly from the tree, and a user would only get it wrong.
 Consequences: adding tags to a channel past a power of two changes the capacity and therefore the hash; it changes the tag set anyway.
+Revision 0.2, replacing the rule above (lead's direction 4; C++ B-3, SCADA B-5): each owner's ring is the next power of two of at least four times its tags, at least 1,024 entries; a channel may override it (`change_ring_capacity`, at least twice its tags). The global key `data_plane.change_ring_capacity` is removed. 300 channel owners at the old default took 600 MiB against "under 64 MB" of reference 5.8; at 100 tags each they now take about 10 MiB.
 
 ## D-77: Validation codes and severities
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 10
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: reference 12.5 asks for validation rules; the outline asks for each with an error code and a message; reference 12.4 distinguishes errors and warnings.
 Options: free-text messages; codes per rule.
 Decision: codes `CF-<n>` for errors (a commit is refused) and `CW-<n>` for warnings, numbered by contract section (1xx files, 2xx schema, 3xx names, 4xx templates, 5xx tags and expressions, 6xx drivers, 7xx outputs, 8xx alarms and logging, 9xx control, 10xx tag set), with a fixed message and placeholders. A code never changes meaning from 1.0 on; a removed rule leaves its code unused. Every report has file, line, column, code and message, and for an expanded value the template's file and line.
 Reason: stable codes let tests, the web editor and documentation refer to a rule without matching text.
 Consequences: the severity of two rules (pacing, outputs without interlocks) waits for the owner's ruling X-13 of the device survey; the draft makes pacing a warning and a missing `interlocks` key an error.
+Revision 0.2: validation runs in seven stages (files, parsing, schema, expansion, cross-file rules, the protocols' `configure` run by `scada-conf`, the tag set), errors sorted by file, line, column and code within a stage; warnings only when no stage failed. Refusals that need a protocol's knowledge carry codes CF-650 to CF-699, listed in the protocol's annex; the driver interface contract's own codes are for runtime diagnostics. New codes include CF-419, CF-516, CF-618 to CF-622, CW-608, CF-716, CF-717, CF-906, CF-1007, CF-1008.
 
 ## D-78: The expression grammar
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 5.6
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: reference 7.6 says virtual tags use the structured-text expression syntax with conditional selection, aggregates and time functions, and 7.4 gives tag access with `.quality` and `.age`. Tag names may contain `-` and segments that start with a digit, and a tag may be named `x.quality`.
 Options: an operator `?:`; the IEC function `SEL`; a function `if`. Attributes only as `.quality`; also functions.
 Decision: the EBNF of contract section 5.6, with `if(c, a, b)` evaluated lazily; `tag("...")` for names that are not identifiers; `.quality` and `.age`, refused when ambiguous, with `quality(x)` and `age(x)` as the unambiguous forms; TIME literals `T#5s`; INT, REAL, BOOL and TIME as reference 7.4; no mixing of BOOL and numbers; overflow, division by zero and non-finite results give BAD with OVERFLOW. Configuration expressions in templates use the same grammar without tags and time functions.
 Reason: one grammar for virtual tags, alarms, interlocks and structured text means one parser and one set of tests (#100, phase 6); `if` reads better than `SEL` and needs no new operator.
 Consequences: phase 6 implements the same grammar for structured text, with the statements of section 9.3.
+Revision 0.2 (C++ B-6, S-16, S-17, S-36): a lexical section; `/` is true division (`ct_primary / 1000` with 250 is 0.25, not 0), `DIV` and `MOD` for integers; `AND`, `OR`, `XOR`, `NOT` take BOOL only, with bitwise functions for INT; keywords reserved in every position, `tag("...")` as the escape; a type table for every operator and function; aggregates `min_of`, `max_of` apart from the maths `min`, `max`; `in`, ranges and string literals for configuration expressions; `16#` hexadecimal; two deliberate departures from IEC 61131-3 stated (`**` right-associative, one unary operator in a row). Scaling is computed as two operations, never fused into a multiply-add, so that x86-64 and ARM64 give the same bits: the implementing pull requests (#100, #104) build the scaling and expression code with floating-point contraction off and record the flag; the transcendental functions may differ by one unit in the last place. A negative exponent divides by the exact power of ten.
 
 ## D-79: Generated tags and their names
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #101
-Status: proposed, in the draft contract 0.1, section 12.5
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: the tag set must contain every tag a service writes: the parts of an output (reference 8.1), area authority (8.3), alarm states (10.2), tunable parameters (7.3), driver system tags (6.3). The reference names none of them.
 Options: names fixed by each service; names fixed by the configuration contract.
 Decision: `<output>.mode`, `.status`, `.req_manual`, `.req_auto`; `sys.area.<area>.authority`; `<tag>.alarm.<id>` and `.shelved_until`; `ctl.<program>.<block>.<param>`; the interlock's own name; driver system tags as the driver interface contract names them, proposed `sys.drv.<channel>.<name>` and `sys.dev.<device>.<name>`. Owners, types, flags and value codes as in contract section 12.5. Mode and authority tags are RETAIN and RETAIN_NOW.
 Reason: the tag set must be computable from the tree before any service runs, and the names must be checked against the 127-byte limit with the user's names (#119).
 Consequences: services of phases 5 to 7 use these names and codes; a change is a minor version of the configuration contract and a tag-set change. Every tree with an output or area has RETAIN_NOW tags, so the 400 ms limit on `heartbeat_check_ms` always applies to it.
+Revision 0.2: status value 6 ACCEPTED_UNVERIFIED; `<output>.refresh` (refresh state, alarmed when a refresh ends without a new request); `<output>.device_selected` only for a native select (none in phase 2); `sys.proc.<process>.config_id` and `config_state` for the apply report; process owners for `sys.proc` tags; no scan-group tag in phase 2.
 
 ## D-80: Tree format and migration
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01)
-Status: proposed, in the draft contract 0.1, section 11
+Status: proposed, in the draft contract `config-schemas.md` 0.2; for review by a person. Review: committee of the lead session (C++, SCADA, Linux), 2026-11-22, on contract 0.1; revised in 0.2.
 
 Context: outline item 11 asks how an older configuration tree is upgraded.
 Options: a version per file; one version for the tree.
 Decision: one integer `format` in `system.yaml`. Additions of optional keys or values are contract minor versions and keep the format; a change that invalidates or changes the meaning of a valid tree is a new format with a migration function in `libscada-conf` that rewrites only the lines it must change. After a software update `scada-conf` migrates the active tree and commits it as a new version; `scadactl config migrate` stages a migration for review. Protocol schemas are versioned with the format.
 Reason: templates and instances depend on each other across files, so a per-file version would allow trees whose files have formats that do not fit together.
 Consequences: older software refuses a tree that uses an addition as an unknown or reserved key rather than misreading it.
+Revision 0.2: `format` may be left out while the tree is of format 1, as in the example of reference 12.3.
+
+## D-93: How a committed tree reaches the services
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #102 and #104
+Status: proposed, in the draft contract `config-schemas.md` 0.2, section 13; for review by a person. Where the active tree lives and the version store are the owner's ruling O-5.
+
+Context: the committee review of 0.1 (Linux L-6, C++ fit section, lead's direction 9) found that neither draft said where the active tree lives (the root file system is read-only, reference 4.4, 14.5), how a commit is activated atomically, which files sit beside the tree, their ownership, how a service learns of a change (`scada-conf` cannot signal processes of other users), how it reports back, which tree a reattaching driver loads, and who starts a driver that had no channel. Two expansions (one in `scada-conf`, one in each driver) and two validators of a protocol binding would drift.
+Options, store: a Git repository as reference 12.4 suggests; plain version directories. Options, reload: a signal through the privileged helper; the service manager; a socket; a watch on the active link. Options, expansion: each driver expands the tree; `scada-conf` expands once and writes one file per process.
+Decision: versions are complete directories `/var/lib/scada/conf/versions/<n>/` (the tree in `tree/`, beside it `meta.json`, the tag set, the name map, one expanded file per process stamped with `config_id` and `config_hash`, later the signature); `active` is a symbolic link renamed atomically after every file and directory is synced; `/etc/scada` is a link to the active tree. Everything is `scada-conf:scada`, directories 2750, files 0640. `scada-conf` links each protocol's library and runs its `configure` and `plan` as a validation stage (codes CF-650 to CF-699). Services watch the directory of `active` (and look every 5 s), load only their expanded file, report `sys.proc.<process>.config_id` and `config_state`, and refuse to run channels when their expanded file's `config_hash` is not that of the generation they attached to. A driver with no channel exits with status 0; `scada-sys` starts and stops driver services when a protocol gains or loses its first channel.
+Reason: the read-only root and reference 14.5 need writes under `/var/lib/scada` with a single atomic switch; Git is GPL-2.0 as a program (`CLAUDE.md` forbids it until the licensing decision) and does not sync as reference 14.5 needs. One expansion and one validator mean that a tree `scada-conf` accepts is never refused by a driver for its configuration.
+Consequences: #102 builds the store, activation, history and rollback without Git; reference 12.4's "should be Git" is listed as a difference (contract 16). Drivers depend on `scada-conf`'s expanded file format, which #102 and #104 fix together.
+
+## D-94: The `io` protocol schema and local outputs at start and crash
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01); for #107
+Status: proposed, in the draft contract `config-schemas.md` 0.2, Annex B; for review by a person (fail-safe output behaviour).
+
+Context: contract 0.1 named `io` as a phase 2 protocol and had no schema for it (Linux L-3, lead's direction 8); #107 could not start. The kernel gives a GPIO line a level when it is requested and promises nothing after the process that holds it dies (Linux L-13); lines on bus expanders and slow converters sleep (L-9).
+Options: chip and line numbers, or names; one scan for every line, or a helper for slow ones; safe states after a crash by the process, by the service manager, or not at all.
+Decision: backends `simulator`, `gpio`, `iio`; a GPIO chip by its label and a line by name or offset, an IIO device and channel by name, never by `gpiochipN` or `iio:deviceN`; no path in the tree. Per channel `scan: every_cycle | helper`, the slow case read by a helper thread. Per output `start: hold | safe`, required. A crash leaves outputs as the hardware leaves them; a step run by the service manager after every stop of `scada-io` drives the safe states. A local output's default `on_control_loss` is `safe` at once (reference 6.5).
+Reason: numbers change between boots; a sleeping call in a 10 ms scan breaks it; the process that died cannot drive a safe state.
+Consequences: #107 builds the backends, the helper and the stop step; codes CF-660 to CF-662.
+
+## D-95: One owner of every configuration key; fail-safe keys; command kinds and written values
+Date: 2026-11-22
+Phase / issue: 2, #98 (P2-01), with the driver interface contract (#99)
+Status: proposed, in the draft contract `config-schemas.md` 0.2, sections 4.10, 7.2 and 7.4; agreed with the #99 session; for review by a person (command handling, fail-safe behaviour). The fail-safe audit rule is the owner's ruling O-1.
+
+Context: the committee found the two drafts disagreeing on 20 to 29 keys and defaults (`on_mismatch`, back-off, reconnect, `connect_timeout`, `keepalive`, `on_invalid`, `bit_order`, the function list, the fail-safe keys and more), command kinds without a meaning per value, no inverse scaling for written values, a release value in the wrong domain, and fail-safe writes waiting for an audit record (lead's directions 1 and 6, C++ B-4, B-8, SCADA B-1 to B-3).
+Options: each contract defines what it uses; one contract owns every key.
+Decision: this contract owns every key name, type, default and validation code (section 4.10 lists the shared ones; the driver interface contract cites them and gives no defaults). Notable choices: `on_mismatch` `refuse`; `backoff` 10 s to `backoff_max` 300 s; `reconnect` 1 s to 30 s, reset after the first valid answer; `connect_timeout` 3 s; `keepalive` per device and template; `on_invalid` without `uncertain`; `bit_order` required with bits, no default; `functions`; `storage` required on writable points; `write_limits` on any writable point. Fail-safe keys: `on_shutdown` and `on_control_loss`, each `hold | safe | release`, where `on_control_loss` means "the owner of the request tag of the current mode reads as down"; default `safe` at once for a `scada-io` output, `hold` for a remote one; a fail-safe write is made first and journalled best-effort. Command kinds have a value each (section 7.2); `pulse` only device-timed in phase 2; `refresh` only for `setpoint`, never `dangerous`, `sbo` or `nvm`; the raw value of a setpoint is the inverse of `scale`, rounded half away from zero, with NaN and out-of-range values refused; `release` and `safe_state` state their domain (`value` or `raw`).
+Reason: two documents defining one key drift, and a site writes the key once. The defaults chosen are the safe side where the drafts differed (refuse a mismatched device; require `storage` and `bit_order` rather than guess). Reference 6.5 requires local safe states when control stops, and the audit service may be down in the same failure.
+Consequences: the driver interface contract removes its own key definitions and cites this contract; #104 and #107 implement the fail-safe table; phase 5 builds the rest of command handling on these keys.
+
