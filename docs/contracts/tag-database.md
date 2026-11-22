@@ -464,9 +464,18 @@ writing without a data race; it compiles to plain moves.
 
 `SCADA_E_BUSY` means the writer was in the middle of a write for the whole
 attempt, for example a non-real-time owner preempted mid-write. It says
-nothing about the value. The caller keeps its previous value for this cycle;
-a dead owner is reported through the overlay below within its heartbeat
-timeout.
+nothing about the value. The output is left untouched, `age_ns` included:
+the caller keeps its previous copy for this cycle and computes its age from
+that copy's `update_mono_ns`. A caller starts with its outputs BAD, so that
+a `SCADA_E_BUSY` before its first good read holds no value.
+
+Liveness is per process (section 10.1), while an owner is a thread. A dead
+process is reported through the overlay below within its heartbeat
+timeout. A stalled owner thread in a process that still beats is not:
+`SCADA_E_BUSY` on its record then has no bound, and its other records read
+with their old values and their real age. Issue #116 (phase 6) covers a
+real-time task that reads a tag of a non-real-time owner, repeated
+`SCADA_E_BUSY`, and core placement.
 
 After a successful read the library overlays the owner state: if the owner's
 process is down, or the owner's region is missing or not ready, the returned
@@ -1142,9 +1151,14 @@ its whole life. A second process with the same name fails to attach with
 
 `cycle_seq` lets another process run in step: a control task bound to a
 synchronous scan waits for the I/O process's `cycle_seq` to change, whether or
-not any tag changed in that scan.
+not any tag changed in that scan. It counts the `scada_tag_notify` calls of
+the whole process, from any of its threads; there is none per owner.
 
 ### 10.1 Liveness
+
+Liveness is judged per process, while an owner is a thread of a process.
+A stalled owner thread in a process whose heartbeat goes on is not down
+(section 6.2, #116).
 
 A process is **down** when any of these holds:
 
