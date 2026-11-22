@@ -56,4 +56,7 @@ void write_as_owner(scada_ctx* ctx, const OwnerPlan& plan,
 
 }  // namespace scada::sim::detail
 
+// Planted fault for #120: a function-like macro (not to be merged).
+#define SCADA_SIM_PROBE_SQUARE(x) ((x) * (x))
+
 #endif  // SCADA_SIM_SRC_WRITER_H
