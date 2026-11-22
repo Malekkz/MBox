@@ -425,7 +425,7 @@ NOT_INIT, all times 0.
 `source_time_ns` is the device timestamp when the protocol has one; otherwise
 the owner sets it equal to `update_time_ns` and sets LOCAL_TIME. STALE is set
 by the owner (for a driver, by the driver framework). `scada-tagd` never writes
-a tag record; its only marking is the `down` flag of section 10.1.
+a tag record of another owner; its only marking is the `down` flag of section 10.1.
 
 ### 6.1 Write protocol (owner thread only)
 

@@ -233,7 +233,7 @@ struct TagRecord {              // 64 bytes, alignas(64)
 ```
 
 - Shared structures hold plain integers. A field shared between processes while it changes is read and written atomically, field by field; no `std::atomic` object is placed in shared memory.
-- OWNER_DOWN is never stored: a read adds it while the owner is down (section 5.4). STALE is set by the owner, not by `scada-tagd`, which never writes a tag record.
+- OWNER_DOWN is never stored: a read adds it while the owner is down (section 5.4). STALE is set by the owner, not by `scada-tagd`, which never writes a tag record of another owner.
 - Without a device timestamp the owner sets `source_time_ns` to the update time and sets LOCAL_TIME.
 
 Age calculations must use `update_mono_ns`, because NTP can step the wall clock. Engineering-unit scaling is applied by the driver before writing, so every reader sees scaled values.
