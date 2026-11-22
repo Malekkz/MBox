@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tests of lint_selection.py and of `--tidy-base` in scada_check.py.
+"""Tests of lint_selection.py, of `--tidy-base` and of `--tidy-share` in
+scada_check.py.
 
 They build a small project in a temporary directory, take its dependencies
 from the real compiler, and run the selection on lists of changes. The
@@ -25,10 +26,12 @@ import lint_selection  # noqa: E402
 from lint_selection import Change  # noqa: E402
 
 SCRIPT = TESTS_DIR.parent / "scada_check.py"
+VERIFY = TESTS_DIR.parent / "lint_shares.py"
 REPOSITORY = TESTS_DIR.parents[2]
 
 EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
+EXIT_CANNOT_RUN = 2
 
 # Set from the command line before the tests run.
 COMPILER = []
@@ -233,8 +236,8 @@ def commit_all(root, message):
         "commit", "--quiet", "--no-verify", "-m", message)
 
 
-class TidyBase(unittest.TestCase):
-    """scada_check.py --tidy-base on a git repository of the project."""
+class GitProject(unittest.TestCase):
+    """The project in a git repository: branch `change` off `main`."""
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -258,6 +261,10 @@ class TidyBase(unittest.TestCase):
 
     def write(self, name, text):
         (self.root / name).write_text(text, encoding="utf-8")
+
+
+class TidyBase(GitProject):
+    """scada_check.py --tidy-base on a git repository of the project."""
 
     def test_documents_only_lint_nothing_and_pass(self):
         self.write("docs/notes.md", "# Notes\n\nMore.\n")
@@ -341,6 +348,115 @@ class TidyBase(unittest.TestCase):
                       "worked out", result.stdout)
         self.assertIn("4 of 4 translation units", result.stdout)
         self.assertNotEqual(result.returncode, EXIT_CLEAN)
+
+
+class TidyShare(GitProject):
+    """scada_check.py --tidy-share: the lint split across jobs (D-68).
+
+    Sorted, the units are four, one, three, two; in two shares split by
+    round-robin, share 1 lints four.cpp and three.cpp, share 2 one.cpp and
+    two.cpp."""
+
+    def run_shares(self, shares, *arguments):
+        """Runs every share; returns their results and record paths."""
+        results = []
+        records = []
+        for share in range(1, shares + 1):
+            record = self.root.parent / f"record-{share}.json"
+            results.append(self.run_check(
+                "--tidy-share", f"{share}/{shares}", "--tidy-record",
+                str(record), *arguments))
+            records.append(str(record))
+        return results, records
+
+    def verify(self, records):
+        return subprocess.run(
+            [sys.executable, str(VERIFY), "verify", *records],
+            capture_output=True, text=True, check=False)
+
+    def test_every_unit_once_and_the_records_verify(self):
+        results, records = self.run_shares(2, "--tidy-split-from", "1")
+        for result in results:
+            self.assertEqual(result.returncode, EXIT_CLEAN,
+                             result.stdout + result.stderr)
+        self.assertIn("check: tidy: share 1 of 2 (round-robin over the "
+                      "sorted list): 2 of 4 selected translation units",
+                      results[0].stdout)
+        self.assertIn("share 1: libs/demo/src/four.cpp", results[0].stdout)
+        self.assertIn("share 1: libs/demo/src/three.cpp", results[0].stdout)
+        self.assertIn("share 2: libs/demo/src/one.cpp", results[1].stdout)
+        self.assertIn("share 2: libs/demo/src/two.cpp", results[1].stdout)
+        verified = self.verify(records)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertIn("4 translation units in 2 shares: 2 + 2 = 4, each "
+                      "linted exactly once", verified.stdout)
+
+    def test_fault_in_a_unit_of_the_last_share_fails_it(self):
+        """The planted fault: only the share that holds the unit finds it,
+        and the records then do not verify."""
+        self.write("libs/demo/src/two.cpp",
+                   FILES["libs/demo/src/two.cpp"]
+                   + "\n#define DEMO_SQUARE(x) ((x) * (x))\n")
+        results, records = self.run_shares(2, "--tidy-split-from", "1")
+        self.assertEqual(results[0].returncode, EXIT_CLEAN,
+                         results[0].stdout + results[0].stderr)
+        self.assertEqual(results[1].returncode, EXIT_FINDINGS,
+                         results[1].stdout + results[1].stderr)
+        self.assertIn("cppcoreguidelines-macro-usage", results[1].stdout)
+        verified = self.verify(records)
+        self.assertEqual(verified.returncode, 1, verified.stdout)
+        self.assertIn("share 2 of 2 has findings", verified.stderr)
+
+    def test_missing_share_does_not_verify(self):
+        _, records = self.run_shares(3, "--tidy-split-from", "1")
+        verified = self.verify(records[:2])
+        self.assertEqual(verified.returncode, 1, verified.stdout)
+        self.assertIn("expected the records of shares 1 to 3",
+                      verified.stderr)
+
+    def test_small_selection_is_not_split(self):
+        self.write("libs/demo/include/demo/shared.h",
+                   FILES["libs/demo/include/demo/shared.h"]
+                   + "// Changed.\n")
+        commit_all(self.root, "shared")
+        results, records = self.run_shares(2, "--tidy-base", "main")
+        for result in results:
+            self.assertEqual(result.returncode, EXIT_CLEAN,
+                             result.stdout + result.stderr)
+            self.assertIn("check: tidy: changed files", result.stdout)
+        self.assertIn("share 1 of 2 (not split: fewer than 40 units, all in "
+                      "share 1): 2 of 2 selected", results[0].stdout)
+        self.assertIn("share 2 of 2 (not split: fewer than 40 units, all in "
+                      "share 1): 0 of 2 selected", results[1].stdout)
+        verified = self.verify(records)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertIn("2 translation units in 2 shares: 2 + 0 = 2",
+                      verified.stdout)
+
+    def test_share_runs_only_tidy(self):
+        for arguments in (["--only", "format"], ["--only", "banned"],
+                          ["--only", "rt"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--source-dir",
+                     str(self.root), "--build-dir", str(self.root / "build"),
+                     "--only", "tidy", "--tidy-share", "1/2"]
+                    + arguments + TOOLS,
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, EXIT_CANNOT_RUN)
+                self.assertIn("--tidy-share needs --only tidy",
+                              result.stderr)
+
+    def test_bad_share_and_record_without_share(self):
+        for arguments in (["--tidy-share", "3/2"], ["--tidy-share", "0/2"],
+                          ["--tidy-record", "record.json"],
+                          ["--tidy-share", "1/2", "--tidy-split-from", "0"],
+                          ["--tidy-share", "1/2",
+                           str(self.root / "libs/demo/src/one.cpp")]):
+            with self.subTest(arguments=arguments):
+                result = self.run_check(*arguments)
+                self.assertEqual(result.returncode, EXIT_CANNOT_RUN,
+                                 result.stdout + result.stderr)
 
 
 def main():

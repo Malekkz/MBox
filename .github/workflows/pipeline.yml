@@ -134,12 +134,48 @@ jobs:
           cmake --preset dev -DSCADA_REQUIRE_HERD7=ON
           ctest --preset model --verbose
 
-  check:
-    name: check
+  # The `check` target in three parts (decision D-68): the checks that read
+  # every file once, clang-tidy split across N shares, and the job `check`,
+  # the one result to require on `main`, which passes only if both passed and
+  # the shares linted every selected unit exactly once.
+  #
+  # On a pull request clang-tidy lints only the translation units the pull
+  # request could have affected, and everything if a file that sets the
+  # rules changed or the set cannot be worked out. A push to main and a
+  # manual run lint everything. The formatter, banned-function and SCADA_RT
+  # checks run on every file either way (decision D-67).
+  check-files:
+    name: check (format, banned, rt)
     runs-on: ubuntu-24.04
-    # clang-tidy takes most of this job, and its time grows with the code:
-    # the job passed 15 minutes when phase 1 added its tests.
-    timeout-minutes: 45
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-machine
+      - name: Configure (dev)
+        run: cmake --preset dev -DSCADA_CHECK_ONLY="format;banned;rt"
+      # The self-tests of the selection and of the split.
+      - name: Self-test of the lint selection and of the split
+        run: >-
+          ctest --preset dev -R '^scada-check-(selection|shares)-test$'
+          --output-on-failure --no-tests=error
+      - name: Formatter, banned-function and SCADA_RT checks
+        run: cmake --build --preset dev --target check
+
+  # Each share works out the same selection and lints its part of it: a
+  # round-robin over the sorted list, or all of a selection of fewer than 40
+  # units in share 1 (tools/check/lint_shares.py). N is the length of the
+  # list `share`. The job `check` needs the record of every share.
+  check-tidy:
+    name: check (tidy ${{ matrix.share }} of ${{ strategy.job-total }})
+    runs-on: ubuntu-24.04
+    # A share of a full lint takes about 10 minutes (D-68).
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        share: [1, 2, 3, 4]
     steps:
       # The whole history, so that the merge base with the target branch
       # can be found; a shallow clone lints everything.
@@ -148,20 +184,55 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: ./.github/actions/setup-build-machine
-      # On a pull request clang-tidy lints only the translation units the
-      # pull request could have affected, and everything if a file that sets
-      # the rules changed or the set cannot be worked out. A push to main
-      # and a manual run lint everything. The formatter, banned-function and
-      # SCADA_RT checks run on every file either way (decision D-67).
       - name: Configure (dev)
         env:
           TIDY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-        run: cmake --preset dev -DSCADA_CHECK_TIDY_BASE="${TIDY_BASE}"
-      # The self-test of that selection.
-      - name: Self-test of the lint selection
-        run: ctest --preset dev -R '^scada-check-selection-test$' --output-on-failure --no-tests=error
-      - name: Formatter, linter, banned-function and SCADA_RT checks
+          TIDY_SHARE: ${{ matrix.share }}/${{ strategy.job-total }}
+          TIDY_RECORD: ${{ runner.temp }}/tidy-share-${{ matrix.share }}.json
+        run: >-
+          cmake --preset dev -DSCADA_CHECK_TIDY_BASE="${TIDY_BASE}"
+          -DSCADA_CHECK_ONLY=tidy -DSCADA_CHECK_TIDY_SHARE="${TIDY_SHARE}"
+          -DSCADA_CHECK_TIDY_RECORD="${TIDY_RECORD}"
+      - name: Linter, share ${{ matrix.share }} of ${{ strategy.job-total }}
         run: cmake --build --preset dev --target check
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tidy-share-${{ matrix.share }}
+          path: ${{ runner.temp }}/tidy-share-${{ matrix.share }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  check:
+    name: check
+    needs: [check-files, check-tidy]
+    # Always, so that a failed, cancelled or skipped part fails this job:
+    # a job left out because a needed job failed would be skipped, and a
+    # skipped job counts as passed for a required check.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Every part of the check passed
+        env:
+          FILES_RESULT: ${{ needs.check-files.result }}
+          TIDY_RESULT: ${{ needs.check-tidy.result }}
+        run: |
+          echo "check (format, banned, rt): ${FILES_RESULT}"
+          echo "check (tidy): ${TIDY_RESULT}"
+          test "${FILES_RESULT}" = success
+          test "${TIDY_RESULT}" = success
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: tidy-share-*
+          path: ${{ runner.temp }}/tidy-records
+          merge-multiple: true
+      # Every share 1 to N, with the same selection, together each selected
+      # unit exactly once, none with findings. Prints the totals.
+      - name: Every unit linted exactly once
+        run: python3 tools/check/lint_shares.py verify "${RUNNER_TEMP}"/tidy-records/tidy-share-*.json
 
   sanitizers:
     name: sanitizers (${{ matrix.preset }})

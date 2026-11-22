@@ -1458,3 +1458,25 @@ Decision:
 - `banned` and `rt` run in one clang-query run per unit with both rule sets, instead of one run per set. The rules, the matches and the reports are the same; the parse of each unit is done once.
 Reason: `-M` is the compiler's own view of what a unit includes, for the flags the unit is linted with, at a cost of seconds. A full lint for a deleted header is the simplest way to cover its former dependents: a dependent that stopped including it had to change a file it includes and is linted anyway, but `__has_include` and a header of the same name elsewhere on the include path are not visible in the dependencies after the change. The combined clang-query run keeps a pull request of documents only under the 5 minutes the issue asks for: format 2 s, banned 100 s and rt 72 s apart on 4 processors.
 Consequences: a header that no unit includes is not linted, as before. If the selection misses a unit, its finding first shows in the full run on `main` after the merge; the self-test `scada-check-selection-test` and the planted-fault proof of #120 guard against that. A new file that sets the rules of the lint must be added to `FULL_LINT_PATTERNS`.
+
+## D-68: A full clang-tidy lint is split across four parallel jobs
+Date: 2026-11-22
+Phase / issue: 1, #123
+Status: accepted
+
+Context: since D-67 a pull request lints only what it could have affected, but a push to `main`, a manual run and a pull request that changes the rules still lint all translation units. That took 38 min 17 s for 165 units in run 45018629275, against the job's limit of 45 minutes; clang-tidy was about 35 minutes of it, the set-up and configure about 15 s. Issue #123 asks for a split across N jobs that finishes in under 20 minutes, with one required result.
+Options:
+- N: 2 (about 18 minutes of lint per share, no room for phase 2), 3 (about 12), 4 (about 9), 6 or more (more minutes of set-up for little wall time).
+- The split: a round-robin over the sorted list; by file size; by the measured time of each unit (a table to keep up to date).
+- The shares: a plan job that works out the selection once and hands each share its list (a dynamic matrix, the shares start after it); or a fixed matrix in which every share works out the same selection itself.
+- The build: one configure shared through an artifact (absolute paths, generated headers), or one per share.
+Decision:
+- N = 4: a fixed matrix `check (tidy K of 4)`, K = 1 to 4, each `cmake --preset dev -DSCADA_CHECK_ONLY=tidy -DSCADA_CHECK_TIDY_SHARE=K/4` and the `check` target, which runs `scada_check.py --only tidy --tidy-share K/4`. Limit 25 minutes per share.
+- Each share configures itself (about 5 s) and works out the selection of D-67 itself. The selection depends only on the commit, the base revision and the compile commands, which are the same in every share.
+- The split: the selected units sorted by their path relative to the source directory, and share K takes the units K, K + N, K + 2N and so on (`tools/check/lint_shares.py`). The shares differ by one unit at most. Sorted by path, the units of one library and its tests are next to each other, so the round-robin also spreads the expensive test units of each library over all shares.
+- A selection of fewer than 40 units (`SPLIT_FROM`) is not split: share 1 lints all of it, shares 2 to 4 lint nothing and pass after their set-up. 40 units take about as long as one share of a full lint.
+- The formatter, banned-function and `SCADA_RT` checks run once on every file, in the job `check (format, banned, rt)` (`SCADA_CHECK_ONLY="format;banned;rt"`), with the self-tests of the selection and of the split. Limit 20 minutes. `--tidy-share` with any other check is refused.
+- Each share writes a record (`--tidy-record`): the selection, its number, the units it linted, and whether it found anything. The job `check`, which needs the two others and runs `if: always()`, fails unless both results are `success`, and runs `lint_shares.py verify` on the four records: a clean record for every share 1 to 4, of the same selection, each with exactly its part. It prints the totals. Limit 10 minutes. Only `check` is to be required on `main`.
+- Locally, `cmake --build --preset dev --target check` is unchanged: the three options are empty and it is one run of every check over every unit.
+Reason: the fixed matrix needs no plan job before the shares start and no list handed from job to job; the record makes the cost of that visible: if two shares ever worked out different selections, `check` fails. The round-robin is the cheapest balance that needs no data kept up to date. A configure costs seconds, less than handing a build directory from job to job.
+Consequences: every run of the pipeline starts four share jobs and the job `check`, also for a pull request of documents only, and each pays the set-up of a runner. A new share is a new entry in the list `share` of the matrix; `strategy.job-total` gives N to the shares, and `check` takes N from the records.

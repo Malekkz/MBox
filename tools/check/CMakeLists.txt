@@ -57,6 +57,29 @@ if(SCADA_CHECK_TIDY_BASE)
   set(scada_check_tidy_base --tidy-base "${SCADA_CHECK_TIDY_BASE}")
 endif()
 
+# For the pipeline, which runs the checks in several jobs (D-68). Empty, the
+# default: every check, and clang-tidy lints all of its units in one run.
+# SCADA_CHECK_ONLY runs only the listed checks (format, tidy, banned, rt).
+# SCADA_CHECK_TIDY_SHARE "K/N" lints only share K of N of the units, needs
+# SCADA_CHECK_ONLY "tidy", and writes what it linted to
+# SCADA_CHECK_TIDY_RECORD if set.
+set(SCADA_CHECK_ONLY "" CACHE STRING
+  "check: run only these checks, a list of format, tidy, banned and rt (empty: all)")
+set(SCADA_CHECK_TIDY_SHARE "" CACHE STRING
+  "check: lint only share K/N of the units clang-tidy lints (empty: all)")
+set(SCADA_CHECK_TIDY_RECORD "" CACHE FILEPATH
+  "check: with SCADA_CHECK_TIDY_SHARE, write what the share linted here")
+set(scada_check_split "")
+foreach(check IN LISTS SCADA_CHECK_ONLY)
+  list(APPEND scada_check_split --only "${check}")
+endforeach()
+if(SCADA_CHECK_TIDY_SHARE)
+  list(APPEND scada_check_split --tidy-share "${SCADA_CHECK_TIDY_SHARE}")
+endif()
+if(SCADA_CHECK_TIDY_RECORD)
+  list(APPEND scada_check_split --tidy-record "${SCADA_CHECK_TIDY_RECORD}")
+endif()
+
 set(scada_check_tools
   --clang-format "${SCADA_CLANG_FORMAT}"
   --clang-tidy "${SCADA_CLANG_TIDY}"
@@ -67,14 +90,17 @@ set(scada_check_tools
 # builds (tests/sanitizer-fixtures/CMakeLists.txt). The model fixtures are
 # compiler input kept for their disassembly, not part of any build
 # (tests/model/README.md).
+set(scada_check_excludes
+  --exclude tools/check/tests/fixtures
+  --exclude tests/sanitizer-fixtures
+  --exclude tests/model/fixtures)
 add_custom_target(check
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scada_check.py"
     --source-dir "${PROJECT_SOURCE_DIR}"
     --build-dir "${PROJECT_BINARY_DIR}"
-    --exclude tools/check/tests/fixtures
-    --exclude tests/sanitizer-fixtures
-    --exclude tests/model/fixtures
+    ${scada_check_excludes}
     ${scada_check_tidy_base}
+    ${scada_check_split}
     ${scada_check_tools}
   COMMENT "Checking format, lint, banned functions and SCADA_RT"
   USES_TERMINAL
@@ -98,4 +124,15 @@ if(BUILD_TESTING)
       --compiler "${CMAKE_CXX_COMPILER}" ${scada_check_tools})
   set_tests_properties(scada-check-selection-test PROPERTIES
     LABELS unit TIMEOUT 120)
+  # The split of the lint across the jobs of the pipeline (D-68), on its
+  # own lists and on the translation units of this build, found as the
+  # check target finds them. No tools; under a second.
+  add_test(NAME scada-check-shares-test
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/shares_test.py"
+      --source-dir "${PROJECT_SOURCE_DIR}"
+      --build-dir "${PROJECT_BINARY_DIR}"
+      ${scada_check_excludes})
+  set_tests_properties(scada-check-shares-test PROPERTIES
+    LABELS unit TIMEOUT 60)
 endif()
