@@ -1147,7 +1147,7 @@ and the read cursors of every reliable queue the process consumes.
 struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint64_t heartbeat;            // A; incremented by scada_tag_heartbeat
   int64_t  heartbeat_mono_ns;    // A
-  uint32_t pid;                  // for diagnosis only; never used for a decision
+  uint32_t pid;                  // A; for diagnosis only; never used for a decision (#118)
   uint32_t state;                // A; 1 STARTING, 2 RUNNING, 3 STOPPING
   uint32_t cycle_seq;            // A; incremented by scada_tag_notify
   uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
