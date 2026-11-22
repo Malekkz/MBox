@@ -2039,7 +2039,7 @@ because the real-time rule no longer holds on that unit.
 | --- | --- |
 | Tags per generation | 1,000,000 (design target 50,000) |
 | Owners | 1,023 |
-| Tags per owner | 4,194,303 |
+| Tags per owner | 524,288: the largest change ring, 1,048,576 entries, holds twice that (section 5). The handle allows 4,194,303 (section 5.1) |
 | Processes | 1,024 |
 | Reliable queues | 4,096 |
 | Tag name length | 127 bytes |
