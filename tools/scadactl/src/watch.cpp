@@ -513,3 +513,6 @@ int watch(Database& database, const Arguments& args, std::ostream& out,
 }
 
 }  // namespace scada::ctl
+
+// Planted fault for #123, never to be merged: a function-like macro.
+#define SCADA_PROBE_SQUARE(x) ((x) * (x))
