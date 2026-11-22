@@ -1425,7 +1425,7 @@ Decision:
 Reason: a and c meet their criteria on both architectures with the code that ships. For b, huge pages cannot apply to a region of the reference load, and the one architecture where they lowered the figures needs no gain for a target. For d, option A keeps one clock for every age and timeout (D-46), and option B is restart behaviour that belongs with the command service. For e, the latch is a behaviour of the command service, which is built in phase 5 (reference 18.2).
 Consequences:
 - Contract section 16: every point settled; heading and intro say so; the lost-audit item moves to the deferred list.
-- Contract 1.0: layout version 1 frozen; a later change is of one of the three levels of ruling f. Section 17 says that reference 1.1 section 5 matches the contract and lists what remains: reference 1.1 also corrects the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to section 5, and 10.4 stays a phase 5 gap (#75).
+- Contract 1.0: layout version 1 frozen; a later change is of one of the three levels of ruling f. Section 17 says that reference 1.1 section 5 matches the contract and lists what remains: reference 1.1 also corrects the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to section 5, and 10.4 stays a gap for phase 7 (#75).
 - Reference document 1.1: section 5 updated to match the contract, and the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to it corrected, approved by the product owner; no other section changed.
 - No change to code or to any structure.
 
