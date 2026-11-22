@@ -510,6 +510,14 @@ with an odd `seq`: write quality BAD and flag NOT_INIT, then store `seq + 1`.
 Values of other records are kept, so readers see the last value until the
 owner refreshes it. A string slot belonging to a repaired record gets `len` 0.
 
+A complete record keeps its last value, quality, flags and times until the
+owner writes it again. It can read GOOD with a value from before the
+restart: its age (`update_mono_ns`) is the only sign. An owner therefore
+writes every kept tag straight after attach, with the quality it can
+vouch for now (BAD or UNCERTAIN until it has read its source again). The
+driver interface contract (#99) must make `libscada-driver` do this for
+every driver.
+
 The owner then increments `epoch` in its change ring header (section 8). A
 crash can lose the change entry of the last write, so every consumer must
 resynchronise after an owner restart; the epoch tells it to.
