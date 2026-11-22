@@ -48,7 +48,7 @@ endif()
 # Empty: clang-tidy lints every translation unit. A revision: it lints only
 # the units the changes since its merge base with HEAD could have affected,
 # and everything if that cannot be worked out. The pipeline sets it on a pull
-# request (docs/decisions.md, D-66). The other checks run on every file
+# request (docs/decisions.md, D-67). The other checks run on every file
 # either way.
 set(SCADA_CHECK_TIDY_BASE "" CACHE STRING
   "check: lint only what changed since this revision (empty: everything)")

@@ -2,18 +2,50 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.26 (draft) |
+| Contract version | 1.0 |
 | Layout version | 1 |
-| Status | Accepted for phase 1 implementation (reviews P1-01, section 18). Becomes 1.0 when phase 1 passes its acceptance tests. |
-| Implements | Reference architecture, section 5 |
+| Status | Accepted as 1.0 at the close of phase 1 (issue #21, P1-13, D-66). Layout version 1 is frozen. |
+| Implements | Reference architecture 1.1, section 5 |
 | Owners of this contract | `scada-tagd`, `libscada-tag` |
 
 This contract defines the shared-memory data plane exactly enough that two
 independent implementations would interoperate. All access goes through
 `libscada-tag`; no other code may depend on the binary layout.
 
-Until this contract reaches 1.0 it may change freely within phase 1. After
-that, any change needs a layout version bump and a migration note.
+This is version 1.0, and layout version 1 is frozen. A later change is one
+of three levels (product owner, 2026-11-22, D-66):
+
+1. Layout version (now 1). `libscada-tag` refuses to attach to a region
+   whose layout version is not its own (section 11.2, step 1). It goes up
+   when a process built to the old contract and one built to the new could
+   not safely share a generation:
+   - a structure's size, a field's offset or a field's meaning;
+   - the first use of a reserved field or bit that readers refuse when it
+     is not 0 (section 14.1);
+   - a new enumeration value or flag stored in shared memory;
+   - a limit that readers validate;
+   - file names, owners and modes (section 3);
+   - the protocol steps and orderings of sections 6, 8 and 9;
+   - the liveness rules (section 10.1);
+   - the clock of `*_mono_ns`.
+
+   The library is static: each service carries its own copy, so services
+   of two builds can run on one generation, and the layout version is the
+   only guard against a partial upgrade.
+2. Contract minor version (1.1, 1.2, ...), with a migration note:
+   - additions to the library interface: a function, an appended return
+     code, a counter;
+   - behaviour local to one process;
+   - the order of checks;
+   - defaults and tunable constants (section 14.1);
+   - a new conformance test;
+   - deployment requirements (section 3.4);
+   - the use of reserved bytes that every reader ignores (section 14.1).
+3. Editorial revision (1.0.1, ...): wording and formatting with no change
+   of meaning. Migration: none.
+
+Every level gets a row in the change log (section 18). The retain file has
+its own format version (now 2, section 12).
 
 ## 1. Conventions
 
@@ -82,7 +114,10 @@ named `<process>.<writer>`.
 `<producer>`, `<driver>` and `<source>` are owner names when the process posts
 from more than one thread, so that every queue has exactly one producing
 thread. The full queue name is at most 31 bytes; the tag-set builder rejects a
-longer one.
+longer one. The builder checks the prefix (`events.`, `cmd.`, `result.`),
+that something follows it, the name rules of section 1, and the `result.`
+queue of each `cmd.` queue (section 9). The rest of the name is free text;
+the forms above are a convention.
 
 The base directory and the retain directory (section 12) are the defaults.
 `scada_tag_attach_opts` (section 13) can replace both, so tests can run in
@@ -195,6 +230,14 @@ accepted for layout version 1:
   The checks above reject it and `scada-tagd` removes it, but the rightful
   process cannot attach until then. A directory that `scada-tagd` cannot remove
   stays until reboot; removal of an old generation is best effort.
+- A group member can open the base directory (mode `2750` lets the group
+  read it) and hold an `flock` on it. `scada-tagd` then refuses to start,
+  as for a second instance (section 3.1).
+- A region of another process that cannot be opened, mapped or
+  pre-faulted for lack of a resource (`LimitNOFILE`: `EMFILE`;
+  `LimitMEMLOCK` under `mlockall`, or memory: `ENOMEM`) reads as a missing
+  region: its tags read BAD with OWNER_DOWN, and the library reports no
+  cause (#117). `docs/install.md` sizes the limits.
 
 ### 3.4 Deployment requirements
 
@@ -207,6 +250,15 @@ accepted for layout version 1:
   offset clock would make a process look stale or keep it alive.
 - Real-time processes need a locked-memory limit that covers their mappings;
   `scada-tagd` needs write access to the retain directory.
+- Swap may be on. The library pre-faults every mapping but locks none, so
+  the pages of a process that does not lock its memory can be swapped out;
+  that delays a read, it does not break one. A real-time process keeps its
+  mappings resident with `mlockall`.
+- A system call filter (seccomp) must allow every call the library and
+  `scada-tagd` make; `docs/install.md` lists them.
+- `/dev/shm/scada` may be a tmpfs of its own, mounted before `scada-tagd`
+  starts with the owner, group and mode of section 3.1: the checks are of
+  owner and mode, not of the file system.
 - `fs.protected_hardlinks` and `fs.protected_symlinks` are 1.
 - A process feeds the service manager's watchdog from the same loop that
   writes its heartbeat.
@@ -425,7 +477,7 @@ NOT_INIT, all times 0.
 `source_time_ns` is the device timestamp when the protocol has one; otherwise
 the owner sets it equal to `update_time_ns` and sets LOCAL_TIME. STALE is set
 by the owner (for a driver, by the driver framework). `scada-tagd` never writes
-a tag record; its only marking is the `down` flag of section 10.1.
+a tag record of another owner; its only marking is the `down` flag of section 10.1.
 
 ### 6.1 Write protocol (owner thread only)
 
@@ -439,8 +491,12 @@ seq.store(s + 2, release)          // even again
 if changed: append a change entry (section 8)
 ```
 
-The fence is required: on ARM64 a release store does not order the stores that
-follow it. The write wakes nobody (section 8.4).
+The fence is required: the store that makes `seq` odd is relaxed, and no
+store, relaxed or release, orders the stores that follow it, on ARM64 or in
+C++. The release fence orders the odd `seq` before every data store after
+it: a reader whose copy saw one of those stores then loads, after its
+acquire fence, a `seq` other than its first (section 6.2) and tries again.
+The write wakes nobody (section 8.4).
 
 ### 6.2 Read protocol (any thread of any process)
 
@@ -460,9 +516,18 @@ writing without a data race; it compiles to plain moves.
 
 `SCADA_E_BUSY` means the writer was in the middle of a write for the whole
 attempt, for example a non-real-time owner preempted mid-write. It says
-nothing about the value. The caller keeps its previous value for this cycle;
-a dead owner is reported through the overlay below within its heartbeat
-timeout.
+nothing about the value. The output is left untouched, `age_ns` included:
+the caller keeps its previous copy for this cycle and computes its age from
+that copy's `update_mono_ns`. A caller starts with its outputs BAD, so that
+a `SCADA_E_BUSY` before its first good read holds no value.
+
+Liveness is per process (section 10.1), while an owner is a thread. A dead
+process is reported through the overlay below within its heartbeat
+timeout. A stalled owner thread in a process that still beats is not:
+`SCADA_E_BUSY` on its record then has no bound, and its other records read
+with their old values and their real age. Issue #116 (phase 6) covers a
+real-time task that reads a tag of a non-real-time owner, repeated
+`SCADA_E_BUSY`, and core placement.
 
 After a successful read the library overlays the owner state: if the owner's
 process is down, or the owner's region is missing or not ready, the returned
@@ -505,6 +570,14 @@ generation, it must repair it before setting itself running. For every record
 with an odd `seq`: write quality BAD and flag NOT_INIT, then store `seq + 1`.
 Values of other records are kept, so readers see the last value until the
 owner refreshes it. A string slot belonging to a repaired record gets `len` 0.
+
+A complete record keeps its last value, quality, flags and times until the
+owner writes it again. It can read GOOD with a value from before the
+restart: its age (`update_mono_ns`) is the only sign. An owner therefore
+writes every kept tag straight after attach, with the quality it can
+vouch for now (BAD or UNCERTAIN until it has read its source again). The
+driver interface contract (#99) must make `libscada-driver` do this for
+every driver.
 
 The owner then increments `epoch` in its change ring header (section 8). A
 crash can lose the change entry of the last write, so every consumer must
@@ -713,7 +786,7 @@ w = write_seq.load(relaxed)
 if r > w or w - r > capacity: return SCADA_E_PEER_DOWN   // cursor is not valid
 if w - r == capacity: return SCADA_E_FULL
 write records[w & (capacity - 1)], with its id set from w (section 9.4)
-write_seq.store(w + 1, release)
+write_seq.store(w + 1, seq_cst)    // publishes the record; seq_cst for 9.5
 ```
 
 "Down" here uses the test of section 10.1, which the producer evaluates itself
@@ -762,7 +835,8 @@ loss.
 
 ```
 r = cursors[queue_id].load(relaxed)
-w = write_seq.load(acquire)
+w = write_seq.load(acquire)        // seq_cst after a load of the state that saw
+                                   // RETIRING, and in every drain of a request queue (9.2, 9.5)
 if r == w: nothing new
 if r > w or w - r > capacity: report, consume nothing
 copy records[r & (capacity - 1)] and validate it
@@ -921,6 +995,14 @@ If the consumer's region is missing or its process is down, `post` returns
 - This applies to write requests of every source, AUTO included. While the
   consumer of its event queue is down, `scada-control` cannot post write
   requests, and outputs follow their configured hold or safe behaviour.
+  REMOTE writes (reference 17.4) are the same.
+- Open for phase 5 (#83, deferred by the owner, section 16): whether "its
+  event record" means one record per request, or one per change of state,
+  for AUTO and REMOTE writes. An output written every 10 ms gives 100
+  records a second into an events queue of the default 1,024 records
+  (section 14). The library does not enforce the pairing: `scada_queue_post`
+  of a request does not look for an event record, and the requester must
+  post it first. Neither answer changes the layout.
 - The only bypass is emergency direct mode (reference section 11.6).
 - Residual window: a consumer that has just died is seen as down only after
   its heartbeat timeout. Records accepted in that window are in shared memory
@@ -1079,9 +1161,10 @@ Decision D-54 (issue #65).
 - `scada_queue_next` in a RETIRING generation makes system calls, also
   with timeout 0: it looks for a producer region it has not mapped
   (`fstatat`, and `open`, `mmap` and the pre-fault when the region is
-  there) and wakes the requester after answering ABORTED (`futex`). A
-  real-time driver that polls in its cycle stops polling there and
-  detaches outside the cycle.
+  there) and wakes the requester after answering ABORTED (`futex`).
+  `scada_queue_next` is not real-time safe in 1.0 in any state of the
+  generation (section 13); how a real-time task takes requests is #116.
+  A driver detaches outside its cycle.
 - Nothing is carried over: every region of the new generation is new, so
   `write_seq`, cursors and ids start at 0 (section 9.4). The processes do
   their part: a driver never answers in the new generation a request it took
@@ -1110,7 +1193,7 @@ and the read cursors of every reliable queue the process consumes.
 struct ProcHeader {              // 64 bytes, alignas(64), follows RegionHeader
   uint64_t heartbeat;            // A; incremented by scada_tag_heartbeat
   int64_t  heartbeat_mono_ns;    // A
-  uint32_t pid;                  // for diagnosis only; never used for a decision
+  uint32_t pid;                  // A; for diagnosis only; never used for a decision (#118)
   uint32_t state;                // A; 1 STARTING, 2 RUNNING, 3 STOPPING
   uint32_t cycle_seq;            // A; incremented by scada_tag_notify
   uint32_t late_beats;           // A; late heartbeats (10.1); wraps; diagnosis only
@@ -1129,9 +1212,14 @@ its whole life. A second process with the same name fails to attach with
 
 `cycle_seq` lets another process run in step: a control task bound to a
 synchronous scan waits for the I/O process's `cycle_seq` to change, whether or
-not any tag changed in that scan.
+not any tag changed in that scan. It counts the `scada_tag_notify` calls of
+the whole process, from any of its threads; there is none per owner.
 
 ### 10.1 Liveness
+
+Liveness is judged per process, while an owner is a thread of a process.
+A stalled owner thread in a process whose heartbeat goes on is not down
+(section 6.2, #116).
 
 A process is **down** when any of these holds:
 
@@ -1538,7 +1626,7 @@ know they are there, and any number may run.
   as a restore from another file: `scada-tagd` looks up its source in the
   files and records it ADOPTED, with SOURCE_NOT_FINAL and an unknown age if
   none holds it. That is the safe side also for an owner that writes
-  RESTORED itself, for example `scada-link` on a master, which passes the
+  RESTORED itself, for example `scada-drv-link` on a master, which passes the
   quality and flags of a slave's tag through unchanged (reference 17), so
   that a restored value of the slave arrives with RESTORED.
 - A file written again holds the stamp of its oldest value the owner has
@@ -1730,7 +1818,7 @@ void scada_sub_close(scada_sub *sub);
 /* Reliable queues */
 int  scada_queue_open(scada_ctx *ctx, const char *queue_name, scada_queue **out);
 int  scada_queue_post(scada_queue *q, const void *record, size_t size);   /* RT-safe */
-int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);
+int  scada_queue_next(scada_queue *q, void *record, size_t size, int timeout_ms);   /* not RT-safe in 1.0 (#116) */
 int  scada_queue_ack(scada_queue *q);                  /* EVENTS and RESULT only */
 int  scada_queue_stats(scada_queue *q, scada_queue_stats_t *out);   /* counts of one side */
 void scada_queue_close(scada_queue *q);
@@ -1842,6 +1930,7 @@ typedef struct {                 /* one side of a queue in one context, since at
 } scada_queue_stats_t;           /* 80 bytes */
 ```
 
+```c
 #define SCADA_NO_PROCESS 0xFFFF  /* process_index of an observer (11.4) */
 
 typedef struct {                 /* what scada_tag_status reports */
@@ -2033,7 +2122,7 @@ because the real-time rule no longer holds on that unit.
 | --- | --- |
 | Tags per generation | 1,000,000 (design target 50,000) |
 | Owners | 1,023 |
-| Tags per owner | 4,194,303 |
+| Tags per owner | 524,288: the largest change ring, 1,048,576 entries, holds twice that (section 5). The handle allows 4,194,303 (section 5.1) |
 | Processes | 1,024 |
 | Reliable queues | 4,096 |
 | Tag name length | 127 bytes |
@@ -2046,6 +2135,68 @@ because the real-time rule no longer holds on that unit.
 The cursor array of a `proc` region has one entry for every queue of the
 generation, 8 bytes each. Cursors of different queues share cache lines; at
 command and event rates this is harmless.
+
+### 14.1 What 1.0 freezes
+
+Reserved fields and unknown values, as `libscada-tag` treats them. Every
+reserved field is written as 0 (section 1). A second implementation must
+ignore the fields this table marks ignored, and refuse those it marks
+refused, in the same way. The first use of an ignored field is a minor
+version; the first use of a refused one is a layout version.
+
+| Field or value | Reader | In the code |
+| --- | --- | --- |
+| `RegionHeader.reserved` | Ignored | `region_file.cpp`: `header_matches`; `header_view.cpp`: `read_header` |
+| `GlobalHeader.reserved0`, `reserved1`, `reserved`; `OwnerEntry.reserved0`, `reserved1`; `ProcessEntry.reserved`; `QueueEntry.reserved`; `DirectoryEntry.reserved` | Ignored | `header_view.cpp`: `read_header`, `read_processes`, `read_owners`, `read_queues`, `directory_entry` |
+| `TagRecord.reserved`, `StringSlot.reserved` | Ignored | `tag_record.cpp`: `copy_fields`, `read_record`, `read_string_record` |
+| `ChangeRingHeader.reserved` | Ignored | `change_ring.cpp`: `read_change`, `ring_write_seq`, `ring_epoch` |
+| `ProcHeader.reserved` | Ignored | `proc_region.cpp`: `read_proc_fields`, `proc_liveness` |
+| `QueueHeader.reserved` (32 bytes) | Ignored | `queue_region.cpp`: `queue_base_of` |
+| `QueueHeader.reserved0`, a bit of `QueueHeader.flags` other than `QUEUE_BASE_SET` | Refused: the consumer stops the queue, and `scada_queue_next` returns `SCADA_E_LAYOUT` (section 9.2) | `queue_region.cpp:106`, `queue_base_of`; `queue_access.cpp:206` and `:223`, `Attachment::follow_queue`; `queue.cpp:305`, `Queue::next` |
+| `WriteRequest.reserved0`, `reserved1`, `reserved`; `WriteResult.reserved0`, `reserved`; an unknown operation, source, value type or status | Refused: `SCADA_E_INVALID` at post; when taken, the record is passed over and counted in `invalid` | `queue_region.cpp:185`, `request_valid`, and `:215`, `result_valid`; `queue_access.cpp:600`, `Attachment::post_record`; `queue.cpp:182`, `Queue::poll`; `queue_access.cpp:466`, `Attachment::drain_file` |
+| An unknown bit of `ProcessEntry.flags` | Refused: the header is not valid, attach and observe return `SCADA_E_LAYOUT` | `header_view.cpp:85`, `read_processes` |
+| An unknown bit of `DirectoryEntry.flags` | Refused: the directory entry is not valid, attach and observe return `SCADA_E_LAYOUT` | `header_view.cpp:267`, `directory_entry`; `attachment.cpp:357`, `Attachment::read_directory` |
+| An unknown quality, quality flag bit (above bit 11) or type in a tag record or change entry; OWNER_DOWN stored | Refused: the read or `scada_sub_next` returns `SCADA_E_LAYOUT` | `tag_access.cpp:94`, `storable`, and `:102`, `record_valid`; `tag_access.cpp:363`, `Attachment::read_at`; `tag_access.cpp:262`, `Attachment::change_valid`; `subscription.cpp:202`, `Subscription::poll` |
+| `ProcHeader.state` other than RUNNING, unknown values included | The process is down (section 10.1) | `proc_region.cpp:266`, `proc_liveness` |
+| The reserved bytes of the retain file header and records; an unknown file flag | Refused: the file is not valid, and no value is taken from it | `retain_file.cpp:338` and `:341`, `decode_header`; `retain_file.cpp:383`, `decode_quality`; `retain_file.cpp:402`, `decode_record` |
+
+Closed at the freeze: a change to any of these is a layout version, not a
+minor version. The product owner accepted them on 2026-11-22 (D-66).
+
+- The handle split of 10 and 22 bits (section 5.1): at most 1,023 owners,
+  and an owner is one writing thread.
+- Bits 12 to 15 of `quality_flags` are unassigned. Readers refuse a tag
+  record or change entry that has one of them set (the table above,
+  `quality_flags_valid` in `types.h`), so assigning one is a layout
+  version.
+- No spare bytes in `ChangeEntry` (32 bytes), `scada_value` (48 bytes) or
+  `scada_status` (32 bytes).
+
+Not frozen by layout 1: these are constants or defaults of one side, and
+change by a minor version.
+
+- The read retry limit of 64 (section 6.2), a constant of the reader.
+- The heartbeat timeout defaults of 3,000 ms and 500 ms, and the default
+  `heartbeat_check_ms` of 250 ms: defaults of the tag-set builder. The
+  values in force are those the header holds.
+- The default change ring capacity of 65,536 entries and the default queue
+  capacity of 1,024 records: defaults of the tag-set builder. The limits
+  that readers validate (section 14) are layout.
+- Huge pages: a mount option of the file system, not of the layout.
+- The 100 ms cap of a wait (section 8.4) and the look of at most once a
+  second (section 9.2): constants of the waiting process.
+- W = 200 ms, K and the 400 ms limit on `heartbeat_check_ms` for a tag set
+  with a RETAIN_NOW tag (section 12): constants of `scada-tagd` and of its
+  tag-set builder.
+- The minimum kernel (section 1): a deployment requirement.
+
+The 60 s limit on a write request's lifetime (section 14) is a limit that
+readers validate: the poster's library refuses a longer one at post, and
+the consumer's library answers it EXPIRED when taken (`queue_region.cpp`,
+`request_expired`, called from `Attachment::post_record` and
+`Queue::poll`). It is layout. Two ends that disagree fail safe, since a
+request is never executed after its expiry, but a request one end accepts
+is refused by the other.
 
 ## 15. Conformance tests
 
@@ -2143,31 +2294,74 @@ ARM64:
     not valid, for a file changed in size in place (also when then
     replaced), and at the 17th file under the name.
 
-## 16. Open points to settle in phase 1
+## 16. Points settled in phase 1
 
-Each is settled by measurement or experiment in the issue named, recorded in
-the decisions log, and then written into this contract before it becomes 1.0
-(P1-13).
+Every point of this section is settled. Each was settled by measurement,
+experiment or decision in the issue named, recorded in the decisions log,
+and written into this contract before 1.0 (P1-13, D-66). The table is kept
+as the record; the pass criterion of each row is the one it was settled
+against.
+
+Every figure in the table comes from shared GitHub-hosted virtual machines
+with 4 vCPUs, not the target board. Issue #41, the target board, stays open:
+it is the hardware acceptance before the first release on the board, and
+measures these figures again there. Contract 1.0 does not wait for it (the
+product owner's decision, D-66). A worse figure on the board changes a
+default, a constant or core placement by a minor version, not the layout
+(section 14.1).
 
 | Point | Proposal | Settled in | Pass criterion |
 | --- | --- | --- | --- |
 | Wake mechanism | Settled in P1-07 (D-32): futex on a read-only mapping, `futex_waitv` for wait sets, in-process eventfd bridge (section 8.4) | P1-07 | Conformance test 24 on x86-64 and ARM64 |
-| Read retry limit before `SCADA_E_BUSY` | Settled in P1-12 (D-57): confirmed at 64 attempts. Conformance test 26, 600 s: 0 `SCADA_E_BUSY` in 1.20 billion reads on x86-64 and on ARM64 with the shipped `isb` pause (at 99.9 % confidence the rate is below about 0.006 in 1,000,000); the `yield` pause, which is not shipped, gave 0.124 in 1,000,000, also within the criterion. Measured by the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure | P1-06, P1-12 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
-| Default change ring capacity per owner | 65,536. The size half is settled in P1-12 (D-57): the database of the reference load is 28.8 MB, below 64 MB, on both runners (conformance test 27; the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure). The gap half stays open: no test yet looks for gaps of a consumer that keeps up with the reference load; conformance tests 13 and 14 check gaps at smaller loads | P1-12 (size); open (gap), before 1.0 | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
-| Huge pages for the `tags` regions | Not used. Open: P1-12 did not measure huge pages (D-57) | Open, before 1.0 | Used only if the benchmark shows a lower 99.9th percentile read latency |
+| Read retry limit before `SCADA_E_BUSY` | Settled in P1-12 (D-57) and confirmed again in P1-13 (D-66): 64 attempts. Conformance test 26, 600 s, two runs of the workflow `measurements` (perf build). Run 43875571560 (commit 0fd68a2): 0 `SCADA_E_BUSY` in 1.20 billion reads on x86-64 and on ARM64 with the shipped `isb` pause; the `yield` pause, which is not shipped, gave 0.124 in 1,000,000. Run 43905525505 (commit 5bbfa71): x86-64 1 in 1.20 billion (0.0008 in 1,000,000); ARM64 `isb` 424 in 1.20 billion (0.35 in 1,000,000); ARM64 `yield` 169 (0.14 in 1,000,000; not shipped). The rate varies between runs on shared virtual machines. Both runs are below the criterion; the margin of ARM64 `isb` in the second run was about 3 times. Both ran on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is to measure it again. The row measures real-time readers on processors they share with non-real-time owners. The limit of 64 is a constant of the library, not of the layout: a worse figure on the board changes core placement (#116), not the layout | P1-06, P1-12, P1-13 | Conformance test 26: the rate of `SCADA_E_BUSY` is below 1 in 1,000,000 reads |
+| Default change ring capacity per owner | Settled: 65,536, both halves. Size, in P1-12 (D-57): the database of the reference load is 28.8 MB, below 64 MB, on both runners (conformance test 27; the workflow `measurements`, run 43875571560, commit 0fd68a2, perf build). Gap, in P1-13 (D-64, D-66): `scada-tag-ring-gap-perf-test` received 30,000,000 changes with 0 gaps at the reference load for 600 s on each runner (x86-64, ARM64 `isb`, ARM64 `yield`; the workflow `measurements`, run 43905525505, commit 5bbfa71, perf build); its 10 s form runs in the pipeline's perf gate. Both on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure. The default is settled for the reference load of 10 owners; the capacity is per owner (`OwnerEntry.change_ring_capacity`), and phase 2 sizes each owner's ring | P1-12 (size), P1-13 (gap) | No gap for a consumer that keeps up with the reference load; database stays under 64 MB |
+| Huge pages for the `tags` regions | Settled in P1-13 (D-64, D-66): not used, a judgement on single runs of about 0.6 s, one per mode and runner. `scada-tag-huge-pages-root-test`, the workflow `measurements`, run 43905525505 (commit 5bbfa71, perf build). No gain on x86-64: the read medians were equal at 80 ns, and the read 99.9th percentile was 261 ns without and 270 ns with huge pages. On ARM64 the read median was up to about 40 ns lower (`isb` 120 to 104 ns, `yield` 144 to 104 ns; the 99.9th percentile 312 to 272 ns and 416 to 384 ns), within the noise of single 0.6 s runs, and not needed for any target; D-64 asked for a lower 99.9th percentile on both architectures. An owner region at the reference load (320 KB) is smaller than one 2 MB page. To be measured again on the target board (#41) if a target there needs it | P1-13 | Used only if the benchmark shows a lower 99.9th percentile read latency |
 | Heartbeat timeout defaults | Settled in P1-12 (D-57): confirmed at 3,000 ms general and 500 ms for real-time processes. Conformance test 5 passes on both architectures in the pipeline (for example run 43870993972); conformance test 26, 600 s, with real-time readers under SCHED_FIFO beside the owners, reported no process down and no late heartbeat on x86-64 and ARM64 (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-04, P1-12 | Conformance tests 5 and 26 |
 | Retained values across a generation change | Settled in P1-09 (D-45): FINAL retain files and the bounded wait of sections 11.3 and 12 | P1-09 | Conformance test 21, with a value changed immediately before the change (retained values; the queue part is #65) |
 | Cost of clock reads in `write` | Settled in P1-12 (D-57): kept at two reads per `write`, one pair per `write_many`. A scan writing 5,000 tags (`scada_tag_write_many`, conformance test 27, 2,000 scans per run, 10 runs per architecture on fresh runners and the 3 measurement jobs) took a median of 98 us on x86-64 and 197 us on ARM64 (the median of the 10 runs), and at most 296 us at the 99.9th percentile in any of the 23 runs, below 0.5 ms (the workflow `measurements`, run 43875571560 (commit 0fd68a2, perf build), on shared GitHub-hosted virtual machines with 4 vCPUs (x86-64: AMD EPYC 9V74; ARM64: Neoverse-N2); the target board (#41) is still to measure) | P1-12 | A scan writing 5,000 tags spends under 0.5 ms in the library |
 | Queue counts per process | Settled in P1-13 (D-63): not added; `scada_queue_stats` per queue only, `scada_status` stays 32 bytes (D-40) | P1-13 | Decided before 1.0 |
 | A queue region recreated inside a generation | Settled: the base sequence (9.1, 9.2, D-49), the periodic look while waiting, the try-lock in `scada_tag_notify`, the kept mapping used again, and the report of a falling `write_seq` (D-51) | #53 | Conformance test 29 |
-| Commands after lost audit records (does not block 1.0) | Whether commands stay refused after `scada-tagd` reported lost audit records until an operator acknowledges is not specified and is safety-relevant; the library has no such latch. For the owner, before the command service (D-49, C14) | Phase 5 | Decided by the owner |
-| Retiring the generation on a detected suspend | `scada-tagd` would start a generation change when it sees a suspend (3.4), so that pending requests are answered ABORTED. Restart behaviour; builds on the generation change of P1-09 | After P1-09, by the committee | Decided before 1.0 |
+| Retiring the generation on a detected suspend | Settled in P1-13 (D-66) by the committee of the lead session: option A for 1.0. `scada-tagd` reports a detected suspend only, as before (section 3.4 forbids suspend; D-46), and starts no generation change. Option B, retiring the generation so that pending requests are answered ABORTED, is phase 5 (#109) | P1-13 | Decided before 1.0 |
+
+Deferred by the owner, does not block 1.0:
+
+- Commands after lost audit records: whether commands stay refused after
+  `scada-tagd` reported lost audit records, until an operator acknowledges.
+  It is safety-relevant, and the library has no such latch. It is for the
+  command service in phase 5 (D-49, C14; issues #74, #75 and #83). The
+  product owner approved the deferral (D-66).
+- One event record per request, or per change of state, for AUTO and
+  REMOTE writes (section 9.3). At 100 writes a second the first fills an
+  events queue of 1,024 records in about 10 s while its consumer takes
+  none. The library does not enforce the pairing. Neither answer changes
+  the layout. For the command service's journalling in phase 5 (#83). The
+  product owner deferred it on 2026-11-22 (D-66).
 
 ## 17. Differences from the reference document
 
-This contract refines section 5 of the reference architecture. When the
-contract reaches 1.0, the reference document is updated to match and the
-change is recorded in its change log.
+This contract refines section 5 of the reference architecture. Section 5 of
+the reference document 1.1 matches this contract 1.0, except for the
+differences listed below (reference change log, version 1.1, issue #21). The list below is kept as the record of the
+differences that update resolved; the numbers are cited elsewhere.
+
+Reference 1.1 also corrects the lines of reference 3.1, 4.2, 6.1, 14.4
+and 17.4 that refer to section 5. The differences that remain:
+
+- Reference 10.4 has no system alarm for lost audit records or a broken
+  queue (item 22). It is a gap for the system alarms of phase 7 (#75).
+- String tags cannot be commanded: the tag-set builder refuses a STRING
+  tag that is `writable_by_command` (section 5). The reference does not
+  restrict commands to a type.
+- Adding tags without a restart (reference 5.5 and 19.3) needs a new
+  layout version: everything in `header` but `state` and `down` is
+  immutable for the life of a generation (section 5).
+- Reference 11.6 gives emergency direct mode to the group
+  `scada-emergency` and lists queues among what it inspects. The contract
+  gives read access to the group `scada` only (section 3.1; D-42), and an
+  observer cannot open a queue (section 11.4, step 4).
+- OWNER_DOWN cannot be stored (section 6.2), so the pass-through of
+  quality "unchanged" over the node link (reference 17.3) needs a mapping
+  for a slave tag whose owner is down. It is for phase 11.
 
 Confirmed by the product owner in review P1-01:
 
@@ -2262,6 +2456,16 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.24 | 2026-11-16 | Issue #96 (D-62). Section 12: a file of an owner is written again only K checks after the last, K = max(1, floor((1000 ms − 200 ms) / P) − 1), also for RETAIN_NOW; FINAL, the timeout write and the flush are not held back; the 1 s bound of RETAIN_NOW holds while a retain write, with those queued before it, takes at most 200 ms, and a later write is logged (`retain_now change reached the disk late`); `heartbeat_check_ms` at most 400 ms in a tag set with a RETAIN_NOW tag; the D-45 window is up to K · P. Section 18, tests 16 and 25: the 200 ms condition. |
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
+| 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen. Rulings of the product owner, 2026-11-22 (D-66): later changes are of three levels, layout version, minor version with a migration note, or editorial revision, each with a change-log row (introduction); what 1.0 freezes, the reserved fields and unknown values with their place in the code, the choices that close at the freeze (the 10/22 handle split, 4 free quality-flag bits, no spare bytes in `ChangeEntry`, `scada_value` and `scada_status`), and the constants that are not frozen (14.1); a worse figure on the target board changes no layout (16). Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to it (17.4: REMOTE writes need their event record, as in 9.3; ruling of 2026-11-22, D-66); 9.3 and 16: one event record per request or per change of state for AUTO and REMOTE, deferred to phase 5 (#83); reference 10.4 remains a gap for phase 7 (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
+
+Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
+structure or behaviour changed: section 16 records settled points, section
+17 the state of the reference, and the header the version. 1.0 is cut on
+top of every phase 1 change, 0.24 (#96, PR #111) included. The changes of
+the committee review of PR #115 are wording that matches the code; no
+structure or behaviour changed. The rulings of 2026-11-22 (D-66) state how
+later versions are numbered and what layout 1 freezes; they change no
+structure, constant, default or behaviour.
 
 Migration, 0.25 to 0.26 (0.24 is used by #96): none for data;
 the layout version stays 1 and no structure changed. A process that calls

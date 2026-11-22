@@ -1,5 +1,5 @@
 AArch64 handshake
-"A post against the retirement of its generation and the drain of its consumer, contract 0.19 section 9.5, decision D-54"
+"A post against the retirement of its generation and the drain of its consumer, contract 1.0 section 9.5, decision D-54"
 (*
  * P0 is scada_queue_post on an event queue (libs/scada-tag/src/
  * queue_access.cpp, post_record): the first load of the state

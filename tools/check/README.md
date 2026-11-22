@@ -38,7 +38,7 @@ what changed".
 `format`, `banned` and `rt` always check every file. `tidy` lints every
 translation unit unless a base revision is given, with the CMake option
 `SCADA_CHECK_TIDY_BASE` or the script's `--tidy-base`. Then it lints
-(`lint_selection.py`, decision D-66):
+(`lint_selection.py`, decision D-67):
 
 - every changed translation unit, and every unit whose dependencies contain
   a changed file. The dependencies are the compiler's own output: the

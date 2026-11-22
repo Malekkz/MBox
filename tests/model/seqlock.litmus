@@ -1,5 +1,5 @@
 AArch64 seqlock
-"Sequence lock of a tag record, contract 0.6 sections 6.1, 6.2 and 7"
+"Sequence lock of a tag record, contract 1.0 sections 6.1, 6.2 and 7"
 (*
  * P0 is the owner thread: two calls of write_string_record
  * (libs/scada-tag/src/tag_record.cpp), each `begin_write`, the string slot,

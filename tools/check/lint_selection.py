@@ -2,7 +2,7 @@
 
 The `tidy` check of scada_check.py lints every translation unit by default.
 Given a base revision, it lints only the units a change could have affected
-(docs/decisions.md, D-66):
+(docs/decisions.md, D-67):
 
 - every changed translation unit, and every translation unit whose
   dependencies, as the compiler reports them, contain a changed file;

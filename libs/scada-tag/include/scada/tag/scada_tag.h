@@ -6,13 +6,13 @@
  * (docs/contracts/tag-database.md, section 13). It is the stable interface;
  * this header can be included from C and from C++.
  *
- * Present so far: attach, observe, detach, heartbeat, notify, status, the
- * owner and process functions (scada_owner_info, scada_proc_resolve,
- * scada_proc_status), the tag functions (resolve, info, read, write and
+ * It declares every function of section 13: attach, observe, detach,
+ * heartbeat, notify, status, the retained-value reports
+ * (scada_tag_retain_status, scada_tag_retain_info), the owner and process
+ * functions (scada_owner_info, scada_proc_resolve, scada_proc_status,
+ * scada_tag_handle), the tag functions (resolve, info, read, write and
  * their batch and string forms), the change rings (scada_sub_*), the
- * reliable queues (scada_queue_*) and the wait sets (scada_waitset_*). The
- * other functions of section 13 are added by the issues that implement
- * them.
+ * reliable queues (scada_queue_*) and the wait sets (scada_waitset_*).
  */
 
 #include <stddef.h>
@@ -1007,11 +1007,15 @@ int scada_queue_post(scada_queue* queue, const void* record, size_t size);
  * SCADA_E_LAYOUT: the next record is not valid (its id is not its
  * position, or a check of scada_queue_post fails); it is passed over and
  * the next call goes on with the one after it. Also when the queue is
- * stopped: its cursor and position are no valid pair, or its file was
- * replaced inside the generation (section 9.2). Nothing is consumed then,
- * the call returns only when `timeout_ms` has passed, so that a loop over
- * this call does not spin, and the queue stays stopped until a tag-set
- * change or a reboot; log it once. SCADA_E_INVALID: an argument is NULL,
+ * stopped (section 9.2): its cursor and position are no valid pair, or
+ * the consumer could not follow its file: a file created anew without a
+ * base, with a header that is not valid or with a base below the old
+ * write_seq, the file in use changed in size, or a 17th file under its
+ * name. A file created anew with a valid base is followed, not stopped
+ * (decision D-49). Nothing is consumed then, the call returns only when
+ * `timeout_ms` has passed, so that a loop over this call does not spin,
+ * and the queue stays stopped until a tag-set change or a reboot; log it
+ * once. SCADA_E_INVALID: an argument is NULL,
  * `queue` is the producer's side, `size` is not the record size, or
  * `timeout_ms` is negative. SCADA_E_IO with errno set: the kernel refused the
  * wait. SCADA_E_RETIRING: the generation is RETIRING (section 11.3) and the
@@ -1059,11 +1063,11 @@ typedef struct {
                                  too long, answered EXPIRED (9.2) */
     uint64_t aborted;         /* consumer of a cmd queue: requests drained
                                  at attach and answered ABORTED (9.2) */
-    uint64_t skipped;         /* consumer: records attach passed over
-                                 undelivered: those a new proc region
-                                 skipped (9.2) and those of a cmd queue
-                                 whose cursor was out of range. For an
-                                 events queue these are lost audit
+    uint64_t skipped;         /* consumer: positions passed over
+                                 undelivered: at attach with a new proc
+                                 region, and at a jump to the base of a
+                                 queue file (9.2; an upper bound). For an
+                                 events queue these may be lost audit
                                  records */
     uint64_t answers_dropped; /* consumer of a cmd queue: EXPIRED and
                                  ABORTED answers that could not be posted
@@ -1077,14 +1081,16 @@ typedef struct {
                                  the queue's position out of range; the
                                  queue is stopped until the next
                                  generation */
-    uint64_t replaced;        /* consumer: 1 if the queue's file was found
-                                 replaced, removed or shrunk inside the
-                                 generation; the queue is dead from then on
-                                 and the producer gets SCADA_E_PEER_DOWN.
-                                 Producer: 1 if attach created the queue's
-                                 file while the consumer's cursor was not
-                                 0, that is anew inside the generation; log
-                                 it as a WARNING */
+    uint64_t replaced;        /* consumer: queue files given up inside the
+                                 generation: each one left for a file
+                                 created anew (followed), and a stop (the
+                                 queue is dead from then on and the
+                                 producer gets SCADA_E_PEER_DOWN; a stop
+                                 also counts in out_of_range at every
+                                 look). Producer: 1 if attach created the
+                                 queue's file while the consumer's cursor
+                                 was not 0, that is anew inside the
+                                 generation; log it as a WARNING */
     uint16_t queue_id;        /* the queue's id in the queue table */
     uint16_t kind;            /* 6 EVENTS, 7 CMD, 8 RESULT */
     uint8_t producer;         /* 1 for the producer's side, 0 for the

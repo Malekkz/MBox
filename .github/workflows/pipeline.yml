@@ -152,7 +152,7 @@ jobs:
       # pull request could have affected, and everything if a file that sets
       # the rules changed or the set cannot be worked out. A push to main
       # and a manual run lint everything. The formatter, banned-function and
-      # SCADA_RT checks run on every file either way (decision D-66).
+      # SCADA_RT checks run on every file either way (decision D-67).
       - name: Configure (dev)
         env:
           TIDY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}

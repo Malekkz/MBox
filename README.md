@@ -124,7 +124,7 @@ header was deleted or renamed, and when the changed set cannot be worked out
 names the mode, the reason and the number of units. The pipeline sets the
 option on a pull request; a push to `main` lints everything. The formatter,
 banned-function and `SCADA_RT` checks always run on every file. Clear the
-option with `-DSCADA_CHECK_TIDY_BASE=` (decision D-66).
+option with `-DSCADA_CHECK_TIDY_BASE=` (decision D-67).
 
 ## Pipeline
 

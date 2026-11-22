@@ -33,14 +33,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -632,6 +636,33 @@ TEST_F(Attach, AHeaderWithADamagedTagDirectoryFailsTheAttach) {
     EXPECT_FALSE(std::filesystem::exists(generation_dir() / "tags.io"));
 }
 
+// The permissions column (for example "r--s") of the line of
+// /proc/self/maps whose range starts at `start`; empty if there is none.
+std::string permissions_of_mapping_at(const void* start) {
+    // /proc/self/maps writes the start of a range in lower-case hex.
+    constexpr int HEX = 16;
+    std::array<char, 2 * sizeof(std::uintptr_t)> digits{};
+    const auto [end, error] =
+        std::to_chars(digits.data(), digits.data() + digits.size(),
+                      std::bit_cast<std::uintptr_t>(start), HEX);
+    if (error != std::errc{}) {
+        return {};
+    }
+    const std::string wanted = std::string(digits.data(), end) + "-";
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.starts_with(wanted)) {
+            std::istringstream fields(line);
+            std::string range;
+            std::string permissions;
+            fields >> range >> permissions;
+            return permissions;
+        }
+    }
+    return {};
+}
+
 TEST_F(Attach, RegionsOfOtherProcessesAreMappedReadOnly) {
     start_host();
     const Attached feeder = attached("io");
@@ -643,6 +674,14 @@ TEST_F(Attach, RegionsOfOtherProcessesAreMappedReadOnly) {
                scada::monotonic_ns());
     const std::span<std::byte> tags = peers.bytes(peers.tags_slot(OWNER_IO));
     ASSERT_EQ(tags.size(), tags_region_size(IO_TAG_COUNT));
+    // The kernel holds the reader's mapping of the owner's region read-only
+    // (reference 18.2: read-only mappings cannot write). The owner's own
+    // mapping of the same file in this test process is read-write.
+    EXPECT_EQ(permissions_of_mapping_at(tags.data()).substr(0, 2), "r-");
+    EXPECT_EQ(permissions_of_mapping_at(
+                  feeder->owners()[0].tags.memory.bytes().data())
+                  .substr(0, 2),
+              "rw");
     // What the owner writes, the reader sees.
     record(feeder->owners()[0].tags.memory.bytes(), SLOT_LEVEL).value =
         KEPT_VALUE;

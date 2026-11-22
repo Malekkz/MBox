@@ -1,5 +1,5 @@
 AArch64 repair
-"Repair of a record after an owner restart, contract 0.6 sections 6.1, 6.2 and 6.3"
+"Repair of a record after an owner restart, contract 1.0 sections 6.1, 6.2 and 6.3"
 (*
  * P0 is the owner of a record: first a write that does not finish, then,
  * after a restart, repair_tag_records (libs/scada-tag/src/attachment.cpp).
