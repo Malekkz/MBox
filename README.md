@@ -165,8 +165,8 @@ over the list sorted by path. A selection of fewer than 40 units is not
 split; share 1 lints all of it. Each share prints its number and its units,
 and keeps a record of them for `check`, which fails if a share failed, timed
 out, was cancelled or skipped, if a record is missing, or if a unit was
-linted twice or not at all. A full lint of 165 units takes about 11 minutes
-of wall time instead of 38.
+linted twice or not at all. A full lint of 165 units took 7 min 24 s of
+wall time instead of 38 min 17 s (run 45023188297).
 
 A failing command fails its check: a compiler warning, a failing test, a
 finding of the `check` target, a sanitizer report or a fuzzing crash. Nothing
