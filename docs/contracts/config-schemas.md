@@ -505,7 +505,7 @@ Framework keys of a channel (the protocol's keys are in its schema):
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | channel name | required | Equals the file name |
-| `enabled` | bool | `true` | A disabled channel is not connected. Its tags and system tags stay in the tag set (BAD, NOT_INIT), so that enabling or disabling it is a live change and references to its tags stay valid. Open with the driver interface contract, whose draft creates no tags for a disabled device |
+| `enabled` | bool | `true` | A disabled channel is not connected. Its tags and system tags stay in the tag set (BAD, NOT_INIT), so that enabling or disabling it is a live change and references to its tags stay valid. The same holds for a disabled device (driver interface contract, live reload) |
 | `role` | `connect`, `listen` | `connect` | Who opens the connection. `listen` is reserved (open: needs the product owner's ruling (X-2)). Both are the client or master role of reference 6.4 |
 | `poll_groups` | map of poll group name to `{ period, priority }` | `fast` 200 ms, `normal` 1 s, `slow` 10 s, priorities 1, 2, 3 | Reference 6.2. `period` 10 ms to 1 d; `priority` 1 (highest) to 16 |
 | `min_request_interval` | duration, `0s` to `60s` | `0s` | Pacing of the channel: least time between two requests on it |
