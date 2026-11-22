@@ -670,6 +670,7 @@ Framework keys of a channel (the protocol's keys are in its schema):
 | `min_write_interval` | duration, `0s` to `60s` | `0s` | Least time between two writes on the channel (a gateway that limits writes for all its devices); a device's own interval applies as well |
 | `reconnect` | `{ min, max }` durations, `100ms` to `10m` | `{ min: 1s, max: 30s }` | Reconnect back-off after a connection failure, doubling from `min` to `max`. It starts again from `min` after the first valid answer, not after a connect |
 | `max_pending_writes` | 1 to 256 | 16 | Write requests the channel holds in its own order queue; one more is answered `BUSY` (driver interface contract) |
+| `lost_after_timeouts` | 1 to 10 | 3 | On a TCP channel (`tcp`, `rtu_over_tcp`), this many consecutive timed-out requests with no valid answer between them count as a lost connection: the driver closes it abortively, so that nothing sent is delivered later, and reconnects (driver interface contract) |
 | `change_ring_capacity` | power of two, 1,024 to 1,048,576 | computed (section 12.3) | Override of the computed ring size of the channel's owner, for channels whose changes come in bursts. At least twice the owner's tags (CF-1003) |
 | `process_group` | reserved | | Several driver processes for one protocol (open: needs the product owner's ruling (O-3)) |
 
@@ -685,7 +686,7 @@ Framework keys of a device instance:
 | `write_timeout` | duration, `10ms` to `60s` | `timeout` | Section 4.11 |
 | `write_timeout_per_value` | duration, `0s` to `10s` | `0s` | Added to `write_timeout` for each value written, for devices whose write time grows with the number of values |
 | `retries` | 0 to 10 | 2 | Retries of a failed read. A write is never retried |
-| `busy_retries` | 0 to 10 | 3 | Times a read answered "busy" is tried again at later turns before it counts as failed |
+| `busy_retries` | 0 to 10 | 3 | Times a read answered "busy" is tried again at later turns before it counts as failed. Reads only: a write answered busy is refused `BUSY` and never sent again by the driver (driver interface contract) |
 | `demote_after` | 1 to 100 | 3 | Consecutive failed transactions before the device is demoted (reference 6.2). A read whose retries all failed counts once; "busy", a sentinel answer and failures within `startup_grace` do not count |
 | `backoff` | duration, `1s` to `1h` | `10s` | First retry period of a demoted device; it doubles at each failed probe up to `backoff_max` |
 | `backoff_max` | duration, `1s` to `1h` | `300s` | Largest retry period of a demoted device |
@@ -873,7 +874,7 @@ the driver treats the device as restarted (driver interface contract).
 
 ### 4.10 Shared keys and defaults
 
-Decision D-95. The keys below are read by the driver framework or a protocol, whose
+Decision D-102. The keys below are read by the driver framework or a protocol, whose
 behaviour the driver interface contract defines. Their names, types,
 defaults and ranges are those of this contract; the driver interface
 contract cites them and gives no default of its own.
@@ -884,7 +885,7 @@ contract cites them and gives no default of its own.
 | `retries`, `busy_retries` | device | 2, 3 | Driver interface, failure handling |
 | `demote_after`, `backoff`, `backoff_max` | device | 3, 10 s, 300 s | Driver interface, demotion |
 | `startup_grace` | device | 0 s | Driver interface, demotion |
-| `reconnect` | channel | 1 s to 30 s | Driver interface, connection loss |
+| `reconnect`, `lost_after_timeouts` | channel | 1 s to 30 s; 3 | Driver interface, connection loss |
 | `connect_timeout` | channel (Modbus `tcp`, `rtu_over_tcp`) | 3 s | Annex A.1 |
 | `min_request_interval`, `min_write_interval` | channel and device | 0 s | Driver interface, pacing |
 | `max_values_per_request` | device | protocol limit | Driver interface, block planning |
@@ -901,7 +902,7 @@ contract cites them and gives no default of its own.
 | `read` (ranges, limits) | template, device | Annex A.4 | Driver interface, block planning and side effects |
 | `scale`, `exponent_from`, `invalid_values`, `on_invalid`, `raw_range`, `quality_from`, `source_time_from`, `bits`, `enum`, `counter`, `states`, `invert` | point | section 4.7 | Driver interface, samples (the framework applies them after decode) |
 | `access`, `storage`, `write_limits`, `dangerous` | point | `ro`; required; none; `false` | Section 7.2 here; driver interface, write requests |
-| Output keys (`kind`, `sbo`, `select_timeout`, `native_select`, `limits`, `refresh`, `on_shutdown`, `on_control_loss`, `safe_state`, `feedback`, `termination_timeout`) | output | section 7.2 | Driver interface, write requests; reference 8 (`scada-cmd`, phase 5) |
+| Output keys (`kind`, `sbo`, `select_timeout`, `native_select`, `limits`, `refresh`, `on_shutdown`, `on_control_loss`, `on_generation_change`, `safe_state`, `feedback`, `termination_timeout`) | output | section 7.2 | Driver interface, write requests; reference 8 (`scada-cmd`, phase 5) |
 | `change_ring_capacity` | channel | computed | Section 12.3 |
 | `enabled` | channel, device | `true` | Driver interface, reload |
 
@@ -1344,8 +1345,9 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `refresh` | duration, `1s` to `1d` | none | `kind: setpoint` only. The driver writes the accepted value again at this period, for devices whose setpoint lapses or that fall back when writes stop. Open: needs the product owner's ruling (X-5) |
 | `auto_deadband` | number | 0 | For `setpoint` outputs driven by a program: `scada-control` posts a new AUTO request only when the value moved by more than this (reference 7.2, step 3 posts on change) |
 | `safe_state` | `off`, `on`, `hold`, `{ value }` or `{ raw }` | required (reference 12.5) | The state the output is driven to when a rule says "safe". `value` is in engineering units, `raw` is the raw pattern written as it stands (section 2.3) |
-| `on_shutdown` | `hold`, `safe`, `release` | `hold` | Section 7.4 |
-| `on_control_loss` | `{ action: hold \| safe \| release, after }` | `{ action: safe, after: 0s }` for a target of `scada-io`, `{ action: hold }` otherwise | Section 7.4; `after` from `0s` to `10m` |
+| `on_shutdown` | `hold`, `safe`, `release` | `safe` for a target of `scada-io` (reference 6.5), `hold` otherwise (reference 14.4) | Section 7.4 |
+| `on_control_loss` | `{ action: hold \| safe \| release, after }` | `{ action: safe, after: 0s }` for a target of `scada-io`, `{ action: hold }` otherwise | Section 7.4: `scada-control` down while the output is in AUTO; `after` from `0s` to `10m` |
+| `on_generation_change` | `hold`, `safe` | `hold` | During a coordinated restart of the data plane (reference 5.5, 19.2: "each output's behaviour during the restart" is a setting). An output goes safe anyway when the restart exceeds its limit |
 | `task` | task reference | the task of the program that drives it, else `normal` | Owner of the AUTO request tag |
 | `termination_timeout` | duration | reserved | For two-phase results of phase 9 (driver interface contract) |
 
@@ -1395,7 +1397,7 @@ Rules (each has its code in section 10):
   least twice the device's `timeout` (CF-716).
 - A target point that is `dangerous` makes the output dangerous: no program
   may drive it (CF-705), it cannot have `refresh` or a `safe_state`,
-  `on_shutdown` or `on_control_loss` other than `hold` (CF-705), and
+  `on_shutdown`, `on_control_loss` or `on_generation_change` other than `hold`, which are its defaults whatever the target (CF-705), and
   `reason_required` and `reauth` are forced true.
 - `refresh` only with `kind: setpoint`, a `volatile` target, no `sbo` and no
   `dangerous` (CF-714). A target with `storage: nvm` cannot be driven by a
@@ -1446,18 +1448,22 @@ An interlock (reference 8.2 step 5, 8.4) is declared once, in the
 
 ### 7.4 Safe states and fail-safe behaviour
 
-Decision D-95. One set of keys, with one meaning in both contracts. The behaviour is the
+Decision D-102. One set of keys, with one meaning in both contracts. The behaviour is the
 driver interface contract's (protocol drivers) and #107's (`scada-io`);
 `scada-cmd` and `scada-control` are phases 5 and 6.
 
 | Situation | Key | Values | Delay | Default, `scada-io` output | Default, remote output |
 | --- | --- | --- | --- | --- | --- |
-| Orderly stop of the writer of the target (the driver or `scada-io`), an update | `on_shutdown` | `hold`, `safe`, `release` | none | `hold` | `hold` |
-| The owner of the request tag of the output's current mode reads as down: `scada-control` for AUTO, `scada-cmd` for MANUAL | `on_control_loss` | `hold`, `safe`, `release` | `after` | `safe` at once (reference 6.5) | `hold` |
-| A refreshed setpoint loses its requester | `on_control_loss` (the same) | as above; refreshing stops first | `after` | | `hold` |
-| Generation change (data plane restart) | none | hold, then safe if the limit is exceeded (reference 5.5) | `data_plane.generation_change_limit` | | |
+| Orderly stop of the writer of the target (the driver or `scada-io`), an update | `on_shutdown` | `hold`, `safe`, `release` | none | `safe` (reference 6.5) | `hold` (reference 14.4) |
+| `scada-control` reads as down while the output is in AUTO | `on_control_loss` | `hold`, `safe`, `release` | `after` | `safe` at once (reference 6.5) | `hold` |
+| The requester of a refreshed setpoint reads as down (`scada-control` in AUTO, `scada-cmd` in MANUAL) | none | refreshing stops; in AUTO `on_control_loss` then applies; in MANUAL the device's own fallback acts | | | |
+| `scada-cmd` reads as down while the output is in MANUAL | none | hold: an operator-held output does not drop at a restart of `scada-cmd` | | hold | hold |
+| Coordinated restart of the data plane (a generation change) | `on_generation_change` | `hold`, `safe`; safe anyway when the limit is exceeded (reference 5.5, 19.2) | `data_plane.generation_change_limit` | `hold` | `hold` |
 | The unit or its link to the device fails | none on the unit | the device's own communication-loss behaviour, set on the device (reference 14.4) | | | |
-| After a restart | `areas.<area>.auto_resume` | outputs are not driven until a full control cycle with valid inputs and the restore of retained modes and setpoints; AUTO resumes per area | | A GPIO output must be given a level when it is requested: its `start` key (Annex B) | |
+| After a restart | `areas.<area>.auto_resume` | outputs are not driven until a full control cycle with valid inputs and the restore of retained modes and setpoints; AUTO resumes per area | | A GPIO output must be given a level when it is requested: its `at_start` key (Annex B) | |
+
+The behaviour of each row is the driver interface contract's (protocol drivers,
+`scada-io`); its table cites these keys and defaults.
 
 - `safe` drives the target to its `safe_state`; `release` writes
   `limits.release`; `hold` leaves the device as it is and, for a refreshed
@@ -1866,6 +1872,7 @@ runtime diagnostics only.
 | CF-1006 | Two channels or two tasks with the same short name (section 12.3) | `{kind} {a} and {b} have the same short name {c}; rename one` |
 | CF-1007 | More than 4,096 queues | `{n} queues, the limit is 4096` |
 | CF-1008 | More than 1,023 owners | `{n} owners, the limit is 1023` |
+| CF-1009 | More than 126 command queues consumed by one driver process (one wait set of 127 sources holds them, tag database contract 8.4) | `driver {name} consumes {n} command queues, the limit is 126` |
 | CF-1005 | A service user that does not exist on the unit, uid 0, or two processes with one uid | `process {name}: {reason}` |
 | CF-1010 | `heartbeat_check_ms` above 400 with a `retain_now` tag (D-62, #96) | `heartbeat_check_ms must be at most 400 in a tag set with a retain_now tag` |
 | CF-1011 | Any other refusal of `scada::tag::validate` | `tag set: {reason}` |
@@ -2187,7 +2194,7 @@ canonical encoding of the tag set).
 
 ## 13. Apply: how a committed tree reaches the services
 
-Decision D-93. This section is owned here and cited by the driver interface
+Decision D-100. This section is owned here and cited by the driver interface
 contract. It fixes where versions live, how one becomes active, what the
 services read, and how they report back. #102 builds it.
 
@@ -2402,7 +2409,7 @@ order of section 1.4. The tests run on x86-64 and ARM64.
     by several points and refused across poll groups, `device` paths and
     duplicates, literal addresses only.
 20. Local I/O (Annex B): lines and channels named by label, refused by
-    number; outputs without `start`; a slow channel in the scan.
+    number; outputs without `at_start`; a slow channel in the scan.
 
 **Fuzz targets** (`CLAUDE.md`: every parser of outside input): the YAML
 subset parser, the expression parser, the structured-text parser and the
@@ -2510,7 +2517,7 @@ the reference finds it.
 | Version | Date | Change |
 | --- | --- | --- |
 | 0.1 | 2026-11-22 | First draft (issue #98, P2-01), from the outline in `README.md`, reference 1.1 and the device survey of 2026-11-22 (not in the repository). Decisions D-69 to D-80. |
-| 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA, Linux) and the lead's directions: this contract owns every key (section 4.10, Annex C); scalar typing and limits (1.2, 1.3); validation stages and order (1.4); the expression grammar completed, `/` true division, logical operators BOOL only (5.6); merge rules for expressions, exclusive groups and `replace` (4.5); `only`, template `disable`, `bit_order` required, `storage` required, `write_limits`, `invert`, `restart_indication`, `device_time` with trust; `timeout` defined (4.11); side effects on register ranges (A.4); command kinds and inverse scaling (7.2); one set of fail-safe keys (7.4); queues per driver process, readable short names, owners per thread, rings sized per owner (12.3); `config_id` details; Apply (13); the `io` schema (Annex B); open rulings with the committee's recommendation (15); differences from the reference (16). Decisions D-69 to D-80 revised, D-93 to D-95 added. Migration: none (draft). |
+| 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA, Linux) and the lead's directions: this contract owns every key (section 4.10, Annex C); scalar typing and limits (1.2, 1.3); validation stages and order (1.4); the expression grammar completed, `/` true division, logical operators BOOL only (5.6); merge rules for expressions, exclusive groups and `replace` (4.5); `only`, template `disable`, `bit_order` required, `storage` required, `write_limits`, `invert`, `restart_indication`, `device_time` with trust; `timeout` defined (4.11); side effects on register ranges (A.4); command kinds and inverse scaling (7.2); one set of fail-safe keys (7.4); queues per driver process, readable short names, owners per thread, rings sized per owner (12.3); `config_id` details; Apply (13); the `io` schema (Annex B); open rulings with the committee's recommendation (15); differences from the reference (16). Decisions D-69 to D-80 revised, D-100 to D-102 added (D-81 to D-99 are the driver interface contract's). Migration: none (draft). |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
@@ -2669,7 +2676,7 @@ value of section 7.2, unless a key below says otherwise.
 
 ## Annex B. The `io` protocol schema
 
-Decision D-94. The protocol keys of `drivers/io/*.yaml` for `scada-io` (reference 6.5, #107).
+Decision D-101. The protocol keys of `drivers/io/*.yaml` for `scada-io` (reference 6.5, #107).
 The hardware abstraction layer resolves every name; no path is written in
 the tree, so that no distribution-specific path appears in configuration
 (`CLAUDE.md`).
@@ -2695,7 +2702,7 @@ A channel that `scada-conf`'s `configure` of the backend reports as slow, with
 | `active_low` | bool | `false` | |
 | `bias` | `none`, `pull_up`, `pull_down` | `none` | |
 | `debounce` | duration, `0ms` to `1s` | `0ms` | Digital inputs (reference 6.5) |
-| `start` | `hold`, `safe` | required for an output | A line requested as an output must be given a level when it is requested: `hold` reads the level found and requests the line with it; `safe` requests it at the output's `safe_state`. Reference 14.4's "not driven until one full control cycle" means `hold` here |
+| `at_start` | `hold`, `safe` | required for an output | A line requested as an output must be given a level when it is requested: `hold` reads the level found and requests the line with it; `safe` requests it at the output's `safe_state`. Reference 14.4's "not driven until one full control cycle" means `hold` here |
 | `channel` | text | required for `iio` | The IIO channel by its name (`in_voltage0`) |
 | `filter` | duration, `0ms` to `60s` | `0ms` | First-order filter time constant of an analog input (reference 6.5) |
 | `clamp` | `[min, max]` | none | Clamping of an analog value after scaling (reference 6.5) |

@@ -1493,7 +1493,7 @@ Options: write the JSON Schema files in #98 and keep the document for the rest; 
 Decision: the contract states every key of every file type as a table (type, default, range, meaning) and is normative. P2-03 writes the JSON Schema files under `libs/scada-conf/schemas/` from the tables, with a test that the corpus of contract section 13 passes them. Where a table and a file disagree, the table wins and the file is fixed.
 Reason: the schema files are only useful with the code that loads them, and a review of tables is a review of the format; writing JSON Schema twice, once without a validator to test it, would double the review. The keys a person reviews are the same either way.
 Consequences: the contract is the one place to change a key; a change to a schema file without the table is a defect. The protocol schemas (contract Annex A for Modbus) follow the same rule.
-Revision 0.2: every key that takes several shapes is listed in contract Annex C. The JSON Schema files use the 2020-12 dialect (`unevaluatedProperties` is needed to merge framework and protocol keys into one object). The validator is the project's own, over a parsed tree that keeps file, line and column, with a fixed subset of keywords each mapped to a CF-2xx code; a general validator library would report neither and would be a new dependency. This contract owns every configuration key, default and validation code; the driver interface contract cites them (lead's direction 1, D-95).
+Revision 0.2: every key that takes several shapes is listed in contract Annex C. The JSON Schema files use the 2020-12 dialect (`unevaluatedProperties` is needed to merge framework and protocol keys into one object). The validator is the project's own, over a parsed tree that keeps file, line and column, with a fixed subset of keywords each mapped to a CF-2xx code; a general validator library would report neither and would be a new dependency. This contract owns every configuration key, default and validation code; the driver interface contract cites them (lead's direction 1, D-102).
 
 ## D-70: The YAML subset of the configuration tree
 Date: 2026-11-22
@@ -1626,7 +1626,7 @@ Reason: templates and instances depend on each other across files, so a per-file
 Consequences: older software refuses a tree that uses an addition as an unknown or reserved key rather than misreading it.
 Revision 0.2: `format` may be left out while the tree is of format 1, as in the example of reference 12.3.
 
-## D-93: How a committed tree reaches the services
+## D-100: How a committed tree reaches the services
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #102 and #104
 Status: proposed, in the draft contract `config-schemas.md` 0.2, section 13; for review by a person. Where the active tree lives and the version store are the owner's ruling O-5.
@@ -1637,7 +1637,7 @@ Decision: versions are complete directories `/var/lib/scada/conf/versions/<n>/` 
 Reason: the read-only root and reference 14.5 need writes under `/var/lib/scada` with a single atomic switch; Git is GPL-2.0 as a program (`CLAUDE.md` forbids it until the licensing decision) and does not sync as reference 14.5 needs. One expansion and one validator mean that a tree `scada-conf` accepts is never refused by a driver for its configuration.
 Consequences: #102 builds the store, activation, history and rollback without Git; reference 12.4's "should be Git" is listed as a difference (contract 16). Drivers depend on `scada-conf`'s expanded file format, which #102 and #104 fix together.
 
-## D-94: The `io` protocol schema and local outputs at start and crash
+## D-101: The `io` protocol schema and local outputs at start and crash
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01); for #107
 Status: proposed, in the draft contract `config-schemas.md` 0.2, Annex B; for review by a person (fail-safe output behaviour).
@@ -1648,14 +1648,14 @@ Decision: backends `simulator`, `gpio`, `iio`; a GPIO chip by its label and a li
 Reason: numbers change between boots; a sleeping call in a 10 ms scan breaks it; the process that died cannot drive a safe state.
 Consequences: #107 builds the backends, the helper and the stop step; codes CF-660 to CF-662.
 
-## D-95: One owner of every configuration key; fail-safe keys; command kinds and written values
+## D-102: One owner of every configuration key; fail-safe keys; command kinds and written values
 Date: 2026-11-22
 Phase / issue: 2, #98 (P2-01), with the driver interface contract (#99)
 Status: proposed, in the draft contract `config-schemas.md` 0.2, sections 4.10, 7.2 and 7.4; agreed with the #99 session; for review by a person (command handling, fail-safe behaviour). The fail-safe audit rule is the owner's ruling O-1.
 
 Context: the committee found the two drafts disagreeing on 20 to 29 keys and defaults (`on_mismatch`, back-off, reconnect, `connect_timeout`, `keepalive`, `on_invalid`, `bit_order`, the function list, the fail-safe keys and more), command kinds without a meaning per value, no inverse scaling for written values, a release value in the wrong domain, and fail-safe writes waiting for an audit record (lead's directions 1 and 6, C++ B-4, B-8, SCADA B-1 to B-3).
 Options: each contract defines what it uses; one contract owns every key.
-Decision: this contract owns every key name, type, default and validation code (section 4.10 lists the shared ones; the driver interface contract cites them and gives no defaults). Notable choices: `on_mismatch` `refuse`; `backoff` 10 s to `backoff_max` 300 s; `reconnect` 1 s to 30 s, reset after the first valid answer; `connect_timeout` 3 s; `keepalive` per device and template; `on_invalid` without `uncertain`; `bit_order` required with bits, no default; `functions`; `storage` required on writable points; `write_limits` on any writable point. Fail-safe keys: `on_shutdown` and `on_control_loss`, each `hold | safe | release`, where `on_control_loss` means "the owner of the request tag of the current mode reads as down"; default `safe` at once for a `scada-io` output, `hold` for a remote one; a fail-safe write is made first and journalled best-effort. Command kinds have a value each (section 7.2); `pulse` only device-timed in phase 2; `refresh` only for `setpoint`, never `dangerous`, `sbo` or `nvm`; the raw value of a setpoint is the inverse of `scale`, rounded half away from zero, with NaN and out-of-range values refused; `release` and `safe_state` state their domain (`value` or `raw`).
+Decision: this contract owns every key name, type, default and validation code (section 4.10 lists the shared ones; the driver interface contract cites them and gives no defaults). Notable choices: `on_mismatch` `refuse`; `backoff` 10 s to `backoff_max` 300 s; `reconnect` 1 s to 30 s, reset after the first valid answer; `connect_timeout` 3 s; `keepalive` per device and template; `on_invalid` without `uncertain`; `bit_order` required with bits, no default; `functions`; `storage` required on writable points; `write_limits` on any writable point. Fail-safe keys, agreed with the #99 session after its objections: `on_shutdown` (`hold | safe | release`; default `safe` for a `scada-io` output, reference 6.5, and `hold` for a remote one, reference 14.4); `on_control_loss` (`{ action, after }`, `scada-control` down while the output is in AUTO; default `safe` at once for a `scada-io` output, `hold` for a remote one); `on_generation_change` (`hold | safe`, default `hold`, safe anyway when the limit is exceeded, as reference 19.2 makes it a setting). In MANUAL a restart of `scada-cmd` drops nothing: outputs hold, and a refreshed setpoint stops refreshing so that the device's own fallback acts. A fail-safe write is made first and journalled best-effort. `busy_retries` applies to reads only; `lost_after_timeouts` (channel, default 3) closes a TCP connection abortively after consecutive time-outs. Command kinds have a value each (section 7.2); `pulse` only device-timed in phase 2; `refresh` only for `setpoint`, never `dangerous`, `sbo` or `nvm`; the raw value of a setpoint is the inverse of `scale`, rounded half away from zero, with NaN and out-of-range values refused; `release` and `safe_state` state their domain (`value` or `raw`).
 Reason: two documents defining one key drift, and a site writes the key once. The defaults chosen are the safe side where the drafts differed (refuse a mismatched device; require `storage` and `bit_order` rather than guess). Reference 6.5 requires local safe states when control stops, and the audit service may be down in the same failure.
 Consequences: the driver interface contract removes its own key definitions and cites this contract; #104 and #107 implement the fail-safe table; phase 5 builds the rest of command handling on these keys.
 
