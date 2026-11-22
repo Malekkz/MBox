@@ -184,7 +184,7 @@ before the first check. A reused generation keeps what the previous
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 0.20, sections 3, 5,
+- Contract: `docs/contracts/tag-database.md`, version 1.0, sections 3, 5,
   9.2, 9.5, 10, 11.1, 11.3 and 12; decisions D-27, D-36, D-38, D-46, D-47,
   D-49, D-51, D-53, D-54 and D-59 in
   `docs/decisions.md`.
