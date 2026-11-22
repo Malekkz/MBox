@@ -9,3 +9,5 @@ thin executable like the services.
 | `scadactl/` | `scadactl`, the local command-line tool (reference 11.5). Installed to `/usr/bin`. |
 
 The first installed tool is `scadactl` (phase 1); see `scadactl/README.md`.
+
+Probe for #120, not to be merged.
