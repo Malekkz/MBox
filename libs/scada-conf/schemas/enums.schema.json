@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "enums.schema.json",
+  "title": "enums.yaml (configuration schemas contract, section 5.5)",
+  "type": "object",
+  "properties": {
+    "enums": {
+      "type": "object",
+      "x-scada-key-type": "identifier",
+      "unevaluatedProperties": { "$ref": "#/$defs/enumeration" }
+    }
+  },
+  "required": ["enums"],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "enumeration": {
+      "description": "Integer codes, sparse and negative allowed, to display names",
+      "type": "object",
+      "x-scada-key-type": "integer",
+      "unevaluatedProperties": { "$ref": "common.schema.json#/$defs/text" }
+    }
+  }
+}

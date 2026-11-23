@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.schema.json",
+  "title": "Definitions shared by the schema files (configuration schemas contract, sections 2 and 6)",
+  "$defs": {
+    "identifier": {
+      "description": "Section 2.1: [a-z][a-z0-9_]*, 1 to 31 bytes",
+      "type": "string",
+      "x-scada-type": "identifier"
+    },
+    "tag_name": {
+      "description": "Section 2.1: segments [a-z0-9][a-z0-9_-]* joined by '.', 1 to 127 bytes",
+      "type": "string",
+      "x-scada-type": "tag_name"
+    },
+    "text": {
+      "description": "Section 2.1: free text, UTF-8 without control characters, at most 1,024 bytes",
+      "type": "string",
+      "x-scada-type": "text",
+      "x-scada-max": 1024
+    },
+    "identifier_list": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identifier" }
+    },
+    "logging_settings": {
+      "description": "Section 6: the settings of a logging policy",
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["on_change", "periodic", "both"] },
+        "deadband": { "type": ["number", "string"], "x-scada-type": "number_or_percentage", "minimum": 0 },
+        "interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms" },
+        "max_interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "raw_retention": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "tiers": {
+          "type": "object",
+          "x-scada-key-type": "tier_name",
+          "unevaluatedProperties": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+        }
+      }
+    }
+  }
+}

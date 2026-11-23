@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tasks.schema.json",
+  "title": "control/tasks.yaml (configuration schemas contract, section 9.1)",
+  "type": "object",
+  "properties": {
+    "tasks": {
+      "type": "object",
+      "x-scada-key-type": "identifier",
+      "unevaluatedProperties": {
+        "type": "object",
+        "properties": {
+          "period": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "1h" },
+          "priority": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 90 },
+          "scan_group": { "x-scada-reserved": true },
+          "rt_required": { "type": "boolean", "x-scada-type": "boolean" },
+          "overrun_alarm_after": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000 },
+          "budget": { "type": "integer", "x-scada-type": "integer", "minimum": 1000, "maximum": 100000000 },
+          "programs": { "$ref": "common.schema.json#/$defs/identifier_list" }
+        },
+        "required": ["period"],
+        "unevaluatedProperties": false
+      }
+    }
+  },
+  "required": ["tasks"],
+  "unevaluatedProperties": false
+}

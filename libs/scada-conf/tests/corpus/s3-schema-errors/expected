@@ -1,0 +1,7 @@
+# Several schema errors of one file, in line order (section 1.4).
+system.yaml:2:7: CF-212
+system.yaml:4:3: CF-201
+system.yaml:6:9: CF-210
+system.yaml:10:5: CF-202
+system.yaml:12:13: CF-203
+system.yaml:13:17: CF-204

@@ -1,0 +1,2 @@
+# Section 3: servers are required unless mode is none (the default is ntp).
+system.yaml:5:5: CF-202

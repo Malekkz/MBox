@@ -1,0 +1,4 @@
+# CF-102 at the line of the name key (stage 3, contract 0.6).
+control/ps1_levels.yaml:1:10: CF-102
+drivers/modbus/line1.yaml:2:9: CF-102
+templates/flow_meter.yaml:2:11: CF-102

@@ -4,6 +4,9 @@ scada_add_test(scada-conf-unit-test KIND unit
     diagnostic_test.cpp
     node_test.cpp
     path_class_test.cpp
+    read_test.cpp
+    scalar_test.cpp
+    schema_test.cpp
     tree_scan_test.cpp
     yaml_test.cpp
   DEPENDS scada::conf scada::test-support)

@@ -1,0 +1,7 @@
+unit: { id: site-0042, name: x }
+time: { timezone: Etc/UTC }
+email: { server: mail, from: x, password: { secret: p } }
+upstream: { url: "https://x", auth: { token: { secret: t } }, window: { from: "01:00", to: "05:00" } }
+data_plane: { processes: { drv-modbus: { heartbeat_timeout_ms: 3000, control_attach_grace: 60s } }, event_queue_capacity: 1024 }
+network: { hostname: unit1, interfaces: [ { name: eth0, zone: field, addresses: [192.168.1.2/24, "fe80::1/64"], gateway: 192.168.1.1, dns: ["::1"] } ] }
+realtime: { cpus: [2, 3], io_priority: 95 }

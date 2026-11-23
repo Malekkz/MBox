@@ -9,3 +9,9 @@ scada_add_fuzz_target(path_class_fuzz
 scada_add_fuzz_target(yaml_fuzz
   SOURCES yaml_fuzz.cpp
   DEPENDS scada::conf)
+
+# Stage 3, the schema validator, over any parsed file. Its seeds are files of
+# every type with a schema, valid and not.
+scada_add_fuzz_target(schema_fuzz
+  SOURCES schema_fuzz.cpp
+  DEPENDS scada::conf)

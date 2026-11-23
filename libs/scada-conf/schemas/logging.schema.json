@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "logging.schema.json",
+  "title": "logging.yaml (configuration schemas contract, section 6)",
+  "type": "object",
+  "properties": {
+    "aggregate_tiers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "x-scada-type": "tier_name" },
+          "interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "1d" }
+        },
+        "required": ["name", "interval"],
+        "unevaluatedProperties": false
+      }
+    },
+    "default_policy": { "$ref": "common.schema.json#/$defs/identifier" },
+    "policies": {
+      "type": "object",
+      "x-scada-key-type": "identifier",
+      "unevaluatedProperties": {
+        "allOf": [{ "$ref": "common.schema.json#/$defs/logging_settings" }],
+        "required": ["mode", "raw_retention"],
+        "unevaluatedProperties": false
+      }
+    }
+  },
+  "unevaluatedProperties": false
+}
