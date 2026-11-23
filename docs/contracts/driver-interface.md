@@ -1557,14 +1557,15 @@ action, after }`, `on_generation_change: hold | safe` (output keys),
   `double` output with a `safe_state` of `off` or `on` sets `hold`
   explicitly in `on_control_loss` or `on_shutdown`.
 - **`after: 30s` for remote outputs.** Control lost already needs
-  `scada-control`'s heartbeat timeout (TD 10.1; 3 s by default, CS
-  `heartbeat_timeout_ms`). 30 s more covers one restart of `scada-control`
-  by its supervisor, its attach and its first full cycle with valid inputs
-  (reference 14.4), so that a crash that recovers, or a stall of a few
-  seconds, does not stop pumps and fans across the plant; a control process
-  that is not back within about 33 s counts as gone. Remote devices often
-  have a communication-loss fallback of their own, which acts in any case
-  if the unit dies. The local default stays 0 s (reference 6.5). CS allows
+  `scada-control`'s heartbeat timeout (TD 10.1; 500 ms by default for a
+  real-time process, CS `heartbeat_timeout_ms`). The 30 s cover one
+  restart of `scada-control` by its supervisor with back-off, its attach
+  and its first full cycle with valid inputs (reference 14.4), so that a
+  crash that recovers, or a stall of a few seconds, does not stop pumps and
+  fans across the plant; a control process that is not back within about
+  30 s counts as gone. Remote devices often have a communication-loss
+  fallback of their own, which acts in any case if the unit dies. The local
+  default stays 0 s (reference 6.5). CS allows
   0 s to 10 min per output.
 - Outputs of a channel, device or output that a commit removes get their
   old `on_shutdown` at G3, like an orderly stop of their writer, and then
