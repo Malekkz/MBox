@@ -387,7 +387,7 @@ data_plane:
 | `data_plane.retain_interval_ms` | 1,000 to 60,000 | 5,000 | Retain interval of `scada-tagd` (`--retain-interval-ms`, tag database contract 12). Not in the tag set |
 | `data_plane.generation_change_limit` | duration, `1s` to `60s` | `5s` | Time limit of the coordinated restart (reference 5.5, 19.2) |
 | `data_plane.processes.<process>.heartbeat_timeout_ms` | 1 to 600,000 | 3,000; 500 for a real-time process | Per process (section 12.2) |
-| `data_plane.processes.<process>.control_attach_grace` | duration, `0s` to `600s` | `60s` | For a driver process and `io`: after the writer attaches to a generation, control counts as lost only once `scada-control` has attached in that generation, or once this time has passed, whichever comes first (driver interface contract 8.13). It keeps the local default `{ action: safe, after: 0s }` from defeating `at_start: hold` and `on_generation_change: hold` |
+| `data_plane.processes.<process>.control_attach_grace` | duration, `0s` to `600s` | `60s` | For a driver process and `io`: after the writer attaches to a generation, control counts as lost only once `scada-control` has attached in that generation, or once this time has passed, whichever comes first (driver interface contract 8.13.2). It keeps the local default `{ action: safe, after: 0s }` from defeating `at_start: hold` and `on_generation_change: hold` |
 | `data_plane.event_queue_capacity`, `data_plane.command_queue_capacity` | power of two, 16 to 1,048,576 | 1,024 | Capacity of each event queue and of each command and result queue (section 12.3) |
 | `realtime.cpus` | list of CPU numbers | none | CPUs for every real-time thread of every process: control tasks and the `scada-io` scan (reference 4.3). A CPU the unit does not have is not an error: the threads then run without isolation and a system alarm is raised at start (reference 4.3), because the list depends on the hardware as the uids do |
 | `realtime.io_priority` | 2 to 98 | 95 | `SCHED_FIFO` priority of the `scada-io` scan thread. It is above every control task (section 9.1), so that a task never waits for a scan that it preempts |
@@ -1415,8 +1415,8 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `refresh` | duration, `1s` to `1d` | none | `kind: setpoint` only. The driver writes the accepted value again at this period, for devices whose setpoint lapses or that fall back when writes stop. Open: needs the product owner's ruling (X-5) |
 | `auto_deadband` | number | 0 | For `setpoint` outputs driven by a program: `scada-control` posts a new AUTO request only when the value moved by more than this (reference 7.2, step 3 posts on change) |
 | `safe_state` | per kind: `off`, `on` or `hold` for `single` and `double` (for `double`, `off` is code 1 open, `on` code 2 closed); `{ value }`, `{ raw }` or `hold` for `setpoint`; `hold` only for `step`, `pulse` and `trigger` | required (reference 12.5). A fail-safe key with `safe` and a `safe_state` of `hold` is CF-722 | The state the output is driven to when a rule says "safe". `value` is in engineering units, `raw` is the raw pattern written as it stands (section 2.3). A `step`, `pulse` or `trigger` has no safe action: its `safe_state`, `on_shutdown`, `on_control_loss` and `on_generation_change` must be `hold` (CF-719) |
-| `failsafe_retry` | duration, `1s` to `60s` | `5s` | The first interval at which a fail-safe write that was not confirmed is repeated while its condition holds; it doubles after each time-out, up to 60 s (driver interface contract 8.13, section 7.4) |
-| `failsafe_max_refusals` | 1 to 10 | 3 | After this many refusals (REJECTED) of the fail-safe write, the repeats stop, `<output>.failsafe` stays 2 and an alarm is raised; a new condition starts them again (driver interface contract 8.13) |
+| `failsafe_retry` | duration, `1s` to `60s` | `5s` | The first interval at which a fail-safe write that was not confirmed is repeated while its condition holds; it doubles after each time-out, up to 60 s (driver interface contract 8.13.4, section 7.4) |
+| `failsafe_max_refusals` | 1 to 10 | 3 | After this many refusals (REJECTED) of the fail-safe write, the repeats stop, `<output>.failsafe` stays 2 and an alarm is raised; a new condition starts them again (driver interface contract 8.13.3, 8.13.4) |
 | `on_shutdown` | `hold`, `safe`, `release` | `safe` for a target of `scada-io` (reference 6.5), `hold` otherwise (reference 14.4) | Section 7.4 |
 | `on_control_loss` | `{ action: hold \| safe \| release, after }` | `{ action: safe, after: 0s }` for a target of `scada-io`, `{ action: hold }` otherwise | Section 7.4: `scada-control` down while the output is in AUTO; `after` from `0s` to `10m` |
 | `on_generation_change` | `hold`, `safe` | `hold` | During a coordinated restart of the data plane (reference 5.5, 19.2: "each output's behaviour during the restart" is a setting). An output goes safe anyway when the restart exceeds its limit |
@@ -1569,8 +1569,10 @@ The behaviour of each row is the driver interface contract's (protocol drivers,
   setpoint, stops refreshing.
 - **When a fail-safe action is taken, repeated and ended** is defined once,
   as a state machine per output and per key, in the driver interface
-  contract (8.13, fail-safe behaviour); this contract defines only the keys
-  and cites it. That state machine says what starts and ends each condition
+  contract: 8.13.1 the cases and defaults, 8.13.2 control lost and the other
+  conditions, 8.13.3 the states of an output and `<output>.failsafe`,
+  8.13.4 fail-safe writes and their repeats, 8.13.5 the audit record. This
+  contract defines only the keys and cites it. That state machine says what starts and ends each condition
   (control lost as defined there, ruling R-18; shutdown; a generation
   change), the grace at boot and after a generation change (so that the
   local default `{ action: safe, after: 0s }` does not defeat `at_start:
@@ -2227,7 +2229,7 @@ Decision D-79. Every generated tag name is checked against the 127-byte limit
 | `<output>.req_manual` | `cmd` | the target's type | RETAIN | The value last requested in MANUAL |
 | `<output>.req_auto` | `control.<T(task)>` | the target's type | none | The value last requested by logic |
 | `<output>.refresh` | the target's channel owner | INT64 | none | Outputs with `refresh` only: 0 none, 1 refreshing, 2 ended without a new request (section 7.2) |
-| `<output>.failsafe` | the thread that writes the target: the channel owner `drv-<protocol>.<C>` for a remote output, `io.scan` for a local one | INT64 | none | Outputs with a `safe` or `release` fail-safe key: 0 no fail-safe action, 1 the action was written and answered OK, 2 the action is due but not confirmed (it may not have reached the device; being repeated, or stopped after refusals). When it returns to 0 is the driver interface contract's (8.13) |
+| `<output>.failsafe` | the thread that writes the target: the channel owner `drv-<protocol>.<C>` for a remote output, `io.scan` for a local one | INT64 | none | Outputs with a `safe` or `release` fail-safe key: 0 no fail-safe action, 1 the action was written and answered OK, 2 the action is due but not confirmed (it may not have reached the device; being repeated, or stopped after refusals). It returns to 0 when the condition ends (driver interface contract 8.13.3) |
 | `<output>.device_selected` | the target's channel owner | BOOL | none | Only for a target whose protocol declares a native select (none in phase 2): the device holds a selection |
 | `sys.area.<area>.authority` | `cmd` | INT64 | RETAIN, RETAIN_NOW | 1 LOCAL_PANEL, 2 CLI, 3 WEB, 4 API, 5 MASTER (phase 11) |
 | Interlock `<name>` | `control.<T(task)>` | BOOL | none | Section 7.3 |
@@ -3164,9 +3166,10 @@ The kernel does not report whether a chip's calls sleep, so validation cannot
 know it and does not depend on the hardware present: an explicit `scan:
 every_cycle` is CW-660. At run time a channel whose calls on the scan thread
 are repeatedly slow is moved to the helper, with a diagnostic, by the rule of
-the driver interface contract (local I/O), which states the threshold, how
-many slow calls it takes (one preemption is not enough) and that the move
-lasts until `scada-io` restarts; it is not stored.
+the driver interface contract (13.1): three calls above 1 ms within 1,000
+cycles, and only while the scan thread runs under `SCHED_FIFO`; otherwise
+the slow calls are counted and alarmed and the channel is never moved. The
+move lasts until `scada-io` restarts; it is not stored.
 
 Validation does not look for the lines, chips and IIO channels named: the
 check mode opens nothing (13.1). A name that is not present on the unit is
