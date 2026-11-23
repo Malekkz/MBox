@@ -25,7 +25,7 @@ boundary.
 | --- | --- | --- | --- |
 | Tag database | `tag-database.md` | Phase 1 | 1.0, accepted at the close of phase 1 (D-66) |
 | Configuration schemas | `config-schemas.md` | Phase 2 | Outline below |
-| Driver interface | `driver-interface.md` | Phase 2 | Draft 0.2, for review by a person (#99); open rulings in its section 18 |
+| Driver interface | `driver-interface.md` | Phase 2 | Draft 0.3, for review by a person (#99); open rulings in its section 18 |
 | Historian file format and upload | `historian-format.md` | Phase 3 | Outline below |
 | REST and WebSocket API | `rest-api.md` | Phase 4 | Outline below |
 | Node link protocol | `node-link.md` | Phase 11 | Outline below |
