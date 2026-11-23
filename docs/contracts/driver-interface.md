@@ -314,7 +314,7 @@ drafted.**
 `CLAUDE.md` says that code running in "the I/O scan" must not "make system
 calls ... or do file or network I/O". An I/O scan cannot exchange anything
 with hardware without the system calls of that exchange. This contract
-proposes, decision D-83:
+takes, decision D-83:
 
 - **Phase 2: the real-time tier is `scada-io` only** (reference 4.3 names it).
   Modbus workers run under the normal scheduler. Reference 7.5 already gives
@@ -331,6 +331,8 @@ proposes, decision D-83:
   sits between them, unannotated, with its bound stated per backend and
   channel.
 - `CLAUDE.md` and the coding standard are not changed by this contract.
+  The wording `CLAUDE.md` would need for the exchange is with the lead,
+  for the product owner.
 
 What enforces the rules, honestly stated:
 
