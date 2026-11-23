@@ -1,0 +1,5 @@
+# Names that start with "." are not exempt (section 1): an editor's backup
+# file in the tree is an error.
+.hidden.yaml:1:1: CF-101
+tags/site.yaml~:1:1: CF-101
+templates/.flow_meter.yaml.swp:1:1: CF-101

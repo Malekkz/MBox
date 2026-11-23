@@ -1,6 +1,7 @@
 add_subdirectory(scada-common)
 add_subdirectory(scada-service)
 add_subdirectory(scada-tag)
+add_subdirectory(scada-conf)
 add_subdirectory(scada-tagd)
 add_subdirectory(scada-sim)
 add_subdirectory(scada-hello)

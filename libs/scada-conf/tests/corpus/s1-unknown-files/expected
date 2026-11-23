@@ -1,0 +1,4 @@
+# Files that section 1 does not list, or outside the path grammar: CF-101.
+notes.txt:1:1: CF-101
+tags/site.yml:1:1: CF-101
+templates/Flow_meter.yaml:1:1: CF-101
