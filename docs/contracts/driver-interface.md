@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.5 |
+| Contract version | 0.6 |
 | Status | Accepted for phase 2 implementation; becomes 1.0 when phase 2 passes its acceptance tests. Ruled by the product owner on 2026-11-23 (section 18; issue #99, P2-02) |
 | Implements | Reference architecture 1.2, sections 6, 8.1 and 14.4; tag database contract 1.0, sections 6.3, 9 and 9.5 |
 | Owners of this contract | `libscada-driver`; every `scada-drv-<protocol>` and `scada-io` |
@@ -1198,12 +1198,13 @@ Decision D-94. **Review by a person.**
   raw value is the inverse of the point's scaling (5.1, step 4).
 - **Which path** is CS 7.2's rule, cited here: the integer path when the
   target is INT64 or UINT64 and `scale` is absent or has an integer `gain`
-  or `divide_by` and an integer `offset` (an absent gain counts as 1, an
-  absent offset as 0); binary64 otherwise.
+  and an integer `offset` (an absent gain counts as 1, an absent offset as
+  0); an integer target takes no other scaling (CS 4.7, CF-517); binary64
+  otherwise.
 - **Integer path:** the result is the exact integer and must fit the raw
-  type; (value − offset) must divide by the gain exactly, and the
-  multiplication by `divide_by` is checked; otherwise `INVALID_VALUE`. No
-  value goes through binary64, which would lose values above 2^53.
+  type; (value − offset) must divide by the gain exactly; otherwise
+  `INVALID_VALUE`. No value goes through binary64, which would lose values
+  above 2^53.
 - **Binary64 path**, with contraction off:
   - `scale: { gain, offset }`: raw = (value − offset) / gain;
   - `scale: { divide_by, offset }`: raw = (value − offset) × divide_by;
@@ -2550,6 +2551,7 @@ match, so these are no longer differences from the reference in force.
 | --- | --- | --- |
 | 0.1 | 2026-11-22 | First draft (issue #99, P2-02), from the outline in `docs/contracts/README.md`, reference sections 6, 8.1 and 14.4, TD 1.0, issue #84, and the device survey of 2026-11-22 (not in the repository). Decisions D-81 to D-92 |
 | 0.5 | 2026-11-23 | Rulings of the product owner (section 18, D-103): every open point as drafted, with three changes. A refused new request no longer ends a running refresh; a request with an unknown outcome does, and `<output>.refresh` 3 shows a refresh on an older value (8.12, X-5). Remote `single` and `double` outputs with a `safe_state` of `off` or `on` default to `safe` after 30 s on control loss, and every remote output to `hold` at an orderly stop (8.13.1, O-12). `<output>.failsafe` 3 for FAILED (8.13.3). Tests 37, 44 and 45. Markers of open rulings removed; status accepted for phase 2 implementation; reference 1.2. Migration: none (no implementation yet). |
+| 0.6 | 2026-11-23 | With configuration schemas 0.6 (#100): an integer target takes no `divide_by`, a decimal `gain` or `offset`, or `exponent_from` (CS 4.7, CF-517), so the integer path of 8.4 covers no `scale` and integer `gain` and `offset` only. Migration: none (no implementation yet). |
 | 0.4 | 2026-11-23 | Third pass of the committee on 0.3. The fail-safe state machine (8.13.1 to 8.13.5): the definition of control lost with its grace (`control_attach_grace`), what ends a condition (a mode change, an accepted request, control back), states and `<output>.failsafe`, a writer restart, which checks of 8.2 a fail-safe write passes, repeats with back-off, refusals and budgets (`failsafe_max_refusals`), the journal; removed outputs and slow writers at a generation change (O-18); tests 37 and 38 row by row. The run of consecutive timeouts as one determinate rule (7.3); a reconnect within `connect_timeout`; `TCP_USER_TIMEOUT` from the loss rule; a broken frame on `tcp` closes; a wrong unit id on `rtu_over_tcp` is dropped. `DecodeResult` with read-side kinds; the transaction id in a per-attempt record; run-time objects in the object table. Check 8 refuses a device before its identity check. Inverse scaling cites CS 7.2. Rulings R-18, O-18 to O-20; consequences of R-11, R-16, R-17. Tests 40 to 43. Migration: none |
 | 0.3 | 2026-11-23 | Delta check of 0.2 by the committee. Consecutive timeouts close a connection only when they span every live unit; a close the driver makes itself keeps tags and states; `rtu_over_tcp` read timeouts do not close; a side-effect read timeout closes (7.3, R-15). Two-stage timeout with a margin of 3.5 characters or 20 ms (7.1). Transaction ids per connection; `EncodeResult`, `FrameState`, `DecodeResult` defined; IEC 104 and DNP3 stated as room (2.2). Outcome-queue admission rule (2.4). Stall rule: waits capped, connect counted (2.6). Run-time state kept across a reload (3.2, 12). Non-finite values BAD with OUT_OF_RANGE; `keep_last` UNCERTAIN and STALE then BAD; health point as CS (5). Command kinds with target types and safe actions; master-timed pulses refused (8.3, O-16). Exact integer conversion (8.4). Local-panel input for `local_blocks_auto` (8.2, R-16). Fail-safe actions repeated until confirmed, `<output>.failsafe`; warning for remote switching outputs left at `hold` (8.13, R-11, O-12). `READ_NOW` as a probe on a demoted device (8.14, R-12). Apply as CS 13; a driver without a channel idles (10). A logger thread writes the journal (11.3). Local I/O: helper channels by bus, AO reserved, `hold` keeps direction, the stop step's scope and what it promises (13). Tests 35 to 39; the #108 composition is CS's. One ruling id across both contracts (18). Migration: none; no code depends on 0.2 |
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA and Linux reviewers). The protocol interface is one request per call, the framework owns the exchange (2.2, D-93). Keys, defaults and codes are CS's; this contract cites them. Real-time tier in phase 2 is `scada-io` only; the `SCADA_RT` check stated as it is; allocation and system-call tests (2.5). Request queues per process and source, as reference 5.1. Watchdog ends the process (2.6). Reload builds aside and swaps (3.2). Raw pattern after byte and word order; non-finite values; exponent and integer arithmetic; counters (5). Side effects on register ranges (6.6). Timeout defined, frame time, serial lines, TCP rules: abortive close on a write timeout, consecutive timeouts, idle close, back-off, literal addresses (7). Command kinds, value conversion, selection on mode change, DIRECT on a selected output, `local_blocks_auto`, demoted devices refused, results retried, rate count at the first byte, refresh setpoint only and visible, one fail-safe table, fail-safe without waiting for audit (8). Process start and stop (10). Logging (11.3). Local I/O (13). Simulators and conformance tests extended; a composition for #108 (14, 15). Replayed events deferred (5.9). Decisions D-82 to D-99. Migration: none; no code depends on 0.1 |
