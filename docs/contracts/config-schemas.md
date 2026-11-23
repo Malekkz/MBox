@@ -131,11 +131,45 @@ scalar gets its type is section 1.2, not a YAML schema.
 | Block and flow mappings and sequences | Anchors (`&a`), aliases (`*a`), merge keys (`<<`) |
 | Keys that are plain or quoted scalars | Complex keys (`? `), keys that are collections, duplicate keys after typing (CF-111) |
 | Plain, single-quoted and double-quoted scalars; literal (`\|`) and folded (`>`) block scalars | Tags (`!x`, `!!str`) |
-| Comments (`#`) | `null`, `~` or an empty value; a key must have a value (CF-112) |
+| Comments (`#`) | `null`, `Null`, `NULL`, `~` or an empty value; a key must have a value (CF-112) |
 
 Reason: anchors, merge keys and tags let one line change values far away and
 make "file and line" of an error ambiguous; templates (section 4) are the
 mechanism for reuse.
+
+The subset in detail (D-106):
+
+- A file gives at most one stage 2 error: the first refusal ends its parse.
+  Columns count characters (code points), not bytes; the offset of CF-114
+  counts bytes from 0.
+- Invalid UTF-8, a NUL, a CR without LF, the C0 and C1 control characters,
+  DEL and the non-characters U+FFFE and U+FFFF are CF-114 anywhere. A tab is
+  CF-114 outside a comment, a quoted scalar and the content of a block
+  scalar: in indentation, between tokens, in a plain scalar and on a blank
+  line, YAML white space is spaces only.
+- `null`, `Null`, `NULL` and `~` as plain values, an empty value and an
+  empty sequence item are CF-112. As keys, and quoted, they are text.
+- An escape that gives U+0000 (`\0`, `\x00`, `\u0000`) is CF-110. An escape
+  of a surrogate code point (`\uD800` to `\uDFFF`) is CF-110, also when two
+  of them form a pair: a character above U+FFFF is written as itself or as
+  `\U` with eight digits. The other escapes of YAML 1.2 are accepted; the
+  schema decides whether a control character may stand in a value
+  (section 2.1).
+- A flow mapping is written in braces. A single-pair mapping inside a flow
+  sequence (`[a: b]`) is CF-110.
+- Every line inside a flow collection, its closing bracket included, is
+  indented more than the key or the sequence item that holds the
+  collection. A closing bracket at the key's indentation is CF-110 with its
+  own message, which says to indent the bracket or to write the list as a
+  block:
+
+  ```
+  ports: [
+    502,
+  ]
+  ```
+
+  is CF-110 at 3:1.
 
 ### 1.2 Scalar typing
 
@@ -211,8 +245,8 @@ no error, except stage 3, which checks every file that parsed in stage 2.
 | Stage | What | Codes |
 | --- | --- | --- |
 | 1 | The tree: paths, file kinds, sizes | CF-101, CF-103; CF-113 for the file and tree size limits |
-| 2 | Parsing of every file | CF-110 to CF-114; CF-113 for the node, depth, entry, scalar and key limits |
-| 3 | Schema of each file (before expansion; expression strings are checked as text) | CF-2xx (CF-212 on a name written in the file); CF-102 at the line of the name key; CF-111 for keys that are equal only once typed (section 1.2); CF-517 when its keys are in one point object |
+| 2 | Parsing of every file | CF-110 to CF-114; CF-113 for the node, depth, entry, scalar and key limits; CF-920 at 1:1 on every `control/*.st` file (section 9.3) |
+| 3 | Schema of each file (before expansion; expression strings are checked as text) | CF-2xx (CF-212 on a name written in the file); CF-102 at the line of the name key; CF-111 for keys that are equal only once typed (section 1.2); CF-517 when its keys are in one point object; CF-520, CF-526, CF-528 and CF-529 for the syntax of an expression (D-109) |
 | 4 | Expansion of templates and instances | CF-4xx; CF-113 for the `repeat` limit; CF-1001 when the expanded tags pass `limits.max_tags` (expansion stops); CF-212 on a name made by expansion |
 | 5 | Names, references and cross-file rules of the expanded tree | CF-3xx, CF-5xx to CF-9xx (CF-517 when merging brought its keys together) |
 | 6 | The tag set, which gives the `config_hash` the expanded files carry | CF-10xx, but CF-1001, CF-1012 and CW-1013 |
@@ -804,7 +838,8 @@ order, in binary64 unless every step stays an integer:
 **An integer value type needs an integer scaling.** A `value_type` of
 `int64` or `uint64`, given or derived, takes no `scale`, or a `gain` and an
 `offset` written as integers (section 1.2; an absent `gain` counts as 1 and
-an absent `offset` as 0). A `divide_by` above 1, a `gain` or `offset`
+an absent `offset` as 0). `divide_by: 1` and an absent `divide_by` are
+integer scalings. A `divide_by` above 1, a `gain` or `offset`
 written as a decimal, and `exponent_from` are refused with it (CF-517), at
 stage 3 when the keys are in one point object and at stage 5 when merging
 brought them together (section 4.5). For an integer value type, read and
@@ -1448,8 +1483,8 @@ contract 9.4). The driver interface contract says what is sent for each.
 **From engineering value to raw value.** For a `setpoint`, the raw value is
 computed from the requested value v. For an INT64 or UINT64 target with no
 `scale`, or whose `gain` and `offset` are integers (written as integers,
-section 1.2; an absent `gain` counts as 1 and an absent `offset` as 0; an
-integer target takes no other scaling, CF-517, section 4.7), it is
+section 1.2; an absent `gain` and `divide_by: 1` count as a gain of 1 and
+an absent `offset` as 0; an integer target takes no other scaling, CF-517, section 4.7), it is
 computed in exact integer arithmetic: the result is the exact integer
 (v − offset) ÷ gain, every step checked, and it must fit the raw type, so a UINT64 target with a
 negative offset is not refused for a difference above 2^63 − 1 (with no
@@ -1790,6 +1825,14 @@ blocks:
 
 ### 9.3 Structured-text programs
 
+**Not available in this version.** Every file `control/<name>.st` is
+refused with CF-920 at line 1, column 1, message `structured text is not
+available in this version`, in stage 2, after the limits of stage 1. A tree
+with a `.st` file is therefore not committed: a program that is not run must
+not look accepted. The grammar below is the one a later version implements
+(phase 6); until then CF-920 means "not available", and CF-921 and CF-922 do
+not arise.
+
 A file `control/<name>.st` holds one program:
 
 ```
@@ -2030,7 +2073,7 @@ runtime diagnostics only.
 | CF-914 | Pin types do not match | `block {id}: input {pin} needs {type}, {source} is {other}` |
 | CF-915 | A loop in the block graph | `blocks form a loop: {ids}; mark one source prev: true if intended` |
 | CF-916 | An output driven twice | `output {name} is driven by {a} and {b}` |
-| CF-920 | A structured-text error | `{reason}` |
+| CF-920 | A structured-text error; in this version, every `.st` file (section 9.3) | `{reason}`; in this version `structured text is not available in this version` |
 | CF-921 | A `FOR` loop with non-literal bounds or more than 10,000 iterations | `FOR loop: {reason}` |
 | CF-922 | An assignment to something the program may not write | `{target} cannot be written by program {name}` |
 
@@ -2754,6 +2797,18 @@ order of section 1.4. The tests run on x86-64 and ARM64.
    `null`, `yes`, `True`, `010`, `+5`, `.5`, `1_000`, a byte order mark, a
    NUL, each refused with its code and the right column; `label: 0123` read
    as a string; `gain: 10` and `gain: 10.0` giving `int64` and `float64`.
+   Also, each with its code and column (section 1.1): `Null`, `NULL`, `~`
+   and an empty sequence item; `[a: b]`; `"\0"` and a surrogate pair
+   written as two `\u` escapes; a tab in a plain scalar and on a blank line;
+   U+FFFE; a column after a multi-byte character, counted in characters; a
+   file with two errors giving the first only; a flow collection's closing
+   bracket at its key's indentation, with its own message; a scalar at the
+   scalar limit accepted and one byte above it refused (CF-113), for a
+   block scalar whose content is blank lines too; a `control/*.st` file
+   refused with CF-920 at 1:1 (section 9.3); an `int64` point with
+   `divide_by: 10`, with a decimal `gain` and with `exponent_from` refused
+   (CF-517), and with `divide_by: 1`, with an integer `gain` and with no
+   `scale` accepted.
 4. Limits: one case per limit of section 1.3, each refused before the work it
    bounds (a range `"1..9223372036854775807"` is refused without iterating;
    a tree that passes `limits.max_tags` stops expanding); a symbolic link, a
@@ -3035,7 +3090,7 @@ the reference finds it.
 | 0.3 | 2026-11-23 | Delta check of 0.2 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: one apply sequence, triggered by the watched link, with step tables, power cuts, the report and idle drivers that never exit (13.4 to 13.7, D-100); the driver's check mode instead of linked protocol libraries, and the expanded file's format (13.1, 13.3); a changed uid makes a new version (13.2); `lost_after_timeouts` split into write and read cases (4.6); `timeout` cites the driver interface's frame time (4.11); the grammar fixed (no range as an operand, reserved words only as one-segment names, `0x` literals, literal bounds) and checked mechanically (5.6, D-78); `avg` REAL; `keep_last` UNCERTAIN and STALE, then BAD; `states` integer keys; exact integer inverse scaling; `double` targets INT64; `safe_state` per kind; `latch` reserved; fail-safe writes repeated (`failsafe_retry`, `<output>.failsafe`); `local_panel` as an input tag; shared command registers; `only` in templates; joined `repeat` bindings; the stage of each code; `scan: auto`, the stop step and `at_start` in Annex B; NTP host names allowed; rulings O-5 split, O-11 to O-17 added, one id per ruling across both contracts. New codes CF-422, CF-528, CF-529, CF-640, CF-718 to CF-720, CW-721, CF-1012, CW-1013, CF-1014, CW-1015, CW-660, CW-661; CF-660 and CF-661 removed. Migration: none (draft). |
 | 0.4 | 2026-11-23 | Third pass on 0.3 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: the fail-safe state machine is the driver interface contract's (8.13) and 7.4 cites it; new keys `control_attach_grace`, `failsafe_max_refusals`, and `failsafe_retry` as the first interval of a back-off; owner and meaning of `<output>.failsafe`; removed outputs and slow writers at a generation change (13.5, O-18); the `scada-tagd` hang (O-19); stages 6 and 7 swapped so that the check reads the bytes the driver reads; `apply.json` against the link after a power cut; the kind of apply against the running generation; reports paired with their `config_id`, state 3, `incomplete` after 30 s; check mode enforcement, re-check after a driver update, expanded-file limits, format version, computed values, JSON subset, load thread; CW-661 removed (validation opens no hardware); idle drivers keep the watchdog; exact integer inverse scaling with no `scale`; CW-721 only when both keys are absent; CF-722, CF-723, CF-1016; lexical rules (abutting tokens, case); corpus cases; `lost_after_timeouts` quotes the driver interface rule word for word; `apply.json` by rename, the switch back after a refused G2, a power cut before it, the first start, retention (`conf.keep_versions`); check-mode enforcement without privilege; re-check in the update's health check; the stop step's version, form and bound; `auto` by ancestor bus; A.3 and A.5 on shared command registers; rulings O-18 to O-20, X-5 dissent, consequences of O-13, R-11, R-16, R-17. Migration: none (draft). |
 | 0.5 | 2026-11-23 | Rulings of the product owner of 2026-11-23 (section 15): every ruling as drafted on the committee's recommendation, with three changes: X-5 (a refused newer request does not end the refresh, an unknown outcome ends it; `<output>.refresh` value 3), O-12 (remote switching outputs default to `safe` on control loss after 30 s and to `hold` at an orderly stop; CW-721 now warns on an explicit hold on control loss), `<output>.failsafe` value 3 for an action given up. Every "open" marker replaced by its ruling; status accepted for phase 2 implementation; reference architecture 1.2; differences 23 and 24; test 23. Migration: none |
-| 0.6 | 2026-11-23 | Corrections found while P2-03 (#100) implements the contract, agreed with the lead: CF-102 arises in stage 3 at the line of the name key, not in stage 1 (a file name can only be compared with its name key once parsed); CF-111 for keys equal only once typed arises in stage 3, which types them; a `value_type` of `int64` or `uint64` needs an integer scaling (CF-517, 4.7, 10.5), so the exact-integer write of 7.2 covers no `scale` and integer `gain` and `offset` only, and read and write of an integer point are exact inverses (the gap was found by #104); the keywords of the schema files, the project keywords `x-scada-*` and their types (Annex C); `libscada-conf` for `libscada-config` (13.3). Migration: none (no tree of format 1 is deployed yet) |
+| 0.6 | 2026-11-23 | Corrections found while P2-03 (#100) implements the contract, agreed with the lead: CF-102 arises in stage 3 at the line of the name key, not in stage 1 (a file name can only be compared with its name key once parsed); CF-111 for keys equal only once typed arises in stage 3, which types them; a `value_type` of `int64` or `uint64` needs an integer scaling (CF-517, 4.7, 10.5), so the exact-integer write of 7.2 covers no `scale` and integer `gain` and `offset` only, and read and write of an integer point are exact inverses (the gap was found by #104); `divide_by: 1` and an absent `divide_by` are integer scalings (4.7); the keywords of the schema files, the project keywords `x-scada-*` and their types, with the types of the protocol, template and point files and the two expression forms (Annex C), and the expression syntax codes in stage 3; the YAML subset in detail (1.1, D-106): one stage 2 error per file, columns in characters, `Null` and `NULL`, the `\0` and surrogate escapes, `[a: b]`, tabs, U+FFFE and U+FFFF, and a flow collection's closing bracket; structured text is not available in this version, and every `.st` file is CF-920 at 1:1 (9.3); the corpus cases of these (test 3); `libscada-conf` for `libscada-config` (13.3). Migration: none (no tree of format 1 is deployed yet) |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
@@ -3370,12 +3425,23 @@ Types of `x-scada-type`:
 | `boolean` | Plain `true` or `false` | 1.2 |
 | `duration`, `size`, `percentage` | Plain or quoted | 2.2 (CF-206) |
 | `number_or_percentage` | A plain number, or a percentage | 2.2 |
-| `expression` | Any text; its grammar is checked later | 2.4, 5.6 |
+| `expression` | The run-time form of the grammar; its syntax is checked in stage 3 (CF-520, CF-526, CF-528, CF-529), its names and types in stage 5 | 2.4, 5.6 |
 | `number_or_expression` | A plain number, otherwise an expression | 1.2 |
 | `host`, `host_name`, `ip_address`, `cidr` | A host name (RFC 1123) or an IP address; a host name; an IPv4 or IPv6 address; an address with a prefix length | 3, A.1 |
 | `time_zone` | The form of an IANA zone name; whether the zone exists on the unit is not checked | 3 |
 | `time_of_day` | `HH:MM`, 00:00 to 23:59 | 3 |
 | `https_url` | An `https://` URL | 3 |
+| `point_name_template` | A point name that may hold `{<variable>}` of a `repeat` block; checked as a tag name with each variable replaced; the full name is checked after expansion | 2.1, 4.4 (CF-212) |
+| `name_pattern` | A pattern of point names (`*`, `?`) that may hold `{<variable>}` | 2.5, 4.4 (CF-212) |
+| `raw_pattern`, `raw_pattern_or_nan` | Plain only; 0 to 2^64 − 1, or a negative int64 value; the second also takes `nan` | 2.3, 4.7 |
+| `number_or_boolean` | A plain number, or plain `true` or `false` | 4.7, 7.2 |
+| `number_or_tag` | A plain number, otherwise a tag name | 4.7 (CF-212) |
+| `duration_or_off` | A duration, or `off` | 2.2, 4.6 |
+| `ip_literal_host` | An IP address; a host name is reserved in this version (CF-210) | A.1 |
+| `dev_path` | An absolute path under `/dev/`, at most 255 bytes, without empty, `.` or `..` components | A.1 |
+| `resolution` | `1s`, `1ms` or `<n>ns` with n ≥ 1 | A.2 |
+| `config_expression` | The configuration form of the grammar (strings, `IN`, ranges); its syntax is checked in stage 3 (CF-520, CF-526, CF-528, CF-529) | 4.4, 5.6 |
+| `for_value` | The `for_value` form of a `repeat` range; its syntax is checked in stage 3 | 4.4, 5.6 |
 
 To any other JSON Schema 2020-12 validator the `x-scada-*` keywords are
 annotations, so a schema file stays valid JSON Schema; such a validator
