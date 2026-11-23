@@ -2,7 +2,7 @@
 
 Nov 12, 2026 · @Malek
 
-**Version 1.1, frozen on 13 November 2026; section 5 updated on 16 November 2026, and a line of 17.4 corrected on 22 November 2026 (change log).** This is the baseline for the build. Later changes are reviewed before they are made and recorded in the change log (section 20).
+**Version 1.2 of 23 November 2026: the product owner's rulings on the driver interface and configuration schemas contracts (change log). Version 1.1 was frozen on 13 November 2026; section 5 updated on 16 November 2026, and a line of 17.4 corrected on 22 November 2026.** This is the baseline for the build. Later changes are reviewed before they are made and recorded in the change log (section 20).
 
 ## 1. Purpose and scope
 
@@ -162,10 +162,10 @@ The system targets 64-bit Linux on x86-64 and ARM64, with each process running a
 
 ### 4.3 Real-time tier and fallback
 
-The 10 ms tier applies to `scada-control`, `scada-io` and any driver assigned to a fast poll group.
+The 10 ms tier applies to `scada-control` and `scada-io`. Protocol drivers run outside it; real-time protocol drivers and synchronous scan groups (section 6.2) are a later version of the driver interface contract (ruling O-4).
 
 1. At start, `scada-control` checks whether the kernel is PREEMPT\_RT and whether it holds permission for `SCHED_FIFO` and `mlockall`.
-2. If both hold, real-time tasks run under `SCHED_FIFO` with locked memory, pre-faulted stacks, and no heap allocation inside the cycle. CPU isolation for these threads should be configurable.
+2. If both hold, real-time tasks run under `SCHED_FIFO` with locked memory, pre-faulted stacks, and no heap allocation inside the cycle. CPU isolation for these threads is configured by `realtime.cpus` in `system.yaml`.
 3. If either fails, the same tasks run under the normal scheduler at the same period. The unit raises a standing system alarm, "real-time tier unavailable", and sets a status tag.
 4. In both modes, each task records its cycle time, jitter and overruns in system tags. An overrun must never be silent.
 
@@ -175,8 +175,8 @@ Fallback is automatic and never prevents start-up. Whether a project may operate
 
 | Path | Content |
 | --- | --- |
-| `/etc/scada/` | Active configuration files (section 12) |
-| `/var/lib/scada/config-history/` | Committed configuration versions |
+| `/etc/scada/` | A symbolic link to the active configuration tree, `/var/lib/scada/conf/active/tree` (section 12) |
+| `/var/lib/scada/conf/` | Committed configuration versions, the `active` link and the staged tree (section 12.4) |
 | `/var/lib/scada/hist/` | Time-series files and the historian index |
 | `/var/lib/scada/journal/` | Alarm, event and audit journals |
 | `/var/lib/scada/retain/` | Retained tag values |
@@ -202,7 +202,7 @@ The database is split into one region file per writer, so the operating system e
 | `tags.<owner>` | The owner | Array of tag records for the tags that owner writes |
 | `changes.<owner>` | The owner | Broadcast ring of tag changes from that owner |
 | `events.<producer>` | The producing thread | Reliable queue of journal events (alarms, commands, audit) |
-| `cmd.<driver>.<source>` | The source (`control` or `cmd`) | Write requests for that driver |
+| `cmd.<driver>.<source>` | The source: `scada-cmd`, or one control task | Write requests for that driver process; `<source>` is `cmd` or a short name of the task |
 | `result.<driver>.<source>` | The driver | Results of those write requests |
 | `strings.<owner>` | The owner | Fixed-size slots for string tag values |
 
@@ -250,7 +250,7 @@ Three mechanisms carry everything that is not a current value. All are single-pr
 
 - A change entry holds tag handle, type, value, quality and flags, source time and update monotonic time (32 bytes), and no sequence number of its own. A consumer also gets a gap when the owner restarts (the ring's epoch changes), when the owner's process goes down or comes back, and when the ring file appears, disappears or is replaced. Default ring size is 65,536 entries per owner and is configurable; it must be at least twice the owner's tag count.
 - A subscription is per owner; a filter by tag is applied by the caller.
-- The rule for event queues is **no audit, no action**: if a command cannot be journalled, it is rejected. Every write request, `AUTO` included, needs its event record accepted first.
+- The rule for event queues is **no audit, no action**: if a command cannot be journalled, it is rejected. Every write request, `AUTO` included, needs its event record accepted first. A fail-safe action of `scada-io` or a driver (section 14.4) is not a write request: it is taken first, and its record is posted afterwards, best effort.
 - When the historian detects a change-ring gap, it must write a gap marker for the affected tags so that missing data is visible, not silently interpolated.
 - A command is never executed twice and never executed late. A driver takes a request before it acts on it, so a request is not delivered again after a driver crash. When a driver attaches, the library drains the requests still in its command queues without executing them and answers each `ABORTED`; selections do not survive a driver restart. A request that has expired, or whose lifetime is longer than the limit (60 seconds), is answered `EXPIRED` by the library and never reaches the driver.
 - Consumers sleep until new entries arrive, on a shared futex in the read-only mapping. Writers never wake anyone: a thread calls `scada_tag_notify` after its writes and posts (a real-time task once per cycle), so `write` and the queue post make no system call. A wait is capped at 100 ms, so a missed notify delays delivery but cannot lose it.
@@ -275,9 +275,9 @@ A write request and its result have these fields:
 ### 5.5 Versioning and reconfiguration
 
 - The header carries a layout version (the binary structure) and a config generation (the set of tags). `libscada-tag` refuses to attach when its compiled layout version differs.
-- Changes that do not alter the tag set (alarm limits, poll rates, scaling, logic parameters) are applied live by a reload signal.
+- Changes that do not alter the tag set (alarm limits, poll rates, scaling, values of existing logic parameters) are applied live. Every service watches the active configuration version and reloads when it changes; no signal is sent (ruling O-13). Adding or removing an alarm, an output or a tunable parameter changes the tag set.
 - Restarting `scada-tagd` with an unchanged tag set keeps the generation, and the other processes keep running.
-- Changes that add, remove or retype tags create a new generation. `scada-tagd` builds it and marks the old one `RETIRING`. Each process then drains its queues (requests still queued are answered `ABORTED`), detaches, attaches to the new generation and resolves its handles again. Retained values are handed over through retain files that `scada-tagd` writes, marked final, once each owner has left the old generation. `scada-conf` performs the coordinated restart: outputs hold their last value or go to their safe state as configured, services reattach, and retained values are restored. This should complete within a configurable time limit (default 5 seconds; conformance test 21 checks 5 seconds). If the limit is exceeded, outputs go to their safe state and a system alarm is raised.
+- Changes that add, remove or retype tags create a new generation. `scada-tagd` builds it and marks the old one `RETIRING`. Each process then drains its queues (requests still queued are answered `ABORTED`), detaches, attaches to the new generation and resolves its handles again. Retained values are handed over through retain files that `scada-tagd` writes, marked final, once each owner has left the old generation. `scada-tagd` starts the generation change when it sees a committed version with a new tag set; each writer of outputs applies their configured behaviour during the change, services reattach, and retained values are restored. Outputs that the commit removes get their `on_shutdown` behaviour (rulings O-18, O-19). This should complete within a configurable time limit (default 5 seconds; conformance test 21 checks 5 seconds). If the limit is exceeded, each writer that is late sends its `hold` outputs to their safe state and a system alarm is raised.
 - Adding tags without a restart may be built later; the tag directory format should not prevent it.
 
 ### 5.6 Retained values
@@ -312,23 +312,9 @@ Each protocol is a separate process built on one driver framework, so a new prot
 
 ### 6.1 Driver framework
 
-A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command handling on top of the command queues (the tag library drains them at attach and answers expired requests, section 5.3), statistics, heartbeat and reload. A protocol implements this interface:
+A shared library, `libscada-driver`, supplies everything that is not protocol-specific: configuration loading, tag binding, poll scheduling, command handling on top of the command queues (the tag library drains them at attach and answers expired requests, section 5.3), statistics, heartbeat and reload. A protocol implements a **frame protocol**: it plans the requests for a poll group, encodes one request into a frame, says when an answer frame is complete, and decodes it, one request per call and without I/O of its own. The framework owns the exchange: transport, timeouts, retries, pacing and writes first. The interface is the driver interface contract's (section 2.2); session and report-driven protocols get their own form there in a later phase.
 
-```cpp
-class ProtocolDriver {
-public:
-  virtual Status configure(const DriverConfig&) = 0;      // parse channels, devices, points
-  virtual Status connect(Channel&) = 0;                   // open port or session
-  virtual void   disconnect(Channel&) = 0;
-  virtual Status poll(Device&, PollGroup&, Samples& out) = 0;   // polled protocols
-  virtual void   on_unsolicited(Device&, Samples& out) {}       // report-driven protocols
-  virtual Result write(Device&, const WriteRequest&) = 0;       // DIRECT, SELECT, OPERATE, CANCEL
-  virtual Status read_now(Device&, PointRef, Samples& out) = 0;
-  virtual ~ProtocolDriver() = default;
-};
-```
-
-The hierarchy is **driver, channel, device, point**. A channel is one physical or logical connection (a serial port, a TCP connection, a broker session). Each channel runs in its own worker thread, so a slow device only delays others on the same channel.
+The hierarchy is **driver, channel, device, point**. A channel is one physical or logical connection (a serial port, a TCP connection, a broker session). Each channel runs in its own worker thread, so a slow device only delays others on the same channel. A command thread takes the requests from the driver's command queues and hands them to the channel workers. A worker that stalls ends its driver process, so every channel of that driver restarts (driver interface contract 2.6).
 
 ### 6.2 Polling model
 
@@ -336,8 +322,8 @@ The hierarchy is **driver, channel, device, point**. A channel is one physical o
 - Within a channel, the scheduler serves pending write requests first, then poll groups by priority, then by due time.
 - The framework must merge adjacent points into block reads where the protocol allows it (for example contiguous Modbus registers), within a configurable maximum gap.
 - Each device has a timeout and a retry count. After a configurable number of consecutive failures the device is **demoted**: its tags go to `BAD` with `COMM_FAIL`, and it is retried at a slow backoff rate so that it stops stalling the channel.
-- If a point is not refreshed within its `max_age`, its tag gets the `STALE` flag. Marking staleness is the driver's job for its own tags.
-- A **synchronous scan group** may be configured for a small set of devices: the driver signals `scada-control` at the end of each scan, and a control task bound to that group runs once per scan (read, compute, write) instead of on a timer.
+- If a point is not confirmed by a successful read within its `max_age`, its tag gets the `STALE` flag; a value read again unchanged is confirmed. Marking staleness is the driver's job for its own tags.
+- A **synchronous scan group** may be configured for a small set of devices (in a later phase, section 4.3): the driver signals `scada-control` at the end of each scan, and a control task bound to that group runs once per scan (read, compute, write) instead of on a timer.
 
 ### 6.3 Diagnostics
 
@@ -345,18 +331,18 @@ Every driver must publish system tags per channel and per device: connection sta
 
 ### 6.4 Protocol notes
 
-All drivers act as client or master only.
+All drivers act as client or master only. A channel may later be declared to listen for devices that connect to the unit, still as client or master (driver interface contract 3.4).
 
 | Driver | Must support | Notes |
 | --- | --- | --- |
-| Modbus | RTU over RS-485 and TCP; function codes 1 to 6, 15, 16; configurable byte and word order; bit extraction | One channel per serial port; several devices per port |
+| Modbus | RTU over RS-485 and TCP; function codes 1 to 6, 15, 16 as the minimum set, each device using those it declares; configurable byte and word order; bit extraction | One channel per serial port; several devices per port |
 | OPC UA | Client with subscriptions (monitored items) and fallback to polled reads; security policies with certificates | Source timestamps and status codes map to tag timestamp and quality |
 | MQTT Sparkplug B | Host application role: consumes birth, data and death messages; issues commands | Death messages set tags to `BAD`; plain MQTT with JSON topic mapping should also be supported |
 | IEC 61850 | MMS client: data sets, buffered and unbuffered reports, direct and select-before-operate control models; SCL file import for point lists | GOOSE is deferred |
 | IEC 60870-5-104 | Controlling station: general interrogation, spontaneous data, clock sync, single and double commands with select and execute, setpoints | Device timestamps preserved |
 | DNP3 | Master: integrity and event polls, unsolicited responses, select-before-operate and direct operate, time sync | Device timestamps and flags map to tag timestamp and quality |
 
-Where a protocol has a native select-before-operate procedure, the driver must use it for `SELECT` and `OPERATE` requests. Where it does not (Modbus), the driver accepts `OPERATE` after a `SELECT` held by the command gateway (section 8.2).
+Where a device has a native select-before-operate procedure, configured per device and point, the driver must use it for `SELECT` and `OPERATE` requests. Where it does not (most Modbus devices), the driver accepts `OPERATE` after a `SELECT` held by the command gateway (section 8.2).
 
 ### 6.5 Local I/O HAL
 
@@ -367,7 +353,7 @@ Where a protocol has a native select-before-operate procedure, the driver must u
 - A `simulator` backend must exist from the first build phase, so every other component can be developed and tested without hardware.
 - `scada-io` scans at the fastest control task period (10 ms by default) and is part of the real-time tier.
 - Digital inputs support configurable debounce; analog channels support scaling, clamping and a filter time constant.
-- Every output channel has a configured **safe state** (`off`, `on`, `hold`, or a value). `scada-io` applies it when the control runtime's heartbeat stops, when a hardware watchdog is about to expire, and on shutdown (section 14.4).
+- Every output channel has a configured **safe state** (`off`, `on`, `hold`, or a value). `scada-io` applies it when the control runtime's heartbeat stops, when a hardware watchdog is about to expire, and on shutdown (section 14.4). Protocol drivers apply the safe state of remote outputs in the same cases, as configured per output (driver interface contract 8.13).
 
 ## 7. Control runtime
 
@@ -469,9 +455,11 @@ Each controllable point is declared once in configuration as an **output** with 
 | Request tag | `scada-control` in auto, `scada-cmd` in manual | The value last requested |
 | Feedback tag | The driver | The state the device reports |
 | Mode tag | `scada-cmd` | `AUTO` or `MANUAL`; retained |
-| Status tag | `scada-cmd` | `IDLE`, `SELECTED`, `EXECUTING`, `OK`, `FAILED`, `BLOCKED` |
+| Status tag | `scada-cmd` | `IDLE`, `SELECTED`, `EXECUTING`, `OK`, `FAILED`, `BLOCKED`, `ACCEPTED_UNVERIFIED` (an output with `no_feedback`) |
 
-Because a tag has one owner, the request is stored as two tags (auto request, manual request) and the driver framework reads the one that matches the mode. The driver accepts `AUTO`-sourced write requests only when the mode is `AUTO`, and `OPERATOR`-sourced ones only when it is `MANUAL`; anything else is answered `NOT_AUTHORISED`.
+Because a tag has one owner, the request is stored as two tags (auto request, manual request) and the driver framework reads the one that matches the mode. The driver accepts `AUTO`-sourced write requests only when the mode is `AUTO`, and `OPERATOR`-sourced ones only when it is `MANUAL`; anything else is answered `NOT_AUTHORISED`. While `scada-cmd` is down its mode tags read `BAD` with `OWNER_DOWN`, and the driver accepts `AUTO` requests on a stored mode of `AUTO`, so automatic control does not depend on `scada-cmd` (driver interface contract 8.2).
+
+A setpoint output may instead be refreshed by its driver, which writes the last value it executed again each period (driver interface contract 8.12); an output uses one of the two.
 
 On a slave unit an output can have a third mode, `REMOTE`, in which the request comes from the master's control logic (section 17.4).
 
@@ -495,7 +483,7 @@ Interlocks are re-evaluated at step 9, immediately before the request is posted,
 Control authority decides where commands may come from, per configured **area** (a named group of outputs).
 
 - Authority locations are `LOCAL_PANEL`, `CLI`, `WEB` and `API`.
-- `LOCAL_PANEL` is bound to a digital input tag from a physical local/remote switch, where one exists. While it is active, every command from the unit to that area is refused, including automatic ones if the area is configured `local_blocks_auto: true`.
+- `LOCAL_PANEL` is bound to a digital input tag from a physical local/remote switch, where one exists. While it is active, every command from the unit to that area is refused, including automatic ones if the area is configured `local_blocks_auto: true`; the driver refuses those automatic ones, and also while the switch input is not `GOOD`.
 - Among `CLI`, `WEB` and `API`, exactly one holds authority per area at a time. A user with the required permission can take authority; the transfer is audited and shown on every HMI session.
 - Authority state is retained across restarts.
 
@@ -769,9 +757,10 @@ The whole unit is defined by a tree of YAML and JSON files under `/etc/scada/`. 
 | `system.yaml` | Unit identity, time zone and time sync, network, storage thresholds, upstream sync, email server |
 | `security.yaml` | Roles and permissions, password and session policy, TLS settings |
 | `areas.yaml` | Areas, and control authority settings per area |
-| `templates/*.yaml` | Device templates: points, scaling, alarms, logging policy and default symbol for one device type |
-| `drivers/<driver>/*.yaml` | Channels and device instances; each device references a template or lists its points |
+| `templates/*.yaml` | Device templates: points, scaling, alarms, logging policy and default symbol for one device type (no subdirectories) |
+| `drivers/<driver>/<channel>.yaml` | One channel per file, named after the channel, with its device instances; each device references a template or lists its points |
 | `tags/*.yaml` | Virtual (calculated), internal and manually entered tags |
+| `enums.yaml` | Enumerations shared by templates and tags |
 | `outputs/*.yaml` | Outputs: request and feedback binding, select-before-operate, limits, interlocks, safe state |
 | `alarms/*.yaml` | Alarms not already supplied by a template |
 | `logging.yaml` | Logging policies |
@@ -779,6 +768,8 @@ The whole unit is defined by a tree of YAML and JSON files under `/etc/scada/`. 
 | `notifications.yaml` | Email rules and recipient lists |
 | `screens/*.json`, `symbols/*.json` | Mimic screens, dashboards and symbols |
 | link.yaml (slave), drivers/link/\*.yaml (master) | Node link exports and connections (section 17) |
+
+Any file not listed here is an error.
 
 User accounts and password hashes are not in this tree; they live in a separate store (section 13.2). Secrets such as SMTP passwords and private keys are referenced by name and held in the secrets store (section 13.3).
 
@@ -836,7 +827,7 @@ points:
 channel:
   name: line1
   type: rtu
-  port: /dev/ttyS1
+  device: /dev/ttyS1
   baud: 19200
   parity: even
   poll_groups:
@@ -911,7 +902,7 @@ blocks:
 5. **Apply:** affected services reload live, or the data plane restarts if the tag set changed (section 5.5). The user is told which before confirming.
 6. **Confirm or revert:** changes to network, time or security settings must be confirmed within a timeout (default 5 minutes) or they roll back automatically, so a mistake cannot lock everyone out.
 
-The version store under `/var/lib/scada/config-history/` should be a Git repository, which provides history, diff and rollback without new code. Rollback creates a new version whose content equals an older one; history is never rewritten.
+The version store under `/var/lib/scada/conf/` keeps each committed version as a complete directory; `scada-conf` provides history, diff and rollback (rulings O-5, O-11). Rollback creates a new version whose content equals an older one; history is never rewritten.
 
 ### 12.5 Validation rules
 
@@ -920,10 +911,10 @@ Validation must cover at least:
 - Schema conformance of every file.
 - Unique tag names; every reference to a tag, template, policy, area or symbol resolves.
 - Exactly one owner per tag.
-- No overlapping or duplicate device addresses on a channel; address ranges valid for the protocol.
+- No overlapping or duplicate device addresses on a channel (devices may share a protocol address when the data they use is disjoint, ruling X-4); address ranges valid for the protocol.
 - Structured-text programs compile; function block wiring is type-correct and free of unintended loops.
 - The task timing rules of section 7.5.
-- Every output has a safe state, a feedback binding or an explicit `no_feedback: true`, and an area.
+- Every output has a safe state, a feedback binding or an explicit `no_feedback: true`, an area, and, if it switches, its interlocks (an empty list allowed; ruling O-21).
 - Totals within the unit's limits (tag count, devices per channel, ring sizes).
 
 ### 12.6 System settings and the privileged helper
@@ -1046,7 +1037,7 @@ The following constraints are in force now so the later move is a packaging chan
 | --- | --- | --- |
 | A service crashes or hangs | systemd exit status or missed watchdog | Restart with backoff; system alarm; its tags read `BAD` with `OWNER_DOWN` until it returns |
 | A service restarts repeatedly | Restart counter | Stop restarting after a limit, keep the alarm, leave the rest running |
-| `scada-control` stops | Heartbeat in its `proc` region (section 5.4) | `scada-io` and drivers apply each affected output's configured behaviour: hold, or go to safe state after a timeout |
+| `scada-control` stops | Heartbeat in its `proc` region (section 5.4) | `scada-io` and drivers apply each affected output's configured behaviour: hold, go to the safe state, or write a release value, after a configured delay. Defaults: local outputs safe at once; switching outputs of protocol drivers whose safe state is off or on safe after 30 s; other remote outputs hold (ruling O-12). A fail-safe write that is not confirmed is repeated while its condition holds (R-11), and does not wait for an audit record (O-1) |
 | A driver loses a device | Timeouts | Tags `BAD` with `COMM_FAIL`; device demoted; control blocks apply bad-input behaviour |
 | Whole system hangs | Hardware watchdog not refreshed | Reboot; onboard outputs go to their hardware default state |
 | Command path broken | Request expiry or missing feedback | Command fails visibly; no automatic retry of operator commands |
@@ -1055,7 +1046,7 @@ The following constraints are in force now so the later move is a packaging chan
 
 - The hardware watchdog is refreshed by a small dedicated chain: systemd refreshes the hardware device, and systemd in turn depends on the health of `scada-tagd`, `scada-io` and `scada-control`. A hang in any of those three should lead to a reboot if restarting does not recover it.
 - **Safe states on remote devices:** the unit can only command a safe state while it is alive and connected. If the unit itself dies, remote devices must fall back on their own communication-loss behaviour. Where a device supports a communication watchdog or heartbeat register, the driver should serve it, and the site engineer must configure the device's fallback.
-- On orderly shutdown and before updates, outputs follow a per-output `on_shutdown` setting: `hold` (default for most process outputs) or `safe`.
+- On orderly shutdown and before updates, outputs follow a per-output `on_shutdown` setting: `hold`, `safe` or `release`. The default is `safe` for local outputs and for switching outputs of protocol drivers whose safe state is off or on, and `hold` for setpoints, outputs whose safe state is hold, and dangerous outputs (ruling O-12).
 - After a restart, outputs are not driven until the control runtime has run one full cycle with valid inputs, and retained modes and setpoints have been restored. Automatic resumption after restart is a per-area setting; the alternative is to return in `MANUAL` and wait for an operator.
 
 ### 14.5 Power-loss safety
@@ -1393,3 +1384,4 @@ The design leaves room for each of these without rework of the core.
 | --- | --- | --- |
 | 1.0 | 13 November 2026 | Baseline frozen by the product owner. Includes per-tag logging granularity with configurable aggregate tiers, virtual tags, master and slave units over a direct node link, and distribution-agnostic packaging. |
 | 1.1 | 16 November 2026 | Section 5 updated to match the tag database contract 1.0 (issue #21, P1-13); approved by the product owner. Changed: section 5 and the lines in 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to it. In section 5: 5 (intro, pointer to the contract), 5.1 (`proc` regions, who creates what, owners are threads, base directory, minimum kernel), 5.2 (record layout, quality flags, atomic access, `SCADA_E_BUSY`), 5.3 (change entry, gaps, full queues, at-most-once commands, wake mechanism, queue limits, request and result fields), 5.4 (heartbeat, liveness judged by readers, timeouts, no suspend), 5.5 (generation change, restart of `scada-tagd`), 5.6 (retain file, retain-now, final files, no strings), 5.7 (C interface, observer, wait sets, real-time-safe functions) and 5.8 (measured size). In 3.1, the row of `scada-tagd`; in 4.2, the pointer for per-region access; in 6.1, command handling of `libscada-driver`; in 14.4, where the heartbeat of `scada-control` is; in 17.4, `REMOTE` writes need their event record accepted first, as every write request does (5.3), and no longer "are not journalled one by one" (product owner, 22 November 2026). No other section changed; 10.4 does not yet list system alarms for lost audit records or a broken queue (phase 7, #75). |
+| 1.2 | 23 November 2026 | The product owner's rulings of 23 November 2026 on the driver interface contract 0.5 (#99, its section 18) and the configuration schemas contract 0.5 (#98, its section 15), approved by the merge of PR #126. Changed: 4.3, 4.4, 5.1, 5.3, 5.5, 6.1, 6.2, 6.4, 6.5, 8.1, 8.3, 12.1, 12.3, 12.4, 12.5, 14.4. In 4.3, the real-time tier in phase 2 (O-4) and where CPU isolation is configured; in 4.4, the active configuration link and the version store (O-5); in 5.1, the sources of command queues (O-8); in 5.3, fail-safe actions are not write requests and are journalled after (O-1); in 5.5, commits reach services by their watch on the active version (O-13), and writers apply output behaviour during a generation change (O-18, O-19); in 6.1, the frame protocol interface (X-10) and the command thread and channel watchdog (O-3); in 6.2, STALE means not confirmed (X-11), and synchronous scan groups later (O-4); in 6.4, listening channels reserved (X-2), the Modbus function codes as a minimum set (X-17), and native select per device and point (X-1); in 6.5, drivers apply safe states of remote outputs (X-9); in 8.1, the status value `ACCEPTED_UNVERIFIED`, AUTO requests while `scada-cmd` is down (O-2), and driver refresh of setpoints (X-5); in 8.3, the driver enforces `local_blocks_auto` and fails closed (R-16); in 12.1, one channel per file, `enums.yaml`, unlisted files are errors; in 12.3, `device` for a serial port; in 12.4, the version store without Git (O-11); in 12.5, shared device addresses (X-4) and interlocks of switching outputs (O-21); in 14.4, the defaults of fail-safe behaviour (O-12), their repeats (R-11) and no prior audit record (O-1). No other section changed. |
