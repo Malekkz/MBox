@@ -24,7 +24,7 @@ boundary.
 | Contract | File | Needed by | Status |
 | --- | --- | --- | --- |
 | Tag database | `tag-database.md` | Phase 1 | 1.0, accepted at the close of phase 1 (D-66) |
-| Configuration schemas | `config-schemas.md` | Phase 2 | Draft 0.3, for review by a person (#98); the outline below is kept for reference |
+| Configuration schemas | `config-schemas.md` | Phase 2 | Draft 0.4, for review by a person (#98); the outline below is kept for reference |
 | Driver interface | `driver-interface.md` | Phase 2 | Outline below |
 | Historian file format and upload | `historian-format.md` | Phase 3 | Outline below |
 | REST and WebSocket API | `rest-api.md` | Phase 4 | Outline below |
