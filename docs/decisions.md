@@ -1487,7 +1487,7 @@ Consequences: every run of the pipeline starts four share jobs and the job `chec
 ## D-81: A protocol is linked into its driver executable, not loaded as a plugin
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02)
-Status: proposed in the driver interface contract 0.1, kept in 0.2; review by a person before P2-07 starts
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103)
 
 Context: the outline of the driver interface contract leaves open whether a protocol is linked into its driver executable or loaded as a plugin. Reference 4.4 lists `/usr/lib/scada/` for "binaries and driver plugins"; reference 6.5 calls the hardware backends of `scada-io` plugins.
 Options: (A) each protocol linked statically into its own `scada-drv-<protocol>` executable with `libscada-driver` and `libscada-tag`; (B) one generic driver executable that loads a protocol from a shared object at start.
@@ -1498,7 +1498,7 @@ Consequences: a new protocol is a new executable and package. `/usr/lib/scada/` 
 ## D-82: Threads of a driver process: main, one command thread, one worker per channel; session protocols as an event loop (room)
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey item D-40; committee review of 0.1
-Status: proposed in the driver interface contract 0.2 (sections 2.4, 2.7); review by a person before P2-07 starts
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (sections 2.4, 2.7)
 
 Context: the outline leaves open the threading model for report-driven protocols. The tag database allows one writing thread per owner and one consuming thread per queue (contract 1.0, sections 2 and 9); `scada_queue_next` is not real-time safe (its 9.5, #116); a wait set holds at most 127 sources (its 8.4).
 Options: (A) a main thread, one non-real-time command thread that consumes every request queue of the process and posts every answer, one worker per channel that is the only writer of its channel's tags; protocols built on a stack with its own threads run as an event loop on the worker, helpers hand samples over bounded queues; (B) a protocol receive thread with a sample sink that writes tags; (C) workers take requests from the queues themselves.
@@ -1510,7 +1510,7 @@ Revised in contract 0.3 (delta check): the command thread admits an order to a c
 ## D-83: Real-time tier in phase 2: `scada-io` only; the hardware exchange sits between `SCADA_RT` parts
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); committee review of 0.1
-Status: proposed; open: needs the product owner's ruling (R-3 of the driver interface contract). `CLAUDE.md` and the coding standard are not changed.
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103); the ruling is O-4 of the configuration schemas contract (formerly R-3). `CLAUDE.md` and the coding standard are not changed.
 
 Context: `CLAUDE.md` forbids system calls and I/O in code that runs in "the I/O scan"; an I/O scan must exchange with hardware. The committee found that 0.1 overstated what the `SCADA_RT` check does and that its system-call table was not what Linux gives.
 Options: (A) only `scada-io` is in the real-time tier in phase 2; in a real-time thread the functions around the hardware exchange are `SCADA_RT`, the exchange itself is listed with its bound; enforcement by a per-thread allocation count and a system-call trace; (B) Modbus workers real-time as well (0.1); (C) a non-real-time I/O thread feeding the real-time one.
@@ -1521,7 +1521,7 @@ Consequences: phase 2 Modbus workers run under the normal scheduler; `encode`, `
 ## D-84: A stalled channel worker ends its driver process
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); #116 comment, point 1; committee review of 0.1
-Status: proposed; open: needs the product owner's ruling (O-3 of the driver interface contract)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (O-3)
 
 Context: liveness is per process while an owner is a thread (tag database contract 1.0, 10.1). A stalled worker in a process whose main thread beats leaves its tags with their last values, never OWNER_DOWN. Stopping only the tag heartbeat (0.1) is not seen by the service manager, and the other workers would go on executing orders in a process every reader sees as down.
 Options: (A) the main thread detects the stall from a progress counter, stops the other threads at their next boundary, stops the tag heartbeat and the service manager's watchdog, and ends the process with `std::_Exit` and a distinct exit status; (B) per-owner liveness in the tag database (a layout change); (C) accept the gap.
@@ -1533,7 +1533,7 @@ Revised in contract 0.3 (delta check): every wait of a worker is capped at a thi
 ## D-85: Results of a driver: reason and raw protocol code in `WriteResult.protocol_error`
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey items D-30, D-31
-Status: proposed; open: needs the product owner's ruling (R-4 of the driver interface contract)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (R-4)
 
 Context: the survey asks for about twenty outcomes of a write. The status of `WriteResult` has seven values and is frozen (tag database contract 1.0, 14.1); `protocol_error` is `int32_t`, "driver-specific, 0 if none".
 Options: (A) `protocol_error = (reason << 16) | raw`, with a reason table common to every driver; (B) the raw code only, the reason in a diagnostic tag; (C) a layout version with a wider result.
@@ -1544,7 +1544,7 @@ Consequences: the reason table is part of the driver interface contract; a new r
 ## D-86: A driver-stamped event time is marked LOCAL_TIME
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey item D-12
-Status: proposed in the driver interface contract 0.1, kept in 0.2 (section 5.8; R-1)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (section 5.8; R-1)
 
 Context: the survey's reports differed on how to mark an event whose device gave no time, stamped by the driver.
 Options: LOCAL_TIME; TIME_UNCERTAIN; both; none.
@@ -1555,7 +1555,7 @@ Consequences: every polled Modbus sample without a time companion carries LOCAL_
 ## D-87: A change latch is an ordinary point in a side-effect read range
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey item D-21; committee review of 0.1
-Status: proposed in the driver interface contract 0.2 (sections 5.6, 6.6; R-2)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (sections 5.6, 6.6; R-2)
 
 Context: a device may report a state bit plus a latch bit that records "changed since last read", cleared on read.
 Options: (A) expose the latch as its own BOOL tag; (B) synthesise an on-then-off event at the poll time.
@@ -1566,7 +1566,7 @@ Consequences: synthesis stays room for a later protocol option, which would carr
 ## D-88: Replayed events: deferred to the historian and alarm contracts
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey X-6; committee review of 0.1
-Status: deferred; open: needs the product owner's ruling (X-6)
+Status: deferred by the product owner on 2026-11-23 to the historian contract (X-6; D-103)
 
 Context: after a reconnect a device may replay buffered events, then an interrogation gives the current state. 0.1 proposed writing them with STALE. The committee found that phase 2 does not need it and that STALE has a cost: if the alarm engine raises no alarm from a STALE sample, a trip during the outage raises none.
 Options: (a) write replayed events in device-time order with STALE, interrogation last; (a') the same without STALE; (b) mark them for the historian only, which needs a new path or a layout version.
@@ -1577,7 +1577,7 @@ Consequences: none for phase 2 code.
 ## D-89: Native select with a short device window: per output `at_select` or `at_operate`
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02), agreed with #98 (P2-01); survey X-7
-Status: proposed; open: needs the product owner's ruling (X-1, X-7). Review by a person: select before operate
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (X-1, X-7). Review by a person: select before operate
 
 Context: devices with a native select have windows from about 1 s to over 60 s; the gateway's select must suit an operator (reference 8.2 step 6, 30 s by default).
 Options: (A) the gateway's select never longer than the device's window; (B) per output: `at_select`, the device selects at SELECT and `select_timeout` must not exceed the window, or `at_operate`, the gateway holds the operator's selection and the driver runs the device's select and operate back to back at OPERATE; (C) the driver chooses by comparing the two times.
@@ -1588,18 +1588,19 @@ Consequences: with `at_operate` a device's refusal arrives at OPERATE, after the
 ## D-90: Refresh of setpoints belongs to the request whose value it repeats, and its end is visible
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey X-5; implemented in phase 5; committee review of 0.1
-Status: proposed; open: needs the product owner's ruling (X-5). Review by a person: command handling, "no audit, no action"
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (X-5, changed: a refused new request does not end the refresh). Review by a person: command handling, "no audit, no action"
 
 Context: some devices drop a setpoint after a validity time, or fall back when setpoints stop. "No audit, no action" must hold. The committee found that a refresh can end silently (a restart of `scada-cmd`, any tag-set commit, a refused new request) and that 0.1 allowed refresh on any kind.
 Options: (A) refreshes covered by the event record of the request whose value they repeat, ending for good when a condition fails; (B) a record per refresh; (C) no refresh service.
 Decision: (A), for `kind: setpoint` only, never on a `dangerous`, `sbo` or `nvm` target. The end is shown in `<output>.refresh` (2: ended other than by a new request) and journalled best-effort; nobody re-establishes a standing MANUAL setpoint automatically.
 Reason: (B) floods the events queue with no added information; (C) leaves devices that need it falling back; a silent end of a grid operator's curtailment limit is a compliance event, hence the tag.
 Consequences: the journal record of a refreshed output says that it refreshes (phase 5). An AUTO output uses this or the refresh of `scada-control` (reference 7.2), not both.
+Revised in contract 0.5 (ruling X-5 of 2026-11-23, D-103): a refused new request no longer ends the refresh. The refreshed value is that of the last request executed OK; a request refused before sending, or refused by the device, leaves it running with `<output>.refresh` 3 (active on an older value); a request sent with an unknown outcome (timeout, partial) ends it with 2, because writing either value again could undo or resend a command.
 
 ## D-91: One fail-safe table; a fail-safe action never waits for its audit record
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey X-9; committee review of 0.1
-Status: proposed; open: needs the product owner's ruling (X-9, R-5). Review by a person: fail-safe and shutdown behaviour, "no audit, no action"
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (X-9; O-1, formerly R-5; O-12 changed to option (b)). Review by a person: fail-safe and shutdown behaviour, "no audit, no action"
 
 Context: references 6.5 and 14.4 give safe states to `scada-io` and say drivers hold or go safe when `scada-control` stops. 0.1 made a remote safe write wait for the driver's own event record; the committee found that a fail-safe action that waits for audit fails exactly when control and audit are down together, against reference 6.5 and the phase 5 acceptance.
 Options: (A) stop refreshing only; (B) the framework can hold, write the safe state or write the release value, journalled first, else only stop refreshing (0.1); (B') the same, the action taken first and journalled best-effort after.
@@ -1608,11 +1609,12 @@ Reason: a safe state on loss of control is the configured answer to a failure; "
 Consequences: a refused event record is counted (`sys.proc.<process>.safe_unjournalled`) and logged. The keys and defaults are the configuration contract's (its 7.4, agreed with #98): `on_shutdown` `safe` for local and `hold` for remote outputs; `on_control_loss` for AUTO and `scada-control` only, `safe` locally and `hold` remotely; `on_generation_change` per output, default `hold`, safe when the limit of reference 5.5 is exceeded; in MANUAL a restart of `scada-cmd` drops nothing.
 Revised in contract 0.3 (delta check; ruling R-11): a fail-safe write that did not end OK is repeated every `failsafe_retry` (default 5 s) while its condition holds, and at once when the device returns, shown in `<output>.failsafe`; an exception to "no resend of a write" for fail-safe actions only. At a generation change each writer measures the limit itself (configuration contract 13.5, G6). Remote switching outputs left at `hold` get a warning (O-12).
 Revised in contract 0.4 (third pass; rulings R-11, R-18): the condition is defined as a state machine per output (contract 8.13.2 to 8.13.4). Control is lost when the output is in AUTO (or OWNER_DOWN with a stored AUTO), `scada-control` reads down, a grace has passed (`scada-control` seen up once in this generation, or `control_attach_grace`, default 60 s, after the writer's attach) and `after` has passed; a mode change, an accepted request or control back ends it and cancels a pending write at once. Repeats double to 60 s after a timeout, go only to usable devices, count against write limits, and end FAILED after `failsafe_max_refusals` refusals or a spent budget; the first write and each state change are journalled, not each repeat.
+Revised in contract 0.5 (rulings O-12 and the FAILED value, 2026-11-23, D-103): a remote `single` or `double` output with a `safe_state` of `off` or `on` defaults to `safe` on shutdown and on control loss, with `after: 30s` (the 3 s heartbeat timeout plus one supervised restart of `scada-control` before a plant trips); other remote outputs stay `hold`. `<output>.failsafe` is 3 for FAILED, distinct from 2 (still trying).
 
 ## D-92: Checks a driver makes on every write request
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); survey items D-29, D-35, D-36; committee review of 0.1
-Status: proposed in the driver interface contract 0.2 (sections 8.2, 8.6, 8.9); open in part: needs the product owner's ruling (O-2). Review by a person: command handling, select before operate
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (sections 8.2, 8.6, 8.9; O-2). Review by a person: command handling, select before operate
 
 Context: reference 8.1 has the driver accept AUTO requests only in AUTO mode and OPERATOR requests only in MANUAL; tag database contract 17 item 19 makes drivers time their selections; reference 14.4 forbids automatic retry of operator commands. The committee found that a dead `scada-cmd` stopped automatic control, that a selection survived a mode change, that a DIRECT could act on a selected output, and that `local_blocks_auto` had no enforcer for AUTO.
 Options: for the mode tag read: fail closed always (0.1), or allow AUTO on the stored mode when OWNER_DOWN is the only defect.
@@ -1624,7 +1626,7 @@ Revised in contract 0.3 (delta check): `local_blocks_auto` is checked on the are
 ## D-93: The unit of the protocol interface is one request; the framework owns the exchange
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); committee review of 0.1
-Status: proposed; open: needs the product owner's ruling (X-10 of the driver interface contract)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (X-10)
 
 Context: in 0.1, as in reference 6.1, a protocol's `poll` was one poll group and did its own I/O, so the framework could not act between requests, while it had to pace, retry, serve writes first, split refused blocks, send keep-alives, keep select and operate exclusive and count per request.
 Options: (A) the protocol plans, encodes, finds the end of an answer and decodes, as pure functions; the framework owns the transport and every request; (B) one call per request, the protocol doing its own I/O; (C) one call per poll group (0.1).
@@ -1637,7 +1639,7 @@ Revised in contract 0.4 (third pass): `DecodeResult` has read-side kinds (`SPLIT
 ## D-94: Engineering value to raw value on a write
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); committee review of 0.1
-Status: proposed in the driver interface contract 0.2 (section 8.4). Review by a person: command handling
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (section 8.4). Review by a person: command handling
 
 Context: neither draft of 0.1 said how a commanded engineering value becomes raw register contents.
 Options: truncation or rounding; conversion of raw configured values or not.
@@ -1649,7 +1651,7 @@ Revised in contract 0.3 (delta check): INT64 and UINT64 tags use checked integer
 ## D-95: TCP channels: abortive close on a write timeout, consecutive timeouts as a lost connection, idle close noticed
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); committee review of 0.1 (Linux L-1, L-12)
-Status: proposed in the driver interface contract 0.2 (section 7.3). Review by a person: command safety
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (section 7.3; R-15, R-17). Review by a person: command safety
 
 Context: on TCP a request passed to `send` stays in the kernel's send queue and is retransmitted for minutes; a write answered TIMEOUT could be executed after its expiry when the network returns.
 Options: close the connection on a write timeout or not; detect a dead connection from timeouts or only from the kernel.
@@ -1662,7 +1664,7 @@ Revised in contract 0.4 (third pass; R-15, R-17): the run of consecutive read ti
 ## D-96: The meaning of `timeout`, the frame time, and serial line handling
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02), agreed with #98; committee review of 0.1 (Linux L-2, L-10)
-Status: proposed in the driver interface contract 0.2 (sections 7.1, 7.2)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (sections 7.1, 7.2)
 
 Context: neither draft said when a timeout starts; at 1,200 bit/s a 125-register answer takes 2.34 s, so a 1 s timeout demoted every such device. User space cannot meet RS-485 turnaround by draining and toggling lines.
 Options: timeout from the send, from the end of the request, or including the frame.
@@ -1674,7 +1676,7 @@ Revised in contract 0.3 (delta check): two stages, the first byte by end of requ
 ## D-97: Local I/O: bounded channels only on the scan thread; outputs at start, stop and crash
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02), #107; committee review of 0.1 (Linux L-3, L-9, L-13)
-Status: proposed in the driver interface contract 0.2 (section 13). Review by a person: fail-safe behaviour
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (section 13). Review by a person: fail-safe behaviour
 
 Context: a GPIO line on an expander or an IIO conversion sleeps for milliseconds to a second; the kernel promises no state for a line whose process died; a line requested as an output must be given a level.
 Options: read every channel on the scan thread; a helper for slow channels. At a crash: nothing, or a stop step of the service manager.
@@ -1686,7 +1688,7 @@ Revised in contract 0.3 (delta check): `scan: auto` chooses the scan thread only
 ## D-98: Floating-point contraction off for scaling and value conversion
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02); committee review of 0.1 (C++ S-17)
-Status: proposed; open: needs the product owner's ruling (R-7)
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (R-7)
 
 Context: `raw x gain + offset` is contracted to a fused multiply-add on ARM64 and not on baseline x86-64, so scaled values can differ in the last bit between the architectures, which the golden vectors forbid.
 Options: compile the scaling and conversion code with contraction off (`-ffp-contract=off`, an added flag, not one removed from coding standard 2); allow a tolerance in the tests.
@@ -1697,7 +1699,7 @@ Consequences: a flag on one library, recorded here as coding standard 2 asks for
 ## D-99: Command kinds and what each sends
 Date: 2026-11-22
 Phase / issue: 2, #99 (P2-02), agreed with #98; committee review of 0.1 (SCADA B-1)
-Status: proposed in the driver interface contract 0.2 (section 8.3). Review by a person: command handling
+Status: accepted: ruled by the product owner on 2026-11-23 (D-103) (section 8.3). Review by a person: command handling
 
 Context: the configuration draft defined seven kinds and the driver draft none; a framework-timed pulse whose off write times out leaves a coil energised.
 Options: framework-timed pulses or device-timed only; refresh on any kind or setpoints only.
@@ -1705,3 +1707,15 @@ Decision: per kind the request value and what is sent (driver interface contract
 Reason: no write is retried (D-92), so a two-write pulse cannot be made safe without that exception, which needs its own review.
 Consequences: the configuration contract cites the table.
 Revised in contract 0.3 (delta check): the kinds table gives target type and safe action per kind; a double point is INT64 1 or 2 also on two coils, its safe state `off` or `on`; `latch` reserved; step, pulse and trigger have fail-safe keys `hold` only (CF-719); a master-timed pulse is refused (CF-720, O-16).
+
+## D-103: The product owner's rulings on the driver interface contract
+Date: 2026-11-23
+Phase / issue: 2, #99 (P2-02); PR #126
+Status: decided by the product owner on 2026-11-23, on the committee's recommendation. Review by a person: command handling, fail-safe and shutdown behaviour, "no audit, no action"
+
+Context: the driver interface contract 0.4 carried every conflict with reference 1.1 and every choice the reference left open as a ruling for the product owner (its section 18), with the committee's recommendation for each.
+Options: per ruling, as listed in the contract's section 18 (the option drafted and the options not taken).
+Decision: every ruling of the contract (X-1 to X-17, R-1, R-2, R-4, R-6, R-7, R-11 to R-18, O-2, O-3), and the rulings it shares with the configuration schemas contract (O-1, O-4, O-7, O-9, O-10, O-12, O-13, O-15 to O-20, recorded there), decided as drafted, with three changes: X-5, a refused new request does not end a running refresh (contract 8.12); O-12, option (b), remote switching outputs with a `safe_state` of `off` or `on` default to `safe`, after 30 s on control loss (contract 8.13.1); `<output>.failsafe` 3 for FAILED (contract 8.13.3). X-6 stays deferred to the historian contract; X-13 stays a warning.
+Reason: the committee's recommendations; the three changes as the product owner gave them.
+Consequences: the contract is version 0.5, accepted for phase 2 implementation, and becomes 1.0 when phase 2 passes its acceptance tests. Reference 1.2 carries the changes to the reference, approved by the merge of PR #126. The decisions D-81 to D-99 are accepted with it.
+
