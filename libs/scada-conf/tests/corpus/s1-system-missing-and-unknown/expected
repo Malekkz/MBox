@@ -1,0 +1,3 @@
+# Both rules of stage 1, sorted by path.
+system.yaml:1:1: CF-103
+system.yml:1:1: CF-101
