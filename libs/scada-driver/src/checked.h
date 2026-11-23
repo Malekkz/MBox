@@ -124,20 +124,26 @@ SCADA_RT [[nodiscard]] constexpr std::optional<std::uint64_t> wide_to_unsigned(
 }
 
 // True when `value` fits a signed integer of `width` bits (8 to 64).
+// A width of 0 or above 64 fits nothing.
 SCADA_RT [[nodiscard]] constexpr bool fits_signed(Wide value,
                                                   unsigned width) noexcept {
+    constexpr unsigned FULL_WIDTH = 64;
+    if (width == 0 || width > FULL_WIDTH) {
+        return false;
+    }
     const std::uint64_t limit = std::uint64_t{1} << (width - 1U);  // 2^(w-1)
     return value.negative ? value.magnitude <= limit : value.magnitude < limit;
 }
 
-// True when `value` fits an unsigned integer of `width` bits (8 to 64).
+// True when `value` fits an unsigned integer of `width` bits (1 to 64); a
+// width of 0 or above 64 fits nothing.
 SCADA_RT [[nodiscard]] constexpr bool fits_unsigned(Wide value,
                                                     unsigned width) noexcept {
-    if (value.negative) {
+    constexpr unsigned FULL_WIDTH = 64;
+    if (value.negative || width == 0 || width > FULL_WIDTH) {
         return false;
     }
-    constexpr unsigned FULL_WIDTH = 64;
-    return width >= FULL_WIDTH || value.magnitude < (std::uint64_t{1} << width);
+    return width == FULL_WIDTH || value.magnitude < (std::uint64_t{1} << width);
 }
 
 }  // namespace scada::driver::detail

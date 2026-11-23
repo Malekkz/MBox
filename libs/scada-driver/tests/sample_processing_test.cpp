@@ -3,6 +3,7 @@
 // conformance tests 4, 6, 7, 8, 17 and 40, the processing half).
 
 #include "scada/driver/sample_processing.h"
+#include "sample_helpers.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/tag_value.h"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,6 +48,16 @@ constexpr std::uint8_t FIELD_LOW = 8;
 constexpr std::uint8_t FIELD_HIGH = 11;
 constexpr std::int64_t FIELD_TEST = 5;
 constexpr std::uint8_t BIT_7 = 7;
+constexpr std::uint64_t UNLISTED_STATUS = 7;
+constexpr std::uint8_t TOP_BIT_16 = 15;
+constexpr std::uint8_t FIELD_4 = 4;
+constexpr std::uint8_t FIELD_5 = 5;
+constexpr std::uint8_t BEYOND_64 = 70;
+constexpr std::int64_t OFFSET_MINUS_3 = -3;
+// Local wall-clock times in Europe/Berlin, read as if they were UTC.
+constexpr std::int64_t OCT25_0230_LOCAL = 1'792'895'400;  // repeated
+constexpr std::int64_t MAR29_0230_LOCAL = 1'774'751'400;  // skipped
+constexpr std::int64_t JUN1_1200_LOCAL = 1'780'315'200;
 
 std::uint16_t flags(std::initializer_list<QualityFlag> list) {
     std::uint16_t out = 0;
@@ -62,9 +74,8 @@ bool has(std::uint16_t value, QualityFlag wanted) {
 // One point and its state, fed samples at given monotonic times.
 class Point {
 public:
-    explicit Point(PointRules point_rules) : rules_(std::move(point_rules)) {
-        reset_point_state(state_, rules_.tag_type, 0);
-    }
+    explicit Point(PointRules point_rules)
+        : rules_(std::move(point_rules)), state_(test::fresh_state(rules_)) {}
 
     bool stale(std::int64_t now_mono_ns, ProcessedSample& out) {
         return check_stale(rules_, state_, now_mono_ns, out);
@@ -72,7 +83,7 @@ public:
 
     ProcessedSample feed(const RawSample& sample, std::int64_t mono_ns,
                          std::span<const CompanionInput> companions = {}) {
-        return process_sample(
+        return test::processed(
             rules_, state_, sample, companions,
             SampleTimes{.receive_time_ns = RECEIVE_NS + mono_ns,
                         .receive_mono_ns = mono_ns});
@@ -93,6 +104,12 @@ private:
 PointRules int_rules() {
     PointRules rules;
     rules.tag_type = TagType::INT64;
+    return rules;
+}
+
+PointRules float_point_rules() {
+    PointRules rules;
+    rules.tag_type = TagType::FLOAT64;
     return rules;
 }
 
@@ -140,23 +157,109 @@ TEST(SampleProcessing, AbsentIsBadNotInitIfNeverReadAndCounted) {
     EXPECT_TRUE(point.value(1, 4 * SECOND).counts.left_absent);
 }
 
-TEST(SampleProcessing, DeviceInvalidTakesTheMappingAndIsNeverGood) {
-    Point point(int_rules());
+TEST(SampleProcessing, DeviceInvalidHoldsTheLastValueThenGoesBad) {
+    // DEVICE_INVALID is held like `keep_last` (decision D-131): the last
+    // valid value, UNCERTAIN with STALE and the mapping's flags, BAD with
+    // STALE after max_age; never GOOD.
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    Point point(rules);
     (void)point.value(SECOND_VALUE, SECOND);
-    const ProcessedSample test_mode =
-        point.feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
-                             .mark = {.quality = Quality::UNCERTAIN,
-                                      .flags = flags({QualityFlag::TEST})}},
-                   2 * SECOND);
-    EXPECT_EQ(test_mode.tag.quality, Quality::UNCERTAIN);
-    EXPECT_TRUE(has(test_mode.tag.flags, QualityFlag::TEST));
-    EXPECT_EQ(test_mode.tag.value.i, SECOND_VALUE);
-    EXPECT_TRUE(test_mode.counts.invalid);
+    const RawSample test_mode{.outcome = Outcome::DEVICE_INVALID,
+                              .mark = {.quality = Quality::UNCERTAIN,
+                                       .flags = flags({QualityFlag::TEST})}};
+    const ProcessedSample held = point.feed(test_mode, 2 * SECOND);
+    EXPECT_EQ(held.tag.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(held.tag.flags, QualityFlag::TEST));
+    EXPECT_TRUE(has(held.tag.flags, QualityFlag::STALE));
+    EXPECT_EQ(held.tag.value.i, SECOND_VALUE);
+    EXPECT_TRUE(held.counts.invalid);
     const ProcessedSample unmapped =
         point.feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
                              .mark = {.quality = Quality::GOOD}},
                    3 * SECOND);
     EXPECT_EQ(unmapped.tag.quality, Quality::UNCERTAIN);
+    // max_age after the last valid value: BAD, by the next answer or by
+    // the boundary check.
+    ProcessedSample out;
+    ASSERT_TRUE(point.stale((MAX_AGE_S + 1) * SECOND + 1, out));
+    EXPECT_EQ(out.tag.quality, Quality::BAD);
+    EXPECT_TRUE(has(out.tag.flags, QualityFlag::STALE));
+    const ProcessedSample later =
+        point.feed(test_mode, (MAX_AGE_S + 2) * SECOND);
+    EXPECT_EQ(later.tag.quality, Quality::BAD);
+    EXPECT_EQ(later.tag.value.i, SECOND_VALUE);
+}
+
+TEST(SampleProcessing, DeviceInvalidBeforeAnyReadIsBadNotAMadeUpZero) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    Point point(rules);
+    const TagWrite write =
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = {.quality = Quality::UNCERTAIN,
+                                     .flags = flags({QualityFlag::TEST})}},
+                  SECOND)
+            .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::NOT_INIT));
+    EXPECT_TRUE(has(write.flags, QualityFlag::TEST));
+}
+
+TEST(SampleProcessing, DeviceInvalidMappedBadIsBadWithoutStale) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    Point point(rules);
+    (void)point.value(SECOND_VALUE, SECOND);
+    const TagWrite write =
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = {.quality = Quality::BAD,
+                                     .flags = flags({QualityFlag::BLOCKED})}},
+                  2 * SECOND)
+            .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_EQ(write.flags,
+              flags({QualityFlag::BLOCKED, QualityFlag::LOCAL_TIME}));
+}
+
+TEST(SampleProcessing, IncomingFlagsAreMaskedToWhatADeviceMayGive) {
+    // SUBSTITUTED waits for tag database 1.1; OWNER_DOWN is never stored and
+    // RESTORED is the library's (decision D-131).
+    const std::uint16_t forbidden = flags(
+        {QualityFlag::SUBSTITUTED, QualityFlag::OWNER_DOWN,
+         QualityFlag::RESTORED, QualityFlag::STALE, QualityFlag::NOT_INIT});
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.quality_rules.push_back(QualityRule{
+        .self = true,
+        .entries = {{.key = 1,
+                     .mark = {.quality = Quality::UNCERTAIN,
+                              .flags = static_cast<std::uint16_t>(
+                                  forbidden | flags({QualityFlag::TEST}))}}}});
+    Point point(rules);
+    const TagWrite from_map = point.value(1, SECOND).tag;
+    EXPECT_EQ(from_map.flags,
+              flags({QualityFlag::TEST, QualityFlag::LOCAL_TIME}));
+    const TagWrite no_value =
+        point
+            .feed(RawSample{.outcome = Outcome::NO_VALUE,
+                            .mark = {.quality = Quality::BAD,
+                                     .flags = forbidden}},
+                  2 * SECOND)
+            .tag;
+    EXPECT_EQ(no_value.flags, flags({QualityFlag::LOCAL_TIME}));
+    const TagWrite invalid =
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = {.quality = Quality::UNCERTAIN,
+                                     .flags = forbidden}},
+                  3 * SECOND)
+            .tag;
+    EXPECT_FALSE(has(invalid.flags, QualityFlag::SUBSTITUTED));
+    EXPECT_FALSE(has(invalid.flags, QualityFlag::OWNER_DOWN));
+    EXPECT_FALSE(has(invalid.flags, QualityFlag::RESTORED));
 }
 
 TEST(SampleProcessing, CommFailIsBadCommFailAndKeepsTheValue) {
@@ -342,15 +445,14 @@ TEST(SampleProcessing, NamedBitsFromOneReadWithInvert) {
                    SECOND);
     EXPECT_FALSE(out.write_tag);
     ASSERT_EQ(out.bit_count, 3U);
-    EXPECT_TRUE(out.bits.at(0).value.b);
-    EXPECT_TRUE(out.bits.at(1).value.b);
-    EXPECT_TRUE(out.bits.at(2).value.b);  // bit 7 is 0, inverted
-    EXPECT_EQ(out.bits.at(0).value.type, TagType::BOOL);
+    EXPECT_TRUE(sample_bit(out, 0));
+    EXPECT_TRUE(sample_bit(out, 1));
+    EXPECT_TRUE(sample_bit(out, 2));  // bit 7 is 0, inverted
     // A lost answer keeps the bits with the word's quality.
     const ProcessedSample lost =
         point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 2 * SECOND);
-    EXPECT_TRUE(lost.bits.at(1).value.b);
-    EXPECT_EQ(lost.bits.at(1).quality, Quality::BAD);
+    EXPECT_TRUE(sample_bit(lost, 1));
+    EXPECT_EQ(lost.tag.quality, Quality::BAD);
 }
 
 TEST(SampleProcessing, BoolPointWithInvert) {
@@ -424,7 +526,7 @@ PointRules timed_rules(DeviceTimeRule rule) {
     PointRules rules = int_rules();
     rules.companions = {COMPANION_INDEX};
     rules.time_companion = 0;
-    rules.companion_time = std::move(rule);
+    rules.companion_time = rule;
     return rules;
 }
 
@@ -461,9 +563,8 @@ TEST(SampleProcessing, LocalDeviceTimeInTheRepeatedAndSkippedHour) {
     auto zone = ZoneTable::build("Europe/Berlin");
     ASSERT_TRUE(zone.ok());
     Point point(timed_rules(
-        DeviceTimeRule{.local = true, .zone = zone.value(), .synced = true}));
+        DeviceTimeRule{.local = true, .zone = &zone.value(), .synced = true}));
     // 2026-10-25 02:30 local is repeated: the first occurrence, 00:30 UTC.
-    constexpr std::int64_t OCT25_0230_LOCAL = 1'792'895'400;
     const CompanionInput repeated{.outcome = Outcome::VALUE,
                                   .raw = raw_time(OCT25_0230_LOCAL * SECOND)};
     const TagWrite first = point.value(1, SECOND, {&repeated, 1}).tag;
@@ -471,14 +572,12 @@ TEST(SampleProcessing, LocalDeviceTimeInTheRepeatedAndSkippedHour) {
     EXPECT_EQ(first.flags, flags({QualityFlag::TIME_UNCERTAIN}));
     // 2026-03-29 02:30 local does not exist: moved forward to 03:30 CEST,
     // 01:30 UTC.
-    constexpr std::int64_t MAR29_0230_LOCAL = 1'774'751'400;
     const CompanionInput skipped{.outcome = Outcome::VALUE,
                                  .raw = raw_time(MAR29_0230_LOCAL * SECOND)};
     const TagWrite second = point.value(1, SECOND, {&skipped, 1}).tag;
     EXPECT_EQ(second.source_time_ns, (MAR29_0230_LOCAL - 3600) * SECOND);
     EXPECT_EQ(second.flags, flags({QualityFlag::TIME_UNCERTAIN}));
     // An ordinary hour converts without a flag.
-    constexpr std::int64_t JUN1_1200_LOCAL = 1'780'315'200;
     const CompanionInput summer{.outcome = Outcome::VALUE,
                                 .raw = raw_time(JUN1_1200_LOCAL * SECOND)};
     const TagWrite third = point.value(1, SECOND, {&summer, 1}).tag;
@@ -498,9 +597,8 @@ TEST(SampleProcessing, TimePointValueIsUtcNanoseconds) {
     auto zone = ZoneTable::build("Europe/Berlin");
     ASSERT_TRUE(zone.ok());
     PointRules rules = int_rules();
-    rules.device_time = DeviceTimeRule{.local = true, .zone = zone.value()};
+    rules.device_time = DeviceTimeRule{.local = true, .zone = &zone.value()};
     Point point(rules);
-    constexpr std::int64_t JUN1_1200_LOCAL = 1'780'315'200;
     const TagWrite write =
         point
             .feed(RawSample{.outcome = Outcome::VALUE,
@@ -508,6 +606,571 @@ TEST(SampleProcessing, TimePointValueIsUtcNanoseconds) {
                   SECOND)
             .tag;
     EXPECT_EQ(write.value.i, (JUN1_1200_LOCAL - 7200) * SECOND);
+}
+
+// --- Step 6 for every outcome and marker action (CS 4.7, 4.9) ---------
+
+// A meter behind a gateway: a health rule with COMM_FAIL on a connection
+// status companion (slot 0), a status word with `quality_from` (slot 1).
+PointRules gateway_rules(InvalidAction action) {
+    PointRules rules;
+    rules.tag_type = TagType::FLOAT64;
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.companions = {COMPANION_INDEX, COMPANION_INDEX + 1};
+    rules.health.push_back(
+        HealthRule{.companion = 0, .good = {1}, .comm_fail = true});
+    rules.markers.push_back(InvalidMarker{
+        .any_nan = true, .action = action, .substitute = float64_value(0.0)});
+    return rules;
+}
+
+const RawSample NAN_SAMPLE{
+    .outcome = Outcome::VALUE,
+    .raw = raw_float32(std::numeric_limits<float>::quiet_NaN())};
+const RawSample POWER_SAMPLE{.outcome = Outcome::VALUE,
+                             .raw = raw_float32(1500.5F)};
+
+std::array<CompanionInput, 2> link(std::uint64_t status) {
+    return {CompanionInput{.outcome = Outcome::VALUE,
+                           .raw = raw_unsigned(status, INT16)},
+            CompanionInput{.outcome = Outcome::VALUE,
+                           .raw = raw_unsigned(0, INT16)}};
+}
+
+void expect_bad_comm_fail(const TagWrite& write) {
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::COMM_FAIL));
+}
+
+TEST(SampleProcessing, HealthRuleAppliesToAValue) {
+    Point point(gateway_rules(InvalidAction::SUBSTITUTE));
+    const auto offline = link(0);
+    expect_bad_comm_fail(point.feed(POWER_SAMPLE, SECOND, offline).tag);
+    const auto online = link(1);
+    EXPECT_EQ(point.feed(NAN_SAMPLE, 2 * SECOND, online).tag.quality,
+              Quality::UNCERTAIN);
+}
+
+TEST(SampleProcessing, HealthRuleAppliesToASubstitute) {
+    Point point(gateway_rules(InvalidAction::SUBSTITUTE));
+    const auto offline = link(0);
+    expect_bad_comm_fail(point.feed(NAN_SAMPLE, SECOND, offline).tag);
+    std::array<CompanionInput, 2> lost = link(1);
+    lost[0] = CompanionInput{.outcome = Outcome::COMM_FAIL};
+    expect_bad_comm_fail(point.feed(NAN_SAMPLE, 2 * SECOND, lost).tag);
+}
+
+TEST(SampleProcessing, HealthRuleAppliesToKeepLastAndBad) {
+    Point keep(gateway_rules(InvalidAction::KEEP_LAST));
+    const auto online = link(1);
+    const auto offline = link(0);
+    (void)keep.feed(POWER_SAMPLE, SECOND, online);
+    expect_bad_comm_fail(keep.feed(NAN_SAMPLE, 2 * SECOND, offline).tag);
+    Point bad_marker(gateway_rules(InvalidAction::BAD));
+    expect_bad_comm_fail(bad_marker.feed(NAN_SAMPLE, SECOND, offline).tag);
+}
+
+TEST(SampleProcessing, HealthRuleAppliesToDeviceInvalidAndNoValue) {
+    Point point(gateway_rules(InvalidAction::SUBSTITUTE));
+    const auto online = link(1);
+    const auto offline = link(0);
+    (void)point.feed(POWER_SAMPLE, SECOND, online);
+    expect_bad_comm_fail(
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = {.quality = Quality::UNCERTAIN}},
+                  2 * SECOND, offline)
+            .tag);
+    expect_bad_comm_fail(
+        point.feed(RawSample{.outcome = Outcome::NO_VALUE}, 3 * SECOND, offline)
+            .tag);
+}
+
+TEST(SampleProcessing, QualityFromAppliesToKeepLast) {
+    // A status word that says "fault" while the raw value is the marker:
+    // BAD, not the held value UNCERTAIN.
+    PointRules rules = gateway_rules(InvalidAction::KEEP_LAST);
+    rules.health.clear();
+    rules.quality_rules.push_back(
+        QualityRule{.companion = 1, .entries = {{.key = 0, .mark = {}}}});
+    Point point(rules);
+    std::array<CompanionInput, 2> status = link(1);
+    (void)point.feed(POWER_SAMPLE, SECOND, status);
+    status[1].raw =
+        raw_unsigned(UNLISTED_STATUS, INT16);  // not in the map: `default` BAD
+    EXPECT_EQ(point.feed(NAN_SAMPLE, 2 * SECOND, status).tag.quality,
+              Quality::BAD);
+}
+
+// --- Companions carry their own quality (decision D-131) -------------------
+
+TEST(SampleProcessing, ACompanionWhoseOwnMarkerMatchedFailsTheDependent) {
+    // A time companion whose 0 is its "no time" marker: the companion's own
+    // processing made it BAD, so the value is not stamped 1970 and GOOD.
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.time_companion = 0;
+    rules.companion_time = DeviceTimeRule{.synced = true};
+    Point point(rules);
+    const CompanionInput no_time{.outcome = Outcome::VALUE,
+                                 .raw = raw_time(0),
+                                 .mark = {.quality = Quality::BAD}};
+    const TagWrite write = point.value(1, SECOND, {&no_time, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_NE(write.source_time_ns, 0);
+}
+
+TEST(SampleProcessing, AnUncertainCompanionMakesTheDependentUncertain) {
+    PointRules rules = float_point_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.exponent = ExponentRule{.companion = 0};
+    Point point(rules);
+    const CompanionInput exponent{
+        .outcome = Outcome::VALUE,
+        .raw = raw_signed(1, INT16),
+        .mark = {.quality = Quality::UNCERTAIN,
+                 .flags = flags({QualityFlag::TEST})}};
+    const TagWrite write = point.value(2, SECOND, {&exponent, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(write.flags, QualityFlag::TEST));
+    EXPECT_EQ(write.value.f, 20.0);
+}
+
+TEST(SampleProcessing, CompanionFlagsReachTheDependent) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.quality_rules.push_back(
+        QualityRule{.companion = 0, .entries = {{.key = 0, .mark = {}}}});
+    Point point(rules);
+    const CompanionInput blocked{
+        .outcome = Outcome::VALUE,
+        .raw = raw_unsigned(0, INT16),
+        .mark = {.quality = Quality::BAD,
+                 .flags = flags({QualityFlag::BLOCKED})}};
+    const TagWrite write = point.value(1, SECOND, {&blocked, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::BLOCKED));
+    const CompanionInput absent{.outcome = Outcome::ABSENT};
+    EXPECT_EQ(point.value(1, SECOND, {&absent, 1}).tag.quality, Quality::BAD);
+}
+
+TEST(SampleProcessing, TimeCompanionOfTheWrongKindIsBad) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.time_companion = 0;
+    Point point(rules);
+    const CompanionInput number{.outcome = Outcome::VALUE,
+                                .raw = raw_signed(1, INT16)};
+    EXPECT_EQ(point.value(1, SECOND, {&number, 1}).tag.quality, Quality::BAD);
+}
+
+// --- Quality rules ---------------------------------------------------------
+
+TEST(SampleProcessing, QualityRuleOnTheOwnWordWithAndWithoutDefault) {
+    PointRules rules = int_rules();
+    rules.quality_rules.push_back(
+        QualityRule{.self = true,
+                    .has_field = true,
+                    .lo = TOP_BIT_16,
+                    .hi = TOP_BIT_16,
+                    .entries = {{.key = 0, .mark = {}}},
+                    .otherwise = {.quality = Quality::UNCERTAIN}});
+    Point with_default(rules);
+    EXPECT_EQ(with_default.value(1, SECOND).tag.quality, Quality::GOOD);
+    EXPECT_EQ(with_default.value(-1, SECOND).tag.quality, Quality::UNCERTAIN);
+    rules.quality_rules[0].otherwise =
+        QualityRule{}.otherwise;  // no default: BAD
+    Point without_default(rules);
+    EXPECT_EQ(without_default.value(-1, SECOND).tag.quality, Quality::BAD);
+}
+
+TEST(SampleProcessing, SixtyFourBitFieldWithTheTopBitSetMatchesNoKey) {
+    PointRules rules;
+    rules.tag_type = TagType::UINT64;
+    rules.quality_rules.push_back(
+        QualityRule{.self = true,
+                    .has_field = true,
+                    .lo = 0,
+                    .hi = MAX_BIT_NUMBER,
+                    .entries = {{.key = 0, .mark = {}}},
+                    .otherwise = {.quality = Quality::UNCERTAIN}});
+    Point point(rules);
+    const TagWrite write =
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE,
+                            .raw = raw_unsigned(std::uint64_t{1} << 63U, 64)},
+                  SECOND)
+            .tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+}
+
+TEST(SampleProcessing, HealthRuleWithAField) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.health.push_back(HealthRule{.companion = 0,
+                                      .has_field = true,
+                                      .lo = FIELD_4,
+                                      .hi = FIELD_5,
+                                      .good = {2}});
+    Point point(rules);
+    const CompanionInput good{.outcome = Outcome::VALUE,
+                              .raw = raw_unsigned(0b10'0000, INT16)};
+    const CompanionInput fault{.outcome = Outcome::VALUE,
+                               .raw = raw_unsigned(0b01'0000, INT16)};
+    EXPECT_EQ(point.value(1, SECOND, {&good, 1}).tag.quality, Quality::GOOD);
+    const TagWrite bad_write = point.value(1, SECOND, {&fault, 1}).tag;
+    EXPECT_EQ(bad_write.quality, Quality::BAD);
+    EXPECT_FALSE(has(bad_write.flags, QualityFlag::COMM_FAIL));
+}
+
+// --- Rules that validate_point_rules refuses give BAD, never UB --------------
+
+TEST(SampleProcessing, OutOfRangeRuleFieldsGiveBad) {
+    PointRules bits = int_rules();
+    bits.bits = {BitRule{.bit = MAX_BIT_NUMBER + 1}};
+    Point bit_point(bits);
+    EXPECT_EQ(bit_point.value(1, SECOND).tag.quality, Quality::BAD);
+    PointRules field = int_rules();
+    field.quality_rules.push_back(
+        QualityRule{.self = true,
+                    .has_field = true,
+                    .lo = FIELD_LOW,
+                    .hi = BEYOND_64,
+                    .entries = {},
+                    .otherwise = {.quality = Quality::UNCERTAIN}});
+    Point field_point(field);
+    EXPECT_EQ(field_point.value(1, SECOND).tag.quality, Quality::UNCERTAIN);
+    PointRules slot = int_rules();
+    slot.exponent = ExponentRule{.companion = 3};
+    slot.tag_type = TagType::FLOAT64;
+    Point slot_point(slot);
+    EXPECT_EQ(slot_point.value(1, SECOND).tag.quality, Quality::BAD);
+}
+
+TEST(SampleProcessing, RawValueWithAWidthOfZeroIsBad) {
+    // A protocol that left the width 0 would make every marker miss.
+    PointRules rules = int_rules();
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES});
+    Point point(rules);
+    RawValue raw = raw_unsigned(UINT16_ALL_ONES, INT16);
+    raw.width = 0;
+    EXPECT_EQ(
+        point.feed(RawSample{.outcome = Outcome::VALUE, .raw = raw}, SECOND)
+            .tag.quality,
+        Quality::BAD);
+}
+
+// --- Integer scaling with divide_by 1 (decision D-133) -----------------------
+
+TEST(SampleProcessing, DivideByOneOnAnIntegerTagIsExact) {
+    PointRules rules = int_rules();
+    rules.scale = ScaleRule{.form = ScaleRule::Form::DIVIDE_BY,
+                            .integer = true,
+                            .offset_i = OFFSET_MINUS_3,
+                            .divide_by = 1,
+                            .offset = static_cast<double>(OFFSET_MINUS_3)};
+    Point point(rules);
+    const TagWrite write = point.value(FIRST_VALUE, SECOND).tag;
+    EXPECT_EQ(write.quality, Quality::GOOD);
+    EXPECT_EQ(write.value.i, FIRST_VALUE + OFFSET_MINUS_3);
+}
+
+// --- Bits --------------------------------------------------------------------
+
+TEST(SampleProcessing, BitsKeepTheirValuesWhenTheWordMatchedAMarker) {
+    PointRules rules = int_rules();
+    rules.bits = {BitRule{.bit = 0}};
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES});
+    Point point(rules);
+    const ProcessedSample before =
+        point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, SECOND);
+    EXPECT_FALSE(sample_bit(before, 0));
+    EXPECT_TRUE(has(before.tag.flags, QualityFlag::NOT_INIT));
+    EXPECT_TRUE(sample_bit(point.value(1, 2 * SECOND), 0));
+    const ProcessedSample marker = point.value(-1, 3 * SECOND);  // 0xFFFF
+    EXPECT_TRUE(sample_bit(marker, 0));  // kept from the last valid word
+    EXPECT_EQ(marker.tag.quality, Quality::BAD);
+}
+
+TEST(SampleProcessing, StaleCheckCoversTheBits) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.bits = {BitRule{.bit = 1}};
+    Point point(rules);
+    (void)point.value(2, SECOND);
+    ProcessedSample out;
+    ASSERT_TRUE(point.stale((MAX_AGE_S + 2) * SECOND, out));
+    EXPECT_EQ(out.bit_count, 1U);
+    EXPECT_TRUE(sample_bit(out, 0));
+    EXPECT_TRUE(has(out.tag.flags, QualityFlag::STALE));
+}
+
+// --- Counters
+// ------------------------------------------------------------------
+
+PointRules counter_rules(CounterRule rule) {
+    PointRules rules;
+    rules.tag_type = TagType::UINT64;
+    rules.counter = rule;
+    return rules;
+}
+
+TagWrite counter_value(Point& point, std::uint64_t raw, unsigned width) {
+    return point
+        .feed(RawSample{.outcome = Outcome::VALUE,
+                        .raw = raw_unsigned(raw, width)},
+              SECOND)
+        .tag;
+}
+
+TEST(SampleProcessing, ThirtyTwoBitCounterSteppingBackAcrossHalfIsAWrap) {
+    // The contract's wrap rule (5.4): a decrease from at least limit/2 to
+    // below it is a wrap, written GOOD with no flag, even with `hold`.
+    constexpr std::uint64_t LIMIT = 0xFFFF'FFFFU;
+    constexpr std::uint64_t HIGH = 3'000'000'000U;
+    constexpr std::uint64_t LOW = 2'000'000'000U;
+    constexpr unsigned INT32 = 32;
+    Point point(counter_rules(CounterRule{
+        .limit = LIMIT, .on_decrease = CounterRule::OnDecrease::HOLD}));
+    (void)counter_value(point, HIGH, INT32);
+    const TagWrite after = counter_value(point, LOW, INT32);
+    EXPECT_EQ(after.value.u, LOW);
+    EXPECT_EQ(after.quality, Quality::GOOD);
+    EXPECT_EQ(after.flags, flags({QualityFlag::LOCAL_TIME}));
+}
+
+TEST(SampleProcessing, CounterWrapAtExactlyHalfTheLimit) {
+    constexpr std::uint64_t LIMIT = UINT16_ALL_ONES;
+    Point point(counter_rules(CounterRule{
+        .limit = LIMIT, .on_decrease = CounterRule::OnDecrease::HOLD}));
+    (void)counter_value(point, LIMIT / 2, INT16);  // 32767: at least half
+    EXPECT_EQ(counter_value(point, 10, INT16).quality, Quality::GOOD);  // wrap
+    (void)counter_value(point, LIMIT / 2 - 1, INT16);  // below half
+    EXPECT_EQ(counter_value(point, 10, INT16).quality,
+              Quality::UNCERTAIN);  // hold
+}
+
+TEST(SampleProcessing, CounterSaturateThenADecreaseFollowsOnDecrease) {
+    constexpr std::uint64_t LIMIT = 9999;
+    Point point(counter_rules(
+        CounterRule{.limit = LIMIT,
+                    .saturate = true,
+                    .on_decrease = CounterRule::OnDecrease::HOLD}));
+    EXPECT_TRUE(
+        has(counter_value(point, LIMIT, INT16).flags, QualityFlag::OVERFLOW));
+    const TagWrite down =
+        counter_value(point, 3, INT16);  // no wrap under saturate
+    EXPECT_EQ(down.value.u, LIMIT);
+    EXPECT_EQ(down.quality, Quality::UNCERTAIN);
+}
+
+TEST(SampleProcessing, CounterHoldKeepsItsOwnValueAcrossASubstituteAndALoss) {
+    PointRules rules = counter_rules(
+        CounterRule{.limit = UINT16_ALL_ONES,
+                    .on_decrease = CounterRule::OnDecrease::HOLD});
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                          .action = InvalidAction::SUBSTITUTE,
+                                          .substitute = uint64_value(0)});
+    Point point(rules);
+    constexpr std::uint64_t FIRST = 1000;
+    (void)counter_value(point, FIRST, INT16);
+    EXPECT_EQ(counter_value(point, UINT16_ALL_ONES, INT16).value.u, 0U);
+    (void)point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, SECOND);
+    const TagWrite held = counter_value(point, 900, INT16);
+    EXPECT_EQ(held.value.u, FIRST);
+    EXPECT_EQ(held.quality, Quality::UNCERTAIN);
+}
+
+TEST(SampleProcessing, CounterOnANegativeOrFloatingRawIsBad) {
+    PointRules rules = counter_rules(CounterRule{.limit = UINT16_ALL_ONES});
+    rules.tag_type = TagType::INT64;
+    Point point(rules);
+    EXPECT_EQ(point.value(-1, SECOND).tag.quality, Quality::BAD);
+    PointRules floating = counter_rules(CounterRule{.limit = UINT16_ALL_ONES});
+    floating.tag_type = TagType::FLOAT64;
+    Point float_point(floating);
+    EXPECT_EQ(float_point
+                  .feed(RawSample{.outcome = Outcome::VALUE,
+                                  .raw = raw_float32(1.0F)},
+                        SECOND)
+                  .tag.quality,
+              Quality::BAD);
+}
+
+// --- Double points
+// -------------------------------------------------------------
+
+TEST(SampleProcessing, DoublePointFromAFloatRawUsesTheTolerance) {
+    PointRules rules = int_rules();
+    rules.double_point = DoublePointRule{
+        .states = {{1, DoublePoint::OPEN}, {2, DoublePoint::CLOSED}}};
+    Point point(rules);
+    const TagWrite near_one = point
+                                  .feed(RawSample{.outcome = Outcome::VALUE,
+                                                  .raw = raw_float32(1.0004F)},
+                                        SECOND)
+                                  .tag;
+    EXPECT_EQ(near_one.value.i, 1);
+    EXPECT_EQ(near_one.quality, Quality::GOOD);
+    // 3 (faulty) then a valid code: GOOD again.
+    rules.double_point->states.push_back({3, DoublePoint::BAD_STATE});
+    Point again(rules);
+    EXPECT_EQ(again.value(3, SECOND).tag.quality, Quality::BAD);
+    EXPECT_EQ(again.value(2, 2 * SECOND).tag.quality, Quality::GOOD);
+}
+
+TEST(SampleProcessing, DoublePointWithAQualityRule) {
+    PointRules rules = int_rules();
+    rules.double_point = DoublePointRule{.states = {{1, DoublePoint::OPEN}}};
+    rules.companions = {COMPANION_INDEX};
+    rules.quality_rules.push_back(
+        QualityRule{.companion = 0, .entries = {{.key = 0, .mark = {}}}});
+    Point point(rules);
+    const CompanionInput fault{.outcome = Outcome::VALUE,
+                               .raw = raw_unsigned(1, INT16)};
+    const TagWrite write = point.value(1, SECOND, {&fault, 1}).tag;
+    EXPECT_EQ(write.value.i, 1);
+    EXPECT_EQ(write.quality, Quality::BAD);
+}
+
+// --- Substitute, strings, exponent edges
+// -----------------------------------------
+
+TEST(SampleProcessing, SubstituteBeforeAnyReadThenStale) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.markers.push_back(
+        InvalidMarker{.pattern = UINT16_ALL_ONES,
+                      .action = InvalidAction::SUBSTITUTE,
+                      .substitute = int64_value(KEPT_VALUE)});
+    Point point(rules);
+    const TagWrite first = point.value(-1, SECOND).tag;
+    EXPECT_EQ(first.value.i, KEPT_VALUE);
+    EXPECT_EQ(first.quality, Quality::UNCERTAIN);
+    EXPECT_FALSE(has(first.flags, QualityFlag::NOT_INIT));  // decision D-131
+    ProcessedSample out;
+    ASSERT_TRUE(point.stale((MAX_AGE_S + 1) * SECOND, out));  // never confirmed
+    EXPECT_TRUE(has(out.tag.flags, QualityFlag::STALE));
+}
+
+TEST(SampleProcessing, StringEdges) {
+    PointRules rules;
+    rules.tag_type = TagType::STRING;
+    Point point(rules);
+    const std::string exact(TAG_STRING_MAX_BYTES, 'x');
+    const TagWrite whole =
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE,
+                            .raw = raw_string(bytes_of(exact))},
+                  SECOND)
+            .tag;
+    EXPECT_EQ(whole.value.text.size(), TAG_STRING_MAX_BYTES);
+    EXPECT_FALSE(has(whole.flags, QualityFlag::OVERFLOW));
+    // A 4-byte character that would end at byte 251.
+    const std::string four = std::string(247, 'a') + "\xF0\x9F\x98\x80";
+    const TagWrite cut = point
+                             .feed(RawSample{.outcome = Outcome::VALUE,
+                                             .raw = raw_string(bytes_of(four))},
+                                   SECOND)
+                             .tag;
+    EXPECT_EQ(cut.value.text.size(), 247U);
+    EXPECT_TRUE(has(cut.flags, QualityFlag::OVERFLOW));
+    // A surrogate (U+D800 encoded) is not UTF-8.
+    const std::string surrogate = "\xED\xA0\x80";
+    EXPECT_EQ(point
+                  .feed(RawSample{.outcome = Outcome::VALUE,
+                                  .raw = raw_string(bytes_of(surrogate))},
+                        SECOND)
+                  .tag.quality,
+              Quality::BAD);
+}
+
+TEST(SampleProcessing, ExponentAtItsLimits) {
+    PointRules rules = float_point_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.exponent = ExponentRule{.companion = 0};
+    Point point(rules);
+    for (const std::int64_t exponent :
+         {EXPONENT_MIN, std::int64_t{0}, EXPONENT_MAX}) {
+        const CompanionInput power{.outcome = Outcome::VALUE,
+                                   .raw = raw_signed(exponent, INT16)};
+        const TagWrite write = point.value(3, SECOND, {&power, 1}).tag;
+        EXPECT_EQ(write.quality, Quality::GOOD) << exponent;
+    }
+    const CompanionInput below{.outcome = Outcome::VALUE,
+                               .raw = raw_signed(EXPONENT_MIN - 1, INT16)};
+    EXPECT_EQ(point.value(3, SECOND, {&below, 1}).tag.quality, Quality::BAD);
+}
+
+// --- A time-valued point (CS 4.6; the lead's ruling)
+// ----------------------------
+
+TEST(SampleProcessing, TimeValueWithTrustUnknownIsTimeUncertain) {
+    PointRules rules = int_rules();
+    rules.device_time = DeviceTimeRule{};  // UTC, trust unknown
+    Point point(rules);
+    const TagWrite write =
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = raw_time(SECOND)},
+                  SECOND)
+            .tag;
+    EXPECT_EQ(write.value.i, SECOND);
+    EXPECT_TRUE(has(write.flags, QualityFlag::TIME_UNCERTAIN));
+    rules.device_time.synced = true;
+    Point synced(rules);
+    EXPECT_FALSE(has(
+        synced
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = raw_time(SECOND)},
+                  SECOND)
+            .tag.flags,
+        QualityFlag::TIME_UNCERTAIN));
+}
+
+TEST(SampleProcessing, TimeValueInTheRepeatedAndSkippedHour) {
+    auto zone = ZoneTable::build("Europe/Berlin");
+    ASSERT_TRUE(zone.ok());
+    PointRules rules = int_rules();
+    rules.device_time =
+        DeviceTimeRule{.local = true, .zone = &zone.value(), .synced = true};
+    Point point(rules);
+    for (const std::int64_t local_s : {OCT25_0230_LOCAL, MAR29_0230_LOCAL}) {
+        const TagWrite write =
+            point
+                .feed(RawSample{.outcome = Outcome::VALUE,
+                                .raw = raw_time(local_s * SECOND)},
+                      SECOND)
+                .tag;
+        EXPECT_TRUE(has(write.flags, QualityFlag::TIME_UNCERTAIN)) << local_s;
+    }
+    EXPECT_FALSE(
+        has(point
+                .feed(RawSample{.outcome = Outcome::VALUE,
+                                .raw = raw_time(JUN1_1200_LOCAL * SECOND)},
+                      SECOND)
+                .tag.flags,
+            QualityFlag::TIME_UNCERTAIN));
+}
+
+TEST(SampleProcessing, LocalTimeWithoutAZoneIsNeverCertain) {
+    PointRules rules = int_rules();
+    rules.device_time = DeviceTimeRule{.local = true, .synced = true};
+    Point point(rules);
+    EXPECT_TRUE(has(
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = raw_time(SECOND)},
+                  SECOND)
+            .tag.flags,
+        QualityFlag::TIME_UNCERTAIN));
+}
+
+TEST(SampleProcessing, TimeRawOnAFloatTagIsBad) {
+    Point point(float_point_rules());
+    EXPECT_EQ(
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = raw_time(SECOND)},
+                  SECOND)
+            .tag.quality,
+        Quality::BAD);
 }
 
 }  // namespace

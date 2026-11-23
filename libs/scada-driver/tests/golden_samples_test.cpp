@@ -6,6 +6,7 @@
 // order, word order and parts); the bytes-to-pattern half of the vectors
 // belongs to each protocol and its simulator (#105, #106).
 
+#include "sample_helpers.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/sample_processing.h"
@@ -66,9 +67,8 @@ constexpr std::uint16_t LOCAL = tag::to_raw(QualityFlag::LOCAL_TIME);
 // Processes one VALUE sample of a fresh point and returns the tag write.
 TagWrite run(const PointRules& rules, const RawValue& raw,
              std::span<const CompanionInput> companions = {}) {
-    PointState state;
-    reset_point_state(state, rules.tag_type, 0);
-    const ProcessedSample out = process_sample(
+    PointState state = test::fresh_state(rules);
+    const ProcessedSample out = test::processed(
         rules, state, RawSample{.outcome = Outcome::VALUE, .raw = raw},
         companions,
         SampleTimes{.receive_time_ns = RECEIVE_NS, .receive_mono_ns = MONO_NS});
@@ -385,18 +385,18 @@ public:
     }
 
     TagWrite next(std::uint64_t raw) {
-        return process_sample(rules_, state_,
-                              RawSample{.outcome = Outcome::VALUE,
-                                        .raw = raw_unsigned(raw, INT16)},
-                              {}, SampleTimes{})
+        return test::processed(rules_, state_,
+                               RawSample{.outcome = Outcome::VALUE,
+                                         .raw = raw_unsigned(raw, INT16)},
+                               {}, SampleTimes{})
             .tag;
     }
 
     ProcessedSample next_sample(std::uint64_t raw) {
-        return process_sample(rules_, state_,
-                              RawSample{.outcome = Outcome::VALUE,
-                                        .raw = raw_unsigned(raw, INT16)},
-                              {}, SampleTimes{});
+        return test::processed(rules_, state_,
+                               RawSample{.outcome = Outcome::VALUE,
+                                         .raw = raw_unsigned(raw, INT16)},
+                               {}, SampleTimes{});
     }
 
 private:

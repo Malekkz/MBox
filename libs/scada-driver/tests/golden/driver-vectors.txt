@@ -1,0 +1,111 @@
+# Golden vectors of the driver framework: a raw value and a point's rules
+# give value bits, quality and flags; an engineering value and a point's
+# rules give the raw pattern written (driver interface contract 5.1, 8.4;
+# conformance test 5). Bit-identical on x86-64 and ARM64.
+#
+# The framework's half: raw values are the pattern a protocol assembles
+# (after byte order, word order and parts). Each protocol and its simulator
+# (#105, #106) add the bytes half to a copy of a line with two fields that
+# the framework's test ignores: `bytes=<hex>` (the bytes on the wire) and
+# `binding=<text>` (the point's protocol address). Every example is
+# invented.
+#
+# One item per line; `#` starts a comment. Fields are separated by spaces.
+#
+#   rules <name> <key>=<value>...
+#     tag=bool|int64|uint64|float64   the tag's type (required)
+#     gain=<decimal> offset=<decimal> binary64 scaling, `{ gain, offset }`
+#     gain_i=<int> offset_i=<int>     the same written as integers
+#     divide_by=<int>                 `{ divide_by, offset }`
+#     marker=<0xhex|nan>[:<FLAG>...]  an invalid marker with action `bad`
+#     raw_range=<min>:<max>           `raw_range`
+#     enum=<code>,<code>...           an enumeration
+#     invert                          a BOOL point read inverted
+#
+#   sample <rules> raw=<raw> [bytes=... binding=...] -> value=<value> quality=<Q> flags=<F>,...
+#     A fresh point after attach processes one answer with VALUE, at a
+#     receive time stamped by the driver.
+#
+#   write <rules> raw_type=<kind>:<width> value=<value> -> raw=<0xhex> written=<value>
+#   write <rules> raw_type=<kind>:<width> value=<value> -> refused
+#
+#   <raw>   signed:<width>:<decimal> | unsigned:<width>:<decimal or 0xhex>
+#           | float32:<0xbits> | float64:<0xbits> | bool:<0|1>
+#   <value> int64:<decimal> | uint64:<decimal> | float64:<0xbits> | bool:<0|1>
+#   <kind>  signed | unsigned | float | bool
+#   <Q>     GOOD | UNCERTAIN | BAD; <F> the flag names of tag database 6, or -
+
+# --- Rules ----------------------------------------------------------------
+
+rules plain_int tag=int64
+rules temp_tenths tag=float64 gain=0.1 marker=0x7FFF:OUT_OF_RANGE marker=0x8000
+rules gain_offset tag=float64 gain=0.1 offset=0.2
+rules tenths tag=float64 divide_by=10
+rules thousandths tag=float64 divide_by=1000
+rules int_gain tag=int64 gain_i=3 offset_i=-7
+rules int_gain10 tag=int64 gain_i=10
+rules uint_exact tag=uint64 gain_i=1 offset_i=1
+rules int_edge tag=int64 gain_i=1 offset_i=9223372036854775807
+rules power tag=float64 marker=nan
+rules power_inf tag=float64 marker=0x7F800000
+rules no_marker tag=float64
+rules ranged tag=int64 raw_range=0:4000
+rules states tag=int64 enum=-1,0,1,3
+rules flag_inverted tag=bool invert
+rules huge_gain tag=float64 gain=1e300
+rules setpoint_kw tag=float64 gain=0.1
+rules setpoint_pct tag=float64 divide_by=10
+rules setpoint_offset tag=float64 gain=0.1 offset=-40
+rules float_target tag=float64
+
+# --- Samples: markers on the pattern (step 1) -------------------------------
+
+sample temp_tenths raw=signed:16:215 -> value=float64:0x4035800000000000 quality=GOOD flags=LOCAL_TIME
+sample temp_tenths raw=signed:16:-57 -> value=float64:0xC016CCCCCCCCCCCD quality=GOOD flags=LOCAL_TIME
+sample temp_tenths raw=signed:16:32767 -> value=float64:0x0000000000000000 quality=BAD flags=OUT_OF_RANGE,NOT_INIT,LOCAL_TIME
+sample temp_tenths raw=signed:16:-32768 -> value=float64:0x0000000000000000 quality=BAD flags=NOT_INIT,LOCAL_TIME
+sample power raw=float32:0x7FC01234 -> value=float64:0x0000000000000000 quality=BAD flags=NOT_INIT,LOCAL_TIME
+sample power raw=float32:0x44BB9000 -> value=float64:0x4097720000000000 quality=GOOD flags=LOCAL_TIME
+sample power_inf raw=float32:0x7F800000 -> value=float64:0x0000000000000000 quality=BAD flags=NOT_INIT,LOCAL_TIME
+
+# --- Non-finite without a marker (step 2) -----------------------------------
+
+sample no_marker raw=float32:0x7F800000 -> value=float64:0x0000000000000000 quality=BAD flags=OUT_OF_RANGE,NOT_INIT,LOCAL_TIME
+sample no_marker raw=float64:0xFFF0000000000000 -> value=float64:0x0000000000000000 quality=BAD flags=OUT_OF_RANGE,NOT_INIT,LOCAL_TIME
+sample no_marker raw=float64:0x7FF8000000000000 -> value=float64:0x0000000000000000 quality=BAD flags=OUT_OF_RANGE,NOT_INIT,LOCAL_TIME
+
+# --- Scale (step 4) ---------------------------------------------------------
+
+sample gain_offset raw=signed:16:1 -> value=float64:0x3FD3333333333334 quality=GOOD flags=LOCAL_TIME
+sample tenths raw=signed:16:125 -> value=float64:0x4029000000000000 quality=GOOD flags=LOCAL_TIME
+sample tenths raw=signed:16:-1 -> value=float64:0xBFB999999999999A quality=GOOD flags=LOCAL_TIME
+sample thousandths raw=signed:16:12345 -> value=float64:0x4028B0A3D70A3D71 quality=GOOD flags=LOCAL_TIME
+sample int_gain raw=signed:16:-1000 -> value=int64:-3007 quality=GOOD flags=LOCAL_TIME
+sample uint_exact raw=unsigned:64:9007199254740993 -> value=uint64:9007199254740994 quality=GOOD flags=LOCAL_TIME
+sample int_edge raw=signed:16:1 -> value=int64:0 quality=BAD flags=OVERFLOW,NOT_INIT,LOCAL_TIME
+sample huge_gain raw=float64:0x7FEFFFFFFFFFFFFF -> value=float64:0x0000000000000000 quality=BAD flags=OVERFLOW,NOT_INIT,LOCAL_TIME
+
+# --- raw_range, enumerations, bool ------------------------------------------
+
+sample ranged raw=unsigned:16:4000 -> value=int64:4000 quality=GOOD flags=LOCAL_TIME
+sample ranged raw=unsigned:16:4001 -> value=int64:4001 quality=UNCERTAIN flags=OUT_OF_RANGE,LOCAL_TIME
+sample states raw=signed:16:3 -> value=int64:3 quality=GOOD flags=LOCAL_TIME
+sample states raw=signed:16:2 -> value=int64:2 quality=UNCERTAIN flags=OUT_OF_RANGE,LOCAL_TIME
+sample states raw=float32:0x403FFDF4 -> value=int64:3 quality=GOOD flags=LOCAL_TIME
+sample flag_inverted raw=bool:1 -> value=bool:0 quality=GOOD flags=LOCAL_TIME
+
+# --- Writes (8.4) -----------------------------------------------------------
+
+write setpoint_kw raw_type=signed:16 value=float64:0x4029000000000000 -> raw=0x007D written=float64:0x4029000000000000
+write setpoint_pct raw_type=unsigned:16 value=float64:0x4052C00000000000 -> raw=0x02EE written=float64:0x4052C00000000000
+write tenths raw_type=signed:16 value=float64:0x4028AE147AE147AE -> raw=0x007B written=float64:0x402899999999999A
+write setpoint_kw raw_type=signed:16 value=float64:0x40A999851EB851EC -> refused
+write setpoint_offset raw_type=unsigned:16 value=float64:0xC044051EB851EB85 -> raw=0x0000 written=float64:0xC044000000000000
+write uint_exact raw_type=unsigned:64 value=uint64:9007199254740994 -> raw=0x0020000000000001 written=uint64:9007199254740994
+write int_gain10 raw_type=signed:16 value=int64:150 -> raw=0x000F written=int64:150
+write int_gain10 raw_type=signed:16 value=int64:155 -> refused
+write int_gain10 raw_type=signed:16 value=int64:327680 -> refused
+write float_target raw_type=float:32 value=float64:0x3FB999999999999A -> raw=0x3DCCCCCD written=float64:0x3FB99999A0000000
+write float_target raw_type=float:32 value=float64:0x7FF8000000000000 -> refused
+write float_target raw_type=float:32 value=float64:0x48078287F49C4A1D -> refused
+write flag_inverted raw_type=bool:1 value=bool:1 -> raw=0x0 written=bool:1

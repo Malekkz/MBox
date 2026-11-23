@@ -32,6 +32,7 @@ constexpr std::uint16_t flag(QualityFlag value) noexcept {
 }
 
 constexpr QualityMark GOOD_MARK{};
+constexpr QualityMark UNCERTAIN_MARK{.quality = Quality::UNCERTAIN};
 
 // The worse of two marks: the higher quality value, the union of flags
 // (CS 4.7: "The worst result of all rules ... is the tag's quality").
@@ -47,10 +48,26 @@ QualityMark bad(std::uint16_t flags) noexcept {
     return QualityMark{.quality = Quality::BAD, .flags = flags};
 }
 
+// A mark that came from a device or a configured map, with only the flags a
+// device may give (DEVICE_FLAGS_MASK).
+QualityMark device_mark(QualityMark mark) noexcept {
+    const Quality quality =
+        tag::quality_from_raw(tag::to_raw(mark.quality)).value_or(Quality::BAD);
+    return QualityMark{
+        .quality = quality,
+        .flags = static_cast<std::uint16_t>(mark.flags & DEVICE_FLAGS_MASK)};
+}
+
 // The flags a failed companion passes to the point that depends on it
 // (contract 5.5: "that outcome's flags").
-std::uint16_t companion_flags(Outcome outcome) noexcept {
-    return outcome == Outcome::COMM_FAIL ? flag(QualityFlag::COMM_FAIL) : 0;
+std::uint16_t companion_flags(const CompanionInput& companion) noexcept {
+    const std::uint16_t own = companion.outcome == Outcome::COMM_FAIL
+                                  ? flag(QualityFlag::COMM_FAIL)
+                                  : 0;
+    const auto carried = static_cast<std::uint16_t>(
+        companion.mark.flags &
+        (DEVICE_FLAGS_MASK | flag(QualityFlag::COMM_FAIL)));
+    return static_cast<std::uint16_t>(own | carried);
 }
 
 // Powers of ten that binary64 holds exactly, up to the exponent limit of
@@ -63,7 +80,14 @@ constexpr std::array<double, 21> POWERS_OF_TEN{
 // to int64 exactly.
 constexpr double TWO_TO_THE_63 = 9223372036854775808.0;
 
-// The raw value as a signed integer, when it is one.
+// How far a floating raw value may be from an integer and still be read as
+// one (CS 5.5; decision D-131).
+constexpr double INTEGER_TOLERANCE = 0.001;
+
+constexpr unsigned FLOAT32_WIDTH = 32;
+constexpr unsigned FLOAT64_WIDTH = 64;
+
+// The raw value as a signed integer, when it is one exactly.
 std::optional<std::int64_t> integer_of(const RawValue& raw) noexcept {
     switch (raw.kind) {
         case RawKind::BOOL:
@@ -74,7 +98,6 @@ std::optional<std::int64_t> integer_of(const RawValue& raw) noexcept {
             }
             return static_cast<std::int64_t>(raw.number_u);
         case RawKind::SIGNED:
-        case RawKind::TIME:
             return raw.number_i;
         case RawKind::FLOAT: {
             const double value = raw.number_f;
@@ -85,9 +108,31 @@ std::optional<std::int64_t> integer_of(const RawValue& raw) noexcept {
             return static_cast<std::int64_t>(value);
         }
         case RawKind::STRING:
+        case RawKind::TIME:
             return std::nullopt;
     }
     return std::nullopt;
+}
+
+// A binary64 number as the nearest integer, when it is within the tolerance
+// of one and inside int64 (CS 5.5).
+std::optional<std::int64_t> near_integer(double number) noexcept {
+    if (!std::isfinite(number)) {
+        return std::nullopt;
+    }
+    const double rounded = std::round(number);
+    if (std::fabs(number - rounded) > INTEGER_TOLERANCE ||
+        rounded >= TWO_TO_THE_63 || rounded < -TWO_TO_THE_63) {
+        return std::nullopt;
+    }
+    return static_cast<std::int64_t>(rounded);
+}
+
+// The raw value as a code: exact for an integer, within the tolerance for a
+// floating value (enumerations and double points alike, decision D-131).
+std::optional<std::int64_t> code_of(const RawValue& raw) noexcept {
+    return raw.kind == RawKind::FLOAT ? near_integer(raw.number_f)
+                                      : integer_of(raw);
 }
 
 // The raw value as a binary64 number.
@@ -112,15 +157,40 @@ bool is_integer_kind(RawKind kind) noexcept {
            kind == RawKind::UNSIGNED;
 }
 
+bool is_integer_tag(TagType type) noexcept {
+    return type == TagType::INT64 || type == TagType::UINT64;
+}
+
+// A raw value whose width a protocol left inconsistent with its kind (a
+// width of 0 would make every marker miss) is not used (decision D-131).
+bool width_ok(const RawValue& raw) noexcept {
+    switch (raw.kind) {
+        case RawKind::BOOL:
+        case RawKind::SIGNED:
+        case RawKind::UNSIGNED:
+            return raw.width >= 1 && raw.width <= RAW_MAX_WIDTH;
+        case RawKind::FLOAT:
+            return raw.width == FLOAT32_WIDTH || raw.width == FLOAT64_WIDTH;
+        case RawKind::STRING:
+        case RawKind::TIME:
+            return true;
+    }
+    return false;
+}
+
 detail::Wide wide_of(const RawValue& raw) noexcept {
     return raw.kind == RawKind::SIGNED
                ? detail::wide_from_signed(raw.number_i)
                : detail::wide_from_unsigned(raw.number_u);
 }
 
-// Bits `low` to `high` of `pattern`, shifted down.
-std::uint64_t field_of(std::uint64_t pattern, std::uint8_t low,
-                       std::uint8_t high) noexcept {
+// Bits `low` to `high` of `pattern`, shifted down; nothing for a field that
+// is not within 0 to 63 with low <= high.
+std::optional<std::uint64_t> field_of(std::uint64_t pattern, std::uint8_t low,
+                                      std::uint8_t high) noexcept {
+    if (low > high || high > MAX_BIT_NUMBER) {
+        return std::nullopt;
+    }
     const unsigned width = static_cast<unsigned>(high - low) + 1U;
     return (pattern >> low) & width_mask(width);
 }
@@ -129,17 +199,18 @@ std::uint64_t field_of(std::uint64_t pattern, std::uint8_t low,
 std::optional<std::int64_t> key_of(const RawValue& raw, bool has_field,
                                    std::uint8_t low,
                                    std::uint8_t high) noexcept {
-    if (has_field) {
-        // A field has at most 64 bits; one of 64 bits does not fit int64
-        // when its top bit is set, and then matches no key.
-        const std::uint64_t field = field_of(raw.pattern, low, high);
-        if (field > static_cast<std::uint64_t>(
-                        std::numeric_limits<std::int64_t>::max())) {
-            return std::nullopt;
-        }
-        return static_cast<std::int64_t>(field);
+    if (!has_field) {
+        return code_of(raw);
     }
-    return integer_of(raw);
+    const std::optional<std::uint64_t> field = field_of(raw.pattern, low, high);
+    // A field of 64 bits with its top bit set does not fit int64 and
+    // matches no key.
+    if (!field.has_value() ||
+        *field > static_cast<std::uint64_t>(
+                     std::numeric_limits<std::int64_t>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<std::int64_t>(*field);
 }
 
 bool marker_matches(const InvalidMarker& marker, const RawValue& raw) noexcept {
@@ -152,66 +223,11 @@ bool marker_matches(const InvalidMarker& marker, const RawValue& raw) noexcept {
     return (raw.pattern & width_mask(raw.width)) == marker.pattern;
 }
 
-// The mark of the `quality_from` rules (CS 4.7).
-QualityMark quality_from_rules(const PointRules& rules, const RawSample& sample,
-                               std::span<const CompanionInput> companions) {
-    QualityMark mark = GOOD_MARK;
-    for (const QualityRule& rule : rules.quality_rules) {
-        const RawValue* raw = &sample.raw;
-        if (!rule.self) {
-            if (rule.companion >= companions.size()) {
-                mark = worse(mark, bad(flag(QualityFlag::COMM_FAIL)));
-                continue;
-            }
-            const CompanionInput& companion = companions[rule.companion];
-            if (companion.outcome != Outcome::VALUE) {
-                mark = worse(mark, bad(companion_flags(companion.outcome)));
-                continue;
-            }
-            raw = &companion.raw;
-        }
-        const std::optional<std::int64_t> key =
-            key_of(*raw, rule.has_field, rule.lo, rule.hi);
-        QualityMark found = rule.otherwise;
-        if (key.has_value()) {
-            const auto entry = std::lower_bound(
-                rule.entries.begin(), rule.entries.end(), *key,
-                [](const QualityRule::Entry& candidate, std::int64_t wanted) {
-                    return candidate.key < wanted;
-                });
-            if (entry != rule.entries.end() && entry->key == *key) {
-                found = entry->mark;
-            }
-        }
-        mark = worse(mark, found);
-    }
-    return mark;
-}
-
-// The mark of the device's `health` rules that apply to the point (CS 4.9).
-QualityMark health_mark(const PointRules& rules,
-                        std::span<const CompanionInput> companions) {
-    QualityMark mark = GOOD_MARK;
-    for (const HealthRule& rule : rules.health) {
-        const std::uint16_t fail_flags =
-            rule.comm_fail ? flag(QualityFlag::COMM_FAIL) : 0;
-        if (rule.companion >= companions.size()) {
-            mark = worse(mark, bad(fail_flags));
-            continue;
-        }
-        const CompanionInput& companion = companions[rule.companion];
-        bool good = false;
-        if (companion.outcome == Outcome::VALUE && !companion.stale) {
-            const std::optional<std::int64_t> key =
-                key_of(companion.raw, rule.has_field, rule.lo, rule.hi);
-            good = key.has_value() &&
-                   std::binary_search(rule.good.begin(), rule.good.end(), *key);
-        }
-        if (!good) {
-            mark = worse(mark, bad(fail_flags));
-        }
-    }
-    return mark;
+CompanionInput companion_at(std::span<const CompanionInput> companions,
+                            std::uint8_t slot) noexcept {
+    return slot < companions.size()
+               ? companions[slot]
+               : CompanionInput{.outcome = Outcome::COMM_FAIL};
 }
 
 // The work of one call, kept together so that the steps can be functions.
@@ -221,11 +237,14 @@ struct Work {
     const RawSample* sample = nullptr;
     std::span<const CompanionInput> companions;
     const SampleTimes* times = nullptr;
-    ProcessedSample out{};
+    ProcessedSample* out = nullptr;
     QualityMark mark{};
-    // A new value was computed from the device; otherwise the last value is
+    // A value to write was computed or chosen; otherwise the last value is
     // written again.
     bool new_value = false;
+    // The new value came from the device (or a substitute), so the point is
+    // no longer NOT_INIT.
+    bool from_device = false;
     TagValue value{};
     // The read confirmed the value (contract 7.5).
     bool confirmed = false;
@@ -235,24 +254,96 @@ struct Work {
     std::uint16_t time_flags = 0;
 };
 
-// The input of a companion slot; a slot that is missing counts as lost.
-CompanionInput companion_at(std::span<const CompanionInput> companions,
-                            std::uint8_t slot) noexcept {
-    return slot < companions.size()
-               ? companions[slot]
-               : CompanionInput{.outcome = Outcome::COMM_FAIL};
+// A companion the value depends on (exponent, time): usable when it was
+// read with a value that is not BAD; an UNCERTAIN one makes the value at
+// most UNCERTAIN (contract 5.5; decision D-131).
+std::optional<CompanionInput> usable_companion(Work& work,
+                                               std::uint8_t slot) noexcept {
+    const CompanionInput companion = companion_at(work.companions, slot);
+    if (companion.outcome != Outcome::VALUE ||
+        companion.mark.quality == Quality::BAD) {
+        work.mark = worse(work.mark, bad(companion_flags(companion)));
+        return std::nullopt;
+    }
+    if (companion.mark.quality == Quality::UNCERTAIN) {
+        work.mark =
+            worse(work.mark, QualityMark{.quality = Quality::UNCERTAIN,
+                                         .flags = companion_flags(companion)});
+    }
+    return companion;
+}
+
+// Step 6: the `quality_from` rules (CS 4.7). A rule on the point's own word
+// applies only to an answer with a value.
+QualityMark quality_from_rules(const Work& work) noexcept {
+    QualityMark mark = GOOD_MARK;
+    const bool has_raw = work.sample->outcome == Outcome::VALUE;
+    for (const QualityRule& rule : work.rules->quality_rules) {
+        std::optional<RawValue> raw;
+        if (rule.self) {
+            if (!has_raw) {
+                continue;
+            }
+            raw = work.sample->raw;
+        } else {
+            const CompanionInput companion =
+                companion_at(work.companions, rule.companion);
+            if (companion.outcome != Outcome::VALUE ||
+                companion.mark.quality == Quality::BAD) {
+                mark = worse(mark, bad(companion_flags(companion)));
+                continue;
+            }
+            raw = companion.raw;
+        }
+        const std::optional<std::int64_t> key =
+            key_of(*raw, rule.has_field, rule.lo, rule.hi);
+        QualityMark found = device_mark(rule.otherwise);
+        if (key.has_value()) {
+            const auto entry = std::lower_bound(
+                rule.entries.begin(), rule.entries.end(), *key,
+                [](const QualityRule::Entry& candidate, std::int64_t wanted) {
+                    return candidate.key < wanted;
+                });
+            if (entry != rule.entries.end() && entry->key == *key) {
+                found = device_mark(entry->mark);
+            }
+        }
+        mark = worse(mark, found);
+    }
+    return mark;
+}
+
+// Step 6: the device's `health` rules that apply to the point (CS 4.9).
+QualityMark health_mark(const Work& work) noexcept {
+    QualityMark mark = GOOD_MARK;
+    for (const HealthRule& rule : work.rules->health) {
+        const CompanionInput companion =
+            companion_at(work.companions, rule.companion);
+        bool good = false;
+        if (companion.outcome == Outcome::VALUE &&
+            companion.mark.quality != Quality::BAD && !companion.stale) {
+            const std::optional<std::int64_t> key =
+                key_of(companion.raw, rule.has_field, rule.lo, rule.hi);
+            good = key.has_value() &&
+                   std::binary_search(rule.good.begin(), rule.good.end(), *key);
+        }
+        if (!good) {
+            mark = worse(
+                mark, bad(rule.comm_fail ? flag(QualityFlag::COMM_FAIL) : 0));
+        }
+    }
+    return mark;
 }
 
 // Step 3, the exponent (CS 4.7); nothing when the value is BAD.
 std::optional<double> apply_exponent(Work& work,
                                      const ExponentRule& rule) noexcept {
-    const CompanionInput companion =
-        companion_at(work.companions, rule.companion);
-    if (companion.outcome != Outcome::VALUE) {
-        work.mark = worse(work.mark, bad(companion_flags(companion.outcome)));
+    const std::optional<CompanionInput> companion =
+        usable_companion(work, rule.companion);
+    if (!companion.has_value()) {
         return std::nullopt;
     }
-    const std::optional<std::int64_t> exponent = integer_of(companion.raw);
+    const std::optional<std::int64_t> exponent = integer_of(companion->raw);
     if (!exponent.has_value() || *exponent < EXPONENT_MIN ||
         *exponent > EXPONENT_MAX) {
         work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
@@ -273,14 +364,10 @@ bool integer_scale(Work& work) noexcept {
     std::optional<detail::Wide> result = wide_of(work.sample->raw);
     if (rules.scale.has_value()) {
         const ScaleRule& scale = *rules.scale;
-        if (!scale.integer || scale.form != ScaleRule::Form::GAIN) {
-            // CF-517 refuses it (decision D-133); stated here so that a
-            // value is never invented.
-            work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
-            return false;
-        }
-        result = detail::wide_multiply(*result,
-                                       detail::wide_from_signed(scale.gain_i));
+        // `divide_by: 1` is a gain of 1 (decision D-133).
+        const std::int64_t gain =
+            scale.form == ScaleRule::Form::GAIN ? scale.gain_i : 1;
+        result = detail::wide_multiply(*result, detail::wide_from_signed(gain));
         if (result.has_value()) {
             result = detail::wide_add(*result,
                                       detail::wide_from_signed(scale.offset_i));
@@ -315,51 +402,47 @@ double binary_scale(const PointRules& rules, double number) noexcept {
     return quotient + scale.offset;
 }
 
-// A binary64 value on an INT64 or UINT64 tag: an enumeration or a double
-// point reads a floating raw value as its nearest integer (CS 5.5); false
-// when it is not within the tolerance or the type.
-bool to_integer_tag(Work& work, double number) noexcept {
-    constexpr double TOLERANCE = 0.001;
-    const double rounded = std::round(number);
-    const bool is_unsigned = work.rules->tag_type == TagType::UINT64;
-    if (std::fabs(number - rounded) > TOLERANCE || rounded >= TWO_TO_THE_63 ||
-        rounded < -TWO_TO_THE_63 || (is_unsigned && rounded < 0.0)) {
-        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
-        return false;
-    }
-    work.value = is_unsigned ? uint64_value(static_cast<std::uint64_t>(rounded))
-                             : int64_value(static_cast<std::int64_t>(rounded));
-    return true;
-}
-
 // Steps 3 and 4 on a numeric raw value; false when the value is BAD.
 bool scale_value(Work& work) noexcept {
     const PointRules& rules = *work.rules;
     const RawValue& raw = work.sample->raw;
-    const bool integer_tag =
-        rules.tag_type == TagType::INT64 || rules.tag_type == TagType::UINT64;
-    std::optional<double> number;
-    if (integer_tag && rules.exponent.has_value()) {
-        // CF-517 refuses an exponent on an integer tag (decision D-133).
+    const bool integer_tag = is_integer_tag(rules.tag_type);
+    if (integer_tag &&
+        (rules.exponent.has_value() ||
+         (rules.scale.has_value() && !is_integer_scaling(*rules.scale)))) {
+        // CF-517 refuses it (decision D-133); a value is never computed.
         work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
         return false;
     }
+    if (integer_tag && is_integer_kind(raw.kind)) {
+        return integer_scale(work);
+    }
+    if (integer_tag) {
+        // A floating raw value on an integer tag without a scale: read as
+        // its nearest integer (CS 5.5).
+        const std::optional<std::int64_t> code = near_integer(raw.number_f);
+        if (!code.has_value() ||
+            (rules.tag_type == TagType::UINT64 && *code < 0)) {
+            work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+            return false;
+        }
+        work.value = rules.tag_type == TagType::INT64
+                         ? int64_value(*code)
+                         : uint64_value(static_cast<std::uint64_t>(*code));
+        return true;
+    }
+    std::optional<double> number;
     if (rules.exponent.has_value()) {
         number = apply_exponent(work, *rules.exponent);
         if (!number.has_value()) {
             return false;
         }
-    } else if (integer_tag && is_integer_kind(raw.kind)) {
-        return integer_scale(work);
     }
     const double scaled =
         binary_scale(rules, number.has_value() ? *number : double_of(raw));
     if (!std::isfinite(scaled)) {
         work.mark = worse(work.mark, bad(flag(QualityFlag::OVERFLOW)));
         return false;
-    }
-    if (integer_tag) {
-        return to_integer_tag(work, scaled);
     }
     work.value = float64_value(scaled);
     return true;
@@ -381,6 +464,9 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
         work.mark.flags |= flag(QualityFlag::OVERFLOW);
     }
     if (state.counter_has_previous && current < state.counter_previous) {
+        // A wrap is a decrease from at least limit/2 to below it (contract
+        // 5.4): a 32-bit counter stepping back across half its limit is
+        // read as a wrap, by that rule.
         const std::uint64_t half = rule.limit / 2U;
         const bool wrap =
             !rule.saturate && state.counter_previous >= half && current < half;
@@ -389,14 +475,14 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
                 case CounterRule::OnDecrease::ACCEPT:
                     break;
                 case CounterRule::OnDecrease::HOLD:
-                    // Keep the previous value until the counter passes it.
+                    // Keep the counter's own last value, not whatever the
+                    // tag held last, until the counter passes it.
                     state.counter_holding = true;
-                    work.value = state.value;
-                    work.mark = worse(
-                        work.mark, QualityMark{.quality = Quality::UNCERTAIN});
+                    work.value = state.counter_held;
+                    work.mark = worse(work.mark, UNCERTAIN_MARK);
                     return true;
                 case CounterRule::OnDecrease::RESET:
-                    work.out.counts.counter_reset = true;
+                    work.out->counts.counter_reset = true;
                     break;
             }
         }
@@ -404,12 +490,13 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
     state.counter_holding = false;
     state.counter_has_previous = true;
     state.counter_previous = current;
+    state.counter_held = work.value;
     return true;
 }
 
 // Step 5 for double points (contract 5.4); the value is always written.
 void apply_double_point(Work& work, const DoublePointRule& rule) noexcept {
-    const std::optional<std::int64_t> raw = integer_of(work.sample->raw);
+    const std::optional<std::int64_t> raw = code_of(work.sample->raw);
     if (raw.has_value()) {
         const std::int64_t code = *raw;
         const auto entry = std::lower_bound(
@@ -431,20 +518,36 @@ void apply_double_point(Work& work, const DoublePointRule& rule) noexcept {
     work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
 }
 
-// Step 5 for enumerations (CS 5.5).
-void apply_enum(Work& work) noexcept {
-    const std::vector<std::int64_t>& codes = work.rules->enum_codes;
-    if (!std::binary_search(codes.begin(), codes.end(), work.value.i)) {
+// Step 5 for enumerations (CS 5.5): an INT64 tag of the code, no scale;
+// false when the value is BAD.
+bool apply_enum(Work& work) noexcept {
+    const PointRules& rules = *work.rules;
+    if (rules.tag_type != TagType::INT64 || rules.scale.has_value() ||
+        rules.exponent.has_value()) {
+        // Refused by validate_point_rules (decision D-131): an enumeration
+        // is read and written as the device's code.
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return false;
+    }
+    const std::optional<std::int64_t> code = code_of(work.sample->raw);
+    if (!code.has_value()) {
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return false;
+    }
+    work.value = int64_value(*code);
+    if (!std::binary_search(rules.enum_codes.begin(), rules.enum_codes.end(),
+                            *code)) {
         work.mark = worse(
             work.mark, QualityMark{.quality = Quality::UNCERTAIN,
                                    .flags = flag(QualityFlag::OUT_OF_RANGE)});
     }
+    return true;
 }
 
 // The value of a STRING point (contract 5.2, 5.4); false when it is BAD.
 bool take_string(Work& work) noexcept {
     const std::span<const std::byte> bytes = work.sample->raw.bytes;
-    if (!detail::is_utf8(bytes)) {
+    if (work.sample->raw.kind != RawKind::STRING || !detail::is_utf8(bytes)) {
         work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
         return false;
     }
@@ -457,6 +560,22 @@ bool take_string(Work& work) noexcept {
     return true;
 }
 
+// A device time converted by `rule`; uncertain when the conversion is, or
+// when the clock is not declared synchronised (CS 4.6).
+UtcTime device_to_utc(const DeviceTimeRule& rule,
+                      std::int64_t device_ns) noexcept {
+    if (!rule.local) {
+        return UtcTime{.utc_ns = device_ns, .uncertain = !rule.synced};
+    }
+    if (rule.zone == nullptr) {
+        // Refused by validate_point_rules; never shown as certain.
+        return UtcTime{.utc_ns = device_ns, .uncertain = true};
+    }
+    UtcTime utc = rule.zone->to_utc(device_ns);
+    utc.uncertain = utc.uncertain || !rule.synced;
+    return utc;
+}
+
 // Step 7, the time of the sample (contract 5.8).
 void sample_time(Work& work) noexcept {
     const PointRules& rules = *work.rules;
@@ -465,62 +584,77 @@ void sample_time(Work& work) noexcept {
     if (!rules.time_companion.has_value()) {
         return;
     }
-    const CompanionInput companion =
-        companion_at(work.companions, *rules.time_companion);
-    if (companion.outcome != Outcome::VALUE ||
-        companion.raw.kind != RawKind::TIME) {
-        work.mark = worse(work.mark, bad(companion_flags(companion.outcome)));
+    const std::optional<CompanionInput> companion =
+        usable_companion(work, *rules.time_companion);
+    if (!companion.has_value()) {
         return;
     }
-    const std::int64_t device_ns = companion.raw.number_i;
-    const DeviceTimeRule& rule = rules.companion_time;
+    if (companion->raw.kind != RawKind::TIME) {
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return;
+    }
     const UtcTime utc =
-        rule.local ? rule.zone.to_utc(device_ns) : UtcTime{.utc_ns = device_ns};
+        device_to_utc(rules.companion_time, companion->raw.number_i);
     work.source_time_ns = utc.utc_ns;
-    work.time_flags =
-        (utc.uncertain || !rule.synced) ? flag(QualityFlag::TIME_UNCERTAIN) : 0;
+    work.time_flags = utc.uncertain ? flag(QualityFlag::TIME_UNCERTAIN) : 0;
+}
+
+// The last valid value, held UNCERTAIN with STALE (and `extra`), or BAD
+// with STALE once `max_age` has passed since it was read (CS 4.7, for
+// `keep_last`; decision D-131, for DEVICE_INVALID). A point without
+// `max_age` cannot hold (CF-640 refuses `keep_last` without it).
+void hold_last(Work& work, QualityMark extra) noexcept {
+    PointState& state = *work.state;
+    const PointRules& rules = *work.rules;
+    const bool young =
+        state.has_valid && rules.max_age_ns > 0 &&
+        work.times->receive_mono_ns - state.valid_mono_ns <= rules.max_age_ns;
+    const QualityMark stale{.quality = Quality::UNCERTAIN,
+                            .flags = flag(QualityFlag::STALE)};
+    if (extra.quality == Quality::BAD) {
+        state.holding = false;
+        work.mark = extra;
+        return;
+    }
+    if (young) {
+        state.holding = true;
+        work.new_value = true;
+        work.value = state.valid_value;
+        work.mark = worse(stale, extra);
+        return;
+    }
+    state.holding = false;
+    work.mark = bad(static_cast<std::uint16_t>(
+        extra.flags | (state.has_valid ? flag(QualityFlag::STALE) : 0)));
 }
 
 // Step 1, invalid markers on the raw pattern. Returns true when one matched
-// and decided the write.
+// and decided the value.
 bool apply_markers(Work& work) noexcept {
-    const PointRules& rules = *work.rules;
-    PointState& state = *work.state;
-    for (const InvalidMarker& marker : rules.markers) {
+    for (const InvalidMarker& marker : work.rules->markers) {
         if (!marker_matches(marker, work.sample->raw)) {
             continue;
         }
-        work.out.counts.sentinel = true;
-        state.keeping_last = marker.action == InvalidAction::KEEP_LAST;
+        work.out->counts.sentinel = true;
+        work.state->holding = false;
         switch (marker.action) {
             case InvalidAction::BAD:
-                work.mark = bad(marker.flags);
+                work.mark = bad(marker.flags & DEVICE_FLAGS_MASK);
                 break;
             case InvalidAction::KEEP_LAST:
-                if (state.has_valid && rules.max_age_ns > 0 &&
-                    work.times->receive_mono_ns - state.valid_mono_ns <=
-                        rules.max_age_ns) {
-                    work.new_value = true;
-                    work.value = state.valid_value;
-                    work.mark = QualityMark{.quality = Quality::UNCERTAIN,
-                                            .flags = flag(QualityFlag::STALE)};
-                } else {
-                    // No valid value, or older than `max_age` (and a point
-                    // without `max_age`, which CF-640 refuses): BAD.
-                    work.mark = bad(flag(QualityFlag::STALE));
-                }
+                hold_last(work, GOOD_MARK);
                 break;
             case InvalidAction::SUBSTITUTE:
                 // UNCERTAIN; SUBSTITUTED only from tag database 1.1
                 // (contract 5.2, R-6 depends on #89).
                 work.new_value = true;
+                work.from_device = true;
                 work.value = marker.substitute;
-                work.mark = QualityMark{.quality = Quality::UNCERTAIN};
+                work.mark = UNCERTAIN_MARK;
                 break;
         }
         return true;
     }
-    state.keeping_last = false;
     return false;
 }
 
@@ -546,6 +680,11 @@ bool compute_value(Work& work) noexcept {
     const RawValue& raw = work.sample->raw;
     switch (rules.tag_type) {
         case TagType::BOOL:
+            if (raw.kind == RawKind::STRING || raw.kind == RawKind::TIME) {
+                work.mark =
+                    worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+                return false;
+            }
             work.value = bool_value((double_of(raw) != 0.0) != rules.invert);
             return true;
         case TagType::STRING:
@@ -556,142 +695,195 @@ bool compute_value(Work& work) noexcept {
             break;
     }
     if (raw.kind == RawKind::TIME) {
-        // A device time: INT64 nanoseconds UTC (contract 5.4).
-        const DeviceTimeRule& rule = rules.device_time;
-        work.value = int64_value(
-            rule.local ? rule.zone.to_utc(raw.number_i).utc_ns : raw.number_i);
+        // A device time: INT64 nanoseconds UTC (contract 5.4), with
+        // TIME_UNCERTAIN as for a source time (CS 4.6).
+        if (rules.tag_type != TagType::INT64) {
+            work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+            return false;
+        }
+        const UtcTime utc = device_to_utc(rules.device_time, raw.number_i);
+        work.value = int64_value(utc.utc_ns);
+        if (utc.uncertain) {
+            work.mark.flags |= flag(QualityFlag::TIME_UNCERTAIN);
+        }
         return true;
+    }
+    if (raw.kind == RawKind::STRING) {
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return false;
     }
     if (rules.double_point.has_value()) {
         apply_double_point(work, *rules.double_point);
         return true;
     }
+    if (rules.has_enum) {
+        return apply_enum(work);
+    }
     if (!scale_value(work)) {
         return false;
     }
-    if (rules.counter.has_value() && !apply_counter(work, *rules.counter)) {
-        return false;
+    return !rules.counter.has_value() || apply_counter(work, *rules.counter);
+}
+
+// The bits of the word (CS 5.4), from the one read.
+bool take_bits(Work& work) noexcept {
+    const PointRules& rules = *work.rules;
+    std::uint64_t values = 0;
+    for (std::size_t index = 0;
+         index < rules.bits.size() && index < MAX_POINT_BITS; ++index) {
+        const BitRule& rule = rules.bits[index];
+        if (rule.bit > MAX_BIT_NUMBER) {
+            work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+            return false;
+        }
+        const bool set =
+            (((work.sample->raw.pattern >> rule.bit) & 1U) != 0) != rule.invert;
+        values |= (set ? std::uint64_t{1} : 0U) << index;
     }
-    if (rules.has_enum) {
-        apply_enum(work);
-    }
+    work.state->bit_values = values;
     return true;
 }
 
-// Steps 1 to 6 for an answer with a value.
+// Steps 1 to 5 for an answer with a value.
 void process_value(Work& work) noexcept {
-    const PointRules& rules = *work.rules;
-    PointState& state = *work.state;
     const RawValue& raw = work.sample->raw;
-
+    if (!width_ok(raw)) {
+        work.mark = bad(flag(QualityFlag::OUT_OF_RANGE));
+        return;
+    }
     if (apply_markers(work)) {
         return;
     }
+    work.state->holding = false;
     // Step 2, non-finite values without a marker.
     if (raw.kind == RawKind::FLOAT && !std::isfinite(raw.number_f)) {
-        work.out.counts.invalid = true;
+        work.out->counts.invalid = true;
         work.mark = bad(flag(QualityFlag::OUT_OF_RANGE));
         return;
     }
     work.confirmed = true;
     apply_raw_range(work);
-    if (!compute_value(work)) {
+    if (!compute_value(work) || !take_bits(work)) {
         return;
     }
     work.new_value = true;
-
-    // Bits from the one read of the word (CS 5.4).
-    for (std::size_t index = 0;
-         index < rules.bits.size() && index < state.bit_values.size();
-         ++index) {
-        const BitRule& rule = rules.bits[index];
-        state.bit_values.at(index) =
-            (((raw.pattern >> rule.bit) & 1U) != 0) != rule.invert;
-    }
-
-    // Step 6, quality from companions and health rules.
-    work.mark = worse(work.mark,
-                      quality_from_rules(rules, *work.sample, work.companions));
-    work.mark = worse(work.mark, health_mark(rules, work.companions));
+    work.from_device = true;
 }
 
-// Fills the writes of `out` from the state's last value and mark.
+// A DEVICE_INVALID answer: never GOOD, never a value nobody read; the last
+// valid value is held as `keep_last` holds it (decision D-131).
+void process_device_invalid(Work& work) noexcept {
+    work.out->counts.invalid = true;
+    const QualityMark mapping =
+        worse(UNCERTAIN_MARK, device_mark(work.sample->mark));
+    hold_last(work, mapping);
+}
+
+// Fills `out` from the state's last value and mark.
 void fill_writes(const PointRules& rules, const PointState& state,
                  ProcessedSample& out) noexcept {
     out.write_tag = rules.has_tag;
     out.tag.value = state.value;
     if (state.value.type == TagType::STRING) {
         out.tag.value.text =
-            std::string_view(state.text.data(), state.text_length);
+            std::string_view(state.text.data(), state.text.size());
     }
     out.tag.quality = state.quality;
     out.tag.flags = state.flags;
     out.tag.source_time_ns = state.source_time_ns;
-    out.bit_count = std::min(rules.bits.size(), out.bits.size());
-    for (std::size_t index = 0; index < out.bit_count; ++index) {
-        out.bits.at(index) =
-            TagWrite{.value = bool_value(state.bit_values.at(index)),
-                     .quality = state.quality,
-                     .flags = state.flags,
-                     .source_time_ns = state.source_time_ns};
+    out.bit_count = std::min(rules.bits.size(), MAX_POINT_BITS);
+    out.bit_values = state.bit_values;
+}
+
+void store_text(PointState& state, std::span<const std::byte> text) noexcept {
+    // The capacity was reserved by init_point_state: this never allocates
+    // for a prepared state, and never writes beyond what was reserved.
+    const std::size_t length =
+        std::min({text.size(), TAG_STRING_MAX_BYTES, state.text.capacity()});
+    state.text.clear();
+    for (std::size_t index = 0; index < length; ++index) {
+        state.text.push_back(static_cast<char>(text[index]));
     }
 }
 
 }  // namespace
 
-void reset_point_state(PointState& state, TagType type,
-                       std::int64_t now_mono_ns) noexcept {
-    state = PointState{};
-    state.value = zero_value(type);
-    state.valid_value = zero_value(type);
-    state.quality = Quality::BAD;
-    state.flags = flag(QualityFlag::NOT_INIT);
-    state.confirmed_mono_ns = now_mono_ns;
-    state.valid_mono_ns = now_mono_ns;
+void init_point_state(PointState& state, TagType type) {
+    if (type == TagType::STRING) {
+        state.text.reserve(TAG_STRING_MAX_BYTES);
+    }
 }
 
-ProcessedSample process_sample(const PointRules& rules, PointState& state,
-                               const RawSample& sample,
-                               std::span<const CompanionInput> companions,
-                               const SampleTimes& times) noexcept {
+void reset_point_state(PointState& state, TagType type,
+                       std::int64_t now_mono_ns) noexcept {
+    state.value = zero_value(type);
+    state.quality = Quality::BAD;
+    state.flags = flag(QualityFlag::NOT_INIT);
+    state.source_time_ns = 0;
+    state.has_value = false;
+    state.confirmed_mono_ns = now_mono_ns;
+    state.has_valid = false;
+    state.valid_value = zero_value(type);
+    state.valid_mono_ns = now_mono_ns;
+    state.holding = false;
+    state.absent = false;
+    state.counter_has_previous = false;
+    state.counter_previous = 0;
+    state.counter_holding = false;
+    state.counter_held = zero_value(type);
+    state.bit_values = 0;
+    state.text.clear();
+}
+
+void process_sample(const PointRules& rules, PointState& state,
+                    const RawSample& sample,
+                    std::span<const CompanionInput> companions,
+                    const SampleTimes& times, ProcessedSample& out) noexcept {
+    out = ProcessedSample{};
     Work work;
     work.rules = &rules;
     work.state = &state;
     work.sample = &sample;
     work.companions = companions;
     work.times = &times;
+    work.out = &out;
 
     switch (sample.outcome) {
         case Outcome::VALUE:
             process_value(work);
             break;
         case Outcome::NO_VALUE:
-            work.out.counts.sentinel = true;
-            work.mark = bad(sample.mark.flags);
+            out.counts.sentinel = true;
+            state.holding = false;
+            work.mark = bad(device_mark(sample.mark).flags);
             break;
         case Outcome::ABSENT:
+            state.holding = false;
             work.mark = bad(0);
             break;
         case Outcome::DEVICE_INVALID:
-            work.out.counts.invalid = true;
-            // Never GOOD: the device said the value is invalid.
-            work.mark =
-                worse(QualityMark{.quality = Quality::UNCERTAIN}, sample.mark);
+            process_device_invalid(work);
             break;
         case Outcome::COMM_FAIL:
+            state.holding = false;
             work.mark = bad(flag(QualityFlag::COMM_FAIL));
             break;
     }
+
+    // Step 6 for every outcome and every marker action: the worst of all
+    // rules is the tag's quality (CS 4.7, 4.9).
+    work.mark = worse(work.mark, quality_from_rules(work));
+    work.mark = worse(work.mark, health_mark(work));
 
     // ABSENT is counted while it lasts; a lost answer says nothing either
     // way.
     if (sample.outcome == Outcome::ABSENT && !state.absent) {
         state.absent = true;
-        work.out.counts.became_absent = true;
+        out.counts.became_absent = true;
     } else if (sample.outcome != Outcome::ABSENT &&
                sample.outcome != Outcome::COMM_FAIL && state.absent) {
         state.absent = false;
-        work.out.counts.left_absent = true;
+        out.counts.left_absent = true;
     }
 
     if (sample.outcome == Outcome::VALUE) {
@@ -705,15 +897,10 @@ ProcessedSample process_sample(const PointRules& rules, PointState& state,
     // The new state of the point.
     if (work.new_value) {
         state.value = work.value;
-        if (rules.tag_type == TagType::STRING && !work.text.empty()) {
-            std::transform(
-                work.text.begin(), work.text.end(), state.text.begin(),
-                [](std::byte byte) { return static_cast<char>(byte); });
-            state.text_length = work.text.size();
-        } else if (rules.tag_type == TagType::STRING) {
-            state.text_length = 0;
+        if (rules.tag_type == TagType::STRING && !state.holding) {
+            store_text(state, work.text);
         }
-        if (!state.keeping_last) {
+        if (work.from_device) {
             state.has_value = true;
         }
     }
@@ -737,8 +924,7 @@ ProcessedSample process_sample(const PointRules& rules, PointState& state,
     state.flags = flags;
     state.source_time_ns = work.source_time_ns;
 
-    fill_writes(rules, state, work.out);
-    return work.out;
+    fill_writes(rules, state, out);
 }
 
 bool check_stale(const PointRules& rules, PointState& state,
@@ -747,9 +933,10 @@ bool check_stale(const PointRules& rules, PointState& state,
         return false;
     }
     const std::uint16_t stale = flag(QualityFlag::STALE);
-    if (state.keeping_last && state.quality != Quality::BAD &&
+    if (state.holding && state.quality != Quality::BAD &&
         now_mono_ns - state.valid_mono_ns > rules.max_age_ns) {
-        // `keep_last` past `max_age`: BAD with STALE (CS 4.7).
+        // A held value past `max_age`: BAD with STALE (CS 4.7).
+        state.holding = false;
         state.quality = Quality::BAD;
         state.flags |= stale;
     } else if ((state.flags & stale) == 0 &&
