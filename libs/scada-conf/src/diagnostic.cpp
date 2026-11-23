@@ -1,13 +1,121 @@
 #include "scada/conf/diagnostic.h"
 
+#include "utf8.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace scada::conf {
+
+namespace {
+
+constexpr unsigned char FIRST_PRINTABLE = 0x20;
+constexpr unsigned char ASCII_DEL = 0x7F;
+constexpr unsigned char FIRST_NON_ASCII = 0x80;
+constexpr std::uint32_t LAST_C1 = 0x9F;
+constexpr std::uint32_t LEFT_TO_RIGHT_MARK = 0x200E;
+constexpr std::uint32_t RIGHT_TO_LEFT_MARK = 0x200F;
+constexpr std::uint32_t LINE_SEPARATOR = 0x2028;
+constexpr std::uint32_t RIGHT_TO_LEFT_OVERRIDE = 0x202E;
+constexpr std::uint32_t LEFT_TO_RIGHT_ISOLATE = 0x2066;
+constexpr std::uint32_t POP_DIRECTIONAL_ISOLATE = 0x2069;
+constexpr std::uint32_t BYTE_ORDER_MARK = 0xFEFF;
+constexpr std::uint32_t NON_CHARACTER_FFFE = 0xFFFE;
+constexpr std::uint32_t NON_CHARACTER_FFFF = 0xFFFF;
+constexpr std::string_view ELLIPSIS = "...";
+constexpr std::string_view HEX_DIGITS = "0123456789ABCDEF";
+constexpr unsigned NIBBLE_BITS = 4;
+constexpr std::uint32_t NIBBLE_MASK = 0xF;
+
+bool needs_escape(std::uint32_t code_point) noexcept {
+    return code_point <= LAST_C1 ||
+           (code_point >= LEFT_TO_RIGHT_MARK &&
+            code_point <= RIGHT_TO_LEFT_MARK) ||
+           (code_point >= LINE_SEPARATOR &&
+            code_point <= RIGHT_TO_LEFT_OVERRIDE) ||
+           (code_point >= LEFT_TO_RIGHT_ISOLATE &&
+            code_point <= POP_DIRECTIONAL_ISOLATE) ||
+           code_point == BYTE_ORDER_MARK || code_point == NON_CHARACTER_FFFE ||
+           code_point == NON_CHARACTER_FFFF;
+}
+
+// `\x` or `\u` and `digits` hexadecimal digits of `value`.
+std::string hex_escape(char kind, std::uint32_t value, unsigned digits) {
+    std::string out = {'\\', kind};
+    for (unsigned i = digits; i > 0; --i) {
+        out.push_back(
+            HEX_DIGITS[(value >> ((i - 1) * NIBBLE_BITS)) & NIBBLE_MASK]);
+    }
+    return out;
+}
+
+// The printable form of the character or byte at `text[where]`, and how
+// many bytes of `text` it stands for.
+std::pair<std::string, std::size_t> printable_at(std::string_view text,
+                                                 std::size_t where) {
+    constexpr unsigned BYTE_DIGITS = 2;
+    constexpr unsigned CODE_POINT_DIGITS = 4;
+    const auto byte = static_cast<unsigned char>(text[where]);
+    if (byte < FIRST_NON_ASCII) {
+        switch (byte) {
+            case '\\':
+                return {"\\\\", 1};
+            case '\n':
+                return {"\\n", 1};
+            case '\r':
+                return {"\\r", 1};
+            case '\t':
+                return {"\\t", 1};
+            default:
+                break;
+        }
+        if (byte < FIRST_PRINTABLE || byte == ASCII_DEL) {
+            return {hex_escape('x', byte, BYTE_DIGITS), 1};
+        }
+        return {std::string(1, static_cast<char>(byte)), 1};
+    }
+    const auto decoded = utf8::decode(text, where);
+    if (!decoded) {
+        return {hex_escape('x', byte, BYTE_DIGITS), 1};
+    }
+    if (needs_escape(decoded->second)) {
+        return {hex_escape('u', decoded->second, CODE_POINT_DIGITS),
+                decoded->first};
+    }
+    return {std::string(text.substr(where, decoded->first)), decoded->first};
+}
+
+}  // namespace
+
+std::string printable(std::string_view text, std::size_t max_bytes) {
+    std::string out;
+    const std::size_t room =
+        max_bytes > ELLIPSIS.size() ? max_bytes - ELLIPSIS.size() : 0;
+    // The length of `out` at the last whole piece that leaves room for the
+    // ellipsis.
+    std::size_t cut = 0;
+    std::size_t where = 0;
+    while (where < text.size()) {
+        const auto [piece, used] = printable_at(text, where);
+        out += piece;
+        where += used;
+        if (out.size() <= room) {
+            cut = out.size();
+        }
+        if (out.size() > max_bytes) {
+            out.resize(cut);
+            out += ELLIPSIS;
+            return out;
+        }
+    }
+    return out;
+}
 
 std::string code_text(const Diagnostic& diagnostic) {
     std::string text = diagnostic.severity == Severity::ERROR ? "CF-" : "CW-";
@@ -82,6 +190,13 @@ void Diagnostics::warning(std::uint16_t code, Location location,
 }
 
 void Diagnostics::add(Diagnostic diagnostic) {
+    diagnostic.message = printable(diagnostic.message);
+    diagnostic.location.file = printable(diagnostic.location.file);
+    for (Diagnostic::Note& note : diagnostic.notes) {
+        note.kind = printable(note.kind);
+        note.location.file = printable(note.location.file);
+        note.detail = printable(note.detail);
+    }
     if (diagnostic.severity == Severity::ERROR) {
         ++error_count_;
         errors_.push_back(std::move(diagnostic));

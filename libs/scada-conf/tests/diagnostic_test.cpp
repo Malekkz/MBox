@@ -198,5 +198,59 @@ TEST(Diagnostic, AReportWithWarningsOnlyPasses) {
     EXPECT_TRUE(passed(report));
 }
 
+// S1 of the #130 review (D-110): no text of a file reaches a report
+// unescaped.
+TEST(Diagnostic, PrintableEscapesWhatCouldDriveATerminal) {
+    EXPECT_EQ(printable("plain text: a.b_c"), "plain text: a.b_c");
+    // A forged second line, a terminal escape and a backslash.
+    EXPECT_EQ(printable("x\nsystem.yaml:1:1: error CF-101: y"),
+              "x\\nsystem.yaml:1:1: error CF-101: y");
+    EXPECT_EQ(printable("\x1b[2J\x1b]0;title\x07"),
+              "\\x1B[2J\\x1B]0;title\\x07");
+    EXPECT_EQ(printable("a\\nb"), "a\\\\nb");
+    EXPECT_EQ(printable("\r\t\x7f"), "\\r\\t\\x7F");
+    // Invalid UTF-8, a C1 control character, and characters that reorder
+    // or hide text.
+    EXPECT_EQ(printable("\xff\xc3"), "\\xFF\\xC3");
+    EXPECT_EQ(printable("\xc2\x9b"), "\\u009B");
+    EXPECT_EQ(printable("\xe2\x80\xae"), "\\u202E");
+    EXPECT_EQ(printable("\xe2\x80\xa8"), "\\u2028");
+    EXPECT_EQ(printable("\xef\xbb\xbf"), "\\uFEFF");
+    // Other characters are kept.
+    EXPECT_EQ(printable("\xc3\xa9t\xc3\xa9 \xe2\x82\xac"),
+              "\xc3\xa9t\xc3\xa9 \xe2\x82\xac");
+}
+
+TEST(Diagnostic, PrintableCapsTheLength) {
+    constexpr std::size_t CAP = 10;
+    EXPECT_EQ(printable("0123456789", CAP), "0123456789");
+    EXPECT_EQ(printable("0123456789a", CAP), "0123456...");
+    // An escape is never cut in two.
+    EXPECT_EQ(printable("012345\n789", CAP), "012345...");
+    // A character is never cut in two.
+    EXPECT_EQ(printable("012345\xc3\xa9\xc3\xa9\xc3\xa9", CAP), "012345...");
+    EXPECT_EQ(printable(std::string(MAX_DIAGNOSTIC_TEXT_BYTES * 2, 'x')).size(),
+              MAX_DIAGNOSTIC_TEXT_BYTES);
+}
+
+TEST(Diagnostic, EveryDiagnosticIsMadePrintable) {
+    Diagnostics diagnostics;
+    Diagnostic diagnostic{.severity = Severity::ERROR,
+                          .code = CF_110,
+                          .location = line_of("a\nb.yaml", 1),
+                          .message = "duplicate key \"x\ny\"",
+                          .notes = {}};
+    diagnostic.notes.push_back(Diagnostic::Note{
+        .kind = "template\x1b", .location = line_of("t\r.yaml", 2),
+        .detail = "point \x1b[31m"});
+    diagnostics.add(std::move(diagnostic));
+    Report report;
+    diagnostics.move_into(report);
+    ASSERT_EQ(report.errors.size(), 1U);
+    EXPECT_EQ(format(report.errors.front()),
+              "a\\nb.yaml:1:1: error CF-110: duplicate key \"x\\ny\"\n"
+              "  from template\\x1B t\\r.yaml:2:1 (point \\x1B[31m)");
+}
+
 }  // namespace
 }  // namespace scada::conf
