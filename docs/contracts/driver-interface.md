@@ -649,7 +649,8 @@ architectures. The vectors are shared by #104, #105 and the simulators.
 | 5 | `COMM_FAIL` | No usable answer: timeout, broken frame, lost connection, a gateway that cannot reach its device | BAD | COMM_FAIL | Counts (7.4) |
 
 - A tag whose sample is not `VALUE` keeps its last value, or 0 if it never
-  had one. Readers must not use the value of a BAD tag (TD 6.2).
+  had one. A consumer must not act on the value of a BAD tag; the one
+  exception is the mode check of 8.2 (O-2).
 - An `ABSENT` point is counted in `sys.dev.<device>.points_absent`, logged
   once per connection in a summary (11.3), and requested again only at
   `backoff`.
@@ -1132,9 +1133,10 @@ CS) is read at the check.
   so while it is down the stored mode cannot change, and automatic control
   continues. Reference 14.4 keeps `scada-cmd` out of the watchdog chain, so
   the reference does not make control depend on it. This uses the stored
-  value of a tag that reads BAD, which TD 6.2 forbids ("readers must not
-  use the value of a BAD tag"): it is an exception to that rule, for this
-  check only, and the ruling decides it. NOT_INIT, any other flag (RESTORED
+  value of a tag that reads BAD, an exception to the rule of 5.2, for this
+  check only. TD 6.2 allows it: a read with the OWNER_DOWN overlay returns
+  the stored record unchanged, and when the owner's region is missing the
+  value is 0, which fails the check. NOT_INIT, any other flag (RESTORED
   included), a value that is not 1, 2 or 3, and a read that is not
   `SCADA_OK` fail the check for every source (fail closed). So AUTO writes
   are refused in the moment after a restart of `scada-cmd` until it has
@@ -2469,7 +2471,7 @@ CS; this list cites them. The last column keeps the options not taken.
 | R-16 | 8.2 | `local_blocks_auto` and a local-panel input that is not GOOD | The driver refuses AUTO while the panel input is active or not GOOD (fail closed); an alarm on the input in phase 7 | Local control wins when its state is unknown | Allow AUTO while the input is not GOOD |
 | R-17 | 7.3 | A close the driver makes itself (D-95) | Abortive close and immediate reconnect, keeping the other devices' state when it succeeds within `connect_timeout` | A late answer can never be taken for the next request | Mark every device COMM_FAIL on any close (0.2) |
 | R-18 | 8.13.2 | When control counts as lost | AUTO, `scada-control` down, the grace passed (`control_attach_grace`, default 60 s), and `after` passed | A boot or a new generation does not trip outputs; a control process that never starts does | No grace; only after `scada-control` was seen up |
-| O-2 | 8.2 | AUTO writes while `scada-cmd` is down | Allowed on the stored mode AUTO when the mode tag's only defect is OWNER_DOWN: an exception to TD 6.2, written as such | Automatic control does not depend on `scada-cmd` (reference 14.4) | Refused (fail closed, 0.1) |
+| O-2 | 8.2 | AUTO writes while `scada-cmd` is down | Allowed on the stored mode AUTO when the mode tag's only defect is OWNER_DOWN: an exception to the rule of 5.2, written as such; TD 6.2 returns the stored value with the overlay | Automatic control does not depend on `scada-cmd` (reference 14.4) | Refused (fail closed, 0.1) |
 | O-3 | 2.6 | A stalled channel restarts every channel of its protocol | Accepted for phase 2; separate processes per channel group reserved | Only the stalled thread may write its tags | Per-owner liveness first (#116) |
 
 Shared with CS and recorded there: O-1 (a fail-safe action does not wait
