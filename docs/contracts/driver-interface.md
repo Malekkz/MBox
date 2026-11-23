@@ -664,6 +664,13 @@ architectures. The vectors are shared by #104, #105 and the simulators.
   two by the flag; it tells them by the journal record of the entry. HMI
   text says "substituted", never "entered by an operator". It holds for
   `substitute` and forced values.
+- **R-6 depends on tag database 1.1 (with #89).** The comment of
+  SUBSTITUTED in TD 6 ("value entered by a person in place of the source")
+  is not changed here: its wider meaning is an addition to tag database
+  contract 1.0, a minor version with a migration note (D-66 f), made with
+  #89 and reviewed by a person. Until 1.1, a driver writes a forced value
+  and a configured substitute without SUBSTITUTED, with the rest of their
+  quality and flags as above.
 - `on_invalid: keep_last` (CS 4.7) is not SUBSTITUTED: the last value is
   kept with UNCERTAIN and STALE, and after the point's `max_age` (required
   with `keep_last`, CF-640) the tag goes BAD, so that a regulator does not run on a frozen measurement for as
@@ -2044,7 +2051,7 @@ CS annex B.
   test runner) and for an explicit `every_cycle`, they are counted and
   alarmed, never moved, so that one preemption does not change the
   behaviour of a tree. Validation never depends on the hardware present:
-  whether a chip exists is a run-time state of the channel (CS B.5).
+  whether a chip exists is a run-time state of the channel (CS B.1).
 - A helper reads and writes its channels at their own period and hands
   samples to the scan thread through the bounded queue of 2.7; orders and
   safe states of those channels go through the helper too, one helper cycle
@@ -2466,7 +2473,7 @@ CS; this list cites them. The last column keeps the options not taken.
 | R-1 | 5.8 | Marking of a driver-stamped event time | LOCAL_TIME | The time is the unit's, not the device's | TIME_UNCERTAIN; both; none |
 | R-2 | 5.6 | Change latches | The latch as its own tag in a side-effect range | No event is invented | Synthesised events |
 | R-4 | 8.8 | `WriteResult.protocol_error` packing | `(reason << 16) \| raw`, computed in unsigned arithmetic, the reason table append-only | Within TD's "driver-specific"; no layout change | Raw code only; the reason in a tag |
-| R-6 | 5.2 | SUBSTITUTED for a configured substitute and a value forced at the device | Accepted; not for `keep_last`; HMI text "substituted" | The value is not measured; the journal tells an operator's entry apart | A companion tag |
+| R-6 | 5.2 | SUBSTITUTED for a configured substitute and a value forced at the device | Accepted; not for `keep_last`; HMI text "substituted"; in effect with tag database 1.1 (#89), which changes the comment of the flag | The value is not measured; the journal tells an operator's entry apart | A companion tag |
 | R-7 | 5.1 | Bit-identical scaling on both architectures | Floating-point contraction off for scaling and conversion code (D-98) | Equal values on both architectures | A tolerance in the tests |
 | R-11 | 8.13.4 | Fail-safe writes not confirmed | Repeated with back-off while the condition holds, never to an unusable device; counted against write limits; FAILED after `failsafe_max_refusals` or a spent budget | A safe state sent once may be lost; repeats stay bounded | Sent once (0.2); repeated without end (0.3) |
 | R-12 | 8.2, 8.14 | Commands to a demoted or refusing device | Refused (`DEVICE_UNAVAILABLE`); a `READ_NOW` on a demoted device is an immediate probe | A dead device answers at once instead of after a timeout | Attempted once with the device's timeout (0.1) |
