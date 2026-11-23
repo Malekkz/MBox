@@ -1604,7 +1604,13 @@ one.
 | NONE | 0 | No fail-safe condition holds, or its action is `hold` |
 | PENDING | 2 | A condition holds; its write has not yet been answered OK |
 | APPLIED | 1 | A condition holds; its write was answered OK |
-| FAILED | 2 | A condition holds; the writer stopped trying (8.13.4); an alarm is raised (phase 7, from the tag and the log record) |
+| FAILED | 2 | A condition holds; the writer stopped trying (8.13.4); an alarm is raised (phase 7, from the log record) |
+
+PENDING and FAILED both show 2, as CS 12.5 defines the tag (0 no action, 1
+confirmed, 2 due but not confirmed): to an operator both mean "the safe
+value may not be at the device". FAILED is told apart by its log record and,
+from phase 7, its alarm; it is not a separate tag value, so that the tag
+keeps one meaning for every reader.
 
 | From | Event | To | What the writer does |
 | --- | --- | --- | --- |
