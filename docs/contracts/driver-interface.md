@@ -691,7 +691,7 @@ As step 1 of 5.1, with the keys and actions of CS 4.7 (`invalid_values`,
   flags.
 - `quality_from` maps a companion's bit, field or value to a point's
   quality; a device `health` rule applies to all or a named group and states
-  whether it sets COMM_FAIL (CS 4.7). The health point is in the same poll
+  whether it sets COMM_FAIL (CS 4.9). The health point is in the same poll
   group as the points it governs (CF-612); a health point that is itself
   BAD makes them BAD (CS 4.9).
 
@@ -1477,8 +1477,9 @@ This section defines the behaviour.
   (raw or engineering as declared, 8.4); `hold` writes nothing. Which kinds
   have a safe action is in 8.3.
 - **Remote switching outputs** default to `hold`, as the reference has it.
-  CS warns for an output of a kind other than `setpoint` on a protocol
-  driver whose `on_control_loss` and `on_shutdown` are both `hold`: a pump
+  CS warns (CW-721) for a `single` or `double` output on a protocol driver
+  whose `on_control_loss` and `on_shutdown` are both `hold` (`step`,
+  `pulse` and `trigger` must be `hold`, CF-719): a pump
   run command on a remote I/O coil is the same function as one on a local
   line (reference 6.5), and with these defaults it stays on when control
   dies. **open: needs the product owner's ruling (O-12, listed in CS)**; the
