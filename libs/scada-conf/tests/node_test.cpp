@@ -35,12 +35,12 @@ Document sample() {
             .ok();
     good = good && builder.key("a", ScalarStyle::PLAIN, at(2, 1)).ok();
     good = good && builder.begin_sequence(at(2, 4)).ok();
-    good = good && builder.scalar("x", ScalarStyle::PLAIN, at(2, 5)).ok();
+    good = good && builder.scalar("x", ScalarStyle::PLAIN, at(2, 3)).ok();
     good = good &&
-           builder.scalar("y", ScalarStyle::SINGLE_QUOTED, at(3, 7, 1)).ok();
+           builder.scalar("y", ScalarStyle::SINGLE_QUOTED, at(3, 4, 1)).ok();
     good = good && builder.end_sequence().ok();
     good = good && builder.key("c", ScalarStyle::DOUBLE_QUOTED, at(4, 1)).ok();
-    good = good && builder.begin_map(at(4, 6)).ok();
+    good = good && builder.begin_map(at(4, 4)).ok();
     good = good && builder.end_map().ok();
     good = good && builder.end_map().ok();
     EXPECT_TRUE(good);

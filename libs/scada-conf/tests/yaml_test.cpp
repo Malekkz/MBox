@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace scada::conf {
 namespace {
@@ -294,29 +295,50 @@ std::string place(const Document& document, NodeId node_id) {
     return std::to_string(where.line) + ":" + std::to_string(where.column);
 }
 
-TEST(Yaml, NodesCarryTheirLineAndColumn) {
+// The document of `text`; a failed parse is a test failure and gives an
+// empty map.
+Document parsed_document(std::string_view text) {
     Diagnostics diagnostics;
-    const std::optional<Document> parsed = parse_yaml(
-        "a:\n  b: [x, 'y']\n# c\n\xc3\xa9: z\n", "f.yaml", diagnostics);
-    if (!parsed.has_value()) {
-        ADD_FAILURE() << "no document";
-        return;
+    std::optional<Document> parsed = parse_yaml(text, "f.yaml", diagnostics);
+    if (parsed.has_value()) {
+        return std::move(*parsed);
     }
-    const Document& document = *parsed;
+    ADD_FAILURE() << "no document";
+    DocumentBuilder empty;
+    static_cast<void>(empty.add_file("f.yaml"));
+    static_cast<void>(empty.begin_map(SourcePosition{}));
+    static_cast<void>(empty.end_map());
+    return std::move(empty.finish()).value();
+}
+
+constexpr std::string_view PLACES = "a:\n  b: [x, 'y']\n# c\n\xc3\xa9: z\n";
+
+TEST(Yaml, NodesCarryTheirLineAndColumn) {
+    const Document document = parsed_document(PLACES);
     const NodeId root = document.root();
     ASSERT_EQ(document.entries(root).size(), 2U);
     const NodeId a_value = document.entries(root)[0].value;
     EXPECT_EQ(place(document, document.entries(a_value)[0].key), "2:3");
     const NodeId list = document.entries(a_value)[0].value;
     ASSERT_EQ(document.items(list).size(), 2U);
-    const NodeId y_node = document.items(list)[1];
-    EXPECT_EQ(place(document, y_node), "2:10");
-    EXPECT_EQ(document.style(y_node), ScalarStyle::SINGLE_QUOTED);
+    EXPECT_EQ(place(document, document.items(list)[1]), "2:10");
     // Columns count characters, not bytes (D-106): é is one.
     EXPECT_EQ(place(document, document.entries(root)[1].value), "4:4");
+}
+
+TEST(Yaml, NodesCarryTheirStyleAndFile) {
+    const Document document = parsed_document(PLACES);
+    const NodeId root = document.root();
+    ASSERT_EQ(document.entries(root).size(), 2U);
+    const NodeId a_value = document.entries(root)[0].value;
     EXPECT_EQ(document.location(document.entries(root)[1].key).file, "f.yaml");
     EXPECT_EQ(document.find(root, "a"), a_value);
     EXPECT_FALSE(document.find(root, "b"));
+    const std::optional<NodeId> list = document.find(a_value, "b");
+    ASSERT_TRUE(list.has_value());
+    const auto items = document.items(list.value_or(root));
+    ASSERT_EQ(items.size(), 2U);
+    EXPECT_EQ(document.style(items[1]), ScalarStyle::SINGLE_QUOTED);
 }
 
 // --- What the subset refuses, with its code and place (test 3) ----------
