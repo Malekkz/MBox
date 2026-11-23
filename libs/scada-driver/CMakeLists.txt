@@ -21,8 +21,9 @@ target_compile_definitions(libscada-driver PRIVATE
   "SCADA_ZONEINFO_DIR=\"${SCADA_ZONEINFO_DIR}\"")
 
 # Scaling and value conversion give the same bits on both architectures only
-# without floating-point contraction (decision D-98). GCC leaves it off in
-# ISO mode, Clang does not; state it for both.
+# without floating-point contraction (decision D-98): GCC contracts a
+# multiply and an add into one fused instruction in C++ wherever the target
+# has one (ARM64), whatever the language standard.
 target_compile_options(libscada-driver PRIVATE -ffp-contract=off)
 
 if(BUILD_TESTING)

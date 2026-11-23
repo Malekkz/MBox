@@ -8,6 +8,12 @@ scada_add_test(scada-driver-unit-test KIND unit
     tzif_test.cpp
     zone_table_test.cpp
   DEPENDS scada::driver)
+# The tests compute expected values with the same arithmetic as the library
+# (a read of the raw value written), so they too are compiled without
+# floating-point contraction (decision D-98); otherwise ARM64 fuses the
+# test's own multiply and add and the expected value differs in the last
+# bit.
+target_compile_options(scada-driver-unit-test PRIVATE -ffp-contract=off)
 target_compile_definitions(scada-driver-unit-test PRIVATE
   "SCADA_DRIVER_GOLDEN_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/golden/driver-vectors.txt\"")
 
