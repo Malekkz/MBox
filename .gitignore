@@ -1,3 +1,10 @@
 /build/
 /stage/
 __pycache__/
+# libFuzzer writes its logs and findings into the working directory.
+fuzz-*.log
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
