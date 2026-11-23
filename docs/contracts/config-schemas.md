@@ -1411,7 +1411,7 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `native_select` | `at_select`, `at_operate` | `at_select` | For a target with a select on the device. Open: needs the product owner's ruling (X-1, X-7) |
 | `reason_required`, `reauth` | bool | `false` | Reference 8.2, step 7; 13.2 |
 | `limits` | `{ min, max, ranges, rate, release }` | none | Value validation (reference 8.2, step 4), in engineering units: `min`, `max`, or `ranges`, a list of `[lo, hi]` intervals (a union); `rate` (most change per second); `release` (below) |
-| `interlocks` | list of interlock references, or `{ on: [...], off: [...] }` | required for kinds other than `setpoint` | Reference 8.2, step 5. The map form gives the interlocks per commanded direction (a close only when an earth switch is open, an open always). Open: needs the product owner's ruling (X-13) |
+| `interlocks` | list of interlock references, or `{ on: [...], off: [...] }` | required for kinds other than `setpoint` | Reference 8.2, step 5. The map form gives the interlocks per commanded direction (a close only when an earth switch is open, an open always). Open: needs the product owner's ruling (O-21) |
 | `refresh` | duration, `1s` to `1d` | none | `kind: setpoint` only. The driver writes the accepted value again at this period, for devices whose setpoint lapses or that fall back when writes stop. Open: needs the product owner's ruling (X-5) |
 | `auto_deadband` | number | 0 | For `setpoint` outputs driven by a program: `scada-control` posts a new AUTO request only when the value moved by more than this (reference 7.2, step 3 posts on change) |
 | `safe_state` | per kind: `off`, `on` or `hold` for `single` and `double` (for `double`, `off` is code 1 open, `on` code 2 closed); `{ value }`, `{ raw }` or `hold` for `setpoint`; `hold` only for `step`, `pulse` and `trigger` | required (reference 12.5). A fail-safe key with `safe` and a `safe_state` of `hold` is CF-722 | The state the output is driven to when a rule says "safe". `value` is in engineering units, `raw` is the raw pattern written as it stands (section 2.3). A `step`, `pulse` or `trigger` has no safe action: its `safe_state`, `on_shutdown`, `on_control_loss` and `on_generation_change` must be `hold` (CF-719) |
@@ -1937,7 +1937,7 @@ runtime diagnostics only.
 | CF-708 | A target address the protocol cannot write | `output {name}: the protocol cannot write {address}` |
 | CF-709 | No `feedback` and no `no_feedback` | `output {name} needs feedback or no_feedback: true` |
 | CF-710 | No `safe_state` | `output {name} needs a safe_state` |
-| CF-711 | A switching output without `interlocks`. Open: needs the product owner's ruling (X-13) | `output {name} needs interlocks (an empty list if none applies)` |
+| CF-711 | A switching output without `interlocks`. Open: needs the product owner's ruling (O-21) | `output {name} needs interlocks (an empty list if none applies)` |
 | CW-712 | A switching output with `interlocks: []` | `output {name} has no interlock` |
 | CF-713 | A value (limit, safe value, release) outside the target's type | `output {name}: {key} does not fit the target's type` |
 | CF-714 | `refresh` on a kind other than `setpoint`, on an `nvm` target, with `sbo`; `release` in `on_shutdown` or `on_control_loss` without `limits.release` | `output {name}: {reason}` |
@@ -2876,7 +2876,7 @@ listed in both is the same ruling, decided once.
 | X-8 | Several protocols of one device type | (a) bindings per protocol; (b) one template per protocol on a base; (c) independent | (b) now, `bindings:` reserved for (a) | As drafted |
 | X-9 | Release or safe value written to a remote setpoint | (a) stop refreshing only; (b) also write one | (b): `on_shutdown`, `on_control_loss` with `hold`, `safe`, `release` | As drafted; fail-safe, person review |
 | X-12 | Who sets device clocks | (a) none in phase 2; (b) a service, default off | (a) | As drafted |
-| X-13 | Errors or warnings | Pacing, and switching outputs without interlocks | Pacing a warning (CW-606, CW-608); missing `interlocks` an error, empty a warning | The reviewers differ: one asks for an error when the estimated cycle of a poll group exceeds the smallest `max_age` of the group, and a warning otherwise |
+| X-13 | Unservable pacing: error or warning | (a) a warning (CW-606, CW-608); (b) an error | (a) | The reviewers differ: one asks for an error when the estimated cycle of a poll group exceeds the smallest `max_age` of the group, and a warning otherwise |
 | X-14 | Feedback with four states | Accepted or not | Double-point feedback accepted | As drafted |
 | X-15 | Point lists from device files | (a) accept generated files; (b) an importer now | (a) | As drafted |
 | X-16 | Settings edits and setting-group switching | (a) both out; (b) group switching as a command | (b) as an `on_only` output; settings edits out | As drafted |
@@ -2897,10 +2897,11 @@ listed in both is the same ruling, decided once.
 | O-14 | Reserved words in expressions (section 5.6) | (a) only the operator words and literals, only as a one-segment name; function names only before `(`; (b) every keyword and function name reserved everywhere (0.2) | (a) | (a): (b) forbids `x.quality` and common point names (C++ reviewer) |
 | O-15 | Write groups (a curve or table written in one request) | (a) none in this version; (b) in phase 2 | (a) | (a) |
 | O-16 | Pulses timed by the unit (section 7.2, CF-720) | (a) not in this version: in the device, or a control program with a timer block; (b) a framework pulse with an off write | (a) | (a), with the guidance on where such a pulse belongs (SCADA reviewer) |
+| O-17 | How `scada-conf` runs a protocol's validation (section 13.1) | (a) the driver executable's check mode as a child process; (b) `scada-conf` links every protocol library | (a) | (a): a protocol's licence and faults stay in its own process (D-81; Linux reviewer) |
 | O-18 | A writer that is not running in the new generation within `data_plane.generation_change_limit` sends its `hold` outputs safe (G6, section 13.5) | (a) as drafted, each writer measuring the limit itself; (b) outputs hold whatever the duration, with an alarm only | (a), reference 5.5. Consequence: a writer slower than the limit (a long write deadline) trips every `hold` output it writes on every tag-set change; outputs that the commit removes get their old `on_shutdown` instead (13.5) | Person review (fail-safe) |
 | O-19 | `scada-tagd` hangs during a tag-set change (section 13.5) | (a) nothing is made safe, the old configuration stays in force after the accepted commit, the apply is `incomplete` and completes when `scada-tagd` restarts; (b) `scada-conf` switches `active` back after the limit | (a): control is not lost, so nothing must go safe; switching back would race a `scada-tagd` that resumes | Lead: state it for the owner |
 | O-20 | Nothing is promised after the stop step of `scada-io` releases a line (Annex B.4) | (a) a deployment requirement: a controller that keeps the level, or a hardware pull to the safe level; (b) a process that keeps holding the lines until `scada-io` starts again, with a hand-over | (a) | Linux reviewer: say so as a requirement |
-| O-17 | How `scada-conf` runs a protocol's validation (section 13.1) | (a) the driver executable's check mode as a child process; (b) `scada-conf` links every protocol library | (a) | (a): a protocol's licence and faults stay in its own process (D-81; Linux reviewer) |
+| O-21 | Switching outputs without `interlocks` (section 7.2, CF-711; reference 12.5 does not ask for the key) | (a) the key is required, an empty list allowed with a warning (CW-712); (b) optional | (a) | As drafted |
 
 X-6 (replayed events), X-10 (driver interface shape), X-11 (STALE for
 reported points) and the R rulings of the driver interface contract belong
