@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -213,7 +214,10 @@ TEST(Diagnostic, PrintableEscapesWhatCouldDriveATerminal) {
     // or hide text.
     EXPECT_EQ(printable("\xff\xc3"), "\\xFF\\xC3");
     EXPECT_EQ(printable("\xc2\x9b"), "\\u009B");
-    EXPECT_EQ(printable("\xe2\x80\xae"), "\\u202E");
+    // U+202E, written byte by byte so that this file holds no such
+    // character.
+    const std::string right_to_left_override = {'\xe2', '\x80', '\xae'};
+    EXPECT_EQ(printable(right_to_left_override), "\\u202E");
     EXPECT_EQ(printable("\xe2\x80\xa8"), "\\u2028");
     EXPECT_EQ(printable("\xef\xbb\xbf"), "\\uFEFF");
     // Other characters are kept.
@@ -240,9 +244,10 @@ TEST(Diagnostic, EveryDiagnosticIsMadePrintable) {
                           .location = line_of("a\nb.yaml", 1),
                           .message = "duplicate key \"x\ny\"",
                           .notes = {}};
-    diagnostic.notes.push_back(Diagnostic::Note{
-        .kind = "template\x1b", .location = line_of("t\r.yaml", 2),
-        .detail = "point \x1b[31m"});
+    diagnostic.notes.push_back(
+        Diagnostic::Note{.kind = "template\x1b",
+                         .location = line_of("t\r.yaml", 2),
+                         .detail = "point \x1b[31m"});
     diagnostics.add(std::move(diagnostic));
     Report report;
     diagnostics.move_into(report);

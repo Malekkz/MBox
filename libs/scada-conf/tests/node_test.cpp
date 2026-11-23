@@ -9,6 +9,8 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -20,29 +22,37 @@ SourcePosition at(std::uint32_t line, std::uint32_t column,
     return SourcePosition{.file = file, .line = line, .column = column};
 }
 
-// { b: 1, a: [x, y], c: {} } from two files.
+// { b: 1, a: [x, y], c: {} } from two files. Every step must succeed.
 Document sample() {
     DocumentBuilder builder;
-    EXPECT_EQ(builder.add_file("one.yaml").value(), 0U);
-    EXPECT_EQ(builder.add_file("two.yaml").value(), 1U);
-    EXPECT_TRUE(builder.begin_map(at(1, 1)).ok());
-    EXPECT_TRUE(builder.key("b", ScalarStyle::PLAIN, at(1, 1)).ok());
-    EXPECT_TRUE(builder
-                    .scalar("1", ScalarStyle::PLAIN, at(1, 4),
-                            ScalarType::INTEGER)
-                    .ok());
-    EXPECT_TRUE(builder.key("a", ScalarStyle::PLAIN, at(2, 1)).ok());
-    EXPECT_TRUE(builder.begin_sequence(at(2, 4)).ok());
-    EXPECT_TRUE(builder.scalar("x", ScalarStyle::PLAIN, at(2, 5)).ok());
-    EXPECT_TRUE(
-        builder.scalar("y", ScalarStyle::SINGLE_QUOTED, at(3, 7, 1)).ok());
-    EXPECT_TRUE(builder.end_sequence().ok());
-    EXPECT_TRUE(builder.key("c", ScalarStyle::DOUBLE_QUOTED, at(4, 1)).ok());
-    EXPECT_TRUE(builder.begin_map(at(4, 6)).ok());
-    EXPECT_TRUE(builder.end_map().ok());
-    EXPECT_TRUE(builder.end_map().ok());
+    bool good = builder.add_file("one.yaml").ok();
+    good = good && builder.add_file("two.yaml").ok();
+    good = good && builder.begin_map(at(1, 1)).ok();
+    good = good && builder.key("b", ScalarStyle::PLAIN, at(1, 1)).ok();
+    good =
+        good &&
+        builder.scalar("1", ScalarStyle::PLAIN, at(1, 4), ScalarType::INTEGER)
+            .ok();
+    good = good && builder.key("a", ScalarStyle::PLAIN, at(2, 1)).ok();
+    good = good && builder.begin_sequence(at(2, 4)).ok();
+    good = good && builder.scalar("x", ScalarStyle::PLAIN, at(2, 5)).ok();
+    good = good &&
+           builder.scalar("y", ScalarStyle::SINGLE_QUOTED, at(3, 7, 1)).ok();
+    good = good && builder.end_sequence().ok();
+    good = good && builder.key("c", ScalarStyle::DOUBLE_QUOTED, at(4, 1)).ok();
+    good = good && builder.begin_map(at(4, 6)).ok();
+    good = good && builder.end_map().ok();
+    good = good && builder.end_map().ok();
+    EXPECT_TRUE(good);
     Result<Document> built = builder.finish();
-    EXPECT_TRUE(built.ok());
+    if (!built.ok()) {
+        ADD_FAILURE() << "the sample does not build";
+        DocumentBuilder empty;
+        static_cast<void>(empty.add_file("one.yaml"));
+        static_cast<void>(empty.begin_map(at(1, 1)));
+        static_cast<void>(empty.end_map());
+        return std::move(empty.finish()).value();
+    }
     return std::move(built).value();
 }
 
@@ -91,27 +101,43 @@ TEST(Node, FindLooksUpEveryKey) {
     EXPECT_FALSE(document.find(root, ""));
     EXPECT_FALSE(document.find(root, "bb"));
     EXPECT_FALSE(document.find(root, "0"));
+}
 
-    // A large map: every key is found, in any order of the file.
-    constexpr std::size_t KEYS = 1000;
+// A map of `count` keys `k<n>`, each with its key as its value, added in an
+// order other than the keys' byte order.
+Document big_map(std::size_t count) {
+    constexpr std::size_t STRIDE = 7;
     DocumentBuilder builder;
-    ASSERT_TRUE(builder.add_file("f.yaml").ok());
-    ASSERT_TRUE(builder.begin_map(at(1, 1)).ok());
-    for (std::size_t i = KEYS; i > 0; --i) {
-        const std::string key = "k" + std::to_string(i * 7 % KEYS);
-        ASSERT_TRUE(builder.key(key, ScalarStyle::PLAIN, at(1, 1)).ok());
-        ASSERT_TRUE(builder.scalar(key, ScalarStyle::PLAIN, at(1, 1)).ok());
+    bool good = builder.add_file("f.yaml").ok();
+    good = good && builder.begin_map(at(1, 1)).ok();
+    for (std::size_t i = count; i > 0 && good; --i) {
+        const std::string key = "k" + std::to_string(i * STRIDE % count);
+        good = builder.key(key, ScalarStyle::PLAIN, at(1, 1)).ok() &&
+               builder.scalar(key, ScalarStyle::PLAIN, at(1, 1)).ok();
     }
-    ASSERT_TRUE(builder.end_map().ok());
-    const Result<Document> big = builder.finish();
-    ASSERT_TRUE(big.ok());
+    good = good && builder.end_map().ok();
+    EXPECT_TRUE(good);
+    Result<Document> built = builder.finish();
+    if (!built.ok()) {
+        ADD_FAILURE() << "the map does not build";
+        return sample();
+    }
+    return std::move(built).value();
+}
+
+TEST(Node, FindLooksUpEveryKeyOfALargeMap) {
+    constexpr std::size_t KEYS = 1000;
+    const Document document = big_map(KEYS);
+    std::size_t found = 0;
     for (std::size_t i = 0; i < KEYS; ++i) {
         const std::string key = "k" + std::to_string(i);
-        const std::optional<NodeId> found = big.value().find(
-            big.value().root(), key);
-        ASSERT_TRUE(found.has_value()) << key;
-        EXPECT_EQ(big.value().text(*found), key);
+        const std::optional<NodeId> value = document.find(document.root(), key);
+        if (value.has_value() && document.text(*value) == key) {
+            ++found;
+        }
     }
+    EXPECT_EQ(found, KEYS);
+    EXPECT_FALSE(document.find(document.root(), "k1000"));
 }
 
 TEST(Node, ADuplicateKeyIsRefusedAndTheBuilderStaysFailed) {
@@ -120,8 +146,8 @@ TEST(Node, ADuplicateKeyIsRefusedAndTheBuilderStaysFailed) {
     ASSERT_TRUE(builder.begin_map(at(1, 1)).ok());
     ASSERT_TRUE(builder.key("a", ScalarStyle::PLAIN, at(1, 1)).ok());
     ASSERT_TRUE(builder.scalar("1", ScalarStyle::PLAIN, at(1, 4)).ok());
-    const Result<NodeId> again = builder.key("a", ScalarStyle::SINGLE_QUOTED,
-                                             at(2, 1));
+    const Result<NodeId> again =
+        builder.key("a", ScalarStyle::SINGLE_QUOTED, at(2, 1));
     ASSERT_FALSE(again.ok());
     EXPECT_EQ(again.status().code(), StatusCode::ALREADY_EXISTS);
     EXPECT_FALSE(builder.scalar("2", ScalarStyle::PLAIN, at(2, 6)).ok());
@@ -134,10 +160,9 @@ TEST(Node, TheBuilderRefusesMisuse) {
         ASSERT_TRUE(builder.add_file("f.yaml").ok());
         ASSERT_TRUE(builder.begin_map(at(1, 1)).ok());
         // A value where a key is due.
-        EXPECT_EQ(builder.scalar("x", ScalarStyle::PLAIN, at(1, 1))
-                      .status()
-                      .code(),
-                  StatusCode::FAILED_PRECONDITION);
+        EXPECT_EQ(
+            builder.scalar("x", ScalarStyle::PLAIN, at(1, 1)).status().code(),
+            StatusCode::FAILED_PRECONDITION);
     }
     {
         DocumentBuilder builder;

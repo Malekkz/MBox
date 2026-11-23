@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -20,6 +21,9 @@ namespace scada::conf {
 
 namespace {
 
+// The size of a node record, which node.h and the README state.
+constexpr std::size_t RECORD_BYTES = 24;
+
 constexpr std::size_t MAX_INDEX = std::numeric_limits<std::uint32_t>::max();
 
 }  // namespace
@@ -28,7 +32,7 @@ constexpr std::size_t MAX_INDEX = std::numeric_limits<std::uint32_t>::max();
 
 const Document::Record& Document::record(NodeId node) const noexcept {
     // The memory figure of node.h and the README.
-    static_assert(sizeof(Record) == 24, "a node is 24 bytes");
+    static_assert(sizeof(Record) == RECORD_BYTES, "a node is 24 bytes");
     if (node >= nodes_.size()) {
         panic("Document: a node id of another document");
     }
@@ -92,8 +96,8 @@ std::span<const NodeId> Document::items(NodeId node) const noexcept {
     return std::span<const NodeId>(items_).subspan(found.first, found.count);
 }
 
-std::optional<NodeId> Document::find(NodeId map, std::string_view key) const
-    noexcept {
+std::optional<NodeId> Document::find(NodeId map,
+                                     std::string_view key) const noexcept {
     const Record& found = record(map);
     if (found.kind != NodeKind::MAP) {
         return std::nullopt;
@@ -142,7 +146,7 @@ Status DocumentBuilder::place_value(NodeId node) noexcept {
         }
         has_root_ = true;
         document_.root_ = node;
-        return Status();
+        return {};
     }
     Frame& frame = open_.back();
     if (frame.kind == NodeKind::MAP) {
@@ -153,7 +157,7 @@ Status DocumentBuilder::place_value(NodeId node) noexcept {
         frame.expect_key = true;
     }
     pending_.push_back(node);
-    return Status();
+    return {};
 }
 
 Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
@@ -189,8 +193,8 @@ Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
     return node;
 }
 
-Result<NodeId> DocumentBuilder::scalar(std::string_view text,
-                                       ScalarStyle style, SourcePosition where,
+Result<NodeId> DocumentBuilder::scalar(std::string_view text, ScalarStyle style,
+                                       SourcePosition where,
                                        ScalarType resolved) {
     const Result<NodeId> node =
         add(NodeKind::SCALAR, style, where, resolved, text);
@@ -237,12 +241,12 @@ Result<NodeId> DocumentBuilder::begin_map(SourcePosition where) {
     if (const Status placed = place_value(node.value()); !placed.ok()) {
         return placed;
     }
-    open_.push_back(Frame{.node = node.value(),
-                          .kind = NodeKind::MAP,
-                          .first_pending = pending_.size(),
-                          .expect_key = true,
-                          .keys = std::set<NodeId, KeyLess>(
-                              KeyLess{.document = &document_})});
+    open_.push_back(
+        Frame{.node = node.value(),
+              .kind = NodeKind::MAP,
+              .first_pending = pending_.size(),
+              .expect_key = true,
+              .keys = std::set<NodeId, KeyLess>(KeyLess(&document_))});
     return node;
 }
 
@@ -255,12 +259,12 @@ Result<NodeId> DocumentBuilder::begin_sequence(SourcePosition where) {
     if (const Status placed = place_value(node.value()); !placed.ok()) {
         return placed;
     }
-    open_.push_back(Frame{.node = node.value(),
-                          .kind = NodeKind::SEQUENCE,
-                          .first_pending = pending_.size(),
-                          .expect_key = false,
-                          .keys = std::set<NodeId, KeyLess>(
-                              KeyLess{.document = &document_})});
+    open_.push_back(
+        Frame{.node = node.value(),
+              .kind = NodeKind::SEQUENCE,
+              .first_pending = pending_.size(),
+              .expect_key = false,
+              .keys = std::set<NodeId, KeyLess>(KeyLess(&document_))});
     return node;
 }
 
@@ -310,12 +314,16 @@ Status DocumentBuilder::end(NodeKind kind) {
     }
     pending_.resize(frame.first_pending);
     open_.pop_back();
-    return Status();
+    return {};
 }
 
-Status DocumentBuilder::end_map() { return end(NodeKind::MAP); }
+Status DocumentBuilder::end_map() {
+    return end(NodeKind::MAP);
+}
 
-Status DocumentBuilder::end_sequence() { return end(NodeKind::SEQUENCE); }
+Status DocumentBuilder::end_sequence() {
+    return end(NodeKind::SEQUENCE);
+}
 
 Result<Document> DocumentBuilder::finish() {
     if (!failure_.ok()) {

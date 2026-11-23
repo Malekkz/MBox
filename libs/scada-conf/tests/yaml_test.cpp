@@ -12,7 +12,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
 
 namespace scada::conf {
 namespace {
@@ -24,8 +23,7 @@ constexpr std::size_t DEPTH_LIMIT = 32;
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
 void dump(const Document& document, NodeId node_id, std::string& out);
 
-void dump_scalar(const Document& document, NodeId node_id,
-                 std::string& out) {
+void dump_scalar(const Document& document, NodeId node_id, std::string& out) {
     const ScalarStyle style = document.style(node_id);
     switch (style) {
         case ScalarStyle::PLAIN:
@@ -300,7 +298,10 @@ TEST(Yaml, NodesCarryTheirLineAndColumn) {
     Diagnostics diagnostics;
     const std::optional<Document> parsed = parse_yaml(
         "a:\n  b: [x, 'y']\n# c\n\xc3\xa9: z\n", "f.yaml", diagnostics);
-    ASSERT_TRUE(parsed.has_value());
+    if (!parsed.has_value()) {
+        ADD_FAILURE() << "no document";
+        return;
+    }
     const Document& document = *parsed;
     const NodeId root = document.root();
     ASSERT_EQ(document.entries(root).size(), 2U);
@@ -313,8 +314,7 @@ TEST(Yaml, NodesCarryTheirLineAndColumn) {
     EXPECT_EQ(document.style(y_node), ScalarStyle::SINGLE_QUOTED);
     // Columns count characters, not bytes (D-106): é is one.
     EXPECT_EQ(place(document, document.entries(root)[1].value), "4:4");
-    EXPECT_EQ(document.location(document.entries(root)[1].key).file,
-              "f.yaml");
+    EXPECT_EQ(document.location(document.entries(root)[1].key).file, "f.yaml");
     EXPECT_EQ(document.find(root, "a"), a_value);
     EXPECT_FALSE(document.find(root, "b"));
 }
@@ -364,7 +364,8 @@ TEST(Yaml, DocumentMarkersAndDirectives) {
 }
 
 TEST(Yaml, ADuplicateKey) {
-    EXPECT_EQ(parse("a: 1\nb: 2\na: 3\n"), "error 3:1 CF-111: duplicate key \"a\"");
+    EXPECT_EQ(parse("a: 1\nb: 2\na: 3\n"),
+              "error 3:1 CF-111: duplicate key \"a\"");
     // The same text quoted or not is the same key.
     EXPECT_EQ(code_at("a: 1\n'a': 2\n"), "error 2:1 CF-111");
     EXPECT_EQ(code_at("x: {a: 1, \"a\": 2}\n"), "error 1:11 CF-111");
@@ -577,8 +578,9 @@ TEST(Yaml, TheDefaultLimitsAreThoseOfTheContract) {
 // B1: every line counts against the scalar limit before it is stored, and
 // empty lines are counted, not stored.
 TEST(Yaml, EmptyLinesOfABlockScalarCountAgainstTheLimit) {
+    constexpr std::size_t LIMIT = 8;
     ParseLimits limits;
-    limits.max_scalar_bytes = 8;
+    limits.max_scalar_bytes = LIMIT;
     // "x\n" and six kept empty lines: 8 bytes.
     EXPECT_EQ(parse("a: |+\n x\n" + std::string(6, '\n'), limits),
               "{a: |\"x\\n\\n\\n\\n\\n\\n\\n\"}");
@@ -641,7 +643,8 @@ TEST(Yaml, TrailingWhiteSpaceOfABlockScalar) {
     EXPECT_EQ(parse("a: >\n    \nb: 1\n"), "{a: >\"\", b: 1}");
     EXPECT_EQ(parse("a: |\n x\n  "), "{a: |\"x\\n \"}");
     EXPECT_EQ(parse("a: |+\n x\n\n\n"), "{a: |\"x\\n\\n\\n\"}");
-    EXPECT_EQ(parse("a: >\n x\n\n y\n  z\n w\n"), "{a: >\"x\\ny\\n z\\nw\\n\"}");
+    EXPECT_EQ(parse("a: >\n x\n\n y\n  z\n w\n"),
+              "{a: >\"x\\ny\\n z\\nw\\n\"}");
     EXPECT_EQ(parse("a: |2\n   x\n"), "{a: |\" x\\n\"}");
 }
 
@@ -653,7 +656,8 @@ TEST(Yaml, MessagesEscapeTheTextOfTheFile) {
               "error 2:1 CF-111: duplicate key \"a\\nf.yaml:9:9: "
               "error\\x1B[2J\"");
     // An empty key stays visible.
-    EXPECT_EQ(parse("\"\": 1\n'': 2\n"), "error 2:1 CF-111: duplicate key \"\"");
+    EXPECT_EQ(parse("\"\": 1\n'': 2\n"),
+              "error 2:1 CF-111: duplicate key \"\"");
     EXPECT_EQ(parse("\"\":\n"), "error 1:1 CF-112: \"\" has no value");
 }
 

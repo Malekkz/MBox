@@ -129,15 +129,12 @@ void built(Status status) noexcept {
     }
 }
 
-
-
 class Parser {
 public:
-    Parser(std::string_view source, const std::string& path,
-           Diagnostics& diagnostics, const ParseLimits& limits,
-           NodeBudget* budget)
+    Parser(std::string_view source, std::string path, Diagnostics& diagnostics,
+           const ParseLimits& limits, NodeBudget* budget)
         : source_(source),
-          path_(path),
+          path_(std::move(path)),
           diagnostics_(&diagnostics),
           limits_(limits),
           budget_(budget) {}
@@ -501,8 +498,8 @@ private:
         if (!count_node(scalar.start)) {
             return false;
         }
-        built(builder_.scalar(scalar.text, scalar.style,
-                              position(scalar.start)));
+        built(
+            builder_.scalar(scalar.text, scalar.style, position(scalar.start)));
         return true;
     }
 
@@ -513,7 +510,8 @@ private:
         }
         const Result<NodeId> added =
             builder_.key(key.text, key.style, position(key.start));
-        if (!added.ok() && added.status().code() == StatusCode::ALREADY_EXISTS) {
+        if (!added.ok() &&
+            added.status().code() == StatusCode::ALREADY_EXISTS) {
             return fail(CF_DUPLICATE, key.start,
                         "duplicate key " + named_key(key.text));
         }
@@ -540,7 +538,8 @@ private:
 
     // True if `bytes` more bytes on a scalar of `size` bytes keep it within
     // the scalar limit.
-    [[nodiscard]] bool fits(std::size_t size, std::size_t bytes) const noexcept {
+    [[nodiscard]] bool fits(std::size_t size,
+                            std::size_t bytes) const noexcept {
         return size <= limits_.max_scalar_bytes &&
                bytes <= limits_.max_scalar_bytes - size;
     }
@@ -786,8 +785,7 @@ private:
             return parse_block_scalar(parent_indent);
         }
         if (chr == '[' || chr == '{') {
-            return parse_flow_collection(parent_indent, depth) &&
-                   finish_line();
+            return parse_flow_collection(parent_indent, depth) && finish_line();
         }
         if (chr == '\'' || chr == '"') {
             Scalar scalar;
@@ -992,8 +990,7 @@ private:
         return true;
     }
 
-    bool parse_plain(Context context, std::int64_t parent_indent,
-                     Scalar& out) {
+    bool parse_plain(Context context, std::int64_t parent_indent, Scalar& out) {
         out.start = mark_;
         out.style = ScalarStyle::PLAIN;
         if (!check_plain_start(context)) {
@@ -1013,9 +1010,9 @@ private:
                 break;
             }
             // The line's trailing spaces are dropped by the fold.
-            gap = next->second == 0 ? PlainGap{.spaces = 1, .breaks = 0}
-                                    : PlainGap{.spaces = 0,
-                                               .breaks = next->second};
+            gap = next->second == 0
+                      ? PlainGap{.spaces = 1, .breaks = 0}
+                      : PlainGap{.spaces = 0, .breaks = next->second};
             mark_ = next->first;
         }
         mark_ = content_end;
@@ -1062,8 +1059,10 @@ private:
                                    : "a flow collection's line that is not "
                                      "indented");
         }
-        const std::size_t separator =
-            empty_lines > 0 ? empty_lines : (escaped ? 0 : 1);
+        std::size_t separator = empty_lines;
+        if (empty_lines == 0 && !escaped) {
+            separator = 1;
+        }
         if (!fits(out.text.size(), separator)) {
             return fail_scalar_limit(out.start);
         }
@@ -1194,7 +1193,7 @@ private:
             done = fold_quoted_break(out, context, parent_indent, false);
         } else if (!write_white(out, white)) {
             done = false;
-        } else if (chr == quote && !(quote == '\'' && peek(1) == '\'')) {
+        } else if (chr == quote && (quote != '\'' || peek(1) != '\'')) {
             advance();
             return QuotedStep::CLOSED;
         } else if (chr == quote) {
@@ -1268,11 +1267,10 @@ private:
             }
         }
         if (peek() >= '0' && peek() <= '9') {
-            return fail_syntax(mark_,
-                               indicator != 0
-                                   ? "an indentation indicator of more than "
-                                     "one digit"
-                                   : "an indentation indicator after text");
+            return fail_syntax(
+                mark_, indicator != 0 ? "an indentation indicator of more than "
+                                        "one digit"
+                                      : "an indentation indicator after text");
         }
         if (!skip_spaces()) {
             return false;
@@ -1341,8 +1339,7 @@ private:
                 space = true;
             }
         }
-        if (!fits(fold.value.size(),
-                  breaks + (space ? 1 : 0) + line.size())) {
+        if (!fits(fold.value.size(), breaks + (space ? 1 : 0) + line.size())) {
             return fail_scalar_limit(start);
         }
         fold.value.append(breaks, '\n');

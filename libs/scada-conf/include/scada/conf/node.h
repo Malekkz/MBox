@@ -136,9 +136,8 @@ public:
     // For a map: the value of the entry whose key text is `key`, if any.
     // Keys of one map are unique by text. O(log n) in the map's entries;
     // nothing for anything but a map.
-    [[nodiscard]] std::optional<NodeId> find(NodeId map,
-                                             std::string_view key) const
-        noexcept;
+    [[nodiscard]] std::optional<NodeId> find(
+        NodeId map, std::string_view key) const noexcept;
 
 private:
     friend class DocumentBuilder;
@@ -224,11 +223,16 @@ public:
 
 private:
     // Orders key nodes by their text, for the duplicate check.
-    struct KeyLess {
-        const Document* document = nullptr;
+    class KeyLess {
+    public:
+        explicit KeyLess(const Document* document) noexcept
+            : document_(document) {}
         bool operator()(NodeId lhs, NodeId rhs) const noexcept {
-            return document->text(lhs) < document->text(rhs);
+            return document_->text(lhs) < document_->text(rhs);
         }
+
+    private:
+        const Document* document_;
     };
 
     // A collection being built.
@@ -238,7 +242,7 @@ private:
         // Where its children start in `pending_`.
         std::size_t first_pending = 0;
         bool expect_key = true;
-        std::set<NodeId, KeyLess> keys;
+        std::set<NodeId, KeyLess> keys{KeyLess(nullptr)};
     };
 
     Status fail(Status status) noexcept;

@@ -52,13 +52,16 @@ constexpr unsigned NIBBLE_BITS = 4;
 constexpr unsigned NIBBLE_MASK = 0xF;
 constexpr std::string_view HEX_DIGITS = "0123456789ABCDEF";
 constexpr std::size_t INDENT_STEP = 2;
+constexpr unsigned NON_CHARACTER_FFFE = 0xFFFE;
+constexpr unsigned NON_CHARACTER_FFFF = 0xFFFF;
 
 // Ends the run with the line of the property that failed.
 void check(bool condition,
            std::source_location where = std::source_location::current()) {
     if (!condition) {
-        std::fprintf(stderr, "yaml_fuzz: property at line %u failed\n",
-                     static_cast<unsigned>(where.line()));
+        const std::string message = "yaml_fuzz: property at line " +
+                                    std::to_string(where.line()) + " failed\n";
+        static_cast<void>(std::fputs(message.c_str(), stderr));
         std::abort();
     }
 }
@@ -110,8 +113,7 @@ void check_limits_and_positions(const Document& document,
             check(entry.key > node && entry.value > node);
             check(document.kind(entry.key) == NodeKind::SCALAR);
             check(document.text(entry.key).size() <= limits.max_key_bytes);
-            check(document.find(node, document.text(entry.key)) ==
-                  entry.value);
+            check(document.find(node, document.text(entry.key)) == entry.value);
             ++visited;
             stack.emplace_back(entry.value, depth + 1);
         }
@@ -130,8 +132,8 @@ std::string quote(std::string_view text) {
         out.push_back('\\');
         out.push_back(kind);
         for (unsigned i = digits; i > 0; --i) {
-            out.push_back(
-                HEX_DIGITS.at((value >> ((i - 1) * NIBBLE_BITS)) & NIBBLE_MASK));
+            out.push_back(HEX_DIGITS.at((value >> ((i - 1) * NIBBLE_BITS)) &
+                                        NIBBLE_MASK));
         }
     };
     std::size_t where = 0;
@@ -154,7 +156,10 @@ std::string quote(std::string_view text) {
         } else if (byte == LEAD_EF && next(1) == SECOND_BF &&
                    next(2) >= THIRD_BE) {
             // U+FFFE or U+FFFF.
-            escape('u', next(2) == THIRD_BE ? 0xFFFEU : 0xFFFFU, 4);
+            escape(
+                'u',
+                next(2) == THIRD_BE ? NON_CHARACTER_FFFE : NON_CHARACTER_FFFF,
+                4);
             where += 2;
         } else {
             out.push_back(static_cast<char>(byte));
@@ -170,6 +175,23 @@ bool is_empty_collection(const Document& document, NodeId node) {
            document.entry_count(node) == 0;
 }
 
+void emit(const Document& document, NodeId node, std::size_t indent,
+          std::string& out);
+
+// Writes the value of an entry or an item whose indicator stands at
+// `indent`: on the same line if it is a scalar or empty, else indented below.
+// NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
+void emit_child(const Document& document, NodeId value, std::size_t indent,
+                std::string& out) {
+    if (document.kind(value) == NodeKind::SCALAR ||
+        is_empty_collection(document, value)) {
+        out.push_back(' ');
+        emit(document, value, indent, out);
+    } else {
+        emit(document, value, indent + INDENT_STEP, out);
+    }
+}
+
 // Writes `node` in block style, its entries indented by `indent` spaces.
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
 void emit(const Document& document, NodeId node, std::size_t indent,
@@ -183,23 +205,14 @@ void emit(const Document& document, NodeId node, std::size_t indent,
         out += kind == NodeKind::MAP ? "{}" : "[]";
         return;
     }
-    const auto child = [&](NodeId value) {
-        if (document.kind(value) == NodeKind::SCALAR ||
-            is_empty_collection(document, value)) {
-            out.push_back(' ');
-            emit(document, value, indent, out);
-        } else {
-            emit(document, value, indent + INDENT_STEP, out);
-        }
-    };
     for (const Entry& entry : document.entries(node)) {
-        out += '\n' + std::string(indent, ' ') + quote(document.text(entry.key)) +
-               ':';
-        child(entry.value);
+        out += '\n' + std::string(indent, ' ') +
+               quote(document.text(entry.key)) + ':';
+        emit_child(document, entry.value, indent, out);
     }
     for (const NodeId item : document.items(node)) {
         out += '\n' + std::string(indent, ' ') + '-';
-        child(item);
+        emit_child(document, item, indent, out);
     }
 }
 
@@ -256,7 +269,10 @@ void parse_once(std::string_view text, const ParseLimits& limits) {
     const std::optional<Document> reparsed =
         scada::conf::parse_yaml(written, "f.yaml", again, limits);
     check(reparsed.has_value());
-    check(same_tree(*document, document->root(), *reparsed, reparsed->root()));
+    if (reparsed.has_value()) {
+        check(same_tree(*document, document->root(), *reparsed,
+                        reparsed->root()));
+    }
 }
 
 }  // namespace
