@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -23,8 +24,10 @@ constexpr std::size_t DEPTH_LIMIT = 32;
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
 void dump(const Document& document, NodeId node_id, std::string& out);
 
-void dump_scalar(const Node& node, std::string& out) {
-    switch (node.style) {
+void dump_scalar(const Document& document, NodeId node_id,
+                 std::string& out) {
+    const ScalarStyle style = document.style(node_id);
+    switch (style) {
         case ScalarStyle::PLAIN:
             break;
         case ScalarStyle::SINGLE_QUOTED:
@@ -40,7 +43,7 @@ void dump_scalar(const Node& node, std::string& out) {
             out += ">\"";
             break;
     }
-    for (const char chr : node.text) {
+    for (const char chr : document.text(node_id)) {
         if (chr == '\n') {
             out += "\\n";
         } else if (chr == '\t') {
@@ -49,8 +52,8 @@ void dump_scalar(const Node& node, std::string& out) {
             out.push_back(chr);
         }
     }
-    if (node.style != ScalarStyle::PLAIN) {
-        out += node.style == ScalarStyle::SINGLE_QUOTED ? "'" : "\"";
+    if (style != ScalarStyle::PLAIN) {
+        out += style == ScalarStyle::SINGLE_QUOTED ? "'" : "\"";
     }
 }
 
@@ -59,25 +62,32 @@ void dump_scalar(const Node& node, std::string& out) {
 // >"") and \n, \t escaped.
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
 void dump(const Document& document, NodeId node_id, std::string& out) {
-    const Node& node = document.node(node_id);
-    if (node.kind == NodeKind::SCALAR) {
-        dump_scalar(node, out);
+    const NodeKind kind = document.kind(node_id);
+    if (kind == NodeKind::SCALAR) {
+        dump_scalar(document, node_id, out);
         return;
     }
-    const bool map = node.kind == NodeKind::MAP;
-    out += map ? "{" : "[";
-    const std::size_t step = map ? 2 : 1;
-    for (std::size_t i = 0; i < node.children.size(); i += step) {
-        if (i > 0) {
-            out += ", ";
-        }
-        dump(document, node.children.at(i), out);
-        if (map) {
+    if (kind == NodeKind::MAP) {
+        out += "{";
+        bool first = true;
+        for (const Entry& entry : document.entries(node_id)) {
+            out += first ? "" : ", ";
+            first = false;
+            dump(document, entry.key, out);
             out += ": ";
-            dump(document, node.children.at(i + 1), out);
+            dump(document, entry.value, out);
         }
+        out += "}";
+        return;
     }
-    out += map ? "}" : "]";
+    out += "[";
+    bool first = true;
+    for (const NodeId item : document.items(node_id)) {
+        out += first ? "" : ", ";
+        first = false;
+        dump(document, item, out);
+    }
+    out += "]";
 }
 
 // The tree of `text`, or "error <line>:<column> CF-<n>: <message>".
@@ -282,40 +292,30 @@ TEST(Yaml, AFileWithoutAFinalLineEnd) {
 
 // The line and column of node `node_id` as "line:column".
 std::string place(const Document& document, NodeId node_id) {
-    const Node& node = document.node(node_id);
-    return std::to_string(node.line) + ":" + std::to_string(node.column);
-}
-
-// The document of `text`; a failed parse is a test failure and gives an
-// empty map.
-Document parsed_document(std::string_view text) {
-    Diagnostics diagnostics;
-    std::optional<Document> parsed = parse_yaml(text, "f.yaml", diagnostics);
-    EXPECT_TRUE(parsed.has_value());
-    if (parsed.has_value()) {
-        return std::move(*parsed);
-    }
-    Document empty({"f.yaml"});
-    Node map;
-    map.kind = NodeKind::MAP;
-    empty.set_root(empty.add(std::move(map)));
-    return empty;
+    const SourcePosition where = document.position(node_id);
+    return std::to_string(where.line) + ":" + std::to_string(where.column);
 }
 
 TEST(Yaml, NodesCarryTheirLineAndColumn) {
-    const Document document =
-        parsed_document("a:\n  b: [x, 'y']\n# c\n\xc3\xa9: z\n");
+    Diagnostics diagnostics;
+    const std::optional<Document> parsed = parse_yaml(
+        "a:\n  b: [x, 'y']\n# c\n\xc3\xa9: z\n", "f.yaml", diagnostics);
+    ASSERT_TRUE(parsed.has_value());
+    const Document& document = *parsed;
     const NodeId root = document.root();
-    const NodeId a_value = document.value(root, 0);
-    EXPECT_EQ(place(document, document.key(a_value, 0)), "2:3");
-    const NodeId list = document.value(a_value, 0);
-    const NodeId y_node = document.node(list).children.at(1);
+    ASSERT_EQ(document.entries(root).size(), 2U);
+    const NodeId a_value = document.entries(root)[0].value;
+    EXPECT_EQ(place(document, document.entries(a_value)[0].key), "2:3");
+    const NodeId list = document.entries(a_value)[0].value;
+    ASSERT_EQ(document.items(list).size(), 2U);
+    const NodeId y_node = document.items(list)[1];
     EXPECT_EQ(place(document, y_node), "2:10");
-    EXPECT_EQ(document.node(y_node).style, ScalarStyle::SINGLE_QUOTED);
+    EXPECT_EQ(document.style(y_node), ScalarStyle::SINGLE_QUOTED);
     // Columns count characters, not bytes (D-106): é is one.
-    EXPECT_EQ(place(document, document.value(root, 1)), "4:4");
-    EXPECT_EQ(document.location(document.key(root, 1)).file, "f.yaml");
-    EXPECT_TRUE(document.find(root, "a"));
+    EXPECT_EQ(place(document, document.entries(root)[1].value), "4:4");
+    EXPECT_EQ(document.location(document.entries(root)[1].key).file,
+              "f.yaml");
+    EXPECT_EQ(document.find(root, "a"), a_value);
     EXPECT_FALSE(document.find(root, "b"));
 }
 
@@ -364,7 +364,7 @@ TEST(Yaml, DocumentMarkersAndDirectives) {
 }
 
 TEST(Yaml, ADuplicateKey) {
-    EXPECT_EQ(parse("a: 1\nb: 2\na: 3\n"), "error 3:1 CF-111: duplicate key a");
+    EXPECT_EQ(parse("a: 1\nb: 2\na: 3\n"), "error 3:1 CF-111: duplicate key \"a\"");
     // The same text quoted or not is the same key.
     EXPECT_EQ(code_at("a: 1\n'a': 2\n"), "error 2:1 CF-111");
     EXPECT_EQ(code_at("x: {a: 1, \"a\": 2}\n"), "error 1:11 CF-111");
@@ -373,10 +373,10 @@ TEST(Yaml, ADuplicateKey) {
 }
 
 TEST(Yaml, NullAndEmptyValues) {
-    EXPECT_EQ(parse("a: null\n"), "error 1:4 CF-112: a has no value");
+    EXPECT_EQ(parse("a: null\n"), "error 1:4 CF-112: \"a\" has no value");
     EXPECT_EQ(code_at("a: ~\n"), "error 1:4 CF-112");
     EXPECT_EQ(code_at("a: Null\n"), "error 1:4 CF-112");
-    EXPECT_EQ(parse("a:\nb: 1\n"), "error 1:1 CF-112: a has no value");
+    EXPECT_EQ(parse("a:\nb: 1\n"), "error 1:1 CF-112: \"a\" has no value");
     EXPECT_EQ(code_at("x: 1\na:\n"), "error 2:1 CF-112");
     EXPECT_EQ(code_at("a:   # comment\n"), "error 1:1 CF-112");
     EXPECT_EQ(parse("- 1\n-\n"),
@@ -570,6 +570,198 @@ TEST(Yaml, TheDefaultLimitsAreThoseOfTheContract) {
     EXPECT_EQ(limits.max_depth, DEPTH_LIMIT);
     EXPECT_EQ(limits.max_scalar_bytes, KIB_64);
     EXPECT_EQ(limits.max_key_bytes, KEY_LIMIT);
+}
+
+// --- Review fixes of #130 -----------------------------------------------
+
+// B1: every line counts against the scalar limit before it is stored, and
+// empty lines are counted, not stored.
+TEST(Yaml, EmptyLinesOfABlockScalarCountAgainstTheLimit) {
+    ParseLimits limits;
+    limits.max_scalar_bytes = 8;
+    // "x\n" and six kept empty lines: 8 bytes.
+    EXPECT_EQ(parse("a: |+\n x\n" + std::string(6, '\n'), limits),
+              "{a: |\"x\\n\\n\\n\\n\\n\\n\\n\"}");
+    EXPECT_EQ(parse("a: |+\n x\n" + std::string(7, '\n'), limits),
+              "error 1:4 CF-113: a scalar exceeds its limit of 8 bytes");
+    // Between two lines, the empty lines are in the value.
+    EXPECT_EQ(parse("a: |\n x\n\n\n\n\n y\n", limits),
+              "{a: |\"x\\n\\n\\n\\n\\ny\\n\"}");
+    EXPECT_EQ(code_at("a: |\n x\n\n\n\n\n\n y\n", limits), "error 1:4 CF-113");
+    // Stripped or clipped, trailing empty lines are not in the value and
+    // cost nothing: 1,000,000 of them are accepted.
+    const std::string many(1000000, '\n');
+    EXPECT_EQ(parse("a: |\n x\n" + many, limits), "{a: |\"x\\n\"}");
+    EXPECT_EQ(parse("a: >-\n x\n" + many, limits), "{a: >\"x\"}");
+    EXPECT_EQ(parse("a: |\n" + many), "{a: |\"\"}");
+}
+
+TEST(Yaml, FoldedLinesOfPlainAndQuotedScalarsCountAgainstTheLimit) {
+    ParseLimits limits;
+    limits.max_scalar_bytes = 4;
+    // Two empty lines fold to two line feeds: "x\n\ny" is 4 bytes.
+    EXPECT_EQ(parse("a: x\n\n\n y\n", limits), "{a: x\\n\\ny}");
+    EXPECT_EQ(code_at("a: x\n\n\n\n y\n", limits), "error 1:4 CF-113");
+    EXPECT_EQ(parse("a: 'x\n\n\n y'\n", limits), "{a: 'x\\n\\ny'}");
+    EXPECT_EQ(code_at("a: 'x\n\n\n\n y'\n", limits), "error 1:4 CF-113");
+    // An escape counts by the bytes it gives: `\n` at the limit fits (found
+    // by yaml_fuzz).
+    EXPECT_EQ(parse("a: \"abc\\n\"\n", limits), "{a: \"abc\\n\"}");
+    EXPECT_EQ(code_at("a: \"abcd\\n\"\n", limits), "error 1:4 CF-113");
+    // Trailing white space of a line is dropped before it counts (N4).
+    EXPECT_EQ(parse("a: abcd" + std::string(100, ' ') + "\n", limits),
+              "{a: abcd}");
+    EXPECT_EQ(parse("a: 'ab" + std::string(100, ' ') + "\n  c'\n", limits),
+              "{a: 'ab c'}");
+    EXPECT_EQ(code_at("a: 'abc" + std::string(100, ' ') + "\n  d'\n", limits),
+              "error 1:4 CF-113");
+}
+
+TEST(Yaml, TheScalarLimitAtNAndNPlusOne) {
+    // The default limit, 65,536 bytes, in every style.
+    const std::string at_limit(KIB_64, 'x');
+    const std::string over(KIB_64 + 1, 'x');
+    EXPECT_EQ(parse("a: '" + at_limit + "'\n").substr(0, 5), "{a: '");
+    EXPECT_EQ(code_at("a: '" + over + "'\n"), "error 1:4 CF-113");
+    EXPECT_EQ(parse("a: \"" + at_limit + "\"\n").substr(0, 5), "{a: \"");
+    EXPECT_EQ(code_at("a: \"" + over + "\"\n"), "error 1:4 CF-113");
+    EXPECT_EQ(parse("a: |-\n  " + at_limit + "\n").substr(0, 5), "{a: |");
+    EXPECT_EQ(code_at("a: |\n  " + std::string(KIB_64, 'x') + "\n"),
+              "error 1:4 CF-113");  // the final line feed is byte 65,537
+    EXPECT_EQ(
+        parse("a: |\n  " + std::string(KIB_64 - 1, 'x') + "\n").substr(0, 5),
+        "{a: |");
+}
+
+// B2: white space at the end of a block scalar, as YAML 1.2 reads it.
+TEST(Yaml, TrailingWhiteSpaceOfABlockScalar) {
+    EXPECT_EQ(parse("a: |\n   \n"), "{a: |\"\"}");
+    EXPECT_EQ(parse("a: |-\n          "), "{a: |\"\"}");
+    EXPECT_EQ(parse("a: |+\n x\n "), "{a: |\"x\\n\"}");
+    EXPECT_EQ(parse("a: >\n    \nb: 1\n"), "{a: >\"\", b: 1}");
+    EXPECT_EQ(parse("a: |\n x\n  "), "{a: |\"x\\n \"}");
+    EXPECT_EQ(parse("a: |+\n x\n\n\n"), "{a: |\"x\\n\\n\\n\"}");
+    EXPECT_EQ(parse("a: >\n x\n\n y\n  z\n w\n"), "{a: >\"x\\ny\\n z\\nw\\n\"}");
+    EXPECT_EQ(parse("a: |2\n   x\n"), "{a: |\" x\\n\"}");
+}
+
+// S1: text of the file is escaped in every message.
+TEST(Yaml, MessagesEscapeTheTextOfTheFile) {
+    // A key that forges a second line and a terminal escape.
+    EXPECT_EQ(parse("\"a\\nf.yaml:9:9: error\\e[2J\": 1\n"
+                    "\"a\\nf.yaml:9:9: error\\e[2J\": 2\n"),
+              "error 2:1 CF-111: duplicate key \"a\\nf.yaml:9:9: "
+              "error\\x1B[2J\"");
+    // An empty key stays visible.
+    EXPECT_EQ(parse("\"\": 1\n'': 2\n"), "error 2:1 CF-111: duplicate key \"\"");
+    EXPECT_EQ(parse("\"\":\n"), "error 1:1 CF-112: \"\" has no value");
+}
+
+// S2: a closing bracket at its key's indentation has its own message.
+TEST(Yaml, AClosingBracketAtItsKeysIndentation) {
+    constexpr std::string_view MESSAGE =
+        "CF-110: a closing bracket not indented more than its key is not "
+        "allowed in configuration files; indent the bracket, or write the "
+        "collection as a block";
+    EXPECT_EQ(parse("ports: [\n  502,\n]\n"),
+              "error 3:1 " + std::string(MESSAGE));
+    EXPECT_EQ(parse("a:\n  b: {\n    c: 1\n  }\n"),
+              "error 4:3 " + std::string(MESSAGE));
+    EXPECT_EQ(parse("ports: [\n  502,\n ]\n"), "{ports: [502]}");
+}
+
+// N1 to N5 of the review.
+TEST(Yaml, ADocumentMarkerInsideARootBlockScalar) {
+    EXPECT_EQ(parse("|\na\n---\nb\n"),
+              "error 3:1 CF-110: a document marker is not allowed in "
+              "configuration files");
+}
+
+TEST(Yaml, ASecondNodeAtTheTopLevel) {
+    EXPECT_EQ(parse("- a\nb: 1\n"),
+              "error 2:1 CF-110: a second node at the top level is not "
+              "allowed in configuration files");
+    EXPECT_EQ(code_at("a\n---x\n"), "error 2:1 CF-110");
+    EXPECT_EQ(code_at("  a: 1\nb: 2\n"), "error 2:1 CF-110");
+}
+
+TEST(Yaml, NonCharacters) {
+    EXPECT_EQ(parse("a: x\xef\xbf\xbe\n"),
+              "error 1:5 CF-114: invalid character at byte 4");
+    EXPECT_EQ(code_at("a: x\xef\xbf\xbf\n"), "error 1:5 CF-114");
+    // U+FFFD is a character.
+    EXPECT_EQ(parse("a: \xef\xbf\xbd\n"), "{a: \xef\xbf\xbd}");
+}
+
+TEST(Yaml, TheIndentationOfAQuotedLineIsCountedInSpaces) {
+    EXPECT_EQ(code_at("a: 'x\n\ty'\n"), "error 2:2 CF-110");
+    EXPECT_EQ(parse("a: 'x\n \ty'\n"), "{a: 'x y'}");
+    EXPECT_EQ(code_at("a: [\n 'x\n\ty']\n"), "error 3:2 CF-110");
+}
+
+TEST(Yaml, MessagesOfBlockScalarIndicators) {
+    EXPECT_EQ(parse("|: 1\n"),
+              "error 1:1 CF-110: a block scalar as a key is not allowed in "
+              "configuration files");
+    EXPECT_EQ(parse("a: |10\n  x\n"),
+              "error 1:6 CF-110: an indentation indicator of more than one "
+              "digit is not allowed in configuration files");
+    EXPECT_EQ(code_at("a: |0\n  x\n"), "error 1:5 CF-110");
+}
+
+// Ruling 10: the default limits at N and N + 1.
+TEST(Yaml, TheDefaultEntryLimitAtNAndNPlusOne) {
+    constexpr std::size_t ENTRIES = 65536;
+    std::string list = "[0";
+    for (std::size_t i = 1; i < ENTRIES; ++i) {
+        list += ",0";
+    }
+    EXPECT_EQ(parse(list + "]").substr(0, 2), "[0");
+    // Item 65,537 stands at column 2 x 65,537.
+    EXPECT_EQ(code_at(list + ",0]"), "error 1:131074 CF-113");
+}
+
+TEST(Yaml, TheDefaultNodeLimitOfAFileAtNAndNPlusOne) {
+    // A list of 20 lists, of 999,979 items in all: 1,000,000 nodes, each list
+    // within the entry limit.
+    constexpr std::size_t LISTS = 20;
+    constexpr std::size_t ITEMS = 999979;
+    constexpr std::size_t PER_LIST = 50000;
+    std::string tree = "[\n";
+    tree.reserve(3 * ITEMS);
+    std::size_t left = ITEMS;
+    for (std::size_t list = 0; list < LISTS; ++list) {
+        const std::size_t count = std::min(left, PER_LIST);
+        tree += "[0";
+        for (std::size_t i = 1; i < count; ++i) {
+            tree += ",0";
+        }
+        left -= count;
+        tree += "],\n";
+    }
+    EXPECT_EQ(parse(tree + "]").substr(0, 3), "[[0");
+    // One item more in the outer list.
+    const std::string over = parse(tree + "0]");
+    EXPECT_EQ(over.substr(over.find("CF-113")),
+              "CF-113: the file exceeds its limit of 1000000 nodes");
+}
+
+TEST(Yaml, TheDefaultFileSizeAtNAndNPlusOne) {
+    constexpr std::size_t MIB_8 = std::size_t{8} * 1024 * 1024;
+    const std::string comment = "#" + std::string(MIB_8 - 1, 'c');
+    EXPECT_EQ(parse(comment), "{}");
+    EXPECT_EQ(parse(comment + "c"),
+              "error 1:1 CF-113: the file exceeds its limit of 8 MiB");
+}
+
+TEST(Yaml, TheDefaultTreeLimitAtNAndNPlusOne) {
+    // A tree with one node left of the 4,000,000: one more file of one
+    // node fits, the next does not.
+    NodeBudget budget;
+    budget.remaining = 1;
+    EXPECT_EQ(parse("[]", {}, &budget), "[]");
+    EXPECT_EQ(parse("[]", {}, &budget),
+              "error 1:1 CF-113: the tree exceeds its limit of 4000000 nodes");
 }
 
 }  // namespace

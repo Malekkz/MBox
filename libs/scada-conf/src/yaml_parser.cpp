@@ -4,10 +4,14 @@
 // enters is counted against the depth limit first, so recursion is bounded by
 // `ParseLimits::max_depth`. The first refusal ends the parse (D-106).
 
+#include "scada/common/panic.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/yaml.h"
+#include "utf8.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -15,9 +19,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
-#include <vector>
 
 namespace scada::conf {
 
@@ -32,9 +34,8 @@ constexpr std::uint16_t CF_CHARACTER = 114;
 // Code point boundaries of UTF-8 and of the characters refused.
 constexpr std::uint32_t FIRST_C1 = 0x80;
 constexpr std::uint32_t LAST_C1 = 0x9F;
-constexpr std::uint32_t FIRST_SURROGATE = 0xD800;
-constexpr std::uint32_t LAST_SURROGATE = 0xDFFF;
-constexpr std::uint32_t LAST_CODE_POINT = 0x10FFFF;
+constexpr std::uint32_t NON_CHARACTER_FFFE = 0xFFFE;
+constexpr std::uint32_t NON_CHARACTER_FFFF = 0xFFFF;
 constexpr unsigned char ASCII_DEL = 0x7F;
 constexpr unsigned char FIRST_PRINTABLE = 0x20;
 
@@ -51,38 +52,6 @@ struct Mark {
 enum class Context : std::uint8_t { BLOCK, FLOW };
 
 enum class Chomping : std::uint8_t { CLIP, STRIP, KEEP };
-
-// UTF-8 (RFC 3629): lead bytes, continuation bytes and the bits each
-// carries.
-constexpr unsigned char CONTINUATION = 0x80;
-constexpr unsigned char CONTINUATION_MASK = 0xC0;
-constexpr unsigned char CONTINUATION_LOW = 0x80;
-constexpr unsigned char CONTINUATION_HIGH = 0xBF;
-constexpr unsigned char LEAD_TWO = 0xC0;
-constexpr unsigned char LEAD_TWO_FIRST_VALID = 0xC2;
-constexpr unsigned char LEAD_TWO_LAST = 0xDF;
-constexpr unsigned char LEAD_THREE = 0xE0;
-constexpr unsigned char LEAD_THREE_LAST = 0xEF;
-constexpr unsigned char LEAD_THREE_SURROGATES = 0xED;
-constexpr unsigned char LEAD_FOUR = 0xF0;
-constexpr unsigned char LEAD_FOUR_LAST_VALID = 0xF4;
-// The second byte's range where it rules out overlong forms, surrogates and
-// code points above U+10FFFF.
-constexpr unsigned char AFTER_E0_LOW = 0xA0;
-constexpr unsigned char AFTER_ED_HIGH = 0x9F;
-constexpr unsigned char AFTER_F0_LOW = 0x90;
-constexpr unsigned char AFTER_F4_HIGH = 0x8F;
-constexpr std::uint32_t TWO_BYTE_BITS = 0x1F;
-constexpr std::uint32_t THREE_BYTE_BITS = 0x0F;
-constexpr std::uint32_t FOUR_BYTE_BITS = 0x07;
-constexpr std::uint32_t CONTINUATION_BITS = 0x3F;
-constexpr unsigned BITS_PER_CONTINUATION = 6;
-constexpr std::uint32_t LIMIT_ONE_BYTE = 0x80;
-constexpr std::uint32_t LIMIT_TWO_BYTES = 0x800;
-constexpr std::uint32_t LIMIT_THREE_BYTES = 0x10000;
-constexpr std::size_t TWO = 2;
-constexpr std::size_t THREE = 3;
-constexpr std::size_t FOUR = 4;
 
 // Code points of the escapes \N, \_, \L and \P (YAML 1.2, 5.7).
 constexpr std::uint32_t NEXT_LINE = 0x85;
@@ -116,111 +85,51 @@ std::uint32_t hex_value(char chr) noexcept {
     return static_cast<std::uint32_t>(chr - 'A') + TEN;
 }
 
-void append_byte(std::string& out, std::uint32_t value) {
-    out.push_back(static_cast<char>(static_cast<unsigned char>(value)));
-}
-
-std::uint32_t continuation_byte(std::uint32_t code_point, unsigned shift) {
-    return CONTINUATION | ((code_point >> shift) & CONTINUATION_BITS);
-}
-
-// Appends the UTF-8 form of `code_point`, which must be a scalar value.
-void append_utf8(std::string& out, std::uint32_t code_point) {
-    constexpr unsigned SHIFT_1 = BITS_PER_CONTINUATION;
-    constexpr unsigned SHIFT_2 = 2 * BITS_PER_CONTINUATION;
-    constexpr unsigned SHIFT_3 = 3 * BITS_PER_CONTINUATION;
-    if (code_point < LIMIT_ONE_BYTE) {
-        append_byte(out, code_point);
-    } else if (code_point < LIMIT_TWO_BYTES) {
-        append_byte(out, LEAD_TWO | (code_point >> SHIFT_1));
-        append_byte(out, continuation_byte(code_point, 0));
-    } else if (code_point < LIMIT_THREE_BYTES) {
-        append_byte(out, LEAD_THREE | (code_point >> SHIFT_2));
-        append_byte(out, continuation_byte(code_point, SHIFT_1));
-        append_byte(out, continuation_byte(code_point, 0));
-    } else {
-        append_byte(out, LEAD_FOUR | (code_point >> SHIFT_3));
-        append_byte(out, continuation_byte(code_point, SHIFT_2));
-        append_byte(out, continuation_byte(code_point, SHIFT_1));
-        append_byte(out, continuation_byte(code_point, 0));
-    }
-}
-
-// How a UTF-8 sequence starts: its length, the bits of its lead byte, and
-// the allowed range of its second byte.
-struct Lead {
-    std::size_t length = 0;
-    std::uint32_t bits = 0;
-    unsigned char low = CONTINUATION_LOW;
-    unsigned char high = CONTINUATION_HIGH;
-};
-
-std::optional<Lead> lead_of(unsigned char byte) noexcept {
-    if (byte >= LEAD_TWO_FIRST_VALID && byte <= LEAD_TWO_LAST) {
-        return Lead{.length = TWO,
-                    .bits = byte & TWO_BYTE_BITS,
-                    .low = CONTINUATION_LOW,
-                    .high = CONTINUATION_HIGH};
-    }
-    if (byte >= LEAD_THREE && byte <= LEAD_THREE_LAST) {
-        return Lead{.length = THREE,
-                    .bits = byte & THREE_BYTE_BITS,
-                    .low = byte == LEAD_THREE ? AFTER_E0_LOW : CONTINUATION_LOW,
-                    .high = byte == LEAD_THREE_SURROGATES ? AFTER_ED_HIGH
-                                                          : CONTINUATION_HIGH};
-    }
-    if (byte >= LEAD_FOUR && byte <= LEAD_FOUR_LAST_VALID) {
-        return Lead{.length = FOUR,
-                    .bits = byte & FOUR_BYTE_BITS,
-                    .low = byte == LEAD_FOUR ? AFTER_F0_LOW : CONTINUATION_LOW,
-                    .high = byte == LEAD_FOUR_LAST_VALID ? AFTER_F4_HIGH
-                                                         : CONTINUATION_HIGH};
-    }
-    return std::nullopt;
-}
-
-// The length of the UTF-8 sequence that starts at `text[where]` and its
-// code point, or nothing if it is not valid UTF-8 (overlong forms,
-// surrogates and values above U+10FFFF included).
-std::optional<std::pair<std::size_t, std::uint32_t>> decode_utf8(
-    std::string_view text, std::size_t where) {
-    const std::optional<Lead> lead =
-        lead_of(static_cast<unsigned char>(text[where]));
-    if (!lead || text.size() - where < lead->length) {
-        return std::nullopt;
-    }
-    std::uint32_t code_point = lead->bits;
-    for (std::size_t i = 1; i < lead->length; ++i) {
-        const auto next = static_cast<unsigned char>(text[where + i]);
-        const unsigned char min = i == 1 ? lead->low : CONTINUATION_LOW;
-        const unsigned char max = i == 1 ? lead->high : CONTINUATION_HIGH;
-        if (next < min || next > max) {
-            return std::nullopt;
-        }
-        code_point =
-            (code_point << BITS_PER_CONTINUATION) | (next & CONTINUATION_BITS);
-    }
-    return std::make_pair(lead->length, code_point);
-}
-
-// The number of bytes of the UTF-8 sequence whose lead byte is `byte`, in
-// input already checked to be valid UTF-8.
-std::size_t sequence_length(unsigned char byte) noexcept {
-    if (byte >= LEAD_FOUR) {
-        return FOUR;
-    }
-    if (byte >= LEAD_THREE) {
-        return THREE;
-    }
-    if (byte >= LEAD_TWO) {
-        return TWO;
-    }
-    return 1;
-}
-
 bool is_null_word(std::string_view text) noexcept {
     return text == "null" || text == "Null" || text == "NULL" || text == "~";
 }
+
+// A key as a message names it: in double quotes, so that an empty key or one
+// with spaces stays visible. Diagnostics makes the text printable.
+std::string named_key(std::string_view key) {
+    std::string out = "\"";
+    out += key;
+    out += '"';
+    return out;
+}
+
+// A scalar read but not yet added to the document.
+struct Scalar {
+    std::string text;
+    ScalarStyle style = ScalarStyle::PLAIN;
+    Mark start;
+};
+
+// A block scalar's value as its lines are read (YAML 1.2, 8.1): the lines
+// folded so far, and the empty lines not yet written, kept as a count so that
+// any number of them costs no memory.
+struct BlockFold {
+    std::string value;
+    std::size_t pending_empty = 0;
+    bool have_previous = false;
+    bool previous_normal = false;
+    bool last_break = false;
+};
+
+// The builder refuses only a misuse by this parser, never outside input.
+void built(const Result<NodeId>& node) noexcept {
+    if (!node.ok()) {
+        panic("yaml parser: the document builder refused a node");
+    }
+}
+
+void built(Status status) noexcept {
+    if (!status.ok()) {
+        panic("yaml parser: the document builder refused a collection");
+    }
+}
+
+
 
 class Parser {
 public:
@@ -231,10 +140,12 @@ public:
           path_(path),
           diagnostics_(&diagnostics),
           limits_(limits),
-          budget_(budget),
-          document_(std::vector<std::string>{path}) {}
+          budget_(budget) {}
 
     std::optional<Document> run() {
+        if (!builder_.add_file(path_).ok()) {
+            panic("yaml parser: the document builder refused the file");
+        }
         if (source_.size() > MAX_FILE_BYTES) {
             fail_limit(mark_, "the file", "8 MiB");
             return std::nullopt;
@@ -242,25 +153,31 @@ public:
         if (!check_characters() || !next_content_line()) {
             return std::nullopt;
         }
-        NodeId root = 0;
         if (next_indent_ == NO_LINE) {
             // A file of comments only, or empty: an empty map.
-            if (!new_node(NodeKind::MAP, ScalarStyle::PLAIN, mark_, {}, root)) {
+            if (!count_node(mark_)) {
                 return std::nullopt;
             }
+            built(builder_.begin_map(position(mark_)));
+            built(builder_.end_map());
         } else {
-            if (!parse_block_node(NO_LINE, 1, root, "the document")) {
+            const std::int64_t first_indent = next_indent_;
+            if (!parse_block_node(NO_LINE, 1, "the document")) {
                 return std::nullopt;
             }
             if (next_indent_ != NO_LINE) {
-                fail_syntax(mark_,
-                            "a line indented less than the "
-                            "document's first line");
+                fail_syntax(mark_, next_indent_ < first_indent
+                                       ? "a line indented less than the "
+                                         "document's first line"
+                                       : "a second node at the top level");
                 return std::nullopt;
             }
         }
-        document_.set_root(root);
-        return std::move(document_);
+        Result<Document> document = builder_.finish();
+        if (!document.ok()) {
+            panic("yaml parser: the document builder refused the document");
+        }
+        return std::move(document).value();
     }
 
 private:
@@ -297,6 +214,11 @@ private:
         return fail(CF_LIMIT, where, std::move(message));
     }
 
+    bool fail_scalar_limit(const Mark& start) {
+        return fail_limit(start, "a scalar",
+                          std::to_string(limits_.max_scalar_bytes) + " bytes");
+    }
+
     bool fail_no_value(const Mark& where, std::string_view owner) {
         std::string message(owner);
         message += " has no value";
@@ -306,15 +228,16 @@ private:
     // --- Characters ----------------------------------------------------
 
     // Refuses a byte order mark, invalid UTF-8, a NUL, a carriage return not
-    // followed by a line feed, and every control character but tab and line
-    // feed (C0, DEL and C1). Where a tab may stand is checked while parsing.
+    // followed by a line feed, every control character but tab and line
+    // feed (C0, DEL and C1), and U+FFFE and U+FFFF. Where a tab may stand is
+    // checked while parsing.
     bool check_characters() {
         if (source_.starts_with("\xEF\xBB\xBF")) {
             return fail_syntax(mark_, "a byte order mark");
         }
         Mark where;
         while (where.pos < source_.size()) {
-            const auto byte = static_cast<unsigned char>(source_[where.pos]);
+            const auto byte = static_cast<unsigned char>(byte_at(where.pos));
             if (byte < FIRST_C1) {
                 if (byte == '\n') {
                     ++where.pos;
@@ -322,10 +245,7 @@ private:
                     where.column = 1;
                     continue;
                 }
-                const bool crlf = byte == '\r' &&
-                                  where.pos + 1 < source_.size() &&
-                                  source_[where.pos + 1] == '\n';
-                if (crlf) {
+                if (byte == '\r' && byte_at(where.pos + 1) == '\n') {
                     ++where.pos;
                     continue;
                 }
@@ -337,9 +257,11 @@ private:
                 ++where.column;
                 continue;
             }
-            const auto decoded = decode_utf8(source_, where.pos);
+            const auto decoded = utf8::decode(source_, where.pos);
             if (!decoded ||
-                (decoded->second >= FIRST_C1 && decoded->second <= LAST_C1)) {
+                (decoded->second >= FIRST_C1 && decoded->second <= LAST_C1) ||
+                decoded->second == NON_CHARACTER_FFFE ||
+                decoded->second == NON_CHARACTER_FFFF) {
                 return fail_character(where);
             }
             where.pos += decoded->first;
@@ -350,15 +272,19 @@ private:
 
     // --- Cursor --------------------------------------------------------
 
+    // The byte at `where`, or NUL past the end (NUL is refused in the
+    // input, so it never stands for a real byte).
+    [[nodiscard]] char byte_at(std::size_t where) const noexcept {
+        return where < source_.size() ? source_[where] : '\0';
+    }
+
     [[nodiscard]] bool at_end() const noexcept {
         return mark_.pos >= source_.size();
     }
 
-    // The byte `ahead` bytes after the cursor, or NUL past the end (NUL is
-    // refused in the input, so it never stands for a real byte).
+    // The byte `ahead` bytes after the cursor, or NUL past the end.
     [[nodiscard]] char peek(std::size_t ahead = 0) const noexcept {
-        const std::size_t where = mark_.pos + ahead;
-        return where < source_.size() ? source_[where] : '\0';
+        return byte_at(mark_.pos + ahead);
     }
 
     [[nodiscard]] bool is_break(std::size_t ahead = 0) const noexcept {
@@ -389,12 +315,13 @@ private:
     // Moves past one byte, keeping line and column (columns count
     // characters, D-106).
     void step(Mark& where) const noexcept {
-        const auto byte = static_cast<unsigned char>(source_[where.pos]);
+        const auto byte = static_cast<unsigned char>(byte_at(where.pos));
         ++where.pos;
         if (byte == '\n') {
             ++where.line;
             where.column = 1;
-        } else if (byte != '\r' && (byte & CONTINUATION_MASK) != CONTINUATION) {
+        } else if (byte != '\r' &&
+                   (byte & utf8::CONTINUATION_MASK) != utf8::CONTINUATION) {
             ++where.column;
         }
     }
@@ -405,10 +332,14 @@ private:
         }
     }
 
+    // The number of bytes of the character at the cursor.
+    [[nodiscard]] std::size_t character_length() const noexcept {
+        return utf8::sequence_length(static_cast<unsigned char>(peek()));
+    }
+
     // Moves past one character and appends its bytes to `out`.
     void take(std::string& out) {
-        const std::size_t length =
-            sequence_length(static_cast<unsigned char>(peek()));
+        const std::size_t length = character_length();
         for (std::size_t i = 0; i < length && !at_end(); ++i) {
             out.push_back(peek());
             advance();
@@ -421,6 +352,16 @@ private:
         }
         if (peek() == '\n') {
             advance();
+        }
+    }
+
+    // Moves `where` past the line break it stands on, if any.
+    void step_line_break(Mark& where) const noexcept {
+        if (byte_at(where.pos) == '\r') {
+            step(where);
+        }
+        if (byte_at(where.pos) == '\n') {
+            step(where);
         }
     }
 
@@ -444,7 +385,7 @@ private:
         if (mark_.pos == 0) {
             return true;
         }
-        const char before = source_[mark_.pos - 1];
+        const char before = byte_at(mark_.pos - 1);
         return before == ' ' || before == '\t' || before == '\n' ||
                before == '\r';
     }
@@ -534,9 +475,15 @@ private:
 
     // --- Nodes and limits ----------------------------------------------
 
-    bool new_node(NodeKind kind, ScalarStyle style, const Mark& where,
-                  std::string text, NodeId& out) {
-        if (document_.size() >= limits_.max_nodes) {
+    static SourcePosition position(const Mark& where) noexcept {
+        return SourcePosition{
+            .file = 0, .line = where.line, .column = where.column};
+    }
+
+    // Counts one node against the file's and the tree's limits, before it
+    // is added.
+    bool count_node(const Mark& where) {
+        if (builder_.size() >= limits_.max_nodes) {
             return fail_limit(where, "the file",
                               std::to_string(limits_.max_nodes) + " nodes");
         }
@@ -547,13 +494,30 @@ private:
             }
             --budget_->remaining;
         }
-        out = document_.add(Node{.kind = kind,
-                                 .style = style,
-                                 .file = 0,
-                                 .line = where.line,
-                                 .column = where.column,
-                                 .text = std::move(text),
-                                 .children = {}});
+        return true;
+    }
+
+    bool add_scalar(const Scalar& scalar) {
+        if (!count_node(scalar.start)) {
+            return false;
+        }
+        built(builder_.scalar(scalar.text, scalar.style,
+                              position(scalar.start)));
+        return true;
+    }
+
+    // Adds a map's key; a key of the same text in the map is CF-111.
+    bool add_key(const Scalar& key) {
+        if (!count_node(key.start)) {
+            return false;
+        }
+        const Result<NodeId> added =
+            builder_.key(key.text, key.style, position(key.start));
+        if (!added.ok() && added.status().code() == StatusCode::ALREADY_EXISTS) {
+            return fail(CF_DUPLICATE, key.start,
+                        "duplicate key " + named_key(key.text));
+        }
+        built(added);
         return true;
     }
 
@@ -574,24 +538,17 @@ private:
         return true;
     }
 
-    bool check_scalar_size(const std::string& text, const Mark& start) {
-        if (text.size() > limits_.max_scalar_bytes) {
-            return fail_limit(
-                start, "a scalar",
-                std::to_string(limits_.max_scalar_bytes) + " bytes");
-        }
-        return true;
+    // True if `bytes` more bytes on a scalar of `size` bytes keep it within
+    // the scalar limit.
+    [[nodiscard]] bool fits(std::size_t size, std::size_t bytes) const noexcept {
+        return size <= limits_.max_scalar_bytes &&
+               bytes <= limits_.max_scalar_bytes - size;
     }
 
     // --- Block structure -----------------------------------------------
 
     [[nodiscard]] bool is_sequence_entry() const noexcept {
         return peek() == '-' && is_space_end(1);
-    }
-
-    // The byte at `where`, or NUL past the end.
-    [[nodiscard]] char byte_at(std::size_t where) const noexcept {
-        return where < source_.size() ? source_[where] : '\0';
     }
 
     // A space, a tab, a line end or the end of the file at `where`.
@@ -678,27 +635,24 @@ private:
     // `depth` is the depth a collection here would have.
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_block_node(std::int64_t parent_indent, std::size_t depth,
-                          NodeId& out, std::string_view owner) {
+                          std::string_view owner) {
         const std::int64_t indent = next_indent_;
         if (is_sequence_entry()) {
-            return parse_block_sequence(indent, depth, out);
+            return parse_block_sequence(indent, depth);
         }
         if (looks_like_key()) {
-            return parse_block_mapping(indent, depth, out);
+            return parse_block_mapping(indent, depth);
         }
-        return parse_value_on_line(parent_indent, depth, out, owner);
+        return parse_value_on_line(parent_indent, depth, owner);
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
-    bool parse_block_mapping(std::int64_t indent, std::size_t depth,
-                             NodeId& out) {
+    bool parse_block_mapping(std::int64_t indent, std::size_t depth) {
         const Mark start = mark_;
-        NodeId map = 0;
-        if (!check_depth(depth, start) ||
-            !new_node(NodeKind::MAP, ScalarStyle::PLAIN, start, {}, map)) {
+        if (!check_depth(depth, start) || !count_node(start)) {
             return false;
         }
-        std::unordered_set<std::string> keys;
+        built(builder_.begin_map(position(start)));
         std::size_t entries = 0;
         while (true) {
             const Mark key_at = mark_;
@@ -708,31 +662,18 @@ private:
             if (is_sequence_entry()) {
                 return fail_syntax(key_at, "a sequence entry inside a mapping");
             }
-            NodeId key = 0;
-            if (!parse_key(Context::BLOCK, indent, key)) {
-                return false;
-            }
-            if (!skip_spaces()) {
+            Scalar key;
+            if (!parse_key(Context::BLOCK, indent, key) || !skip_spaces()) {
                 return false;
             }
             if (peek() != ':' || !is_space_end(1)) {
                 return fail_syntax(mark_, "a key without ': '");
             }
             advance();
-            // A copy: parsing the value adds nodes and may move this one.
-            const std::string key_text = document_.node(key).text;
-            if (!keys.insert(key_text).second) {
-                return fail(CF_DUPLICATE, key_at, "duplicate key " + key_text);
-            }
-            if (!count_entry(entries, key_at)) {
+            if (!add_key(key) || !count_entry(entries, key_at) ||
+                !parse_map_value(indent, depth, key_at, named_key(key.text))) {
                 return false;
             }
-            document_.append_child(map, key);
-            NodeId value = 0;
-            if (!parse_map_value(indent, depth, key_at, key_text, value)) {
-                return false;
-            }
-            document_.append_child(map, value);
             if (next_indent_ < indent) {
                 break;
             }
@@ -742,15 +683,14 @@ private:
                                    "mapping's");
             }
         }
-        out = map;
+        built(builder_.end_map());
         return true;
     }
 
     // After `key:` at a mapping indented `indent`.
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_map_value(std::int64_t indent, std::size_t depth,
-                         const Mark& key_at, const std::string& key_text,
-                         NodeId& out) {
+                         const Mark& key_at, const std::string& owner) {
         if (!skip_spaces()) {
             return false;
         }
@@ -759,27 +699,24 @@ private:
                 return false;
             }
             if (next_indent_ > indent) {
-                return parse_block_node(indent, depth + 1, out, key_text);
+                return parse_block_node(indent, depth + 1, owner);
             }
             if (next_indent_ == indent && is_sequence_entry()) {
                 // A sequence at the indentation of its key.
-                return parse_block_sequence(indent, depth + 1, out);
+                return parse_block_sequence(indent, depth + 1);
             }
-            return fail_no_value(key_at, key_text);
+            return fail_no_value(key_at, owner);
         }
-        return parse_value_on_line(indent, depth + 1, out, key_text);
+        return parse_value_on_line(indent, depth + 1, owner);
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
-    bool parse_block_sequence(std::int64_t indent, std::size_t depth,
-                              NodeId& out) {
+    bool parse_block_sequence(std::int64_t indent, std::size_t depth) {
         const Mark start = mark_;
-        NodeId sequence = 0;
-        if (!check_depth(depth, start) ||
-            !new_node(NodeKind::SEQUENCE, ScalarStyle::PLAIN, start, {},
-                      sequence)) {
+        if (!check_depth(depth, start) || !count_node(start)) {
             return false;
         }
+        built(builder_.begin_sequence(position(start)));
         std::size_t entries = 0;
         while (true) {
             const Mark dash = mark_;
@@ -787,14 +724,9 @@ private:
                 return false;
             }
             advance();
-            if (!skip_spaces()) {
+            if (!skip_spaces() || !parse_sequence_item(indent, depth, dash)) {
                 return false;
             }
-            NodeId item = 0;
-            if (!parse_sequence_item(indent, depth, dash, item)) {
-                return false;
-            }
-            document_.append_child(sequence, item);
             if (next_indent_ < indent ||
                 (next_indent_ == indent && !is_sequence_entry())) {
                 break;
@@ -805,21 +737,21 @@ private:
                                    "sequence's");
             }
         }
-        out = sequence;
+        built(builder_.end_sequence());
         return true;
     }
 
     // After `- ` of a sequence indented `indent`.
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_sequence_item(std::int64_t indent, std::size_t depth,
-                             const Mark& dash, NodeId& out) {
+                             const Mark& dash) {
         constexpr std::string_view OWNER = "a sequence item";
         if (at_end() || is_break() || at_comment()) {
             if (!finish_line()) {
                 return false;
             }
             if (next_indent_ > indent) {
-                return parse_block_node(indent, depth + 1, out, OWNER);
+                return parse_block_node(indent, depth + 1, OWNER);
             }
             return fail_no_value(dash, OWNER);
         }
@@ -828,18 +760,19 @@ private:
         const std::int64_t item_indent =
             static_cast<std::int64_t>(mark_.column) - 1;
         if (is_sequence_entry()) {
-            return parse_block_sequence(item_indent, depth + 1, out);
+            return parse_block_sequence(item_indent, depth + 1);
         }
         if (looks_like_key()) {
-            return parse_block_mapping(item_indent, depth + 1, out);
+            return parse_block_mapping(item_indent, depth + 1);
         }
-        return parse_value_on_line(indent, depth + 1, out, OWNER);
+        return parse_value_on_line(indent, depth + 1, OWNER);
     }
 
     // A value that starts on the current line, in block context, and the
     // rest of its line(s). Ends at the next content line.
+    // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_value_on_line(std::int64_t parent_indent, std::size_t depth,
-                             NodeId& out, std::string_view owner) {
+                             std::string_view owner) {
         if (!refuse_node_properties()) {
             return false;
         }
@@ -850,24 +783,19 @@ private:
                                "same line");
         }
         if (chr == '|' || chr == '>') {
-            return parse_block_scalar(parent_indent, out);
+            return parse_block_scalar(parent_indent);
         }
         if (chr == '[' || chr == '{') {
-            if (!parse_flow_collection(parent_indent, depth, out)) {
-                return false;
-            }
-            return finish_line();
+            return parse_flow_collection(parent_indent, depth) &&
+                   finish_line();
         }
         if (chr == '\'' || chr == '"') {
-            if (!parse_quoted(Context::BLOCK, parent_indent, out)) {
-                return false;
-            }
-            return finish_line();
+            Scalar scalar;
+            return parse_quoted(Context::BLOCK, parent_indent, scalar) &&
+                   add_scalar(scalar) && finish_line();
         }
-        if (!parse_plain_value(Context::BLOCK, parent_indent, out, owner)) {
-            return false;
-        }
-        return finish_line();
+        return parse_plain_value(Context::BLOCK, parent_indent, owner) &&
+               finish_line();
     }
 
     // Anchors, aliases and tags are refused wherever a node may start.
@@ -885,7 +813,7 @@ private:
     }
 
     // A map key: a plain or quoted scalar on one line.
-    bool parse_key(Context context, std::int64_t parent_indent, NodeId& out) {
+    bool parse_key(Context context, std::int64_t parent_indent, Scalar& out) {
         const Mark start = mark_;
         if (!refuse_node_properties()) {
             return false;
@@ -902,33 +830,34 @@ private:
             if (!parse_plain(context, parent_indent, out)) {
                 return false;
             }
-            if (document_.node(out).text == "<<") {
+            if (out.text == "<<") {
                 return fail_syntax(start, "a merge key");
             }
         }
         if (mark_.line != start.line) {
             return fail_syntax(start, "a key on several lines");
         }
-        if (document_.node(out).text.size() > limits_.max_key_bytes) {
+        if (out.text.size() > limits_.max_key_bytes) {
             return fail_limit(start, "a key",
                               std::to_string(limits_.max_key_bytes) + " bytes");
         }
         return true;
     }
 
-    // --- Scalars -------------------------------------------------------
+    // --- Plain scalars -------------------------------------------------
 
-    // A plain scalar as a value: `null` and `~` are refused (CF-112).
+    // A plain scalar as a value, added to the document: `null` and `~` are
+    // refused (CF-112).
     bool parse_plain_value(Context context, std::int64_t parent_indent,
-                           NodeId& out, std::string_view owner) {
-        const Mark start = mark_;
-        if (!parse_plain(context, parent_indent, out)) {
+                           std::string_view owner) {
+        Scalar scalar;
+        if (!parse_plain(context, parent_indent, scalar)) {
             return false;
         }
-        if (is_null_word(document_.node(out).text)) {
-            return fail_no_value(start, owner);
+        if (is_null_word(scalar.text)) {
+            return fail_no_value(scalar.start, owner);
         }
-        return true;
+        return add_scalar(scalar);
     }
 
     bool check_plain_start(Context context) {
@@ -938,9 +867,11 @@ private:
             return fail_syntax(mark_, std::string("a '") + chr + "' here");
         }
         if (chr == '|' || chr == '>') {
-            return fail_syntax(mark_,
-                               "a block scalar inside a flow "
-                               "collection");
+            // In block context a value never gets here: this is a key.
+            return fail_syntax(mark_, context == Context::BLOCK
+                                          ? "a block scalar as a key"
+                                          : "a block scalar inside a flow "
+                                            "collection");
         }
         if (chr == '%' || chr == '@' || chr == '`') {
             return fail_syntax(
@@ -965,21 +896,11 @@ private:
         return true;
     }
 
-    // Moves `where` past the line break it stands on, if any.
-    void step_line_break(Mark& where) const noexcept {
-        if (where.pos < source_.size() && source_[where.pos] == '\r') {
-            step(where);
-        }
-        if (where.pos < source_.size() && source_[where.pos] == '\n') {
-            step(where);
-        }
-    }
-
     // True if a plain scalar continues on the line whose first character
     // (after its spaces) is at `where`.
     [[nodiscard]] bool continues_plain(const Mark& where, Context context,
                                        std::int64_t parent_indent) const {
-        const char chr = source_[where.pos];
+        const char chr = byte_at(where.pos);
         const auto indent = static_cast<std::int64_t>(where.column) - 1;
         if (chr == '\t' || chr == '#' || indent <= parent_indent) {
             return false;
@@ -1001,13 +922,13 @@ private:
         std::size_t empty_lines = 0;
         step_line_break(from);
         while (true) {
-            while (from.pos < source_.size() && source_[from.pos] == ' ') {
+            while (byte_at(from.pos) == ' ') {
                 step(from);
             }
             if (from.pos >= source_.size()) {
                 return std::nullopt;
             }
-            const char chr = source_[from.pos];
+            const char chr = byte_at(from.pos);
             if (chr != '\n' && chr != '\r') {
                 break;
             }
@@ -1034,42 +955,56 @@ private:
         return context == Context::FLOW && is_flow_indicator(chr);
     }
 
-    // The text of one line of a plain scalar, up to its end (`: `, ` #`, a
-    // flow indicator or the line end). `content_end` and `content_length`
-    // follow the last character that is not a space.
-    bool scan_plain_line(Context context, const Mark& start, std::string& text,
-                         Mark& content_end, std::size_t& content_length) {
+    // The separator a plain scalar's text gets before its next character:
+    // the spaces read on the line, or the fold of a line break (a space, or
+    // a line feed per empty line). Written only when a character follows,
+    // so trailing white space never counts or costs memory.
+    struct PlainGap {
+        std::size_t spaces = 0;
+        std::size_t breaks = 0;
+    };
+
+    // One line of a plain scalar, up to its end (`: `, ` #`, a flow
+    // indicator or the line end). `content_end` follows its last character
+    // that is not a space.
+    bool scan_plain_line(Context context, Scalar& out, PlainGap& gap,
+                         Mark& content_end) {
         while (!at_end() && !is_break() && !ends_plain_here(context)) {
             const char chr = peek();
             if (chr == '\t') {
                 return fail_character(mark_);
             }
-            take(text);
-            if (chr != ' ') {
-                content_end = mark_;
-                content_length = text.size();
+            if (chr == ' ') {
+                ++gap.spaces;
+                advance();
+                continue;
             }
-            if (!check_scalar_size(text, start)) {
-                return false;
+            if (!fits(out.text.size(),
+                      gap.breaks + gap.spaces + character_length())) {
+                return fail_scalar_limit(out.start);
             }
+            out.text.append(gap.breaks, '\n');
+            out.text.append(gap.spaces, ' ');
+            gap = PlainGap{};
+            take(out.text);
+            content_end = mark_;
         }
         return true;
     }
 
-    bool parse_plain(Context context, std::int64_t parent_indent, NodeId& out) {
-        const Mark start = mark_;
+    bool parse_plain(Context context, std::int64_t parent_indent,
+                     Scalar& out) {
+        out.start = mark_;
+        out.style = ScalarStyle::PLAIN;
         if (!check_plain_start(context)) {
             return false;
         }
-        std::string text;
         Mark content_end = mark_;
-        std::size_t content_length = 0;
+        PlainGap gap;
         while (true) {
-            if (!scan_plain_line(context, start, text, content_end,
-                                 content_length)) {
+            if (!scan_plain_line(context, out, gap, content_end)) {
                 return false;
             }
-            text.resize(content_length);
             if (!at_end() && !is_break()) {
                 break;
             }
@@ -1077,56 +1012,65 @@ private:
             if (!next) {
                 break;
             }
-            if (next->second == 0) {
-                text.push_back(' ');
-            } else {
-                text.append(next->second, '\n');
-            }
+            // The line's trailing spaces are dropped by the fold.
+            gap = next->second == 0 ? PlainGap{.spaces = 1, .breaks = 0}
+                                    : PlainGap{.spaces = 0,
+                                               .breaks = next->second};
             mark_ = next->first;
         }
         mark_ = content_end;
-        return new_node(NodeKind::SCALAR, ScalarStyle::PLAIN, start,
-                        std::move(text), out);
+        return true;
     }
 
-    // Folds a line break inside a quoted scalar: trailing white space of the
-    // line is dropped (`text` back to `keep`), empty lines give line feeds,
-    // a single break a space, and the next line's leading white space is
-    // skipped. False at the end of the file, or at a line not indented
-    // more than `parent_indent` in block context.
-    bool fold_quoted_break(std::string& text, std::size_t keep, Context context,
-                           std::int64_t parent_indent, bool escaped,
-                           const Mark& start) {
-        text.resize(keep);
+    // --- Quoted scalars ------------------------------------------------
+
+    // Folds a line break inside a quoted scalar (YAML 1.2, 7.3): empty
+    // lines give line feeds, a single break a space (none after an escaped
+    // break), and the next line's leading white space is skipped. Its
+    // indentation, counted in spaces, must be more than `parent_indent`.
+    bool fold_quoted_break(Scalar& out, Context context,
+                           std::int64_t parent_indent, bool escaped) {
         skip_line_break();
         std::size_t empty_lines = 0;
+        std::int64_t spaces = 0;
         while (true) {
+            spaces = 0;
+            while (peek() == ' ') {
+                advance();
+                ++spaces;
+            }
             while (peek() == ' ' || peek() == '\t') {
                 advance();
             }
-            if (is_break()) {
-                ++empty_lines;
-                skip_line_break();
-                continue;
+            if (!is_break()) {
+                break;
             }
-            break;
+            ++empty_lines;
+            skip_line_break();
         }
         if (at_end()) {
-            return fail_syntax(start, "an unterminated quoted scalar");
-        }
-        if (context == Context::BLOCK &&
-            static_cast<std::int64_t>(mark_.column) - 1 <= parent_indent) {
-            return fail_syntax(mark_,
-                               "a quoted scalar's line that is not "
-                               "indented");
+            return fail_syntax(out.start, "an unterminated quoted scalar");
         }
         if (mark_.column == 1 && is_document_marker()) {
             return fail_syntax(mark_, "a document marker");
         }
+        if (spaces <= parent_indent) {
+            return fail_syntax(mark_,
+                               context == Context::BLOCK
+                                   ? "a quoted scalar's line that is not "
+                                     "indented"
+                                   : "a flow collection's line that is not "
+                                     "indented");
+        }
+        const std::size_t separator =
+            empty_lines > 0 ? empty_lines : (escaped ? 0 : 1);
+        if (!fits(out.text.size(), separator)) {
+            return fail_scalar_limit(out.start);
+        }
         if (empty_lines > 0) {
-            text.append(empty_lines, '\n');
+            out.text.append(empty_lines, '\n');
         } else if (!escaped) {
-            text.push_back(' ');
+            out.text.push_back(' ');
         }
         return true;
     }
@@ -1138,6 +1082,11 @@ private:
         auto simple = [this, &text](char value) {
             text.push_back(value);
             advance();
+            return true;
+        };
+        auto code_point = [this, &text](std::uint32_t value) {
+            advance();
+            utf8::append(text, value);
             return true;
         };
         switch (chr) {
@@ -1166,21 +1115,13 @@ private:
             case '\\':
                 return simple(chr);
             case 'N':
-                advance();
-                append_utf8(text, NEXT_LINE);
-                return true;
+                return code_point(NEXT_LINE);
             case '_':
-                advance();
-                append_utf8(text, NO_BREAK_SPACE);
-                return true;
+                return code_point(NO_BREAK_SPACE);
             case 'L':
-                advance();
-                append_utf8(text, LINE_SEPARATOR);
-                return true;
+                return code_point(LINE_SEPARATOR);
             case 'P':
-                advance();
-                append_utf8(text, PARAGRAPH_SEPARATOR);
-                return true;
+                return code_point(PARAGRAPH_SEPARATOR);
             case 'x':
                 return parse_hex_escape(where, HEX_DIGITS_X, text);
             case 'u':
@@ -1207,11 +1148,29 @@ private:
         if (code_point == 0) {
             return fail_syntax(where, "an escaped NUL character");
         }
-        if ((code_point >= FIRST_SURROGATE && code_point <= LAST_SURROGATE) ||
-            code_point > LAST_CODE_POINT) {
+        if ((code_point >= utf8::FIRST_SURROGATE &&
+             code_point <= utf8::LAST_SURROGATE) ||
+            code_point > utf8::LAST_CODE_POINT) {
             return fail_syntax(where, "an invalid escape");
         }
-        append_utf8(text, code_point);
+        utf8::append(text, code_point);
+        return true;
+    }
+
+    // White space of a quoted scalar read but not yet written: the bytes
+    // `from` to `from + count` of the source. Dropped at a line break,
+    // written before anything else.
+    struct QuotedWhite {
+        std::size_t from = 0;
+        std::size_t count = 0;
+    };
+
+    bool write_white(Scalar& out, QuotedWhite& white) {
+        if (!fits(out.text.size(), white.count)) {
+            return fail_scalar_limit(out.start);
+        }
+        out.text.append(source_.substr(white.from, white.count));
+        white.count = 0;
         return true;
     }
 
@@ -1220,72 +1179,74 @@ private:
 
     // One character, escape or line break of a quoted scalar.
     QuotedStep quoted_step(char quote, Context context,
-                           std::int64_t parent_indent, const Mark& start,
-                           std::string& text, std::size_t& keep) {
+                           std::int64_t parent_indent, Scalar& out,
+                           QuotedWhite& white) {
         const char chr = peek();
-        if (chr == quote) {
-            if (quote == '\'' && peek(1) == '\'') {
-                text.push_back('\'');
-                advance();
-                advance();
-                keep = text.size();
-                return QuotedStep::MORE;
+        bool done = true;
+        if (chr == ' ' || chr == '\t') {
+            if (white.count == 0) {
+                white.from = mark_.pos;
             }
+            ++white.count;
+            advance();
+        } else if (is_break()) {
+            white.count = 0;
+            done = fold_quoted_break(out, context, parent_indent, false);
+        } else if (!write_white(out, white)) {
+            done = false;
+        } else if (chr == quote && !(quote == '\'' && peek(1) == '\'')) {
             advance();
             return QuotedStep::CLOSED;
-        }
-        bool done = true;
-        if (quote == '"' && chr == '\\' && is_break(1)) {
+        } else if (chr == quote) {
             advance();
-            done = fold_quoted_break(text, text.size(), context, parent_indent,
-                                     true, start);
-            keep = text.size();
+            advance();
+            done = fits(out.text.size(), 1) || fail_scalar_limit(out.start);
+            if (done) {
+                out.text.push_back('\'');
+            }
+        } else if (quote == '"' && chr == '\\' && is_break(1)) {
+            advance();
+            done = fold_quoted_break(out, context, parent_indent, true);
         } else if (quote == '"' && chr == '\\') {
-            done = parse_escape(text);
-            keep = text.size();
-        } else if (is_break()) {
-            done = fold_quoted_break(text, keep, context, parent_indent, false,
-                                     start);
-            keep = text.size();
+            std::string escaped;
+            done = parse_escape(escaped) &&
+                   (fits(out.text.size(), escaped.size()) ||
+                    fail_scalar_limit(out.start));
+            out.text += escaped;
         } else {
-            take(text);
-            if (chr != ' ' && chr != '\t') {
-                keep = text.size();
+            done = fits(out.text.size(), character_length()) ||
+                   fail_scalar_limit(out.start);
+            if (done) {
+                take(out.text);
             }
         }
         return done ? QuotedStep::MORE : QuotedStep::FAILED;
     }
 
     bool parse_quoted(Context context, std::int64_t parent_indent,
-                      NodeId& out) {
-        const Mark start = mark_;
+                      Scalar& out) {
+        out.start = mark_;
         const char quote = peek();
+        out.style = quote == '\'' ? ScalarStyle::SINGLE_QUOTED
+                                  : ScalarStyle::DOUBLE_QUOTED;
         advance();
-        std::string text;
-        // Length of `text` up to its last character that is not trailing
-        // white space of the current line.
-        std::size_t keep = 0;
+        QuotedWhite white;
         while (true) {
             if (at_end()) {
-                return fail_syntax(start, "an unterminated quoted scalar");
+                return fail_syntax(out.start, "an unterminated quoted scalar");
             }
-            const QuotedStep step_result =
-                quoted_step(quote, context, parent_indent, start, text, keep);
-            if (step_result == QuotedStep::FAILED) {
+            const QuotedStep result =
+                quoted_step(quote, context, parent_indent, out, white);
+            if (result == QuotedStep::FAILED) {
                 return false;
             }
-            if (step_result == QuotedStep::CLOSED) {
-                break;
-            }
-            if (!check_scalar_size(text, start)) {
-                return false;
+            if (result == QuotedStep::CLOSED) {
+                return true;
             }
         }
-        return new_node(NodeKind::SCALAR,
-                        quote == '\'' ? ScalarStyle::SINGLE_QUOTED
-                                      : ScalarStyle::DOUBLE_QUOTED,
-                        start, std::move(text), out);
     }
+
+    // --- Block scalars -------------------------------------------------
 
     // The header of a block scalar: chomping and indentation indicators,
     // then a comment or nothing up to the line end.
@@ -1297,14 +1258,21 @@ private:
                 chomping = chr == '-' ? Chomping::STRIP : Chomping::KEEP;
                 chomping_given = true;
                 advance();
+            } else if (chr == '0' && indicator == 0) {
+                return fail_syntax(mark_, "an indentation indicator of 0");
             } else if (chr >= '1' && chr <= '9' && indicator == 0) {
                 indicator = chr - '0';
                 advance();
-            } else if (chr == '0') {
-                return fail_syntax(mark_, "an indentation indicator of 0");
             } else {
                 break;
             }
+        }
+        if (peek() >= '0' && peek() <= '9') {
+            return fail_syntax(mark_,
+                               indicator != 0
+                                   ? "an indentation indicator of more than "
+                                     "one digit"
+                                   : "an indentation indicator after text");
         }
         if (!skip_spaces()) {
             return false;
@@ -1319,142 +1287,119 @@ private:
         return true;
     }
 
-    // The indentation of a block scalar's content, found from its first
-    // line that is not empty (`parent_indent` + 1 if it has none). Leading
-    // empty lines may not be indented more than it.
+    // The indentation of a block scalar's content (YAML 1.2, 8.1.1.1): that
+    // of its first line that is not empty, if indented more than
+    // `parent_indent`. Otherwise the scalar has no content line, and the
+    // indentation is that of its widest empty line, at least
+    // `parent_indent` + 1, so that every white-space line is empty. Leading
+    // empty lines may not be indented more than the first content line.
     bool detect_block_indent(std::int64_t parent_indent,
                              std::int64_t& content_indent) {
         Mark where = mark_;
         std::int64_t widest_empty = 0;
         while (true) {
             std::int64_t spaces = 0;
-            while (where.pos < source_.size() && source_[where.pos] == ' ') {
+            while (byte_at(where.pos) == ' ') {
                 step(where);
                 ++spaces;
             }
-            if (where.pos >= source_.size()) {
-                content_indent = parent_indent + 1;
+            const bool at_file_end = where.pos >= source_.size();
+            const char chr = byte_at(where.pos);
+            if (!at_file_end && chr != '\n' && chr != '\r') {
+                if (spaces <= parent_indent) {
+                    break;  // the scalar has no content line
+                }
+                if (widest_empty > spaces) {
+                    return fail_syntax(mark_,
+                                       "a leading empty line indented more "
+                                       "than its block scalar");
+                }
+                content_indent = spaces;
                 return true;
             }
-            const char chr = source_[where.pos];
-            if (chr == '\n' || chr == '\r') {
-                widest_empty = std::max(widest_empty, spaces);
-                if (chr == '\r') {
-                    step(where);
-                }
-                step(where);
-                continue;
+            widest_empty = std::max(widest_empty, spaces);
+            if (at_file_end) {
+                break;
             }
-            if (spaces <= parent_indent) {
-                content_indent = parent_indent + 1;
-            } else {
-                content_indent = spaces;
-            }
-            break;
+            step_line_break(where);
         }
-        if (widest_empty > content_indent) {
-            return fail_syntax(mark_,
-                               "a leading empty line indented more "
-                               "than its block scalar");
-        }
+        content_indent = std::max(parent_indent + 1, widest_empty);
         return true;
     }
 
-    struct BlockLine {
-        std::string text;
-        bool empty = true;
-        bool ends_with_break = false;
-    };
+    // Adds one content line of a block scalar to `fold`, with the empty
+    // lines before it, checked against the scalar limit first.
+    bool fold_block_line(BlockFold& fold, std::string_view line, bool literal,
+                         const Mark& start) {
+        const bool normal = line.front() != ' ' && line.front() != '\t';
+        std::size_t breaks = fold.pending_empty;
+        bool space = false;
+        if (fold.have_previous) {
+            if (literal || !(fold.previous_normal && normal)) {
+                ++breaks;
+            } else if (breaks == 0) {
+                space = true;
+            }
+        }
+        if (!fits(fold.value.size(),
+                  breaks + (space ? 1 : 0) + line.size())) {
+            return fail_scalar_limit(start);
+        }
+        fold.value.append(breaks, '\n');
+        if (space) {
+            fold.value.push_back(' ');
+        }
+        fold.value.append(line);
+        fold.have_previous = true;
+        fold.previous_normal = normal;
+        fold.pending_empty = 0;
+        return true;
+    }
 
-    // Reads the lines of a block scalar's content, up to the first line
-    // that is not empty and indented less than `content_indent`.
-    bool read_block_lines(std::int64_t content_indent,
-                          std::vector<BlockLine>& lines, const Mark& start) {
-        std::size_t total = 0;
+    // Reads the lines of a block scalar's content into `fold`, up to the
+    // first line that is not empty and indented less than `content_indent`.
+    bool read_block_lines(std::int64_t content_indent, bool literal,
+                          BlockFold& fold, const Mark& start) {
         while (!at_end()) {
             const Mark line_start = mark_;
+            if (is_document_marker()) {
+                return fail_syntax(mark_, "a document marker");
+            }
             std::int64_t spaces = 0;
             while (peek() == ' ' && spaces < content_indent) {
                 advance();
                 ++spaces;
             }
+            if (is_break()) {
+                skip_line_break();
+                ++fold.pending_empty;
+                continue;
+            }
+            if (at_end()) {
+                // White space without a line break is not a line.
+                break;
+            }
             if (spaces < content_indent) {
-                if (is_break()) {
-                    skip_line_break();
-                    lines.push_back(BlockLine{
-                        .text = {}, .empty = true, .ends_with_break = true});
-                    continue;
-                }
-                if (at_end()) {
-                    break;
-                }
                 // Less indented: the scalar ends before this line.
                 mark_ = line_start;
                 break;
             }
-            BlockLine line;
+            const std::size_t from = mark_.pos;
             while (!at_end() && !is_break()) {
-                take(line.text);
+                advance();
             }
-            line.empty = line.text.empty();
-            line.ends_with_break = is_break();
+            const std::string_view line =
+                source_.substr(from, mark_.pos - from);
+            fold.last_break = is_break();
             skip_line_break();
-            total += line.text.size() + 1;
-            if (total > limits_.max_scalar_bytes + 1) {
-                return fail_limit(
-                    start, "a scalar",
-                    std::to_string(limits_.max_scalar_bytes) + " bytes");
+            if (!fold_block_line(fold, line, literal, start)) {
+                return false;
             }
-            lines.push_back(std::move(line));
         }
         return true;
     }
 
-    static std::string fold_lines(const std::vector<BlockLine>& lines,
-                                  std::size_t content_lines, bool literal) {
-        std::string value;
-        if (literal) {
-            for (std::size_t i = 0; i < content_lines; ++i) {
-                if (i > 0) {
-                    value.push_back('\n');
-                }
-                value += lines[i].text;
-            }
-            return value;
-        }
-        bool have_previous = false;
-        bool previous_normal = false;
-        std::size_t pending_empty = 0;
-        for (std::size_t i = 0; i < content_lines; ++i) {
-            const BlockLine& line = lines[i];
-            if (line.empty) {
-                ++pending_empty;
-                continue;
-            }
-            const bool normal =
-                line.text.front() != ' ' && line.text.front() != '\t';
-            if (have_previous) {
-                if (previous_normal && normal) {
-                    if (pending_empty == 0) {
-                        value.push_back(' ');
-                    } else {
-                        value.append(pending_empty, '\n');
-                    }
-                } else {
-                    value.append(pending_empty + 1, '\n');
-                }
-            } else {
-                value.append(pending_empty, '\n');
-            }
-            value += line.text;
-            have_previous = true;
-            previous_normal = normal;
-            pending_empty = 0;
-        }
-        return value;
-    }
-
-    bool parse_block_scalar(std::int64_t parent_indent, NodeId& out) {
+    bool parse_block_scalar(std::int64_t parent_indent) {
         const Mark start = mark_;
         const bool literal = peek() == '|';
         advance();
@@ -1469,36 +1414,27 @@ private:
         } else if (!detect_block_indent(parent_indent, content_indent)) {
             return false;
         }
-        std::vector<BlockLine> lines;
-        if (!read_block_lines(content_indent, lines, start)) {
+        BlockFold fold;
+        if (!read_block_lines(content_indent, literal, fold, start)) {
             return false;
         }
-        std::size_t content_lines = lines.size();
-        while (content_lines > 0 && lines[content_lines - 1].empty) {
-            --content_lines;
+        std::size_t final_breaks = 0;
+        if (chomping == Chomping::KEEP) {
+            final_breaks = (fold.have_previous && fold.last_break ? 1 : 0) +
+                           fold.pending_empty;
+        } else if (chomping == Chomping::CLIP && fold.have_previous &&
+                   fold.last_break) {
+            final_breaks = 1;
         }
-        std::string value = fold_lines(lines, content_lines, literal);
-        const std::size_t trailing = lines.size() - content_lines;
-        if (content_lines > 0) {
-            const bool had_break = lines[content_lines - 1].ends_with_break;
-            if (chomping == Chomping::CLIP && had_break) {
-                value.push_back('\n');
-            } else if (chomping == Chomping::KEEP) {
-                if (had_break) {
-                    value.push_back('\n');
-                }
-                value.append(trailing, '\n');
-            }
-        } else if (chomping == Chomping::KEEP) {
-            value.append(trailing, '\n');
+        if (!fits(fold.value.size(), final_breaks)) {
+            return fail_scalar_limit(start);
         }
-        if (!check_scalar_size(value, start) ||
-            !new_node(NodeKind::SCALAR,
-                      literal ? ScalarStyle::LITERAL : ScalarStyle::FOLDED,
-                      start, std::move(value), out)) {
-            return false;
-        }
-        return next_content_line();
+        fold.value.append(final_breaks, '\n');
+        return add_scalar(Scalar{.text = std::move(fold.value),
+                                 .style = literal ? ScalarStyle::LITERAL
+                                                  : ScalarStyle::FOLDED,
+                                 .start = start}) &&
+               next_content_line();
     }
 
     // --- Flow collections ----------------------------------------------
@@ -1527,6 +1463,13 @@ private:
             if (mark_.column == 1 && is_document_marker()) {
                 return fail_syntax(mark_, "a document marker");
             }
+            if (indent <= parent_indent && (peek() == ']' || peek() == '}')) {
+                return fail(CF_SYNTAX, mark_,
+                            "a closing bracket not indented more than its "
+                            "key is not allowed in configuration files; "
+                            "indent the bracket, or write the collection as "
+                            "a block");
+            }
             if (indent <= parent_indent) {
                 return fail_syntax(mark_,
                                    "a flow collection's line that is "
@@ -1537,68 +1480,46 @@ private:
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
-    bool parse_flow_collection(std::int64_t parent_indent, std::size_t depth,
-                               NodeId& out) {
+    bool parse_flow_collection(std::int64_t parent_indent, std::size_t depth) {
         if (!check_depth(depth, mark_)) {
             return false;
         }
-        return peek() == '[' ? parse_flow_sequence(parent_indent, depth, out)
-                             : parse_flow_mapping(parent_indent, depth, out);
+        return peek() == '[' ? parse_flow_sequence(parent_indent, depth)
+                             : parse_flow_mapping(parent_indent, depth);
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
-    bool parse_flow_sequence(std::int64_t parent_indent, std::size_t depth,
-                             NodeId& out) {
+    bool parse_flow_sequence(std::int64_t parent_indent, std::size_t depth) {
+        constexpr std::string_view UNCLOSED = "an unclosed flow sequence";
         const Mark start = mark_;
-        NodeId sequence = 0;
-        if (!new_node(NodeKind::SEQUENCE, ScalarStyle::PLAIN, start, {},
-                      sequence)) {
+        if (!count_node(start)) {
             return false;
         }
+        built(builder_.begin_sequence(position(start)));
         advance();
         std::size_t entries = 0;
         while (true) {
-            if (!skip_flow_space(parent_indent)) {
+            if (!skip_flow_space_in(parent_indent, start, UNCLOSED)) {
                 return false;
-            }
-            if (at_end()) {
-                return fail_syntax(start, "an unclosed flow sequence");
             }
             if (peek() == ']') {
                 advance();
                 break;
             }
             const Mark item_at = mark_;
-            if (!count_entry(entries, item_at)) {
+            if (!count_entry(entries, item_at) ||
+                !parse_flow_node(parent_indent, depth, "a sequence item") ||
+                !skip_flow_space_in(parent_indent, start, UNCLOSED)) {
                 return false;
             }
-            NodeId item = 0;
-            if (!parse_flow_node(parent_indent, depth, item,
-                                 "a sequence item")) {
-                return false;
-            }
-            document_.append_child(sequence, item);
-            if (!skip_flow_space(parent_indent)) {
-                return false;
-            }
-            if (at_end()) {
-                return fail_syntax(start, "an unclosed flow sequence");
-            }
-            const char chr = peek();
-            if (chr == ':') {
+            if (peek() == ':') {
                 return fail_syntax(mark_, "a mapping inside a flow sequence");
             }
-            if (chr == ',') {
-                advance();
-                continue;
+            if (!flow_separator(']')) {
+                return false;
             }
-            if (chr == ']') {
-                advance();
-                break;
-            }
-            return fail_syntax(mark_, "a missing ',' between entries");
         }
-        out = sequence;
+        built(builder_.end_sequence());
         return true;
     }
 
@@ -1631,9 +1552,7 @@ private:
     // One `key: value` entry of a flow mapping, the cursor at its key.
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_flow_entry(std::int64_t parent_indent, std::size_t depth,
-                          const Mark& start, NodeId map,
-                          std::unordered_set<std::string>& keys,
-                          std::size_t& entries) {
+                          const Mark& start, std::size_t& entries) {
         constexpr std::string_view UNCLOSED = "an unclosed flow mapping";
         const Mark key_at = mark_;
         if (peek() == '?' && !is_plain_safe(1, Context::FLOW)) {
@@ -1642,49 +1561,38 @@ private:
         if (peek() == ',') {
             return fail_syntax(key_at, "an empty entry");
         }
-        NodeId key = 0;
+        Scalar key;
         if (!parse_key(Context::FLOW, parent_indent, key) ||
             !skip_flow_space_in(parent_indent, start, UNCLOSED)) {
             return false;
         }
-        const std::string key_text = document_.node(key).text;
+        const std::string owner = named_key(key.text);
         if (peek() == ',' || peek() == '}') {
-            return fail_no_value(key_at, key_text);
+            return fail_no_value(key_at, owner);
         }
         if (peek() != ':') {
             return fail_syntax(mark_, "a key without ':'");
         }
         advance();
-        if (!keys.insert(key_text).second) {
-            return fail(CF_DUPLICATE, key_at, "duplicate key " + key_text);
-        }
-        if (!count_entry(entries, key_at) ||
+        if (!add_key(key) || !count_entry(entries, key_at) ||
             !skip_flow_space_in(parent_indent, start, UNCLOSED)) {
             return false;
         }
         if (peek() == ',' || peek() == '}') {
-            return fail_no_value(key_at, key_text);
+            return fail_no_value(key_at, owner);
         }
-        NodeId value = 0;
-        if (!parse_flow_node(parent_indent, depth, value, key_text)) {
-            return false;
-        }
-        document_.append_child(map, key);
-        document_.append_child(map, value);
-        return true;
+        return parse_flow_node(parent_indent, depth, owner);
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
-    bool parse_flow_mapping(std::int64_t parent_indent, std::size_t depth,
-                            NodeId& out) {
+    bool parse_flow_mapping(std::int64_t parent_indent, std::size_t depth) {
         constexpr std::string_view UNCLOSED = "an unclosed flow mapping";
         const Mark start = mark_;
-        NodeId map = 0;
-        if (!new_node(NodeKind::MAP, ScalarStyle::PLAIN, start, {}, map)) {
+        if (!count_node(start)) {
             return false;
         }
+        built(builder_.begin_map(position(start)));
         advance();
-        std::unordered_set<std::string> keys;
         std::size_t entries = 0;
         while (true) {
             if (!skip_flow_space_in(parent_indent, start, UNCLOSED)) {
@@ -1694,14 +1602,13 @@ private:
                 advance();
                 break;
             }
-            if (!parse_flow_entry(parent_indent, depth, start, map, keys,
-                                  entries) ||
+            if (!parse_flow_entry(parent_indent, depth, start, entries) ||
                 !skip_flow_space_in(parent_indent, start, UNCLOSED) ||
                 !flow_separator('}')) {
                 return false;
             }
         }
-        out = map;
+        built(builder_.end_map());
         return true;
     }
 
@@ -1709,21 +1616,23 @@ private:
     // are one deeper.
     // NOLINTNEXTLINE(misc-no-recursion): bounded by ParseLimits::max_depth, checked before each collection is entered
     bool parse_flow_node(std::int64_t parent_indent, std::size_t depth,
-                         NodeId& out, std::string_view owner) {
+                         std::string_view owner) {
         if (!refuse_node_properties()) {
             return false;
         }
         const char chr = peek();
         if (chr == '[' || chr == '{') {
-            return parse_flow_collection(parent_indent, depth + 1, out);
+            return parse_flow_collection(parent_indent, depth + 1);
         }
         if (chr == '\'' || chr == '"') {
-            return parse_quoted(Context::FLOW, parent_indent, out);
+            Scalar scalar;
+            return parse_quoted(Context::FLOW, parent_indent, scalar) &&
+                   add_scalar(scalar);
         }
         if (chr == ',') {
             return fail_syntax(mark_, "an empty entry");
         }
-        return parse_plain_value(Context::FLOW, parent_indent, out, owner);
+        return parse_plain_value(Context::FLOW, parent_indent, owner);
     }
 
     std::string_view source_;
@@ -1731,7 +1640,7 @@ private:
     Diagnostics* diagnostics_;
     ParseLimits limits_;
     NodeBudget* budget_;
-    Document document_;
+    DocumentBuilder builder_;
     Mark mark_;
     std::int64_t next_indent_ = NO_LINE;
     bool failed_ = false;

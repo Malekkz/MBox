@@ -17,8 +17,9 @@ namespace scada::conf {
 // warnings. A stage runs only when the stages before it found no error.
 //
 // Implemented so far: stage 1 (paths, file kinds, sizes) and stage 2 (the
-// YAML subset of every file but `.st` files). Later stages are added by
-// P2-03 (#100) slice by slice.
+// YAML subset of every YAML file; every `.st` file is CF-920, as structured
+// text is not available in this version, contract 9.3). Later stages are
+// added by P2-03 (#100) slice by slice.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is
 // wrong is a report with errors, not a failure.

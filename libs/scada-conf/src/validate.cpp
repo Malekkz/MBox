@@ -6,10 +6,17 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/yaml.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 
 namespace scada::conf {
+
+namespace {
+
+constexpr std::uint16_t CF_STRUCTURED_TEXT = 920;
+
+}  // namespace
 
 Result<Report> validate_tree(const std::filesystem::path& root,
                              const ScanLimits& limits) {
@@ -25,12 +32,16 @@ Result<Report> validate_tree(const std::filesystem::path& root,
         return report;
     }
 
-    // Stage 2: every YAML file. A `.st` file is not parsed in phase 2; it is
-    // held to the limits of stage 1 only (D-106).
+    // Stage 2: every YAML file. Structured text is not available in this
+    // version: a `.st` file is refused, so that a program that is not run
+    // cannot look accepted (contract 9.3).
     Diagnostics stage2;
     NodeBudget budget;
     for (const TreeFile& file : tree.value().files) {
         if (file.path_class.type == FileType::STRUCTURED_TEXT) {
+            stage2.error(CF_STRUCTURED_TEXT,
+                         Location{.file = file.path, .line = 1, .column = 1},
+                         "structured text is not available in this version");
             continue;
         }
         const std::optional<Document> document =
