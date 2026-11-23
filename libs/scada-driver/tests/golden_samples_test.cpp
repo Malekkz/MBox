@@ -253,6 +253,26 @@ TEST(GoldenSamples, DivideByIsTheExactDecimalForm) {
     EXPECT_EQ(bits_of(run(rules, raw_signed(-1, 16)).value.f), bits_of(-0.1));
 }
 
+TEST(GoldenSamples, IntegerTagWithANonIntegerScalingIsBad) {
+    // CF-517 refuses these (decision D-133); the framework never computes
+    // a value for them.
+    PointRules divide;
+    divide.tag_type = TagType::INT64;
+    divide.scale = ScaleRule{.form = ScaleRule::Form::DIVIDE_BY,
+                             .integer = true,
+                             .divide_by = DIVIDE_BY_10};
+    EXPECT_EQ(run(divide, raw_signed(DIVIDE_BY_10, INT16)).quality,
+              Quality::BAD);
+    PointRules exponent;
+    exponent.tag_type = TagType::INT64;
+    exponent.companions = {COMPANION_INDEX};
+    exponent.exponent = ExponentRule{.companion = 0};
+    const CompanionInput power{.outcome = Outcome::VALUE,
+                               .raw = raw_signed(1, INT16)};
+    EXPECT_EQ(run(exponent, raw_signed(1, INT16), {&power, 1}).quality,
+              Quality::BAD);
+}
+
 TEST(GoldenSamples, ScaleThatOverflowsBinary64IsBadOverflow) {
     PointRules rules = float_rules();
     rules.scale = ScaleRule{.gain = HUGE_GAIN};

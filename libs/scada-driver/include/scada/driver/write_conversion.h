@@ -47,8 +47,9 @@ SCADA_RT [[nodiscard]] std::optional<RawValue> to_raw_value(
     const WriteRules& rules, const TagValue& value) noexcept;
 
 // True when a write of a point with `rules` takes the exact integer path
-// (CS 7.2): an INT64 or UINT64 tag with no scale, or with an integer `gain`
-// or `divide_by` and an integer `offset`.
+// (CS 7.2 as ruled with CF-517): an INT64 or UINT64 tag with no scale, or
+// with an integer `gain` and `offset`. An integer tag with any other scaling
+// is refused (decision D-133).
 SCADA_RT [[nodiscard]] bool is_integer_path(const WriteRules& rules) noexcept;
 
 }  // namespace scada::driver

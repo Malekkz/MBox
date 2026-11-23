@@ -274,8 +274,8 @@ bool integer_scale(Work& work) noexcept {
     if (rules.scale.has_value()) {
         const ScaleRule& scale = *rules.scale;
         if (!scale.integer || scale.form != ScaleRule::Form::GAIN) {
-            // Refused when the configuration is compiled (decision D-108);
-            // stated here so that a value is never invented.
+            // CF-517 refuses it (decision D-133); stated here so that a
+            // value is never invented.
             work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
             return false;
         }
@@ -339,6 +339,11 @@ bool scale_value(Work& work) noexcept {
     const bool integer_tag =
         rules.tag_type == TagType::INT64 || rules.tag_type == TagType::UINT64;
     std::optional<double> number;
+    if (integer_tag && rules.exponent.has_value()) {
+        // CF-517 refuses an exponent on an integer tag (decision D-133).
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return false;
+    }
     if (rules.exponent.has_value()) {
         number = apply_exponent(work, *rules.exponent);
         if (!number.has_value()) {
@@ -421,7 +426,7 @@ void apply_double_point(Work& work, const DoublePointRule& rule) noexcept {
             return;
         }
     }
-    // A raw code the map does not name is a bad state (decision D-107).
+    // A raw code the map does not name is a bad state (decision D-132).
     work.value = int64_value(tag::to_raw(DoublePoint::BAD_STATE));
     work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
 }

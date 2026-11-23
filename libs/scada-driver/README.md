@@ -12,12 +12,12 @@ The library is built in slices. This is the first:
 | Raw values, as a protocol's decode delivers them | `scada/driver/raw_value.h` | 5.1, 5.2 |
 | Compiled rules of a point's common keys | `scada/driver/point_rules.h` | 5.1 to 5.8; CS 4.7, 4.9, 5.3 to 5.5 |
 | Processing after decode, staleness | `scada/driver/sample_processing.h` | 5.1 to 5.8, 7.5 |
-| Device local time to UTC | `scada/driver/zone_table.h` | 5.8; CS 4.6 (decision D-105) |
+| Device local time to UTC | `scada/driver/zone_table.h` | 5.8; CS 4.6 (decision D-130) |
 | Engineering value to raw value for a write | `scada/driver/write_conversion.h` | 8.4; CS 7.2 |
 
 Not yet here: the protocol interface (2.2), the object model, scheduling,
 transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-105 to D-108 record the choices
+change and reload. `docs/decisions.md` D-130 to D-133 record the choices
 the contract left open.
 
 ## What it does

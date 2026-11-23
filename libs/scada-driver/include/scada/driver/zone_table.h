@@ -7,7 +7,7 @@
 // A ZoneTable is built once, when a configuration is compiled, from the
 // system's time zone database; converting a time is then a search in a
 // table that does not change, with no allocation, lock or system call, so
-// that it can run on any worker (decision D-105).
+// that it can run on any worker (decision D-130).
 
 #include "scada/common/realtime.h"
 #include "scada/common/result.h"

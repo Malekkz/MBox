@@ -173,7 +173,9 @@ std::optional<RawValue> binary64_path(const WriteRules& rules,
 bool is_integer_path(const WriteRules& rules) noexcept {
     const bool integer_tag =
         rules.tag_type == TagType::INT64 || rules.tag_type == TagType::UINT64;
-    return integer_tag && (rules.scale == nullptr || rules.scale->integer);
+    return integer_tag && (rules.scale == nullptr ||
+                           (rules.scale->integer &&
+                            rules.scale->form == ScaleRule::Form::GAIN));
 }
 
 std::optional<RawValue> to_raw_value(const WriteRules& rules,
@@ -206,6 +208,11 @@ std::optional<RawValue> to_raw_value(const WriteRules& rules,
     }
     if (is_integer_path(rules)) {
         return integer_path(rules, value);
+    }
+    if (rules.scale != nullptr) {
+        // An integer tag with any other scaling is CF-517 (decision D-133):
+        // refused, never converted through binary64.
+        return std::nullopt;
     }
     const double requested = rules.tag_type == TagType::INT64
                                  ? static_cast<double>(value.i)

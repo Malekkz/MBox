@@ -1920,7 +1920,7 @@ Reason: the owner followed the lead's recommendations. For O-12 the 30 s delay r
 Consequences: the contract is 0.5, accepted for phase 2 implementation, and becomes 1.0 when phase 2 passes its acceptance tests. The reference architecture becomes 1.2: the lines that section 16 of the contract names are changed in the driver interface pull request (#99), in one commit for both contracts. One ruling rests on a sentence of a document this pull request does not change: R-6 widens SUBSTITUTED beyond tag database contract 6 ("value entered by a person"); the lead takes the wording to the owner. O-2 needs no change there: tag database contract 6.2 returns the stored value under the OWNER_DOWN overlay, and when to use it is the driver interface contract's rule.
 
 
-## D-105: Device local times are converted with a table built when the configuration is compiled
+## D-130: Device local times are converted with a table built when the configuration is compiled
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07)
 Status: accepted
@@ -1931,7 +1931,7 @@ Decision: `ZoneTable::build` reads the system's time zone database through `std:
 Reason: the library's lookups may allocate, lock and read files on first use, which a worker must not do per sample; a table built aside fits the reload of contract 3.2 and gives the same answer on both architectures for one database.
 Consequences: the zone data is the unit's, read at compile time; a database update takes effect at the next reload. No zone data enters the repository.
 
-## D-106: Details of the processing after decode that the driver interface contract leaves open
+## D-131: Details of the processing after decode that the driver interface contract leaves open
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07)
 Status: accepted
@@ -1952,7 +1952,7 @@ Decision:
 Reason: each is the reading that never shows a value as better than it is; the rest is left as tag database contract 6 defines its flags.
 Consequences: conformance tests 4, 7, 17 and 40 test these readings with the test protocol; a protocol cannot change them.
 
-## D-107: A double-point raw code that the `states` map does not name is a bad state
+## D-132: A double-point raw code that the `states` map does not name is a bad state
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07)
 Status: accepted
@@ -1963,13 +1963,13 @@ Decision: code 3 with BAD and OUT_OF_RANGE.
 Reason: an unknown position must not be shown as a position; 3 with BAD is what the contract already uses for "faulty", and `scada-cmd` compares feedback by these codes (phase 5).
 Consequences: a template with an incomplete map shows the device faulty, not travelling.
 
-## D-108: An integer value type with `divide_by` is not computed until the configuration contract rules on it
+## D-133: An integer value type with a non-integer scaling is refused (CF-517); the framework never computes it
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07)
-Status: accepted (pending a ruling, reported to the lead)
+Status: accepted: ruled by the lead on 2026-11-23 (CF-517, configuration schemas contract 0.6)
 
-Context: configuration schemas contract 4.7 derives `float64` for `scale: { divide_by }` and says that with an integer value type "the computation is in INT64 or UINT64, checked"; 7.2 gives the exact inverse for an INT64 or UINT64 target with `divide_by`. Neither says what the read side gives on an INT64 tag when `raw ÷ divide_by` is not a whole number: truncation, rounding or refusal. The value reaches outputs' feedback and the historian, so it is not guessed.
-Options: truncate; round half away from zero; BAD when not exact; refuse the configuration.
-Decision: the framework does not compute it. The compile step of the next slice refuses such a point; until then the processing writes BAD with OUT_OF_RANGE for it.
-Reason: an external interface left open is asked, not guessed (`CLAUDE.md`, "When to stop and ask"); refusing is the reading that cannot show a wrong value.
-Consequences: a ruling changes only the compile step and one branch of the processing.
+Context: configuration schemas contract 0.5, 4.7, derives `float64` for `scale: { divide_by }` but says that with an integer value type "the computation is in INT64 or UINT64, checked", without saying what an INT64 tag gives when `raw ÷ divide_by` is not whole. Found while writing the processing after decode and reported to the lead (finding F4).
+Options: truncate; round half away from zero; BAD at run time when not exact; refuse the configuration.
+Decision: the lead ruled that the configuration contract refuses it: a `value_type` of `int64` or `uint64` needs an integer scaling, and `divide_by` above 1, a decimal `gain` or `offset`, and `exponent_from` are CF-517 (configuration schemas 0.6, #100). The framework's integer paths assume no scale or an integer `gain` and `offset`. Anything else reaching them is written BAD with OUT_OF_RANGE, never a computed value.
+Reason: every other choice makes the read and the write of the same point disagree, or turns a configuration mistake into a run-time BAD value.
+Consequences: the defensive branch in `sample_processing.cpp` cites CF-517; the compile step of the next slice refuses the same cases.

@@ -30,6 +30,7 @@ RawValue converted(const WriteRules& rules, const TagValue& value) {
 }
 
 constexpr std::uint8_t INT16 = 16;
+constexpr std::uint64_t DIVIDE_BY_1000 = 1000;
 
 WriteRules setpoint(TagType type, RawKind kind, std::uint8_t width,
                     const ScaleRule* scale) {
@@ -98,13 +99,21 @@ TEST(GoldenWrite, IntegerPathNeedsAnExactQuotient) {
     EXPECT_FALSE(to_raw_value(rules, int64_value(126)).has_value());
 }
 
-TEST(GoldenWrite, IntegerPathDivideByIsChecked) {
-    const ScaleRule scale{
-        .form = ScaleRule::Form::DIVIDE_BY, .integer = true, .divide_by = 1000};
-    const WriteRules rules =
-        setpoint(TagType::INT64, RawKind::SIGNED, 32, &scale);
-    EXPECT_EQ(converted(rules, int64_value(-2)).number_i, -2000);
-    EXPECT_FALSE(to_raw_value(rules, int64_value(3'000'000)).has_value());
+TEST(GoldenWrite, IntegerTagWithANonIntegerScalingIsRefused) {
+    // CF-517 (decision D-133): `divide_by` and a decimal gain on an INT64
+    // tag never reach the device, whatever the value.
+    const ScaleRule divide{.form = ScaleRule::Form::DIVIDE_BY,
+                           .integer = true,
+                           .divide_by = DIVIDE_BY_1000};
+    const ScaleRule decimal{.gain = 0.5};
+    EXPECT_FALSE(
+        to_raw_value(setpoint(TagType::INT64, RawKind::SIGNED, INT16, &divide),
+                     int64_value(2))
+            .has_value());
+    EXPECT_FALSE(
+        to_raw_value(setpoint(TagType::INT64, RawKind::SIGNED, INT16, &decimal),
+                     int64_value(2))
+            .has_value());
 }
 
 TEST(GoldenWrite, NegativeOffsetOnUint64AboveInt64Max) {
