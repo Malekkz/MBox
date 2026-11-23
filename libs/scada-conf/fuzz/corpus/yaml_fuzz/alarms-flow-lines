@@ -1,0 +1,3 @@
+alarms:
+  - { id: level_hh, tag: ps1.tank.level, type: high_high, limit: 4.8,
+      priority: critical, message: "tank level very high" }

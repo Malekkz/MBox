@@ -3,9 +3,11 @@
 scada_add_library(scada-conf
   SOURCES
     src/diagnostic.cpp
+    src/node.cpp
     src/path_class.cpp
     src/tree_scan.cpp
     src/validate.cpp
+    src/yaml_parser.cpp
   DEPENDS scada::common)
 
 if(BUILD_TESTING)

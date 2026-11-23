@@ -1,0 +1,7 @@
+channel:
+  name: line1
+  type: rtu
+  poll_groups:
+    fast:   { period: 200ms, priority: 1 }
+devices:
+  - { name: ps1.fm1, template: flow_meter_x, unit_id: 11 }

@@ -1930,3 +1930,24 @@ Options: line 0 for "no line"; line 1, column 1; a diagnostic without a location
 Decision: a diagnostic about a whole file, a directory or the tree points at line 1, column 1 of that path. The 20,000 limit counts every entry of the tree, refused ones (links, FIFOs, unknown names) too, except the directories the tree may hold (at most 8 besides the root); a tree limit points at the entry that passed it. A directory is listed only as far as the limit plus those 8 directories, and a limit passed while listing points at that directory, `.` for the root, so the work of stage 1 is bounded whatever the tree holds. The scan reads directories depth first in byte order of their paths and stops when a tree limit is passed, so the same tree always stops at the same place.
 Reason: 1-based locations keep one format for every diagnostic and every tool that reads it. Counting only regular files would leave the time spent on other entries unbounded; counting the tree's own directories would refuse a tree of exactly 20,000 files, which the contract allows.
 Consequences: an invalid entry costs one of the 20,000, so a tree with many refused entries stops early with CF-113; it is refused either way.
+
+## D-106: The YAML subset parser is the project's own; how it reports
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted (parser choice: the lead, 2026-11-23)
+
+Context: D-70 leaves the parser of the YAML subset, a new dependency or not, to #100. Configuration schemas contract 1.1 and 1.4 ask for a refusal with a code, line and column for every construct outside the subset, and 1.3 for limits checked before the work they bound. The contract leaves open some details of how a refusal is reported.
+Options: libyaml 0.2.5 (MIT), event API with marks, plus a layer that maps its events onto the subset's errors; rapidyaml (MIT), which builds the whole tree before anything can be checked; a parser of the subset written for the project.
+Decision: the project's own parser (`libs/scada-conf/src/yaml_parser.cpp`), no dependency. It is recursive descent, and every collection it enters is checked against the depth limit first, so recursion is bounded. The reporting rules are these:
+- The first refusal ends the parse of its file; a file gives at most one stage 2 error.
+- Columns count characters (code points), not bytes. The offset in CF-114's message counts bytes from 0.
+- A byte order mark is CF-110 ("a byte order mark"). Invalid UTF-8, a NUL, a CR without LF, C0 and C1 control characters and DEL are CF-114 anywhere. A tab is CF-114 outside a comment, a quoted scalar or a block scalar's content: indentation, separation and plain scalars use spaces only.
+- An escape giving U+0000 (`\0`, `\x00`) is CF-110. Other escapes of YAML 1.2 are accepted; the schema decides whether a control character may stand in a value (contract 2.1).
+- `null`, `Null`, `NULL` and `~` as plain values, an empty value and an empty sequence item are CF-112. As keys, and quoted, they are text.
+- A single-pair mapping inside a flow sequence (`[a: b]`) is CF-110: the subset's flow mappings are written in braces.
+- Two keys of one map with equal text are CF-111 in stage 2. Keys that are equal only after typing (`16` and `0x10`, contract 1.2) are CF-111 in stage 3, which types them.
+- The nesting depth counts collections: the root collection is at depth 1, and 33 nested collections are CF-113.
+- An empty file, or one of comments only, is an empty map; the schema then reports what it needs.
+- A `.st` file is not parsed in phase 2. It is held to the limits of stage 1 only (the lead, 2026-11-23); the structured-text parser is phase 6.
+Reason: the subset refuses constructs that a general parser accepts quietly, and each refusal needs its own code and column. Every scalar must keep its source text and quoting style (contract 1.2), and every limit must be checked before its work. A library would need a mapping layer for all of that, and would bring code that the project cannot bound or fuzz on its own terms. Without a dependency there is no licence to record.
+Consequences: the parser is a fuzz target (`yaml_fuzz`) with a seed corpus of every refused construct. The README of libscada-conf says plainly that it is a subset parser and lists what it refuses. A test compared its trees with PyYAML (BaseLoader) on 15,000 random documents written in every style PyYAML emits; they were equal. That comparison is not part of the suite, because PyYAML is not a dependency.

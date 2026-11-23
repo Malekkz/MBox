@@ -1,0 +1,3 @@
+# One error per file, the files in path order (section 1.4).
+areas.yaml:3:18: CF-112
+tags/site.yaml:4:5: CF-111

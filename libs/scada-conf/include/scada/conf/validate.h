@@ -16,8 +16,9 @@ namespace scada::conf {
 // section 1.4: the errors of the first stage that has any, otherwise the
 // warnings. A stage runs only when the stages before it found no error.
 //
-// Implemented so far: stage 1 (paths, file kinds, sizes). Later stages are
-// added by P2-03 (#100) slice by slice.
+// Implemented so far: stage 1 (paths, file kinds, sizes) and stage 2 (the
+// YAML subset of every file but `.st` files). Later stages are added by
+// P2-03 (#100) slice by slice.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is
 // wrong is a report with errors, not a failure.

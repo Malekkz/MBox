@@ -1,0 +1,4 @@
+template: meter
+protocol: modbus
+defaults: &d
+  poll_group: fast
