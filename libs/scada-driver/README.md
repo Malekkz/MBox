@@ -2,8 +2,8 @@
 
 The driver framework that every protocol driver and `scada-io` are built on
 (issue #104, P2-07). The behaviour is that of the driver interface contract,
-`docs/contracts/driver-interface.md` (version 0.5); the configuration keys
-are those of the configuration schemas contract.
+`docs/contracts/driver-interface.md` (version 0.6); the configuration keys
+are those of the configuration schemas contract (version 0.6).
 
 The library is built in slices. This is the first:
 
