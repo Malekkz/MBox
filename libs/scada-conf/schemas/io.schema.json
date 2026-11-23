@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "io.schema.json",
+  "title": "The io protocol schema of scada-io (configuration schemas contract, Annex B)",
+  "$defs": {
+    "address": {
+      "description": "Annex B.2, and the simulator's profile (B.3)",
+      "type": "object",
+      "properties": {
+        "line": {
+          "oneOf": [
+            { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 1023 },
+            { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 }
+          ]
+        },
+        "direction": { "type": "string", "enum": ["input", "output"] },
+        "active_low": { "$ref": "point.schema.json#/$defs/boolean" },
+        "bias": { "type": "string", "enum": ["none", "pull_up", "pull_down"] },
+        "debounce": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "1s" },
+        "at_start": { "type": "string", "enum": ["hold", "safe"] },
+        "channel": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
+        "filter": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "60s" },
+        "clamp": { "$ref": "point.schema.json#/$defs/range" },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["constant", "ramp", "sine", "square", "random"] }
+          },
+          "required": ["type"],
+          "x-scada-key-type": "identifier",
+          "unevaluatedProperties": { "type": ["number", "string", "boolean"], "x-scada-type": "string" }
+        },
+        "replace": { "$ref": "point.schema.json#/$defs/replace" }
+      },
+      "unevaluatedProperties": false
+    },
+    "point": { "properties": { "address": { "$ref": "#/$defs/address" } } },
+    "points": { "type": "array", "items": { "$ref": "#/$defs/point" } },
+    "addresses_of_points": {
+      "properties": {
+        "points": { "$ref": "#/$defs/points" },
+        "defaults": { "$ref": "#/$defs/point" },
+        "overrides": { "type": "object", "unevaluatedProperties": { "$ref": "#/$defs/point" } },
+        "repeat": { "type": "array", "items": { "properties": { "points": { "$ref": "#/$defs/points" } } } },
+        "identify": { "type": "array", "items": { "properties": { "address": { "$ref": "#/$defs/address" } } } }
+      }
+    },
+    "template": {
+      "allOf": [{ "$ref": "template.schema.json#/$defs/template_keys" }, { "$ref": "#/$defs/addresses_of_points" }],
+      "unevaluatedProperties": false
+    },
+    "channel": {
+      "allOf": [{ "$ref": "channel.schema.json#/$defs/channel" }],
+      "properties": {
+        "backend": { "type": "string", "enum": ["simulator", "gpio", "iio"] },
+        "chip": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
+        "device": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
+        "scan": { "type": "string", "enum": ["auto", "every_cycle", "helper"] }
+      },
+      "required": ["backend"],
+      "unevaluatedProperties": false
+    },
+    "device": {
+      "allOf": [{ "$ref": "channel.schema.json#/$defs/device" }, { "$ref": "#/$defs/addresses_of_points" }],
+      "unevaluatedProperties": false
+    },
+    "channel_file": {
+      "type": "object",
+      "properties": {
+        "channel": { "$ref": "#/$defs/channel" },
+        "devices": { "type": "array", "items": { "$ref": "#/$defs/device" } }
+      },
+      "required": ["channel"],
+      "unevaluatedProperties": false
+    }
+  }
+}

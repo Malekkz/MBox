@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tags.schema.json",
+  "title": "tags/*.yaml (configuration schemas contract, section 5.1)",
+  "type": "object",
+  "properties": {
+    "tags": { "type": "array", "items": { "$ref": "#/$defs/tag" } }
+  },
+  "required": ["tags"],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "tag": {
+      "type": "object",
+      "properties": {
+        "name": { "$ref": "common.schema.json#/$defs/tag_name" },
+        "type": { "type": "string", "enum": ["internal", "manual", "virtual"] },
+        "value_type": { "type": "string", "enum": ["bool", "int64", "uint64", "float64", "string"] },
+        "kind": { "type": "string", "enum": ["plain", "counter"] },
+        "description": { "$ref": "common.schema.json#/$defs/text" },
+        "unit": { "type": "string", "x-scada-type": "text", "x-scada-max": 32 },
+        "range": { "$ref": "point.schema.json#/$defs/range" },
+        "enum": { "$ref": "point.schema.json#/$defs/enumeration_or_reference" },
+        "area": { "$ref": "common.schema.json#/$defs/identifier" },
+        "alarms": { "$ref": "point.schema.json#/$defs/alarms" },
+        "logging": { "$ref": "point.schema.json#/$defs/logging" },
+        "retain": { "$ref": "point.schema.json#/$defs/boolean" },
+        "retain_now": { "$ref": "point.schema.json#/$defs/boolean" },
+        "retain_max_age": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "3650d" },
+        "task": { "$ref": "common.schema.json#/$defs/identifier" },
+        "expr": { "type": "string", "x-scada-type": "expression" },
+        "quality": { "type": "string", "enum": ["worst", "ignore_bad"] },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "min": { "$ref": "point.schema.json#/$defs/number" },
+            "max": { "$ref": "point.schema.json#/$defs/number" }
+          },
+          "unevaluatedProperties": false
+        },
+        "initial": { "type": ["number", "boolean", "string"], "x-scada-type": "string" }
+      },
+      "required": ["name", "type"],
+      "unevaluatedProperties": false
+    }
+  }
+}

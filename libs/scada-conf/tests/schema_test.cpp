@@ -851,5 +851,32 @@ TEST(Schema, ACappedBranchKeepsTheFirstErrorsInReportOrder) {
               "f.yaml:1:1: error CF-202: f.yaml needs need");
 }
 
+// The special types of slice 4 follow the integer rules of D-107.
+TEST(Schema, SpecialTypesFollowTheIntegerRules) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "raw": { "type": ["integer", "string"], "x-scada-type": "raw_pattern" },
+        "nb": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" },
+        "nt": { "type": ["number", "string"], "x-scada-type": "number_or_tag" } } })";
+    EXPECT_EQ(check(json, "raw: -1\nnb: true\nnt: ps1.flow\n"), Lines{});
+    EXPECT_EQ(check(json, "raw: 18446744073709551616\n"),
+              Lines{"1:6 CF-204: raw must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "raw: -9223372036854775809\n"),
+              Lines{"1:6 CF-204: raw must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "raw: x\n"),
+              Lines{"1:6 CF-203: raw must be a raw pattern"});
+    EXPECT_EQ(check(json, "nb: 18446744073709551616\n"),
+              Lines{"1:5 CF-204: nb must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "nb: yes\n"),
+              Lines{"1:5 CF-203: nb must be a number or true or false"});
+    EXPECT_EQ(check(json, "nt: Bad\n"),
+              Lines{"1:5 CF-212: \"Bad\" is not a valid tag name"});
+    EXPECT_EQ(root_types(json, "raw: 5\nnb: 1.5\nnt: 2\n"),
+              (std::vector<ScalarType>{ScalarType::INTEGER, ScalarType::DECIMAL,
+                                       ScalarType::INTEGER}));
+}
+
 }  // namespace
 }  // namespace scada::conf

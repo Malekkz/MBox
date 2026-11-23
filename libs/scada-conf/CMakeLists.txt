@@ -6,11 +6,20 @@
 # the directory.
 set(scada_conf_schemas
   common.schema.json
+  point.schema.json
   system.schema.json
   areas.schema.json
   enums.schema.json
   logging.schema.json
-  tasks.schema.json)
+  tasks.schema.json
+  template.schema.json
+  channel.schema.json
+  modbus.schema.json
+  io.schema.json
+  tags.schema.json
+  outputs.schema.json
+  alarms.schema.json
+  program.schema.json)
 set(scada_conf_schema_entries "")
 foreach(schema IN LISTS scada_conf_schemas)
   set(schema_path "${CMAKE_CURRENT_SOURCE_DIR}/schemas/${schema}")

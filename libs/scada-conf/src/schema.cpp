@@ -75,7 +75,7 @@ constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
 // The `x-scada-type` names this validator implements (contract Annex C). A
 // schema file with another name does not compile, so that a type not
 // implemented yet cannot check nothing.
-constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
+constexpr std::array<std::string_view, 40> KNOWN_SCALAR_TYPES = {
     "string",
     "text",
     "identifier",
@@ -105,16 +105,26 @@ constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
     "cidr",
     "time_zone",
     "time_of_day",
-    "https_url"};
+    "https_url",
+    "point_name_template",
+    "name_pattern",
+    "dev_path",
+    "resolution",
+    "raw_pattern",
+    "raw_pattern_or_nan",
+    "number_or_boolean",
+    "number_or_tag",
+    "duration_or_off",
+    "ip_literal_host"};
 
 // The name kind of a name type, and texts joined by commas (below).
 std::optional<std::string_view> name_kind(std::string_view type);
 std::string join(const std::vector<std::string>& texts);
 
 // The types that "minimum" and "maximum" apply to.
-constexpr std::array<std::string_view, 7> NUMBER_TYPES = {
-    "integer", "uint64",     "power_of_two",        "decimal",
-    "number",  "percentage", "number_or_percentage"};
+constexpr std::array<std::string_view, 8> NUMBER_TYPES = {
+    "integer", "uint64",     "power_of_two",         "decimal",
+    "number",  "percentage", "number_or_percentage", "number_or_tag"};
 
 bool listed(std::span<const std::string_view> list, std::string_view name) {
     return std::ranges::find(list, name) != list.end();
@@ -673,22 +683,32 @@ private:
     // True if the scalar names of "type" are those the `x-scada-type` is
     // written as: "integer" for the integer types, "number" (or "integer")
     // for decimals and numbers, "boolean" for booleans, "number" and
-    // "string" for a number or a percentage or an expression, "string" for
-    // every other type.
+    // "string" for a number or a percentage or an expression, any kind for
+    // `string` and `expression`, "string" for every other type.
     static bool type_agrees(const SchemaNode& node) {
         if (node.scalar_type.empty() || node.scalar_kinds.empty()) {
             return true;
         }
         const std::string& type = node.scalar_type;
+        // `string` is any text, also a value whose type another key decides
+        // later (D-108): every scalar kind.
+        // An expression's text may be a literal number or boolean (5.6).
+        if (type == "string" || type == "expression") {
+            return true;
+        }
         std::vector<std::string_view> allowed;
         if (type == "integer" || type == "uint64" || type == "power_of_two") {
             allowed = {"integer"};
+        } else if (type == "raw_pattern" || type == "raw_pattern_or_nan") {
+            allowed = {"integer", "string"};
+        } else if (type == "number_or_boolean") {
+            allowed = {"number", "integer", "boolean"};
         } else if (type == "decimal" || type == "number") {
             allowed = {"number", "integer"};
         } else if (type == "boolean") {
             allowed = {"boolean"};
         } else if (type == "number_or_percentage" ||
-                   type == "number_or_expression") {
+                   type == "number_or_expression" || type == "number_or_tag") {
             allowed = {"number", "integer", "string"};
         } else {
             allowed = {"string"};
@@ -723,7 +743,8 @@ private:
             const std::string text = bound->value_or(std::string());
             const std::optional<Integer> count = parse_integer(text);
             const bool valid =
-                (type == "duration" && parse_duration_ms(text)) ||
+                ((type == "duration" || type == "duration_or_off") &&
+                 parse_duration_ms(text)) ||
                 (type == "size" && parse_size_bytes(text)) ||
                 (type == "text" && count.has_value() &&
                  !count.value_or(Integer{}).negative);
@@ -871,7 +892,8 @@ std::optional<std::string_view> name_kind(std::string_view type) {
         {"point_name", "point"},           {"device_name", "device"},
         {"poll_group_name", "poll group"}, {"tier_name", "tier"},
         {"protocol_name", "protocol"},     {"unit_id", "unit id"},
-        {"process_name", "process"},
+        {"process_name", "process"},       {"point_name_template", "point"},
+        {"name_pattern", "name pattern"},
     };
     const auto found = KINDS.find(type);
     if (found == KINDS.end()) {
@@ -880,7 +902,36 @@ std::optional<std::string_view> name_kind(std::string_view type) {
     return found->second;
 }
 
+// `text` with every `{<identifier>}` (a `repeat` variable, 4.4) replaced by
+// `0`, and, for a pattern, every `*` and `?` (2.5) by `a`; nothing if a brace
+// is not closed or holds no identifier.
+std::optional<std::string> instantiated(std::string_view text, bool pattern) {
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const char chr = text[pos];
+        if (chr == '{') {
+            const std::size_t close = text.find('}', pos);
+            if (close == std::string_view::npos ||
+                !is_identifier(text.substr(pos + 1, close - pos - 1))) {
+                return std::nullopt;
+            }
+            out.push_back('0');
+            pos = close + 1;
+            continue;
+        }
+        out.push_back(pattern && (chr == '*' || chr == '?') ? 'a' : chr);
+        ++pos;
+    }
+    return out;
+}
+
 bool name_matches(std::string_view type, std::string_view text) {
+    if (type == "point_name_template" || type == "name_pattern") {
+        const std::optional<std::string> plain =
+            instantiated(text, type == "name_pattern");
+        return plain && is_tag_name(*plain);
+    }
     if (type == "identifier") {
         return is_identifier(text);
     }
@@ -900,6 +951,45 @@ bool name_matches(std::string_view type, std::string_view text) {
         return is_unit_id(text);
     }
     return is_process_name(text);
+}
+
+// An absolute path under /dev/ without `..` or empty components, at most
+// 255 bytes (Annex A.1).
+bool is_device_path(std::string_view text) {
+    constexpr std::size_t MAX_PATH = 255;
+    if (!text.starts_with("/dev/") || text.size() > MAX_PATH ||
+        text.ends_with('/') || !is_free_text(text) ||
+        text.find(' ') != std::string_view::npos) {
+        return false;
+    }
+    std::size_t start = 1;
+    while (start < text.size()) {
+        const std::size_t end = text.find('/', start);
+        const std::string_view part = text.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start);
+        if (part.empty() || part == "." || part == "..") {
+            return false;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return true;
+}
+
+// The resolution of an epoch value (Annex A.2): `1s`, `1ms` or `<n>ns`.
+bool is_resolution(std::string_view text) {
+    if (text == "1s" || text == "1ms") {
+        return true;
+    }
+    if (!text.ends_with("ns")) {
+        return false;
+    }
+    const std::optional<Integer> count =
+        parse_integer(text.substr(0, text.size() - 2));
+    return count && !count->negative && count->magnitude > 0;
 }
 
 // Text forms that are strings with a grammar, refused with CF-203 and the
@@ -927,6 +1017,13 @@ std::optional<std::pair<bool, std::string_view>> text_form(
     }
     if (type == "https_url") {
         return std::make_pair(is_https_url(text), "an https URL");
+    }
+    if (type == "dev_path") {
+        return std::make_pair(is_device_path(text),
+                              "an absolute path under /dev/");
+    }
+    if (type == "resolution") {
+        return std::make_pair(is_resolution(text), "1s, 1ms or <n>ns");
     }
     return std::nullopt;
 }
@@ -1200,6 +1297,9 @@ private:
 
     void check_exclusive(const SchemaNode& rules, NodeId map,
                          const std::string& path, Outcome& out) {
+        // A key in two groups (`value` and `mask` of a write) is reported
+        // once.
+        std::set<std::size_t> reported;
         for (const std::vector<std::string>& group : rules.exclusive) {
             std::optional<std::size_t> first;
             for (std::size_t i = 0; i < document_->entry_count(map); ++i) {
@@ -1209,6 +1309,9 @@ private:
                 }
                 if (!first) {
                     first = i;
+                    continue;
+                }
+                if (!reported.insert(i).second) {
                     continue;
                 }
                 error(out, CF_EXCLUSIVE, key_of(map, i),
@@ -1701,6 +1804,13 @@ private:
         if (type == "expression") {
             return ScalarType::EXPRESSION;
         }
+        if (const std::optional<ScalarType> special =
+                type_special(rules, scalar, key, out)) {
+            if (*special == ScalarType::NONE) {
+                return std::nullopt;
+            }
+            return special;
+        }
         if (type == "number_or_expression") {
             if (value.style == ScalarStyle::PLAIN) {
                 Number number;
@@ -1716,6 +1826,130 @@ private:
             return ScalarType::EXPRESSION;
         }
         return type_string_form(rules, scalar, key, out);
+    }
+
+    // A raw pattern (2.3): 0 to 2^64 - 1, or a negative int64 value. An
+    // integer of the form beyond these is CF-204 (D-107).
+    std::optional<ScalarType> type_raw_pattern(NodeId scalar,
+                                               const std::string& key,
+                                               Outcome& out) {
+        const NodeView value = node(scalar);
+        const IntegerRead read = value.style == ScalarStyle::PLAIN
+                                     ? read_integer(value.text)
+                                     : IntegerRead{};
+        if (read.form == IntegerForm::NOT_INTEGER) {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be a raw pattern");
+            return std::nullopt;
+        }
+        if (read.form == IntegerForm::TOO_LARGE ||
+            (read.value.negative && !as_int64(read.value))) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between " + std::string(INT64_MIN_TEXT) +
+                      " and " + std::string(UINT64_MAX_TEXT));
+            return std::nullopt;
+        }
+        return ScalarType::INTEGER;
+    }
+
+    ScalarType type_number_or_boolean(NodeId scalar, const std::string& key,
+                                      Outcome& out) {
+        const NodeView value = node(scalar);
+        const std::string phrase = "a number or true or false";
+        if (value.style == ScalarStyle::PLAIN) {
+            if (parse_boolean(value.text)) {
+                return ScalarType::BOOLEAN;
+            }
+            Number number;
+            const NumberRead read =
+                read_number(value.text, scalar, key, phrase, out, number);
+            if (read == NumberRead::REFUSED) {
+                return ScalarType::NONE;
+            }
+            if (read == NumberRead::NUMBER) {
+                return type_of(number);
+            }
+        }
+        error(out, CF_WRONG_TYPE, scalar, key + " must be " + phrase);
+        return ScalarType::NONE;
+    }
+
+    ScalarType type_number_or_tag(const SchemaNode& rules, NodeId scalar,
+                                  const std::string& key, Outcome& out) {
+        const NodeView value = node(scalar);
+        if (value.style == ScalarStyle::PLAIN) {
+            Number number;
+            const NumberRead read = read_number(
+                value.text, scalar, key, "a number or a tag name", out, number);
+            if (read == NumberRead::REFUSED) {
+                return ScalarType::NONE;
+            }
+            if (read == NumberRead::NUMBER) {
+                return number_in_range(rules, number, scalar, key, out)
+                           ? type_of(number)
+                           : ScalarType::NONE;
+            }
+        }
+        if (!is_tag_name(value.text)) {
+            error(out, CF_BAD_NAME, scalar,
+                  quote_text(value.text) + " is not a valid tag name");
+            return ScalarType::NONE;
+        }
+        return ScalarType::STRING;
+    }
+
+    ScalarType type_ip_literal_host(NodeId scalar, const std::string& key,
+                                    Outcome& out) {
+        const NodeView value = node(scalar);
+        if (is_ip_address(value.text)) {
+            return ScalarType::STRING;
+        }
+        if (is_host_name(value.text)) {
+            error(out, CF_RESERVED, scalar,
+                  key +
+                      ": a host name is reserved and not available in this "
+                      "version");
+        } else {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be an IP address");
+        }
+        return ScalarType::NONE;
+    }
+
+    // The types that combine two forms, and the raw patterns. Nothing for a
+    // type that is not one of them; NONE, the error added, if the value
+    // does not fit.
+    std::optional<ScalarType> type_special(const SchemaNode& rules,
+                                           NodeId scalar,
+                                           const std::string& key,
+                                           Outcome& out) {
+        const std::string& type = rules.scalar_type;
+        const NodeView value = node(scalar);
+        if (type == "raw_pattern" ||
+            (type == "raw_pattern_or_nan" && value.text != "nan")) {
+            return type_raw_pattern(scalar, key, out)
+                .value_or(ScalarType::NONE);
+        }
+        if (type == "raw_pattern_or_nan") {
+            return ScalarType::STRING;
+        }
+        if (type == "number_or_boolean") {
+            return type_number_or_boolean(scalar, key, out);
+        }
+        if (type == "number_or_tag") {
+            return type_number_or_tag(rules, scalar, key, out);
+        }
+        if (type == "duration_or_off") {
+            if (value.text == "off") {
+                return ScalarType::STRING;
+            }
+            SchemaNode as_duration = rules;
+            as_duration.scalar_type = "duration";
+            return type_with_unit(as_duration, scalar, key, out)
+                .value_or(ScalarType::NONE);
+        }
+        if (type == "ip_literal_host") {
+            return type_ip_literal_host(scalar, key, out);
+        }
+        return std::nullopt;
     }
 
     // Free text, names and the other string forms.

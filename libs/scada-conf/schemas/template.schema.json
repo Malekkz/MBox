@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "template.schema.json",
+  "title": "templates/<name>.yaml (configuration schemas contract, sections 4.1 to 4.9); the protocol's schema adds its keys",
+  "allOf": [
+    {
+      "$ref": "#/$defs/template_keys"
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "template_keys": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "description": {
+          "$ref": "common.schema.json#/$defs/text"
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "document": {
+              "$ref": "common.schema.json#/$defs/text"
+            },
+            "revision": {
+              "$ref": "common.schema.json#/$defs/text"
+            },
+            "file": {
+              "$ref": "common.schema.json#/$defs/text"
+            },
+            "sha256": {
+              "$ref": "common.schema.json#/$defs/text"
+            },
+            "generated_by": {
+              "$ref": "common.schema.json#/$defs/text"
+            },
+            "min_protocol_version": {
+              "$ref": "common.schema.json#/$defs/text"
+            }
+          },
+          "unevaluatedProperties": false
+        },
+        "extends": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "protocol": {
+          "type": "string",
+          "x-scada-type": "protocol_name"
+        },
+        "params": {
+          "type": "object",
+          "x-scada-key-type": "identifier",
+          "unevaluatedProperties": {
+            "$ref": "#/$defs/parameter"
+          }
+        },
+        "defaults": {
+          "$ref": "point.schema.json#/$defs/partial_point"
+        },
+        "enums": {
+          "type": "object",
+          "x-scada-key-type": "identifier",
+          "unevaluatedProperties": {
+            "$ref": "enums.schema.json#/$defs/enumeration"
+          }
+        },
+        "points": {
+          "$ref": "point.schema.json#/$defs/points"
+        },
+        "repeat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repeat"
+          }
+        },
+        "disable": {
+          "$ref": "point.schema.json#/$defs/name_patterns"
+        },
+        "only": {
+          "$ref": "point.schema.json#/$defs/name_patterns"
+        },
+        "bit_order": {
+          "type": "string",
+          "enum": [
+            "lsb0",
+            "msb0"
+          ]
+        },
+        "read": {
+          "type": "object"
+        },
+        "functions": {
+          "type": "array"
+        },
+        "device_time": {
+          "$ref": "point.schema.json#/$defs/device_time"
+        },
+        "keepalive": {
+          "type": "string",
+          "x-scada-type": "duration_or_off",
+          "x-scada-min": "1s",
+          "x-scada-max": "1h"
+        },
+        "idle_timeout": {
+          "type": "string",
+          "x-scada-type": "duration",
+          "x-scada-min": "1ms"
+        },
+        "identify": {
+          "$ref": "#/$defs/identify"
+        },
+        "on_mismatch": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "refuse"
+          ]
+        },
+        "restart_indication": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "point": {
+                "$ref": "point.schema.json#/$defs/point_name"
+              },
+              "rule": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "decreases",
+                      "changes"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "equals": {
+                        "type": [
+                          "number",
+                          "boolean",
+                          "string"
+                        ],
+                        "x-scada-type": "string"
+                      }
+                    },
+                    "required": [
+                      "equals"
+                    ],
+                    "unevaluatedProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "point",
+              "rule"
+            ],
+            "unevaluatedProperties": false
+          }
+        },
+        "health": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "point": {
+                "$ref": "point.schema.json#/$defs/point_name"
+              },
+              "good_when": {
+                "oneOf": [
+                  {
+                    "type": [
+                      "number",
+                      "boolean",
+                      "string"
+                    ],
+                    "x-scada-type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": [
+                        "number",
+                        "boolean",
+                        "string"
+                      ],
+                      "x-scada-type": "string"
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "field": {
+                        "$ref": "point.schema.json#/$defs/pair"
+                      },
+                      "equals": {
+                        "type": [
+                          "number",
+                          "boolean",
+                          "string"
+                        ],
+                        "x-scada-type": "string"
+                      }
+                    },
+                    "required": [
+                      "field",
+                      "equals"
+                    ],
+                    "unevaluatedProperties": false
+                  }
+                ]
+              },
+              "applies_to": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "all"
+                    ]
+                  },
+                  {
+                    "$ref": "point.schema.json#/$defs/name_patterns"
+                  }
+                ]
+              },
+              "comm_fail": {
+                "$ref": "point.schema.json#/$defs/boolean"
+              }
+            },
+            "required": [
+              "point",
+              "good_when",
+              "applies_to"
+            ],
+            "unevaluatedProperties": false
+          }
+        },
+        "symbol": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "session": {
+          "x-scada-reserved": true
+        },
+        "bindings": {
+          "x-scada-reserved": true
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "x-scada-exclusive": [
+        [
+          "disable",
+          "only"
+        ]
+      ]
+    },
+    "parameter": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "int",
+            "number",
+            "bool",
+            "string",
+            "enum",
+            "set"
+          ]
+        },
+        "default": {
+          "oneOf": [
+            {
+              "type": [
+                "number",
+                "boolean",
+                "string"
+              ],
+              "x-scada-type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "x-scada-type": "string"
+              }
+            }
+          ]
+        },
+        "min": {
+          "$ref": "point.schema.json#/$defs/number"
+        },
+        "max": {
+          "$ref": "point.schema.json#/$defs/number"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "x-scada-type": "string"
+          }
+        },
+        "description": {
+          "$ref": "common.schema.json#/$defs/text"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "unevaluatedProperties": false
+    },
+    "for_value": {
+      "oneOf": [
+        {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "x-scada-type": "expression"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "x-scada-type": "expression"
+          }
+        }
+      ]
+    },
+    "repeat": {
+      "type": "object",
+      "properties": {
+        "for": {
+          "type": "object",
+          "x-scada-key-type": "identifier",
+          "unevaluatedProperties": {
+            "$ref": "#/$defs/for_value"
+          }
+        },
+        "when": {
+          "type": "string",
+          "x-scada-type": "expression"
+        },
+        "points": {
+          "$ref": "point.schema.json#/$defs/points"
+        }
+      },
+      "required": [
+        "for",
+        "points"
+      ],
+      "unevaluatedProperties": false
+    },
+    "identity_check": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "object"
+        },
+        "point": {
+          "$ref": "point.schema.json#/$defs/point_name"
+        },
+        "equals": {
+          "type": [
+            "number",
+            "boolean",
+            "string"
+          ],
+          "x-scada-type": "string"
+        },
+        "in": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": [
+              "number",
+              "boolean",
+              "string"
+            ],
+            "x-scada-type": "string"
+          }
+        },
+        "range": {
+          "$ref": "point.schema.json#/$defs/pair"
+        },
+        "pattern": {
+          "type": "string",
+          "x-scada-type": "string"
+        }
+      },
+      "x-scada-exclusive": [
+        [
+          "address",
+          "point"
+        ],
+        [
+          "equals",
+          "in",
+          "range",
+          "pattern"
+        ]
+      ],
+      "unevaluatedProperties": false
+    },
+    "identify": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/identity_check"
+      }
+    }
+  }
+}

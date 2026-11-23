@@ -1993,6 +1993,32 @@ Reason: one place per key, the schema file, with types, ranges and codes beside 
 - Memory (S1): outside a `oneOf` branch every error goes to the stage's diagnostics at once, which keep the first 1,000 and a count; a branch holds at most 1,000, the first in the order of the report (section 1.4), and counts the rest (`Diagnostics::count_unlisted_errors`). A branch also holds a type per scalar it typed; the bound on nested `oneOf` of the next slice is to cover that too.
 Consequences: a new contract type is a new `x-scada-type` name, added to the validator, its known-type table and Annex C together. Templates, channels, tags, outputs, alarms and programs get their schema files in the next slice of #100; until then their files are parsed but not schema-checked.
 
+## D-108: The schema files of templates, channels, protocols, tags, outputs, alarms and programs
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted
+
+Context: the remaining key tables of configuration schemas contract 0.6 (sections 4 to 9, Annexes A and B) become schema files. Stage 3 checks files before expansion (section 1.4), so a point in a template may still be partial, and some rules of the tables can only be checked once a tree is expanded or merged.
+Options: check at stage 3 only what holds before expansion and leave the rest to stage 4 and 5; check more at stage 3 and refuse partial points that expansion would complete.
+Decision: stage 3 checks only what holds before expansion:
+- A protocol's schema composes with the framework's: `<protocol>.schema.json` defines `template` and `channel_file` as an `allOf` of the framework keys (`template_keys`, `channel`, `device`, which do not close their objects) and the protocol's keys, closed by `unevaluatedProperties: false`. A key in neither is CF-201, as Annex C and section 4.1 ask.
+- A point's `address` has the protocol's keys and types, none of them required: `defaults` and an override may give part of an address, and a point without an address after expansion is CF-417 (#103).
+- Point names may hold `{<variable>}` of a `repeat` block (`pv{n}.voltage`); the full name is checked after expansion (CF-212 on a name made by expansion, section 1.4).
+- `defaults` and `overrides` take a point without `name`. `when` is accepted there by the schema, so that #103 gives CF-419, its own code. `invalid_values` in `defaults` may also be a map from raw type to a list (section 4.7).
+- Checked later, not by the schemas, each by its own code:
+  - the bit numbers of `bits` (0 to 63);
+  - the keys of `write.values` against the target's type;
+  - `data_bits: 7` (CF-622), `unit_id` 1 to 247 on RTU, and `max_gap` with `gap_policy: illegal`;
+  - the keys a tag or an output takes per kind;
+  - `duration` on a `pulse` output (CF-720; the key is accepted by the schema for that reason);
+  - `logging` settings without `policy` that lack `mode` or `raw_retention` (CF-802);
+  - the parameters and pins of a block, from the block library.
+- A template whose `protocol` this version does not know is checked as a base template; the unknown protocol is a stage 5 error.
+- Values whose type depends on another key (`alarm_on`, `equals`, `initial`, a parameter's `default`, a profile's parameters) are typed as text here and checked against that key later.
+- CF-517 is given at stage 3 where one point object gives an integer `value_type` and `exponent_from`, a decimal `gain` or `offset`, or a `divide_by` above 1. A `divide_by` written as an expression is checked after expansion.
+Reason: a stage 3 error must be one that no expansion can remove; anything else would refuse a valid template.
+Consequences: the corpus pins each file type's example at stage 3. The expanded-tree rules of slices 6 and 7, and #103, give the remaining codes.
+
 ## D-110: Text of the tree in diagnostics is escaped and capped
 Date: 2026-11-23
 Phase / issue: 2, #100 (P2-03)

@@ -63,6 +63,16 @@ constexpr std::string_view EVERY_KEYWORD = R"({
     "tier": { "type": "string", "x-scada-type": "tier_name" },
     "proto": { "type": "string", "x-scada-type": "protocol_name" },
     "point": { "type": "string", "x-scada-type": "point_name" },
+    "tmpl": { "type": "string", "x-scada-type": "point_name_template" },
+    "pat": { "type": "string", "x-scada-type": "name_pattern" },
+    "dev": { "type": "string", "x-scada-type": "dev_path" },
+    "res": { "type": "string", "x-scada-type": "resolution" },
+    "raw": { "type": ["integer", "string"], "x-scada-type": "raw_pattern" },
+    "rawn": { "type": ["integer", "string"], "x-scada-type": "raw_pattern_or_nan" },
+    "nb": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" },
+    "nt": { "type": ["number", "string"], "x-scada-type": "number_or_tag", "minimum": -10 },
+    "ka": { "type": "string", "x-scada-type": "duration_or_off", "x-scada-min": "1s" },
+    "ipl": { "type": "string", "x-scada-type": "ip_literal_host" },
     "mode": { "type": "string", "enum": ["auto", "manual", "off"], "x-scada-reserved-values": ["off"] },
     "one": { "const": 1, "type": "integer", "x-scada-type": "integer" },
     "old": { "x-scada-reserved": true },
@@ -145,7 +155,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     for (const std::string_view schema :
          {"system.schema.json", "areas.schema.json", "enums.schema.json",
-          "logging.schema.json", "tasks.schema.json"}) {
+          "logging.schema.json", "tasks.schema.json", "template.schema.json",
+          "modbus.schema.json#/$defs/template",
+          "modbus.schema.json#/$defs/channel_file",
+          "io.schema.json#/$defs/template",
+          "io.schema.json#/$defs/channel_file", "tags.schema.json",
+          "outputs.schema.json", "alarms.schema.json", "program.schema.json"}) {
         check_one(scada::conf::SchemaSet::builtin(), schema, text, lines);
     }
     check_one(every_keyword(), "fuzz.schema.json", text, lines);

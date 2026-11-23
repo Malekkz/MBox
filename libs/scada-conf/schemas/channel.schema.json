@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "channel.schema.json",
+  "title": "The framework keys of a channel and a device instance (configuration schemas contract, section 4.6); the protocol's schema adds its keys and closes the objects",
+  "$defs": {
+    "duration_0s_60s": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "60s" },
+    "channel": {
+      "type": "object",
+      "properties": {
+        "name": { "$ref": "common.schema.json#/$defs/identifier" },
+        "enabled": { "$ref": "point.schema.json#/$defs/boolean" },
+        "role": { "type": "string", "enum": ["connect", "listen"], "x-scada-reserved-values": ["listen"] },
+        "poll_groups": {
+          "type": "object",
+          "x-scada-key-type": "poll_group_name",
+          "unevaluatedProperties": {
+            "type": "object",
+            "properties": {
+              "period": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "1d" },
+              "priority": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 16 }
+            },
+            "required": ["period"],
+            "unevaluatedProperties": false
+          }
+        },
+        "min_request_interval": { "$ref": "#/$defs/duration_0s_60s" },
+        "min_write_interval": { "$ref": "#/$defs/duration_0s_60s" },
+        "reconnect": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "string", "x-scada-type": "duration", "x-scada-min": "100ms", "x-scada-max": "10m" },
+            "max": { "type": "string", "x-scada-type": "duration", "x-scada-min": "100ms", "x-scada-max": "10m" }
+          },
+          "unevaluatedProperties": false
+        },
+        "max_pending_writes": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 256 },
+        "lost_after_timeouts": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 10 },
+        "change_ring_capacity": { "type": "integer", "x-scada-type": "power_of_two", "minimum": 1024, "maximum": 1048576 },
+        "process_group": { "x-scada-reserved": true }
+      },
+      "required": ["name"]
+    },
+    "device": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "x-scada-type": "device_name" },
+        "template": { "$ref": "common.schema.json#/$defs/identifier" },
+        "params": {
+          "type": "object",
+          "x-scada-key-type": "identifier",
+          "unevaluatedProperties": {
+            "oneOf": [
+              { "type": ["number", "boolean", "string"], "x-scada-type": "string" },
+              { "type": "array", "items": { "type": "string", "x-scada-type": "string" } }
+            ]
+          }
+        },
+        "defaults": { "$ref": "point.schema.json#/$defs/partial_point" },
+        "overrides": {
+          "type": "object",
+          "x-scada-key-type": "point_name_template",
+          "unevaluatedProperties": { "$ref": "point.schema.json#/$defs/partial_point" }
+        },
+        "disable": { "$ref": "point.schema.json#/$defs/name_patterns" },
+        "only": { "$ref": "point.schema.json#/$defs/name_patterns" },
+        "points": { "$ref": "point.schema.json#/$defs/points" },
+        "enabled": { "$ref": "point.schema.json#/$defs/boolean" },
+        "timeout": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "60s" },
+        "write_timeout": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "60s" },
+        "write_timeout_per_value": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "10s" },
+        "retries": { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 10 },
+        "busy_retries": { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 10 },
+        "demote_after": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 100 },
+        "backoff": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "1h" },
+        "backoff_max": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "1h" },
+        "startup_grace": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "10m" },
+        "min_request_interval": { "$ref": "#/$defs/duration_0s_60s" },
+        "min_write_interval": { "$ref": "#/$defs/duration_0s_60s" },
+        "max_values_per_request": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 65535 },
+        "keepalive": { "type": "string", "x-scada-type": "duration_or_off", "x-scada-min": "1s", "x-scada-max": "1h" },
+        "idle_timeout": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "acquisition": { "type": "string", "enum": ["poll", "report"], "x-scada-reserved-values": ["report"] },
+        "device_time": { "$ref": "point.schema.json#/$defs/device_time" },
+        "time_sync": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["none", "on_connect", "periodic"], "x-scada-reserved-values": ["on_connect", "periodic"] },
+            "period": { "x-scada-reserved": true }
+          },
+          "unevaluatedProperties": false
+        },
+        "on_mismatch": { "type": "string", "enum": ["warn", "refuse"] },
+        "identify": { "$ref": "template.schema.json#/$defs/identify" }
+      },
+      "required": ["name"],
+      "x-scada-exclusive": [["disable", "only"]]
+    }
+  }
+}

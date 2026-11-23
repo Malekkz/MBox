@@ -1,0 +1,11 @@
+i: 1
+tmpl: pv{N}.v
+pat: "*{"
+dev: /dev/../x
+res: 0ns
+raw: 18446744073709551616
+rawn: -9223372036854775809
+nb: yes
+nt: -11
+ka: 0s
+ipl: host.example

@@ -1,0 +1,643 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "modbus.schema.json",
+  "title": "The Modbus protocol schema (configuration schemas contract, Annex A): its channel, device, template and address keys",
+  "$defs": {
+    "table": {
+      "type": "string",
+      "enum": [
+        "coil",
+        "discrete",
+        "input",
+        "holding"
+      ]
+    },
+    "raw_type": {
+      "type": "string",
+      "enum": [
+        "bool",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "float32",
+        "float64",
+        "string",
+        "bytes",
+        "mod10k",
+        "epoch",
+        "datetime"
+      ]
+    },
+    "unit_id": {
+      "type": "integer",
+      "x-scada-type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "register": {
+      "$ref": "point.schema.json#/$defs/number_or_expression"
+    },
+    "raw": {
+      "type": [
+        "integer",
+        "string"
+      ],
+      "x-scada-type": "raw_pattern"
+    },
+    "coil_or_register": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/$defs/table"
+        },
+        "register": {
+          "$ref": "#/$defs/register"
+        },
+        "value": {
+          "$ref": "#/$defs/raw"
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "write": {
+      "description": "Annex A.5",
+      "type": "object",
+      "properties": {
+        "function": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "x-scada-type": "string",
+          "enum": [
+            "5",
+            "6",
+            "15",
+            "16",
+            "auto"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/raw"
+        },
+        "values": {
+          "type": "object",
+          "x-scada-key-type": "string",
+          "unevaluatedProperties": {
+            "$ref": "#/$defs/raw"
+          }
+        },
+        "on": {
+          "$ref": "#/$defs/coil_or_register"
+        },
+        "off": {
+          "$ref": "#/$defs/coil_or_register"
+        },
+        "mask": {
+          "$ref": "#/$defs/raw"
+        },
+        "type": {
+          "$ref": "#/$defs/raw_type"
+        },
+        "quantity": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 123
+        },
+        "replace": {
+          "$ref": "point.schema.json#/$defs/replace"
+        }
+      },
+      "x-scada-exclusive": [
+        [
+          "value",
+          "values",
+          "on",
+          "mask"
+        ],
+        [
+          "value",
+          "values",
+          "off",
+          "mask"
+        ]
+      ],
+      "unevaluatedProperties": false
+    },
+    "address_keys": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/$defs/table"
+        },
+        "register": {
+          "$ref": "#/$defs/register"
+        },
+        "type": {
+          "$ref": "#/$defs/raw_type"
+        },
+        "byte_order": {
+          "type": "string",
+          "enum": [
+            "big",
+            "little"
+          ]
+        },
+        "word_order": {
+          "type": "string",
+          "enum": [
+            "big",
+            "little"
+          ]
+        },
+        "bit": {
+          "$ref": "point.schema.json#/$defs/number_or_expression"
+        },
+        "field": {
+          "$ref": "point.schema.json#/$defs/pair"
+        },
+        "byte": {
+          "type": "string",
+          "enum": [
+            "high",
+            "low"
+          ]
+        },
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "register": {
+                "$ref": "#/$defs/register"
+              }
+            },
+            "required": [
+              "register"
+            ],
+            "unevaluatedProperties": false
+          }
+        },
+        "length": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "ascii",
+            "utf8",
+            "latin1"
+          ]
+        },
+        "padding": {
+          "type": "string",
+          "enum": [
+            "nul",
+            "space"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 2,
+          "maximum": 4
+        },
+        "width": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "enum": [
+            "32",
+            "64"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "x-scada-type": "resolution"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "year",
+              "year2",
+              "month",
+              "day",
+              "hour",
+              "minute",
+              "second",
+              "ms"
+            ]
+          }
+        },
+        "device_time": {
+          "$ref": "point.schema.json#/$defs/device_time"
+        },
+        "unit_id": {
+          "$ref": "#/$defs/unit_id"
+        },
+        "write": {
+          "$ref": "#/$defs/write"
+        },
+        "replace": {
+          "$ref": "point.schema.json#/$defs/replace"
+        }
+      },
+      "x-scada-exclusive": [
+        [
+          "register",
+          "parts"
+        ]
+      ]
+    },
+    "sub_address": {
+      "description": "One bit or coil of a double point (Annex A.2)",
+      "allOf": [
+        {
+          "$ref": "#/$defs/address_keys"
+        }
+      ],
+      "x-scada-exclusive": [
+        [
+          "bit",
+          "field"
+        ]
+      ],
+      "unevaluatedProperties": false
+    },
+    "address": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/address_keys"
+        }
+      ],
+      "properties": {
+        "on": {
+          "$ref": "#/$defs/sub_address"
+        },
+        "off": {
+          "$ref": "#/$defs/sub_address"
+        },
+        "fault": {
+          "$ref": "#/$defs/sub_address"
+        }
+      },
+      "x-scada-exclusive": [
+        [
+          "bit",
+          "field",
+          "on"
+        ],
+        [
+          "bit",
+          "field",
+          "off"
+        ],
+        [
+          "bit",
+          "field",
+          "fault"
+        ]
+      ],
+      "unevaluatedProperties": false
+    },
+    "read": {
+      "description": "Annex A.4",
+      "type": "object",
+      "properties": {
+        "max_registers": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 125
+        },
+        "max_bits": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "max_gap": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 0,
+          "maximum": 124
+        },
+        "gap_policy": {
+          "type": "string",
+          "enum": [
+            "illegal",
+            "reads_zero",
+            "reads_sentinel"
+          ]
+        },
+        "max_write_registers": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 123
+        },
+        "input_as_holding": {
+          "$ref": "point.schema.json#/$defs/boolean"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "side_effect",
+                  "exclusive",
+                  "atomic",
+                  "no_read"
+                ]
+              },
+              "table": {
+                "$ref": "#/$defs/table"
+              },
+              "first": {
+                "$ref": "#/$defs/register"
+              },
+              "last": {
+                "$ref": "#/$defs/register"
+              },
+              "unit_id": {
+                "$ref": "#/$defs/unit_id"
+              }
+            },
+            "required": [
+              "kind",
+              "table",
+              "first",
+              "last"
+            ],
+            "unevaluatedProperties": false
+          }
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "functions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "integer",
+        "x-scada-type": "integer",
+        "enum": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "15",
+          "16",
+          "23"
+        ],
+        "x-scada-reserved-values": [
+          "23"
+        ]
+      }
+    },
+    "point": {
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/address"
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/point"
+      }
+    },
+    "partial_point": {
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/address"
+        }
+      }
+    },
+    "addresses_of_points": {
+      "description": "Where a point, and so an address, may stand in a template or a device",
+      "properties": {
+        "points": {
+          "$ref": "#/$defs/points"
+        },
+        "defaults": {
+          "$ref": "#/$defs/partial_point"
+        },
+        "overrides": {
+          "type": "object",
+          "unevaluatedProperties": {
+            "$ref": "#/$defs/partial_point"
+          }
+        },
+        "repeat": {
+          "type": "array",
+          "items": {
+            "properties": {
+              "points": {
+                "$ref": "#/$defs/points"
+              }
+            }
+          }
+        },
+        "identify": {
+          "type": "array",
+          "items": {
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/address"
+              }
+            }
+          }
+        }
+      }
+    },
+    "template": {
+      "allOf": [
+        {
+          "$ref": "template.schema.json#/$defs/template_keys"
+        },
+        {
+          "$ref": "#/$defs/addresses_of_points"
+        }
+      ],
+      "properties": {
+        "read": {
+          "$ref": "#/$defs/read"
+        },
+        "functions": {
+          "$ref": "#/$defs/functions"
+        },
+        "address_base": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "enum": [
+            "0",
+            "1"
+          ]
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "channel": {
+      "allOf": [
+        {
+          "$ref": "channel.schema.json#/$defs/channel"
+        }
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "rtu",
+            "tcp",
+            "rtu_over_tcp",
+            "ascii",
+            "udp"
+          ],
+          "x-scada-reserved-values": [
+            "ascii",
+            "udp"
+          ]
+        },
+        "device": {
+          "type": "string",
+          "x-scada-type": "dev_path"
+        },
+        "baud": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 300,
+          "maximum": 4000000
+        },
+        "data_bits": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "enum": [
+            "7",
+            "8"
+          ]
+        },
+        "parity": {
+          "type": "string",
+          "enum": [
+            "none",
+            "even",
+            "odd"
+          ]
+        },
+        "stop_bits": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "enum": [
+            "1",
+            "2"
+          ]
+        },
+        "turnaround": {
+          "type": "string",
+          "x-scada-type": "duration",
+          "x-scada-min": "0ms",
+          "x-scada-max": "1s"
+        },
+        "rs485": {
+          "x-scada-reserved": true
+        },
+        "host": {
+          "type": "string",
+          "x-scada-type": "ip_literal_host"
+        },
+        "port": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "connect_timeout": {
+          "type": "string",
+          "x-scada-type": "duration",
+          "x-scada-min": "100ms",
+          "x-scada-max": "60s"
+        },
+        "local_address": {
+          "x-scada-reserved": true
+        },
+        "tls": {
+          "x-scada-reserved": true
+        },
+        "connections": {
+          "x-scada-reserved": true
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "unevaluatedProperties": false
+    },
+    "device": {
+      "allOf": [
+        {
+          "$ref": "channel.schema.json#/$defs/device"
+        },
+        {
+          "$ref": "#/$defs/addresses_of_points"
+        }
+      ],
+      "properties": {
+        "unit_id": {
+          "$ref": "#/$defs/unit_id"
+        },
+        "functions": {
+          "$ref": "#/$defs/functions"
+        },
+        "address_base": {
+          "type": "integer",
+          "x-scada-type": "integer",
+          "enum": [
+            "0",
+            "1"
+          ]
+        },
+        "read": {
+          "$ref": "#/$defs/read"
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "channel_file": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/channel"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/device"
+          }
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

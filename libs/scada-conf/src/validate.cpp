@@ -25,6 +25,7 @@ constexpr std::uint16_t CF_STRUCTURED_TEXT = 920;
 constexpr std::uint16_t CF_FILE_NAME = 102;
 constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_FORMAT = 211;
+constexpr std::uint16_t CF_INTEGER_SCALING = 517;
 
 // The tree format this version reads (contract section 11).
 constexpr std::uint64_t TREE_FORMAT = 1;
@@ -37,10 +38,13 @@ struct ParsedFile {
     ScalarTypes types;
 };
 
-// The schema file of a file type, or nothing if it has none yet. The other
-// file types get their schemas in the next slice of #100.
-std::optional<std::string_view> schema_of(FileType type) {
-    switch (type) {
+// The schema of a file: by its type, and for a channel by its protocol
+// directory, for a template by its `protocol` key (section 4.1). A template
+// of a protocol this version does not know is checked as a base template;
+// the unknown protocol is a stage 5 error. Empty for a file without one.
+std::string schema_of(const ParsedFile& file) {
+    const PathClass& path_class = file.source->path_class;
+    switch (path_class.type) {
         case FileType::SYSTEM:
             return "system.schema.json";
         case FileType::AREAS:
@@ -51,9 +55,31 @@ std::optional<std::string_view> schema_of(FileType type) {
             return "logging.schema.json";
         case FileType::TASKS:
             return "tasks.schema.json";
-        default:
-            return std::nullopt;
+        case FileType::TAGS:
+            return "tags.schema.json";
+        case FileType::OUTPUTS:
+            return "outputs.schema.json";
+        case FileType::ALARMS:
+            return "alarms.schema.json";
+        case FileType::PROGRAM:
+            return "program.schema.json";
+        case FileType::CHANNEL:
+            return path_class.protocol + ".schema.json#/$defs/channel_file";
+        case FileType::TEMPLATE:
+            break;
+        case FileType::STRUCTURED_TEXT:
+            return {};
     }
+    const Document& document = file.document;
+    const NodeId root = document.root();
+    if (const std::optional<NodeId> protocol = document.find(root, "protocol");
+        protocol && document.kind(*protocol) == NodeKind::SCALAR) {
+        const std::string name(document.text(*protocol));
+        if (is_known_protocol(name)) {
+            return name + ".schema.json#/$defs/template";
+        }
+    }
+    return "template.schema.json";
 }
 
 // Rules of system.yaml that a schema cannot state (section 3).
@@ -132,19 +158,141 @@ void check_name_key(const ParsedFile& file, Diagnostics& diagnostics) {
     }
 }
 
+// The map `key` of `map`, if `map` is a map that has it and it is a map.
+std::optional<NodeId> map_entry(const Document& document, NodeId map,
+                                std::string_view key) {
+    const std::optional<NodeId> value = document.find(map, key);
+    if (!value || document.kind(*value) != NodeKind::MAP) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// CF-517 (contract 4.7, 0.6) where a point object gives both keys: an
+// integer value type with a scaling that is not integer. A `divide_by`
+// written as an expression is checked after expansion (#103).
+void check_integer_scaling(const ParsedFile& file, NodeId point,
+                           const std::string& name, Diagnostics& diagnostics) {
+    const Document& document = file.document;
+    const std::optional<NodeId> value_type = document.find(point, "value_type");
+    if (!value_type) {
+        return;
+    }
+    const std::string type(document.text(*value_type));
+    if (type != "int64" && type != "uint64") {
+        return;
+    }
+    const auto refuse = [&](NodeId where) {
+        diagnostics.error(CF_INTEGER_SCALING, document.location(where),
+                          name + ": value_type " + type +
+                              " needs an integer scaling; use float64");
+    };
+    if (const std::optional<NodeId> exponent =
+            document.find(point, "exponent_from")) {
+        refuse(*exponent);
+    }
+    const std::optional<NodeId> scale = map_entry(document, point, "scale");
+    if (!scale) {
+        return;
+    }
+    for (const std::string_view key : {"gain", "offset"}) {
+        const std::optional<NodeId> factor = document.find(*scale, key);
+        if (factor && file.types.of(*factor) == ScalarType::DECIMAL) {
+            refuse(*factor);
+        }
+    }
+    if (const std::optional<NodeId> divide =
+            document.find(*scale, "divide_by")) {
+        const ScalarType divisor = file.types.of(*divide);
+        const std::optional<Integer> number =
+            parse_integer(document.text(*divide));
+        const bool above_one = divisor == ScalarType::INTEGER && number &&
+                               !number->negative && number->magnitude > 1;
+        if (above_one || divisor == ScalarType::DECIMAL) {
+            refuse(*divide);
+        }
+    }
+}
+
+// The name a message gives a point object: its `name`, else "point".
+std::string point_label(const Document& document, NodeId point) {
+    const std::optional<NodeId> name = document.find(point, "name");
+    if (name && document.kind(*name) == NodeKind::SCALAR) {
+        return quote_text(document.text(*name));
+    }
+    return "point";
+}
+
+// The point objects of a template or channel file: points (also of repeat
+// blocks and devices), defaults and overrides.
+void check_points(const ParsedFile& file, NodeId owner,
+                  Diagnostics& diagnostics) {
+    const Document& document = file.document;
+    const auto each_point = [&](NodeId list) {
+        for (const NodeId point : document.items(list)) {
+            if (document.kind(point) == NodeKind::MAP) {
+                check_integer_scaling(file, point, point_label(document, point),
+                                      diagnostics);
+            }
+        }
+    };
+    if (const std::optional<NodeId> points = document.find(owner, "points")) {
+        each_point(*points);
+    }
+    if (const std::optional<NodeId> repeat = document.find(owner, "repeat")) {
+        for (const NodeId block : document.items(*repeat)) {
+            if (const std::optional<NodeId> points =
+                    document.find(block, "points")) {
+                each_point(*points);
+            }
+        }
+    }
+    if (const std::optional<NodeId> defaults =
+            map_entry(document, owner, "defaults")) {
+        check_integer_scaling(file, *defaults, "defaults", diagnostics);
+    }
+    if (const std::optional<NodeId> overrides =
+            map_entry(document, owner, "overrides")) {
+        for (const Entry& entry : document.entries(*overrides)) {
+            if (document.kind(entry.value) == NodeKind::MAP) {
+                check_integer_scaling(file, entry.value,
+                                      quote_text(document.text(entry.key)),
+                                      diagnostics);
+            }
+        }
+    }
+}
+
+void check_point_rules(const ParsedFile& file, Diagnostics& diagnostics) {
+    const Document& document = file.document;
+    const NodeId root = document.root();
+    if (file.source->path_class.type == FileType::TEMPLATE) {
+        check_points(file, root, diagnostics);
+        return;
+    }
+    if (file.source->path_class.type != FileType::CHANNEL) {
+        return;
+    }
+    if (const std::optional<NodeId> devices = document.find(root, "devices")) {
+        for (const NodeId device : document.items(*devices)) {
+            check_points(file, device, diagnostics);
+        }
+    }
+}
+
 // Stage 3 for one file.
 void check_schema(ParsedFile& file, Diagnostics& diagnostics) {
     check_name_key(file, diagnostics);
-    const std::optional<std::string_view> schema =
-        schema_of(file.source->path_class.type);
-    if (!schema) {
+    const std::string schema = schema_of(file);
+    if (schema.empty()) {
         return;
     }
-    SchemaSet::builtin().validate(file.document, file.types, *schema,
+    SchemaSet::builtin().validate(file.document, file.types, schema,
                                   file.source->path, diagnostics);
     if (file.source->path_class.type == FileType::SYSTEM) {
         check_system(file.document, file.types, diagnostics);
     }
+    check_point_rules(file, diagnostics);
 }
 
 }  // namespace

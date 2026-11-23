@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "program.schema.json",
+  "title": "control/<name>.yaml: function block programs (configuration schemas contract, section 9.2)",
+  "type": "object",
+  "properties": {
+    "program": { "$ref": "common.schema.json#/$defs/identifier" },
+    "task": { "$ref": "common.schema.json#/$defs/identifier" },
+    "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } }
+  },
+  "required": ["program", "blocks"],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "source": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean"], "x-scada-type": "string" },
+        {
+          "type": "object",
+          "properties": {
+            "tag": { "$ref": "common.schema.json#/$defs/tag_name" },
+            "max_age": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+          },
+          "required": ["tag", "max_age"],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": { "type": "string", "x-scada-type": "string" },
+            "prev": { "type": "boolean", "x-scada-type": "boolean", "enum": ["true"] }
+          },
+          "required": ["from", "prev"],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "block": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/identifier" },
+        "type": { "$ref": "common.schema.json#/$defs/identifier" },
+        "in": { "type": "object", "x-scada-key-type": "identifier", "unevaluatedProperties": { "$ref": "#/$defs/source" } },
+        "params": { "type": "object", "x-scada-key-type": "identifier", "unevaluatedProperties": {} },
+        "tunable": { "$ref": "common.schema.json#/$defs/identifier_list" },
+        "on_bad_input": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["hold", "safe_value", "propagate"] },
+            "then_safe_after": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s" },
+            "safe_value": { "$ref": "point.schema.json#/$defs/number" }
+          },
+          "required": ["action"],
+          "unevaluatedProperties": false
+        },
+        "out": { "type": "object", "x-scada-key-type": "identifier", "unevaluatedProperties": { "$ref": "common.schema.json#/$defs/tag_name" } },
+        "output": { "$ref": "common.schema.json#/$defs/tag_name" }
+      },
+      "required": ["id", "type"],
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -36,11 +36,19 @@ built in slices; this README lists what each part does now.
   `time.sync.servers` of section 3. Stage 3 checks every file that parsed,
   also when another did not.
 
-Schemas so far: `system`, `areas`, `enums`, `logging`, `tasks` (with the
-shared `common`). Templates, channels with their protocols, tags, outputs,
-alarms and programs get theirs in the next slice of #100; until then their
-files are parsed but not schema-checked. The cross-file rules (stage 5)
-follow after that.
+Every file type has its schema: `system`, `areas`, `enums`, `logging`,
+`tasks`, `tags`, `outputs`, `alarms`, `program`, and for templates and
+channels the framework keys (`template`, `channel`) composed with their
+protocol's schema (`modbus`, Annex A; `io`, Annex B), with the shared
+`common` and `point` definitions. A channel file is checked against the
+schema of its protocol directory, a template against that of its
+`protocol` key. Stage 3 also gives CF-517 where one point object gives an
+integer `value_type` and a scaling that is not integer.
+
+Not in phase 2: structured text is not parsed, and the block library
+declares no block type until phase 6, so a tree with control programs does
+not validate before phase 6. The cross-file rules (stage 5) follow in later
+slices of #100.
 
 ## The YAML subset parser
 
