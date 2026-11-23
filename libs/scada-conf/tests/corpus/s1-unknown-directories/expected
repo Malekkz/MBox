@@ -1,0 +1,5 @@
+# A protocol directory other than modbus and io, and any subdirectory where
+# section 1 allows none: CF-101 on the directory.
+drivers/bacnet:1:1: CF-101
+drivers/modbus/old:1:1: CF-101
+templates/vendor:1:1: CF-101

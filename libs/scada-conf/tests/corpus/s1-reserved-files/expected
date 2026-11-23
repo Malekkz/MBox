@@ -1,0 +1,7 @@
+# Reserved files and directories of section 1 are CF-101 in phase 2; nothing
+# below a refused directory is looked at.
+drivers/link:1:1: CF-101
+link.yaml:1:1: CF-101
+notifications.yaml:1:1: CF-101
+screens:1:1: CF-101
+security.yaml:1:1: CF-101
