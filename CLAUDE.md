@@ -86,7 +86,7 @@ real-time functions (`read`, `read_many`, `write`, `post_request`) must not:
 
 - allocate or free memory,
 - block, sleep, or take a lock that a non-real-time thread can hold,
-- make system calls, log, or do file or network I/O.
+- make system calls, log, or do file or network I/O. Two exceptions, each outside `SCADA_RT` functions and each with a stated time bound: the I/O scan's exchange with its hardware (the HAL's `read_inputs` and `write_outputs`, driver interface contract 2.5 and 13.3), and one `scada_tag_notify` per cycle (reference 5.3).
 
 Mark such functions with the `SCADA_RT` annotation so the checks can find them.
 
