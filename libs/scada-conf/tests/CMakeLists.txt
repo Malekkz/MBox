@@ -2,6 +2,7 @@ scada_add_test(scada-conf-unit-test KIND unit
   SOURCES
     corpus_test.cpp
     diagnostic_test.cpp
+    expression_test.cpp
     names_test.cpp
     node_test.cpp
     path_class_test.cpp

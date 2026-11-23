@@ -2028,6 +2028,27 @@ Decision: stage 3 checks only what holds before expansion and merging (the lead'
 Reason: a stage 3 error must be one that no expansion or merge can remove, and every refusal at stage 3 that the contract allows must happen there, because section 1.4 gives the CF-2xx codes to stage 3 only.
 Consequences: points of the contract that this decision reads one way until the next revision are in #136 (C-1 to C-8, C-11 to C-14). The corpus has a valid tree and a refusal case for templates, channels, tags, outputs, alarms and programs, and six device trees (`s3-valid-*`). The expanded-tree rules of slices 6 and 7, and #103, give the remaining codes.
 
+## D-109: The expression parser, and what stage 3 checks of an expression
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted
+
+Context: configuration schemas contract 5.6 gives the grammar (D-78) and 1.3 a limit of 4,096 bytes and a depth of 32 for an expression. Stage 3 checks expression strings "as text" (1.4). The names and types of an expression need the expanded tree.
+Options: check expressions only in stage 5; check the syntax in stage 3 and the names and types in stage 5.
+Decision:
+- Stage 3 parses every expression and gives its syntax codes: CF-520, CF-526, CF-528, and CF-529, because the function table is fixed.
+- The key decides the variant of the grammar:
+  - run-time for `expr`, `suppress_when` and an interlock's `condition`;
+  - configuration (strings, `IN`, ranges) for `when` and for the expression form of a number (addresses, scaling);
+  - the `for_value` form for a `repeat` range.
+  This takes two new `x-scada-type` names, `config_expression` and `for_value`.
+- Names and types (CF-521 to CF-525, CF-527) are checked in stage 5, against the tags of the expanded tree.
+- The error is located at the scalar that holds the expression. CF-520's message gives the column within the expression's text, as the contract's message has it, counting the bytes of the text after the YAML unquoting.
+- The depth that CF-526 limits is the nesting of the parser: parentheses, calls, a unary operator's operand and the right side of `**`. A flat chain such as `a + b + c` does not deepen it, so 4,096 bytes of a flat chain are accepted, and every recursion of the parser is bounded by 32.
+Reason: a syntax error is known from the text alone and belongs to the file's line. Types need the tags, which only the expanded tree has.
+- Messages quote the expression's text with `quote_text` and reach the report through `Diagnostics::add` (D-110), like every other message of stage 3. The size limit is checked before the text is lexed, and the depth before each descent, so neither costs more than the work it bounds.
+Consequences: the parser is a fuzz target with the cases of conformance test 11 as its seeds, and an oracle: the grammar written a second time in the fuzz target, by precedence climbing over a table of the binary levels, which must agree with the parser on whether a text is accepted and on a refusal's code and column (the lead's review of #133). Stage 5 (slice 6 of #100) adds the type checker over the same tree.
+
 ## D-110: Text of the tree in diagnostics is escaped and capped
 Date: 2026-11-23
 Phase / issue: 2, #100 (P2-03)

@@ -1,0 +1,3 @@
+alarms:
+  - { name: site.x, type: expression, expr: "foo(1)", priority: high }
+  - { tag: site.ok, type: high, limit: 1, priority: high, suppress_when: "NOT NOT a" }

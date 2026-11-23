@@ -1,0 +1,16 @@
+template: meter_e
+protocol: modbus
+params:
+  max: { type: int, min: 1, max: 32, default: 8 }
+  options: { type: set, values: [meter, brake] }
+points:
+  - name: power
+    when: "'meter' IN options AND max >= 2"
+    address: { table: holding, register: "100 + 2 * (max - 1)", type: int32 }
+    scale: { gain: "max / 1000", offset: "-max" }
+repeat:
+  - for: { n: "1..max", k: [1, 2, "5..8"] }
+    when: "n IN 1..max - 1"
+    points:
+      - name: "x{n}.y{k}"
+        address: { table: holding, register: "if(n <= 4, 1000 + n, 2000 + k)", type: int16 }
