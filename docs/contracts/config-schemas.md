@@ -681,7 +681,7 @@ Framework keys of a channel (the protocol's keys are in its schema):
 | `min_write_interval` | duration, `0s` to `60s` | `0s` | Least time between two writes on the channel (a gateway that limits writes for all its devices); a device's own interval applies as well |
 | `reconnect` | `{ min, max }` durations, `100ms` to `10m` | `{ min: 1s, max: 30s }` | Reconnect back-off after a connection failure, doubling from `min` to `max`. It starts again from `min` after the first valid answer, not after a connect |
 | `max_pending_writes` | 1 to 256 | 16 | Write requests the channel holds in its own order queue; one more is answered `BUSY` (driver interface contract) |
-| `lost_after_timeouts` | 1 to 10 | 3 | `tcp` channels only: when **read** requests time out, the connection counts as lost only when at least this many consecutive timed-out requests (each counted once, after its retries) come from every device of the channel that is not demoted, at least two distinct devices when more than one is not demoted. Any valid answer, an exception answer included, resets the count; one dead device behind a gateway is demoted alone and never closes the connection. A **write** time-out closes the connection at once, abortively, whatever this key says; the other devices reconnect at once, keep their values (STALE only by `max_age`) and get COMM_FAIL only if the reconnect fails. On `rtu_over_tcp` a read time-out never closes the connection (the quiet-time rule applies). The behaviour is the driver interface contract's (TCP connections). Open: needs the product owner's ruling (R-15 and R-17 of the driver interface contract) |
+| `lost_after_timeouts` | 1 to 10 | 3 | `tcp` channels only: when **read** requests time out, the connection counts as lost only when at least this many consecutive timed-out requests (each counted once, after its retries) come from every device of the channel that is not demoted, at least two distinct devices when more than one is not demoted. Any valid answer, an exception answer included, resets the count; one dead device behind a gateway is demoted alone and never closes the connection. A **write** time-out, a read time-out on a `side_effect` range (`tcp`), or a frame the kernel does not take whole, closes the connection at once, abortively, whatever this key says; the driver reconnects at once, and when that succeeds within one request deadline the other devices keep their values (STALE only by `max_age`), states and identity, with no COMM_FAIL. On `rtu_over_tcp` a read time-out never closes the connection (the quiet-time rule applies). The behaviour is the driver interface contract's (TCP connections). Open: needs the product owner's ruling (R-15 and R-17 of the driver interface contract) |
 | `change_ring_capacity` | power of two, 1,024 to 1,048,576 | computed (section 12.3) | Override of the computed ring size of the channel's owner, for channels whose changes come in bursts. At least twice the owner's tags (CF-1003) |
 | `process_group` | reserved | | Several driver processes for one protocol (open: needs the product owner's ruling (O-3)) |
 
@@ -819,7 +819,7 @@ matches no invalid marker is written BAD with OUT_OF_RANGE, and counted.
   count toward demotion. `keep_last` keeps the last valid value with
   UNCERTAIN and STALE, not SUBSTITUTED: it is a value that was not
   refreshed. Once `max_age` has passed since that value was read, the tag is
-  BAD with STALE. `keep_last` needs `max_age` on the point (CF-623).
+  BAD with STALE. `keep_last` needs `max_age` on the point (CF-640).
   `substitute` writes the value with UNCERTAIN and SUBSTITUTED. SUBSTITUTED
   here means "substituted by configuration"; the HMI must not show it as
   "entered by an operator" (tag database contract 6 defines the flag for a
@@ -1466,9 +1466,10 @@ Rules (each has its code in section 10):
 - A `trigger`, `pulse` or `on_only` output has no off value (CF-707); a
   request of `false` to it is refused (`INVALID_VALUE`), never sent as
   nothing.
-- A switching output (`single`, `double`, `pulse`, `step`) on a protocol
-  driver whose `on_control_loss` or `on_shutdown` is `hold`, given or by
-  default, is CW-721: it keeps its state when `scada-control` stops or the
+- A switching output with a safe action (`single`, `double`) on a protocol
+  driver whose `on_control_loss` and `on_shutdown` are both `hold`, given or
+  by default, is CW-721 (`step`, `pulse` and `trigger` must hold, CF-719, so
+  they are not warned): it keeps its state when `scada-control` stops or the
   unit shuts down. The default follows reference 14.4; the alternative, a
   `safe` default for remote switching outputs, is the product owner's
   ruling (O-12).
@@ -1888,7 +1889,7 @@ runtime diagnostics only.
 | CF-620 | Two channels on one serial device path | `channels {a} and {b} use {device}` |
 | CW-621 | Two channels to one host and port | `channels {a} and {b} both connect to {endpoint}; most devices allow one client` |
 | CF-622 | A key or value of a protocol schema refused by its rules (Annex A.1: `data_bits` 7 on RTU, a loopback, multicast or broadcast address) | `{key}: {reason}` |
-| CF-623 | `keep_last` (in `on_invalid` or an `action`) on a point without `max_age` | `point {name}: keep_last needs max_age` |
+| CF-640 | `keep_last` (in `on_invalid` or an `action`) on a point without `max_age` | `point {name}: keep_last needs max_age` |
 | CF-650 to CF-699 | Refusals of a protocol's `configure` and `plan` (section 13.1), each listed in the protocol's annex | as listed |
 
 ### 10.7 Areas and outputs (CF-7xx)
@@ -1915,7 +1916,7 @@ runtime diagnostics only.
 | CF-718 | `local_blocks_auto` without `local_panel`, or a `local_panel.input` that is not a BOOL tag read by a driver | `area {name}: {reason}` |
 | CF-719 | A `step`, `pulse` or `trigger` output whose `safe_state` or fail-safe key is not `hold` | `output {name}: a {kind} output has no safe action; use hold` |
 | CF-720 | A `duration` on a `pulse` output (a pulse timed by the unit) | `output {name}: the device must time the pulse` |
-| CW-721 | A switching output on a protocol driver that holds on control loss or shutdown (section 7.2) | `output {name} keeps its state when control stops; set on_control_loss and on_shutdown if it must not` |
+| CW-721 | A `single` or `double` output on a protocol driver whose `on_control_loss` and `on_shutdown` are both `hold` (section 7.2) | `output {name} keeps its state when control stops; set on_control_loss and on_shutdown if it must not` |
 
 ### 10.8 Alarms and logging (CF-8xx)
 
@@ -2809,7 +2810,7 @@ the reference finds it.
 | --- | --- | --- |
 | 0.1 | 2026-11-22 | First draft (issue #98, P2-01), from the outline in `README.md`, reference 1.1 and the device survey of 2026-11-22 (not in the repository). Decisions D-69 to D-80. |
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA, Linux) and the lead's directions: this contract owns every key (section 4.10, Annex C); scalar typing and limits (1.2, 1.3); validation stages and order (1.4); the expression grammar completed, `/` true division, logical operators BOOL only (5.6); merge rules for expressions, exclusive groups and `replace` (4.5); `only`, template `disable`, `bit_order` required, `storage` required, `write_limits`, `invert`, `restart_indication`, `device_time` with trust; `timeout` defined (4.11); side effects on register ranges (A.4); command kinds and inverse scaling (7.2); one set of fail-safe keys (7.4); queues per driver process, readable short names, owners per thread, rings sized per owner (12.3); `config_id` details; Apply (13); the `io` schema (Annex B); open rulings with the committee's recommendation (15); differences from the reference (16). Decisions D-69 to D-80 revised, D-100 to D-102 added (D-81 to D-99 are the driver interface contract's). Migration: none (draft). |
-| 0.3 | 2026-11-23 | Delta check of 0.2 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: one apply sequence, triggered by the watched link, with step tables, power cuts, the report and idle drivers that never exit (13.4 to 13.7, D-100); the driver's check mode instead of linked protocol libraries, and the expanded file's format (13.1, 13.3); a changed uid makes a new version (13.2); `lost_after_timeouts` split into write and read cases (4.6); `timeout` cites the driver interface's frame time (4.11); the grammar fixed (no range as an operand, reserved words only as one-segment names, `0x` literals, literal bounds) and checked mechanically (5.6, D-78); `avg` REAL; `keep_last` UNCERTAIN and STALE, then BAD; `states` integer keys; exact integer inverse scaling; `double` targets INT64; `safe_state` per kind; `latch` reserved; fail-safe writes repeated (`failsafe_retry`, `<output>.failsafe`); `local_panel` as an input tag; shared command registers; `only` in templates; joined `repeat` bindings; the stage of each code; `scan: auto`, the stop step and `at_start` in Annex B; NTP host names allowed; rulings O-5 split, O-11 to O-17 added, one id per ruling across both contracts. New codes CF-422, CF-528, CF-529, CF-623, CF-718 to CF-720, CW-721, CF-1012, CW-1013, CF-1014, CW-1015, CW-660, CW-661; CF-660 and CF-661 removed. Migration: none (draft). |
+| 0.3 | 2026-11-23 | Delta check of 0.2 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: one apply sequence, triggered by the watched link, with step tables, power cuts, the report and idle drivers that never exit (13.4 to 13.7, D-100); the driver's check mode instead of linked protocol libraries, and the expanded file's format (13.1, 13.3); a changed uid makes a new version (13.2); `lost_after_timeouts` split into write and read cases (4.6); `timeout` cites the driver interface's frame time (4.11); the grammar fixed (no range as an operand, reserved words only as one-segment names, `0x` literals, literal bounds) and checked mechanically (5.6, D-78); `avg` REAL; `keep_last` UNCERTAIN and STALE, then BAD; `states` integer keys; exact integer inverse scaling; `double` targets INT64; `safe_state` per kind; `latch` reserved; fail-safe writes repeated (`failsafe_retry`, `<output>.failsafe`); `local_panel` as an input tag; shared command registers; `only` in templates; joined `repeat` bindings; the stage of each code; `scan: auto`, the stop step and `at_start` in Annex B; NTP host names allowed; rulings O-5 split, O-11 to O-17 added, one id per ruling across both contracts. New codes CF-422, CF-528, CF-529, CF-640, CF-718 to CF-720, CW-721, CF-1012, CW-1013, CF-1014, CW-1015, CW-660, CW-661; CF-660 and CF-661 removed. Migration: none (draft). |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
