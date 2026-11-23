@@ -1533,7 +1533,7 @@ action, after }`, `on_generation_change: hold | safe` (output keys),
 
 | Case | Key | Default, local output (`scada-io`) | Default, remote output (driver) |
 | --- | --- | --- | --- |
-| Orderly stop of the writer of the output | `on_shutdown` | `safe` (reference 6.5: "on shutdown") | `safe` for a `single` or `double` output whose `safe_state` is `off` or `on`; `hold` otherwise (O-12) |
+| Orderly stop of the writer of the output | `on_shutdown` | `safe` (reference 6.5: "on shutdown") | `hold` (O-12): a driver stop or update does not stop pumps |
 | Control lost (8.13.2) | `on_control_loss` | `{ safe, after: 0s }` (reference 6.5: "when the control runtime's heartbeat stops") | `{ safe, after: 30s }` for a `single` or `double` output whose `safe_state` is `off` or `on`; `{ hold }` otherwise (O-12) |
 | Generation change | `on_generation_change` | `hold`; `safe` when the limit is exceeded (CS 13.5, G6; O-18) | The same |
 | `scada-cmd` down while the output is in MANUAL | None | `hold` | `hold`; a refreshed setpoint stops refreshing and the device falls back (8.12) |
@@ -1547,17 +1547,19 @@ action, after }`, `on_generation_change: hold | safe` (output keys),
   `safe_state: hold` is refused (CF-722).
 - **Remote switching outputs** (O-12, ruled 2026-11-23). A `single` or
   `double` output of a protocol driver whose `safe_state` is `off` or `on`
-  goes safe on control loss and at an orderly stop of its driver, as a
-  local output does: a pump run command on a remote I/O coil is the same
-  function as one on a local line (reference 6.5). One whose `safe_state`
-  is `hold` (a breaker that keeps its position) defaults to `hold`. A
-  `dangerous` output is always `hold` (CS, CF-705). `setpoint`, `step`,
-  `pulse` and `trigger` outputs keep the defaults of the table. An orderly
-  stop includes a driver update and a stop by the operator: such an output
-  goes safe then, and a site that must not trip on an update sets
-  `on_shutdown: hold`. CS warns (CW-721) when a remote `single` or
-  `double` output with a `safe_state` of `off` or `on` sets `hold`
-  explicitly in `on_control_loss` or `on_shutdown`.
+  goes safe on control loss, after 30 s: a pump run command on a remote I/O
+  coil is the same function as one on a local line (reference 6.5). One
+  whose `safe_state` is `hold` (a breaker that keeps its position) defaults
+  to `hold`. A `dangerous` output is always `hold` (CS, CF-705). `setpoint`,
+  `step`, `pulse` and `trigger` outputs keep the defaults of the table.
+- **At an orderly stop** every remote output defaults to `hold`, so that a
+  driver stop or update does not stop pumps. Consequence: a driver that is
+  stopped and not started again leaves such outputs as they were; their
+  devices' own communication-loss fallback, where configured, then acts.
+  Local outputs keep `on_shutdown: safe` (reference 6.5).
+- CS warns (CW-721) only where an output's explicit setting leaves a remote
+  `single` or `double` output with a `safe_state` of `off` or `on` holding
+  on control loss (`on_control_loss` with `hold`).
 - **`after: 30s` for remote outputs.** Control lost already needs
   `scada-control`'s heartbeat timeout (TD 10.1; 500 ms by default for a
   real-time process, CS `heartbeat_timeout_ms`). The 30 s cover one
@@ -2359,9 +2361,9 @@ Lost connections and fail-safe
     written again; a restart of `scada-cmd` ends it with 2.
 45. **Defaults of remote switching outputs** (8.13.1; phase 5): a `single`
     output of the test protocol with `safe_state: off` and no fail-safe keys
-    is written `off` at an orderly stop of the driver and 30 s after
-    `scada-control` is killed in AUTO (not before); one with `safe_state:
-    hold` is not written in either case; a `setpoint` is not written.
+    is written `off` 30 s after `scada-control` is killed in AUTO (not
+    before), and is not written at an orderly stop of the driver; one with
+    `safe_state: hold`, and a `setpoint`, are not written in either case.
 
 Tests of room parts are added with the phase that implements them.
 
@@ -2483,8 +2485,8 @@ reading of the real-time rules for an I/O scan, 2.5), O-7 (literal
 addresses for TCP channels, 7.3), O-9 (sessions with secrets out of phase
 2, 17), O-10 (the communication heartbeat register of reference 14.4 not
 served in phase 2), O-12 (option (b): remote switching outputs with a
-`safe_state` of `off` or `on` default to `safe`, after 30 s on control
-loss, 8.13.1), O-13 (an apply reaches the services by their watch on the
+`safe_state` of `off` or `on` default to `safe` after 30 s on control
+loss, and to `hold` at an orderly stop, 8.13.1), O-13 (an apply reaches the services by their watch on the
 active version, 10, 12), O-15 (no write groups, 8.5), O-16 (no
 master-timed pulse, 8.3), O-17 (the protocol's `configure` run by
 `scada-conf` through the driver's check mode, 10), O-18 (each writer
@@ -2511,8 +2513,8 @@ match, so these are no longer differences from the reference in force.
    confirmed (14.4 forbids retries of operator commands only; R-11).
 6. Local outputs default to `safe` on shutdown and on loss of control
    (reference 6.5). Remote switching outputs with a `safe_state` of `off`
-   or `on` default to `safe`, after 30 s on control loss; other remote
-   outputs to `hold` (reference 14.4 had `hold` as the default for most
+   or `on` default to `safe` after 30 s on control loss; remote outputs
+   default to `hold` at an orderly stop, and the others on control loss (reference 14.4 had `hold` as the default for most
    process outputs; O-12).
 7. A driver has a command thread besides its workers (6.1 names only
    workers), and a channel watchdog that ends the process: one stalled
@@ -2540,7 +2542,7 @@ match, so these are no longer differences from the reference in force.
 | Version | Date | Change |
 | --- | --- | --- |
 | 0.1 | 2026-11-22 | First draft (issue #99, P2-02), from the outline in `docs/contracts/README.md`, reference sections 6, 8.1 and 14.4, TD 1.0, issue #84, and the device survey of 2026-11-22 (not in the repository). Decisions D-81 to D-92 |
-| 0.5 | 2026-11-23 | Rulings of the product owner (section 18, D-103): every open point as drafted, with three changes. A refused new request no longer ends a running refresh; a request with an unknown outcome does, and `<output>.refresh` 3 shows a refresh on an older value (8.12, X-5). Remote `single` and `double` outputs with a `safe_state` of `off` or `on` default to `safe`, after 30 s on control loss (8.13.1, O-12). `<output>.failsafe` 3 for FAILED (8.13.3). Tests 37, 44 and 45. Markers of open rulings removed; status accepted for phase 2 implementation; reference 1.2. Migration: none (no implementation yet). |
+| 0.5 | 2026-11-23 | Rulings of the product owner (section 18, D-103): every open point as drafted, with three changes. A refused new request no longer ends a running refresh; a request with an unknown outcome does, and `<output>.refresh` 3 shows a refresh on an older value (8.12, X-5). Remote `single` and `double` outputs with a `safe_state` of `off` or `on` default to `safe` after 30 s on control loss, and every remote output to `hold` at an orderly stop (8.13.1, O-12). `<output>.failsafe` 3 for FAILED (8.13.3). Tests 37, 44 and 45. Markers of open rulings removed; status accepted for phase 2 implementation; reference 1.2. Migration: none (no implementation yet). |
 | 0.4 | 2026-11-23 | Third pass of the committee on 0.3. The fail-safe state machine (8.13.1 to 8.13.5): the definition of control lost with its grace (`control_attach_grace`), what ends a condition (a mode change, an accepted request, control back), states and `<output>.failsafe`, a writer restart, which checks of 8.2 a fail-safe write passes, repeats with back-off, refusals and budgets (`failsafe_max_refusals`), the journal; removed outputs and slow writers at a generation change (O-18); tests 37 and 38 row by row. The run of consecutive timeouts as one determinate rule (7.3); a reconnect within `connect_timeout`; `TCP_USER_TIMEOUT` from the loss rule; a broken frame on `tcp` closes; a wrong unit id on `rtu_over_tcp` is dropped. `DecodeResult` with read-side kinds; the transaction id in a per-attempt record; run-time objects in the object table. Check 8 refuses a device before its identity check. Inverse scaling cites CS 7.2. Rulings R-18, O-18 to O-20; consequences of R-11, R-16, R-17. Tests 40 to 43. Migration: none |
 | 0.3 | 2026-11-23 | Delta check of 0.2 by the committee. Consecutive timeouts close a connection only when they span every live unit; a close the driver makes itself keeps tags and states; `rtu_over_tcp` read timeouts do not close; a side-effect read timeout closes (7.3, R-15). Two-stage timeout with a margin of 3.5 characters or 20 ms (7.1). Transaction ids per connection; `EncodeResult`, `FrameState`, `DecodeResult` defined; IEC 104 and DNP3 stated as room (2.2). Outcome-queue admission rule (2.4). Stall rule: waits capped, connect counted (2.6). Run-time state kept across a reload (3.2, 12). Non-finite values BAD with OUT_OF_RANGE; `keep_last` UNCERTAIN and STALE then BAD; health point as CS (5). Command kinds with target types and safe actions; master-timed pulses refused (8.3, O-16). Exact integer conversion (8.4). Local-panel input for `local_blocks_auto` (8.2, R-16). Fail-safe actions repeated until confirmed, `<output>.failsafe`; warning for remote switching outputs left at `hold` (8.13, R-11, O-12). `READ_NOW` as a probe on a demoted device (8.14, R-12). Apply as CS 13; a driver without a channel idles (10). A logger thread writes the journal (11.3). Local I/O: helper channels by bus, AO reserved, `hold` keeps direction, the stop step's scope and what it promises (13). Tests 35 to 39; the #108 composition is CS's. One ruling id across both contracts (18). Migration: none; no code depends on 0.2 |
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA and Linux reviewers). The protocol interface is one request per call, the framework owns the exchange (2.2, D-93). Keys, defaults and codes are CS's; this contract cites them. Real-time tier in phase 2 is `scada-io` only; the `SCADA_RT` check stated as it is; allocation and system-call tests (2.5). Request queues per process and source, as reference 5.1. Watchdog ends the process (2.6). Reload builds aside and swaps (3.2). Raw pattern after byte and word order; non-finite values; exponent and integer arithmetic; counters (5). Side effects on register ranges (6.6). Timeout defined, frame time, serial lines, TCP rules: abortive close on a write timeout, consecutive timeouts, idle close, back-off, literal addresses (7). Command kinds, value conversion, selection on mode change, DIRECT on a selected output, `local_blocks_auto`, demoted devices refused, results retried, rate count at the first byte, refresh setpoint only and visible, one fail-safe table, fail-safe without waiting for audit (8). Process start and stop (10). Logging (11.3). Local I/O (13). Simulators and conformance tests extended; a composition for #108 (14, 15). Replayed events deferred (5.9). Decisions D-82 to D-99. Migration: none; no code depends on 0.1 |
