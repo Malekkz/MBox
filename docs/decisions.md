@@ -1919,3 +1919,57 @@ X-13 stays a warning; X-6 stays deferred to the historian contract.
 Reason: the owner followed the lead's recommendations. For O-12 the 30 s delay rides through a crash of `scada-control` and its supervised restart, attach and first cycle, so a short loss of the control process does not trip the plant, while a remote switching output still goes safe within about half a minute of control really being lost. The driver interface contract records its rulings in D-103.
 Consequences: the contract is 0.5, accepted for phase 2 implementation, and becomes 1.0 when phase 2 passes its acceptance tests. The reference architecture becomes 1.2: the lines that section 16 of the contract names are changed in the driver interface pull request (#99), in one commit for both contracts. One ruling rests on a sentence of a document this pull request does not change: R-6 widens SUBSTITUTED beyond tag database contract 6 ("value entered by a person"); the lead takes the wording to the owner. O-2 needs no change there: tag database contract 6.2 returns the stored value under the OWNER_DOWN overlay, and when to use it is the driver interface contract's rule.
 
+
+## D-105: Device local times are converted with a table built when the configuration is compiled
+Date: 2026-11-23
+Phase / issue: 2, #104 (P2-07)
+Status: accepted
+
+Context: driver interface contract 5.8 and configuration schemas contract 4.6 have the driver convert a device's local time (`device_time: { zone: local, tz }`) to UTC, with the earlier offset in a repeated hour and a move forward in a skipped hour, both marked TIME_UNCERTAIN. Neither says how the zone rules are obtained, and the conversion runs on a worker for every sample with a device time.
+Options: look the zone up in the C++ time zone database (`std::chrono::locate_zone`, `get_info`) for every sample; build a table of the zone's offsets once, when the configuration is compiled, and search it per sample; ship our own zone files.
+Decision: `ZoneTable::build` reads the system's time zone database through `std::chrono` once, when the point is compiled, and keeps every offset interval from 1970 to 2100; `ZoneTable::to_utc` is a binary search with no allocation, lock or system call (`SCADA_RT`). A time outside the table takes the nearest end's offset and is marked uncertain. A zone name the database does not have fails the compile with NOT_FOUND.
+Reason: the library's lookups may allocate, lock and read files on first use, which a worker must not do per sample; a table built aside fits the reload of contract 3.2 and gives the same answer on both architectures for one database.
+Consequences: the zone data is the unit's, read at compile time; a database update takes effect at the next reload. No zone data enters the repository.
+
+## D-106: Details of the processing after decode that the driver interface contract leaves open
+Date: 2026-11-23
+Phase / issue: 2, #104 (P2-07)
+Status: accepted
+
+Context: contract 5.1 to 5.8 and 7.5 fix the order and the rules of the processing after decode, but leave some marks open. None touches a command or an output.
+Options: for each, the simplest reading of the contract and of tag database contract 6 (below), or leaving it to each protocol.
+Decision:
+- NOT_INIT stays on every write of a point until a value read from the device has been written since the attach (tag database contract 6: the initial state; driver interface contract 5.2: "NOT_INIT if never read"). A `substitute` counts as written.
+- A sample that is not VALUE is written with the receive time and LOCAL_TIME: it records when the failure was seen, stamped by the driver.
+- A read **confirms** a point (contract 7.5, X-11) when its outcome is VALUE, no invalid marker matched and the value is finite. The staleness timer starts at the attach, so a point that never answers gets STALE after `max_age` too. A STALE already given stays on writes that do not confirm.
+- A matched invalid marker counts in `sentinels`, like a NO_VALUE sample: both mean the device has no value (contract 5.2, row 2; 11.1).
+- An exponent outside −20 to 20, or not an integer, gives BAD with OUT_OF_RANGE.
+- DEVICE_INVALID is never written GOOD: a protocol mapping that gives GOOD is written UNCERTAIN.
+- Bits named by `bits` take the quality and flags of the word they come from.
+- A STRING value that is not well-formed UTF-8 is BAD with OUT_OF_RANGE; a string cut to 250 bytes keeps its quality and gets OVERFLOW (contract 5.2, last table).
+- A point's own device time (a `datetime` or `epoch` value) is converted to UTC for its value; TIME_UNCERTAIN is for `source_time_ns` only and is not set on it.
+- A floating raw value on an INT64 or UINT64 tag (an enumeration, a double point) is taken only within 0.001 of an integer (CS 5.5), otherwise BAD with OUT_OF_RANGE.
+Reason: each is the reading that never shows a value as better than it is; the rest is left as tag database contract 6 defines its flags.
+Consequences: conformance tests 4, 7, 17 and 40 test these readings with the test protocol; a protocol cannot change them.
+
+## D-107: A double-point raw code that the `states` map does not name is a bad state
+Date: 2026-11-23
+Phase / issue: 2, #104 (P2-07)
+Status: accepted
+
+Context: configuration schemas contract 5.3 has `states` map the device's raw codes onto the four codes of driver interface contract 5.4, and requires a map for the field and integer shapes (CF-613). It does not say what a raw code missing from the map gives.
+Options: code 3 (bad state) with BAD; keep the last value with UNCERTAIN; code 0 (intermediate).
+Decision: code 3 with BAD and OUT_OF_RANGE.
+Reason: an unknown position must not be shown as a position; 3 with BAD is what the contract already uses for "faulty", and `scada-cmd` compares feedback by these codes (phase 5).
+Consequences: a template with an incomplete map shows the device faulty, not travelling.
+
+## D-108: An integer value type with `divide_by` is not computed until the configuration contract rules on it
+Date: 2026-11-23
+Phase / issue: 2, #104 (P2-07)
+Status: accepted (pending a ruling, reported to the lead)
+
+Context: configuration schemas contract 4.7 derives `float64` for `scale: { divide_by }` and says that with an integer value type "the computation is in INT64 or UINT64, checked"; 7.2 gives the exact inverse for an INT64 or UINT64 target with `divide_by`. Neither says what the read side gives on an INT64 tag when `raw ÷ divide_by` is not a whole number: truncation, rounding or refusal. The value reaches outputs' feedback and the historian, so it is not guessed.
+Options: truncate; round half away from zero; BAD when not exact; refuse the configuration.
+Decision: the framework does not compute it. The compile step of the next slice refuses such a point; until then the processing writes BAD with OUT_OF_RANGE for it.
+Reason: an external interface left open is asked, not guessed (`CLAUDE.md`, "When to stop and ask"); refusing is the reading that cannot show a wrong value.
+Consequences: a ruling changes only the compile step and one branch of the processing.

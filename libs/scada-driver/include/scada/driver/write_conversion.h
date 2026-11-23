@@ -1,0 +1,56 @@
+#ifndef SCADA_DRIVER_WRITE_CONVERSION_H
+#define SCADA_DRIVER_WRITE_CONVERSION_H
+
+// Engineering value to raw value for a write (driver interface contract
+// 8.4; configuration schemas contract 7.2, "From engineering value to raw
+// value"). Review by a person: this is command handling.
+//
+// A conversion that cannot be made exactly as the contract states is
+// refused; the caller answers the request REJECTED with INVALID_VALUE
+// (contract 8.2, check 4). Floating-point contraction is off for this code
+// (decision D-98).
+
+#include "scada/common/realtime.h"
+#include "scada/driver/point_rules.h"
+#include "scada/driver/raw_value.h"
+#include "scada/driver/tag_value.h"
+#include "scada/tag/types.h"
+
+#include <cstdint>
+#include <optional>
+#include <span>
+
+namespace scada::driver {
+
+// What a write of one point converts to: the point's tag type, its raw
+// type, and the scaling it is read with.
+struct WriteRules {
+    tag::TagType tag_type = tag::TagType::INT64;
+    RawKind raw_kind = RawKind::UNSIGNED;  // BOOL, SIGNED, UNSIGNED or FLOAT
+    std::uint8_t raw_width = 0;            // 8 to 64; 32 or 64 for FLOAT
+    bool invert = false;                   // BOOL points
+    const ScaleRule* scale = nullptr;      // borrowed; null: no `scale`
+    // An `enum` point: the defined codes, sorted (borrowed).
+    // NOLINTBEGIN(readability-redundant-member-init): GCC\'s
+    // -Wmissing-field-initializers needs it where a designated initializer
+    // leaves the member out.
+    std::span<const std::int64_t> enum_codes{};
+    // NOLINTEND(readability-redundant-member-init)
+    bool has_enum = false;
+};
+
+// Converts `value` to the raw value of a point with `rules`. Returns nothing
+// when the value is refused: not of the tag's type, not finite, not exact on
+// the integer path, not finite after conversion, outside the raw type, or
+// not a defined code of an enumeration (contract 8.4).
+SCADA_RT [[nodiscard]] std::optional<RawValue> to_raw_value(
+    const WriteRules& rules, const TagValue& value) noexcept;
+
+// True when a write of a point with `rules` takes the exact integer path
+// (CS 7.2): an INT64 or UINT64 tag with no scale, or with an integer `gain`
+// or `divide_by` and an integer `offset`.
+SCADA_RT [[nodiscard]] bool is_integer_path(const WriteRules& rules) noexcept;
+
+}  // namespace scada::driver
+
+#endif  // SCADA_DRIVER_WRITE_CONVERSION_H
