@@ -375,6 +375,7 @@ data_plane:
 | `network.hostname` | host name | the unit id | Applied by `scada-sys` (reference 12.6) |
 | `network.interfaces[]` | list | none | `name` (interface name), `zone` (`field` or `management`, reference 13.6), `addresses` (list of CIDR), `gateway`, `dns` (list) |
 | `storage.free_space_alarm` | percentage | `10%` | Reference 9.4 |
+| `conf.keep_versions` | 5 to 1,000 | 50 | Committed versions kept in the version store (section 13.2) |
 | `storage.journal_reserve` | size | `2GiB` | Space kept for journals and configuration (reference 14.4) |
 | `upstream` | map | absent: no upstream | `url` (HTTPS), `auth` (`certificate` or `token`, each a secret), `order` (`newest_first` or `oldest_first`, default `newest_first`), `rate_limit` (size per second), `window` (`from`, `to` as `HH:MM` in the unit's zone). Used from phase 10 |
 | `email` | map | absent: no email | `server`, `port` (default 587), `tls` (`starttls` or `implicit`, default `starttls`), `username`, `password` (secret), `from`. Used from phase 7 |
@@ -682,7 +683,7 @@ Framework keys of a channel (the protocol's keys are in its schema):
 | `min_write_interval` | duration, `0s` to `60s` | `0s` | Least time between two writes on the channel (a gateway that limits writes for all its devices); a device's own interval applies as well |
 | `reconnect` | `{ min, max }` durations, `100ms` to `10m` | `{ min: 1s, max: 30s }` | Reconnect back-off after a connection failure, doubling from `min` to `max`. It starts again from `min` after the first valid answer, not after a connect |
 | `max_pending_writes` | 1 to 256 | 16 | Write requests the channel holds in its own order queue; one more is answered `BUSY` (driver interface contract) |
-| `lost_after_timeouts` | 1 to 10 | 3 | `tcp` channels only: when **read** requests time out, the connection counts as lost only when at least this many consecutive timed-out requests (each counted once, after its retries) come from every device of the channel that is not demoted, at least two distinct devices when more than one is not demoted. Any valid answer, an exception answer included, resets the count; one dead device behind a gateway is demoted alone and never closes the connection. A **write** time-out, a read time-out on a `side_effect` range (`tcp`), or a frame the kernel does not take whole, closes the connection at once, abortively, whatever this key says; the driver reconnects at once, and when that succeeds within one request deadline the other devices keep their values (STALE only by `max_age`), states and identity, with no COMM_FAIL. On `rtu_over_tcp` a read time-out never closes the connection (the quiet-time rule applies). The behaviour is the driver interface contract's (TCP connections). Open: needs the product owner's ruling (R-15 and R-17 of the driver interface contract) |
+| `lost_after_timeouts` | 1 to 10 | 3 | `tcp` channels only; on `rtu_over_tcp` a read time-out never closes the connection. The rule is the driver interface contract's (7.3), quoted word for word: "The worker keeps one run per connection. A read request that times out after its retries (a planned read of a poll group or a keep-alive) adds one to the run and records its unit id; identity reads, `READ_NOW` and probes neither add to the run nor reset it. Any valid answer from any unit, an exception answer included, empties the run. The eligible unit ids are those of the channel that have at least one device in state `INITIALISING` or `RUNNING` with at least one poll group. After each addition, and before the timed-out device's own demotion count is applied, the connection is lost when the run holds at least `lost_after_timeouts` requests and its unit ids include every eligible unit id. A reconnect empties the run; a second close before any valid answer reconnects with the `reconnect` back-off, not at once." A write time-out, a read time-out on a `side_effect` range, or a frame the kernel does not take whole, closes the connection at once whatever this key says (same section). Open: needs the product owner's ruling (R-15 and R-17 of the driver interface contract) |
 | `change_ring_capacity` | power of two, 1,024 to 1,048,576 | computed (section 12.3) | Override of the computed ring size of the channel's owner, for channels whose changes come in bursts. At least twice the owner's tags (CF-1003) |
 | `process_group` | reserved | | Several driver processes for one protocol (open: needs the product owner's ruling (O-3)) |
 
@@ -2359,12 +2360,19 @@ scada-drv-<protocol> --check <expanded-file>      (and scada-io --check)
   uid, tag database contract 11.2), is in no device group, and reads only
   the tree. The check mode opens no port, socket, GPIO or IIO file and reads
   no secret; its system calls are traced in test 22. How the limits are
-  applied to the child: standard input is `/dev/null`; `PR_SET_NO_NEW_PRIVS`
-  is set; `RLIMIT_FSIZE` is 0 (it can write no file); `RLIMIT_AS` is
-  256 MiB and `RLIMIT_CPU` 10 s; it runs in a process group of its own,
-  which `scada-conf` kills with `SIGKILL` after 10 s of wall-clock time; the
+  applied to the child, all without privilege: the executable is named by
+  its absolute path in the install tree; the expanded file is passed as an
+  open read-only descriptor (3), not as a path, and standard input is
+  `/dev/null`; `PR_SET_NO_NEW_PRIVS` is set, so file capabilities of an
+  executable are not gained; `PR_SET_PDEATHSIG` ends it with `scada-conf`;
+  `RLIMIT_FSIZE` is 0 (it can write no file), `RLIMIT_NOFILE` 16,
+  `RLIMIT_DATA` 256 MiB and `RLIMIT_CPU` 10 s; it runs in a process group
+  of its own, which `scada-conf` kills with `SIGKILL` after 30 s of
+  wall-clock time, so that a loaded unit does not refuse a valid tree; the
   environment is empty. Standard error is read up to 64 KiB into the log of
-  `scada-conf` and never parsed.
+  `scada-conf` and never parsed. The same user owns the version store, so
+  these limits, not the user, are what keep a faulty `configure` from
+  writing it; test 22 checks each of them.
 - Its standard output is outside input to `scada-conf`: at most 1 MiB and
   10,000 lines of at most 4 KiB, read by a strict line parser that is a fuzz
   target (section 14). An output over a limit, a malformed line, a code
@@ -2376,18 +2384,18 @@ scada-drv-<protocol> --check <expanded-file>      (and scada-io --check)
   check there; commit step 1 writes the same bytes into the version. The
   check therefore reads exactly the bytes the driver will read.
 - The address-space and time limits are build settings (#102): 256 MiB and
-  10 s in a release build, larger in the sanitizer builds.
+  10 s of CPU in a release build, larger in the sanitizer builds.
   A crash, a time-out or exit 2 is CF-1012 for that protocol: the tree is
   not committed, and the other protocols are still checked.
 - **After a driver update.** `meta.json` records, per protocol, the build
   of the driver executable that checked the version. At its start
   `scada-conf` compares it with the installed executables; for a protocol
-  whose driver changed it runs the check again on the active version. If
-  that check fails, nothing is rolled back and no new version is written:
-  the result is logged and kept in the history as a failed re-check, the
-  driver itself refuses the same channels at run time (it runs the same
-  code) with `config_state` 2 and the codes in its log, and its other
-  channels run. The operator commits a corrected tree.
+  whose driver changed it runs the check again on the active version, as
+  part of the update's health check (section 11). If that check fails, the
+  health check fails and the update is rolled back (reference 14.5), so the
+  old driver keeps running the tree it checked. The claim above therefore
+  reads: a tree is never refused by the build of the driver that checked
+  it.
 - What only a protocol knows (a native select and its window, an address
   the protocol cannot write, a block plan that cannot be made) is therefore
   refused before the commit, with the file and line of the configuration
@@ -2436,6 +2444,11 @@ scada-drv-<protocol> --check <expanded-file>      (and scada-io --check)
 - The files beside `tree/` are written by `scada-conf` only. They are not
   configuration: not validated as such, not in `config_id`, never edited by
   hand.
+- **Retention.** Versions are never changed, but old ones are removed:
+  `scada-conf` keeps the newest `conf.keep_versions` versions (section 3,
+  default 50) and always the active one and the newest one whose
+  `config_hash` is that of the `current` generation (13.5 needs it); it
+  removes the others after a commit, oldest first.
 - `staging/` is written file by file with the rule of commit step 1 (write,
   `fsync`, close, then the directory), so a power cut loses at most the
   file being saved; a staged edit is not a version until it is committed.
@@ -2513,7 +2526,8 @@ library type of `libscada-config`, `ExpandedConfig`, and by nothing else.
    first.
 2. It renames `versions/<n>.tmp` to `versions/<n>` and `fsync`s `versions/`.
 3. It writes `apply.json` (version `n`, the previous version, the kind of
-   apply, state `started`, the start time) and `fsync`s it, then creates a
+   apply, state `started`, the start time) as a temporary file, `fsync`s
+   it and renames it into place, so that it is never torn; then it creates a
    symbolic link `active.tmp` to `versions/<n>`, renames it over `active`
    (an atomic switch) and `fsync`s `/var/lib/scada/conf/`. From the rename
    on, the new version is the active one, also after a power cut.
@@ -2590,7 +2604,11 @@ the `/etc/scada/tag-set.json` of D-26.
   switches `active` back to the previous
   version (the refused one never ran; this switch is not a new version),
   records it in `apply.json` and the history, and reports the apply failed.
-  The services saw no RETIRING and never left the old configuration. A tag
+  The services saw no RETIRING and never left the old configuration. Each
+  sees the switch back as a change of `active` to the version it runs (the
+  same `config_hash` as its generation and the same `config_id` it runs):
+  it writes `config_state` 1 again and does nothing else; `scada-tagd`
+  writes its own state back to 1. A tag
   set that `scada-conf` validated fails to build only on a fault of the
   unit (shared memory too small, tag database contract 3.4), so this is
   rare and is reported as a fault.
@@ -2631,6 +2649,8 @@ the `/etc/scada/tag-set.json` of D-26.
 | A driver restarts between G1 and G2 | `current` on the old generation | It loads the old version's expanded file (above) and moves at G3 |
 | A driver restarts after G2 | `current` on the new generation | It attaches there with the new file; G4 |
 | `scada-conf` crashes during R3 or G5 | `apply.json` `started` | At its start it waits again for the reports, from the time it starts, and records the result |
+| A power cut after `scada-tagd` refused G2 and before the switch back | `active` on a version whose tag set does not build; no generation after the boot | `scada-tagd` reports state 2 at its start; `scada-conf` sees `apply.json` `started` and the refusal, switches `active` back to the previous version and records `failed`; `scada-tagd` then builds from it |
+| First start of a unit | No version and no `active` | The package installs a minimal tree (`system.yaml` only, #105); `scada-conf` commits it as version 1 at its first start; until then `scada-tagd` and the services wait for `active` |
 
 ### 13.6 What the apply reports
 
@@ -2657,8 +2677,11 @@ reference 15.2 and the 5 s of reference 5.5 are measured on every apply
 - Such a process finds no expanded file for itself in the active version
   (13.3), tells the service manager it is ready (its unit is of type
   `notify`, #105), keeps sending the watchdog notification as a running
-  driver does, logs once that it has nothing to run, attaches to nothing,
-  and watches `active` as in 13.5. When a commit gives its protocol
+  driver does (the main thread notifies whether attached or not, also
+  between a detach and the next attach), logs once that it has nothing to
+  run, attaches to nothing, and watches `active` as in 13.5. While idle it
+  has no heartbeat and no tag, since it is not in the tag set; only the
+  service manager shows it, which is correct. When a commit gives its protocol
   a channel, the new tag set holds its process; it attaches at G4 once
   `current` is a generation whose process table holds it, looking again at
   each change of `current` (it watches the base directory of the tag
@@ -2951,7 +2974,7 @@ the reference finds it.
 | 0.1 | 2026-11-22 | First draft (issue #98, P2-01), from the outline in `README.md`, reference 1.1 and the device survey of 2026-11-22 (not in the repository). Decisions D-69 to D-80. |
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA, Linux) and the lead's directions: this contract owns every key (section 4.10, Annex C); scalar typing and limits (1.2, 1.3); validation stages and order (1.4); the expression grammar completed, `/` true division, logical operators BOOL only (5.6); merge rules for expressions, exclusive groups and `replace` (4.5); `only`, template `disable`, `bit_order` required, `storage` required, `write_limits`, `invert`, `restart_indication`, `device_time` with trust; `timeout` defined (4.11); side effects on register ranges (A.4); command kinds and inverse scaling (7.2); one set of fail-safe keys (7.4); queues per driver process, readable short names, owners per thread, rings sized per owner (12.3); `config_id` details; Apply (13); the `io` schema (Annex B); open rulings with the committee's recommendation (15); differences from the reference (16). Decisions D-69 to D-80 revised, D-100 to D-102 added (D-81 to D-99 are the driver interface contract's). Migration: none (draft). |
 | 0.3 | 2026-11-23 | Delta check of 0.2 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: one apply sequence, triggered by the watched link, with step tables, power cuts, the report and idle drivers that never exit (13.4 to 13.7, D-100); the driver's check mode instead of linked protocol libraries, and the expanded file's format (13.1, 13.3); a changed uid makes a new version (13.2); `lost_after_timeouts` split into write and read cases (4.6); `timeout` cites the driver interface's frame time (4.11); the grammar fixed (no range as an operand, reserved words only as one-segment names, `0x` literals, literal bounds) and checked mechanically (5.6, D-78); `avg` REAL; `keep_last` UNCERTAIN and STALE, then BAD; `states` integer keys; exact integer inverse scaling; `double` targets INT64; `safe_state` per kind; `latch` reserved; fail-safe writes repeated (`failsafe_retry`, `<output>.failsafe`); `local_panel` as an input tag; shared command registers; `only` in templates; joined `repeat` bindings; the stage of each code; `scan: auto`, the stop step and `at_start` in Annex B; NTP host names allowed; rulings O-5 split, O-11 to O-17 added, one id per ruling across both contracts. New codes CF-422, CF-528, CF-529, CF-640, CF-718 to CF-720, CW-721, CF-1012, CW-1013, CF-1014, CW-1015, CW-660, CW-661; CF-660 and CF-661 removed. Migration: none (draft). |
-| 0.4 | 2026-11-23 | Third pass on 0.3 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: the fail-safe state machine is the driver interface contract's (8.13) and 7.4 cites it; new keys `control_attach_grace`, `failsafe_max_refusals`, and `failsafe_retry` as the first interval of a back-off; owner and meaning of `<output>.failsafe`; removed outputs and slow writers at a generation change (13.5, O-18); the `scada-tagd` hang (O-19); stages 6 and 7 swapped so that the check reads the bytes the driver reads; `apply.json` against the link after a power cut; the kind of apply against the running generation; reports paired with their `config_id`, state 3, `incomplete` after 30 s; check mode enforcement, re-check after a driver update, expanded-file limits, format version, computed values, JSON subset, load thread; CW-661 removed (validation opens no hardware); idle drivers keep the watchdog; exact integer inverse scaling with no `scale`; CW-721 only when both keys are absent; CF-722, CF-723, CF-1016; lexical rules (abutting tokens, case); corpus cases; A.3 and A.5 on shared command registers; rulings O-18 to O-20, X-5 dissent, consequences of O-13, R-11, R-16, R-17. Migration: none (draft). |
+| 0.4 | 2026-11-23 | Third pass on 0.3 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: the fail-safe state machine is the driver interface contract's (8.13) and 7.4 cites it; new keys `control_attach_grace`, `failsafe_max_refusals`, and `failsafe_retry` as the first interval of a back-off; owner and meaning of `<output>.failsafe`; removed outputs and slow writers at a generation change (13.5, O-18); the `scada-tagd` hang (O-19); stages 6 and 7 swapped so that the check reads the bytes the driver reads; `apply.json` against the link after a power cut; the kind of apply against the running generation; reports paired with their `config_id`, state 3, `incomplete` after 30 s; check mode enforcement, re-check after a driver update, expanded-file limits, format version, computed values, JSON subset, load thread; CW-661 removed (validation opens no hardware); idle drivers keep the watchdog; exact integer inverse scaling with no `scale`; CW-721 only when both keys are absent; CF-722, CF-723, CF-1016; lexical rules (abutting tokens, case); corpus cases; `lost_after_timeouts` quotes the driver interface rule word for word; `apply.json` by rename, the switch back after a refused G2, a power cut before it, the first start, retention (`conf.keep_versions`); check-mode enforcement without privilege; re-check in the update's health check; the stop step's version, form and bound; `auto` by ancestor bus; A.3 and A.5 on shared command registers; rulings O-18 to O-20, X-5 dissent, consequences of O-13, R-11, R-16, R-17. Migration: none (draft). |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
@@ -3134,7 +3157,7 @@ the tree, so that no distribution-specific path appears in configuration
 | `backend` | `simulator`, `gpio`, `iio` | required | Reference 6.5. Vendor backends are added as further values |
 | `chip` | text | required for `gpio` | The GPIO chip by its label, as the kernel reports it, never by `gpiochipN` (the number can change between boots) |
 | `device` | text | required for `iio` | The IIO device by its name, never by `iio:deviceN` |
-| `scan` | `auto`, `every_cycle`, `helper` | `auto` | `every_cycle`: read and written by the scan thread in every cycle; only for lines whose calls do not sleep (a memory-mapped controller). `helper`: read and written by a helper thread that hands samples to the scan and takes its writes, safe-state writes included, one helper cycle later (driver interface contract); for GPIO expanders on I2C or SPI, whose calls sleep or take milliseconds. `auto`: `scada-io` chooses at run time from the bus the chip sits on (memory-mapped: `every_cycle`; anything else: `helper`). An IIO channel is always read through the helper in phase 2 |
+| `scan` | `auto`, `every_cycle`, `helper` | `auto` | `every_cycle`: read and written by the scan thread in every cycle; only for lines whose calls do not sleep (a memory-mapped controller). `helper`: read and written by a helper thread that hands samples to the scan and takes its writes, safe-state writes included, one helper cycle later (driver interface contract); for GPIO expanders on I2C or SPI, whose calls sleep or take milliseconds. `auto`: `scada-io` chooses at run time from the bus the chip sits on: `every_cycle` only when the chip and every ancestor device are on the platform bus (memory-mapped); `helper` when any ancestor is on another bus (I2C, SPI, USB, a multi-function device on such a bus). An IIO channel is always read through the helper in phase 2 |
 
 The kernel does not report whether a chip's calls sleep, so validation cannot
 know it and does not depend on the hardware present: an explicit `scan:
@@ -3191,8 +3214,18 @@ that every other component can be tested without hardware (reference 6.5).
   for a released line. A safe level that must stay while no process runs
   is a deployment requirement: the output is on a controller that keeps
   its last level after release, or has a hardware pull to its safe level.
-- The stop step reads the expanded file of the active version: an output
-  removed by a commit between the crash and the step is not driven.
+- The stop step reads the expanded file whose `config_hash` is that of the
+  `current` generation, which survives a crash of `scada-io` in shared
+  memory (13.5, "the expanded file of a generation"), and the active
+  version's only when there is no generation. So it drives the outputs
+  `scada-io` was running, not an output a newer, not yet applied version
+  adds; an output removed by an applied commit is not driven.
+- The service manager runs the step after every stop, also an orderly stop
+  (the outputs are then already in their state; writing it again is
+  harmless) and a failed start. It exits 0 when `scada-io` has no channel,
+  and has a time bound of its own of 5 s (a bus call can take the adapter's
+  time-out). It does not run on a power cut, a kernel fault or a watchdog
+  reset: that is the hardware default's case (reference 14.4).
 - A hung system is covered by the hardware watchdog and the outputs'
   hardware default (reference 14.4).
 
