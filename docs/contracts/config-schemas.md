@@ -1416,7 +1416,7 @@ An output is the configured controllable point of reference 8.1. Keys:
 | `failsafe_retry` | duration, `1s` to `60s` | `5s` | The first interval at which a fail-safe write that was not confirmed is repeated while its condition holds; it doubles after each time-out, up to 60 s (driver interface contract 8.13.4, section 7.4) |
 | `failsafe_max_refusals` | 1 to 10 | 3 | After this many refusals of the fail-safe write (as the driver interface contract 8.13.4 counts them), the repeats stop, `<output>.failsafe` becomes 3 and an alarm is raised; they also stop when a write limit is spent; a new condition starts them again (8.13.3, 8.13.4) |
 | `on_shutdown` | `hold`, `safe`, `release` | `safe` for a target of `scada-io` (reference 6.5) and for a remote switching output (below); `hold` otherwise | Section 7.4 |
-| `on_control_loss` | `{ action: hold \| safe \| release, after }` | `{ action: safe, after: 0s }` for a target of `scada-io`; `{ action: safe, after: 10s }` for a remote switching output (below); `{ action: hold }` otherwise | Section 7.4: `scada-control` down while the output is in AUTO; `after` from `0s` to `10m` |
+| `on_control_loss` | `{ action: hold \| safe \| release, after }` | `{ action: safe, after: 0s }` for a target of `scada-io`; `{ action: safe, after: 30s }` for a remote switching output (below); `{ action: hold }` otherwise | Section 7.4: `scada-control` down while the output is in AUTO; `after` from `0s` to `10m` |
 | `on_generation_change` | `hold`, `safe` | `hold` | During a coordinated restart of the data plane (reference 5.5, 19.2: "each output's behaviour during the restart" is a setting). An output goes safe anyway when the restart exceeds its limit |
 | `task` | task reference | the task of the program that drives it, else `normal` | Owner of the AUTO request tag |
 | `termination_timeout` | duration | reserved | For two-phase results of phase 9 (driver interface contract) |
@@ -1491,15 +1491,16 @@ Rules (each has its code in section 10):
 - **Remote switching outputs** (ruling O-12). A `single` or `double` output
   on a protocol driver whose `safe_state` is `off` or `on` is a remote
   switching output: its `on_shutdown` defaults to `safe` and its
-  `on_control_loss` to `{ action: safe, after: 10s }`. A switching output
+  `on_control_loss` to `{ action: safe, after: 30s }`. A switching output
   does the same job on remote I/O as on a local line (reference 6.5), so it
-  does not stay on when control stops. The 10 s are not 0 s, as for a local
-  output, because a crash and restart of `scada-control` by its service
-  manager (restart, attach, one full cycle) takes a few seconds and the
-  heartbeat timeout of a real-time process is 500 ms: with 0 s every such
-  restart, or one scheduling stall, would trip the plant; 10 s ride through
-  one restart and still bring the output to its safe state within 10 s of
-  control really being lost. With `safe_state: hold` (a breaker that keeps
+  does not stay on when control stops. The 30 s are not 0 s, as for a local
+  output, because a crash of `scada-control` is followed by a supervised
+  restart with back-off, its attach and its first full cycle: with 0 s every
+  such restart, or one scheduling stall, would trip the plant. 30 s ride
+  through one restart, and the output still reaches its safe state within
+  about half a minute of control really being lost. An orderly stop
+  includes a driver update: such outputs go safe on an update unless their
+  `on_shutdown` is `hold`. With `safe_state: hold` (a breaker that keeps
   its position), a `dangerous` output (CF-705), and the kinds `setpoint`,
   `step`, `pulse` and `trigger`, the defaults stay `hold`. This departs from
   reference 14.4 ("`hold` (default for most process outputs)"), section 16.
@@ -1531,23 +1532,23 @@ value is refreshed after a newer request:
   the driver's checks, or answered `BUSY`, `RATE_LIMITED`,
   `DEVICE_UNAVAILABLE`) and one the device rejects (an exception answer,
   REJECTED or DEVICE_ERROR).
-- A newer request **accepted** replaces the refreshed value. When its write
-  then fails with no answer (a time-out, outcome unknown), the refresh goes
-  on with the **new** value, the operator's last accepted intent: the next
-  refresh write confirms it. Refreshing the old value could undo a new value
-  that did arrive.
+- A newer request **executed OK** replaces the refreshed value: the
+  refreshed value is always that of the last request executed OK in this
+  generation. A newer request that was sent and whose outcome is unknown (a
+  time-out, or a partial answer) **ends** the refresh (value 2): refreshing
+  the new value would retry an operator command whose outcome is unknown,
+  which reference 14.4 forbids, and refreshing the old one could undo a new
+  value that did arrive.
 - The refresh ends, as before, when the mode changes, its requester is lost
   (`scada-control` in AUTO, `scada-cmd` in MANUAL), the tag set changes, or
   the output's own conditions end it. Nobody re-establishes a refresh that
   ended: in MANUAL the operator writes the setpoint again.
 
-`<output>.refresh` (section 12.5) shows it: 0 no refresh, 1 refreshing a
-confirmed value, 2 ended without a new request, 3 refreshing the old value
-after a newer request was refused, 4 refreshing a new value whose first
-write was not confirmed. 4 becomes 1 at the first refresh write answered
-OK; 3 becomes 1 when a newer request is accepted and confirmed. Value 2 is
-a system alarm (phase 7), because the device then falls back after its own
-time; 3 and 4 are shown on the output's faceplate.
+`<output>.refresh` (section 12.5) shows it: 0 no refresh, 1 active, 2 ended
+other than by a newer request executed OK, 3 active on an older value after
+a refused request. 3 becomes 1 when a newer request is executed OK. Value 2
+is a system alarm (phase 7), because the device then falls back after its
+own time; 3 is shown on the output's faceplate.
 
 Feedback with four states (ruling X-14): a
 `double` output takes a `double_point` tag as feedback; `scada-cmd` compares
@@ -1582,8 +1583,8 @@ driver interface contract's (protocol drivers) and #107's (`scada-io`);
 
 | Situation | Key | Values | Delay | Default, `scada-io` output | Default, remote output |
 | --- | --- | --- | --- | --- | --- |
-| Orderly stop of the writer of the target (the driver or `scada-io`), an update | `on_shutdown` | `hold`, `safe`, `release` | none | `safe` (reference 6.5) | `safe` for a remote switching output; `hold` for the others (ruling O-12) |
-| `scada-control` reads as down while the output is in AUTO | `on_control_loss` | `hold`, `safe`, `release` | `after` | `safe` at once (reference 6.5) | `safe` after 10 s for a remote switching output; `hold` for the others (ruling O-12) |
+| Orderly stop of the writer of the target (the driver or `scada-io`), an update | `on_shutdown` | `hold`, `safe`, `release` | none | `safe` (reference 6.5) | `safe` for a remote switching output, also on a driver update; `hold` for the others (ruling O-12) |
+| `scada-control` reads as down while the output is in AUTO | `on_control_loss` | `hold`, `safe`, `release` | `after` | `safe` at once (reference 6.5) | `safe` after 30 s for a remote switching output; `hold` for the others (ruling O-12) |
 | The requester of a refreshed setpoint reads as down (`scada-control` in AUTO, `scada-cmd` in MANUAL) | none | refreshing stops; in AUTO `on_control_loss` then applies; in MANUAL the device's own fallback acts | | | |
 | `scada-cmd` reads as down while the output is in MANUAL | none | hold: an operator-held output does not drop at a restart of `scada-cmd` | | hold | hold |
 | Coordinated restart of the data plane (a generation change) | `on_generation_change` | `hold`, `safe`; safe anyway when the limit is exceeded, measured by the writer itself (reference 5.5, 19.2; section 13.5, G6) | `data_plane.generation_change_limit` | `hold` | `hold` |
@@ -2257,7 +2258,7 @@ Decision D-79. Every generated tag name is checked against the 127-byte limit
 | `<output>.status` | `cmd` | INT64 | none | 0 IDLE, 1 SELECTED, 2 EXECUTING, 3 OK, 4 FAILED, 5 BLOCKED (reference 8.1), 6 ACCEPTED_UNVERIFIED (section 7.2) |
 | `<output>.req_manual` | `cmd` | the target's type | RETAIN | The value last requested in MANUAL |
 | `<output>.req_auto` | `control.<T(task)>` | the target's type | none | The value last requested by logic |
-| `<output>.refresh` | the target's channel owner | INT64 | none | Outputs with `refresh` only: 0 none, 1 refreshing a confirmed value, 2 ended without a new request, 3 refreshing the old value after a newer request was refused, 4 refreshing a new value whose first write was not confirmed (section 7.2) |
+| `<output>.refresh` | the target's channel owner | INT64 | none | Outputs with `refresh` only: 0 none, 1 active, 2 ended other than by a newer request executed OK, 3 active on an older value after a refused request (section 7.2) |
 | `<output>.failsafe` | the thread that writes the target: the channel owner `drv-<protocol>.<C>` for a remote output, `io.scan` for a local one | INT64 | none | Outputs with a `safe` or `release` fail-safe key: 0 no fail-safe action, 1 the action was written and answered OK, 2 the action is due and not yet confirmed, still being tried (it may not have reached the device), 3 the writer gave up (after `failsafe_max_refusals` refusals or a spent write limit; ruling R-11 as changed by the product owner). It returns to 0 when the condition ends (driver interface contract 8.13.3) |
 | `<output>.device_selected` | the target's channel owner | BOOL | none | Only for a target whose protocol declares a native select (none in phase 2): the device holds a selection |
 | `sys.area.<area>.authority` | `cmd` | INT64 | RETAIN, RETAIN_NOW | 1 LOCAL_PANEL, 2 CLI, 3 WEB, 4 API, 5 MASTER (phase 11) |
@@ -2861,12 +2862,12 @@ order of section 1.4. The tests run on x86-64 and ARM64.
 23. Fail-safe defaults (ruling O-12): in the expanded file, a `single` and a
     `double` output on a protocol driver with `safe_state: off` and no
     fail-safe key get `on_shutdown: safe` and `on_control_loss: { action:
-    safe, after: 10s }`; the same with `safe_state: hold`, a `dangerous`
+    safe, after: 30s }`; the same with `safe_state: hold`, a `dangerous`
     target, and a `setpoint` keep `hold`; a `scada-io` output gets `safe`
     and `after: 0s`; an explicit `hold` on a remote switching output with
     `safe_state: on` gives CW-721; every example of section 7.2 validates
-    with no warning. The behaviour of the refresh values 3 and 4 (ruling
-    X-5) and of `<output>.failsafe` 3 is tested by the driver interface
+    with no warning. The behaviour of the refresh value 3 and of 2 after
+    an unknown outcome (ruling X-5), and of `<output>.failsafe` 3, is tested by the driver interface
     contract's tests.
 
 **Fuzz targets** (`CLAUDE.md`: every parser of outside input): the YAML
@@ -2903,7 +2904,7 @@ passes over versions 0.1 to 0.3), with three changes: X-5, O-12 and the value
 3 of `<output>.failsafe` (R-11 of the driver interface contract). Each
 ruling has one id across both contracts. The places in the text that
 depended on a ruling now cite it as "(ruling X-n)" or "(O-n)". Recorded in
-`docs/decisions.md`, D-103.
+`docs/decisions.md`, D-104.
 
 | Id | Question | Ruling | Reason | Options not taken |
 | --- | --- | --- | --- | --- |
@@ -2911,7 +2912,7 @@ depended on a ruling now cite it as "(ruling X-n)" or "(O-n)". Recorded in
 | X-2 | Channels opened by the device | `role` with only `connect` in phase 2; `listen` reserved; client or master only | Keeps the direction open without a server role | Listening channels now; a server role |
 | X-3 | One device on a main and a backup connection | None in phase 2; `connections` reserved | No phase 2 device needs it | A device under two channels |
 | X-4 | Several devices on one device address | Devices may share a unit id with disjoint data; a point-level unit id; one failure count per (channel, unit id) (A.3) | Gateways and loggers present several devices on one address | One device per address; sub-devices |
-| X-5 | Refreshing a setpoint | The driver refreshes an accepted setpoint under its request's record, `setpoint` only, visible in `<output>.refresh`. **Changed by the owner:** a newer request that is refused does not end the refresh of the old value (section 7.2) | The SCADA reviewer's position: a passing refusal must not drop a standing limit | A record per refresh; no refresh |
+| X-5 | Refreshing a setpoint | The driver refreshes an accepted setpoint under its request's record, `setpoint` only, visible in `<output>.refresh`. **Changed by the owner:** a newer request that is refused does not end the refresh of the old value; a newer request with an unknown outcome ends it (section 7.2) | The SCADA reviewer's position: a passing refusal must not drop a standing limit; an unknown outcome is not retried (reference 14.4) | A record per refresh; no refresh |
 | X-7 | Device select windows shorter than the operator's select | Per output `native_select: at_select` (validated, CF-704) or `at_operate` (CF-716) | Both device kinds exist; safety review | The gateway select never longer |
 | X-8 | Several protocols of one device type | One protocol per template on a protocol-free base template; `bindings:` reserved (4.1) | Simple to validate now, room for more | Several per template now; independent templates |
 | X-9 | A safe or release value for a remote setpoint | `on_shutdown` and `on_control_loss` with `hold`, `safe`, `release` (7.4) | A setpoint often has a value that releases the plant | Stop refreshing only |
@@ -2932,7 +2933,7 @@ depended on a ruling now cite it as "(ruling X-n)" or "(O-n)". Recorded in
 | O-9 | Session steps with secrets | Out of phase 2; `session` reserved | Needs the security review of phase 4 | In phase 2 |
 | O-10 | A device's communication heartbeat register | Not in phase 2; a device key reserved | No surveyed device documents one; `refresh` covers setpoints | In phase 2 |
 | O-11 | The version store | Plain version directories handled by `scada-conf` (13.2) | No GPL program (`CLAUDE.md`); writes synced as reference 14.5 asks | A Git repository |
-| O-12 | Defaults of remote switching outputs on control loss and shutdown | **Changed by the owner, option (b):** a `single` or `double` output on a protocol driver whose `safe_state` is `off` or `on` defaults to `safe` on shutdown and on control loss after 10 s; otherwise `hold` (7.2, 7.4) | A switching output does the same job on remote I/O as on a local line (reference 6.5); 10 s rides through a restart of `scada-control` | `hold` with a warning (the draft) |
+| O-12 | Defaults of remote switching outputs on control loss and shutdown | **Changed by the owner, option (b):** a `single` or `double` output on a protocol driver whose `safe_state` is `off` or `on` defaults to `safe` on shutdown and on control loss after 30 s; otherwise `hold` (7.2, 7.4) | A switching output does the same job on remote I/O as on a local line (reference 6.5); 30 s ride through a supervised restart of `scada-control` | `hold` with a warning (the draft) |
 | O-13 | How a commit reaches the services | Every service, `scada-tagd` included, watches the `active` link; no signal and no helper (13.5) | Needs no privilege; a lost event costs at most 5 s | The reload signal through `scada-sys` |
 | O-14 | Reserved words in expressions | Only the operator words and literals, only as a one-segment name; function names only before `(` (5.6) | Keeps `x.quality` and common point names | Every keyword and function name reserved |
 | O-15 | Write groups | None in this version | Tag database 1.0 has one value per request | In phase 2 |
@@ -3003,10 +3004,11 @@ the reference finds it.
 22. `latch` is reserved: it behaves as `single` (reference 8.1 lists it).
 23. Remote switching outputs (`single`, `double` on a protocol driver, with a
     `safe_state` of `off` or `on`) default to `safe` on shutdown and on
-    control loss after 10 s (reference 14.4: "`hold` (default for most
+    control loss after 30 s (reference 14.4: "`hold` (default for most
     process outputs)"; ruling O-12).
 24. A refused newer request does not end the refresh of an accepted setpoint
-    (reference 7.2 and 8 say nothing on it; ruling X-5).
+    (reference 7.2 and 8 say nothing on it); a newer request with an
+    unknown outcome ends it (ruling X-5).
 
 ## 17. Change log
 
@@ -3016,7 +3018,7 @@ the reference finds it.
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA, Linux) and the lead's directions: this contract owns every key (section 4.10, Annex C); scalar typing and limits (1.2, 1.3); validation stages and order (1.4); the expression grammar completed, `/` true division, logical operators BOOL only (5.6); merge rules for expressions, exclusive groups and `replace` (4.5); `only`, template `disable`, `bit_order` required, `storage` required, `write_limits`, `invert`, `restart_indication`, `device_time` with trust; `timeout` defined (4.11); side effects on register ranges (A.4); command kinds and inverse scaling (7.2); one set of fail-safe keys (7.4); queues per driver process, readable short names, owners per thread, rings sized per owner (12.3); `config_id` details; Apply (13); the `io` schema (Annex B); open rulings with the committee's recommendation (15); differences from the reference (16). Decisions D-69 to D-80 revised, D-100 to D-102 added (D-81 to D-99 are the driver interface contract's). Migration: none (draft). |
 | 0.3 | 2026-11-23 | Delta check of 0.2 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: one apply sequence, triggered by the watched link, with step tables, power cuts, the report and idle drivers that never exit (13.4 to 13.7, D-100); the driver's check mode instead of linked protocol libraries, and the expanded file's format (13.1, 13.3); a changed uid makes a new version (13.2); `lost_after_timeouts` split into write and read cases (4.6); `timeout` cites the driver interface's frame time (4.11); the grammar fixed (no range as an operand, reserved words only as one-segment names, `0x` literals, literal bounds) and checked mechanically (5.6, D-78); `avg` REAL; `keep_last` UNCERTAIN and STALE, then BAD; `states` integer keys; exact integer inverse scaling; `double` targets INT64; `safe_state` per kind; `latch` reserved; fail-safe writes repeated (`failsafe_retry`, `<output>.failsafe`); `local_panel` as an input tag; shared command registers; `only` in templates; joined `repeat` bindings; the stage of each code; `scan: auto`, the stop step and `at_start` in Annex B; NTP host names allowed; rulings O-5 split, O-11 to O-17 added, one id per ruling across both contracts. New codes CF-422, CF-528, CF-529, CF-640, CF-718 to CF-720, CW-721, CF-1012, CW-1013, CF-1014, CW-1015, CW-660, CW-661; CF-660 and CF-661 removed. Migration: none (draft). |
 | 0.4 | 2026-11-23 | Third pass on 0.3 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: the fail-safe state machine is the driver interface contract's (8.13) and 7.4 cites it; new keys `control_attach_grace`, `failsafe_max_refusals`, and `failsafe_retry` as the first interval of a back-off; owner and meaning of `<output>.failsafe`; removed outputs and slow writers at a generation change (13.5, O-18); the `scada-tagd` hang (O-19); stages 6 and 7 swapped so that the check reads the bytes the driver reads; `apply.json` against the link after a power cut; the kind of apply against the running generation; reports paired with their `config_id`, state 3, `incomplete` after 30 s; check mode enforcement, re-check after a driver update, expanded-file limits, format version, computed values, JSON subset, load thread; CW-661 removed (validation opens no hardware); idle drivers keep the watchdog; exact integer inverse scaling with no `scale`; CW-721 only when both keys are absent; CF-722, CF-723, CF-1016; lexical rules (abutting tokens, case); corpus cases; `lost_after_timeouts` quotes the driver interface rule word for word; `apply.json` by rename, the switch back after a refused G2, a power cut before it, the first start, retention (`conf.keep_versions`); check-mode enforcement without privilege; re-check in the update's health check; the stop step's version, form and bound; `auto` by ancestor bus; A.3 and A.5 on shared command registers; rulings O-18 to O-20, X-5 dissent, consequences of O-13, R-11, R-16, R-17. Migration: none (draft). |
-| 0.5 | 2026-11-23 | Rulings of the product owner of 2026-11-23 (section 15): every ruling as drafted on the committee's recommendation, with three changes: X-5 (a refused newer request does not end the refresh; `<output>.refresh` values 3 and 4), O-12 (remote switching outputs default to `safe`, on control loss after 10 s; CW-721 now warns on an explicit `hold`), `<output>.failsafe` value 3 for an action given up. Every "open" marker replaced by its ruling; status accepted for phase 2 implementation; reference architecture 1.2; differences 23 and 24; test 23. Migration: none |
+| 0.5 | 2026-11-23 | Rulings of the product owner of 2026-11-23 (section 15): every ruling as drafted on the committee's recommendation, with three changes: X-5 (a refused newer request does not end the refresh, an unknown outcome ends it; `<output>.refresh` value 3), O-12 (remote switching outputs default to `safe`, on control loss after 30 s; CW-721 now warns on an explicit `hold`), `<output>.failsafe` value 3 for an action given up. Every "open" marker replaced by its ruling; status accepted for phase 2 implementation; reference architecture 1.2; differences 23 and 24; test 23. Migration: none |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
