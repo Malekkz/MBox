@@ -58,6 +58,12 @@ public:
                   std::string_view schema_file, std::string_view file_label,
                   Diagnostics& diagnostics) const;
 
+    // The most times validation checks one document node, at most 64: the
+    // product of nested `oneOf` branches and `allOf` parts along a schema
+    // path, found when the set compiles (D-107). Validation work is at most
+    // this times the document's nodes.
+    [[nodiscard]] std::size_t checks_per_node() const noexcept;
+
     // True if a schema file of this name is in the set.
     [[nodiscard]] bool has(std::string_view schema_file) const;
 

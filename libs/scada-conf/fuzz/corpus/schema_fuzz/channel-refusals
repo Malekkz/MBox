@@ -1,0 +1,16 @@
+channel:
+  name: net1
+  type: tcp
+  baud: 9600
+devices:
+  - name: ps1.s1
+    template: sensor_c
+  - name: ps1.s2
+    unit_id: 2
+    params: { n: 1 }
+    points: [ { name: level, address: { table: holding, register: 1 } } ]
+  - name: ps1.s3
+    template: sensor_c
+    unit_id: 3
+    overrides:
+      "level{n}": { unit: m }

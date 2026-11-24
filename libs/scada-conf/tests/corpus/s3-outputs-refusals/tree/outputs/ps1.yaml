@@ -1,0 +1,10 @@
+interlocks:
+  - { name: ps1.p1.permissive, condition: "true" }
+outputs:
+  - name: ps1.p1.speed
+    area: ps1
+    kind: setpoint
+    target: ps1.vfd1.speed_set
+    no_feedback: true
+    duration: 2s
+    safe_state: { value: 0, raw: 1 }

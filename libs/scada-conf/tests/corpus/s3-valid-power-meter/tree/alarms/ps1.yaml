@@ -1,0 +1,4 @@
+priorities: [critical, high, medium, low]
+alarms:
+  - { id: volt_high, tag: ps1.meter1.voltage, type: high, limit: 260, deadband: 2, priority: high, area: ps1 }
+  - { tag: ps1.meter1.voltage, type: rate_of_change, limit: 50, per: 1s, priority: medium, area: ps1 }

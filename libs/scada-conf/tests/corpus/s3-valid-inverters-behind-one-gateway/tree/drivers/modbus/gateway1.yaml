@@ -1,0 +1,16 @@
+channel:
+  name: gateway1
+  type: rtu_over_tcp
+  host: 192.0.2.20
+  port: 4001
+  connect_timeout: 2s
+  min_request_interval: 50ms
+devices:
+  - { name: ps1.inv1, template: inverter_a, unit_id: 1, timeout: 800ms, params: { strings: 12 } }
+  - { name: ps1.inv2, template: inverter_a, unit_id: 2, timeout: 800ms }
+  - { name: ps1.inv3, template: inverter_a, unit_id: 3, timeout: 800ms, disable: ["pv*.voltage"] }
+  - name: ps1.gateway
+    unit_id: 255
+    points:
+      - { name: link_ok, address: { table: holding, register: 1, type: uint16 } }
+      - { name: serial_errors, address: { table: input, register: 9, type: uint16, unit_id: 254 } }

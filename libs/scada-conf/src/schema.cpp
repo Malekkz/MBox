@@ -69,13 +69,17 @@ constexpr std::uint16_t CF_SECRET = 214;
 constexpr std::string_view INT64_MIN_TEXT = "-9223372036854775808";
 constexpr std::string_view INT64_MAX_TEXT = "9223372036854775807";
 constexpr std::string_view UINT64_MAX_TEXT = "18446744073709551615";
+// The most times validation may check one document node: the product of
+// nested `oneOf` branches and `allOf` parts along a schema path (D-107).
+constexpr std::size_t MAX_CHECKS_PER_NODE = 64;
+
 // The longest duration whose nanoseconds fit int64 (D-107), in ms.
 constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
 
 // The `x-scada-type` names this validator implements (contract Annex C). A
 // schema file with another name does not compile, so that a type not
 // implemented yet cannot check nothing.
-constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
+constexpr std::array<std::string_view, 42> KNOWN_SCALAR_TYPES = {
     "string",
     "text",
     "identifier",
@@ -105,16 +109,36 @@ constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
     "cidr",
     "time_zone",
     "time_of_day",
-    "https_url"};
+    "https_url",
+    "point_name_template",
+    "name_pattern",
+    "dev_path",
+    "resolution",
+    "raw_pattern",
+    "raw_pattern_or_nan",
+    "number_or_boolean",
+    "number_or_tag",
+    "duration_or_off",
+    "ip_literal_host",
+    "config_expression",
+    "for_value"};
 
 // The name kind of a name type, and texts joined by commas (below).
 std::optional<std::string_view> name_kind(std::string_view type);
 std::string join(const std::vector<std::string>& texts);
 
 // The types that "minimum" and "maximum" apply to.
-constexpr std::array<std::string_view, 7> NUMBER_TYPES = {
-    "integer", "uint64",     "power_of_two",        "decimal",
-    "number",  "percentage", "number_or_percentage"};
+// For `number_or_expression` they apply to a literal number (D-107).
+constexpr std::array<std::string_view, 9> NUMBER_TYPES = {
+    "integer",
+    "uint64",
+    "power_of_two",
+    "decimal",
+    "number",
+    "percentage",
+    "number_or_percentage",
+    "number_or_tag",
+    "number_or_expression"};
 
 bool listed(std::span<const std::string_view> list, std::string_view name) {
     return std::ranges::find(list, name) != list.end();
@@ -172,6 +196,8 @@ struct CompiledSchemas {
     std::vector<SchemaNode> nodes;
     // "<file>" and "<file>#/$defs/<name>" to the schema they name.
     std::map<std::string, SchemaId, std::less<>> names;
+    // The most times validation checks one document node (D-107).
+    std::size_t checks_per_node = 1;
 };
 
 namespace {
@@ -223,7 +249,91 @@ public:
             }
             node.ref = found->second;
         }
-        return refuse_cycles(problem);
+        return refuse_cycles(problem) && bound_checks(problem);
+    }
+
+    // Bounds the work of validation (D-107). `check` checks a node once for
+    // each schema of its "same node" closure ($ref, allOf, oneOf: every
+    // branch in full), and each schema of the closure checks a child with
+    // its own property, item or unevaluated schema. So with
+    //   g(s) = 1 + the g of the closure's targets of s,
+    //   D(s) = the largest B of the schemas below s itself
+    //          + the D of the closure's targets of s,
+    //   B(s) = max(g(s), D(s)),
+    // a document node is checked at most B(root) times. B is found as a
+    // fixed point; a set whose B passes MAX_CHECKS_PER_NODE, a recursive one
+    // through a oneOf or allOf included, does not compile.
+    bool bound_checks(std::string& problem) const {
+        const std::vector<SchemaNode>& nodes = out_->nodes;
+        const std::size_t count = nodes.size();
+        const std::size_t cap = MAX_CHECKS_PER_NODE + 1;
+        std::vector<std::size_t> same(count, 1);
+        std::vector<std::size_t> below(count, 0);
+        std::vector<std::size_t> bound(count, 1);
+        bool changed = true;
+        // Each pass settles at least one more level; more passes than
+        // schemas mean the bound grows without end.
+        for (std::size_t pass = 0; changed && pass <= count + 1; ++pass) {
+            changed = false;
+            for (SchemaId id = 0; id < count; ++id) {
+                std::size_t checks = 1;
+                std::size_t deeper = largest_below(nodes[id], bound);
+                for (const SchemaId target : closure_edges(nodes[id])) {
+                    checks = std::min(checks + same[target], cap);
+                    deeper = std::min(deeper + below[target], cap);
+                }
+                const std::size_t total = std::max(checks, deeper);
+                changed = changed || checks != same[id] ||
+                          deeper != below[id] || total != bound[id];
+                same[id] = checks;
+                below[id] = deeper;
+                bound[id] = total;
+            }
+        }
+        const std::size_t worst =
+            count == 0 ? 1 : *std::ranges::max_element(bound);
+        if (changed || worst > MAX_CHECKS_PER_NODE) {
+            problem =
+                "the schemas could check one node more than " +
+                std::to_string(MAX_CHECKS_PER_NODE) +
+                " times: nested oneOf or allOf, or a schema that reaches "
+                "itself through properties, items or unevaluatedProperties "
+                "and also refers through $ref, allOf or oneOf to a schema "
+                "with keys or items of its own; such a recursion needs a "
+                "bound per child key, which this validator does not have "
+                "(D-107)";
+            return false;
+        }
+        out_->checks_per_node = worst;
+        return true;
+    }
+
+    // The largest bound of the schemas that `node` itself checks a child
+    // with: its properties, items and unevaluated properties; 0 if none.
+    static std::size_t largest_below(const SchemaNode& node,
+                                     const std::vector<std::size_t>& bound) {
+        std::size_t largest = 0;
+        for (const auto& property : node.properties) {
+            largest = std::max(largest, bound[property.second]);
+        }
+        if (node.items) {
+            largest = std::max(largest, bound[*node.items]);
+        }
+        if (node.unevaluated == Unevaluated::SCHEMA) {
+            largest = std::max(largest, bound[node.unevaluated_schema]);
+        }
+        return largest;
+    }
+
+    // The schemas checked on the same document node as `node`.
+    static std::vector<SchemaId> closure_edges(const SchemaNode& node) {
+        std::vector<SchemaId> out;
+        if (node.ref) {
+            out.push_back(*node.ref);
+        }
+        out.insert(out.end(), node.all_of.begin(), node.all_of.end());
+        out.insert(out.end(), node.one_of.begin(), node.one_of.end());
+        return out;
     }
 
     // A "$ref", "allOf" or "oneOf" chain that comes back to itself would
@@ -673,22 +783,35 @@ private:
     // True if the scalar names of "type" are those the `x-scada-type` is
     // written as: "integer" for the integer types, "number" (or "integer")
     // for decimals and numbers, "boolean" for booleans, "number" and
-    // "string" for a number or a percentage or an expression, "string" for
-    // every other type.
+    // "string" for a number or a percentage or an expression, any kind for
+    // `string` and `expression`, "string" for every other type.
     static bool type_agrees(const SchemaNode& node) {
         if (node.scalar_type.empty() || node.scalar_kinds.empty()) {
             return true;
         }
         const std::string& type = node.scalar_type;
+        // `string` is any text, also a value whose type another key decides
+        // later (D-108): every scalar kind.
+        // An expression's text may be a literal number or boolean (5.6).
+        if (type == "string" || type == "expression" ||
+            type == "config_expression") {
+            return std::ranges::find(node.scalar_kinds, "string") !=
+                   node.scalar_kinds.end();
+        }
         std::vector<std::string_view> allowed;
         if (type == "integer" || type == "uint64" || type == "power_of_two") {
             allowed = {"integer"};
+        } else if (type == "raw_pattern" || type == "raw_pattern_or_nan" ||
+                   type == "for_value") {
+            allowed = {"integer", "string"};
+        } else if (type == "number_or_boolean") {
+            allowed = {"number", "integer", "boolean"};
         } else if (type == "decimal" || type == "number") {
             allowed = {"number", "integer"};
         } else if (type == "boolean") {
             allowed = {"boolean"};
         } else if (type == "number_or_percentage" ||
-                   type == "number_or_expression") {
+                   type == "number_or_expression" || type == "number_or_tag") {
             allowed = {"number", "integer", "string"};
         } else {
             allowed = {"string"};
@@ -723,7 +846,8 @@ private:
             const std::string text = bound->value_or(std::string());
             const std::optional<Integer> count = parse_integer(text);
             const bool valid =
-                (type == "duration" && parse_duration_ms(text)) ||
+                ((type == "duration" || type == "duration_or_off") &&
+                 parse_duration_ms(text)) ||
                 (type == "size" && parse_size_bytes(text)) ||
                 (type == "text" && count.has_value() &&
                  !count.value_or(Integer{}).negative);
@@ -749,23 +873,36 @@ private:
 // with the number of errors. Inside a `oneOf` branch they are held until the
 // branch is known to count, so that a branch that is not taken leaves no
 // trace: at most REPORTED_LIMIT errors, and a count of the rest (D-107).
+//
+// A node whose kind is wrong gets one error, however many schemas state its
+// kind (a framework key that a protocol's schema states again): one
+// diagnostic per cause.
 class Outcome {
 public:
     // Held, for a `oneOf` branch.
     Outcome() = default;
 
     // Given at once to `diagnostics` and `types`.
-    Outcome(Diagnostics& diagnostics, ScalarTypes& types) noexcept
-        : diagnostics_(&diagnostics), types_(&types) {}
+    Outcome(Diagnostics& diagnostics, ScalarTypes& types)
+        : diagnostics_(&diagnostics),
+          types_(&types),
+          kind_reported_(types.size(), false) {}
 
     void error(Diagnostic diagnostic) {
-        ++error_count_;
+        add(std::move(diagnostic), std::nullopt);
+    }
+
+    // An error that `node` is of the wrong kind; dropped if one was given.
+    void kind_error(NodeId node, Diagnostic diagnostic) {
         if (diagnostics_ != nullptr) {
-            diagnostics_->add(std::move(diagnostic));
-        } else {
-            held_errors_.push_back(std::move(diagnostic));
-            trim(false);
+            if (node >= kind_reported_.size() || kind_reported_[node]) {
+                return;
+            }
+            kind_reported_[node] = true;
+        } else if (!held_kinds_.insert(node).second) {
+            return;
         }
+        add(std::move(diagnostic), node);
     }
 
     // Records the type of `node`; a later call for the same node wins.
@@ -795,8 +932,12 @@ public:
         taken.trim(true);
         const std::size_t unlisted =
             taken.error_count_ - taken.held_errors_.size();
-        for (Diagnostic& diagnostic : taken.held_errors_) {
-            error(std::move(diagnostic));
+        for (Held& held : taken.held_errors_) {
+            if (held.kind_node) {
+                kind_error(*held.kind_node, std::move(held.diagnostic));
+            } else {
+                error(std::move(held.diagnostic));
+            }
         }
         error_count_ += unlisted;
         if (diagnostics_ != nullptr) {
@@ -808,6 +949,23 @@ public:
     }
 
 private:
+    struct Held {
+        Diagnostic diagnostic;
+        // The node, for an error of its kind.
+        std::optional<NodeId> kind_node;
+    };
+
+    void add(Diagnostic diagnostic, std::optional<NodeId> kind_node) {
+        ++error_count_;
+        if (diagnostics_ != nullptr) {
+            diagnostics_->add(std::move(diagnostic));
+        } else {
+            held_errors_.push_back(Held{.diagnostic = std::move(diagnostic),
+                                        .kind_node = kind_node});
+            trim(false);
+        }
+    }
+
     // Keeps the first REPORTED_LIMIT held errors in the order of the report
     // (contract 1.4), as Diagnostics does, once twice that many are held.
     void trim(bool force) {
@@ -815,7 +973,10 @@ private:
             return;
         }
         std::stable_sort(held_errors_.begin(), held_errors_.end(),
-                         reported_before);
+                         [](const Held& lhs, const Held& rhs) {
+                             return reported_before(lhs.diagnostic,
+                                                    rhs.diagnostic);
+                         });
         if (held_errors_.size() > Diagnostics::REPORTED_LIMIT) {
             held_errors_.resize(Diagnostics::REPORTED_LIMIT);
         }
@@ -823,7 +984,11 @@ private:
 
     Diagnostics* diagnostics_ = nullptr;
     ScalarTypes* types_ = nullptr;
-    std::vector<Diagnostic> held_errors_;
+    // The nodes given a kind error: at the top, one bit per node; in a
+    // branch, those of the branch.
+    std::vector<bool> kind_reported_;
+    std::set<NodeId> held_kinds_;
+    std::vector<Held> held_errors_;
     std::map<NodeId, ScalarType> held_types_;
     std::size_t error_count_ = 0;
 };
@@ -855,6 +1020,8 @@ std::string type_phrase(std::string_view type) {
         {"number_or_percentage", "a number or a percentage"},
         {"number_or_expression", "a number or an expression"},
         {"expression", "an expression"},
+        {"config_expression", "an expression"},
+        {"for_value", "an integer or a range"},
     };
     const auto found = PHRASES.find(type);
     if (found != PHRASES.end()) {
@@ -871,7 +1038,8 @@ std::optional<std::string_view> name_kind(std::string_view type) {
         {"point_name", "point"},           {"device_name", "device"},
         {"poll_group_name", "poll group"}, {"tier_name", "tier"},
         {"protocol_name", "protocol"},     {"unit_id", "unit id"},
-        {"process_name", "process"},
+        {"process_name", "process"},       {"point_name_template", "point"},
+        {"name_pattern", "name pattern"},
     };
     const auto found = KINDS.find(type);
     if (found == KINDS.end()) {
@@ -880,7 +1048,36 @@ std::optional<std::string_view> name_kind(std::string_view type) {
     return found->second;
 }
 
+// `text` with every `{<identifier>}` (a `repeat` variable, 4.4) replaced by
+// `0`, and, for a pattern, every `*` and `?` (2.5) by `a`; nothing if a brace
+// is not closed or holds no identifier.
+std::optional<std::string> instantiated(std::string_view text, bool pattern) {
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const char chr = text[pos];
+        if (chr == '{') {
+            const std::size_t close = text.find('}', pos);
+            if (close == std::string_view::npos ||
+                !is_identifier(text.substr(pos + 1, close - pos - 1))) {
+                return std::nullopt;
+            }
+            out.push_back('0');
+            pos = close + 1;
+            continue;
+        }
+        out.push_back(pattern && (chr == '*' || chr == '?') ? 'a' : chr);
+        ++pos;
+    }
+    return out;
+}
+
 bool name_matches(std::string_view type, std::string_view text) {
+    if (type == "point_name_template" || type == "name_pattern") {
+        const std::optional<std::string> plain =
+            instantiated(text, type == "name_pattern");
+        return plain && is_tag_name(*plain);
+    }
     if (type == "identifier") {
         return is_identifier(text);
     }
@@ -901,6 +1098,9 @@ bool name_matches(std::string_view type, std::string_view text) {
     }
     return is_process_name(text);
 }
+
+// An absolute path under /dev/ without `..` or empty components, at most
+// 255 bytes (Annex A.1).
 
 // Text forms that are strings with a grammar, refused with CF-203 and the
 // phrase given.
@@ -927,6 +1127,15 @@ std::optional<std::pair<bool, std::string_view>> text_form(
     }
     if (type == "https_url") {
         return std::make_pair(is_https_url(text), "an https URL");
+    }
+    if (type == "dev_path") {
+        return std::make_pair(is_device_path(text),
+                              "an absolute path under /dev/");
+    }
+    if (type == "resolution") {
+        return std::make_pair(
+            read_resolution_ns(text).form != IntegerForm::NOT_INTEGER,
+            "1s, 1ms or <n>ns");
     }
     return std::nullopt;
 }
@@ -1034,8 +1243,13 @@ private:
         }
         const NodeView value = node(node_id);
         if (!kind_allowed(rules, value.kind)) {
-            error(out, CF_WRONG_TYPE, node_id,
-                  label(path) + " must be " + kind_phrase(rules));
+            out.kind_error(node_id,
+                           Diagnostic{.severity = Severity::ERROR,
+                                      .code = CF_WRONG_TYPE,
+                                      .location = document_->location(node_id),
+                                      .message = label(path) + " must be " +
+                                                 kind_phrase(rules),
+                                      .notes = {}});
             return;
         }
         if (value.kind == NodeKind::MAP) {
@@ -1200,6 +1414,9 @@ private:
 
     void check_exclusive(const SchemaNode& rules, NodeId map,
                          const std::string& path, Outcome& out) {
+        // A key in two groups (`value` and `mask` of a write) is reported
+        // once.
+        std::set<std::size_t> reported;
         for (const std::vector<std::string>& group : rules.exclusive) {
             std::optional<std::size_t> first;
             for (std::size_t i = 0; i < document_->entry_count(map); ++i) {
@@ -1209,6 +1426,9 @@ private:
                 }
                 if (!first) {
                     first = i;
+                    continue;
+                }
+                if (!reported.insert(i).second) {
                     continue;
                 }
                 error(out, CF_EXCLUSIVE, key_of(map, i),
@@ -1698,24 +1918,218 @@ private:
         if (type == "percentage" || type == "number_or_percentage") {
             return type_percentage(rules, scalar, key, out);
         }
-        if (type == "expression") {
+        if (type == "expression" || type == "config_expression") {
             return ScalarType::EXPRESSION;
+        }
+        if (const std::optional<ScalarType> special =
+                type_special(rules, scalar, key, out)) {
+            if (*special == ScalarType::NONE) {
+                return std::nullopt;
+            }
+            return special;
         }
         if (type == "number_or_expression") {
-            if (value.style == ScalarStyle::PLAIN) {
-                Number number;
-                const NumberRead read = read_number(
-                    value.text, scalar, key, type_phrase(type), out, number);
-                if (read == NumberRead::REFUSED) {
-                    return std::nullopt;
-                }
-                if (read == NumberRead::NUMBER) {
-                    return type_of(number);
-                }
-            }
-            return ScalarType::EXPRESSION;
+            return type_number_or_expression(rules, scalar, key, out);
+        }
+        if (type == "for_value") {
+            return type_for_value(scalar, key, out);
         }
         return type_string_form(rules, scalar, key, out);
+    }
+
+    // A plain number, otherwise an expression (Annex C). A literal number is
+    // checked at once against "minimum" and "maximum", and must be an
+    // integer where "type" names "integer" and not "number": only a real
+    // expression waits for expansion (D-107).
+    std::optional<ScalarType> type_number_or_expression(const SchemaNode& rules,
+                                                        NodeId scalar,
+                                                        const std::string& key,
+                                                        Outcome& out) {
+        const NodeView value = node(scalar);
+        if (value.style != ScalarStyle::PLAIN) {
+            return ScalarType::EXPRESSION;
+        }
+        Number number;
+        const NumberRead read =
+            read_number(value.text, scalar, key, type_phrase(rules.scalar_type),
+                        out, number);
+        if (read == NumberRead::REFUSED) {
+            return std::nullopt;
+        }
+        if (read == NumberRead::NONE) {
+            return ScalarType::EXPRESSION;
+        }
+        const bool integer_only = !rules.scalar_kinds.empty() &&
+                                  listed_text(rules.scalar_kinds, "integer") &&
+                                  !listed_text(rules.scalar_kinds, "number");
+        if (integer_only && !std::holds_alternative<Integer>(number)) {
+            error(out, CF_WRONG_TYPE, scalar,
+                  key + " must be an integer or an expression");
+            return std::nullopt;
+        }
+        if (!number_in_range(rules, number, scalar, key, out)) {
+            return std::nullopt;
+        }
+        return type_of(number);
+    }
+
+    static bool listed_text(const std::vector<std::string>& list,
+                            std::string_view name) {
+        return std::ranges::find(list, name) != list.end();
+    }
+
+    // A `repeat` range (4.4): a plain integer, which must fit int64,
+    // otherwise the text of a range expression.
+    std::optional<ScalarType> type_for_value(NodeId scalar,
+                                             const std::string& key,
+                                             Outcome& out) {
+        const NodeView value = node(scalar);
+        const IntegerRead read = value.style == ScalarStyle::PLAIN
+                                     ? read_integer(value.text)
+                                     : IntegerRead{};
+        if (read.form == IntegerForm::NOT_INTEGER) {
+            return ScalarType::EXPRESSION;
+        }
+        if (read.form == IntegerForm::TOO_LARGE || !as_int64(read.value)) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between " + std::string(INT64_MIN_TEXT) +
+                      " and " + std::string(INT64_MAX_TEXT));
+            return std::nullopt;
+        }
+        return ScalarType::INTEGER;
+    }
+
+    // A raw pattern (2.3): 0 to 2^64 - 1, or a negative int64 value. An
+    // integer of the form beyond these is CF-204 (D-107).
+    std::optional<ScalarType> type_raw_pattern(NodeId scalar,
+                                               const std::string& key,
+                                               Outcome& out) {
+        const NodeView value = node(scalar);
+        const IntegerRead read = value.style == ScalarStyle::PLAIN
+                                     ? read_integer(value.text)
+                                     : IntegerRead{};
+        if (read.form == IntegerForm::NOT_INTEGER) {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be a raw pattern");
+            return std::nullopt;
+        }
+        if (read.form == IntegerForm::TOO_LARGE ||
+            (read.value.negative && !as_int64(read.value))) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between " + std::string(INT64_MIN_TEXT) +
+                      " and " + std::string(UINT64_MAX_TEXT));
+            return std::nullopt;
+        }
+        return ScalarType::INTEGER;
+    }
+
+    ScalarType type_number_or_boolean(NodeId scalar, const std::string& key,
+                                      Outcome& out) {
+        const NodeView value = node(scalar);
+        const std::string phrase = "a number or true or false";
+        if (value.style == ScalarStyle::PLAIN) {
+            if (parse_boolean(value.text)) {
+                return ScalarType::BOOLEAN;
+            }
+            Number number;
+            const NumberRead read =
+                read_number(value.text, scalar, key, phrase, out, number);
+            if (read == NumberRead::REFUSED) {
+                return ScalarType::NONE;
+            }
+            if (read == NumberRead::NUMBER) {
+                return type_of(number);
+            }
+        }
+        error(out, CF_WRONG_TYPE, scalar, key + " must be " + phrase);
+        return ScalarType::NONE;
+    }
+
+    ScalarType type_number_or_tag(const SchemaNode& rules, NodeId scalar,
+                                  const std::string& key, Outcome& out) {
+        const NodeView value = node(scalar);
+        if (value.style == ScalarStyle::PLAIN) {
+            Number number;
+            const NumberRead read = read_number(
+                value.text, scalar, key, "a number or a tag name", out, number);
+            if (read == NumberRead::REFUSED) {
+                return ScalarType::NONE;
+            }
+            if (read == NumberRead::NUMBER) {
+                return number_in_range(rules, number, scalar, key, out)
+                           ? type_of(number)
+                           : ScalarType::NONE;
+            }
+        }
+        if (!is_tag_name(value.text)) {
+            error(out, CF_BAD_NAME, scalar,
+                  quote_text(value.text) + " is not a valid tag name");
+            return ScalarType::NONE;
+        }
+        return ScalarType::STRING;
+    }
+
+    ScalarType type_ip_literal_host(NodeId scalar, const std::string& key,
+                                    Outcome& out) {
+        const NodeView value = node(scalar);
+        if (is_ip_address(value.text)) {
+            return ScalarType::STRING;
+        }
+        if (is_host_name(value.text)) {
+            error(out, CF_RESERVED, scalar,
+                  key +
+                      ": a host name is reserved and not available in this "
+                      "version");
+        } else {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be an IP address");
+        }
+        return ScalarType::NONE;
+    }
+
+    // The types that combine two forms, and the raw patterns. Nothing for a
+    // type that is not one of them; NONE, the error added, if the value
+    // does not fit.
+    std::optional<ScalarType> type_special(const SchemaNode& rules,
+                                           NodeId scalar,
+                                           const std::string& key,
+                                           Outcome& out) {
+        const std::string& type = rules.scalar_type;
+        const NodeView value = node(scalar);
+        const bool plain_nan =
+            value.text == "nan" && value.style == ScalarStyle::PLAIN;
+        if (type == "raw_pattern" ||
+            (type == "raw_pattern_or_nan" && !plain_nan)) {
+            return type_raw_pattern(scalar, key, out)
+                .value_or(ScalarType::NONE);
+        }
+        if (type == "raw_pattern_or_nan") {
+            return ScalarType::STRING;
+        }
+        if (type == "number_or_boolean") {
+            return type_number_or_boolean(scalar, key, out);
+        }
+        if (type == "number_or_tag") {
+            return type_number_or_tag(rules, scalar, key, out);
+        }
+        if (type == "duration_or_off") {
+            if (value.text == "off") {
+                return ScalarType::STRING;
+            }
+            SchemaNode as_duration = rules;
+            as_duration.scalar_type = "duration";
+            return type_with_unit(as_duration, scalar, key, out)
+                .value_or(ScalarType::NONE);
+        }
+        if (type == "ip_literal_host") {
+            return type_ip_literal_host(scalar, key, out);
+        }
+        if (type == "resolution" &&
+            read_resolution_ns(value.text).form == IntegerForm::TOO_LARGE) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between 1ns and " +
+                      std::string(INT64_MAX_TEXT) + "ns");
+            return ScalarType::NONE;
+        }
+        return std::nullopt;
     }
 
     // Free text, names and the other string forms.
@@ -1789,6 +2203,10 @@ const SchemaSet& SchemaSet::builtin() {
         return std::move(compiled).value();
     }();
     return INSTANCE;
+}
+
+std::size_t SchemaSet::checks_per_node() const noexcept {
+    return compiled_->checks_per_node;
 }
 
 bool SchemaSet::has(std::string_view schema_file) const {

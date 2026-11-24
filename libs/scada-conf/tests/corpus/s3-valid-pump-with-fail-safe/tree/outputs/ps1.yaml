@@ -1,0 +1,16 @@
+interlocks:
+  - name: ps1.pump1.permissive
+    condition: NOT ps1.tank.low
+    message: "tank level low"
+outputs:
+  - name: ps1.pump1.cmd
+    area: ps1
+    kind: single
+    target: ps1.pump1.run_cmd
+    feedback: ps1.pump1.running
+    feedback_timeout: 5s
+    interlocks: [ps1.pump1.permissive]
+    safe_state: off
+    on_shutdown: safe
+    on_control_loss: { action: safe, after: 0s }
+    on_generation_change: hold

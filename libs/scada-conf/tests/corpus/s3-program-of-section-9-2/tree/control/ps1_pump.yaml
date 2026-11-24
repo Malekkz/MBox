@@ -1,0 +1,7 @@
+program: ps1_pump
+task: normal
+blocks:
+  - id: run
+    type: digital_output
+    in: { value: true, interlock: ps1.pump1.permissive }
+    output: ps1.pump1.cmd

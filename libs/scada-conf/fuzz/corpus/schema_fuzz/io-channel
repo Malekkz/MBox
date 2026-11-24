@@ -1,0 +1,2 @@
+channel: { name: local, backend: gpio, chip: pinctrl-a }
+devices: [ { name: ps1.io, points: [ { name: run, access: rw, storage: volatile, address: { line: RELAY1, direction: output, at_start: hold } } ] } ]

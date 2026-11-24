@@ -851,5 +851,247 @@ TEST(Schema, ACappedBranchKeepsTheFirstErrorsInReportOrder) {
               "f.yaml:1:1: error CF-202: f.yaml needs need");
 }
 
+// The special types of slice 4 follow the integer rules of D-107.
+TEST(Schema, SpecialTypesFollowTheIntegerRules) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "raw": { "type": ["integer", "string"], "x-scada-type": "raw_pattern" },
+        "nb": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" },
+        "nt": { "type": ["number", "string"], "x-scada-type": "number_or_tag" } } })";
+    EXPECT_EQ(check(json, "raw: -1\nnb: true\nnt: ps1.flow\n"), Lines{});
+    EXPECT_EQ(check(json, "raw: 18446744073709551616\n"),
+              Lines{"1:6 CF-204: raw must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "raw: -9223372036854775809\n"),
+              Lines{"1:6 CF-204: raw must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "raw: x\n"),
+              Lines{"1:6 CF-203: raw must be a raw pattern"});
+    EXPECT_EQ(check(json, "nb: 18446744073709551616\n"),
+              Lines{"1:5 CF-204: nb must be between -9223372036854775808 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "nb: yes\n"),
+              Lines{"1:5 CF-203: nb must be a number or true or false"});
+    EXPECT_EQ(check(json, "nt: Bad\n"),
+              Lines{"1:5 CF-212: \"Bad\" is not a valid tag name"});
+    EXPECT_EQ(root_types(json, "raw: 5\nnb: 1.5\nnt: 2\n"),
+              (std::vector<ScalarType>{ScalarType::INTEGER, ScalarType::DECIMAL,
+                                       ScalarType::INTEGER}));
+}
+
+// The types of Annex C added with the template and channel schemas, at the
+// edges of their grammars.
+constexpr std::string_view TEMPLATE_TYPES =
+    R"({ "type": "object", "properties": {
+        "dev": { "type": "string", "x-scada-type": "dev_path" },
+        "res": { "type": "string", "x-scada-type": "resolution" },
+        "tmpl": { "type": "string", "x-scada-type": "point_name_template" },
+        "pat": { "type": "string", "x-scada-type": "name_pattern" },
+        "ka": { "type": "string", "x-scada-type": "duration_or_off", "x-scada-min": "1s", "x-scada-max": "1h" },
+        "rawn": { "type": ["integer", "string"], "x-scada-type": "raw_pattern_or_nan" },
+        "ipl": { "type": "string", "x-scada-type": "ip_literal_host" },
+        "ce": { "type": ["string", "boolean"], "x-scada-type": "config_expression" },
+        "fv": { "type": ["string", "integer"], "x-scada-type": "for_value" },
+        "noe": { "type": ["integer", "string"], "x-scada-type": "number_or_expression", "minimum": 0, "maximum": 15 } } })";
+
+TEST(Schema, TheTypesOfTemplatesAndChannelsAtTheirLimits) {
+    const std::string json(TEMPLATE_TYPES);
+    const std::string at_limit = "/dev/" + std::string(250, 'a');
+    EXPECT_EQ(check(json,
+                    "dev: /dev/serial/by-id/usb adapter 1\n"
+                    "res: 1s\ntmpl: \"pv{n}.v\"\npat: \"pv*.{n}?\"\n"
+                    "ka: off\nrawn: nan\nipl: \"2001:db8::1\"\n"
+                    "ce: true\nfv: 9223372036854775807\nnoe: 15\n"),
+              Lines{});
+    EXPECT_EQ(check(json, "dev: " + at_limit +
+                              "\nres: 9223372036854775807ns\n"
+                              "ka: 1h\nrawn: 0xFFFFFFFFFFFFFFFF\nfv: \"1..n\"\n"
+                              "noe: \"n + 1\"\n"),
+              Lines{});
+}
+
+TEST(Schema, DevicePathsAreAbsoluteUnderDev) {
+    const std::string json(TEMPLATE_TYPES);
+    const std::string at_limit = "/dev/" + std::string(250, 'a');
+    EXPECT_EQ(check(json, "dev: " + at_limit + "a\n"),
+              Lines{"1:6 CF-203: dev must be an absolute path under /dev/"});
+    for (const std::string_view path :
+         {"/dev", "/dev/", "/dev//a", "/dev/a/", "/dev/./a", "/dev/a/..",
+          "dev/a", "/sys/a", R"("/dev/a\tb")"}) {
+        SCOPED_TRACE(path);
+        EXPECT_EQ(check(json, "dev: " + std::string(path) + "\n").size(), 1U);
+    }
+}
+
+TEST(Schema, ResolutionsFitInt64Nanoseconds) {
+    const std::string json(TEMPLATE_TYPES);
+    EXPECT_EQ(check(json, "res: 1ns\n"), Lines{});
+    EXPECT_EQ(check(json, "res: 9223372036854775808ns\n"),
+              Lines{"1:6 CF-204: res must be between 1ns and "
+                    "9223372036854775807ns"});
+    EXPECT_EQ(check(json, "res: 18446744073709551616ns\n"),
+              Lines{"1:6 CF-204: res must be between 1ns and "
+                    "9223372036854775807ns"});
+    for (const std::string_view text :
+         {"0ns", "0x10ns", "01ns", "2ms", "1us", "ns", "-1ns", "1.5ns"}) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(check(json, "res: " + std::string(text) + "\n"),
+                  Lines{"1:6 CF-203: res must be 1s, 1ms or <n>ns"});
+    }
+}
+
+TEST(Schema, NamesAndDurationsOrOff) {
+    const std::string json(TEMPLATE_TYPES);
+    EXPECT_EQ(
+        check(json, "tmpl: \"pv{n\"\npat: \"pv{1n}*\"\n"),
+        (Lines{"1:7 CF-212: \"pv{n\" is not a valid point name",
+               "2:6 CF-212: \"pv{1n}*\" is not a valid name pattern name"}));
+    EXPECT_EQ(check(json, "ka: 999ms\n"),
+              Lines{"1:5 CF-204: ka must be between 1s and 1h"});
+    EXPECT_EQ(check(json, "ka: 3601s\n"),
+              Lines{"1:5 CF-204: ka must be between 1s and 1h"});
+    EXPECT_EQ(check(json, "ka: Off\n"),
+              Lines{"1:5 CF-206: \"Off\" is not a valid duration"});
+}
+
+TEST(Schema, RawPatternsAndHosts) {
+    const std::string json(TEMPLATE_TYPES);
+    // Plain only: a quoted nan or number is text (Annex C).
+    EXPECT_EQ(check(json, "rawn: \"nan\"\n"),
+              Lines{"1:7 CF-203: rawn must be a raw pattern"});
+    EXPECT_EQ(check(json, "rawn: NaN\n"),
+              Lines{"1:7 CF-203: rawn must be a raw pattern"});
+    EXPECT_EQ(check(json, "rawn: -9223372036854775809\n"),
+              Lines{"1:7 CF-204: rawn must be between -9223372036854775808 "
+                    "and 18446744073709551615"});
+    EXPECT_EQ(check(json, "ipl: plc.example\n"),
+              Lines{"1:6 CF-210: ipl: a host name is reserved and not "
+                    "available in this version"});
+    EXPECT_EQ(check(json, "ipl: 192.0.2\n"),
+              Lines{"1:6 CF-203: ipl must be an IP address"});
+}
+
+TEST(Schema, ExpressionsAndRanges) {
+    const std::string json(TEMPLATE_TYPES);
+    EXPECT_EQ(check(json, "fv: 9223372036854775808\n"),
+              Lines{"1:5 CF-204: fv must be between -9223372036854775808 and "
+                    "9223372036854775807"});
+    EXPECT_EQ(check(json, "noe: 16\n"),
+              Lines{"1:6 CF-204: noe must be between 0 and 15"});
+    EXPECT_EQ(check(json, "noe: 1.0\n"),
+              Lines{"1:6 CF-203: noe must be an integer or an expression"});
+    EXPECT_EQ(
+        root_types(json, "ce: true\nfv: 3\nnoe: 2\n"),
+        (std::vector<ScalarType>{ScalarType::EXPRESSION, ScalarType::INTEGER,
+                                 ScalarType::INTEGER}));
+}
+
+// `string` and `expression` take any kind of scalar, but their `type` must
+// name `string` (S2 of #131, C2 of #132).
+TEST(Schema, TextTypesNameStringInTheirType) {
+    for (
+        const std::string_view json :
+        {R"({ "type": "integer", "x-scada-type": "string" })",
+         R"({ "type": "boolean", "x-scada-type": "string" })",
+         R"({ "type": "number", "x-scada-type": "expression" })",
+         R"({ "type": ["integer", "boolean"], "x-scada-type": "config_expression" })"}) {
+        SCOPED_TRACE(json);
+        std::string problem;
+        EXPECT_FALSE(
+            SchemaSet::compile({SchemaSource{.name = "t.schema.json",
+                                             .text = std::string(json)}},
+                               problem)
+                .ok());
+        EXPECT_NE(problem.find("disagrees with x-scada-type"),
+                  std::string::npos)
+            << problem;
+    }
+    EXPECT_EQ(
+        check(R"({ "type": ["string", "integer"], "x-scada-type": "string" })",
+              "5\n"),
+        Lines{});
+}
+
+// Inside a `oneOf` branch too, a node of the wrong kind gets one error,
+// however many schemas of the branch state its kind.
+TEST(Schema, OneKindErrorPerNodeInABranch) {
+    EXPECT_EQ(check(R"({ "oneOf": [ { "allOf": [ { "type": "array" },
+                                                 { "type": "array" } ] } ] })",
+                    "5\n"),
+              Lines{"1:1 CF-203: f.yaml must be a list"});
+}
+
+// A recursion that passes an `allOf` to a schema with keys of its own does
+// not compile, with a message that says why (D-107).
+TEST(Schema, ARecursionThroughAnAllOfIsRefused) {
+    const std::string recursive = R"({
+        "$defs": {
+            "common": { "properties": { "name": { "type": "string" } } },
+            "block": {
+                "allOf": [ { "$ref": "#/$defs/common" } ],
+                "properties": { "children": { "type": "array", "items": { "$ref": "#/$defs/block" } } }
+            }
+        },
+        "$ref": "#/$defs/block" })";
+    std::string problem;
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = recursive}}, problem)
+            .ok());
+    EXPECT_NE(problem.find("reaches itself through properties"),
+              std::string::npos)
+        << problem;
+    EXPECT_NE(problem.find("bound per child key"), std::string::npos)
+        << problem;
+}
+
+// A `oneOf` of four branches, nested `depth` times around an integer.
+std::string nested_one_of(int depth) {
+    std::string nested = R"({ "type": "integer" })";
+    constexpr int BRANCHES = 4;
+    for (int level = 0; level < depth; ++level) {
+        std::string next = R"({ "oneOf": [ )";
+        for (int branch = 0; branch < BRANCHES; ++branch) {
+            next += branch == 0 ? "" : ", ";
+            next += nested;
+        }
+        next += " ] }";
+        nested = std::move(next);
+    }
+    return nested;
+}
+
+// The bound on nested `oneOf` and `allOf` (D-107): the built-in schemas
+// check one node at most 21 times; a set that could pass 64 does not
+// compile, nor a recursion through a `oneOf`.
+TEST(Schema, NestedOneOfIsBounded) {
+    constexpr std::size_t BUILTIN_CHECKS = 21;
+    EXPECT_EQ(SchemaSet::builtin().checks_per_node(), BUILTIN_CHECKS);
+    // 4 x 4 x 4 branches, each also checked by the level above: more than
+    // 64 checks of the innermost node.
+    const std::string nested = nested_one_of(3);
+    std::string problem;
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = nested}}, problem)
+            .ok());
+    EXPECT_NE(problem.find("more than 64 times"), std::string::npos) << problem;
+    // Two levels of four: 4 + 4 x 4 + 1 checks at most, within the bound.
+    const std::string two_levels =
+        R"({ "oneOf": [ { "oneOf": [ {}, {}, {}, {} ] }, {}, {}, {} ] })";
+    const Result<SchemaSet> fits = SchemaSet::compile(
+        {SchemaSource{.name = "t.schema.json", .text = two_levels}}, problem);
+    ASSERT_TRUE(fits.ok()) << problem;
+    EXPECT_LE(fits.value().checks_per_node(), 64U);
+    // A recursion down the document through a `oneOf` multiplies at every
+    // level: refused.
+    const std::string recursive = R"({ "$ref": "#/$defs/n", "$defs": { "n": {
+        "oneOf": [ { "type": "object", "properties": { "c": { "$ref": "#/$defs/n" } } },
+                   { "type": "object", "properties": { "d": { "$ref": "#/$defs/n" } } } ] } } })";
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = recursive}}, problem)
+            .ok());
+}
+
 }  // namespace
 }  // namespace scada::conf

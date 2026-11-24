@@ -1,0 +1,9 @@
+# CF-517 at stage 3, each of the three forms, where one point object gives
+# the keys (contract 4.7, 0.6). The last point of the template is valid: an
+# integer gain, an integer offset and a divide_by of 1. (The gain and the
+# divide_by of one scale are CF-207.)
+drivers/modbus/line1.yaml:7:50: CF-517
+templates/meter.yaml:7:25: CF-517
+templates/meter.yaml:11:20: CF-517
+templates/meter.yaml:15:20: CF-517
+templates/meter.yaml:21:36: CF-207

@@ -1,0 +1,4 @@
+template: sensor_c
+protocol: modbus
+points:
+  - { name: level, address: { table: holding, register: 1 } }

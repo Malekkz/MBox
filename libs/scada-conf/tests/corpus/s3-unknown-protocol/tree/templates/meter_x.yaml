@@ -1,0 +1,7 @@
+template: meter_x
+protocol: newproto
+points:
+  - name: power
+    unit: kW
+    address: { object: analog_input, instance: 3 }
+station_address: 7

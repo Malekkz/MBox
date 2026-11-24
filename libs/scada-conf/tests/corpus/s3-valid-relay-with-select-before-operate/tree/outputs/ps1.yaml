@@ -1,0 +1,17 @@
+interlocks:
+  - name: ps1.cb1.close_permissive
+    condition: ps1.relay1.earth_open
+    message: "earth switch closed"
+outputs:
+  - name: ps1.cb1.cmd
+    area: ps1
+    kind: double
+    target: ps1.relay1.cb_ctrl
+    feedback: ps1.relay1.cb_pos
+    sbo: true
+    select_timeout: 20s
+    reason_required: true
+    interlocks: { on: [ps1.cb1.close_permissive], off: [] }
+    safe_state: hold
+    on_shutdown: hold
+    on_control_loss: { action: hold }

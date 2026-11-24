@@ -1,0 +1,3 @@
+# A pump on local I/O: a GPIO channel, an output line with its level at
+# start, a run feedback, and a single output with interlocks and fail-safe
+# keys (7.2 to 7.4, Annex B). Invented.

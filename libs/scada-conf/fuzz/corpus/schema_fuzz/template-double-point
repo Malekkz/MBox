@@ -1,0 +1,24 @@
+template: relay_a
+protocol: modbus
+bit_order: lsb0
+points:
+  - name: cb_pos
+    kind: double_point
+    address:
+      on: { table: holding, register: 60, bit: 4 }
+      off: { table: holding, register: 60, bit: 5 }
+      fault: { table: holding, register: 60, bit: 6 }
+    poll_group: fast
+  - name: cb_ctrl
+    kind: double_point
+    access: wo
+    storage: volatile
+    address:
+      table: holding
+      register: 500
+      write:
+        on: { table: holding, register: 501, value: 0xFF00 }
+        off: { table: holding, register: 502, value: 0xFF00 }
+  - name: earth_open
+    address: { table: discrete, register: 20 }
+    poll_group: fast

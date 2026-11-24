@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "alarms.schema.json",
+  "title": "alarms/*.yaml (configuration schemas contract, section 8)",
+  "type": "object",
+  "properties": {
+    "priorities": { "description": "Most urgent first. Default [critical, high, medium, low]", "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "common.schema.json#/$defs/identifier" } },
+    "max_shelve": {
+      "description": "Priority to the longest shelving. Default 8h for every priority",
+      "type": "object",
+      "x-scada-key-type": "identifier",
+      "unevaluatedProperties": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+    },
+    "classes": { "description": "Default [process, system]", "type": "array", "items": { "$ref": "common.schema.json#/$defs/identifier" } },
+    "alarms": { "$ref": "point.schema.json#/$defs/alarms" }
+  },
+  "unevaluatedProperties": false
+}

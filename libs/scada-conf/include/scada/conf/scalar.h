@@ -87,6 +87,11 @@ struct UnitRead {
 // TOO_LARGE for one of the form beyond uint64 milliseconds.
 [[nodiscard]] UnitRead read_duration_ms(std::string_view text);
 
+// A resolution of an epoch value (Annex A.2, C): `1s`, `1ms`, or `<n>ns`
+// with n a whole number of at least 1, in nanoseconds; TOO_LARGE if n
+// passes int64, like a duration (D-107); NOT_INTEGER for any other text.
+[[nodiscard]] UnitRead read_resolution_ns(std::string_view text);
+
 // The milliseconds of a duration that fits; nothing for any other text.
 [[nodiscard]] std::optional<std::uint64_t> parse_duration_ms(
     std::string_view text);

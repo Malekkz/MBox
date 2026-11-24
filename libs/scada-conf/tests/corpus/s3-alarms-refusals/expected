@@ -1,0 +1,8 @@
+# Alarms refused at stage 3 by their type: a limit alarm without limit, a
+# deviation without setpoint, an expression alarm without name, an alarm
+# without tag in an alarm file, and nine priorities. Invented.
+alarms/ps1.yaml:1:13: CF-204
+alarms/ps1.yaml:3:5: CF-202
+alarms/ps1.yaml:4:5: CF-202
+alarms/ps1.yaml:5:5: CF-202
+alarms/ps1.yaml:6:5: CF-202

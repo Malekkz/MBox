@@ -8,15 +8,23 @@
 // - parse_number never reads an integer of the form as a decimal;
 // - has_decimal_form matches `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?`;
 // - every to_* agrees with the parse_* it reads through, and never takes a
-//   quoted scalar for a number or a boolean.
+//   quoted scalar for a number or a boolean;
+// - nearest_binary64 is parse_decimal on the decimal form, and on the hex
+//   integer form the correctly rounded value std::from_chars reads in its
+//   hex format;
+// - read_resolution_ns and is_device_path follow their grammars (Annex C),
+//   written here again.
 
 #include "scada/common/result.h"
 #include "scada/common/status.h"
+#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/read.h"
 #include "scada/conf/scalar.h"
 
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -24,6 +32,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 
@@ -35,6 +44,10 @@ constexpr unsigned MAX_WIDTH = 64;
 constexpr std::array<unsigned, 6> WIDTHS = {1, 8, 16, 32, 63, MAX_WIDTH};
 constexpr std::string_view UINT64_MAX_DIGITS = "18446744073709551615";
 constexpr std::size_t MAX_HEX_DIGITS = 16;
+constexpr std::string_view INT64_MAX_DIGITS = "9223372036854775807";
+constexpr std::uint64_t NS_PER_MS = 1000000;
+constexpr std::uint64_t NS_PER_S = 1000000000;
+constexpr std::size_t MAX_DEVICE_PATH = 255;
 
 void check(bool condition) {
     if (!condition) {
@@ -126,6 +139,81 @@ bool oracle_decimal_form(std::string_view text) {
         }
     }
     return pos == text.size();
+}
+
+// nearest_binary64 against a second reading of the same value.
+void check_nearest(std::string_view text) {
+    const std::optional<double> nearest = scada::conf::nearest_binary64(text);
+    if (oracle_decimal_form(text)) {
+        const std::optional<double> decimal = scada::conf::parse_decimal(text);
+        check(nearest.has_value() == decimal.has_value());
+        if (nearest && decimal) {
+            check(*nearest == *decimal);
+        }
+        return;
+    }
+    const std::optional<bool> hex_form =
+        text.starts_with("0x") ? oracle_integer_fits(text) : std::nullopt;
+    if (!hex_form) {
+        check(!nearest);
+        return;
+    }
+    const std::string_view digits = text.substr(2);
+    double value = 0;
+    const std::from_chars_result read =
+        std::from_chars(digits.data(), digits.data() + digits.size(), value,
+                        std::chars_format::hex);
+    check(read.ptr == digits.data() + digits.size() ||
+          read.ec == std::errc::result_out_of_range);
+    if (read.ec == std::errc::result_out_of_range || !std::isfinite(value)) {
+        check(!nearest);
+        return;
+    }
+    check(nearest.has_value() && *nearest == value);
+}
+
+// `1s`, `1ms` or `[1-9][0-9]*ns` up to int64 nanoseconds.
+void check_resolution(std::string_view text) {
+    const scada::conf::UnitRead read = scada::conf::read_resolution_ns(text);
+    if (text == "1s" || text == "1ms") {
+        check(read.form == IntegerForm::FITS &&
+              read.value == (text == "1s" ? NS_PER_S : NS_PER_MS));
+        return;
+    }
+    const bool form = text.size() > 2 && text.ends_with("ns") &&
+                      text.front() != '0' && whole(text, 0) == text.size() - 2;
+    if (!form) {
+        check(read.form == IntegerForm::NOT_INTEGER);
+        return;
+    }
+    const std::string_view digits = text.substr(0, text.size() - 2);
+    const bool fits = digits.size() < INT64_MAX_DIGITS.size() ||
+                      (digits.size() == INT64_MAX_DIGITS.size() &&
+                       digits <= INT64_MAX_DIGITS);
+    check(read.form == (fits ? IntegerForm::FITS : IntegerForm::TOO_LARGE));
+    if (fits) {
+        check(std::to_string(read.value) == digits);
+    }
+}
+
+// An absolute path under /dev/ of named components, free text.
+void check_device_path(std::string_view text) {
+    bool valid = text.starts_with("/dev/") && text.size() <= MAX_DEVICE_PATH &&
+                 scada::conf::is_free_text(text);
+    std::size_t start = 1;
+    while (valid) {
+        std::size_t end = text.find('/', start);
+        if (end == std::string_view::npos) {
+            end = text.size();
+        }
+        const std::string_view part = text.substr(start, end - start);
+        valid = !part.empty() && part != "." && part != "..";
+        if (end == text.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+    check(scada::conf::is_device_path(text) == valid);
 }
 
 // A document of one scalar of `text` in `style`.
@@ -238,6 +326,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         check(text.ends_with('%'));
     }
     static_cast<void>(scada::conf::parse_size_bytes(text));
+    check_nearest(text);
+    check_resolution(text);
+    check_device_path(text);
     check_reads(text);
     return 0;
 }

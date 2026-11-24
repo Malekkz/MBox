@@ -1,0 +1,15 @@
+template: shapes
+protocol: modbus
+bit_order: msb0
+params: { inputs: { type: int, min: 1, max: 32, default: 16 } }
+defaults: { invalid_values: { uint16: [0xFFFF], float32: [nan] }, address: { word_order: little } }
+points:
+  - { name: g, kind: double_point, address: { on: { table: holding, register: 60, bit: 4 }, off: { table: holding, register: 60, bit: 5 } } }
+  - { name: w, access: wo, storage: volatile, address: { table: holding, register: 500, write: { function: 6, values: { 1: 0x0002, 2: 0x0001 } } } }
+  - { name: t, address: { table: input, register: 40 }, quality_from: [ { point: s, field: [8, 11], map: { 0: good, 5: [bad, TEST], default: bad } } ], bits: { 0: a, 3: { name: b, invert: true } } }
+repeat:
+  - for: { n: "1..inputs" }
+    points: [ { name: "pv{n}.voltage", address: { table: holding, register: "1000 + 2 * (n - 1)", type: int16 }, scale: { divide_by: 10 } } ]
+read: { max_registers: 100, ranges: [ { kind: side_effect, table: holding, first: 1, last: 4 } ] }
+identify: [ { address: { table: holding, register: 9 }, equals: 42 } ]
+health: [ { point: s, good_when: { field: [0, 1], equals: 0 }, applies_to: all } ]

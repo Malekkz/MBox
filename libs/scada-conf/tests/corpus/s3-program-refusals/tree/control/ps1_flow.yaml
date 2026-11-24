@@ -1,0 +1,5 @@
+program: ps1_flow
+blocks:
+  - id: f1
+    in: { pv: { tag: ps1.flow, max_age: 2s, from: x } }
+    on_bad_input: { then_safe_after: 10s }

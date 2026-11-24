@@ -1,0 +1,5 @@
+# Tags refused at stage 3 by their type: a manual tag without area, a
+# virtual tag without expr, and a key of another type. Invented.
+tags/site.yaml:2:5: CF-202
+tags/site.yaml:3:5: CF-202
+tags/site.yaml:4:59: CF-201

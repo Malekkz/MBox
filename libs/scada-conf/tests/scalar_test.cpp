@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <variant>
 
@@ -82,6 +83,25 @@ TEST(Scalar, IntegersOfTheFormThatAreTooLarge) {
     EXPECT_FALSE(parse_decimal("1e400").has_value());
 }
 
+// A hexadecimal integer beyond 64 bits is rounded once, to nearest, ties
+// to even (the lead's follow-up on #131).
+TEST(Scalar, LargeHexIntegersAreCorrectlyRounded) {
+    constexpr double TWO_64 = 18446744073709551616.0;
+    constexpr double ULP_AT_TWO_64 = 4096.0;
+    // 2^64 + 2^11 is half-way between 2^64 and 2^64 + 2^12: ties to even.
+    EXPECT_EQ(nearest_binary64("0x10000000000000800"), TWO_64);
+    // One more unit far below breaks the tie upwards. Rounding at each
+    // digit would give 2^64.
+    EXPECT_EQ(nearest_binary64("0x10000000000000801"), TWO_64 + ULP_AT_TWO_64);
+    // The same, with the lowest digit far down.
+    EXPECT_EQ(nearest_binary64("0x1000000000000080000001"),
+              (TWO_64 + ULP_AT_TWO_64) * 1048576.0);
+    EXPECT_EQ(nearest_binary64("0x00010000000000000800"), TWO_64);
+    // Beyond binary64: nothing.
+    EXPECT_FALSE(nearest_binary64("0x1" + std::string(256, '0')));
+    EXPECT_TRUE(nearest_binary64("0x1" + std::string(255, '0')));
+}
+
 TEST(Scalar, Decimals) {
     constexpr double TENTH = 0.1;
     constexpr double THOUSAND = 1e3;
@@ -146,6 +166,32 @@ TEST(Scalar, DurationsRefused) {
          {"1.5s", "1s500ms", "-5s", "+5s", "5", "5 s", "5S", "5sec", "s", "05s",
           "5us", "99999999999999999999ms", "584942418y"}) {
         EXPECT_FALSE(parse_duration_ms(text)) << text;
+    }
+}
+
+// The resolution of an epoch value (Annex A.2), in nanoseconds; beyond int64
+// it is too large, as a duration is (D-107).
+TEST(Scalar, Resolutions) {
+    constexpr std::uint64_t MILLISECOND = 1000000;
+    EXPECT_EQ(read_resolution_ns("1s").value, 1000 * MILLISECOND);
+    EXPECT_EQ(read_resolution_ns("1ms").value, MILLISECOND);
+    EXPECT_EQ(read_resolution_ns("1ns").value, 1U);
+    const UnitRead largest = read_resolution_ns("9223372036854775807ns");
+    EXPECT_EQ(largest.form, IntegerForm::FITS);
+    EXPECT_EQ(largest.value, static_cast<std::uint64_t>(
+                                 std::numeric_limits<std::int64_t>::max()));
+    EXPECT_EQ(read_resolution_ns("9223372036854775808ns").form,
+              IntegerForm::TOO_LARGE);
+    EXPECT_EQ(read_resolution_ns("18446744073709551616ns").form,
+              IntegerForm::TOO_LARGE);
+}
+
+TEST(Scalar, ResolutionsRefused) {
+    for (const std::string_view text :
+         {"0ns", "01ns", "0x10ns", "2ms", "2s", "1us", "ns", "-1ns", " 1ns",
+          "1ns ", "1NS"}) {
+        EXPECT_EQ(read_resolution_ns(text).form, IntegerForm::NOT_INTEGER)
+            << text;
     }
 }
 

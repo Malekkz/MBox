@@ -1,0 +1,3 @@
+# A weather sensor on an RS-485 line: serial settings, scaled integers with
+# a sensor-open marker, an enumeration and alarms on a point (4.6, 4.7, 5.5,
+# 8). Invented.

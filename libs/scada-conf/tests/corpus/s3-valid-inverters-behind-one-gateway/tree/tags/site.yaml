@@ -1,0 +1,6 @@
+tags:
+  - name: site.pv.total_power
+    type: virtual
+    expr: sum("ps1.inv*.power")
+    unit: kW
+    quality: ignore_bad
