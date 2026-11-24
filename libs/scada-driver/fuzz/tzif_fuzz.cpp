@@ -48,6 +48,11 @@ void check_zone(const scada::driver::detail::TzifZone& zone,
     }
     const std::size_t count = std::min(times.size(), MAX_CHECKED);
     for (std::size_t index = 0; index + 1 < count; ++index) {
+        // Only transitions inside the table: a file may hold any instant,
+        // and the distance to the next one must not overflow.
+        if (times[index] < FIRST_S || times[index] >= LAST_S) {
+            continue;
+        }
         for (const std::int64_t delta :
              {std::int64_t{0}, std::int64_t{1},
               (times[index + 1] - times[index]) / 2}) {
