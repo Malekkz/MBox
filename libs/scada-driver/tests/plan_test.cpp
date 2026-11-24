@@ -403,6 +403,64 @@ TEST(Plan, ASplitFormKeepsAValueWithItsCompanion) {
     EXPECT_TRUE(plan.requests[plan.by_group[0][0]].split.empty());
 }
 
+// --- Delta check of PR 135: D3, E1 ----------------------------------------
+
+TEST(Plan, ALatchOfAnotherClusterIsNotMergedIntoAChain) {
+    // D3: a value at 0 with its companion at 100, 4 units per request, and a
+    // latch at 1 in a side-effect range 1..1: the latch is its own request,
+    // never a part of the chain that an order may drop and repeat.
+    ReadRules rules{.max_units = 4};
+    rules.ranges = {range(Kind::SIDE_EFFECT, 1, 1)};
+    PlanPoint companion = at(1, 100);
+    companion.cluster = 0;
+    const ReadPlan plan = planned({at(0, 0), companion, at(2, 1)}, rules);
+    EXPECT_EQ(spans(plan), (std::vector<Span>{{0, 1}, {100, 1}, {1, 1}}));
+    EXPECT_TRUE(plan.requests[plan.by_group[0][0]].chained);
+    EXPECT_FALSE(plan.requests[plan.by_group[0][2]].chained);
+    EXPECT_TRUE(plan.requests[plan.by_group[0][2]].side_effect);
+}
+
+TEST(Plan, ASideEffectCompanionIsReadLastInItsChain) {
+    // D3: a value at 100 whose companion, a status word at 0, is in a
+    // side-effect range: the chain reads 100 first and the status word
+    // last, so a chain dropped before its end never read the side effect.
+    ReadRules rules{.max_units = 4};
+    rules.ranges = {range(Kind::SIDE_EFFECT, 0, 0)};
+    PlanPoint status = at(1, 0);
+    status.cluster = 0;
+    const ReadPlan plan = planned({at(0, 100), status}, rules);
+    EXPECT_EQ(spans(plan), (std::vector<Span>{{100, 1}, {0, 1}}));
+    EXPECT_TRUE(plan.requests[plan.by_group[0][0]].chained);
+    EXPECT_TRUE(plan.requests[plan.by_group[0][1]].side_effect);
+    // A chain that would read two side-effect ranges: refused.
+    rules.ranges = {range(Kind::SIDE_EFFECT, 0, 0),
+                    range(Kind::SIDE_EFFECT, 200, 200)};
+    PlanPoint other = at(2, 200);
+    other.cluster = 0;
+    expect_refused({at(0, 100), status, other}, rules);
+}
+
+TEST(Plan, ADeviceWhoseRequestsAreAllChainedStillHasAKeepAlive) {
+    // E1: 49 points at 101..149, one of them with a companion at 300, 125
+    // units per request: [101..149] and [300] form a chain. The keep-alive
+    // is a request of its own, reading one point whose cluster is whole.
+    std::vector<PlanPoint> points;
+    for (std::uint32_t index = 0; index < 49; ++index) {
+        points.push_back(at(index, 101 + index));
+    }
+    PlanPoint companion = at(49, 300);
+    companion.cluster = 0;
+    points.push_back(companion);
+    const ReadPlan plan = planned(points, ReadRules{.max_units = LARGE});
+    ASSERT_EQ(spans(plan), (std::vector<Span>{{101, 49}, {300, 1}}));
+    ASSERT_TRUE(plan.keepalive.has_value());
+    const std::uint32_t keepalive = plan.keepalive.value_or(0);
+    EXPECT_GE(keepalive, 2U);  // not a planned request
+    EXPECT_EQ(plan.requests[keepalive].count, 1U);
+    EXPECT_NE(plan.requests[keepalive].first, 101U);  // not the chained value
+    EXPECT_EQ(plan.probe, plan.keepalive);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

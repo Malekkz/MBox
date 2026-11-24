@@ -117,8 +117,12 @@ struct ReadPlan {
     // For each poll group of the channel, the planned requests of one period
     // in the order they are sent.
     std::vector<std::vector<std::uint32_t>> by_group;
-    // A planned request outside every side-effect, exclusive and no-read
-    // range and outside every chain (6.5, 7.4); none when there is none.
+    // The keep-alive and probe request (6.5, 7.4): the shortest planned
+    // request outside every side-effect, exclusive and no-read range and
+    // outside every chain; else a request of its own (not in `by_group`)
+    // that reads the shortest part of a chain whose clusters are whole and
+    // that reads no side effect; else none, which the compile step reports
+    // when a keep-alive is configured.
     std::optional<std::uint32_t> keepalive;
     std::optional<std::uint32_t> probe;
 };
@@ -132,7 +136,10 @@ struct ReadPlan {
 // or exclusive range are read by one request, over the span from the first
 // to the last unit they decode (CS A.4); an exclusive range's request holds
 // nothing else. A point's cluster (5.5) is one request when it fits in one,
-// with the points between; otherwise its requests are chained back to back.
+// with the points between; otherwise its requests are chained back to back,
+// a side-effect request last (a chain reading two side-effect ranges is
+// refused), and no side-effect point of another cluster joins a request of
+// the chain.
 // Never splits a point's span, never merges across spaces, unit ids or poll
 // groups, never bridges a gap that touches a range. A bridged gap returns
 // units that are never decoded. Every request keeps its space's `max_units`

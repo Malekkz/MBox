@@ -14,6 +14,7 @@
 #include "scada/driver/point_rules.h"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -74,9 +75,13 @@ struct CompiledDevice {
     bool enabled = true;
     // The physical unit: devices of one channel with the same key are one
     // device on the wire (3.4: they share a unit id) and share its pacing
-    // and exclusivity (ruling R3). The compile step sets it from the
-    // protocol's unit id.
-    std::uint32_t unit = 0;
+    // and exclusivity (ruling R3). The compile step sets it to the device's
+    // default unit id; a device whose points name other unit ids too (X-4)
+    // is keyed, and paced, by its default one. OWN_UNIT, the default, is a
+    // unit of the device alone.
+    static constexpr std::uint32_t OWN_UNIT =
+        std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t unit = OWN_UNIT;
     Pacing pacing;
     // `keepalive` (6.5); 0: off.
     std::int64_t keepalive_ns = 0;

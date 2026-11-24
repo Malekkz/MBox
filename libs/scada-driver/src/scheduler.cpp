@@ -11,6 +11,8 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <tuple>
 #include <vector>
 
@@ -27,6 +29,17 @@ std::int64_t later(std::int64_t time, std::int64_t interval) noexcept {
         return time;
     }
     return time > NEVER - interval ? NEVER : time + interval;
+}
+
+// now - since, 0 when the clock is before `since`, saturating (E9).
+std::int64_t elapsed(std::int64_t now, std::int64_t since) noexcept {
+    if (now <= since) {
+        return 0;
+    }
+    if (since < 0 && now > NEVER + since) {
+        return NEVER;
+    }
+    return now - since;
 }
 
 Status invalid(StaticString what) noexcept {
@@ -51,9 +64,17 @@ Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
         }
     }
     for (const Request& request : plan.requests) {
-        if (std::any_of(request.split.begin(), request.split.end(),
-                        [&](std::uint32_t part) { return part >= size; })) {
-            return invalid("split form names a request the plan does not hold");
+        if (request.poll_group >= groups) {
+            return invalid("request of a poll group the channel does not have");
+        }
+        for (const std::uint32_t part : request.split) {
+            if (part >= size) {
+                return invalid(
+                    "split form names a request the plan does not hold");
+            }
+            if (!plan.requests[part].split.empty()) {
+                return invalid("a split part with a split form of its own");
+            }
         }
     }
     if ((plan.keepalive.has_value() && *plan.keepalive >= size) ||
@@ -119,9 +140,7 @@ Status Scheduler::check(const CompiledChannel& channel) noexcept {
         if (!valid_pacing(device.pacing) || device.keepalive_ns < 0) {
             return invalid("negative pacing interval or keep-alive");
         }
-        if (!device.enabled) {
-            continue;
-        }
+        // A disabled device is checked too: a reload may enable it (E5).
         if (const Status status =
                 check_plan(device.plan, channel.poll_groups.size());
             !status.ok()) {
@@ -152,7 +171,11 @@ Scheduler::Scheduler(const CompiledChannel& channel,
         }
         run.split.assign(device.plan.requests.size(), false);
         run.absent.assign(device.plan.requests.size(), false);
-        const auto found = std::find(keys.begin(), keys.end(), device.unit);
+        // OWN_UNIT is never shared: each such device is a unit of its own.
+        const auto found =
+            device.unit == CompiledDevice::OWN_UNIT
+                ? keys.end()
+                : std::find(keys.begin(), keys.end(), device.unit);
         run.unit = static_cast<std::uint32_t>(found - keys.begin());
         if (found == keys.end()) {
             keys.push_back(device.unit);
@@ -193,10 +216,13 @@ std::int64_t Scheduler::allowed_from(std::uint32_t device,
 
 std::int64_t Scheduler::step_allowed_from(const OrderTicket& order,
                                           std::uint32_t step) const noexcept {
-    // R1: the operate follows its select at once, within the request
-    // interval only; a READ_NOW is a read (F2).
+    // R1, R6: the operate follows its select at once, within the request
+    // intervals only (the unit's and the channel's); R5: so does a cancel; a
+    // READ_NOW is a read (F2). Each of them still counts as a write for the
+    // write interval after it, but the READ_NOW.
     const bool operate = order.kind == OrderKind::SELECT_OPERATE && step > 0;
-    const bool write = order.kind != OrderKind::READ_NOW && !operate;
+    const bool write = order.kind != OrderKind::READ_NOW &&
+                       order.kind != OrderKind::CANCEL && !operate;
     return allowed_from(order.device, write);
 }
 
@@ -334,8 +360,10 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
     // The next cycle is due a period after this one was, or now when it is
     // already late. A cycle that waited for pacing and ended after that
     // time missed its period because of pacing (11.1).
+    // E4: the cycle ended when its last request was handed out, not at the
+    // `take` that finds it complete.
     const std::int64_t next_due = later(state.due_ns, period_ns);
-    state.limited = state.waited && now_ns > next_due;
+    state.limited = state.waited && state.last_sent_ns > next_due;
     state.in_cycle = false;
     state.due_ns = std::max(next_due, now_ns);
 }
@@ -371,7 +399,7 @@ void Scheduler::start_due(std::int64_t now_ns) noexcept {
             if (state.started) {
                 *std::next(state.periods.begin(),
                            static_cast<std::ptrdiff_t>(state.period_head)) =
-                    now_ns - state.cycle_start_ns;
+                    elapsed(now_ns, state.cycle_start_ns);
                 state.period_head = (state.period_head + 1) % PERIODS;
                 state.period_count = std::min(state.period_count + 1, PERIODS);
             }
@@ -382,13 +410,29 @@ void Scheduler::start_due(std::int64_t now_ns) noexcept {
     }
 }
 
+bool Scheduler::drop_unit_chain(std::uint32_t device,
+                                std::uint32_t& chain_device) noexcept {
+    const std::uint32_t unit = devices_[device].unit;
+    for (std::uint32_t other = 0; other < devices_.size(); ++other) {
+        if (devices_[other].unit == unit && devices_[other].chain) {
+            drop_chain(other);
+            chain_device = other;
+            return true;  // one chain at most: a chain holds its unit
+        }
+    }
+    return false;
+}
+
 Choice Scheduler::take_order_step(std::uint32_t device,
                                   std::int64_t now_ns) noexcept {
     DeviceRun& run = devices_[device];
-    const Choice choice{.kind = Choice::Kind::ORDER,
-                        .device = device,
-                        .order = run.order.id,
-                        .step = run.order_step};
+    Choice choice{.kind = Choice::Kind::ORDER,
+                  .device = device,
+                  .order = run.order.id,
+                  .step = run.order_step};
+    // D2: no order step between the requests of a chain.
+    choice.chain_dropped = drop_unit_chain(device, choice.chain_device);
+    update_holder(units_[run.unit].holder, device, run.order.exclusive);
     save_undo(choice, 0);
     record(device, run.order.kind != OrderKind::READ_NOW, now_ns);
     ++run.order_step;
@@ -413,6 +457,7 @@ Choice Scheduler::take_poll(std::uint32_t device, std::uint32_t group,
     }
     advance(device, group);
     record(device, false, now_ns);
+    run.groups[group].last_sent_ns = now_ns;
     run.chain = channel_->devices[device].plan.requests[request].chained;
     run.chain_group = group;
     update_holder(units_[run.unit].holder, device,
@@ -439,25 +484,6 @@ bool Scheduler::choose_exclusive_step(std::int64_t now_ns, Choice& out,
 
 bool Scheduler::choose_order(std::int64_t now_ns, Choice& out,
                              std::int64_t& wake) noexcept {
-    // Steps of orders already started whose sequence is not exclusive.
-    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
-        const DeviceRun& run = devices_[device];
-        if (!run.order_active || run.order.exclusive ||
-            unit_exclusive(device)) {
-            continue;
-        }
-        const std::int64_t from = step_allowed_from(run.order, run.order_step);
-        if (from <= now_ns) {
-            out = take_order_step(device, now_ns);
-            return true;
-        }
-        wake = std::min(wake, from);
-    }
-    return choose_new_order(now_ns, out, wake);
-}
-
-bool Scheduler::choose_new_order(std::int64_t now_ns, Choice& out,
-                                 std::int64_t& wake) noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         DeviceRun& run = devices_[device];
         run.order_blocked = run.order_active || unit_exclusive(device);
@@ -476,21 +502,15 @@ bool Scheduler::choose_new_order(std::int64_t now_ns, Choice& out,
             continue;
         }
         orders_.erase(orders_.begin() + static_cast<std::ptrdiff_t>(index));
-        // R2: a new order goes before the rest of a chain on its unit.
-        const std::uint32_t holder = units_[run.unit].holder;
-        const bool dropped = holder != NOBODY && devices_[holder].chain;
-        if (dropped) {
-            drop_chain(holder);
-        }
+        // A sequence of several steps holds its unit (6.6, D1); a one-step
+        // order ends with its step.
         run.order = order;
-        run.order.exclusive =
-            order.exclusive || order.kind == OrderKind::SELECT_OPERATE;
+        run.order.exclusive = order.exclusive ||
+                              order.kind == OrderKind::SELECT_OPERATE ||
+                              order.kind == OrderKind::WRITE_LIST;
         run.order_active = true;
         run.order_step = 0;
-        update_holder(units_[run.unit].holder, order.device,
-                      run.order.exclusive);
         out = take_order_step(order.device, now_ns);
-        out.chain_dropped = dropped;
         return true;
     }
     return false;
@@ -597,9 +617,9 @@ Choice Scheduler::take(std::int64_t now_ns) noexcept {
     return Choice{.kind = Choice::Kind::WAIT, .wake_ns = wake};
 }
 
-void Scheduler::not_sent() noexcept {
+std::optional<std::uint64_t> Scheduler::not_sent() noexcept {
     if (!undo_.valid) {
-        return;
+        return std::nullopt;
     }
     undo_.valid = false;
     const Choice& choice = undo_.choice;
@@ -612,8 +632,10 @@ void Scheduler::not_sent() noexcept {
     has_write_ = undo_.has_write;
     last_write_ns_ = undo_.last_write_ns;
     if (choice.kind == Choice::Kind::ORDER) {
+        // A one-step order ended with its step already: either way it is
+        // ended now, and its outcome is the worker's.
         end_order(choice.device);
-        return;
+        return choice.order;
     }
     if (choice.kind == Choice::Kind::POLL) {
         run.groups[undo_.group] = undo_.group_state;
@@ -624,6 +646,7 @@ void Scheduler::not_sent() noexcept {
         update_holder(units_[run.unit].holder, choice.device,
                       run.chain || (run.order_active && run.order.exclusive));
     }
+    return std::nullopt;
 }
 
 bool Scheduler::add_order(const OrderTicket& order) noexcept {
@@ -632,8 +655,11 @@ bool Scheduler::add_order(const OrderTicket& order) noexcept {
                           order.kind == OrderKind::READ_NOW;
     const bool known =
         order.kind >= OrderKind::WRITE && order.kind <= OrderKind::READ_NOW;
+    const bool two_steps = order.kind == OrderKind::SELECT_OPERATE;
     if (orders_.size() >= max_orders_ || order.device >= devices_.size() ||
-        order.steps == 0 || !known || (one_step && order.steps != 1)) {
+        !channel_->devices[order.device].enabled || order.steps == 0 ||
+        !known || (one_step && order.steps != 1) ||
+        (two_steps && order.steps != 2)) {
         return false;
     }
     orders_.push_back(order);  // capacity reserved: never allocates
@@ -689,18 +715,26 @@ bool Scheduler::refused(std::uint32_t device, std::uint32_t request) noexcept {
     return true;
 }
 
-void Scheduler::reconnect() noexcept {
+std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
+    std::size_t count = 0;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         DeviceRun& run = devices_[device];
         std::fill(run.split.begin(), run.split.end(), false);
         std::fill(run.absent.begin(), run.absent.end(), false);
         drop_chain(device);
-        end_order(device);
+        if (run.order_active) {
+            if (count < ended.size()) {
+                ended[count] = run.order.id;
+            }
+            ++count;
+            end_order(device);
+        }
         for (GroupState& state : run.groups) {
             state.next_split = 0;
         }
     }
     undo_.valid = false;
+    return count;
 }
 
 std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,
@@ -723,7 +757,7 @@ std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,
         }
         if (state.in_cycle || now_ns >= state.due_ns) {
             // A running or overdue cycle already longer counts (K4).
-            value = std::max(value, now_ns - state.cycle_start_ns);
+            value = std::max(value, elapsed(now_ns, state.cycle_start_ns));
         }
         longest = std::max(longest, value);
     }

@@ -20,9 +20,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -582,20 +584,177 @@ TEST(Scheduling, AnExclusiveOrderHoldsItsDevice) {
     EXPECT_EQ(scheduler.take(15 * MILLISECOND).kind, Choice::Kind::ORDER);
 }
 
-TEST(Scheduling, AListOfWritesKeepsTheWriteIntervalBetweenItsWrites) {
-    // R1, the other half: independent writes (8.5) are paced as writes.
+TEST(Scheduling, AListOfWritesHoldsItsUnitAndKeepsTheWriteInterval) {
+    // D1: a list of writes (8.5) is an exclusive sequence, whatever its
+    // ticket says: no poll of its unit between its writes, which keep the
+    // write interval (R1).
     const CompiledChannel channel =
         make_channel({{.name = "d1",
-                       .points = adjacent(0, 1, SLOW),
+                       .points = adjacent(0, 1),
                        .pacing = {.min_write_interval_ns = 10 * MILLISECOND}}},
                      ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     ASSERT_TRUE(scheduler.add_order(OrderTicket{
         .id = 1, .device = 0, .kind = OrderKind::WRITE_LIST, .steps = 2}));
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
-    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::POLL);
-    EXPECT_EQ(scheduler.take(2 * MILLISECOND).wake_ns, 10 * MILLISECOND);
+    const Choice wait = scheduler.take(MILLISECOND);  // the poll is due
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 10 * MILLISECOND);
     EXPECT_EQ(scheduler.take(10 * MILLISECOND).step, 1U);
+    EXPECT_EQ(scheduler.take(11 * MILLISECOND).kind, Choice::Kind::POLL);
+}
+
+TEST(Scheduling, NoOrderStepBetweenTheRequestsOfAChain) {
+    // D2: write interval 10 ms, a chain of two requests in a 100 ms group,
+    // a write at 95 ms and another queued at 100 ms. The second write is
+    // chosen between the chain's requests: it drops the chain, which is
+    // read again whole after it.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}},
+          .pacing = {.min_write_interval_ns = 10 * MILLISECOND}}},
+        ReadRules{.max_units = 4}, Pacing{},
+        {{.name = "g", .period_ns = 100 * MILLISECOND, .priority = 1}});
+    const ReadPlan& plan = channel.devices[0].plan;
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(reads_at(scheduler, plan, {0, MILLISECOND}),
+              (std::vector<std::uint64_t>{0, 100}));
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
+    EXPECT_EQ(scheduler.take(95 * MILLISECOND).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(reads_at(scheduler, plan, {100 * MILLISECOND}),
+              (std::vector<std::uint64_t>{0}));
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 2, .device = 0}));
+    const Choice order = scheduler.take(105 * MILLISECOND);
+    ASSERT_EQ(order.kind, Choice::Kind::ORDER);
+    EXPECT_TRUE(order.chain_dropped);
+    EXPECT_EQ(order.chain_device, 0U);
+    EXPECT_EQ(reads_at(scheduler, plan, {106 * MILLISECOND, 107 * MILLISECOND}),
+              (std::vector<std::uint64_t>{0, 100}));
+}
+
+TEST(Scheduling, ACancelIsNotHeldByTheWriteInterval) {
+    // R5: write interval 10 s; a select at 0, aborted; a cancel queued at
+    // 1 ms goes at once.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = {.min_write_interval_ns = 10 * SECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = 0, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    scheduler.abort_order(0);
+    ASSERT_TRUE(scheduler.add_order(
+        OrderTicket{.id = 2, .device = 0, .kind = OrderKind::CANCEL}));
+    const Choice cancel = scheduler.take(MILLISECOND);
+    EXPECT_EQ(cancel.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(cancel.order, 2U);
+}
+
+TEST(Scheduling, TheChannelsWriteIntervalDoesNotHoldTheOperate) {
+    // R6: a gateway's write interval of 10 s on the channel: the operate
+    // still follows its select at the next free slot.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1, SLOW)}},
+                     ReadRules{.max_units = LARGE},
+                     Pacing{.min_write_interval_ns = 10 * SECOND});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = 0, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
+    EXPECT_EQ(scheduler.take(0).step, 0U);
+    const Choice operate = scheduler.take(MILLISECOND);
+    EXPECT_EQ(operate.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(operate.step, 1U);
+}
+
+TEST(Scheduling, AnOrderToASiblingNamesTheChainItDrops) {
+    // E2: devices 0 and 1 on one unit; device 0's chain is open when an
+    // order to device 1 goes: the choice names device 0 as the chain's.
+    const CompiledChannel channel = make_channel(
+        {{.name = "a",
+          .unit_id = 7,
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}},
+         {.name = "b", .unit_id = 7, .points = adjacent(50, 1, SLOW)}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.device, 0U);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 1}));
+    const Choice order = scheduler.take(MILLISECOND);
+    ASSERT_EQ(order.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(order.device, 1U);
+    EXPECT_TRUE(order.chain_dropped);
+    EXPECT_EQ(order.chain_device, 0U);
+}
+
+TEST(Scheduling, DevicesWithoutAUnitKeyAreUnitsOfTheirOwn) {
+    // E3: two devices built without a unit key do not share pacing.
+    CompiledChannel channel =
+        make_channel({{.name = "a",
+                       .points = adjacent(0, 1),
+                       .pacing = {.min_request_interval_ns = 10 * SECOND}},
+                      {.name = "b", .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    for (CompiledDevice& device : channel.devices) {
+        device.unit = CompiledDevice::OWN_UNIT;
+    }
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).device, 0U);
+    EXPECT_EQ(scheduler.take(MILLISECOND).device, 1U);
+    EXPECT_EQ(scheduler.take(FAST_PERIOD).device, 1U);  // not every 10 s
+}
+
+TEST(Scheduling, PacingLimitedCountsFromTheLastRequestHandedOut) {
+    // E4: interval 10 ms, two requests in a 100 ms group, the last answer
+    // taking 140 ms: the cycle's requests went at 0 and 10 ms, within the
+    // period, so the device is not pacing-limited.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = adjacent(0, 2, NORMAL),
+          .pacing = {.min_request_interval_ns = 10 * MILLISECOND}}},
+        ReadRules{.max_units = 1}, Pacing{},
+        {{.name = "g", .period_ns = 100 * MILLISECOND, .priority = 1},
+         {.name = "n", .period_ns = SECOND, .priority = 2},
+         {.name = "s", .period_ns = SLOW_PERIOD, .priority = 3}});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    EXPECT_EQ(scheduler.take(MILLISECOND).wake_ns, 10 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(10 * MILLISECOND).kind, Choice::Kind::POLL);
+    (void)scheduler.take(150 * MILLISECOND);  // after the slow answer
+    EXPECT_FALSE(scheduler.pacing_limited(0, 150 * MILLISECOND));
+}
+
+TEST(Scheduling, ReconnectAndNotSentNameTheOrdersTheyEnd) {
+    // E10: the worker answers each command whose order ended.
+    const CompiledChannel channel = make_channel(
+        {{.name = "a", .unit_id = 1, .points = adjacent(0, 1, SLOW)},
+         {.name = "b", .unit_id = 2, .points = adjacent(0, 1, SLOW)}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 5, .device = 0, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
+    EXPECT_EQ(scheduler.take(SLOW_PERIOD).order, 5U);
+    std::array<std::uint64_t, 2> ended{};
+    EXPECT_EQ(scheduler.reconnect(ended), 1U);
+    EXPECT_EQ(ended[0], 5U);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 6, .device = 1}));
+    EXPECT_EQ(scheduler.take(SLOW_PERIOD + MILLISECOND).order, 6U);
+    EXPECT_EQ(scheduler.not_sent(), std::optional<std::uint64_t>{6});
+    EXPECT_EQ(scheduler.not_sent(), std::nullopt);  // only right after take
+}
+
+TEST(Scheduling, ANegativeOrHugeClockDoesNotOverflow) {
+    // E9: the published period saturates rather than overflow.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    constexpr std::int64_t EARLY = std::numeric_limits<std::int64_t>::min();
+    constexpr std::int64_t LATE = std::numeric_limits<std::int64_t>::max();
+    Scheduler scheduler(channel, 4, EARLY);
+    EXPECT_EQ(scheduler.take(EARLY).kind, Choice::Kind::POLL);
+    EXPECT_EQ(scheduler.achieved_period_ns(FAST, LATE), LATE);
+    EXPECT_EQ(scheduler.achieved_period_ns(FAST, EARLY), 0);
 }
 
 TEST(Scheduling, AReadNowNeitherWaitsForNorTakesTheWriteInterval) {
@@ -840,8 +999,18 @@ TEST(Scheduling, AMalformedOrderIsRefused) {
     EXPECT_FALSE(scheduler.add_order(OrderTicket{.id = 1, .steps = 2}));
     EXPECT_FALSE(scheduler.add_order(
         OrderTicket{.id = 2, .kind = OrderKind::READ_NOW, .steps = 2}));
+    EXPECT_FALSE(scheduler.add_order(
+        OrderTicket{.id = 4, .kind = OrderKind::SELECT_OPERATE, .steps = 1}));
+    EXPECT_FALSE(scheduler.add_order(
+        OrderTicket{.id = 5, .kind = OrderKind::SELECT_OPERATE, .steps = 3}));
     EXPECT_TRUE(scheduler.add_order(
-        OrderTicket{.id = 4, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+        OrderTicket{.id = 6, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+    // E8: an order to a disabled device.
+    const CompiledChannel disabled = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1), .enabled = false}},
+        ReadRules{.max_units = LARGE});
+    Scheduler idle(disabled, 4, 0);
+    EXPECT_FALSE(idle.add_order(OrderTicket{.id = 7}));
 }
 
 TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
@@ -862,6 +1031,21 @@ TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
         {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
     stray.devices[0].plan.by_group[0].push_back(99);
     EXPECT_FALSE(Scheduler::check(stray).ok());
+    // E5: a request of a poll group the channel lacks, a split part with a
+    // split form of its own, and a disabled device are all checked.
+    CompiledChannel group = make_channel(
+        {{.name = "d1", .points = adjacent(0, 2), .enabled = false}},
+        ReadRules{.max_units = 4});
+    group.devices[0].plan.requests.push_back(Request{.poll_group = 9});
+    EXPECT_FALSE(Scheduler::check(group).ok());
+    CompiledChannel nested = make_channel(
+        {{.name = "d1", .points = adjacent(0, 2)}}, ReadRules{.max_units = 4});
+    ReadPlan& plan = nested.devices[0].plan;
+    plan.requests.push_back(Request{});
+    plan.requests.push_back(Request{});
+    plan.requests[0].split = {1, 2};
+    plan.requests[1].split = {2};
+    EXPECT_FALSE(Scheduler::check(nested).ok());
     const CompiledChannel good = make_channel(
         {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
     Scheduler scheduler(good, 4, 0);
@@ -889,6 +1073,15 @@ TEST(Scheduling, AWriteReachesEncodeAsARequestOfKindWrite) {
     EXPECT_EQ(result.kind, EncodeResult::Kind::REFUSED);
     EXPECT_EQ(attempt.framing, Framing::SERIAL);
     EXPECT_EQ(attempt.protocol.size(), ATTEMPT_PROTOCOL_BYTES);
+    // E9: what encode records for the answer is copied in and out as bytes.
+    const std::uint32_t echo = 0x0610'0002;  // invented function and address
+    const auto bytes_in =
+        std::bit_cast<std::array<std::byte, sizeof echo>>(echo);
+    std::copy(bytes_in.begin(), bytes_in.end(), attempt.protocol.begin());
+    const Attempt copy = attempt;
+    std::array<std::byte, sizeof echo> out_bytes{};
+    std::copy_n(copy.protocol.begin(), out_bytes.size(), out_bytes.begin());
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(out_bytes), echo);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

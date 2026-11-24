@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace scada::driver {
@@ -81,6 +83,15 @@ std::uint64_t max_units_of(const ReadRules& rules, std::uint32_t space) {
         }
     }
     return rules.max_units;
+}
+
+std::uint64_t max_gap_of(const ReadRules& rules, std::uint32_t space) {
+    for (const SpaceLimits& own : rules.spaces) {
+        if (own.space == space) {
+            return own.max_gap;
+        }
+    }
+    return rules.max_gap;
 }
 
 bool in(std::uint64_t first, std::uint64_t last, const Request& request) {
@@ -277,6 +288,248 @@ Broken check_extras(const ReadPlan& plan) {
     return {};
 }
 
+// The units of `request` that something accounts for: its points, and the
+// parts of ranges read as one (atomic, side-effect, exclusive) inside it.
+// Between them, a request may bridge at most `max_gap` units (E6).
+using Interval = std::pair<std::uint64_t, std::uint64_t>;
+
+Broken check_gaps(const Case& tried, const Request& request) {
+    std::vector<Interval> covered;
+    for (const std::uint32_t point : request.points) {
+        const PlanPoint& planned = tried.points[point];
+        covered.emplace_back(planned.first, planned.first + planned.count - 1);
+    }
+    const std::uint64_t request_last = request.first + request.count - 1;
+    for (const ReadRange& given : tried.rules.ranges) {
+        const ReadRange range = union_of(given, tried.rules);
+        if (range.kind != Kind::NO_READ && touches(request, range)) {
+            covered.emplace_back(std::max(range.first, request.first),
+                                 std::min(range.last, request_last));
+        }
+    }
+    std::sort(covered.begin(), covered.end());
+    if (covered.empty() || covered.front().first != request.first) {
+        return covered.empty() ? Broken{} : "a request starts on unread units";
+    }
+    std::uint64_t reach = covered.front().second;
+    for (const Interval& next : covered) {
+        if (next.first > reach + 1 &&
+            next.first - reach - 1 > max_gap_of(tried.rules, request.space)) {
+            return "a gap over max_gap bridged";
+        }
+        reach = std::max(reach, next.second);
+    }
+    return reach == request_last ? Broken{} : "a request ends on unread units";
+}
+
+// Every split form names parts no other names, and its parts read exactly
+// the points of the request they split (E6).
+Broken check_splits(const ReadPlan& plan) {
+    std::vector<std::uint32_t> named;
+    for (const Request& request : plan.requests) {
+        std::vector<std::uint32_t> parts_points;
+        for (const std::uint32_t part : request.split) {
+            named.push_back(part);
+            const auto& points = plan.requests[part].points;
+            parts_points.insert(parts_points.end(), points.begin(),
+                                points.end());
+        }
+        if (request.split.empty()) {
+            continue;
+        }
+        std::vector<std::uint32_t> whole = request.points;
+        std::sort(whole.begin(), whole.end());
+        std::sort(parts_points.begin(), parts_points.end());
+        if (whole != parts_points) {
+            return "a split form that does not read its request's points";
+        }
+    }
+    std::sort(named.begin(), named.end());
+    if (std::adjacent_find(named.begin(), named.end()) != named.end()) {
+        return "a split part named twice";
+    }
+    return {};
+}
+
+// The points of the cluster `cluster` and those between them, in address
+// order; false when the cluster could not be one request for a reason this
+// test does not model (several places, ranges, other clusters of several
+// points).
+bool cluster_run(const Case& tried, std::uint32_t cluster,
+                 std::vector<const PlanPoint*>& run) {
+    std::vector<const PlanPoint*> members;
+    for (const PlanPoint& point : tried.points) {
+        if (point.cluster == cluster) {
+            members.push_back(&point);
+        }
+    }
+    const PlanPoint& first = *members.front();
+    std::uint64_t low = UINT64_MAX;
+    std::uint64_t high = 0;
+    for (const PlanPoint* point : members) {
+        if (point->space != first.space ||
+            point->poll_group != first.poll_group) {
+            return false;
+        }
+        low = std::min(low, point->first);
+        high = std::max(high, point->first + point->count - 1);
+    }
+    for (const PlanPoint& point : tried.points) {
+        if (point.space == first.space &&
+            point.poll_group == first.poll_group && point.first <= high &&
+            low <= point.first + point.count - 1) {
+            run.push_back(&point);
+        }
+    }
+    for (const PlanPoint* point : run) {
+        const auto same =
+            std::count_if(tried.points.begin(), tried.points.end(),
+                          [&](const PlanPoint& other) {
+                              return other.cluster == point->cluster;
+                          });
+        if (point->cluster != cluster && same > 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool touches_a_range(const Case& tried, const PlanPoint& point) {
+    return std::any_of(tried.rules.ranges.begin(), tried.rules.ranges.end(),
+                       [&](const ReadRange& range) {
+                           return range.space == point.space &&
+                                  range.first <=
+                                      point.first + point.count - 1 &&
+                                  point.first <= range.last;
+                       });
+}
+
+// True when the run could be one request: within the limits, every gap
+// within max_gap, no range touched.
+bool fits_one(const Case& tried, std::vector<const PlanPoint*> run) {
+    std::sort(run.begin(), run.end(),
+              [](const PlanPoint* left, const PlanPoint* right) {
+                  return left->first < right->first;
+              });
+    const std::uint32_t space = run.front()->space;
+    std::uint64_t reach = run.front()->first + run.front()->count - 1;
+    for (const PlanPoint* point : run) {
+        if (touches_a_range(tried, *point) ||
+            (point->first > reach + 1 &&
+             point->first - reach - 1 > max_gap_of(tried.rules, space))) {
+            return false;
+        }
+        reach = std::max(reach, point->first + point->count - 1);
+    }
+    return reach - run.front()->first < max_units_of(tried.rules, space) &&
+           (tried.rules.max_values == 0 ||
+            run.size() <= tried.rules.max_values);
+}
+
+// A cluster that fits one request is one request (5.5, E6).
+Broken check_fusion(const Case& tried,
+                    const std::vector<std::uint32_t>& of_point) {
+    for (const PlanPoint& point : tried.points) {
+        std::vector<const PlanPoint*> run;
+        if (!cluster_run(tried, point.cluster, run) || !fits_one(tried, run)) {
+            continue;
+        }
+        for (const PlanPoint& other : tried.points) {
+            if (other.cluster == point.cluster &&
+                of_point[other.point] != of_point[point.point]) {
+                return "a cluster that fits one request is read by two";
+            }
+        }
+    }
+    return {};
+}
+
+// The side-effect or exclusive range (as read, the union) `point` is in.
+std::optional<ReadRange> side_effect_of(const Case& tried,
+                                        const PlanPoint& point) {
+    for (const ReadRange& given : tried.rules.ranges) {
+        const ReadRange range = union_of(given, tried.rules);
+        if ((range.kind == Kind::SIDE_EFFECT ||
+             range.kind == Kind::EXCLUSIVE) &&
+            range.space == point.space &&
+            range.first <= point.first + point.count - 1 &&
+            point.first <= range.last) {
+            return range;
+        }
+    }
+    return std::nullopt;
+}
+
+// True when a cluster of a point of `request` inside `range` is read by
+// another request of the chain [from, to] too: the range is the chain's own.
+bool range_of_the_chain(const Case& tried, const ReadPlan& plan,
+                        const std::vector<std::uint32_t>& order,
+                        std::size_t from, std::size_t last,
+                        std::size_t position, const ReadRange& range) {
+    for (const std::uint32_t point : plan.requests[order[position]].points) {
+        const PlanPoint& mine = tried.points[point];
+        if (mine.first > range.last ||
+            mine.first + mine.count - 1 < range.first) {
+            continue;
+        }
+        for (std::size_t other = from; other <= last; ++other) {
+            const auto& points = plan.requests[order[other]].points;
+            if (other != position &&
+                std::any_of(
+                    points.begin(), points.end(), [&](std::uint32_t member) {
+                        return tried.points[member].cluster == mine.cluster;
+                    })) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// D3: in a chain, only its last request reads a side effect, and that
+// side effect is the chain's own: a cluster of the chain has a point in
+// the range (all points of a range are read together, R4).
+Broken check_chain(const Case& tried, const ReadPlan& plan,
+                   const std::vector<std::uint32_t>& order, std::size_t from,
+                   std::size_t last) {
+    for (std::size_t position = from; position <= last; ++position) {
+        const Request& request = plan.requests[order[position]];
+        if (request.side_effect && position != last) {
+            return "a side effect read before the end of its chain";
+        }
+        for (const std::uint32_t point : request.points) {
+            const std::optional<ReadRange> range =
+                side_effect_of(tried, tried.points[point]);
+            if (range.has_value() &&
+                !range_of_the_chain(tried, plan, order, from, last, position,
+                                    *range)) {
+                return "a side effect of another cluster inside a chain";
+            }
+        }
+    }
+    return {};
+}
+
+Broken check_chains(const Case& tried, const ReadPlan& plan) {
+    for (const auto& order : plan.by_group) {
+        std::size_t from = 0;
+        for (std::size_t position = 0; position < order.size(); ++position) {
+            if (plan.requests[order[position]].chained) {
+                continue;
+            }
+            if (position > from) {
+                if (Broken broken =
+                        check_chain(tried, plan, order, from, position);
+                    !broken.empty()) {
+                    return broken;
+                }
+            }
+            from = position + 1;
+        }
+    }
+    return {};
+}
+
 Broken check_plan(const Case& tried, const ReadPlan& plan) {
     const std::vector<std::uint32_t> of_point = request_of_points(tried, plan);
     if (std::any_of(of_point.begin(), of_point.end(),
@@ -289,6 +542,18 @@ Broken check_plan(const Case& tried, const ReadPlan& plan) {
         if (Broken broken = check_request(tried, request); !broken.empty()) {
             return broken;
         }
+        if (Broken broken = check_gaps(tried, request); !broken.empty()) {
+            return broken;
+        }
+    }
+    if (Broken broken = check_splits(plan); !broken.empty()) {
+        return broken;
+    }
+    if (Broken broken = check_fusion(tried, of_point); !broken.empty()) {
+        return broken;
+    }
+    if (Broken broken = check_chains(tried, plan); !broken.empty()) {
+        return broken;
     }
     if (Broken broken = check_side_effect(tried, of_point); !broken.empty()) {
         return broken;
@@ -339,24 +604,35 @@ TEST(PlanProperty, EveryAcceptedPlanKeepsEveryRule) {
             << "case " << index << ": " << broken << "\n"
             << dump(tried);
     }
-    // Enough cases pass the planner to mean something.
+    // Enough cases pass the planner last mean something.
     EXPECT_GT(accepted, PLANS / 4);
 }
 
-TEST(PlanProperty, AThousandPointsArePlannedQuickly) {
-    // The fusing of clusters repeats over the segments: a device of 1,000
-    // points with many clusters must still plan in well under a second (the
-    // test's own time is the bound ctest reports).
-    std::vector<PlanPoint> points;
+TEST(PlanProperty, ManyPointsArePlannedQuickly) {
+    // The fusing of clusters walks the segments: 1,000 points in pairs that
+    // fit, and 10,000 points whose clusters cannot fit one request (each
+    // with a companion 1,000 units away, E7), must plan in well under a
+    // second each (the test's own time is the bound ctest reports).
+    std::vector<PlanPoint> pairs;
     for (std::uint32_t index = 0; index < 1000; ++index) {
-        points.push_back(PlanPoint{.point = index,
-                                   .cluster = index / 2,
-                                   .first = std::uint64_t{index} * 3,
-                                   .count = 2});
+        pairs.push_back(PlanPoint{.point = index,
+                                  .cluster = index / 2,
+                                  .first = std::uint64_t{index} * 3,
+                                  .count = 2});
     }
     ReadPlan plan;
     EXPECT_TRUE(
-        plan_blocks(points, ReadRules{.max_units = 125, .max_gap = 1}, 1, plan)
+        plan_blocks(pairs, ReadRules{.max_units = 125, .max_gap = 1}, 1, plan)
+            .ok());
+    std::vector<PlanPoint> far;
+    for (std::uint32_t index = 0; index < 10'000; ++index) {
+        const std::uint64_t first =
+            index % 2 == 0 ? index : std::uint64_t{index} + 1000;
+        far.push_back(PlanPoint{
+            .point = index, .cluster = index / 2, .first = first, .count = 1});
+    }
+    EXPECT_TRUE(
+        plan_blocks(far, ReadRules{.max_units = 125, .max_gap = 1}, 1, plan)
             .ok());
 }
 

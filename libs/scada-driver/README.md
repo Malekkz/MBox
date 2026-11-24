@@ -65,6 +65,13 @@ the contracts left open.
 
 ## Known behaviour
 
+- **A list of writes holds its unit.** A list (8.5) is an exclusive
+  sequence: 5 writes at a 10 s write interval hold the unit and the devices
+  that share it for 40 s, with no poll and no keep-alive (D-136).
+- **Orders can starve a chain.** On a busy unit, orders may keep dropping a
+  chain of companions, which then never completes; there is no cap, and the
+  poll group's achieved period shows it (D-136, R7).
+
 - **Counter wraps.** A decrease from at least `limit`/2 to below it is a
   wrap (contract 5.4): it is written GOOD with no flag, whatever
   `on_decrease` says. A 32-bit counter that steps back from 3,000,000,000 to

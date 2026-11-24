@@ -50,7 +50,10 @@ inline constexpr std::size_t ATTEMPT_PROTOCOL_BYTES = 16;
 // immutable (2.2). The worker sets `framing` from the channel's transport;
 // `encode` may record in `protocol` what the answer must echo (a write's
 // function, address and quantity, annex A), which `frame_state` and
-// `decode` read back. Nothing in it allocates.
+// `decode` read back. The area is bytes with an alignment of 1: a protocol
+// copies a value in and out as bytes (std::bit_cast to or from a byte
+// array, then std::copy), never through a cast pointer.
+// Nothing in it allocates.
 struct Attempt {
     std::uint32_t transaction_id = 0;
     Framing framing = Framing::STREAM;

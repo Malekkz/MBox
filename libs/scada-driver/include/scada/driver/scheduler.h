@@ -26,6 +26,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace scada::driver {
@@ -33,16 +35,18 @@ namespace scada::driver {
 // What an order does on the wire (8.3), which decides its pacing (6.4).
 enum class OrderKind : std::uint8_t {
     WRITE = 1,       // one write
-    WRITE_LIST,      // independent writes (8.5): the write interval between
+    WRITE_LIST,      // a list of writes (8.5): exclusive, the write
+                     // interval between its writes
     SELECT_OPERATE,  // select, then operate at once (8.6): exclusive
-    CANCEL,          // the end of a selection (8.6): one write
+    CANCEL,          // the end of a selection (8.6): one write, paced by
+                     // the request interval only (R5)
     READ_NOW,        // one read (8.14): no write interval
 };
 
 // An order the command thread handed to the worker. `steps` requests;
 // `exclusive`: no other request to its physical unit between them (6.6). A
-// select and operate is always exclusive; a write, a cancel and a READ_NOW
-// have one step.
+// list of writes and a select and operate are always exclusive; a select
+// and operate has two steps; a write, a cancel and a READ_NOW have one.
 struct OrderTicket {
     std::uint64_t id = 0;
     std::uint32_t device = 0;
@@ -67,9 +71,11 @@ struct Choice {
     std::uint32_t step = 0;
     std::int64_t wake_ns = std::numeric_limits<std::int64_t>::max();
     // An ORDER that interrupted a chain of companions (5.5) on its physical
-    // unit: the worker drops what it holds of that chain, which publishes
-    // nothing and is read again from its first request (ruling R2).
+    // unit: the worker drops what it holds of the chain of `chain_device`,
+    // which publishes nothing and is read again from its first request
+    // (rulings R2, D2).
     bool chain_dropped = false;
+    std::uint32_t chain_device = 0;
 };
 
 class Scheduler {
@@ -96,25 +102,29 @@ public:
 
     // Chooses the next request at `now_ns` and records it as sent then
     // (6.2): the next step of an exclusive order in progress first, then
-    // the steps of other orders and new orders in arrival order (a new order
-    // interrupts a chain of companions on its unit, R2), then the next
+    // the steps of other orders and new orders in arrival order (any order
+    // step interrupts a chain of companions open on its unit, which may be
+    // a sibling device's: `Choice::chain_device`; R2), then the next
     // request of a due poll group, a chain in progress first, then by
     // priority, due time and device order, then a keep-alive (6.5). Nothing
     // is chosen that the pacing of its unit or of the channel does not
     // allow yet (6.4); a unit that waits does not hold up the others.
     // Devices that share a unit (`CompiledDevice::unit`) share its pacing,
     // and an exclusive order or a chain on one holds all of them (R3).
-    // Never allocates.
+    // Orders may starve a chain on a busy unit; the achieved period shows it
+    // (R7). `now_ns` is the monotonic clock: never negative, never going
+    // back. Never allocates.
     SCADA_RT Choice take(std::int64_t now_ns) noexcept;
 
     // The last choice of `take` was not sent (an order step expired, an
     // encode failed): the pacing is as before it. A poll or keep-alive is
-    // chosen again; an order ends, and its outcome is the worker's. Only
-    // valid right after `take`. Never allocates.
-    SCADA_RT void not_sent() noexcept;
+    // chosen again; an order ends, and its outcome is the worker's: returns
+    // the order's id then. Only valid right after `take`. Never allocates.
+    SCADA_RT std::optional<std::uint64_t> not_sent() noexcept;
 
-    // Queues an order; false when it is malformed or `max_pending_orders`
-    // are queued. Never allocates.
+    // Queues an order; false when it is malformed (steps for its kind, a
+    // device out of range or disabled) or `max_pending_orders` are queued.
+    // Never allocates.
     SCADA_RT bool add_order(const OrderTicket& order) noexcept;
 
     // Removes the queued order `id`; false when it is not queued (it has
@@ -138,8 +148,11 @@ public:
     // A new connection: every request is back to its planned form (6.3);
     // orders in progress end (a selection does not survive a reconnect,
     // 8.6 rule 3), queued orders stay; a chain in progress is read again
-    // from its first request.
-    void reconnect() noexcept;
+    // from its first request. Writes the ids of the orders it ended into
+    // `ended` (at most one per device, so a span of the device count holds
+    // them all) and returns how many it ended; ids beyond the span's size
+    // are not written.
+    std::size_t reconnect(std::span<std::uint64_t> ended = {}) noexcept;
 
     // The achieved period of poll group `group` (`sys.drv.<channel>.
     // period.<group>`, 11.1): per device, the average of its last
@@ -177,6 +190,7 @@ private:
         std::array<std::int64_t, PERIODS> periods{};
         std::size_t period_count = 0;
         std::size_t period_head = 0;
+        std::int64_t last_sent_ns = 0;  // this cycle's last request handed out
         bool waited = false;   // this cycle waited for a pacing interval
         bool limited = false;  // the last cycle waited and ended late
     };
@@ -254,6 +268,10 @@ private:
     void end_order(std::uint32_t device) noexcept;
     static void complete_cycle(GroupState& state, std::int64_t period_ns,
                                std::int64_t now_ns) noexcept;
+    // Drops a chain open on `device`'s unit before an order step; true when
+    // there was one, whose device is `chain_device`.
+    bool drop_unit_chain(std::uint32_t device,
+                         std::uint32_t& chain_device) noexcept;
     [[nodiscard]] bool polls_allowed(std::uint32_t device) const noexcept;
 
     Choice take_order_step(std::uint32_t device, std::int64_t now_ns) noexcept;
@@ -264,8 +282,6 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
-    bool choose_new_order(std::int64_t now_ns, Choice& out,
-                          std::int64_t& wake) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,

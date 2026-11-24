@@ -343,6 +343,9 @@ bool one_request(const std::vector<Segment>& segments,
         }
         last = std::max(last, next.last);
         values += next.members.size();
+        if (!fits(start.place, start.first, last, values, rules)) {
+            return false;  // it only grows from here (E7)
+        }
     }
     return fits(start.place, start.first, last, values, rules);
 }
@@ -399,8 +402,48 @@ struct Block {
 
 // Joins the segments of one poll group in address order, each request as
 // large as its limits allow.
+// True when `from` holds a cluster of `chained` that `into` does not.
+bool brings_a_chain(const Segment& from, const Segment& into,
+                    const std::vector<std::uint32_t>& chained) {
+    return std::any_of(
+        from.clusters.begin(), from.clusters.end(), [&](std::uint32_t cluster) {
+            return std::binary_search(chained.begin(), chained.end(),
+                                      cluster) &&
+                   std::find(into.clusters.begin(), into.clusters.end(),
+                             cluster) == into.clusters.end();
+        });
+}
+
+// D3: a side-effect segment never joins a request of another cluster's
+// chain, so that a dropped chain never reads a side effect twice.
+bool chain_conflict(const Segment& whole, const Segment& segment,
+                    const std::vector<std::uint32_t>& chained) {
+    return (whole.side_effect && brings_a_chain(segment, whole, chained)) ||
+           (segment.side_effect && brings_a_chain(whole, segment, chained));
+}
+
+// The clusters whose points are in more than one segment: those read by a
+// chain. Sorted.
+std::vector<std::uint32_t> chained_clusters(
+    const std::vector<Segment>& segments) {
+    std::map<std::uint32_t, std::size_t> seen;
+    for (const Segment& segment : segments) {
+        for (const std::uint32_t cluster : segment.clusters) {
+            ++seen[cluster];
+        }
+    }
+    std::vector<std::uint32_t> out;
+    for (const auto& [cluster, count] : seen) {
+        if (count > 1) {
+            out.push_back(cluster);
+        }
+    }
+    return out;
+}
+
 std::vector<Block> blocks_of(const std::vector<Segment>& segments,
-                             const ReadRules& rules) {
+                             const ReadRules& rules,
+                             const std::vector<std::uint32_t>& chained) {
     std::vector<Block> blocks;
     for (const Segment& segment : segments) {
         if (!blocks.empty()) {
@@ -408,6 +451,7 @@ std::vector<Block> blocks_of(const std::vector<Segment>& segments,
             const Segment& whole = open.whole;
             if (whole.place == segment.place && !whole.exclusive &&
                 !segment.exclusive &&
+                !chain_conflict(whole, segment, chained) &&
                 bridgeable(whole.place, whole.last, segment.first, rules) &&
                 fits(whole.place, whole.first,
                      std::max(whole.last, segment.last),
@@ -517,15 +561,47 @@ std::vector<std::vector<std::size_t>> chains_of(
 
 // Plans one poll group and appends its requests to `out`; `parts` gets the
 // split parts of each planned request.
-void plan_group(std::vector<Segment> segments,
-                const std::vector<PlanPoint>& points, const ReadRules& rules,
-                ReadPlan& out, std::vector<std::uint32_t>& order,
-                std::vector<std::vector<Segment>>& parts,
-                std::vector<bool>& in_chain) {
+// The output of planning one poll group, beyond the requests themselves.
+struct GroupOut {
+    std::vector<std::vector<Segment>> parts;  // split parts per request
+    std::vector<bool> in_chain;               // per request
+    // Segments of chained requests whose clusters are whole and that read
+    // no side effect: keep-alive candidates when no planned request is one
+    // (E1).
+    std::vector<Segment> keepalive_parts;
+};
+
+// Puts a chain's side-effect request last; false for a chain with two
+// (D3: a chain is complete once its side effect is read).
+bool order_chain(std::vector<std::size_t>& chain,
+                 const std::vector<Block>& blocks) {
+    const auto side_effects = std::count_if(
+        chain.begin(), chain.end(),
+        [&](std::size_t block) { return blocks[block].whole.side_effect; });
+    if (side_effects > 1) {
+        return false;
+    }
+    std::stable_partition(chain.begin(), chain.end(), [&](std::size_t block) {
+        return !blocks[block].whole.side_effect;
+    });
+    return true;
+}
+
+// Plans one poll group and appends its requests to `out`.
+Status plan_group(std::vector<Segment> segments,
+                  const std::vector<PlanPoint>& points, const ReadRules& rules,
+                  ReadPlan& out, std::vector<std::uint32_t>& order,
+                  GroupOut& group) {
     fuse_clusters(segments, rules);
     sort_segments(segments);
-    const std::vector<Block> blocks = blocks_of(segments, rules);
-    for (const std::vector<std::size_t>& chain : chains_of(blocks)) {
+    const std::vector<std::uint32_t> chained = chained_clusters(segments);
+    const std::vector<Block> blocks = blocks_of(segments, rules, chained);
+    for (std::vector<std::size_t> chain : chains_of(blocks)) {
+        if (!order_chain(chain, blocks)) {
+            return refused(
+                "a value and its companions read two side-effect "
+                "ranges in separate requests");
+        }
         for (std::size_t position = 0; position < chain.size(); ++position) {
             const Block& block = blocks[chain[position]];
             order.push_back(static_cast<std::uint32_t>(out.requests.size()));
@@ -534,10 +610,54 @@ void plan_group(std::vector<Segment> segments,
             out.requests.push_back(std::move(request));
             // A request of a chain has no split form: its parts are bound to
             // the other requests of the chain.
-            parts.push_back(chain.size() > 1 ? std::vector<Segment>{}
-                                             : split_parts(block));
-            in_chain.push_back(chain.size() > 1);
+            const bool in_chain = chain.size() > 1;
+            group.parts.push_back(in_chain ? std::vector<Segment>{}
+                                           : split_parts(block));
+            group.in_chain.push_back(in_chain);
+            if (!in_chain) {
+                continue;
+            }
+            for (const Segment& part : block.parts) {
+                if (!part.side_effect && !part.exclusive &&
+                    !brings_a_chain(part, Segment{}, chained)) {
+                    group.keepalive_parts.push_back(part);
+                }
+            }
         }
+    }
+    return {};
+}
+
+// Keep-alive and probe (6.5, 7.4; D-135).
+void choose_keepalive(const std::vector<PlanPoint>& points,
+                      std::uint32_t planned, const GroupOut& group,
+                      ReadPlan& out) {
+    const std::vector<bool>& in_chain = group.in_chain;
+    // Keep-alive and probe: the shortest planned request outside every
+    // side-effect and exclusive range and outside every chain, so that it
+    // never reads a value without its companion (bridging never touches a
+    // range).
+    for (std::uint32_t index = 0; index < planned; ++index) {
+        const Request& request = out.requests[index];
+        if (request.side_effect || request.exclusive || in_chain[index]) {
+            continue;
+        }
+        if (!out.keepalive.has_value() ||
+            request.count < out.requests[*out.keepalive].count) {
+            out.keepalive = index;
+        }
+    }
+    // E1: every planned request is in a chain or reads a side effect: a
+    // request of its own reads the shortest part of a chain whose clusters
+    // are whole. None at all: the compile step warns.
+    if (!out.keepalive.has_value() && !group.keepalive_parts.empty()) {
+        const auto shortest = std::min_element(
+            group.keepalive_parts.begin(), group.keepalive_parts.end(),
+            [](const Segment& left, const Segment& right) {
+                return left.last - left.first < right.last - right.first;
+            });
+        out.keepalive = static_cast<std::uint32_t>(out.requests.size());
+        out.requests.push_back(request_of(*shortest, points));
     }
 }
 
@@ -572,8 +692,7 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
     }
     out = ReadPlan{};
     out.by_group.resize(poll_groups);
-    std::vector<std::vector<Segment>> parts;
-    std::vector<bool> in_chain;
+    GroupOut planned_out;
     for (std::uint32_t group = 0; group < poll_groups; ++group) {
         std::vector<Segment> of_group;
         for (const Segment& segment : segments) {
@@ -581,9 +700,16 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
                 of_group.push_back(segment);
             }
         }
-        plan_group(std::move(of_group), points, rules, out, out.by_group[group],
-                   parts, in_chain);
+        if (const Status status =
+                plan_group(std::move(of_group), points, rules, out,
+                           out.by_group[group], planned_out);
+            !status.ok()) {
+            out = ReadPlan{};
+            out.by_group.resize(poll_groups);
+            return status;
+        }
     }
+    const std::vector<std::vector<Segment>>& parts = planned_out.parts;
     // Split forms: one request per part, for a request of several parts
     // that touches no side-effect range (CS A.4: such a range is never
     // split).
@@ -598,20 +724,7 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
             out.requests.push_back(request_of(part, points));
         }
     }
-    // Keep-alive and probe: the shortest planned request outside every
-    // side-effect and exclusive range and outside every chain, so that it
-    // never reads a value without its companion (bridging never touches a
-    // range).
-    for (std::uint32_t index = 0; index < planned; ++index) {
-        const Request& request = out.requests[index];
-        if (request.side_effect || request.exclusive || in_chain[index]) {
-            continue;
-        }
-        if (!out.keepalive.has_value() ||
-            request.count < out.requests[*out.keepalive].count) {
-            out.keepalive = index;
-        }
-    }
+    choose_keepalive(points, planned, planned_out, out);
     out.probe = out.keepalive;
     return {};
 }
