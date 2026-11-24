@@ -1,0 +1,9 @@
+a: >
+  one
+  two
+
+  three
+    more
+  four
+b: >-
+  x

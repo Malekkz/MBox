@@ -44,6 +44,29 @@ struct Diagnostic {
     std::vector<Note> notes;
 };
 
+// The most bytes of a message, a path, a note's kind or its detail as a
+// Diagnostics object keeps it (D-110); longer text is cut at a character and
+// ends in `...`.
+constexpr std::size_t MAX_DIAGNOSTIC_TEXT_BYTES = 1024;
+
+// Returns `text`, which may hold any bytes of a file or a path, in a form
+// that prints as itself on one line and cannot drive a terminal or hide or
+// reorder characters (D-110): line feed, carriage return and tab as `\n`,
+// `\r`, `\t`; other C0 control characters, DEL and bytes that are not valid
+// UTF-8 as `\xNN`; C1 control characters, invisible and bidirectional
+// characters, the non-characters and the tag characters as `\uNNNN`, or
+// `\UNNNNNNNN` above U+FFFF. Everything else is kept, a backslash too, so
+// that the function changes nothing it has already made printable. At most
+// `max_bytes` bytes (at least 3): longer text is cut before a whole
+// character or escape and ends in `...`.
+[[nodiscard]] std::string printable(
+    std::string_view text, std::size_t max_bytes = MAX_DIAGNOSTIC_TEXT_BYTES);
+
+// Returns `text` in double quotes, with `\` and `"` written `\\` and `\"`,
+// so that a quoted piece of a file in a message has an unambiguous end. For
+// keys and values in messages; `Diagnostics::add` then makes it printable.
+[[nodiscard]] std::string quote_text(std::string_view text);
+
 // Returns the code as written, for example "CF-101" or "CW-510".
 [[nodiscard]] std::string code_text(const Diagnostic& diagnostic);
 
@@ -91,7 +114,9 @@ public:
     // Adds a warning CW-<code>.
     void warning(std::uint16_t code, Location location, std::string message);
 
-    // Adds `diagnostic` as it is.
+    // Adds `diagnostic`, with its message, paths, kinds and details made
+    // `printable`: every diagnostic passes here, so that no text of a file
+    // reaches a report unescaped.
     void add(Diagnostic diagnostic);
 
     // How many errors and warnings were added, also those beyond the limit.

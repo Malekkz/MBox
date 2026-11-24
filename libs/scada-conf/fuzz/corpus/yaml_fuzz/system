@@ -1,0 +1,11 @@
+unit:
+  id: site-0042
+  name: Pump Station 1
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: ntp
+    servers: [10.0.0.1, 10.0.0.2]
+    alarm_offset_ms: 500
+storage:
+  free_space_alarm: 10%

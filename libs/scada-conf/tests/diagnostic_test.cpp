@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -196,6 +197,97 @@ TEST(Diagnostic, AReportWithWarningsOnlyPasses) {
     diagnostics.warning(CW_510, line_of("a.yaml", 1), "");
     diagnostics.move_into(report);
     EXPECT_TRUE(passed(report));
+}
+
+// S1 of the #130 review (D-110): no text of a file reaches a report
+// unescaped.
+TEST(Diagnostic, PrintableEscapesWhatCouldDriveATerminal) {
+    EXPECT_EQ(printable("plain text: a.b_c"), "plain text: a.b_c");
+    // A forged second line, a terminal escape and a backslash.
+    EXPECT_EQ(printable("x\nsystem.yaml:1:1: error CF-101: y"),
+              "x\\nsystem.yaml:1:1: error CF-101: y");
+    EXPECT_EQ(printable("\x1b[2J\x1b]0;title\x07"),
+              "\\x1B[2J\\x1B]0;title\\x07");
+    // A backslash is kept, so printable text stays as it is.
+    EXPECT_EQ(printable("a\\nb"), "a\\nb");
+    EXPECT_EQ(printable(printable("x\ny\x1b")), "x\\ny\\x1B");
+    EXPECT_EQ(printable("\r\t\x7f"), "\\r\\t\\x7F");
+    // Invalid UTF-8, a C1 control character, and characters that reorder
+    // or hide text.
+    EXPECT_EQ(printable("\xff\xc3"), "\\xFF\\xC3");
+    EXPECT_EQ(printable("\xc2\x9b"), "\\u009B");
+    // U+202E, written byte by byte so that this file holds no such
+    // character.
+    const std::string right_to_left_override = {'\xe2', '\x80', '\xae'};
+    EXPECT_EQ(printable(right_to_left_override), "\\u202E");
+    EXPECT_EQ(printable("\xe2\x80\xa8"), "\\u2028");
+    EXPECT_EQ(printable("\xef\xbb\xbf"), "\\uFEFF");
+    // Other characters are kept.
+    EXPECT_EQ(printable("\xc3\xa9t\xc3\xa9 \xe2\x82\xac"),
+              "\xc3\xa9t\xc3\xa9 \xe2\x82\xac");
+}
+
+TEST(Diagnostic, PrintableEscapesInvisibleCharacters) {
+    // F1 of the review of #130. Written byte by byte, so that this file
+    // holds none of them.
+    const std::vector<std::pair<std::string, std::string>> hidden = {
+        {{'\xc2', '\xad'}, "\\u00AD"},
+        {{'\xd8', '\x9c'}, "\\u061C"},
+        {{'\xe1', '\xa0', '\x8e'}, "\\u180E"},
+        {{'\xe2', '\x80', '\x8b'}, "\\u200B"},
+        {{'\xe2', '\x80', '\x8d'}, "\\u200D"},
+        {{'\xe2', '\x81', '\xa0'}, "\\u2060"},
+        {{'\xe2', '\x81', '\xa4'}, "\\u2064"},
+        {{'\xef', '\xb7', '\x90'}, "\\uFDD0"},
+        {{'\xef', '\xb7', '\xaf'}, "\\uFDEF"},
+        {{'\xef', '\xbf', '\xb9'}, "\\uFFF9"},
+        {{'\xef', '\xbf', '\xbb'}, "\\uFFFB"},
+        {{'\xef', '\xbf', '\xbe'}, "\\uFFFE"},
+        {{'\xf0', '\x9f', '\xbf', '\xbf'}, "\\U0001FFFF"},
+        {{'\xf4', '\x8f', '\xbf', '\xbe'}, "\\U0010FFFE"},
+        {{'\xf3', '\xa0', '\x80', '\x80'}, "\\U000E0000"},
+        {{'\xf3', '\xa0', '\x81', '\xbf'}, "\\U000E007F"},
+    };
+    for (const auto& [text, escaped] : hidden) {
+        EXPECT_EQ(printable(text), escaped);
+    }
+    // Neighbours are kept: U+00AE, U+200A, U+FDCF, U+FFFC, U+1F600.
+    const std::string kept = {'\xc2', '\xae', '\xe2', '\x80', '\x8a',
+                              '\xef', '\xb7', '\x8f', '\xef', '\xbf',
+                              '\xbc', '\xf0', '\x9f', '\x98', '\x80'};
+    EXPECT_EQ(printable(kept), kept);
+}
+
+TEST(Diagnostic, PrintableCapsTheLength) {
+    constexpr std::size_t CAP = 10;
+    EXPECT_EQ(printable("0123456789", CAP), "0123456789");
+    EXPECT_EQ(printable("0123456789a", CAP), "0123456...");
+    // An escape is never cut in two.
+    EXPECT_EQ(printable("012345\n789", CAP), "012345...");
+    // A character is never cut in two.
+    EXPECT_EQ(printable("012345\xc3\xa9\xc3\xa9\xc3\xa9", CAP), "012345...");
+    EXPECT_EQ(printable(std::string(MAX_DIAGNOSTIC_TEXT_BYTES * 2, 'x')).size(),
+              MAX_DIAGNOSTIC_TEXT_BYTES);
+}
+
+TEST(Diagnostic, EveryDiagnosticIsMadePrintable) {
+    Diagnostics diagnostics;
+    Diagnostic diagnostic{.severity = Severity::ERROR,
+                          .code = CF_110,
+                          .location = line_of("a\nb.yaml", 1),
+                          .message = "duplicate key \"x\ny\"",
+                          .notes = {}};
+    diagnostic.notes.push_back(
+        Diagnostic::Note{.kind = "template\x1b",
+                         .location = line_of("t\r.yaml", 2),
+                         .detail = "point \x1b[31m"});
+    diagnostics.add(std::move(diagnostic));
+    Report report;
+    diagnostics.move_into(report);
+    ASSERT_EQ(report.errors.size(), 1U);
+    EXPECT_EQ(format(report.errors.front()),
+              "a\\nb.yaml:1:1: error CF-110: duplicate key \"x\\ny\"\n"
+              "  from template\\x1B t\\r.yaml:2:1 (point \\x1B[31m)");
 }
 
 }  // namespace

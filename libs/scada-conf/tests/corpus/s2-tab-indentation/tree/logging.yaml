@@ -1,0 +1,2 @@
+aggregate_tiers:
+	- { name: 1m, interval: 1m }

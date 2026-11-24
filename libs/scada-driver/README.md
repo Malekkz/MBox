@@ -74,8 +74,12 @@ carry them there. They are read when a configuration is compiled.
 - The file is opened beneath the directory (`openat2` with
   `RESOLVE_BENEATH`, Linux 5.6 and later). A link inside the directory, as
   zone aliases are installed, is followed; a link that leads out of it, or
-  an absolute link, is refused. Where `openat2` is not available the path is
-  resolved and checked in user space (D-130).
+  an absolute link, is refused. Where the kernel has no `openat2` (ENOSYS)
+  the path is resolved and checked in user space (D-130).
+- Deployment requirement: a service sandbox (a seccomp filter, a container
+  profile) must allow `openat2`. A filter that answers EPERM is a refusal
+  and is not taken as a missing call, so the zone file is not read and a
+  configuration with a local-time device is refused.
 - A file without a footer rule makes every time after its last transition
   uncertain.
 
