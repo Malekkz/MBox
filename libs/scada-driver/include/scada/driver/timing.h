@@ -98,10 +98,15 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t inter_frame_gap_ns(
 }
 
 namespace detail {
+// left + right, clamped to the range of std::int64_t either way (Q13).
 [[nodiscard]] constexpr std::int64_t saturating_add(
     std::int64_t left, std::int64_t right) noexcept {
     constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
-    return left > MAX - right ? MAX : left + right;
+    constexpr std::int64_t MIN = std::numeric_limits<std::int64_t>::min();
+    if (right >= 0) {
+        return left > MAX - right ? MAX : left + right;
+    }
+    return left < MIN - right ? MIN : left + right;
 }
 }  // namespace detail
 

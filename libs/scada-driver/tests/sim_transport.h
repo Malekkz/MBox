@@ -59,6 +59,11 @@ public:
     }
     // The peer closes the connection now.
     void close_by_peer() noexcept { peer_closed_ = true; }
+    // The peer closes the connection right after the next `checks` calls of
+    // `closed_by_peer`, which still answer false.
+    void close_by_peer_after_checks(int checks) noexcept {
+        close_after_checks_ = checks;
+    }
     // The next `count` connects are accepted and closed by the peer at once.
     void close_on_connect(int count) noexcept { closing_connects_ = count; }
     // Unit `unit_id` answers after `latency_ns` instead of the default.
@@ -73,11 +78,28 @@ public:
     }
     // The next `count` sends are taken only in part.
     void partial_sends(int count) noexcept { partial_sends_ = count; }
+    // Bytes that arrive with the next answer, in the same read: on a stream
+    // the start of a later frame, on a serial line noise.
+    void trailing(std::vector<std::byte> bytes) {
+        trailing_ = std::move(bytes);
+    }
+    // The next receive starts `stall_ns` late: a worker that was not
+    // scheduled in time (7.1).
+    void stall_next_receive(std::int64_t stall_ns) noexcept {
+        stall_ns_ = stall_ns;
+    }
+    // The next `count` sends fail with nothing sent.
+    void failed_sends(int count) noexcept { failed_sends_ = count; }
 
     IoStatus connect(std::int64_t deadline_ns) noexcept override;
     void close(bool abortive) noexcept override;
     [[nodiscard]] bool closed_by_peer() noexcept override {
-        return open_ && peer_closed_;
+        const bool closed = open_ && peer_closed_;
+        if (close_after_checks_ > 0) {
+            --close_after_checks_;
+            peer_closed_ = peer_closed_ || close_after_checks_ == 0;
+        }
+        return closed;
     }
     IoStatus send(std::span<const std::byte> frame) noexcept override;
     IoStatus receive(std::span<std::byte> into, std::int64_t deadline_ns,
@@ -111,10 +133,14 @@ private:
     std::int64_t connect_delay_ns_ = 0;
     int closing_connects_ = 0;
     int partial_sends_ = 0;
+    int failed_sends_ = 0;
     int connects_ = 0;
     int abortive_closes_ = 0;
     std::vector<std::int64_t> connect_times_;
     std::vector<Delivery> deliveries_;  // in order of arrival
+    std::vector<std::byte> trailing_;
+    int close_after_checks_ = 0;
+    std::int64_t stall_ns_ = 0;
 };
 
 // What the engine wrote: the last write of each point, and every device
@@ -125,6 +151,7 @@ public:
         tag::Quality quality = tag::Quality::BAD;
         std::uint16_t flags = 0;
         std::int64_t value = 0;
+        std::int64_t time_ns = 0;  // the sample's source time
         int writes = 0;
     };
 
@@ -149,10 +176,16 @@ public:
     states() const noexcept {
         return states_;
     }
+    // Every point write, in order: (device, point).
+    [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>&
+    order() const noexcept {
+        return order_;
+    }
 
 private:
     std::map<std::pair<std::uint32_t, std::uint32_t>, Written> points_;
     std::vector<std::pair<std::uint32_t, DeviceStatus>> states_;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> order_;
 };
 
 // Steps `engine` until the clock passes `end_ns`, moving the clock to each

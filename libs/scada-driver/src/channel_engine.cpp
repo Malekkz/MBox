@@ -102,6 +102,31 @@ std::int64_t stale_due(const PointRules& rules, const PointState& state,
     return next;
 }
 
+// The compiled keys the engine relies on (CS refuses the rest; checked once
+// here, Q13): a back-off and a deadline above 0, a sane line.
+Status check_keys(const CompiledChannel& channel) noexcept {
+    const ConnectionRules& connection = channel.connection;
+    if (connection.reconnect_min_ns <= 0 ||
+        connection.reconnect_max_ns < connection.reconnect_min_ns ||
+        connection.connect_timeout_ns <= 0) {
+        return invalid("reconnect or connect_timeout not above 0");
+    }
+    if (channel.line.bits_per_char == 0 || channel.line.turnaround_ns < 0) {
+        return invalid(
+            "a line without bits per character, or a negative "
+            "turnaround");
+    }
+    for (const CompiledDevice& device : channel.devices) {
+        const FailureRules& rules = device.failure;
+        if (rules.timeout_ns <= 0 || rules.write_timeout_ns <= 0 ||
+            rules.backoff_ns <= 0 || rules.backoff_max_ns < rules.backoff_ns ||
+            rules.startup_grace_ns < 0 || rules.demote_after == 0) {
+            return invalid("a device's failure keys out of range");
+        }
+    }
+    return {};
+}
+
 }  // namespace
 
 ChannelEngine::ChannelEngine(const CompiledChannel& channel,
@@ -117,6 +142,9 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
       devices_(channel.devices.size()),
       backoff_ns_(channel.connection.reconnect_min_ns) {
     status_ = scheduler_.status();
+    if (status_.ok()) {
+        status_ = check_keys(channel);
+    }
     const std::int64_t now = clock.monotonic_ns();
     std::size_t frame = 0;
     std::size_t request_points = 0;
@@ -241,6 +269,10 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         answered_since_connect_ = false;
         quiet_until_ns_ = 0;
         discard_before_send_ = false;
+        carry_ = 0;
+        for (DeviceRun& run : devices_) {
+            drop_chain(run);  // a chain never spans a connect (P9)
+        }
         scheduler_.reconnect();
         sync_scheduler();
         publish_states();
@@ -268,7 +300,7 @@ void ChannelEngine::apply_loss() noexcept {
     failures_.lost();
     scheduler_.reconnect();
     for (DeviceRun& run : devices_) {
-        run.chain.clear();
+        drop_chain(run);
         run.attempts = 0;
     }
     // Every device is CONNECTING: `publish_states` writes their points BAD
@@ -279,6 +311,7 @@ void ChannelEngine::apply_loss() noexcept {
 void ChannelEngine::lose(std::int64_t now_ns) noexcept {
     transport_->close(false);
     connected_ = false;
+    carry_ = 0;
     apply_loss();
     next_connect_after_backoff(now_ns);
 }
@@ -286,9 +319,10 @@ void ChannelEngine::lose(std::int64_t now_ns) noexcept {
 void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
     transport_->close(true);
     connected_ = false;
+    carry_ = 0;
     ++counts_.own_closes;
     for (DeviceRun& run : devices_) {
-        run.chain.clear();  // a chain cut by the close publishes nothing
+        drop_chain(run);  // a chain cut by the close publishes nothing
         run.attempts = 0;
     }
     if (lost) {
@@ -326,6 +360,12 @@ void ChannelEngine::sync_scheduler() noexcept {
     }
 }
 
+void ChannelEngine::drop_chain(DeviceRun& run) noexcept {
+    run.chain.clear();
+    run.chain_overflow = false;
+    run.chain_cut = false;
+}
+
 void ChannelEngine::publish_states() noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         DeviceRun& run = devices_[device];
@@ -337,6 +377,8 @@ void ChannelEngine::publish_states() noexcept {
         tags_->device_state(device, state);
         if (state == DeviceStatus::DEMOTED ||
             state == DeviceStatus::CONNECTING) {
+            // What a chain held from before is never published (P9).
+            drop_chain(run);
             fail_points(device);  // BAD with COMM_FAIL (7.4, 7.3)
         }
     }
@@ -433,9 +475,11 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     if (choice.kind == Choice::Kind::PROBE) {
         timeout = std::min(timeout, PROBE_TIMEOUT_MAX_NS);
     }
+    std::size_t have = 0;
     std::size_t frame_bytes = 0;
-    const End end = wait_answer(request, sent, encoded.length,
-                                encoded.expected_max, timeout, frame_bytes);
+    const End end =
+        wait_answer(request, sent, encoded.length, encoded.expected_max,
+                    timeout, have, frame_bytes);
     if (end != End::ANSWER) {
         return end;
     }
@@ -448,6 +492,15 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     decoded = protocol_->decode(device, run.protocol, request, sent,
                                 std::span(rx_).first(frame_bytes), sink);
     sink_count_ = sink.samples().size();
+    // Bytes after the frame: on a stream the start of the next one, kept;
+    // on a serial line noise, discarded by the quiet-time rule (Q12).
+    if (have > frame_bytes && channel_->transport != TransportKind::SERIAL) {
+        std::copy(rx_.begin() + static_cast<std::ptrdiff_t>(frame_bytes),
+                  rx_.begin() + static_cast<std::ptrdiff_t>(have), rx_.begin());
+        carry_ = have - frame_bytes;
+    } else if (have > frame_bytes) {
+        discard_before_send_ = true;
+    }
     if (decoded.kind == DecodeResult::Kind::BROKEN) {
         return End::BROKEN;
     }
@@ -457,44 +510,56 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
 
 ChannelEngine::End ChannelEngine::wait_answer(
     const Request& request, const Attempt& sent, std::size_t request_bytes,
-    std::size_t expected_max, std::int64_t timeout_ns,
+    std::size_t expected_max, std::int64_t timeout_ns, std::size_t& have,
     std::size_t& frame_bytes) noexcept {
     const LineTiming& line = channel_->line;
-    std::int64_t deadline = first_byte_deadline_ns(line, clock_->monotonic_ns(),
-                                                   request_bytes, timeout_ns);
-    std::size_t have = 0;
-    bool started = false;  // the first byte of this request's answer is in
+    const std::int64_t first_deadline = first_byte_deadline_ns(
+        line, clock_->monotonic_ns(), request_bytes, timeout_ns);
+    // The latest the answer may end: begun at the last instant of the first
+    // stage. A stale frame never moves the wait past it (P3).
+    const std::int64_t latest =
+        answer_deadline_ns(line, first_deadline, expected_max);
+    std::int64_t deadline = first_deadline;
+    bool started = false;  // bytes that may start this request's answer
+    have = carry_;  // bytes a stream delivered after the last frame (Q12)
+    carry_ = 0;
     for (;;) {
+        if (have > 0) {
+            switch (scan(request, sent, have, frame_bytes)) {
+                case Scan::COMPLETE:
+                    return End::ANSWER;
+                case Scan::BROKEN:
+                    return End::BROKEN;
+                case Scan::MORE:
+                    break;
+            }
+        }
+        // Only bytes left after stale frames are dropped start the second
+        // stage; when all were stale, the first deadline holds again.
+        if (have == 0) {
+            started = false;
+            deadline = first_deadline;
+        } else if (!started) {
+            started = true;
+            deadline = std::min(
+                answer_deadline_ns(line, clock_->monotonic_ns(), expected_max),
+                latest);
+        }
         if (have >= rx_.size()) {
             return End::BROKEN;  // more than `max_frame_bytes` (7.1)
         }
         std::size_t got = 0;
         const IoStatus status =
             transport_->receive(std::span(rx_).subspan(have), deadline, got);
-        if (status == IoStatus::TIMEOUT ||
-            (status == IoStatus::OK && got == 0)) {
+        if (status == IoStatus::TIMEOUT) {
             return started ? End::BROKEN : End::TIMEOUT;
         }
-        if (status != IoStatus::OK) {
-            return End::CLOSED;  // closed, or failed (review Q8)
+        if (status != IoStatus::OK || got == 0) {
+            // Closed or failed; OK with nothing read is a transport fault,
+            // taken as a failed connection (Q8, Q14).
+            return End::CLOSED;
         }
         have += got;
-        switch (scan(request, sent, have, frame_bytes)) {
-            case Scan::COMPLETE:
-                return End::ANSWER;
-            case Scan::BROKEN:
-                return End::BROKEN;
-            case Scan::MORE:
-                break;
-        }
-        // Only bytes that may start this request's answer start its second
-        // stage; a stale frame dropped whole leaves the first deadline
-        // (2.2, 7.2; review P3).
-        if (!started && have > 0) {
-            started = true;
-            deadline =
-                answer_deadline_ns(line, clock_->monotonic_ns(), expected_max);
-        }
     }
 }
 
@@ -526,12 +591,23 @@ ChannelEngine::Scan ChannelEngine::scan(const Request& request,
 }
 
 void ChannelEngine::exchange(const Choice& choice) noexcept {
+    if (choice.chain_dropped) {
+        drop_chain(devices_[choice.chain_device]);  // publishes nothing
+    }
     DecodeResult decoded;
     const End end = attempt(choice, decoded);
     const std::int64_t now = clock_->monotonic_ns();
     switch (end) {
         case End::NOT_SENT:
-            (void)scheduler_.not_sent();
+            // The protocol cannot encode it: the request ends failed
+            // without I/O, and the engine moves on (Q11).
+            if (choice.kind == Choice::Kind::PROBE) {
+                failures_.probe_ended(choice.device, false, now);
+                scheduler_.probe_done();
+            } else {
+                fail_request(choice.device, channel_->devices[choice.device]
+                                                .plan.requests[choice.request]);
+            }
             return;
         case End::CLOSED:
             // Every device of the channel at once, no retries (7.3).
@@ -562,26 +638,33 @@ void ChannelEngine::answered(const Choice& choice,
     const CompiledDevice& compiled = channel_->devices[device];
     const Request& request = compiled.plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
-    // A valid answer: the reconnect back-off starts from `min` again (7.3).
-    answered_since_connect_ = true;
-    backoff_ns_ = channel_->connection.reconnect_min_ns;
     run.attempts = 0;
     if (choice.kind == Choice::Kind::PROBE) {
         // The device answered, busy or not: it is alive (7.4). A probe
-        // neither adds to the run of time-outs nor empties it (7.3).
+        // neither adds to the run of time-outs nor empties it, nor resets
+        // the reconnect back-off (7.3; the lead's ruling R10).
         failures_.probe_ended(device, true, now);
         scheduler_.probe_done();
+        if (choice.cycle && decoded.kind != DecodeResult::Kind::BUSY) {
+            // A whole poll cycle as a probe (R8): published as a poll.
+            deliver(choice, std::span(sink_storage_).first(sink_count_));
+        }
         return;
     }
+    // A valid answer to a poll: the reconnect back-off starts from `min`
+    // again, and the run of time-outs is empty (7.3).
+    answered_since_connect_ = true;
+    backoff_ns_ = channel_->connection.reconnect_min_ns;
     failures_.answer_seen();
     if (decoded.kind == DecodeResult::Kind::BUSY) {
         // Busy never counts and is never retried (7.4, annex A, test 19;
         // the lead's ruling on D-12): the points keep their values, STALE
         // by `max_age`.
         (void)failures_.request_ended(device, RequestEnd::NOT_COUNTED, now);
-        if (!request.chained) {
-            run.chain.clear();
-        }
+        // A busy part cuts its chain: what was held is dropped, and the
+        // parts that follow are read but not published (P9).
+        drop_chain(run);
+        run.chain_cut = request.chained;
         return;
     }
     (void)failures_.request_ended(device, RequestEnd::ANSWERED, now);
@@ -655,11 +738,13 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     if (probe) {
         failures_.probe_ended(device, false, now);
         scheduler_.probe_done();
+        drop_chain(run);
         return;
     }
-    if (!request.chained) {
-        run.chain.clear();  // a chain whose end failed publishes nothing
-    }
+    // A chain with a failed part publishes nothing: what was held is
+    // dropped, and the parts that follow are read but not published (P9).
+    drop_chain(run);
+    run.chain_cut = request.chained;
     fail_request(device, request);
     if (end == End::BROKEN) {
         (void)failures_.request_ended(device, RequestEnd::FAILED, now);
@@ -679,20 +764,31 @@ void ChannelEngine::deliver(const Choice& choice,
     DeviceRun& run = devices_[choice.device];
     const Request& request =
         channel_->devices[choice.device].plan.requests[choice.request];
-    if (choice.kind == Choice::Kind::POLL &&
-        (request.chained || !run.chain.empty())) {
+    const bool poll = choice.kind == Choice::Kind::POLL || choice.cycle;
+    if (poll && (request.chained || !run.chain.empty() || run.chain_overflow ||
+                 run.chain_cut)) {
         // A chain of companions is published when its last request is in
-        // (5.5): held until then.
+        // (5.5): held until then. A chain that does not fit its buffer, or
+        // one with a failed part, is published not at all, never in part
+        // (P9); an overflow is counted.
         for (const DeliveredSample& sample : samples) {
-            if (run.chain.size() < run.chain.capacity()) {
-                run.chain.push_back(sample);
+            if (run.chain.size() == run.chain.capacity()) {
+                run.chain_overflow = true;
+                break;
             }
+            run.chain.push_back(sample);
         }
         if (request.chained) {
             return;
         }
-        process(choice.device, run.chain);
-        run.chain.clear();
+        if (!run.chain_cut) {
+            if (run.chain_overflow) {
+                ++counts_.chain_overflows;
+            } else {
+                process(choice.device, run.chain);
+            }
+        }
+        drop_chain(run);
         return;
     }
     process(choice.device, samples);
@@ -704,19 +800,20 @@ void ChannelEngine::process(std::uint32_t device,
     const CompiledDevice& compiled = channel_->devices[device];
     const SampleTimes times{.receive_time_ns = clock_->realtime_ns(),
                             .receive_mono_ns = clock_->monotonic_ns()};
+    // Points without companions first, so that a dependent point sees what
+    // its companions' own processing gave them (5.5, D-131): two passes
+    // into the engine's own storage, nothing allocated (P8).
     batch_.clear();
-    for (const DeliveredSample& sample : samples) {
-        if (sample.point < run.points.size() &&
-            batch_.size() < batch_.capacity()) {
-            batch_.push_back(sample);
+    for (const bool dependent : {false, true}) {
+        for (const DeliveredSample& sample : samples) {
+            if (sample.point < run.points.size() &&
+                compiled.points[sample.point].rules.companions.empty() !=
+                    dependent &&
+                batch_.size() < batch_.capacity()) {
+                batch_.push_back(sample);
+            }
         }
     }
-    // Points without companions first, so that a dependent point sees what
-    // its companions' own processing gave them (5.5, D-131).
-    std::stable_partition(
-        batch_.begin(), batch_.end(), [&](const DeliveredSample& sample) {
-            return compiled.points[sample.point].rules.companions.empty();
-        });
     for (std::size_t index = 0; index < batch_.size(); ++index) {
         const DeliveredSample& sample = batch_[index];
         const PointRules& rules = compiled.points[sample.point].rules;

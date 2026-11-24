@@ -79,6 +79,11 @@ struct Choice {
     // (rulings R2, D2).
     bool chain_dropped = false;
     std::uint32_t chain_device = 0;
+    // A PROBE that opens one whole normal poll cycle of its device, for a
+    // device whose plan has no probe request (the lead's ruling R8): its
+    // samples are published as a poll's; the cycle goes on only if the
+    // device recovers.
+    bool cycle = false;
 };
 
 class Scheduler {
@@ -182,7 +187,9 @@ public:
     // this many time-outs past its own due time (D-138, Q4).
     static constexpr std::int64_t PROBE_FLOOR = 10;
 
-    // A demoted `device` is due for a probe at `due_ns` (7.4), which waits
+    // A demoted `device` is due for a probe at `due_ns` (7.4); a device
+    // whose plan has no probe request is probed by one whole poll cycle
+    // (Choice::cycle, R8). The probe waits
     // at most `timeout_ns` for its answer. A probe is chosen only when no
     // order is queued or in progress and no polled device has a retry, a
     // chain or a request of a started cycle left (6.2 step 5), when no poll
@@ -352,6 +359,8 @@ private:
     [[nodiscard]] std::int64_t next_poll_due_ns() const noexcept;
     bool choose_probe(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
+    bool start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
+                           Choice& out) noexcept;
     Choice take_retry(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     const CompiledChannel* channel_;

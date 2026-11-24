@@ -730,7 +730,6 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
         const CompiledDevice& compiled = channel_->devices[device];
         const DeviceRun& run = devices_[device];
         if (!compiled.enabled || !run.probe ||
-            !compiled.plan.probe.has_value() ||
             units_[run.unit].holder != NOBODY) {
             continue;
         }
@@ -748,6 +747,15 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
             wake = std::min(wake, floor);
             continue;
         }
+        if (!compiled.plan.probe.has_value()) {
+            // R8: no request may serve as a probe (all side-effect or
+            // chained): one whole normal poll cycle of the device is.
+            if (!start_probe_cycle(device, now_ns, out)) {
+                continue;
+            }
+            probe_in_flight_ = true;
+            return true;
+        }
         out = Choice{.kind = Choice::Kind::PROBE,
                      .device = device,
                      .request = *compiled.plan.probe};
@@ -757,6 +765,35 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
         return true;
     }
     return false;
+}
+
+bool Scheduler::start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
+                                  Choice& out) noexcept {
+    DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    // The group of the highest priority that has requests opens the cycle;
+    // every group of the device is due at once, as when it is polled again.
+    std::optional<std::uint32_t> first;
+    for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+        if (!plan.by_group[group].empty() &&
+            (!first.has_value() ||
+             channel_->poll_groups[group].priority <
+                 channel_->poll_groups[*first].priority)) {
+            first = group;
+        }
+    }
+    if (!first.has_value()) {
+        return false;
+    }
+    run.polled = true;
+    for (GroupState& state : run.groups) {
+        state = GroupState{.due_ns = now_ns};
+    }
+    start_due(now_ns);
+    out = take_poll(device, *first, now_ns);
+    out.kind = Choice::Kind::PROBE;
+    out.cycle = true;
+    return true;
 }
 
 Choice Scheduler::take(std::int64_t now_ns) noexcept {

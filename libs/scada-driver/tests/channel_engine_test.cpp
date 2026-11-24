@@ -700,6 +700,443 @@ TEST(ChannelEngine, TheProbeBudgetKeepsTheLivePeriod) {
     EXPECT_LE(share, 0.60);
 }
 
+// --- C++ review: R8, P3, Q11 to Q15 ---------------------------------------
+
+// A one-device channel whose only point lies in a side-effect range, so its
+// plan has no probe request.
+CompiledChannel side_effect_only(TransportKind transport) {
+    ReadRules rules{.max_units = LARGE};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 0,
+                              .last = 0}};
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)}}, rules);
+    channel.transport = transport;
+    channel.devices[0].failure = quick_failure(0, 1);
+    return channel;
+}
+
+TEST(ChannelEngine, ADeviceWithoutAProbeRequestIsProbedByAWholePollCycle) {
+    // R8: its only request reads a side-effect range, so no probe request
+    // exists. It is demoted, probed by one poll cycle per back-off (the
+    // range read once each time), and recovers when the unit answers.
+    Rig rig(side_effect_only(TransportKind::SERIAL), 1);
+    ASSERT_FALSE(rig.channel.devices[0].plan.probe.has_value());
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    const std::size_t before = requests_of(rig.bus, 1);
+    rig.run_until(8 * SECOND);
+    // Probes at about 1, 3 and 7 s after the demotion: one read each.
+    EXPECT_EQ(requests_of(rig.bus, 1), before + 3);
+    rig.bus.fault(1, Fault::NONE);
+    rig.bus.set(1, 0, 0, 3);
+    rig.run_until(13 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 3);
+}
+
+TEST(ChannelEngine, BytesThatStartNoAnswerEndTheSecondStage) {
+    // A serial unit sends three bytes 5 ms after the request and nothing
+    // more: the answer is broken 20 ms (the margin) after its first byte,
+    // not at the 100 ms time-out.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.transport.inject({std::byte{0}, std::byte{0}, std::byte{1}},
+                         5 * MILLISECOND);
+    rig.run_until(30 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().broken, 1U);
+    EXPECT_EQ(rig.engine.counts().timeouts, 0U);
+}
+
+TEST(ChannelEngine, AStaleFrameNeverMakesTheWaitLonger) {
+    // P3, the other direction: 1,200 bit/s, time-out 100 ms, the unit
+    // answers only after 500 ms, and a stale frame arrives at 90 ms. The
+    // attempt still times out at its first deadline (173 ms); the late
+    // answer is not taken.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 5), TransportKind::SERIAL);
+    channel.line = LineTiming{.bit_rate = 1200,
+                              .bits_per_char = bits_per_char(8, true, 1)};
+    Rig rig(std::move(channel), 1);
+    rig.transport.latency(1, 500 * MILLISECOND);
+    rig.transport.inject(
+        {std::byte{0x7F}, std::byte{0xFF}, std::byte{1}, std::byte{0},
+         std::byte{0}, std::byte{1}, std::byte{0}, std::byte{9}},
+        90 * MILLISECOND);
+    rig.run_until(190 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().stale_frames, 1U);
+    EXPECT_EQ(rig.engine.counts().timeouts, 1U);
+    EXPECT_NE(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+TEST(ChannelEngine, ASecondOwnCloseBeforeAnyAnswerWaitsTheBackOff) {
+    // 7.3: the second close comes before any valid answer: the reconnect
+    // waits `reconnect.min` (1 s), not at once.
+    Rig rig(channel_of(1, quick_failure(2, 10), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.run_until(2 * FAST_PERIOD + 10 * MILLISECOND);
+    const std::vector<std::int64_t>& connects = rig.transport.connect_times();
+    ASSERT_EQ(connects.size(), 2U);  // the first close reconnected at once
+    rig.run_until(4 * SECOND);
+    ASSERT_GE(connects.size(), 3U);
+    EXPECT_GE(connects[2] - connects[1], SECOND);
+}
+
+TEST(ChannelEngine, ASendThatFailsWithNothingSentLosesTheConnection) {
+    Rig rig(channel_of(1, quick_failure(2, 10), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    rig.transport.failed_sends(1);
+    rig.run_until(FAST_PERIOD + MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().losses, 1U);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+}
+
+TEST(ChannelEngine, AProbeWaitsAtMostOneSecond) {
+    // A device time-out of 3 s; its probe waits 1 s (7.4): the second
+    // probe follows the first by 1 s plus the doubled back-off (2 s).
+    FailureRules rules = quick_failure(0, 1);
+    rules.timeout_ns = 3 * SECOND;
+    CompiledChannel channel = channel_of(1, rules, TransportKind::TCP);
+    channel.connection.lost_after_timeouts = 10;
+    Rig rig(std::move(channel), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(20 * SECOND);
+    const std::vector<std::int64_t> sent = times_of(rig.bus, 1);
+    ASSERT_GE(sent.size(), 3U);  // the poll, then two probes
+    EXPECT_EQ(sent[2] - sent[1], SECOND + 2 * SECOND);
+}
+
+TEST(ChannelEngine, AChainIsPublishedWholeOrNotAtAll) {
+    // A value at 0 with its companion at 100 (4 units per request): nothing
+    // is written after the first request, both after the second. When the
+    // companion's request fails, the value is not written, and the
+    // companion goes BAD.
+    CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 10);
+    Rig rig(std::move(channel), 1);
+    rig.run_until(3 * LATENCY);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 1);
+    EXPECT_EQ(rig.tags.point(0, 1).writes, 1);
+    // Both written when the second answer was in, not the value first.
+    EXPECT_EQ(rig.tags.point(0, 0).time_ns, rig.tags.point(0, 1).time_ns);
+    // The companion written before its dependent (P8's order).
+    ASSERT_GE(rig.tags.order().size(), 2U);
+    EXPECT_EQ(rig.tags.order()[0].second, 1U);
+    rig.bus.silent_from(1, 100);
+    rig.run_until(FAST_PERIOD + 200 * MILLISECOND);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 1);  // not written again
+    EXPECT_TRUE(rig.tags.has_flag(0, 1, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, AChainWhoseMiddlePartFailsPublishesNothing) {
+    // P9: a value at 0 with companions at 100 and 200, one request each.
+    // The request at 100 times out: neither the value nor the companion at
+    // 200 is written from this chain; the companion at 100 goes BAD.
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .companions = {1, 2}},
+                                  {.first = 100},
+                                  {.first = 200}}}},
+                     ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 10);
+    Rig rig(std::move(channel), 1);
+    rig.bus.silent_from(1, 100, 100);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.bus.log().size(), 3U);  // the chain read to its end
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 0);
+    EXPECT_EQ(rig.tags.point(0, 2).writes, 0);
+    EXPECT_TRUE(rig.tags.has_flag(0, 1, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, AChainWithABusyPartPublishesNothing) {
+    // P9: as above, the request at 100 answered busy: nothing of the chain
+    // is written, and busy writes nothing either.
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .companions = {1, 2}},
+                                  {.first = 100},
+                                  {.first = 200}}}},
+                     ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 10);
+    Rig rig(std::move(channel), 1);
+    rig.bus.busy_at(1, 100);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.bus.log().size(), 3U);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 0);
+    EXPECT_EQ(rig.tags.point(0, 1).writes, 0);
+    EXPECT_EQ(rig.tags.point(0, 2).writes, 0);
+}
+
+TEST(ChannelEngine, ADeviceDemotedTwiceIsWrittenCommFailTwice) {
+    Rig rig(channel_of(1, quick_failure(0, 1), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    rig.bus.fault(1, Fault::NONE);
+    rig.run_until(3 * SECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(4 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, AnAbsentAnswerWritesThePointsAbsentNotCommFail) {
+    Rig rig(channel_of(1, quick_failure(0, 1), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::ABSENT);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);  // an answer
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 1);
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_NE(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+TEST(ChannelEngine, OnRtuOverTcpAReadTimeOutNeverClosesTheConnection) {
+    // 7.3: no close for read time-outs, the quiet time after each, and the
+    // device demoted by its count.
+    Rig rig(channel_of(1, quick_failure(0, 3), TransportKind::RTU_OVER_TCP), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(2 * SECOND);
+    EXPECT_EQ(rig.engine.counts().own_closes, 0U);
+    EXPECT_EQ(rig.engine.counts().losses, 0U);
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    const std::vector<std::int64_t> sent = times_of(rig.bus, 1);
+    ASSERT_GE(sent.size(), 2U);
+    EXPECT_GE(sent[1] - sent[0], 100 * MILLISECOND + MIN_MARGIN_NS);
+}
+
+TEST(ChannelEngine, ARefusedEncodeEndsTheRequestAndTheEngineMovesOn) {
+    // Q11: a request the protocol cannot encode (more units than the test
+    // protocol reads) fails without I/O; the clock moves on.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 5), TransportKind::TCP);
+    channel.devices[0].plan.requests[0].count = 1000;
+    Rig rig(std::move(channel), 1);
+    const std::size_t steps = run_engine(rig.engine, rig.clock, SECOND);
+    EXPECT_LT(steps, 100U);
+    EXPECT_EQ(rig.engine.counts().requests, 0U);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, OnAStreamBytesAfterAFrameStartTheNextOne) {
+    // Q12: a stale frame and the start of the answer arrive in one read on
+    // a stream; the stale one is dropped and the rest read as the answer.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.bus.set(1, 0, 0, 4);
+    rig.transport.latency(1, 2 * MILLISECOND);
+    rig.transport.inject(
+        {std::byte{0x7F}, std::byte{0xFF}, std::byte{1}, std::byte{0},
+         std::byte{0}, std::byte{1}, std::byte{0}, std::byte{9}},
+        2 * MILLISECOND);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().stale_frames, 1U);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 4);
+}
+
+TEST(ChannelEngine, KeysOutOfRangeAreRefusedWhenTheEngineIsBuilt) {
+    // Q13: a back-off of 0 would spin.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 5), TransportKind::TCP);
+    channel.connection.reconnect_min_ns = 0;
+    Rig rig(std::move(channel), 1);
+    EXPECT_FALSE(rig.engine.status().ok());
+    EXPECT_EQ(rig.engine.step(), ChannelEngine::NEVER);
+    EXPECT_EQ(rig.transport.connects(), 0);
+}
+
+TEST(ChannelEngine, AProbeAnswerLeavesTheReconnectBackOffAndTheRun) {
+    // R10: a probe's answer neither empties the run of time-outs nor
+    // resets the reconnect back-off (only a poll's answer does).
+    Rig rig(channel_of(1, quick_failure(0, 1), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_EQ(rig.engine.failures().timeout_run(), 1U);
+    rig.bus.fault(1, Fault::BUSY);  // the probe will be answered
+    // The probe falls due 1 s after the demotion at 100 ms; stop right
+    // after its exchange, before the recovered device's own poll.
+    rig.run_until(1100 * MILLISECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::INITIALISING);
+    EXPECT_EQ(rig.engine.failures().timeout_run(), 1U);
+}
+
+// --- Tests the mutation pass of Q15 asked for -----------------------------
+
+TEST(ChannelEngine, AStepWhileIdleLearnsOfThePeersClose) {
+    // 7.3 "Idle close": a slow group, the peer closes while the engine waits;
+    // the next boundary finds it without sending anything.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP, SLOW), 1);
+    rig.run_until(SECOND);
+    const std::uint64_t requests = rig.engine.counts().requests;
+    rig.transport.close_by_peer();
+    (void)rig.engine.step();
+    EXPECT_EQ(rig.engine.counts().losses, 1U);
+    EXPECT_EQ(rig.engine.counts().requests, requests);
+}
+
+TEST(ChannelEngine, AConnectThatSucceedsAfterTheWindowIsStillALoss) {
+    // R-17, P1: connect_timeout 500 ms, each connect taking 300 ms. Connected
+    // at 300 ms, a broken answer at 301 ms closes the connection; with no
+    // answer since the connect the reconnect waits 400 ms and starts at
+    // 701 ms, inside the window, and succeeds at 1001 ms, after it: the
+    // rules of a lost connection apply then.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 10), TransportKind::TCP);
+    channel.connection.connect_timeout_ns = 500 * MILLISECOND;
+    channel.connection.reconnect_min_ns = 400 * MILLISECOND;
+    Rig rig(std::move(channel), 1);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.transport.connect_delay(300 * MILLISECOND);
+    rig.run_until(1001 * MILLISECOND + MILLISECOND / 2);
+    EXPECT_EQ(rig.transport.connect_times(),
+              (std::vector<std::int64_t>{0, 701 * MILLISECOND}));
+    EXPECT_EQ(rig.engine.counts().losses, 1U);
+    EXPECT_EQ(rig.engine.counts().resumed, 0U);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+}
+
+TEST(ChannelEngine, OneProbeServesTwoSlicesOfOneUnit) {
+    // Q5: two devices on one dead unit, demoted together: one probe per
+    // back-off, not two.
+    CompiledChannel channel =
+        make_channel({{.name = "a", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "b", .unit_id = 1, .points = adjacent(10, 1)}},
+                     ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::SERIAL;
+    for (CompiledDevice& device : channel.devices) {
+        device.failure = quick_failure(0, 1);
+    }
+    // The first device, which probes for the unit, waits 4 s; the second
+    // would probe after 1 s.
+    channel.devices[0].failure.backoff_ns = 4 * SECOND;
+    channel.devices[0].failure.backoff_max_ns = 8 * SECOND;
+    Rig rig(std::move(channel), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    ASSERT_EQ(rig.state(1), DeviceStatus::DEMOTED);
+    const std::size_t before = requests_of(rig.bus, 1);
+    rig.run_until(4 * SECOND);
+    EXPECT_EQ(requests_of(rig.bus, 1), before);  // no probe of its own
+    rig.run_until(4300 * MILLISECOND);
+    EXPECT_EQ(requests_of(rig.bus, 1), before + 1);  // one, for both
+}
+
+TEST(ChannelEngine, CommFailIsWrittenOnceNotAtEveryRefusedConnect) {
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.transport.refuse_connects(3, MILLISECOND);
+    // Refused at 0, 1, 3 and connected at 7 s: one COMM_FAIL write until
+    // then.
+    rig.run_until(7 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::CONNECTING);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, 1);
+}
+
+TEST(ChannelEngine, AFrameThatCameWithThePreviousAnswerIsReadNext) {
+    // Q12: on a stream the bytes after a frame are kept: the next request's
+    // whole answer came in the same read as the previous one (transaction
+    // id 1, value 77), and is taken without waiting.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.bus.set(1, 0, 0, 5);
+    rig.transport.trailing({std::byte{0}, std::byte{1}, std::byte{1},
+                            std::byte{0}, std::byte{0}, std::byte{1},
+                            std::byte{0}, std::byte{77}});
+    rig.run_until(FAST_PERIOD + MILLISECOND / 2);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 77);
+}
+
+TEST(ChannelEngine, AnEarlyStaleFrameDoesNotShortenTheWait) {
+    // P3: a stale frame at 10 ms, the answer at 50 ms, time-out 100 ms:
+    // after the stale frame the first deadline holds, so the answer is
+    // taken.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::SERIAL), 1);
+    rig.bus.set(1, 0, 0, 6);
+    rig.transport.latency(1, 50 * MILLISECOND);
+    // The stale frame arrives in two reads: its start begins the second
+    // stage, and once it is dropped the first deadline holds again.
+    rig.transport.inject({std::byte{0x7F}, std::byte{0xFF}}, 10 * MILLISECOND);
+    rig.transport.inject({std::byte{1}, std::byte{0}, std::byte{0},
+                          std::byte{1}, std::byte{0}, std::byte{9}},
+                         11 * MILLISECOND);
+    rig.run_until(60 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().timeouts, 0U);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 6);
+}
+
+TEST(ChannelEngine, ABrokenFrameOnASerialLineIsRetried) {
+    // D-12: on a serial line a broken answer is tried again.
+    Rig rig(channel_of(1, quick_failure(1, 5), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().retries, 1U);
+    EXPECT_EQ(rig.engine.counts().broken, 2U);
+}
+
+TEST(ChannelEngine, AWorkerThatReadsLateStillEndsTheAnswerByTheCap) {
+    // P3: the answer's start arrives at 50 ms, inside the first stage of
+    // 100 ms, but the worker reads it only at 250 ms. The answer must end
+    // by the second stage counted from the first deadline, not from the
+    // late read: its rest at 260 ms is too late, and the answer is broken.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.transport.inject(
+        {std::byte{0}, std::byte{0}, std::byte{1}, std::byte{0}},
+        50 * MILLISECOND);
+    rig.transport.inject(
+        {std::byte{0}, std::byte{1}, std::byte{0}, std::byte{9}},
+        260 * MILLISECOND);
+    rig.transport.stall_next_receive(250 * MILLISECOND);
+    rig.run_until(255 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().broken, 1U);
+    EXPECT_NE(rig.tags.point(0, 0).value, 9);
+}
+
+TEST(ChannelEngine, APeerCloseJustBeforeTheSendSendsNothing) {
+    // 7.3: the peer's close is learnt in the instant between the boundary's
+    // check and the send; a send would be accepted after the FIN, so the
+    // engine asks again before it writes.
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    const std::uint64_t requests = rig.engine.counts().requests;
+    // One step at the poll's due time: its boundary check answers false.
+    rig.clock.advance_to(FAST_PERIOD);
+    rig.transport.close_by_peer_after_checks(1);
+    (void)rig.engine.step();
+    EXPECT_EQ(rig.engine.counts().requests, requests);
+    EXPECT_EQ(rig.engine.counts().losses, 1U);
+}
+
+TEST(ChannelEngine, AProbeTimeOutAbove1sIsBoundedTo1sInTheBudget) {
+    // 7.4: a probe waits at most 1 s, and the budget reckons with that, not
+    // with the device's 3 s time-out. The live unit's 2 s group leaves 1 s
+    // of idle time in every period: probes go in it, not only after the
+    // floor of 10 time-outs.
+    CompiledChannel channel =
+        channel_of(2, quick_failure(0, 1), TransportKind::SERIAL, 1);
+    channel.poll_groups[1].period_ns = 2 * SECOND;
+    channel.devices[1].failure.timeout_ns = 3 * SECOND;
+    Rig rig(std::move(channel), 2);
+    rig.bus.fault(2, Fault::SILENT);
+    rig.run_until(4 * SECOND);
+    ASSERT_EQ(rig.state(1), DeviceStatus::DEMOTED);
+    const std::size_t before = requests_of(rig.bus, 2);
+    rig.run_until(20 * SECOND);
+    EXPECT_GE(requests_of(rig.bus, 2), before + 3);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

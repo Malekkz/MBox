@@ -76,6 +76,14 @@ the contracts left open.
   (D-138). Measured: one live unit in a 1 s group and 20 dead ones on a
   serial line keep a live period of at most 1.003 s; the probes take 49 %
   of the line, all of it idle time.
+- **A device with no probe request is probed by a poll cycle.** When every
+  read of a device has side effects or is chained, its probe is one whole
+  poll cycle at each back-off instant, and its samples are published as a
+  poll's: a side-effect read is made once per back-off (D-138).
+- **The connect blocks the worker.** `step` waits in the transport's
+  connect up to `connect_timeout` (3 s by default); orders that arrive
+  meanwhile wait as long. The command slices make the connect polled
+  (D-140).
 - **Orders can starve a chain.** On a busy unit, orders may keep dropping a
   chain of companions, which then never completes; there is no cap, and the
   poll group's achieved period shows it (D-136, R7).

@@ -69,6 +69,9 @@ TEST(Timing, DeadlinesSaturate) {
         first_byte_deadline_ns(LINE_1200_8E1, MAX - 1, REQUEST_BYTES, TIMEOUT),
         MAX);
     EXPECT_EQ(answer_deadline_ns(LINE_1200_8E1, MAX, ANSWER_BYTES), MAX);
+    // A negative time-out cannot overflow either (Q13).
+    constexpr std::int64_t MIN = std::numeric_limits<std::int64_t>::min();
+    EXPECT_EQ(first_byte_deadline_ns(LineTiming{}, MIN + 1, 0, -10), MIN);
     EXPECT_EQ(
         frame_time_ns(LINE_1200_8E1, std::numeric_limits<std::size_t>::max()),
         MAX);

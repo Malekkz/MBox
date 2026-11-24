@@ -64,6 +64,7 @@ struct EngineCounts {
     std::uint64_t own_closes = 0;    // closes the driver made itself (7.3)
     std::uint64_t resumed = 0;       // own closes followed by a quick reconnect
     std::uint64_t stale_frames = 0;  // frames of other requests dropped
+    std::uint64_t chain_overflows = 0;  // chains too long for their buffer
 };
 
 class ChannelEngine {
@@ -76,7 +77,8 @@ public:
     // Allocates every buffer, sized for `channel`, which must outlive the
     // engine, as must `protocol`, `transport`, `clock` and `tags`. Every
     // enabled device starts CONNECTING, its points not initialised. A
-    // channel the scheduler refuses (Scheduler::check), or a device whose
+    // channel the scheduler refuses (Scheduler::check), keys out of range (a
+    // back-off or time-out not above 0, CS refuses them), or a device whose
     // protocol gives no frame size, gives an engine whose `status` is that
     // error and which never connects.
     ChannelEngine(const CompiledChannel& channel, const FrameProtocol& protocol,
@@ -134,6 +136,10 @@ private:
         bool comm_failed = false;    // its points were written COMM_FAIL
         // Samples of a chain of companions until its last request (5.5).
         std::vector<DeliveredSample> chain;
+        bool chain_overflow = false;  // the chain did not fit: not published
+        // A part of the chain failed or was busy: the rest of the chain is
+        // read, and nothing of it published (P9).
+        bool chain_cut = false;
     };
 
     // The exchange and the connection: not real-time, since they reach the
@@ -146,12 +152,15 @@ private:
     End attempt(const Choice& choice, DecodeResult& decoded) noexcept;
     End wait_answer(const Request& request, const Attempt& sent,
                     std::size_t request_bytes, std::size_t expected_max,
-                    std::int64_t timeout_ns, std::size_t& frame_bytes) noexcept;
+                    std::int64_t timeout_ns, std::size_t& have,
+                    std::size_t& frame_bytes) noexcept;
     void exchange(const Choice& choice) noexcept;
     void answered(const Choice& choice, const DecodeResult& decoded) noexcept;
     void failed(const Choice& choice, End end) noexcept;
     void after_bad_frame(const Request& request, End end) noexcept;
 
+    // Empties a device's chain: what it held is never published.
+    SCADA_RT static void drop_chain(DeviceRun& run) noexcept;
     SCADA_RT void sync_scheduler() noexcept;
     SCADA_RT void publish_states() noexcept;
     SCADA_RT void fail_points(std::uint32_t device) noexcept;
@@ -197,6 +206,9 @@ private:
     // Input is discarded once more before the next send (7.2: bytes that
     // arrive during a quiet time are not the next answer).
     bool discard_before_send_ = false;
+    // Bytes a stream delivered after the last complete frame, kept at the
+    // start of `rx_` for the next answer (Q12).
+    std::size_t carry_ = 0;
 };
 
 }  // namespace scada::driver

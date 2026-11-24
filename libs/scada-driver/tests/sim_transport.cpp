@@ -52,11 +52,18 @@ IoStatus SimTransport::send(std::span<const std::byte> frame) noexcept {
         --partial_sends_;
         return IoStatus::PARTIAL;
     }
-    const std::vector<std::byte> answer =
-        bus_->answer(frame, clock_->monotonic_ns());
+    if (failed_sends_ > 0) {
+        --failed_sends_;
+        return IoStatus::FAILED;
+    }
+    std::vector<std::byte> answer = bus_->answer(frame, clock_->monotonic_ns());
     if (answer.empty()) {
         return IoStatus::OK;
     }
+    for (const std::byte byte : trailing_) {
+        answer.push_back(byte);
+    }
+    trailing_.clear();
     const auto unit = static_cast<std::uint8_t>(frame[2]);
     const auto found = latencies_.find(unit);
     const std::int64_t latency =
@@ -79,10 +86,14 @@ IoStatus SimTransport::receive(std::span<std::byte> into,
     if (!open_ || peer_closed_) {
         return IoStatus::CLOSED;
     }
-    std::sort(deliveries_.begin(), deliveries_.end(),
-              [](const Delivery& left, const Delivery& right) {
-                  return left.arrival_ns < right.arrival_ns;
-              });
+    if (stall_ns_ > 0) {
+        clock_->advance_to(clock_->monotonic_ns() + stall_ns_);
+        stall_ns_ = 0;
+    }
+    std::stable_sort(deliveries_.begin(), deliveries_.end(),
+                     [](const Delivery& left, const Delivery& right) {
+                         return left.arrival_ns < right.arrival_ns;
+                     });
     // What is readable when the wait ends: bytes already there, or the
     // first that arrive by the deadline.
     const std::int64_t now = clock_->monotonic_ns();
@@ -119,10 +130,12 @@ void SimTransport::discard_input() noexcept {
 SCADA_RT void RecordingTags::write_point(
     std::uint32_t device, std::uint32_t point,
     const ProcessedSample& sample) noexcept {
+    order_.emplace_back(device, point);
     Written& written = points_[{device, point}];
     written.quality = sample.tag.quality;
     written.flags = sample.tag.flags;
     written.value = sample.tag.value.i;
+    written.time_ns = sample.tag.source_time_ns;
     ++written.writes;
 }
 

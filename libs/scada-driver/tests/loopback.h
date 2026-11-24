@@ -51,13 +51,21 @@ public:
         SILENT,       // no answer at all: a dead unit
         BUSY,         // a busy answer
         UNREACHABLE,  // a gateway's answer that it cannot reach the unit
-        GARBAGE,      // a frame of another unit: broken
+        GARBAGE,      // a frame no answer has: broken
+        ABSENT,       // an answer that the points are not on this device
     };
     void fault(std::uint8_t unit_id, Fault fault) { faults_[unit_id] = fault; }
-    // Requests of `unit_id` from register `first` up get no answer: a device
-    // that answers one block and never another.
-    void silent_from(std::uint8_t unit_id, std::uint32_t first) {
-        silent_from_[unit_id] = first;
+    // Requests of `unit_id` that start at a register from `first` to `last`
+    // get no answer: a device that answers one block and never another.
+    void silent_from(std::uint8_t unit_id, std::uint32_t first,
+                     std::uint32_t last = UINT32_MAX) {
+        silent_from_[unit_id] = {first, last};
+    }
+
+    // Requests of `unit_id` that start at register `first` are answered
+    // busy.
+    void busy_at(std::uint8_t unit_id, std::uint32_t first) {
+        busy_at_[unit_id] = first;
     }
 
     // The answer to one request frame at `now_ns`; logs it.
@@ -78,7 +86,9 @@ private:
     std::map<Key, std::uint16_t> registers_;
     std::map<Key, bool> clears_;
     std::map<std::uint8_t, Fault> faults_;
-    std::map<std::uint8_t, std::uint32_t> silent_from_;
+    std::map<std::uint8_t, std::pair<std::uint32_t, std::uint32_t>>
+        silent_from_;
+    std::map<std::uint8_t, std::uint32_t> busy_at_;
     std::vector<LoggedRequest> log_;
     std::size_t side_effect_reads_ = 0;
 };
