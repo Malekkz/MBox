@@ -110,8 +110,13 @@ evaluation parsed its text again), 100 instances of a 65,536-point
 `repeat` at the node limit, 20,000 instances whose expressions fail at
 18 MB, as 100 errors that each name the other instances.
 
-Stage 5 runs when stage 4 found no error. It checks what needs no point
-tags (`check_references`, `include/scada/conf/references.h`, D-113):
+Stage 5 runs when stage 4 found no error. On each merged point of the
+expanded tree (`src/merged_points.cpp`, D-115) it checks the keys that
+merging had to complete (CF-202), an integer value type or a counter on a
+floating raw type (CF-504), the range of an integer scaling (CF-516) and an
+integer value type with a scaling that is not integer (CF-517). It also
+checks what needs no point tags (`check_references`,
+`include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's
   protocol, areas, logging policies and aggregate tiers, enumerations (of
   the template's chain or `enums.yaml`), tasks, programs, interlocks,

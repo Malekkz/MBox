@@ -29,9 +29,9 @@ namespace scada::conf {
 // - stage 4, when stages 1 to 3 found no error: the expansion of templates
 //   and instances (expand.h);
 // - stage 5, when stage 4 found no error: the names, duplicates, channel
-//   rules and expression types that need no point tags (references.h).
-// The checks of each merged point come with the second pull request of
-// #103, the rest of stage 5 with slice 7 of #100.
+//   rules and expression types that need no point tags (references.h), and
+//   the checks of each merged point: CF-202, CF-504, CF-516, CF-517.
+// The rest of stage 5 comes with slice 7 of #100.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is
 // wrong is a report with errors, not a failure.
