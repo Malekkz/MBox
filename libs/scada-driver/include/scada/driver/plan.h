@@ -34,13 +34,23 @@ struct ReadRange {
     std::uint64_t last = 0;   // last unit, inclusive
 };
 
+// The request limits of one address space (CS A.4: `max_registers` for
+// registers, `max_bits` for bits).
+struct SpaceLimits {
+    std::uint32_t space = 0;
+    std::uint64_t max_units = 1;  // largest request, in units (>= 1)
+    std::uint64_t max_gap = 0;    // unrequested units a request may bridge
+};
+
 // The rules a plan keeps (6.3). Ranges of different kinds must not overlap
-// (CS CF-610); `plan_blocks` refuses rules where they do.
+// (CS CF-610); `plan_blocks` refuses rules where they do. Ranges of one
+// kind may overlap: they are read as their union.
 struct ReadRules {
-    std::uint64_t max_units = 1;   // largest request, in units (>= 1)
-    std::uint64_t max_gap = 0;     // unrequested units a request may bridge
+    std::uint64_t max_units = 1;   // for spaces not in `spaces` (>= 1)
+    std::uint64_t max_gap = 0;     // for spaces not in `spaces`
     std::uint32_t max_values = 0;  // points per request; 0: no limit
     // NOLINTBEGIN(readability-redundant-member-init): designated initializers may omit it (-Wmissing-field-initializers)
+    std::vector<SpaceLimits> spaces{};
     std::vector<ReadRange> ranges{};
     // NOLINTEND(readability-redundant-member-init)
 };
@@ -69,7 +79,7 @@ struct Request {
     // NOLINTBEGIN(readability-redundant-member-init): designated initializers may omit it (-Wmissing-field-initializers)
     std::vector<std::uint32_t> points{};  // in address order
     // NOLINTEND(readability-redundant-member-init)
-    // Touches a SIDE_EFFECT or EXCLUSIVE range: read once per poll, never
+    // Reads a SIDE_EFFECT or EXCLUSIVE range: read once per poll, never
     // retried, never sent as keep-alive, probe, identity or READ_NOW (6.6).
     bool side_effect = false;
     // Holds an EXCLUSIVE range: never merged with anything else.
@@ -93,8 +103,8 @@ struct ReadPlan {
     // For each poll group of the channel, the planned requests of one period
     // in the order they are sent.
     std::vector<std::vector<std::uint32_t>> by_group;
-    // A request outside every side-effect, exclusive and no-read range
-    // (6.5, 7.4); none when every request touches one.
+    // A planned request outside every side-effect, exclusive and no-read
+    // range and outside every chain (6.5, 7.4); none when there is none.
     std::optional<std::uint32_t> keepalive;
     std::optional<std::uint32_t> probe;
 };
@@ -104,17 +114,23 @@ struct ReadPlan {
 [[nodiscard]] std::uint32_t requests_per_scan(const ReadPlan& plan) noexcept;
 
 // Plans the points of one device for `poll_groups` poll groups within
-// `rules` (6.3). Never splits a point's span or an atomic range, never
-// separates a point from its cluster when they fit together, never merges
-// across spaces, unit ids or poll groups, never bridges a no-read, a
-// side-effect or an exclusive range or part of an atomic one. A bridged gap
-// returns units that are never decoded. Each request with more than one
-// cluster gets a split form of one request per cluster; a request that
-// touches a side-effect range has none (CS A.4: never split). Returns
-// INVALID_ARGUMENT for rules or points the compile step should have refused:
-// overlapping ranges of different kinds, a point in a no-read range, a
-// point or atomic range larger than `max_units`, a side-effect range read
-// by more than one poll group, a poll group out of range. Allocates.
+// `rules` (6.3). An atomic range is read whole. All points of a side-effect
+// or exclusive range are read by one request, over the span from the first
+// to the last unit they decode (CS A.4); an exclusive range's request holds
+// nothing else. A point's cluster (5.5) is one request when it fits in one,
+// with the points between; otherwise its requests are chained back to back.
+// Never splits a point's span, never merges across spaces, unit ids or poll
+// groups, never bridges a gap that touches a range. A bridged gap returns
+// units that are never decoded. Every request keeps its space's `max_units`
+// and `max_values`. A request of several parts outside every chain gets a
+// split form of one request per part (a part keeps its clusters whole); a
+// request that reads a side-effect range has none (CS A.4: never split).
+// Returns INVALID_ARGUMENT for rules or points the compile step should have
+// refused: overlapping ranges of different kinds, a point in a no-read
+// range, a point across the edge of an exclusive range, a point, an atomic
+// range or the points of one side-effect range that do not fit one request,
+// a side-effect range read by more than one poll group, a poll group out of
+// range, limits given twice for a space. Allocates.
 [[nodiscard]] Status plan_blocks(const std::vector<PlanPoint>& points,
                                  const ReadRules& rules,
                                  std::uint32_t poll_groups, ReadPlan& out);

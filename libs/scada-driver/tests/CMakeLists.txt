@@ -4,6 +4,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     golden_vectors_test.cpp
     golden_write_test.cpp
     loopback.cpp
+    plan_property_test.cpp
     plan_test.cpp
     point_rules_test.cpp
     sample_processing_test.cpp
