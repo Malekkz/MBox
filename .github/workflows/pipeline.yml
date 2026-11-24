@@ -3,7 +3,11 @@
 name: pipeline
 
 on:
+  # The three default types, and two that change what a run tests: a draft
+  # that becomes ready, and an edit that changes the base (D-112). An edit of
+  # only the title or the description runs no job (the job `events` below).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
   workflow_dispatch:
@@ -11,14 +15,49 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request replaces the run of the previous push.
+# A new push to a pull request replaces the run of the previous push. A run
+# that tests nothing (see `events`) has a group of its own, so that it never
+# cancels a real run. This is the one condition outside `events`: the
+# workflow's concurrency cannot read a job's output, so it states the same
+# test, which must agree with the step `decide`.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'edited' && !github.event.changes.base) && '-edit' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Whether this run tests anything (D-112): every run but that of an edit
+  # of only a pull request's title or description. Every other job needs it,
+  # runs only if `run` is true, and starts its name with `prefix` otherwise,
+  # so that a skipped check never takes the place of a real check of the
+  # same commit (GitHub reads the latest check of a name, and a skipped
+  # required check counts as passed).
+  events:
+    name: events
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      prefix: ${{ steps.decide.outputs.prefix }}
+    steps:
+      - name: Decide whether this run tests anything
+        id: decide
+        env:
+          ACTION: ${{ github.event.action }}
+          BASE_CHANGED: ${{ github.event.changes.base != null }}
+        run: |
+          if [ "${ACTION}" = edited ] && [ "${BASE_CHANGED}" != true ]; then
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "prefix=(not run) " >> "${GITHUB_OUTPUT}"
+            echo "An edit of the title or the description: no job runs."
+          else
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            echo "prefix=" >> "${GITHUB_OUTPUT}"
+          fi
+
   build-test:
-    name: build and test (${{ matrix.arch }})
+    name: ${{ needs.events.outputs.prefix }}build and test (${{ matrix.arch }})
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     # Conformance test 3 puts the writer and the readers on separate
@@ -119,7 +158,9 @@ jobs:
   # library compiles to what the model describes is a test of the release
   # build, so it runs in `build and test (ARM64)`.
   model-check:
-    name: model check
+    name: ${{ needs.events.outputs.prefix }}model check
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -145,7 +186,9 @@ jobs:
   # manual run lint everything. The formatter, banned-function and SCADA_RT
   # checks run on every file either way (decision D-67).
   check-files:
-    name: check (format, banned, rt)
+    name: ${{ needs.events.outputs.prefix }}check (format, banned, rt)
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -168,7 +211,9 @@ jobs:
   # units in share 1 (tools/check/lint_shares.py). N is the length of the
   # list `share`. The job `check` needs the record of every share.
   check-tidy:
-    name: check (tidy ${{ matrix.share }} of ${{ strategy.job-total }})
+    name: ${{ needs.events.outputs.prefix }}check (tidy ${{ matrix.share }} of ${{ strategy.job-total }})
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ubuntu-24.04
     # A share of a full lint takes about 10 minutes (D-68).
     timeout-minutes: 25
@@ -203,20 +248,23 @@ jobs:
           retention-days: 7
 
   check:
-    name: check
-    needs: [check-files, check-tidy]
+    name: ${{ needs.events.outputs.prefix }}check
+    needs: [events, check-files, check-tidy]
     # Always, so that a failed, cancelled or skipped part fails this job:
     # a job left out because a needed job failed would be skipped, and a
     # skipped job counts as passed for a required check.
-    if: always()
+    if: always() && needs.events.outputs.run != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Every part of the check passed
         env:
+          EVENTS_RESULT: ${{ needs.events.result }}
           FILES_RESULT: ${{ needs.check-files.result }}
           TIDY_RESULT: ${{ needs.check-tidy.result }}
         run: |
+          echo "events: ${EVENTS_RESULT}"
+          test "${EVENTS_RESULT}" = success
           echo "check (format, banned, rt): ${FILES_RESULT}"
           echo "check (tidy): ${TIDY_RESULT}"
           test "${FILES_RESULT}" = success
@@ -235,7 +283,9 @@ jobs:
         run: python3 tools/check/lint_shares.py verify "${RUNNER_TEMP}"/tidy-records/tidy-share-*.json
 
   sanitizers:
-    name: sanitizers (${{ matrix.preset }})
+    name: ${{ needs.events.outputs.prefix }}sanitizers (${{ matrix.preset }})
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -257,7 +307,9 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}
 
   fuzz:
-    name: fuzz
+    name: ${{ needs.events.outputs.prefix }}fuzz
+    needs: events
+    if: needs.events.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

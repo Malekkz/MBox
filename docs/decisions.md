@@ -2060,6 +2060,20 @@ Decision:
 Reason: index access keeps every node in a few arrays, which is small, needs no allocation per node, and makes the document cheap to move. A builder is the one place that enforces the invariants (a key is a scalar, keys are unique, collections are closed), for the parser and the loader alike.
 Consequences: the table of types (`ScalarTypes`, `types.h`) and the typed reads of a node (`read.h`) come with stage 3 (slice 3 of #100). A typed read gives INVALID_ARGUMENT for a node of the wrong kind or form (a quoted scalar is never a number or a boolean, contract 1.2) and OUT_OF_RANGE for a value that does not fit; `to_raw_pattern` takes the register's width, 1 to 64 bits, and gives a negative value as its two's complement in that width (section 2.3). Each file's bytes are freed once it has parsed; the README states the measured peak of a tree at every limit at once.
 
+## D-112: The pipeline runs when a pull request's base changes or it leaves draft
+Date: 2026-11-24
+Phase / issue: 2, #138
+Status: accepted (the lead, 2026-11-24)
+
+Context: `pipeline.yml` listened to the default `pull_request` types (`opened`, `synchronize`, `reopened`). PR 133 was force-pushed while its base was a branch it no longer merged into; GitHub made no merge ref, so that push ran nothing, and the change of base to `main` that followed is an `edited` event, which ran nothing either. Marking a draft ready (`ready_for_review`) also ran nothing. The lead merges only on a `pull_request` run of the final head, which tests the merge with the base and gives the linter of D-67 its base.
+Options: add `edited` and `ready_for_review` and run every job on them; add them and run only when the base changed; leave the types and rely on a later push.
+Decision: add `ready_for_review` and `edited` to the types. On `edited`, the jobs run only when the base changed (`github.event.changes.base` is set). `on:` cannot filter on that, so an edit of only the title or the description still makes a run, whose jobs are skipped. The condition is decided in one place, a first job `events`, whose outputs `run` and `prefix` every other job reads (`needs: events`); the workflow's concurrency group, which cannot read a job, states the same test once more. Two rules keep a run that tests nothing harmless (the lead's review on #138):
+- it has a concurrency group of its own (`...-edit`), so it never cancels a real run of the same pull request;
+- its job names start with `(not run) `, so its skipped checks never take the place of the real checks of the same commit: GitHub reads the latest check run of a name, and a skipped required check counts as passed.
+`check` also fails if `events` did not succeed, so a failure of the decision cannot pass as a skipped run.
+Reason: a change of base changes what the pull request merges, and a draft made ready is the point where reviewers rely on the run; both must be tested as a push is. A title edit must not re-run the pipeline, cancel a run, or turn a red pull request green.
+Consequences: a title edit shows a few `(not run) ...` checks, skipped, on the pull request. The probe pull request that tested this is named in its pull request for the owner to delete.
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)

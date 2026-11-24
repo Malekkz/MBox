@@ -141,8 +141,11 @@ jobs" (decision D-68).
 ## Pipeline
 
 `.github/workflows/pipeline.yml` runs on every pull request and on every push
-to `main`. Each job is one check on the pull request, and each runs the
-commands above and nothing else:
+to `main`. On a pull request it runs when one is opened, reopened or pushed
+to, when a draft is marked ready, and when its base branch changes; an edit
+of only the title or the description runs no job (D-112). Each job is one
+check on the pull request, and each runs the commands above and nothing
+else:
 
 | Check | Runs | Machine |
 | --- | --- | --- |
