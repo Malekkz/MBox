@@ -141,8 +141,11 @@ jobs" (decision D-68).
 ## Pipeline
 
 `.github/workflows/pipeline.yml` runs on every pull request and on every push
-to `main`. Each job is one check on the pull request, and each runs the
-commands above and nothing else:
+to `main`. On a pull request it runs when one is opened, reopened or pushed
+to, when a draft is marked ready, and when its base branch changes; an edit
+of only the title or the description runs no job (D-112). Each job is one
+check on the pull request, and each runs the commands above and nothing
+else:
 
 | Check | Runs | Machine |
 | --- | --- | --- |
@@ -153,6 +156,11 @@ commands above and nothing else:
 | `sanitizers (tsan)` | Build and tests of the `tsan` preset | x86-64 |
 | `fuzz` | Every fuzz target for 60 s | x86-64 |
 | `model check` | herd7 builds; `ctest --preset model` (conformance test 4) | x86-64 |
+
+A first job, `events`, decides whether the run tests anything; every other
+job needs it. `events` must not be a required check, because it succeeds in
+a run that tests nothing. The checks meant to be required are the seven of
+the table.
 
 The `check` target runs in five further jobs, which `check` sums up
 (decision D-68). `check (format, banned, rt)` runs the formatter, the
