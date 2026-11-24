@@ -721,6 +721,11 @@ TEST(Scheduling, PacingLimitedCountsFromTheLastRequestHandedOut) {
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
     EXPECT_EQ(scheduler.take(MILLISECOND).wake_ns, 10 * MILLISECOND);
     EXPECT_EQ(scheduler.take(10 * MILLISECOND).kind, Choice::Kind::POLL);
+    // Between the last send and the `take` after the slow answer, too (the
+    // PR 135 final pass): false at 100, 101 and 149 ms.
+    EXPECT_FALSE(scheduler.pacing_limited(0, 100 * MILLISECOND));
+    EXPECT_FALSE(scheduler.pacing_limited(0, 101 * MILLISECOND));
+    EXPECT_FALSE(scheduler.pacing_limited(0, 149 * MILLISECOND));
     (void)scheduler.take(150 * MILLISECOND);  // after the slow answer
     EXPECT_FALSE(scheduler.pacing_limited(0, 150 * MILLISECOND));
 }
@@ -1046,6 +1051,26 @@ TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
     plan.requests[0].split = {1, 2};
     plan.requests[1].split = {2};
     EXPECT_FALSE(Scheduler::check(nested).ok());
+    // A protocol's own plan whose keep-alive is a side-effect read or a
+    // request of a chain (the PR 135 final pass).
+    ReadRules side{.max_units = 4};
+    side.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                             .unit_id = 1,
+                             .first = 0,
+                             .last = 0}};
+    CompiledChannel latch =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}}, side);
+    latch.devices[0].plan.keepalive = latch.devices[0].plan.by_group[0][0];
+    EXPECT_FALSE(Scheduler::check(latch).ok());
+    CompiledChannel chained = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    ReadPlan& chain_plan = chained.devices[0].plan;
+    chain_plan.keepalive = chain_plan.by_group[0][0];
+    EXPECT_FALSE(Scheduler::check(chained).ok());
+    chain_plan.keepalive = chain_plan.by_group[0][1];  // the chain's end
+    EXPECT_FALSE(Scheduler::check(chained).ok());
     const CompiledChannel good = make_channel(
         {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
     Scheduler scheduler(good, 4, 0);

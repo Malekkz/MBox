@@ -51,6 +51,36 @@ bool valid_pacing(const Pacing& pacing) noexcept {
            pacing.min_write_interval_ns >= 0;
 }
 
+// True when `request` follows a chained request in some poll group: the
+// last request of a chain.
+bool ends_a_chain(const ReadPlan& plan, std::uint32_t request) noexcept {
+    for (const std::vector<std::uint32_t>& group : plan.by_group) {
+        for (std::size_t index = 1; index < group.size(); ++index) {
+            if (group[index] == request &&
+                plan.requests[group[index - 1]].chained) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A protocol's own plan must keep 6.5 and 6.6 too: a keep-alive or probe
+// never reads a side effect, nor one request of a chain (a value without
+// its companion).
+Status check_extras(const ReadPlan& plan) noexcept {
+    for (const std::optional<std::uint32_t>& extra :
+         {plan.keepalive, plan.probe}) {
+        if (extra.has_value() &&
+            (plan.requests[*extra].side_effect ||
+             plan.requests[*extra].chained || ends_a_chain(plan, *extra))) {
+            return invalid(
+                "keep-alive or probe reads a side effect or part of a chain");
+        }
+    }
+    return {};
+}
+
 Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
     const std::size_t size = plan.requests.size();
     if (plan.by_group.size() != groups) {
@@ -81,7 +111,7 @@ Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
         (plan.probe.has_value() && *plan.probe >= size)) {
         return invalid("keep-alive or probe the plan does not hold");
     }
-    return {};
+    return check_extras(plan);
 }
 
 // Where the next request of a group's cycle is: a position in the group's
@@ -914,8 +944,14 @@ bool Scheduler::pacing_limited(std::uint32_t device,
         const GroupState& state = devices_[device].groups[group];
         const std::int64_t next_due =
             later(state.due_ns, channel_->poll_groups[group].period_ns);
+        // A running cycle with no request left ended at its last send (the
+        // `take` that closes it comes later); one with requests left is
+        // still running at `now_ns`.
+        std::uint32_t request = 0;
+        const std::int64_t end =
+            peek(device, group, request) ? now_ns : state.last_sent_ns;
         if (state.limited ||
-            (state.in_cycle && state.waited && now_ns > next_due)) {
+            (state.in_cycle && state.waited && end > next_due)) {
             return true;
         }
     }
