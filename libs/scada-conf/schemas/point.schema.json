@@ -217,7 +217,7 @@
         "on_delay": { "description": "Default 0s", "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
         "off_delay": { "description": "Default 0s", "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
         "priority": { "$ref": "common.schema.json#/$defs/identifier" },
-        "area": { "description": "Default the tag's area", "$ref": "common.schema.json#/$defs/identifier" },
+        "area": { "description": "Default the tag's area, else required", "$ref": "common.schema.json#/$defs/identifier" },
         "class": { "description": "Default the first class", "$ref": "common.schema.json#/$defs/identifier" },
         "latched": { "description": "Default false", "$ref": "#/$defs/boolean" },
         "suppress_when": { "type": "string", "x-scada-type": "expression" },

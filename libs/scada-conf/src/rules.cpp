@@ -54,6 +54,17 @@ constexpr std::string_view TCP_ONLY = "lost_after_timeouts";
 constexpr std::array<std::string_view, 6> LIMIT_ALARMS = {
     "high_high", "high", "low", "low_low", "deviation", "rate_of_change"};
 
+// The kinds of an alarm, a tag and an output (contract 8, 5.1, 7.2). A rule
+// of a kind applies only to a kind listed here: another value is the
+// schema's CF-205, and gets no rule of its own.
+constexpr std::array<std::string_view, 9> ALARM_TYPES = {
+    "high_high",      "high",  "low",         "low_low",   "deviation",
+    "rate_of_change", "state", "bad_quality", "expression"};
+constexpr std::array<std::string_view, 3> TAG_TYPES = {"internal", "manual",
+                                                       "virtual"};
+constexpr std::array<std::string_view, 7> OUTPUT_KINDS = {
+    "single", "double", "pulse", "step", "setpoint", "trigger", "latch"};
+
 // The words of a quality map value (contract 4.7).
 constexpr std::array<std::string_view, 3> QUALITY_WORDS = {"good", "uncertain",
                                                            "bad"};
@@ -86,7 +97,6 @@ public:
         if (!is_map(root)) {
             return;
         }
-        check_field_order(root, "");
         switch (type) {
             case FileType::TEMPLATE:
                 check_template(root);
@@ -203,6 +213,13 @@ private:
             check_point(*defaults, "defaults", "defaults");
         }
         check_identify(root, "");
+        for_each_map(root, "health", "health",
+                     [this](NodeId rule, const std::string& path) {
+                         if (const std::optional<NodeId> good =
+                                 find_map(rule, "good_when")) {
+                             check_field_of(*good, child(path, "good_when"));
+                         }
+                     });
     }
 
     void check_repeat(NodeId block, const std::string& path) {
@@ -232,6 +249,10 @@ private:
                                  CF_MISSING_KEY, check,
                                  name + " needs equals, in, range or pattern");
                          }
+                         if (const std::optional<NodeId> address =
+                                 find_map(check, "address")) {
+                             check_field_of(*address, child(name, "address"));
+                         }
                      });
     }
 
@@ -251,7 +272,7 @@ private:
 
     void check_modbus_channel(NodeId channel) {
         const std::string type = text_of(channel, "type");
-        const std::string name = "channel (type " + type + ")";
+        const std::string name = "channel (type " + quote_text(type) + ")";
         check_data_bits(channel, type);
         if (type == "rtu") {
             needs(channel, "channel", "device");
@@ -289,6 +310,8 @@ private:
     }
 
     void check_io_channel(NodeId channel) {
+        // `tcp` channels only (4.6): an io channel has none.
+        refuse_key(channel, TCP_ONLY, "channel (protocol \"io\")");
         const std::string backend = text_of(channel, "backend");
         if (backend == "gpio") {
             needs(channel, "channel", "chip");
@@ -344,6 +367,9 @@ private:
     void check_point(NodeId point, const std::string& name,
                      const std::string& path) {
         check_integer_scaling(point, name);
+        if (const std::optional<NodeId> address = find_map(point, "address")) {
+            check_field_of(*address, child(path, "address"));
+        }
         check_bits(point, path);
         check_quality_rules(point, path);
         check_alarms(point, path, false);
@@ -420,6 +446,7 @@ private:
         for_each_map(
             point, "quality_from", child(path, "quality_from"),
             [this](NodeId rule, const std::string& rule_path) {
+                check_field_of(rule, rule_path);
                 const std::optional<NodeId> map = find_map(rule, "map");
                 if (!map) {
                     return;
@@ -466,10 +493,10 @@ private:
     void check_alarm(NodeId alarm, const std::string& path,
                      bool tag_required) const {
         const std::string type = text_of(alarm, "type");
-        if (type.empty()) {
+        if (!listed(ALARM_TYPES, type)) {
             return;
         }
-        const std::string name = path + " (type " + type + ")";
+        const std::string name = path + " (type " + quote_text(type) + ")";
         if (listed(LIMIT_ALARMS, type)) {
             needs(alarm, name, "limit");
         }
@@ -488,10 +515,11 @@ private:
 
     void check_tag(NodeId tag, const std::string& path) const {
         const std::string type = text_of(tag, "type");
-        if (type.empty()) {
+        if (!listed(TAG_TYPES, type)) {
+            check_alarms(tag, path, false);
             return;
         }
-        const std::string name = path + " (type " + type + ")";
+        const std::string name = path + " (type " + quote_text(type) + ")";
         if (type == "internal" || type == "manual") {
             needs(tag, name, "value_type");
         }
@@ -513,34 +541,20 @@ private:
     // (stage 5): the device times a pulse (contract 7.2).
     void check_output(NodeId output, const std::string& path) const {
         const std::string kind = text_of(output, "kind");
-        if (!kind.empty() && kind != "pulse") {
-            refuse_key(output, "duration", path + " (kind " + kind + ")");
+        if (listed(OUTPUT_KINDS, kind) && kind != "pulse") {
+            refuse_key(output, "duration",
+                       path + " (kind " + quote_text(kind) + ")");
         }
     }
 
     // --- Across the items of one value -----------------------------------
 
     // A bit field `[lo, hi]` of two literal numbers needs lo at most hi
-    // (contract 4.7, A.2): in an address, a quality rule or a health rule.
-    // NOLINTNEXTLINE(misc-no-recursion): bounded by the document's depth (32)
-    void check_field_order(NodeId node, const std::string& path) const {
-        if (document_->kind(node) == NodeKind::SEQUENCE) {
-            const std::span<const NodeId> items = document_->items(node);
-            for (std::size_t i = 0; i < items.size(); ++i) {
-                check_field_order(items[i], item(path, i));
-            }
-            return;
-        }
-        if (!is_map(node)) {
-            return;
-        }
-        for (const Entry& entry : document_->entries(node)) {
-            const std::string key_path =
-                child(path, document_->text(entry.key));
-            if (document_->text(entry.key) == "field") {
-                check_one_field(entry.value, key_path);
-            }
-            check_field_order(entry.value, key_path);
+    // (contract 4.7, A.2). Called only on the maps whose `field` is a bit
+    // field: an address, a quality rule and a health rule's `good_when`.
+    void check_field_of(NodeId map, const std::string& path) const {
+        if (const std::optional<NodeId> field = find(map, "field")) {
+            check_one_field(*field, child(path, "field"));
         }
     }
 

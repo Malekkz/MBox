@@ -1,4 +1,5 @@
 # Three inverters behind one serial gateway on a TCP connection: one
 # template with a repeat block over the strings, a parameter per instance,
-# and devices that share the gateway with their own unit ids (4.4, 4.6,
+# devices that share the gateway with their own unit ids, and the gateway
+# itself on unit 255 with a point read from unit 254 (4.4, 4.6, A.2 unit_id,
 # A.3). Invented.

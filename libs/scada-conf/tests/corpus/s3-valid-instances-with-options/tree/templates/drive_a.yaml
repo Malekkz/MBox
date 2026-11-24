@@ -1,5 +1,6 @@
 template: drive_a
 protocol: modbus
+bit_order: lsb0
 params:
   options: { type: set, values: [meter, brake] }
   rated: { type: number, default: 7.5 }

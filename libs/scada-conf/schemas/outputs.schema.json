@@ -117,7 +117,7 @@
         "failsafe_max_refusals": { "description": "Default 3", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 10 },
         "on_shutdown": { "description": "Default safe for a target of scada-io, else hold", "type": "string", "enum": ["hold", "safe", "release"] },
         "on_control_loss": {
-          "description": "Default { action: safe, after: 0s } for a target of scada-io; { action: safe, after: 30s } for a remote switching output; else { action: hold }",
+          "description": "Default { action: safe, after: 0s } for a target of scada-io; { action: safe, after: 30s } for a remote switching output (a single or double output on a protocol driver, not dangerous, whose safe_state is off or on); else { action: hold }",
           "type": "object",
           "properties": {
             "action": { "type": "string", "enum": ["hold", "safe", "release"] },

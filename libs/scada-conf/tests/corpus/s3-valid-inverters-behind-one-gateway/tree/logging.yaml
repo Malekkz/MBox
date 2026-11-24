@@ -1,0 +1,8 @@
+aggregate_tiers:
+  - { name: 1h, interval: 1h }
+policies:
+  counters:
+    mode: periodic
+    interval: 1m
+    raw_retention: 1y
+    tiers: { 1h: 10y }

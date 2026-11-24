@@ -39,7 +39,10 @@ built in slices; this README lists what each part does now.
   one point object. Validation checks one document node at most 21 times with the
   built-in schemas; a schema set that could pass 64 (nested `oneOf` or
   `allOf`) does not compile (D-107). Stage 3 checks every file that parsed,
-  also when another did not.
+  also when another did not. Measured (release build, x86-64, the lead's
+  delta check of #132): `validate_tree` on 983,079 nodes in 1.49 s, on
+  3.93 million nodes in 5.89 s, about 30 % slower than before the rules of
+  stage 3; stage 5 will add a walk of its own.
 
 Every file type has its schema: `system`, `areas`, `enums`, `logging`,
 `tasks`, `tags`, `outputs`, `alarms`, `program`, and for templates and

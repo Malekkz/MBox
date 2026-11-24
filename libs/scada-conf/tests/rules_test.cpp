@@ -279,35 +279,37 @@ TEST(Rules, KindsRequireTheirKeys) {
                     "  - { name: a.d, type: virtual }\n"
                     "  - { name: a.e, type: manual, value_type: bool, area: a "
                     "}\n"),
-              (Lines{"2:5 CF-202: tags[0] (type internal) needs value_type",
-                     "3:5 CF-202: tags[1] (type manual) needs value_type",
-                     "3:5 CF-202: tags[1] (type manual) needs area",
-                     "4:5 CF-202: tags[2] (type virtual) needs expr"}));
-    EXPECT_EQ(check(FileType::ALARMS, "alarms.schema.json", "",
-                    "alarms:\n"
-                    "  - { tag: a.b, type: high, priority: p }\n"
-                    "  - { tag: a.b, type: deviation, priority: p }\n"
-                    "  - { tag: a.b, type: state, priority: p }\n"
-                    "  - { type: expression, priority: p }\n"
-                    "  - { type: bad_quality, priority: p }\n"
-                    "  - { tag: a.b, type: low, limit: 1, priority: p }\n"
-                    "  - { name: a.x, type: expression, expr: \"a.b\", "
-                    "priority: p }\n"),
-              (Lines{"2:5 CF-202: alarms[0] (type high) needs limit",
-                     "3:5 CF-202: alarms[1] (type deviation) needs limit",
-                     "3:5 CF-202: alarms[1] (type deviation) needs setpoint",
-                     "4:5 CF-202: alarms[2] (type state) needs alarm_on",
-                     "5:5 CF-202: alarms[3] (type expression) needs expr",
-                     "5:5 CF-202: alarms[3] (type expression) needs name",
-                     "6:5 CF-202: alarms[4] (type bad_quality) needs tag"}));
-    EXPECT_EQ(check_template(one_point(
-                  "    alarms: [ { type: rate_of_change, priority: p } ]\n"
-                  "    bits: { 1: { name: trip, alarms: [ { type: state, "
-                  "priority: p } ] } }\n")),
-              (Lines{"5:15 CF-202: points[0].alarms[0] (type rate_of_change) "
-                     "needs limit",
-                     "6:40 CF-202: points[0].bits.1.alarms[0] (type state) "
-                     "needs alarm_on"}));
+              (Lines{"2:5 CF-202: tags[0] (type \"internal\") needs value_type",
+                     "3:5 CF-202: tags[1] (type \"manual\") needs value_type",
+                     "3:5 CF-202: tags[1] (type \"manual\") needs area",
+                     "4:5 CF-202: tags[2] (type \"virtual\") needs expr"}));
+    EXPECT_EQ(
+        check(FileType::ALARMS, "alarms.schema.json", "",
+              "alarms:\n"
+              "  - { tag: a.b, type: high, priority: p }\n"
+              "  - { tag: a.b, type: deviation, priority: p }\n"
+              "  - { tag: a.b, type: state, priority: p }\n"
+              "  - { type: expression, priority: p }\n"
+              "  - { type: bad_quality, priority: p }\n"
+              "  - { tag: a.b, type: low, limit: 1, priority: p }\n"
+              "  - { name: a.x, type: expression, expr: \"a.b\", "
+              "priority: p }\n"),
+        (Lines{"2:5 CF-202: alarms[0] (type \"high\") needs limit",
+               "3:5 CF-202: alarms[1] (type \"deviation\") needs limit",
+               "3:5 CF-202: alarms[1] (type \"deviation\") needs setpoint",
+               "4:5 CF-202: alarms[2] (type \"state\") needs alarm_on",
+               "5:5 CF-202: alarms[3] (type \"expression\") needs expr",
+               "5:5 CF-202: alarms[3] (type \"expression\") needs name",
+               "6:5 CF-202: alarms[4] (type \"bad_quality\") needs tag"}));
+    EXPECT_EQ(
+        check_template(
+            one_point("    alarms: [ { type: rate_of_change, priority: p } ]\n"
+                      "    bits: { 1: { name: trip, alarms: [ { type: state, "
+                      "priority: p } ] } }\n")),
+        (Lines{"5:15 CF-202: points[0].alarms[0] (type \"rate_of_change\") "
+               "needs limit",
+               "6:40 CF-202: points[0].bits.1.alarms[0] (type \"state\") "
+               "needs alarm_on"}));
     EXPECT_EQ(check_template("template: t\nprotocol: modbus\n"
                              "identify: [ { equals: 1 }, { point: p } ]\n"
                              "repeat:\n"
@@ -328,22 +330,22 @@ TEST(Rules, KindsRefuseTheKeysOfOtherKinds) {
     EXPECT_EQ(
         check_channel("channel: { name: c1, type: tcp, host: 192.0.2.1, "
                       "baud: 9600, parity: odd, rs485: {} }\n"),
-        (Lines{"1:50 CF-201: unknown key \"baud\" in channel (type tcp)",
-               "1:62 CF-201: unknown key \"parity\" in channel (type tcp)",
+        (Lines{"1:50 CF-201: unknown key \"baud\" in channel (type \"tcp\")",
+               "1:62 CF-201: unknown key \"parity\" in channel (type \"tcp\")",
                "1:75 CF-210: channel.rs485 is reserved and not available "
                "in this version"}));
     EXPECT_EQ(
         check_channel("channel: { name: c1, type: rtu, device: /dev/ttyS1, "
                       "host: 192.0.2.1, port: 502, lost_after_timeouts: 3 "
                       "}\n"),
-        (Lines{"1:53 CF-201: unknown key \"host\" in channel (type rtu)",
-               "1:70 CF-201: unknown key \"port\" in channel (type rtu)",
+        (Lines{"1:53 CF-201: unknown key \"host\" in channel (type \"rtu\")",
+               "1:70 CF-201: unknown key \"port\" in channel (type \"rtu\")",
                "1:81 CF-201: unknown key \"lost_after_timeouts\" in "
-               "channel (type rtu)"}));
+               "channel (type \"rtu\")"}));
     EXPECT_EQ(check_channel("channel: { name: c1, type: rtu_over_tcp, host: "
                             "192.0.2.1, lost_after_timeouts: 3 }\n"),
               Lines{"1:59 CF-201: unknown key \"lost_after_timeouts\" in "
-                    "channel (type rtu_over_tcp)"});
+                    "channel (type \"rtu_over_tcp\")"});
     EXPECT_EQ(check_channel("channel: { name: c1, type: tcp, host: 192.0.2.1, "
                             "port: 1502, connect_timeout: 1s, "
                             "lost_after_timeouts: 3 }\n"),
@@ -360,15 +362,15 @@ TEST(Rules, KindsRefuseTheKeysOfOtherKinds) {
               "limits: {}, initial: 1 }\n"),
         // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): each message is cut
         (Lines{"2:53 CF-201: unknown key \"expr\" in tags[0] (type "
-               "internal)",
+               "\"internal\")",
                "2:64 CF-201: unknown key \"quality\" in tags[0] (type "
-               "internal)",
+               "\"internal\")",
                "2:80 CF-201: unknown key \"limits\" in tags[0] (type "
-               "internal)",
+               "\"internal\")",
                "3:44 CF-201: unknown key \"initial\" in tags[1] (type "
-               "virtual)",
+               "\"virtual\")",
                "3:56 CF-201: unknown key \"limits\" in tags[1] (type "
-               "virtual)"}));
+               "\"virtual\")"}));
     EXPECT_EQ(check(FileType::OUTPUTS, "outputs.schema.json", "",
                     "outputs:\n"
                     "  - { name: o.a, area: a, kind: setpoint, target: t.a, "
@@ -376,7 +378,7 @@ TEST(Rules, KindsRefuseTheKeysOfOtherKinds) {
                     "  - { name: o.b, area: a, kind: pulse, target: t.b, "
                     "duration: 1s }\n"),
               Lines{"2:56 CF-201: unknown key \"duration\" in outputs[0] "
-                    "(kind setpoint)"});
+                    "(kind \"setpoint\")"});
 }
 
 // Values and keys the contract does not take.
@@ -446,6 +448,77 @@ TEST(Rules, ValuesBeyondTheContractAreRefused) {
         (Lines{"7:7 CF-212: \"p{n}\" is not a valid point name",
                "8:28 CF-203: devices[0].overrides.p.invalid_values must "
                "be a list"}));
+}
+
+// The order of a bit field is checked only where `field` is one: an
+// address, a quality rule and a health rule. A key of the same name
+// elsewhere, such as a `repeat` variable, is not a bit field.
+TEST(Rules, BitFieldsAreCheckedWhereTheyAre) {
+    EXPECT_EQ(check_template("template: t\nprotocol: modbus\n"
+                             "repeat:\n"
+                             "  - for: { field: [5, 2] }\n"
+                             "    points: [ { name: \"p{field}\" } ]\n"),
+              Lines{});
+    EXPECT_EQ(
+        check_template(
+            "template: t\nprotocol: modbus\n"
+            "identify: [ { address: { table: holding, register: 1, field: "
+            "[3, 1] }, equals: 1 } ]\n"
+            "health: [ { point: s, good_when: { field: [9, 8], equals: 0 }, "
+            "applies_to: all } ]\n"
+            "points:\n"
+            "  - name: p\n"
+            "    quality_from: [ { point: self, field: [4, 2], map: { 0: good "
+            "} } ]\n"),
+        (Lines{"3:63 CF-204: identify[0].address.field[0] must be between 0 "
+               "and 1",
+               "4:44 CF-204: health[0].good_when.field[0] must be between 0 "
+               "and 8",
+               "7:44 CF-204: points[0].quality_from[0].field[0] must be "
+               "between 0 and 2"}));
+}
+
+// A kind the schema refuses gets no rule of a kind: one error, CF-205.
+TEST(Rules, AnUnknownKindGetsNoKindRules) {
+    EXPECT_EQ(check(FileType::TAGS, "tags.schema.json", "",
+                    "tags:\n"
+                    "  - { name: a.b, type: virtal, task: normal, expr: \"1\", "
+                    "limits: {}, initial: 1 }\n"),
+              Lines{"2:24 CF-205: tags[0].type must be one of internal, "
+                    "manual, virtual"});
+    EXPECT_EQ(check(FileType::OUTPUTS, "outputs.schema.json", "",
+                    "outputs:\n"
+                    "  - { name: o.a, area: a, kind: sinle, target: t.a, "
+                    "duration: 1s }\n"),
+              Lines{"2:33 CF-205: outputs[0].kind must be one of single, "
+                    "double, pulse, step, setpoint, trigger, latch"});
+    EXPECT_EQ(check(FileType::ALARMS, "alarms.schema.json", "",
+                    "alarms: [ { type: hihg, priority: p } ]\n"),
+              Lines{"1:19 CF-205: alarms[0].type must be one of high_high, "
+                    "high, low, low_low, deviation, rate_of_change, state, "
+                    "bad_quality, expression"});
+}
+
+// `lost_after_timeouts` is for `tcp` channels only (4.6).
+TEST(Rules, AnIoChannelHasNoTcpKeys) {
+    EXPECT_EQ(check(FileType::CHANNEL, IO_CHANNEL, "io",
+                    "channel: { name: c1, backend: simulator, "
+                    "lost_after_timeouts: 3 }\n"),
+              Lines{"1:42 CF-201: unknown key \"lost_after_timeouts\" in "
+                    "channel (protocol \"io\")"});
+}
+
+// CF-517 at the edge of an integer divisor: 1 is an integer scaling, 2 is
+// not.
+TEST(Rules, IntegerScalingAtItsEdge) {
+    EXPECT_EQ(check_template(one_point("    value_type: int64\n"
+                                       "    scale: { divide_by: 1, offset: 3 "
+                                       "}\n")),
+              Lines{});
+    EXPECT_EQ(check_template(one_point("    value_type: uint64\n"
+                                       "    scale: { divide_by: 2 }\n")),
+              Lines{"6:25 CF-517: \"p\": value_type uint64 needs an integer "
+                    "scaling; use float64"});
 }
 }  // namespace
 }  // namespace scada::conf

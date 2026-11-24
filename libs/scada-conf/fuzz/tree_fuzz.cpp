@@ -4,10 +4,10 @@
 // separated by NUL bytes; each file is its relative path, a line feed, and
 // its content. A path that could leave the tree (absolute, `..`, an empty
 // component, a character outside `[a-z0-9_.-]` and `/`) drops its file.
-// The tree is written to a directory of its own under the temporary
-// directory, emptied before each input. Properties: validation never fails
-// on a readable tree; the count is at least the list; every error has a
-// message, and a line given with its column.
+// The tree is written to a directory that `mkdtemp` makes under the
+// temporary directory, emptied before each input and removed at exit.
+// Properties: validation never fails on a readable tree; the count is at least
+// the list; every error has a message, and a line given with its column.
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
@@ -19,7 +19,6 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
-#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -37,17 +36,46 @@ void check(bool condition) {
     }
 }
 
-// The directory of this process's trees, made once.
-const std::filesystem::path& tree_root() {
-    static const std::filesystem::path ROOT = [] {
-        std::random_device random;
-        std::filesystem::path path =
-            std::filesystem::temp_directory_path() /
-            ("scada-tree-fuzz-" + std::to_string(random()));
-        std::filesystem::create_directories(path);
-        return path;
-    }();
-    return ROOT;
+// The directory of this process's trees: made once, with a name no other
+// process has, and removed with everything in it when the process exits.
+class TreeDirectory {
+public:
+    TreeDirectory() {
+        std::string name =
+            (std::filesystem::temp_directory_path() / "scada-tree-fuzz-XXXXXX")
+                .string();
+        check(mkdtemp(name.data()) != nullptr);
+        path_ = name;
+    }
+    TreeDirectory(const TreeDirectory&) = delete;
+    TreeDirectory& operator=(const TreeDirectory&) = delete;
+    TreeDirectory(TreeDirectory&&) = delete;
+    TreeDirectory& operator=(TreeDirectory&&) = delete;
+    ~TreeDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+    // Removes what the last input wrote, keeping the directory.
+    void empty() const {
+        std::error_code error;
+        for (const std::filesystem::directory_entry& entry :
+             std::filesystem::directory_iterator(path_, error)) {
+            std::filesystem::remove_all(entry.path(), error);
+        }
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+const TreeDirectory& tree_directory() {
+    static const TreeDirectory DIRECTORY;
+    return DIRECTORY;
 }
 
 bool safe_path(std::string_view path) {
@@ -114,11 +142,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) {
     const std::span<const std::uint8_t> bytes(data, size);
     const std::string input(bytes.begin(), bytes.end());
-    const std::filesystem::path& root = tree_root();
-    std::error_code error;
-    std::filesystem::remove_all(root, error);
-    std::filesystem::create_directories(root, error);
-    check(!error);
+    const TreeDirectory& directory = tree_directory();
+    directory.empty();
+    const std::filesystem::path& root = directory.path();
     write_tree(input, root);
 
     const scada::Result<scada::conf::Report> report =

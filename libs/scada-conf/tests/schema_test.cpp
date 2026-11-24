@@ -1011,6 +1011,39 @@ TEST(Schema, TextTypesNameStringInTheirType) {
         Lines{});
 }
 
+// Inside a `oneOf` branch too, a node of the wrong kind gets one error,
+// however many schemas of the branch state its kind.
+TEST(Schema, OneKindErrorPerNodeInABranch) {
+    EXPECT_EQ(check(R"({ "oneOf": [ { "allOf": [ { "type": "array" },
+                                                 { "type": "array" } ] } ] })",
+                    "5\n"),
+              Lines{"1:1 CF-203: f.yaml must be a list"});
+}
+
+// A recursion that passes an `allOf` to a schema with keys of its own does
+// not compile, with a message that says why (D-107).
+TEST(Schema, ARecursionThroughAnAllOfIsRefused) {
+    const std::string recursive = R"({
+        "$defs": {
+            "common": { "properties": { "name": { "type": "string" } } },
+            "block": {
+                "allOf": [ { "$ref": "#/$defs/common" } ],
+                "properties": { "children": { "type": "array", "items": { "$ref": "#/$defs/block" } } }
+            }
+        },
+        "$ref": "#/$defs/block" })";
+    std::string problem;
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = recursive}}, problem)
+            .ok());
+    EXPECT_NE(problem.find("reaches itself through properties"),
+              std::string::npos)
+        << problem;
+    EXPECT_NE(problem.find("bound per child key"), std::string::npos)
+        << problem;
+}
+
 // A `oneOf` of four branches, nested `depth` times around an integer.
 std::string nested_one_of(int depth) {
     std::string nested = R"({ "type": "integer" })";

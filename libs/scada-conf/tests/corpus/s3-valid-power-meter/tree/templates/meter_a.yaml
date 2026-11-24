@@ -21,7 +21,6 @@ points:
     address: { table: holding, register: 20, type: uint64 }
     kind: counter
     counter: { limit: 0xFFFFFFFFFFFFFFFF, at_limit: wrap, on_decrease: hold }
-    scale: { gain: 10 }
     unit: Wh
   - name: status
     address: { table: holding, register: 30, type: uint16 }
