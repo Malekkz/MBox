@@ -42,6 +42,7 @@ scada_add_library(scada-conf
     src/node.cpp
     src/path_class.cpp
     src/read.cpp
+    src/rules.cpp
     src/scalar.cpp
     src/schema.cpp
     src/tree_scan.cpp

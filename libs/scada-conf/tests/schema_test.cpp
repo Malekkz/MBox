@@ -898,7 +898,7 @@ std::string nested_one_of(int depth) {
 // check one node at most 25 times; a set that could pass 64 does not
 // compile, nor a recursion through a `oneOf`.
 TEST(Schema, NestedOneOfIsBounded) {
-    constexpr std::size_t BUILTIN_CHECKS = 25;
+    constexpr std::size_t BUILTIN_CHECKS = 21;
     EXPECT_EQ(SchemaSet::builtin().checks_per_node(), BUILTIN_CHECKS);
     // 4 x 4 x 4 branches, each also checked by the level above: more than
     // 64 checks of the innermost node.

@@ -1,0 +1,11 @@
+# A template's refusals at stage 3: a literal address out of range, a bit
+# field upside down, a bit number above 63, a quality list with two quality
+# words, a raw type the protocol does not have, a repeat block of three
+# variables and an identity check without a target. Invented.
+templates/sensor_b.yaml:4:21: CF-201
+templates/sensor_b.yaml:6:5: CF-202
+templates/sensor_b.yaml:9:42: CF-204
+templates/sensor_b.yaml:11:53: CF-204
+templates/sensor_b.yaml:12:13: CF-204
+templates/sensor_b.yaml:13:46: CF-203
+templates/sensor_b.yaml:15:10: CF-204

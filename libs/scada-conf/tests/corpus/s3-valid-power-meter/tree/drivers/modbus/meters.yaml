@@ -1,0 +1,3 @@
+channel: { name: meters, type: tcp, host: 192.0.2.30 }
+devices:
+  - { name: ps1.meter1, template: meter_a, unit_id: 0 }

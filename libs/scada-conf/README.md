@@ -33,8 +33,10 @@ built in slices; this README lists what each part does now.
   checks each file against its JSON Schema file under `schemas/` (Annex C),
   with CF-2xx codes; also CF-102 (a file name and its name key), CF-111 for
   keys equal once typed, CF-211 (`format`) and the conditional
-  `time.sync.servers` of section 3, and CF-504 and CF-517 within one point
-  object. Validation checks one document node at most 25 times with the
+  `time.sync.servers` of section 3, the keys an object requires or refuses
+  by the value of another key (a channel's type, a tag's, an alarm's;
+  `rules.h`, D-108), and CF-517 for an explicit integer `value_type` within
+  one point object. Validation checks one document node at most 21 times with the
   built-in schemas; a schema set that could pass 64 (nested `oneOf` or
   `allOf`) does not compile (D-107). Stage 3 checks every file that parsed,
   also when another did not.
@@ -45,8 +47,10 @@ channels the framework keys (`template`, `channel`) composed with their
 protocol's schema (`modbus`, Annex A; `io`, Annex B), with the shared
 `common` and `point` definitions. A channel file is checked against the
 schema of its protocol directory, a template against that of its
-`protocol` key. Stage 3 also gives CF-517 where one point object gives an
-integer `value_type` and a scaling that is not integer.
+`protocol` key; a template whose protocol this version does not know is
+checked against the framework keys alone. Maps that merging completes (a
+point in `defaults` or `overrides`, an address, every map of a point) are
+not refused at stage 3 for a key they lack; each takes `replace: true`.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does

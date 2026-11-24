@@ -6,7 +6,6 @@
   "properties": {
     "tags": { "type": "array", "items": { "$ref": "#/$defs/tag" } }
   },
-  "required": ["tags"],
   "unevaluatedProperties": false,
   "$defs": {
     "tag": {
@@ -14,22 +13,23 @@
       "properties": {
         "name": { "$ref": "common.schema.json#/$defs/tag_name" },
         "type": { "type": "string", "enum": ["internal", "manual", "virtual"] },
-        "value_type": { "type": "string", "enum": ["bool", "int64", "uint64", "float64", "string"] },
-        "kind": { "type": "string", "enum": ["plain", "counter"] },
+        "value_type": { "description": "Required for internal and manual; derived from expr for virtual", "type": "string", "enum": ["bool", "int64", "uint64", "float64", "string"] },
+        "kind": { "description": "Default plain", "type": "string", "enum": ["plain", "counter"] },
         "description": { "$ref": "common.schema.json#/$defs/text" },
-        "unit": { "type": "string", "x-scada-type": "text", "x-scada-max": 32 },
-        "range": { "$ref": "point.schema.json#/$defs/range" },
+        "unit": { "description": "At most 32 bytes", "type": "string", "x-scada-type": "text", "x-scada-max": 32 },
+        "range": { "description": "[min, max] in engineering units", "$ref": "point.schema.json#/$defs/range" },
         "enum": { "$ref": "point.schema.json#/$defs/enumeration_or_reference" },
-        "area": { "$ref": "common.schema.json#/$defs/identifier" },
+        "area": { "description": "Required for manual", "$ref": "common.schema.json#/$defs/identifier" },
         "alarms": { "$ref": "point.schema.json#/$defs/alarms" },
         "logging": { "$ref": "point.schema.json#/$defs/logging" },
-        "retain": { "$ref": "point.schema.json#/$defs/boolean" },
-        "retain_now": { "$ref": "point.schema.json#/$defs/boolean" },
+        "retain": { "description": "Default true for manual, else false", "$ref": "point.schema.json#/$defs/boolean" },
+        "retain_now": { "description": "internal and manual only; needs retain. Default false", "$ref": "point.schema.json#/$defs/boolean" },
         "retain_max_age": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "3650d" },
-        "task": { "$ref": "common.schema.json#/$defs/identifier" },
-        "expr": { "type": "string", "x-scada-type": "expression" },
-        "quality": { "type": "string", "enum": ["worst", "ignore_bad"] },
+        "task": { "description": "internal and virtual only. Default for virtual: normal", "$ref": "common.schema.json#/$defs/identifier" },
+        "expr": { "description": "virtual only, required", "type": "string", "x-scada-type": "expression" },
+        "quality": { "description": "virtual only. Default worst", "type": "string", "enum": ["worst", "ignore_bad"] },
         "limits": {
+          "description": "manual only: { min, max } in engineering units",
           "type": "object",
           "properties": {
             "min": { "$ref": "point.schema.json#/$defs/number" },
@@ -37,7 +37,7 @@
           },
           "unevaluatedProperties": false
         },
-        "initial": { "type": ["number", "boolean", "string"], "x-scada-type": "string" }
+        "initial": { "description": "manual and internal only: the value when none is restored. Default none: BAD, NOT_INIT until written", "type": ["number", "boolean", "string"], "x-scada-type": "string" }
       },
       "required": ["name", "type"],
       "unevaluatedProperties": false

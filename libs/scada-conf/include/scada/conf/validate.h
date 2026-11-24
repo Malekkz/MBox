@@ -22,7 +22,8 @@ namespace scada::conf {
 //   as structured text is not available in this version (contract 9.3);
 // - stage 3: the schema of every file type, a channel and a template with
 //   their protocol's (Annexes A and B); CF-102, CF-111 once typed, CF-211,
-//   `time.sync.servers` and CF-517 within one point object.
+//   `time.sync.servers`, the keys an object requires or refuses by the
+//   value of another (rules.h) and CF-517 within one point object.
 // The later stages are added by P2-03 (#100) slice by slice.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is

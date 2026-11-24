@@ -1,18 +1,22 @@
 // Fuzz target: stage 3, the schema validator (configuration schemas contract
-// 1.2, 10.2). The input is one file; once it parses, it is validated against
-// every built-in schema and against a test schema that uses every keyword and
-// every type of the validator. Properties: every error points inside the
-// input and has a message; the count is at least the list; the table of
-// types covers the document.
+// 1.2, 10.2) and the rules of stage 3 that follow it (rules.h). The input is
+// one file; once it parses, it is validated against every built-in schema,
+// with the rules of that schema's file type, and against a test schema that
+// uses every keyword and every type of the validator. Properties: every
+// error points inside the input and has a message; the count is at least the
+// list; the table of types covers the document.
 
 #include "scada/common/panic.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/rules.h"
 #include "scada/conf/schema.h"
+#include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -73,6 +77,10 @@ constexpr std::string_view EVERY_KEYWORD = R"({
     "nt": { "type": ["number", "string"], "x-scada-type": "number_or_tag", "minimum": -10 },
     "ka": { "type": "string", "x-scada-type": "duration_or_off", "x-scada-min": "1s" },
     "ipl": { "type": "string", "x-scada-type": "ip_literal_host" },
+    "ce": { "type": ["string", "boolean"], "x-scada-type": "config_expression" },
+    "fv": { "type": ["string", "integer"], "x-scada-type": "for_value" },
+    "noe": { "type": ["integer", "string"], "x-scada-type": "number_or_expression", "minimum": 0, "maximum": 15 },
+    "nod": { "type": ["number", "string"], "x-scada-type": "number_or_expression", "minimum": -1.5 },
     "mode": { "type": "string", "enum": ["auto", "manual", "off"], "x-scada-reserved-values": ["off"] },
     "one": { "const": 1, "type": "integer", "x-scada-type": "integer" },
     "old": { "x-scada-reserved": true },
@@ -114,7 +122,14 @@ const scada::conf::SchemaSet& every_keyword() {
     return SET;
 }
 
-void check_one(const scada::conf::SchemaSet& set, std::string_view schema,
+// A built-in schema, and the file type and protocol whose rules follow it.
+struct Builtin {
+    std::string_view schema;
+    scada::conf::FileType type;
+    std::string_view protocol;
+};
+
+void check_one(const scada::conf::SchemaSet& set, const Builtin& builtin,
                const std::string& text, std::size_t lines) {
     scada::conf::Diagnostics diagnostics;
     std::optional<scada::conf::Document> document =
@@ -123,7 +138,9 @@ void check_one(const scada::conf::SchemaSet& set, std::string_view schema,
         return;
     }
     scada::conf::ScalarTypes types(*document);
-    set.validate(*document, types, schema, "f.yaml", diagnostics);
+    set.validate(*document, types, builtin.schema, "f.yaml", diagnostics);
+    scada::conf::check_file_rules(*document, types, builtin.type,
+                                  builtin.protocol, diagnostics);
     if (types.size() != document->size()) {
         std::abort();
     }
@@ -153,16 +170,28 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             ++lines;
         }
     }
-    for (const std::string_view schema :
-         {"system.schema.json", "areas.schema.json", "enums.schema.json",
-          "logging.schema.json", "tasks.schema.json", "template.schema.json",
-          "modbus.schema.json#/$defs/template",
-          "modbus.schema.json#/$defs/channel_file",
-          "io.schema.json#/$defs/template",
-          "io.schema.json#/$defs/channel_file", "tags.schema.json",
-          "outputs.schema.json", "alarms.schema.json", "program.schema.json"}) {
-        check_one(scada::conf::SchemaSet::builtin(), schema, text, lines);
+    using scada::conf::FileType;
+    static constexpr std::array<Builtin, 15> BUILTINS = {{
+        {"system.schema.json", FileType::SYSTEM, ""},
+        {"areas.schema.json", FileType::AREAS, ""},
+        {"enums.schema.json", FileType::ENUMS, ""},
+        {"logging.schema.json", FileType::LOGGING, ""},
+        {"tasks.schema.json", FileType::TASKS, ""},
+        {"template.schema.json", FileType::TEMPLATE, ""},
+        {"template.schema.json#/$defs/template_keys", FileType::TEMPLATE, ""},
+        {"modbus.schema.json#/$defs/template", FileType::TEMPLATE, "modbus"},
+        {"modbus.schema.json#/$defs/channel_file", FileType::CHANNEL, "modbus"},
+        {"io.schema.json#/$defs/template", FileType::TEMPLATE, "io"},
+        {"io.schema.json#/$defs/channel_file", FileType::CHANNEL, "io"},
+        {"tags.schema.json", FileType::TAGS, ""},
+        {"outputs.schema.json", FileType::OUTPUTS, ""},
+        {"alarms.schema.json", FileType::ALARMS, ""},
+        {"program.schema.json", FileType::PROGRAM, ""},
+    }};
+    for (const Builtin& builtin : BUILTINS) {
+        check_one(scada::conf::SchemaSet::builtin(), builtin, text, lines);
     }
-    check_one(every_keyword(), "fuzz.schema.json", text, lines);
+    check_one(every_keyword(),
+              Builtin{"fuzz.schema.json", FileType::SYSTEM, ""}, text, lines);
     return 0;
 }

@@ -1,0 +1,12 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+  parity: none
+  stop_bits: 2
+  turnaround: 5ms
+  poll_groups:
+    slow: { period: 10s, priority: 3 }
+devices:
+  - { name: site.weather, template: weather_a, unit_id: 17, timeout: 300ms, retries: 1 }

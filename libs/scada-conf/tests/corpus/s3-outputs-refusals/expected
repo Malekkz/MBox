@@ -1,0 +1,5 @@
+# Outputs refused at stage 3: a duration on a setpoint output, a safe state
+# of two forms, and an interlock without message. Invented.
+outputs/ps1.yaml:2:5: CF-202
+outputs/ps1.yaml:9:5: CF-201
+outputs/ps1.yaml:10:29: CF-201

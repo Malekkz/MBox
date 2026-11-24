@@ -4,11 +4,11 @@
   "title": "control/<name>.yaml: function block programs (configuration schemas contract, section 9.2)",
   "type": "object",
   "properties": {
-    "program": { "$ref": "common.schema.json#/$defs/identifier" },
-    "task": { "$ref": "common.schema.json#/$defs/identifier" },
+    "program": { "description": "Equals the file name", "$ref": "common.schema.json#/$defs/identifier" },
+    "task": { "description": "Optional; must agree with control/tasks.yaml", "$ref": "common.schema.json#/$defs/identifier" },
     "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } }
   },
-  "required": ["program", "blocks"],
+  "required": ["program"],
   "unevaluatedProperties": false,
   "$defs": {
     "source": {
@@ -43,10 +43,11 @@
         "params": { "type": "object", "x-scada-key-type": "identifier", "unevaluatedProperties": {} },
         "tunable": { "$ref": "common.schema.json#/$defs/identifier_list" },
         "on_bad_input": {
+          "description": "Default from the block type (hold for regulation and output blocks)",
           "type": "object",
           "properties": {
             "action": { "type": "string", "enum": ["hold", "safe_value", "propagate"] },
-            "then_safe_after": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s" },
+            "then_safe_after": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
             "safe_value": { "$ref": "point.schema.json#/$defs/number" }
           },
           "required": ["action"],

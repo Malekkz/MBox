@@ -1,0 +1,3 @@
+# A protection relay with a breaker as a double point of two bits, its
+# command on two registers, and a double output with select before operate
+# and interlocks per direction (sections 5.3, 7.2, A.2, A.5). Invented.

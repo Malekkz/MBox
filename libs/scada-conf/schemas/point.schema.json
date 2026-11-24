@@ -7,39 +7,67 @@
     "number_or_expression": { "type": ["number", "string"], "x-scada-type": "number_or_expression" },
     "boolean": { "type": "boolean", "x-scada-type": "boolean" },
     "replace": {
-      "description": "Section 4.5: replace the inherited map whole",
+      "description": "Section 4.5: true replaces the inherited map whole instead of merging into it. Default false",
       "type": "boolean", "x-scada-type": "boolean"
     },
     "point_name": { "type": "string", "x-scada-type": "point_name_template" },
     "name_pattern": { "type": "string", "x-scada-type": "name_pattern" },
     "name_patterns": { "type": "array", "items": { "$ref": "#/$defs/name_pattern" } },
+    "when": {
+      "description": "Section 4.4: a configuration expression of type BOOL; the point exists when it is true. Default true",
+      "type": ["string", "boolean"], "x-scada-type": "config_expression"
+    },
     "pair": {
       "type": "array", "minItems": 2, "maxItems": 2,
       "items": { "$ref": "#/$defs/number_or_expression" }
+    },
+    "bit_number": {
+      "description": "Section 5.4: a bit number within the raw value, 0 to 63, or an expression",
+      "type": ["integer", "string"], "x-scada-type": "number_or_expression", "minimum": 0, "maximum": 63
+    },
+    "bit_field": {
+      "description": "[lo, hi]: bits lo to hi of the raw value, lo at most hi",
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": { "$ref": "#/$defs/bit_number" }
     },
     "range": {
       "type": "array", "minItems": 2, "maxItems": 2,
       "items": { "$ref": "#/$defs/number" }
     },
     "device_time": {
-      "description": "Section 4.6",
+      "description": "Section 4.6. Default the device's, else { zone: utc, trust: unknown }",
       "type": "object",
       "properties": {
-        "zone": { "type": "string", "enum": ["utc", "local"] },
-        "tz": { "type": "string", "x-scada-type": "time_zone" },
-        "trust": { "type": "string", "enum": ["unknown", "synced"] },
+        "zone": { "description": "Default utc", "type": "string", "enum": ["utc", "local"] },
+        "tz": { "description": "An IANA zone name; required with zone: local", "type": "string", "x-scada-type": "time_zone" },
+        "trust": { "description": "Default unknown", "type": "string", "enum": ["unknown", "synced"] },
         "replace": { "$ref": "#/$defs/replace" }
       },
       "unevaluatedProperties": false
     },
+    "substitute": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" },
     "invalid_action": {
-      "description": "Section 4.7: bad, keep_last or { substitute: <value> }",
+      "description": "Section 4.7: bad, keep_last or { substitute: <value> }. Default the point's on_invalid",
       "oneOf": [
         { "type": "string", "enum": ["bad", "keep_last"] },
         {
           "type": "object",
-          "properties": { "substitute": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" } },
+          "properties": { "substitute": { "$ref": "#/$defs/substitute" } },
           "required": ["substitute"],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "on_invalid": {
+      "description": "Section 4.7: bad, keep_last or { substitute: <value> }. Default bad",
+      "oneOf": [
+        { "type": "string", "enum": ["bad", "keep_last"] },
+        {
+          "type": "object",
+          "properties": {
+            "substitute": { "$ref": "#/$defs/substitute" },
+            "replace": { "$ref": "#/$defs/replace" }
+          },
           "unevaluatedProperties": false
         }
       ]
@@ -63,22 +91,30 @@
         }
       ]
     },
-    "invalid_list": { "type": "array", "items": { "$ref": "#/$defs/invalid_entry" } },
+    "invalid_list": {
+      "description": "Section 4.7: raw patterns that mean no value. Default the template's defaults; [] turns them off",
+      "type": "array", "items": { "$ref": "#/$defs/invalid_entry" }
+    },
+    "invalid_by_raw_type": {
+      "description": "Section 4.7, in defaults: a map from raw type to a list. The protocol's schema names its raw types; a base template has none",
+      "type": "object"
+    },
     "quality_value": {
+      "description": "good, uncertain or bad, or a list of one of these and flags",
       "oneOf": [
         { "type": "string", "enum": ["good", "uncertain", "bad"] },
         {
           "type": "array", "minItems": 1,
-          "items": { "type": "string", "enum": ["good", "uncertain", "bad", "OUT_OF_RANGE", "OVERFLOW", "BLOCKED", "TEST", "COMM_FAIL", "STALE"] }
+          "items": { "type": "string", "enum": ["good", "uncertain", "bad", "OUT_OF_RANGE", "OVERFLOW", "BLOCKED", "TEST"] }
         }
       ]
     },
     "quality_rule": {
       "type": "object",
       "properties": {
-        "point": { "$ref": "#/$defs/point_name" },
-        "bit": { "$ref": "#/$defs/number_or_expression" },
-        "field": { "$ref": "#/$defs/pair" },
+        "point": { "description": "Another point of the template, or self", "$ref": "#/$defs/point_name" },
+        "bit": { "$ref": "#/$defs/bit_number" },
+        "field": { "$ref": "#/$defs/bit_field" },
         "map": {
           "type": "object",
           "properties": { "default": { "$ref": "#/$defs/quality_value" } },
@@ -90,46 +126,65 @@
       "x-scada-exclusive": [["bit", "field"]],
       "unevaluatedProperties": false
     },
+    "enumeration": {
+      "description": "Section 5.5: an inline map of integer codes to names",
+      "type": "object",
+      "properties": { "replace": { "$ref": "#/$defs/replace" } },
+      "x-scada-key-type": "integer",
+      "unevaluatedProperties": { "$ref": "common.schema.json#/$defs/text" }
+    },
     "enumeration_or_reference": {
       "oneOf": [
         { "$ref": "common.schema.json#/$defs/identifier" },
-        { "$ref": "enums.schema.json#/$defs/enumeration" }
+        { "$ref": "#/$defs/enumeration" }
       ]
     },
     "counter": {
       "type": "object",
       "properties": {
-        "limit": { "type": ["integer", "string"], "x-scada-type": "raw_pattern" },
-        "at_limit": { "type": "string", "enum": ["wrap", "saturate"] },
-        "on_decrease": { "type": "string", "enum": ["accept", "hold", "reset"] },
+        "limit": { "description": "The largest raw value; the device wraps to 0 or stops there", "type": ["integer", "string"], "x-scada-type": "raw_pattern" },
+        "at_limit": { "description": "Default wrap", "type": "string", "enum": ["wrap", "saturate"] },
+        "on_decrease": { "description": "Default accept", "type": "string", "enum": ["accept", "hold", "reset"] },
         "replace": { "$ref": "#/$defs/replace" }
       },
       "unevaluatedProperties": false
     },
     "states": {
+      "description": "Section 5.3: raw code to 0 intermediate, 1 open, 2 closed, 3 faulty. Default for the bit shapes { 0: 0, 1: 1, 2: 2, 3: 3 }",
       "type": "object",
+      "properties": { "replace": { "$ref": "#/$defs/replace" } },
       "x-scada-key-type": "integer",
       "unevaluatedProperties": { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 3 }
     },
     "scale": {
       "type": "object",
       "properties": {
-        "gain": { "$ref": "#/$defs/number_or_expression" },
-        "offset": { "$ref": "#/$defs/number_or_expression" },
-        "divide_by": { "$ref": "#/$defs/number_or_expression" },
+        "gain": { "description": "Default 1", "$ref": "#/$defs/number_or_expression" },
+        "offset": { "description": "In engineering units. Default 0", "$ref": "#/$defs/number_or_expression" },
+        "divide_by": {
+          "description": "A positive integer or an expression giving one. Default 1",
+          "type": ["integer", "string"], "x-scada-type": "number_or_expression", "minimum": 1
+        },
         "replace": { "$ref": "#/$defs/replace" }
       },
       "x-scada-exclusive": [["gain", "divide_by"]],
       "unevaluatedProperties": false
     },
     "logging": {
-      "description": "Section 6: a policy name, none, { policy, <settings> } or complete settings",
+      "description": "Section 6: a policy name, none, { policy, <settings> } or complete settings. Default not logged",
       "oneOf": [
         { "$ref": "common.schema.json#/$defs/identifier" },
         {
-          "allOf": [{ "$ref": "common.schema.json#/$defs/logging_settings" }],
+          "allOf": [{ "$ref": "common.schema.json#/$defs/logging_keys" }],
           "properties": {
             "policy": { "$ref": "common.schema.json#/$defs/identifier" },
+            "tiers": {
+              "description": "Tier name to retention; a tier not listed is not kept",
+              "type": "object",
+              "properties": { "replace": { "$ref": "#/$defs/replace" } },
+              "x-scada-key-type": "tier_name",
+              "unevaluatedProperties": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+            },
             "replace": { "$ref": "#/$defs/replace" }
           },
           "unevaluatedProperties": false
@@ -140,32 +195,33 @@
       "description": "Section 8",
       "type": "object",
       "properties": {
-        "id": { "$ref": "common.schema.json#/$defs/identifier" },
-        "tag": { "$ref": "common.schema.json#/$defs/tag_name" },
-        "name": { "$ref": "common.schema.json#/$defs/tag_name" },
+        "id": { "description": "Unique per tag. Default the type", "$ref": "common.schema.json#/$defs/identifier" },
+        "tag": { "description": "Default the point or tag it is written in; required in alarms/*.yaml except for type expression", "$ref": "common.schema.json#/$defs/tag_name" },
+        "name": { "description": "Required for type expression: the base name of its state tags", "$ref": "common.schema.json#/$defs/tag_name" },
         "type": {
           "type": "string",
           "enum": ["high_high", "high", "low", "low_low", "deviation", "rate_of_change", "state", "bad_quality", "expression"]
         },
-        "limit": { "type": ["number", "string"], "x-scada-type": "number_or_tag" },
-        "deadband": { "type": ["number", "string"], "x-scada-type": "number_or_percentage", "minimum": 0 },
-        "setpoint": { "$ref": "common.schema.json#/$defs/tag_name" },
-        "per": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "limit": { "description": "In the tag's engineering units, or a tag reference. Required for the limit types, deviation and rate_of_change", "type": ["number", "string"], "x-scada-type": "number_or_tag" },
+        "deadband": { "description": "Hysteresis on return to normal, in engineering units or a percentage of range. Default 0", "type": ["number", "string"], "x-scada-type": "number_or_percentage" },
+        "setpoint": { "description": "Required for deviation", "$ref": "common.schema.json#/$defs/tag_name" },
+        "per": { "description": "The rate is change per this time. Default 1s for rate_of_change", "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
         "alarm_on": {
+          "description": "Required for state: values, or enumeration names, that are the alarm state",
           "oneOf": [
             { "type": ["string", "number", "boolean"], "x-scada-type": "string" },
             { "type": "array", "minItems": 1, "items": { "type": ["string", "number", "boolean"], "x-scada-type": "string" } }
           ]
         },
-        "expr": { "type": "string", "x-scada-type": "expression" },
-        "on_delay": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
-        "off_delay": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
+        "expr": { "description": "Required for expression: a BOOL expression", "type": "string", "x-scada-type": "expression" },
+        "on_delay": { "description": "Default 0s", "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
+        "off_delay": { "description": "Default 0s", "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "1d" },
         "priority": { "$ref": "common.schema.json#/$defs/identifier" },
-        "area": { "$ref": "common.schema.json#/$defs/identifier" },
-        "class": { "$ref": "common.schema.json#/$defs/identifier" },
-        "latched": { "$ref": "#/$defs/boolean" },
+        "area": { "description": "Default the tag's area", "$ref": "common.schema.json#/$defs/identifier" },
+        "class": { "description": "Default the first class", "$ref": "common.schema.json#/$defs/identifier" },
+        "latched": { "description": "Default false", "$ref": "#/$defs/boolean" },
         "suppress_when": { "type": "string", "x-scada-type": "expression" },
-        "message": { "$ref": "common.schema.json#/$defs/text" },
+        "message": { "description": "Default the tag name and type", "$ref": "common.schema.json#/$defs/text" },
         "guidance": { "$ref": "common.schema.json#/$defs/text" }
       },
       "required": ["type", "priority"],
@@ -180,13 +236,13 @@
           "type": "object",
           "properties": {
             "name": { "$ref": "#/$defs/point_name" },
-            "invert": { "$ref": "#/$defs/boolean" },
+            "invert": { "description": "Default false", "$ref": "#/$defs/boolean" },
             "description": { "$ref": "common.schema.json#/$defs/text" },
             "alarms": { "$ref": "#/$defs/alarms" },
             "logging": { "$ref": "#/$defs/logging" },
-            "retain": { "$ref": "#/$defs/boolean" }
+            "retain": { "description": "Default false", "$ref": "#/$defs/boolean" },
+            "replace": { "$ref": "#/$defs/replace" }
           },
-          "required": ["name"],
           "unevaluatedProperties": false
         }
       ]
@@ -195,29 +251,30 @@
       "description": "Section 4.7, the keys of a point but name and invalid_values; the protocol's schema adds the content of address",
       "type": "object",
       "properties": {
-        "value_type": { "type": "string", "enum": ["bool", "int64", "uint64", "float64", "string"] },
-        "kind": { "type": "string", "enum": ["plain", "counter", "double_point"] },
+        "value_type": { "description": "Default derived from the raw type, the scaling, kind and enum (section 4.7)", "type": "string", "enum": ["bool", "int64", "uint64", "float64", "string"] },
+        "kind": { "description": "Default plain", "type": "string", "enum": ["plain", "counter", "double_point"] },
         "description": { "$ref": "common.schema.json#/$defs/text" },
         "label": { "$ref": "common.schema.json#/$defs/text" },
-        "unit": { "type": "string", "x-scada-type": "text", "x-scada-max": 32 },
-        "range": { "$ref": "#/$defs/range" },
-        "raw_range": { "$ref": "#/$defs/range" },
-        "access": { "type": "string", "enum": ["ro", "rw", "wo"] },
-        "storage": { "type": "string", "enum": ["volatile", "nvm"] },
+        "unit": { "description": "At most 32 bytes", "type": "string", "x-scada-type": "text", "x-scada-max": 32 },
+        "range": { "description": "[min, max] in engineering units", "$ref": "#/$defs/range" },
+        "raw_range": { "description": "[min, max] of the raw value", "$ref": "#/$defs/range" },
+        "access": { "description": "Default ro", "type": "string", "enum": ["ro", "rw", "wo"] },
+        "storage": { "description": "No default: required for rw and wo (CF-619)", "type": "string", "enum": ["volatile", "nvm"] },
         "write_limits": {
+          "description": "Default none; for nvm { min_interval: 1h, max_per_day: 10 }",
           "type": "object",
           "properties": {
-            "min_interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s" },
-            "max_per_day": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 86400000 },
+            "min_interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+            "max_per_day": { "description": "Writes per day", "type": "integer", "x-scada-type": "uint64" },
             "replace": { "$ref": "#/$defs/replace" }
           },
           "unevaluatedProperties": false
         },
-        "dangerous": { "$ref": "#/$defs/boolean" },
-        "invert": { "$ref": "#/$defs/boolean" },
-        "poll_group": { "type": "string", "x-scada-type": "poll_group_name" },
-        "max_age": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "1d" },
-        "update_period": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "dangerous": { "description": "Default false", "$ref": "#/$defs/boolean" },
+        "invert": { "description": "Default false", "$ref": "#/$defs/boolean" },
+        "poll_group": { "description": "Default normal", "type": "string", "x-scada-type": "poll_group_name" },
+        "max_age": { "description": "Default 3 times the poll group period", "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "1d" },
+        "update_period": { "description": "How often the device refreshes the value; for validation only", "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
         "scale": { "$ref": "#/$defs/scale" },
         "exponent_from": {
           "type": "object",
@@ -226,25 +283,26 @@
             "direction": { "type": "string", "enum": ["multiply", "divide"] },
             "replace": { "$ref": "#/$defs/replace" }
           },
-          "required": ["point", "direction"],
           "unevaluatedProperties": false
         },
-        "on_invalid": { "$ref": "#/$defs/invalid_action" },
+        "on_invalid": { "$ref": "#/$defs/on_invalid" },
         "quality_from": { "type": "array", "items": { "$ref": "#/$defs/quality_rule" } },
         "source_time_from": { "$ref": "#/$defs/point_name" },
         "bits": {
+          "description": "Section 5.4: bit number, 0 to 63, to a bit definition",
           "type": "object",
+          "properties": { "replace": { "$ref": "#/$defs/replace" } },
           "x-scada-key-type": "integer",
           "unevaluatedProperties": { "$ref": "#/$defs/bit" }
         },
-        "tag": { "$ref": "#/$defs/boolean" },
+        "tag": { "description": "Default true", "$ref": "#/$defs/boolean" },
         "enum": { "$ref": "#/$defs/enumeration_or_reference" },
         "counter": { "$ref": "#/$defs/counter" },
         "states": { "$ref": "#/$defs/states" },
-        "when": { "type": "string", "x-scada-type": "expression" },
+        "when": { "$ref": "#/$defs/when" },
         "alarms": { "$ref": "#/$defs/alarms" },
         "logging": { "$ref": "#/$defs/logging" },
-        "retain": { "$ref": "#/$defs/boolean" },
+        "retain": { "description": "Default false", "$ref": "#/$defs/boolean" },
         "retain_max_age": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "3650d" },
         "address": { "type": "object" }
       }
@@ -260,13 +318,22 @@
       "unevaluatedProperties": false
     },
     "partial_point": {
-      "description": "A point in defaults or overrides (section 4.5): no name; invalid_values also as a map from raw type to a list",
+      "description": "A point in overrides (section 4.5): no name",
+      "allOf": [{ "$ref": "#/$defs/point_keys" }],
+      "properties": {
+        "invalid_values": { "$ref": "#/$defs/invalid_list" },
+        "replace": { "$ref": "#/$defs/replace" }
+      },
+      "unevaluatedProperties": false
+    },
+    "defaults_point": {
+      "description": "A point in defaults (section 4.5): no name; invalid_values also as a map from raw type to a list",
       "allOf": [{ "$ref": "#/$defs/point_keys" }],
       "properties": {
         "invalid_values": {
           "oneOf": [
             { "$ref": "#/$defs/invalid_list" },
-            { "type": "object", "x-scada-key-type": "string", "unevaluatedProperties": { "$ref": "#/$defs/invalid_list" } }
+            { "$ref": "#/$defs/invalid_by_raw_type" }
           ]
         },
         "replace": { "$ref": "#/$defs/replace" }

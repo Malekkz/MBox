@@ -1,0 +1,4 @@
+tags:
+  - { name: site.sp, type: manual, value_type: float64 }
+  - { name: site.sum, type: virtual, unit: kW }
+  - { name: site.mode, type: internal, value_type: int64, limits: { min: 0 } }

@@ -3,6 +3,7 @@
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/rules.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/schema.h"
 #include "scada/conf/tree.h"
@@ -25,8 +26,6 @@ constexpr std::uint16_t CF_STRUCTURED_TEXT = 920;
 constexpr std::uint16_t CF_FILE_NAME = 102;
 constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_FORMAT = 211;
-constexpr std::uint16_t CF_VALUE_TYPE = 504;
-constexpr std::uint16_t CF_INTEGER_SCALING = 517;
 
 // The tree format this version reads (contract section 11).
 constexpr std::uint64_t TREE_FORMAT = 1;
@@ -39,10 +38,23 @@ struct ParsedFile {
     ScalarTypes types;
 };
 
+// The protocol of a template: its `protocol` key, if this version knows it.
+std::string template_protocol(const Document& document) {
+    const std::optional<NodeId> protocol =
+        document.find(document.root(), "protocol");
+    if (!protocol || document.kind(*protocol) != NodeKind::SCALAR ||
+        !is_known_protocol(document.text(*protocol))) {
+        return {};
+    }
+    return std::string(document.text(*protocol));
+}
+
 // The schema of a file: by its type, and for a channel by its protocol
 // directory, for a template by its `protocol` key (section 4.1). A template
-// of a protocol this version does not know is checked as a base template;
-// the unknown protocol is a stage 5 error. Empty for a file without one.
+// whose `protocol` this version does not know is checked against the
+// framework keys alone, with its object open, so that its protocol keys
+// give no error: the unknown protocol is one error, at stage 5 (D-108).
+// Empty for a file without one.
 std::string schema_of(const ParsedFile& file) {
     const PathClass& path_class = file.source->path_class;
     switch (path_class.type) {
@@ -72,13 +84,13 @@ std::string schema_of(const ParsedFile& file) {
             return {};
     }
     const Document& document = file.document;
-    const NodeId root = document.root();
-    if (const std::optional<NodeId> protocol = document.find(root, "protocol");
-        protocol && document.kind(*protocol) == NodeKind::SCALAR) {
-        const std::string name(document.text(*protocol));
-        if (is_known_protocol(name)) {
-            return name + ".schema.json#/$defs/template";
-        }
+    const std::string protocol = template_protocol(document);
+    if (!protocol.empty()) {
+        return protocol + ".schema.json#/$defs/template";
+    }
+    if (document.kind(document.root()) == NodeKind::MAP &&
+        document.find(document.root(), "protocol")) {
+        return "template.schema.json#/$defs/template_keys";
     }
     return "template.schema.json";
 }
@@ -159,177 +171,6 @@ void check_name_key(const ParsedFile& file, Diagnostics& diagnostics) {
     }
 }
 
-// The map `key` of `map`, if `map` is a map that has it and it is a map.
-std::optional<NodeId> map_entry(const Document& document, NodeId map,
-                                std::string_view key) {
-    const std::optional<NodeId> value = document.find(map, key);
-    if (!value || document.kind(*value) != NodeKind::MAP) {
-        return std::nullopt;
-    }
-    return value;
-}
-
-// CF-517 (contract 4.7, 0.6) where a point object gives both keys: an
-// integer value type with a scaling that is not integer. A `divide_by`
-// written as an expression is checked after expansion (#103).
-void check_integer_scaling(const ParsedFile& file, NodeId point,
-                           const std::string& name, Diagnostics& diagnostics) {
-    const Document& document = file.document;
-    const std::optional<NodeId> value_type = document.find(point, "value_type");
-    if (!value_type) {
-        return;
-    }
-    const std::string type(document.text(*value_type));
-    if (type != "int64" && type != "uint64") {
-        return;
-    }
-    const auto refuse = [&](NodeId where) {
-        diagnostics.error(CF_INTEGER_SCALING, document.location(where),
-                          name + ": value_type " + type +
-                              " needs an integer scaling; use float64");
-    };
-    if (const std::optional<NodeId> exponent =
-            document.find(point, "exponent_from")) {
-        refuse(*exponent);
-    }
-    const std::optional<NodeId> scale = map_entry(document, point, "scale");
-    if (!scale) {
-        return;
-    }
-    for (const std::string_view key : {"gain", "offset"}) {
-        const std::optional<NodeId> factor = document.find(*scale, key);
-        if (factor && file.types.of(*factor) == ScalarType::DECIMAL) {
-            refuse(*factor);
-        }
-    }
-    if (const std::optional<NodeId> divide =
-            document.find(*scale, "divide_by")) {
-        const ScalarType divisor = file.types.of(*divide);
-        const std::optional<Integer> number =
-            parse_integer(document.text(*divide));
-        const bool above_one = divisor == ScalarType::INTEGER && number &&
-                               !number->negative && number->magnitude > 1;
-        if (above_one || divisor == ScalarType::DECIMAL) {
-            refuse(*divide);
-        }
-    }
-}
-
-// CF-504 (contract 4.7; D-134) where one point object gives both keys: an
-// integer value type, or a counter, on a floating raw type (the address's
-// `type`, Annex A.2). An enumeration and a double point read a floating raw
-// value as a code (5.3, 5.5) and are not refused.
-void check_raw_value_type(const ParsedFile& file, NodeId point,
-                          const std::string& name, Diagnostics& diagnostics) {
-    const Document& document = file.document;
-    const std::optional<NodeId> address = map_entry(document, point, "address");
-    if (!address) {
-        return;
-    }
-    const std::optional<NodeId> raw = document.find(*address, "type");
-    if (!raw) {
-        return;
-    }
-    const std::string raw_type(document.text(*raw));
-    if (raw_type != "float32" && raw_type != "float64") {
-        return;
-    }
-    const std::optional<NodeId> kind = document.find(point, "kind");
-    const std::string kind_text(kind ? document.text(*kind) : "");
-    if (document.find(point, "enum") || kind_text == "double_point") {
-        return;
-    }
-    if (const std::optional<NodeId> value_type =
-            document.find(point, "value_type")) {
-        const std::string type(document.text(*value_type));
-        if (type == "int64" || type == "uint64") {
-            diagnostics.error(
-                CF_VALUE_TYPE, document.location(*value_type),
-                name + ": value_type " + type + " cannot hold " + raw_type);
-        }
-    }
-    std::optional<NodeId> counter_at = document.find(point, "counter");
-    if (!counter_at && kind_text == "counter") {
-        counter_at = kind;
-    }
-    if (counter_at) {
-        diagnostics.error(CF_VALUE_TYPE, document.location(*counter_at),
-                          name + ": a counter cannot hold " + raw_type);
-    }
-}
-
-// The rules of stage 3 for one point object (CF-504, CF-517).
-void check_point(const ParsedFile& file, NodeId point, const std::string& name,
-                 Diagnostics& diagnostics) {
-    check_integer_scaling(file, point, name, diagnostics);
-    check_raw_value_type(file, point, name, diagnostics);
-}
-
-// The name a message gives a point object: its `name`, else "point".
-std::string point_label(const Document& document, NodeId point) {
-    const std::optional<NodeId> name = document.find(point, "name");
-    if (name && document.kind(*name) == NodeKind::SCALAR) {
-        return quote_text(document.text(*name));
-    }
-    return "point";
-}
-
-// The point objects of a template or channel file: points (also of repeat
-// blocks and devices), defaults and overrides.
-void check_points(const ParsedFile& file, NodeId owner,
-                  Diagnostics& diagnostics) {
-    const Document& document = file.document;
-    const auto each_point = [&](NodeId list) {
-        for (const NodeId point : document.items(list)) {
-            if (document.kind(point) == NodeKind::MAP) {
-                check_point(file, point, point_label(document, point),
-                            diagnostics);
-            }
-        }
-    };
-    if (const std::optional<NodeId> points = document.find(owner, "points")) {
-        each_point(*points);
-    }
-    if (const std::optional<NodeId> repeat = document.find(owner, "repeat")) {
-        for (const NodeId block : document.items(*repeat)) {
-            if (const std::optional<NodeId> points =
-                    document.find(block, "points")) {
-                each_point(*points);
-            }
-        }
-    }
-    if (const std::optional<NodeId> defaults =
-            map_entry(document, owner, "defaults")) {
-        check_point(file, *defaults, "defaults", diagnostics);
-    }
-    if (const std::optional<NodeId> overrides =
-            map_entry(document, owner, "overrides")) {
-        for (const Entry& entry : document.entries(*overrides)) {
-            if (document.kind(entry.value) == NodeKind::MAP) {
-                check_point(file, entry.value,
-                            quote_text(document.text(entry.key)), diagnostics);
-            }
-        }
-    }
-}
-
-void check_point_rules(const ParsedFile& file, Diagnostics& diagnostics) {
-    const Document& document = file.document;
-    const NodeId root = document.root();
-    if (file.source->path_class.type == FileType::TEMPLATE) {
-        check_points(file, root, diagnostics);
-        return;
-    }
-    if (file.source->path_class.type != FileType::CHANNEL) {
-        return;
-    }
-    if (const std::optional<NodeId> devices = document.find(root, "devices")) {
-        for (const NodeId device : document.items(*devices)) {
-            check_points(file, device, diagnostics);
-        }
-    }
-}
-
 // Stage 3 for one file.
 void check_schema(ParsedFile& file, Diagnostics& diagnostics) {
     check_name_key(file, diagnostics);
@@ -342,7 +183,14 @@ void check_schema(ParsedFile& file, Diagnostics& diagnostics) {
     if (file.source->path_class.type == FileType::SYSTEM) {
         check_system(file.document, file.types, diagnostics);
     }
-    check_point_rules(file, diagnostics);
+    const FileType type = file.source->path_class.type;
+    std::string protocol;
+    if (type == FileType::CHANNEL) {
+        protocol = file.source->path_class.protocol;
+    } else if (type == FileType::TEMPLATE) {
+        protocol = template_protocol(file.document);
+    }
+    check_file_rules(file.document, file.types, type, protocol, diagnostics);
 }
 
 }  // namespace

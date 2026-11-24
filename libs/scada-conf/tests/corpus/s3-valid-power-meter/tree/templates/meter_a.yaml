@@ -1,0 +1,28 @@
+template: meter_a
+protocol: modbus
+bit_order: lsb0
+points:
+  - name: voltage
+    address: { table: holding, register: 10, type: float32, word_order: little }
+    unit: V
+    range: [0, 500]
+    invalid_values: [ { raw: nan, action: keep_last }, 0x7F800000 ]
+    max_age: 10s
+    quality_from: [ { point: status, field: [0, 3], map: { 0: good, 5: [bad, TEST], default: uncertain } } ]
+  - name: current
+    address: { table: holding, register: 12, type: int16 }
+    exponent_from: { point: current_exp, direction: multiply }
+    unit: A
+  - name: current_exp
+    address: { table: holding, register: 13, type: int16 }
+    tag: false
+  - name: energy
+    value_type: uint64
+    address: { table: holding, register: 20, type: uint64 }
+    kind: counter
+    counter: { limit: 0xFFFFFFFFFFFFFFFF, at_limit: wrap, on_decrease: hold }
+    scale: { gain: 10 }
+    unit: Wh
+  - name: status
+    address: { table: holding, register: 30, type: uint16 }
+    tag: false

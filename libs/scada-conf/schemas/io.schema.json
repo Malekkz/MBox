@@ -8,25 +8,27 @@
       "type": "object",
       "properties": {
         "line": {
+          "description": "The line by its name, or its offset on the chip; required for gpio",
           "oneOf": [
             { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 1023 },
-            { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 }
+            { "type": "string", "x-scada-type": "text" }
           ]
         },
-        "direction": { "type": "string", "enum": ["input", "output"] },
-        "active_low": { "$ref": "point.schema.json#/$defs/boolean" },
-        "bias": { "type": "string", "enum": ["none", "pull_up", "pull_down"] },
-        "debounce": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "1s" },
-        "at_start": { "type": "string", "enum": ["hold", "safe"] },
-        "channel": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
-        "filter": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "60s" },
-        "clamp": { "$ref": "point.schema.json#/$defs/range" },
+        "direction": { "description": "Required for gpio", "type": "string", "enum": ["input", "output"] },
+        "active_low": { "description": "Default false", "$ref": "point.schema.json#/$defs/boolean" },
+        "bias": { "description": "Default none", "type": "string", "enum": ["none", "pull_up", "pull_down"] },
+        "debounce": { "description": "Default 0ms", "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "1s" },
+        "at_start": { "description": "No default: required for an output", "type": "string", "enum": ["hold", "safe"] },
+        "channel": { "description": "The IIO channel by its name; required for iio", "type": "string", "x-scada-type": "text" },
+        "filter": { "description": "First-order filter time constant. Default 0ms", "type": "string", "x-scada-type": "duration", "x-scada-min": "0ms", "x-scada-max": "60s" },
+        "clamp": { "description": "[min, max] in engineering units, after scaling", "$ref": "point.schema.json#/$defs/range" },
         "profile": {
+          "description": "The simulator's profile of the point and its parameters",
           "type": "object",
           "properties": {
-            "type": { "type": "string", "enum": ["constant", "ramp", "sine", "square", "random"] }
+            "type": { "type": "string", "enum": ["constant", "ramp", "sine", "square", "random"] },
+            "replace": { "$ref": "point.schema.json#/$defs/replace" }
           },
-          "required": ["type"],
           "x-scada-key-type": "identifier",
           "unevaluatedProperties": { "type": ["number", "string", "boolean"], "x-scada-type": "string" }
         },
@@ -36,10 +38,26 @@
     },
     "point": { "properties": { "address": { "$ref": "#/$defs/address" } } },
     "points": { "type": "array", "items": { "$ref": "#/$defs/point" } },
+    "defaults": {
+      "description": "io has no raw types: the raw-type map of invalid_values names none (section 4.7)",
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "invalid_values": {
+          "oneOf": [
+            { "type": "array" },
+            {
+              "type": "object",
+              "properties": { "replace": { "$ref": "point.schema.json#/$defs/replace" } },
+              "unevaluatedProperties": false
+            }
+          ]
+        }
+      }
+    },
     "addresses_of_points": {
       "properties": {
         "points": { "$ref": "#/$defs/points" },
-        "defaults": { "$ref": "#/$defs/point" },
+        "defaults": { "$ref": "#/$defs/defaults" },
         "overrides": { "type": "object", "unevaluatedProperties": { "$ref": "#/$defs/point" } },
         "repeat": { "type": "array", "items": { "properties": { "points": { "$ref": "#/$defs/points" } } } },
         "identify": { "type": "array", "items": { "properties": { "address": { "$ref": "#/$defs/address" } } } }
@@ -53,9 +71,9 @@
       "allOf": [{ "$ref": "channel.schema.json#/$defs/channel" }],
       "properties": {
         "backend": { "type": "string", "enum": ["simulator", "gpio", "iio"] },
-        "chip": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
-        "device": { "type": "string", "x-scada-type": "text", "x-scada-min": 1, "x-scada-max": 64 },
-        "scan": { "type": "string", "enum": ["auto", "every_cycle", "helper"] }
+        "chip": { "description": "The GPIO chip by its label; required for gpio", "type": "string", "x-scada-type": "text" },
+        "device": { "description": "The IIO device by its name; required for iio", "type": "string", "x-scada-type": "text" },
+        "scan": { "description": "Default auto", "type": "string", "enum": ["auto", "every_cycle", "helper"] }
       },
       "required": ["backend"],
       "unevaluatedProperties": false

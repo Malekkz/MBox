@@ -1,0 +1,28 @@
+template: inverter_a
+protocol: modbus
+description: "String inverter, invented register map"
+params:
+  strings: { type: int, min: 1, max: 24, default: 8 }
+defaults:
+  address: { word_order: big }
+  invalid_values: { uint16: [0xFFFF], int32: [0x80000000], float32: [nan] }
+read: { max_registers: 60, gap_policy: reads_zero, max_gap: 4 }
+points:
+  - name: power
+    address: { table: input, register: 100, type: int32 }
+    scale: { gain: 0.1 }
+    unit: kW
+    max_age: 15s
+  - name: energy
+    address: { table: input, register: 102, type: uint32 }
+    kind: counter
+    counter: { limit: 0xFFFFFFFF, at_limit: wrap }
+    unit: kWh
+    logging: counters
+repeat:
+  - for: { n: "1..strings" }
+    points:
+      - name: "pv{n}.voltage"
+        address: { table: input, register: "200 + 2 * (n - 1)", type: int16 }
+        scale: { divide_by: 10 }
+        unit: V

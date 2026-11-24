@@ -14,7 +14,7 @@
           "authority": {
             "type": "object",
             "properties": {
-              "default": { "type": "string", "enum": ["cli", "web", "api"] },
+              "default": { "description": "Default web", "type": "string", "enum": ["cli", "web", "api"] },
               "local_panel": {
                 "type": "object",
                 "properties": {
@@ -24,11 +24,11 @@
                 "required": ["input", "active"],
                 "unevaluatedProperties": false
               },
-              "local_blocks_auto": { "type": "boolean", "x-scada-type": "boolean" }
+              "local_blocks_auto": { "description": "Default false", "type": "boolean", "x-scada-type": "boolean" }
             },
             "unevaluatedProperties": false
           },
-          "auto_resume": { "type": "boolean", "x-scada-type": "boolean" }
+          "auto_resume": { "description": "Default false", "type": "boolean", "x-scada-type": "boolean" }
         },
         "unevaluatedProperties": false
       }

@@ -79,7 +79,7 @@ constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
 // The `x-scada-type` names this validator implements (contract Annex C). A
 // schema file with another name does not compile, so that a type not
 // implemented yet cannot check nothing.
-constexpr std::array<std::string_view, 40> KNOWN_SCALAR_TYPES = {
+constexpr std::array<std::string_view, 42> KNOWN_SCALAR_TYPES = {
     "string",
     "text",
     "identifier",
@@ -119,16 +119,26 @@ constexpr std::array<std::string_view, 40> KNOWN_SCALAR_TYPES = {
     "number_or_boolean",
     "number_or_tag",
     "duration_or_off",
-    "ip_literal_host"};
+    "ip_literal_host",
+    "config_expression",
+    "for_value"};
 
 // The name kind of a name type, and texts joined by commas (below).
 std::optional<std::string_view> name_kind(std::string_view type);
 std::string join(const std::vector<std::string>& texts);
 
 // The types that "minimum" and "maximum" apply to.
-constexpr std::array<std::string_view, 8> NUMBER_TYPES = {
-    "integer", "uint64",     "power_of_two",         "decimal",
-    "number",  "percentage", "number_or_percentage", "number_or_tag"};
+// For `number_or_expression` they apply to a literal number (D-107).
+constexpr std::array<std::string_view, 9> NUMBER_TYPES = {
+    "integer",
+    "uint64",
+    "power_of_two",
+    "decimal",
+    "number",
+    "percentage",
+    "number_or_percentage",
+    "number_or_tag",
+    "number_or_expression"};
 
 bool listed(std::span<const std::string_view> list, std::string_view name) {
     return std::ranges::find(list, name) != list.end();
@@ -777,13 +787,15 @@ private:
         // `string` is any text, also a value whose type another key decides
         // later (D-108): every scalar kind.
         // An expression's text may be a literal number or boolean (5.6).
-        if (type == "string" || type == "expression") {
+        if (type == "string" || type == "expression" ||
+            type == "config_expression") {
             return true;
         }
         std::vector<std::string_view> allowed;
         if (type == "integer" || type == "uint64" || type == "power_of_two") {
             allowed = {"integer"};
-        } else if (type == "raw_pattern" || type == "raw_pattern_or_nan") {
+        } else if (type == "raw_pattern" || type == "raw_pattern_or_nan" ||
+                   type == "for_value") {
             allowed = {"integer", "string"};
         } else if (type == "number_or_boolean") {
             allowed = {"number", "integer", "boolean"};
@@ -854,23 +866,36 @@ private:
 // with the number of errors. Inside a `oneOf` branch they are held until the
 // branch is known to count, so that a branch that is not taken leaves no
 // trace: at most REPORTED_LIMIT errors, and a count of the rest (D-107).
+//
+// A node whose kind is wrong gets one error, however many schemas state its
+// kind (a framework key that a protocol's schema states again): one
+// diagnostic per cause.
 class Outcome {
 public:
     // Held, for a `oneOf` branch.
     Outcome() = default;
 
     // Given at once to `diagnostics` and `types`.
-    Outcome(Diagnostics& diagnostics, ScalarTypes& types) noexcept
-        : diagnostics_(&diagnostics), types_(&types) {}
+    Outcome(Diagnostics& diagnostics, ScalarTypes& types)
+        : diagnostics_(&diagnostics),
+          types_(&types),
+          kind_reported_(types.size(), false) {}
 
     void error(Diagnostic diagnostic) {
-        ++error_count_;
+        add(std::move(diagnostic), std::nullopt);
+    }
+
+    // An error that `node` is of the wrong kind; dropped if one was given.
+    void kind_error(NodeId node, Diagnostic diagnostic) {
         if (diagnostics_ != nullptr) {
-            diagnostics_->add(std::move(diagnostic));
-        } else {
-            held_errors_.push_back(std::move(diagnostic));
-            trim(false);
+            if (node >= kind_reported_.size() || kind_reported_[node]) {
+                return;
+            }
+            kind_reported_[node] = true;
+        } else if (!held_kinds_.insert(node).second) {
+            return;
         }
+        add(std::move(diagnostic), node);
     }
 
     // Records the type of `node`; a later call for the same node wins.
@@ -900,8 +925,12 @@ public:
         taken.trim(true);
         const std::size_t unlisted =
             taken.error_count_ - taken.held_errors_.size();
-        for (Diagnostic& diagnostic : taken.held_errors_) {
-            error(std::move(diagnostic));
+        for (Held& held : taken.held_errors_) {
+            if (held.kind_node) {
+                kind_error(*held.kind_node, std::move(held.diagnostic));
+            } else {
+                error(std::move(held.diagnostic));
+            }
         }
         error_count_ += unlisted;
         if (diagnostics_ != nullptr) {
@@ -913,6 +942,23 @@ public:
     }
 
 private:
+    struct Held {
+        Diagnostic diagnostic;
+        // The node, for an error of its kind.
+        std::optional<NodeId> kind_node;
+    };
+
+    void add(Diagnostic diagnostic, std::optional<NodeId> kind_node) {
+        ++error_count_;
+        if (diagnostics_ != nullptr) {
+            diagnostics_->add(std::move(diagnostic));
+        } else {
+            held_errors_.push_back(Held{.diagnostic = std::move(diagnostic),
+                                        .kind_node = kind_node});
+            trim(false);
+        }
+    }
+
     // Keeps the first REPORTED_LIMIT held errors in the order of the report
     // (contract 1.4), as Diagnostics does, once twice that many are held.
     void trim(bool force) {
@@ -920,7 +966,10 @@ private:
             return;
         }
         std::stable_sort(held_errors_.begin(), held_errors_.end(),
-                         reported_before);
+                         [](const Held& lhs, const Held& rhs) {
+                             return reported_before(lhs.diagnostic,
+                                                    rhs.diagnostic);
+                         });
         if (held_errors_.size() > Diagnostics::REPORTED_LIMIT) {
             held_errors_.resize(Diagnostics::REPORTED_LIMIT);
         }
@@ -928,7 +977,11 @@ private:
 
     Diagnostics* diagnostics_ = nullptr;
     ScalarTypes* types_ = nullptr;
-    std::vector<Diagnostic> held_errors_;
+    // The nodes given a kind error: at the top, one bit per node; in a
+    // branch, those of the branch.
+    std::vector<bool> kind_reported_;
+    std::set<NodeId> held_kinds_;
+    std::vector<Held> held_errors_;
     std::map<NodeId, ScalarType> held_types_;
     std::size_t error_count_ = 0;
 };
@@ -960,6 +1013,8 @@ std::string type_phrase(std::string_view type) {
         {"number_or_percentage", "a number or a percentage"},
         {"number_or_expression", "a number or an expression"},
         {"expression", "an expression"},
+        {"config_expression", "an expression"},
+        {"for_value", "an integer or a range"},
     };
     const auto found = PHRASES.find(type);
     if (found != PHRASES.end()) {
@@ -1215,8 +1270,13 @@ private:
         }
         const NodeView value = node(node_id);
         if (!kind_allowed(rules, value.kind)) {
-            error(out, CF_WRONG_TYPE, node_id,
-                  label(path) + " must be " + kind_phrase(rules));
+            out.kind_error(node_id,
+                           Diagnostic{.severity = Severity::ERROR,
+                                      .code = CF_WRONG_TYPE,
+                                      .location = document_->location(node_id),
+                                      .message = label(path) + " must be " +
+                                                 kind_phrase(rules),
+                                      .notes = {}});
             return;
         }
         if (value.kind == NodeKind::MAP) {
@@ -1885,7 +1945,7 @@ private:
         if (type == "percentage" || type == "number_or_percentage") {
             return type_percentage(rules, scalar, key, out);
         }
-        if (type == "expression") {
+        if (type == "expression" || type == "config_expression") {
             return ScalarType::EXPRESSION;
         }
         if (const std::optional<ScalarType> special =
@@ -1896,20 +1956,74 @@ private:
             return special;
         }
         if (type == "number_or_expression") {
-            if (value.style == ScalarStyle::PLAIN) {
-                Number number;
-                const NumberRead read = read_number(
-                    value.text, scalar, key, type_phrase(type), out, number);
-                if (read == NumberRead::REFUSED) {
-                    return std::nullopt;
-                }
-                if (read == NumberRead::NUMBER) {
-                    return type_of(number);
-                }
-            }
-            return ScalarType::EXPRESSION;
+            return type_number_or_expression(rules, scalar, key, out);
+        }
+        if (type == "for_value") {
+            return type_for_value(scalar, key, out);
         }
         return type_string_form(rules, scalar, key, out);
+    }
+
+    // A plain number, otherwise an expression (Annex C). A literal number is
+    // checked at once against "minimum" and "maximum", and must be an
+    // integer where "type" names "integer" and not "number": only a real
+    // expression waits for expansion (D-107).
+    std::optional<ScalarType> type_number_or_expression(const SchemaNode& rules,
+                                                        NodeId scalar,
+                                                        const std::string& key,
+                                                        Outcome& out) {
+        const NodeView value = node(scalar);
+        if (value.style != ScalarStyle::PLAIN) {
+            return ScalarType::EXPRESSION;
+        }
+        Number number;
+        const NumberRead read =
+            read_number(value.text, scalar, key, type_phrase(rules.scalar_type),
+                        out, number);
+        if (read == NumberRead::REFUSED) {
+            return std::nullopt;
+        }
+        if (read == NumberRead::NONE) {
+            return ScalarType::EXPRESSION;
+        }
+        const bool integer_only = !rules.scalar_kinds.empty() &&
+                                  listed_text(rules.scalar_kinds, "integer") &&
+                                  !listed_text(rules.scalar_kinds, "number");
+        if (integer_only && !std::holds_alternative<Integer>(number)) {
+            error(out, CF_WRONG_TYPE, scalar,
+                  key + " must be an integer or an expression");
+            return std::nullopt;
+        }
+        if (!number_in_range(rules, number, scalar, key, out)) {
+            return std::nullopt;
+        }
+        return type_of(number);
+    }
+
+    static bool listed_text(const std::vector<std::string>& list,
+                            std::string_view name) {
+        return std::ranges::find(list, name) != list.end();
+    }
+
+    // A `repeat` range (4.4): a plain integer, which must fit int64,
+    // otherwise the text of a range expression.
+    std::optional<ScalarType> type_for_value(NodeId scalar,
+                                             const std::string& key,
+                                             Outcome& out) {
+        const NodeView value = node(scalar);
+        const IntegerRead read = value.style == ScalarStyle::PLAIN
+                                     ? read_integer(value.text)
+                                     : IntegerRead{};
+        if (read.form == IntegerForm::NOT_INTEGER) {
+            return ScalarType::EXPRESSION;
+        }
+        if (read.form == IntegerForm::TOO_LARGE || !as_int64(read.value)) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between " + std::string(INT64_MIN_TEXT) +
+                      " and " + std::string(INT64_MAX_TEXT));
+            return std::nullopt;
+        }
+        return ScalarType::INTEGER;
     }
 
     // A raw pattern (2.3): 0 to 2^64 - 1, or a negative int64 value. An

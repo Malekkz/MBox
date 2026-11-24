@@ -1,0 +1,3 @@
+# Two instances of one template with different options: parameters with a
+# set, points present by `when`, `only` in one instance and overrides in the
+# other (4.4, 4.5). Invented.

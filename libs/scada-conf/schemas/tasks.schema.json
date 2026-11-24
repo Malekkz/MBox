@@ -11,12 +11,12 @@
         "type": "object",
         "properties": {
           "period": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms", "x-scada-max": "1h" },
-          "priority": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 90 },
+          "priority": { "description": "Default 50", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 90 },
           "scan_group": { "x-scada-reserved": true },
-          "rt_required": { "type": "boolean", "x-scada-type": "boolean" },
-          "overrun_alarm_after": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000 },
-          "budget": { "type": "integer", "x-scada-type": "integer", "minimum": 1000, "maximum": 100000000 },
-          "programs": { "$ref": "common.schema.json#/$defs/identifier_list" }
+          "rt_required": { "description": "Default false", "type": "boolean", "x-scada-type": "boolean" },
+          "overrun_alarm_after": { "description": "Consecutive overruns. Default 3", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000 },
+          "budget": { "description": "Instructions per cycle. Default 1000000", "type": "integer", "x-scada-type": "integer", "minimum": 1000, "maximum": 100000000 },
+          "programs": { "description": "Default []", "$ref": "common.schema.json#/$defs/identifier_list" }
         },
         "required": ["period"],
         "unevaluatedProperties": false

@@ -1,5 +1,0 @@
-# CF-504 at stage 3 where one point object gives the keys (contract 4.7;
-# D-134): an integer value type, or a counter, on a floating raw type. An
-# enumeration, a double point and a float64 value type are not refused.
-templates/inverter.yaml:5:17: CF-504
-templates/inverter.yaml:8:14: CF-504
