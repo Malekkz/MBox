@@ -511,6 +511,26 @@ private:
         return scope;
     }
 
+    // The parameters a level declares with their type.
+    static void add_parameters(const Document& document, NodeId root,
+                               Scope& scope) {
+        const std::optional<NodeId> params = document.find(root, "params");
+        if (!params || document.kind(*params) != NodeKind::MAP) {
+            return;
+        }
+        for (const Entry& entry : document.entries(*params)) {
+            // A child may change a default without repeating the type, and
+            // never changes it (CF-415): the type is that of the nearest
+            // declaration that gives one.
+            if (document.kind(entry.value) != NodeKind::MAP ||
+                !document.find(entry.value, "type")) {
+                continue;
+            }
+            scope.parameters.try_emplace(std::string(document.text(entry.key)),
+                                         parameter_type(document, entry.value));
+        }
+    }
+
     static void add_level(const Document& document, Scope& scope) {
         const NodeId root = document.root();
         if (document.kind(root) != NodeKind::MAP) {
@@ -522,21 +542,7 @@ private:
                 scope.enums.emplace(document.text(entry.key));
             }
         }
-        if (const std::optional<NodeId> params = document.find(root, "params");
-            params && document.kind(*params) == NodeKind::MAP) {
-            for (const Entry& entry : document.entries(*params)) {
-                // A child may change a default without repeating the type,
-                // and never changes it (CF-415): the type is that of the
-                // nearest declaration that gives one.
-                if (document.kind(entry.value) != NodeKind::MAP ||
-                    !document.find(entry.value, "type")) {
-                    continue;
-                }
-                scope.parameters.try_emplace(
-                    std::string(document.text(entry.key)),
-                    parameter_type(document, entry.value));
-            }
-        }
+        add_parameters(document, root, scope);
         if (const std::optional<NodeId> repeat =
                 document.find(root, "repeat")) {
             for (const NodeId block : document.items(*repeat)) {
