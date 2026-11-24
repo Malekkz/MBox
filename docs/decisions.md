@@ -2072,7 +2072,7 @@ Decision: add `ready_for_review` and `edited` to the types. On `edited`, the job
 - its jobs' names come from an expression (`${{ needs.events.outputs.prefix }}build and test (...)`), so its skipped checks never take the place of the real checks of the same commit: GitHub reads the latest check run of a name, and a skipped required check counts as passed. GitHub does not evaluate the name of a job its `if` skips, so such a check shows the template, not a real name (seen on the probe, #139); `prefix` (`(not run) `) marks a job that runs anyway.
 `check` also fails if `events` did not succeed, so a failure of the decision cannot pass as a skipped run.
 Reason: a change of base changes what the pull request merges, and a draft made ready is the point where reviewers rely on the run; both must be tested as a push is. A title edit must not re-run the pipeline, cancel a run, or turn a red pull request green.
-Consequences: a title edit shows a few `(not run) ...` checks, skipped, on the pull request. The probe pull request that tested this is named in its pull request for the owner to delete.
+Consequences: a title edit shows a few skipped checks named by their templates (`${{ needs.events.outputs.prefix }}...`) on the pull request; a red pull request stays red, because its real checks keep their names (probe test 5). The probe pull request that tested this is named in its pull request for the owner to delete.
 
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
