@@ -1,0 +1,2 @@
+interlocks:
+  - { name: site.permit, condition: "mode = 'auto'", message: "not in auto" }

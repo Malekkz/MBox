@@ -1,0 +1,10 @@
+tags:
+  - name: site.sum
+    type: virtual
+    expr: "ps1.power.avg + sum(\"ps1.inv*.power\") - in.flow * 2 ** -1"
+  - name: site.ok
+    type: virtual
+    expr: "NOT (site.sum.quality <> GOOD) AND site.sum.age < T#5s OR mod.x DIV 2 = 1"
+  - name: site.limit
+    type: virtual
+    expr: "if(site.ok, limit(0, site.sum, 100), -1.5e2)"

@@ -61,6 +61,11 @@ SourcePosition Document::position(NodeId node) const noexcept {
         .file = found.file, .line = found.line, .column = found.column};
 }
 
+bool Document::verbatim(NodeId node) const noexcept {
+    static_cast<void>(record(node));
+    return verbatim_[node];
+}
+
 Location Document::location(NodeId node) const {
     const Record& found = record(node);
     std::string file;
@@ -185,15 +190,17 @@ Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
         document_.text_.append(text);
     }
     document_.nodes_.push_back(record);
+    document_.verbatim_.push_back(false);
     return node;
 }
 
 Result<NodeId> DocumentBuilder::scalar(std::string_view text, ScalarStyle style,
-                                       SourcePosition where) {
+                                       SourcePosition where, bool verbatim) {
     const Result<NodeId> node = add(NodeKind::SCALAR, style, where, text);
     if (!node.ok()) {
         return node;
     }
+    document_.verbatim_[node.value()] = verbatim;
     if (const Status placed = place_value(node.value()); !placed.ok()) {
         return placed;
     }

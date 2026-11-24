@@ -29,3 +29,9 @@ scada_add_fuzz_target(scalar_fuzz
 scada_add_fuzz_target(tree_fuzz
   SOURCES tree_fuzz.cpp
   DEPENDS scada::conf)
+
+# The expression grammar of section 5.6; its seeds are the cases of
+# conformance test 11.
+scada_add_fuzz_target(expression_fuzz
+  SOURCES expression_fuzz.cpp
+  DEPENDS scada::conf)

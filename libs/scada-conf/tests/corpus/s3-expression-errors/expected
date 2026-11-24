@@ -1,0 +1,10 @@
+# Expressions are checked for their syntax at stage 3 (section 5.6): run-time
+# expressions refuse the configuration forms (strings, IN, ranges). An
+# error is at the offending character of the file (D-109).
+alarms/site.yaml:2:46: CF-529
+alarms/site.yaml:3:79: CF-520
+outputs/site.yaml:2:45: CF-520
+tags/site.yaml:7:17: CF-520
+templates/meter.yaml:5:13: CF-520
+templates/meter.yaml:6:43: CF-528
+templates/meter.yaml:8:20: CF-520

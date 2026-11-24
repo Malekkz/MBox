@@ -1,0 +1,2 @@
+interlocks:
+  - { name: site.permit, condition: "tag(\"site.pump-1.ok\") AND NOT site.trip", message: "pump not ready" }

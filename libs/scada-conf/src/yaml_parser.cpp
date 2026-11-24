@@ -489,9 +489,35 @@ private:
         if (!count_node(scalar.start)) {
             return false;
         }
-        built(
-            builder_.scalar(scalar.text, scalar.style, position(scalar.start)));
+        built(builder_.scalar(scalar.text, scalar.style, position(scalar.start),
+                              is_verbatim(scalar)));
         return true;
+    }
+
+    // True if `scalar`'s text is its source bytes on one line: a plain
+    // scalar from its start, a quoted one from after its quote up to the
+    // closing quote (Document::verbatim).
+    [[nodiscard]] bool is_verbatim(const Scalar& scalar) const {
+        const std::string_view text = scalar.text;
+        if (text.find('\n') != std::string_view::npos) {
+            return false;
+        }
+        const std::size_t start = scalar.start.pos;
+        switch (scalar.style) {
+            case ScalarStyle::PLAIN:
+                return source_.substr(start, text.size()) == text;
+            case ScalarStyle::SINGLE_QUOTED:
+            case ScalarStyle::DOUBLE_QUOTED: {
+                const char quote =
+                    scalar.style == ScalarStyle::SINGLE_QUOTED ? '\'' : '"';
+                return source_.substr(start + 1, text.size()) == text &&
+                       byte_at(start + 1 + text.size()) == quote;
+            }
+            case ScalarStyle::LITERAL:
+            case ScalarStyle::FOLDED:
+                return false;
+        }
+        return false;
     }
 
     // Adds a map's key; a key of the same text in the map is CF-111.

@@ -1,0 +1,10 @@
+template: sensor_e
+protocol: modbus
+params:
+  bad: { type: int, default: 8 }
+points:
+  - name: p
+    address: { table: holding, register: "100 + bad" }
+repeat:
+  - for: { in: "1..2" }
+    points: [ { name: "q{in}" } ]
