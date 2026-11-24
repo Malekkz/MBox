@@ -27,10 +27,13 @@ concurrency:
 jobs:
   # Whether this run tests anything (D-112): every run but that of an edit
   # of only a pull request's title or description. Every other job needs it,
-  # runs only if `run` is true, and starts its name with `prefix` otherwise,
-  # so that a skipped check never takes the place of a real check of the
-  # same commit (GitHub reads the latest check of a name, and a skipped
-  # required check counts as passed).
+  # runs only if `run` is true, and has its name from an expression, so that
+  # a skipped check never takes the place of a real check of the same commit
+  # (GitHub reads the latest check of a name, and a skipped required check
+  # counts as passed): GitHub does not evaluate the name of a job its `if`
+  # skips, so the check shows the name's template, never a real name.
+  # `prefix` marks a job that runs anyway in such a run (`check`, if
+  # `events` failed).
   events:
     name: events
     runs-on: ubuntu-24.04
