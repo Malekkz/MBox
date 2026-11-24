@@ -2178,3 +2178,21 @@ Options: (a) that time-out is not counted; (b) it is counted after the check.
 Decision: (a), the lead's ruling. `FailureTracker::read_timed_out` adds the time-out to the run first; when that loses the connection, the time-out is not counted toward demotion; otherwise it is counted as a failed request. With one unit, `lost_after_timeouts` 3 and `demote_after` 3, the third time-out loses the connection and the device keeps 2 failures; after the reconnect the run is empty, so the next time-out makes 3 and demotes it, with the run at 1. One dead unit among live ones is demoted without the connection being lost. With no eligible unit, the condition "its unit ids include every eligible unit id" holds as written, and the run's length alone decides.
 Reason: "before" has a meaning only under (a); the point of R-15 is that a lost connection or gateway is handled as a lost connection, not as dead devices: a gateway outage demotes nobody.
 Consequences: a dead single unit is demoted one request after the reconnect. The clarifying sentence and the case with no eligible unit are points D-1 and D-10 of #136.
+
+## D-140: The channel engine's choices that the contract leaves open
+Date: 2026-11-24
+Phase / issue: 2, #104 (P2-07), slice 3
+Status: accepted; the retry of a broken answer is point D-12 of #136
+
+Context: driver interface contract 7.1 to 7.5 and CS 4.6 give the failure rules of a channel worker; `ChannelEngine` (scada/driver/channel_engine.h) applies them. Some cases are not stated: which failures are retried (DI 7.1 "A read that times out is retried up to `retries` times"; CS 4.6 `retries`: "Retries of a failed read"), how `busy_retries` counts, what a probe that answers busy means, when samples of a chain of companions are published, and when an idle worker wakes for staleness.
+Options: for retries, time-outs only (DI's words) or every failed read (CS's words); for the rest, the simplest reading that keeps "no resend of a write" and the side-effect rules.
+Decision:
+- A read is retried, up to `retries` times and within its poll group's turn, after a time-out, a broken answer, or a gateway's "cannot reach" answer: CS's "failed read". Never a side-effect read (6.6), never a probe, never over a closed connection. The request then counts once toward demotion (7.4).
+- A busy answer neither fails nor answers while the device's busy answers in a row stay within `busy_retries`; the next one counts as a failed request, and the run starts again. A probe answered busy recovers its device: it answered.
+- A gateway's "cannot reach" answer is a valid answer for the line (it empties the run of time-outs, 7.3) and a failure of its unit only (7.4, conformance test 19).
+- The samples of a chain of companions are held until its last request is answered and then processed together, companions first; a chain cut by a failure of its last request, a close or a lost connection publishes nothing.
+- A device that becomes DEMOTED or CONNECTING has its polled points written BAD with COMM_FAIL once (by `process_sample` with a COMM_FAIL sample); a close the driver made itself and reconnected within `connect_timeout` writes nothing (R-17).
+- The engine wakes when a point's `max_age` runs out, also while idle, so that STALE is set on time (7.5, conformance test 17).
+- A close the driver makes itself reconnects at once when a valid answer came since the connect, else after the `reconnect` back-off (7.3).
+Reason: CS states the user's key and its meaning; a broken answer on a serial line is as likely a noise burst as a time-out, and a retry reads it again without any side effect. The other choices are the smallest that meet the contract's tests.
+Consequences: orders (writes, select and operate, READ_NOW) are not sent by the engine before the command slices (6, 7); identity checks and device restarts (7.6) come with slice 5. The real transports come with slice 4.

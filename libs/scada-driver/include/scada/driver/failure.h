@@ -17,8 +17,9 @@
 
 namespace scada::driver {
 
-// `sys.dev.<device>.state` (3.5).
-enum class DeviceState : std::uint8_t {
+// `sys.dev.<device>.state` (3.5). Not `DeviceState` of 2.2 (exchange.h),
+// which is a protocol's mutable state of a device.
+enum class DeviceStatus : std::uint8_t {
     DISABLED = 0,
     CONNECTING = 1,
     INITIALISING = 2,
@@ -36,6 +37,9 @@ inline constexpr std::int64_t DEFAULT_BACKOFF_MAX_NS =
 // The failure keys of a device (CS 4.6), with their defaults.
 struct FailureRules {
     std::int64_t timeout_ns = DEFAULT_TIMEOUT_NS;
+    // `write_timeout`: the compile step gives it `timeout`'s value when it
+    // is not set (CS 4.11).
+    std::int64_t write_timeout_ns = DEFAULT_TIMEOUT_NS;
     std::uint8_t retries = 2;
     std::uint8_t busy_retries = 3;
     std::uint8_t demote_after = 3;
@@ -120,7 +124,7 @@ public:
     SCADA_RT void probe_ended(std::uint32_t device, bool answered,
                               std::int64_t now_ns) noexcept;
 
-    [[nodiscard]] DeviceState state(std::uint32_t device) const noexcept;
+    [[nodiscard]] DeviceStatus state(std::uint32_t device) const noexcept;
     // When a demoted device's next probe is due.
     [[nodiscard]] std::int64_t probe_due_ns(
         std::uint32_t device) const noexcept;
@@ -131,7 +135,7 @@ public:
 
 private:
     struct Run {
-        DeviceState state = DeviceState::CONNECTING;
+        DeviceStatus state = DeviceStatus::CONNECTING;
         std::int64_t grace_until_ns = 0;
         std::int64_t backoff_ns = 0;
         std::int64_t probe_due_ns = 0;

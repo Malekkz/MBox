@@ -31,8 +31,8 @@ FailureTracker::FailureTracker(std::vector<Device> devices,
         if (found == units.end()) {
             units.push_back(devices_[index].unit_id);
         }
-        runs_[index].state = devices_[index].enabled ? DeviceState::CONNECTING
-                                                     : DeviceState::DISABLED;
+        runs_[index].state = devices_[index].enabled ? DeviceStatus::CONNECTING
+                                                     : DeviceStatus::DISABLED;
     }
     counts_.assign(units.size(), 0);
     run_units_.assign(units.size(), false);
@@ -55,7 +55,7 @@ void FailureTracker::connected(std::int64_t now_ns) noexcept {
             continue;
         }
         Run& run = runs_[index];
-        run.state = DeviceState::INITIALISING;
+        run.state = DeviceStatus::INITIALISING;
         run.grace_until_ns =
             later(now_ns, devices_[index].rules.startup_grace_ns);
         run.backoff_ns = devices_[index].rules.backoff_ns;
@@ -65,7 +65,7 @@ void FailureTracker::connected(std::int64_t now_ns) noexcept {
 void FailureTracker::lost() noexcept {
     for (std::size_t index = 0; index < devices_.size(); ++index) {
         if (devices_[index].enabled) {
-            runs_[index].state = DeviceState::CONNECTING;
+            runs_[index].state = DeviceStatus::CONNECTING;
         }
     }
 }
@@ -125,7 +125,7 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
     }
     if (end == RequestEnd::ANSWERED) {
         count_of(device) = 0;
-        run.state = DeviceState::RUNNING;
+        run.state = DeviceStatus::RUNNING;
         return false;
     }
     if (now_ns < run.grace_until_ns) {
@@ -141,7 +141,7 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
             continue;
         }
         Run& demote = runs_[other];
-        demote.state = DeviceState::DEMOTED;
+        demote.state = DeviceStatus::DEMOTED;
         demote.backoff_ns = devices_[other].rules.backoff_ns;
         demote.probe_due_ns = later(now_ns, demote.backoff_ns);
         demoted = true;
@@ -152,14 +152,14 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
 void FailureTracker::probe_ended(std::uint32_t device, bool answered,
                                  std::int64_t now_ns) noexcept {
     if (device >= devices_.size() ||
-        runs_[device].state != DeviceState::DEMOTED) {
+        runs_[device].state != DeviceStatus::DEMOTED) {
         return;
     }
     Run& run = runs_[device];
     const FailureRules& rules = devices_[device].rules;
     if (answered) {
         count_of(device) = 0;
-        run.state = DeviceState::INITIALISING;
+        run.state = DeviceStatus::INITIALISING;
         run.backoff_ns = rules.backoff_ns;
         return;
     }
@@ -170,8 +170,8 @@ void FailureTracker::probe_ended(std::uint32_t device, bool answered,
     run.probe_due_ns = later(now_ns, run.backoff_ns);
 }
 
-DeviceState FailureTracker::state(std::uint32_t device) const noexcept {
-    return device < runs_.size() ? runs_[device].state : DeviceState::DISABLED;
+DeviceStatus FailureTracker::state(std::uint32_t device) const noexcept {
+    return device < runs_.size() ? runs_[device].state : DeviceStatus::DISABLED;
 }
 
 std::int64_t FailureTracker::probe_due_ns(std::uint32_t device) const noexcept {
@@ -183,9 +183,9 @@ std::uint32_t FailureTracker::failures(std::uint32_t device) const noexcept {
 }
 
 bool FailureTracker::polled(std::uint32_t device) const noexcept {
-    const DeviceState current = state(device);
-    return current == DeviceState::INITIALISING ||
-           current == DeviceState::RUNNING;
+    const DeviceStatus current = state(device);
+    return current == DeviceStatus::INITIALISING ||
+           current == DeviceStatus::RUNNING;
 }
 
 }  // namespace scada::driver

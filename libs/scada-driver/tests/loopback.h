@@ -45,6 +45,16 @@ public:
     void side_effect(std::uint8_t unit_id, std::uint8_t space,
                      std::uint32_t first, std::uint32_t last);
 
+    // How a unit answers, for the fault tests (7.1 to 7.4).
+    enum class Fault : std::uint8_t {
+        NONE = 0,     // as mapped
+        SILENT,       // no answer at all: a dead unit
+        BUSY,         // a busy answer
+        UNREACHABLE,  // a gateway's answer that it cannot reach the unit
+        GARBAGE,      // a frame of another unit: broken
+    };
+    void fault(std::uint8_t unit_id, Fault fault) { faults_[unit_id] = fault; }
+
     // The answer to one request frame at `now_ns`; logs it.
     std::vector<std::byte> answer(std::span<const std::byte> request,
                                   std::int64_t now_ns);
@@ -62,6 +72,7 @@ private:
                           std::uint32_t>;  // (unit << 8 | space, address)
     std::map<Key, std::uint16_t> registers_;
     std::map<Key, bool> clears_;
+    std::map<std::uint8_t, Fault> faults_;
     std::vector<LoggedRequest> log_;
     std::size_t side_effect_reads_ = 0;
 };

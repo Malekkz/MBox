@@ -21,10 +21,11 @@ The library is built in slices. These are the first two:
 | The order of service, pacing, keep-alive, retries, probes | `scada/driver/scheduler.h` | 6.2 to 6.6, 7.1, 7.4 |
 | The deadlines of an exchange | `scada/driver/timing.h` | 7.1, 7.2 |
 | Device states, demotion, probes' back-off, the run of time-outs | `scada/driver/failure.h` | 3.5, 7.3, 7.4 |
+| What the engine needs of a connection and of time | `scada/driver/transport.h` | 7.1 to 7.3 |
+| The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 
-Not yet here: the exchange engine that applies failure handling over a
-transport (in progress, slice 3), transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-139 record the choices
+Not yet here: the real TCP and serial transports (slice 4), the driver process with its threads, commands, the generation
+change and reload. `docs/decisions.md` D-130 to D-140 record the choices
 the contracts left open.
 
 ## What it does
@@ -147,4 +148,12 @@ ctest --preset integration -R scada-driver-zones
   every request with its time, and a loop that drives the scheduler on an
   injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
   time. `plan_test.cpp` checks the planner against plans worked out by
-  hand.
+  hand, and `plan_property_test.cpp` checks every rule on 10,000 random
+  plans from a fixed seed.
+- The conformance tests of failure handling (15, 16, 17, the dead-device
+  part of 12 and the gateway and busy parts of 19) run the channel engine
+  over a simulated transport (`tests/sim_transport.h`) on the same bus:
+  answers arrive after a fixed latency on an injected clock, and a unit can
+  be silent, busy, unreachable behind its gateway or answer garbage;
+  connects can be refused and the peer can close. `failure_test.cpp` and
+  `timing_test.cpp` check the accounting and the deadlines alone.

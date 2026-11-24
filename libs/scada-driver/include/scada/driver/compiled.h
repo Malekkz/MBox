@@ -10,8 +10,10 @@
 // This slice holds what scheduling needs (sections 6.1 to 6.6); the keys of
 // failure handling, writes and diagnostics join it with their slices.
 
+#include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
+#include "scada/driver/timing.h"
 
 #include <cstdint>
 #include <limits>
@@ -82,6 +84,8 @@ struct CompiledDevice {
     static constexpr std::uint32_t OWN_UNIT =
         std::numeric_limits<std::uint32_t>::max();
     std::uint32_t unit = OWN_UNIT;
+    // The failure keys of CS 4.6: timeouts, retries, demotion (7.1, 7.4).
+    FailureRules failure{};
     Pacing pacing;
     // `keepalive` (6.5); 0: off.
     std::int64_t keepalive_ns = 0;
@@ -90,9 +94,42 @@ struct CompiledDevice {
     std::unique_ptr<ProtocolData> protocol;
 };
 
+// How a channel carries frames (CS `transport`; 7.2, 7.3).
+enum class TransportKind : std::uint8_t {
+    TCP = 1,       // `tcp`
+    RTU_OVER_TCP,  // `rtu_over_tcp`: serial frames over a stream
+    SERIAL,        // a serial line (`rtu`)
+};
+
+inline constexpr std::int64_t DEFAULT_RECONNECT_MIN_NS = 1'000'000'000;  // 1 s
+inline constexpr std::int64_t DEFAULT_RECONNECT_MAX_NS =
+    30'000'000'000;  // 30 s
+inline constexpr std::uint32_t DEFAULT_LOST_AFTER_TIMEOUTS = 3;
+inline constexpr std::int64_t DEFAULT_CONNECT_TIMEOUT_NS =
+    3'000'000'000;  // 3 s
+inline constexpr std::size_t DEFAULT_MAX_PENDING_WRITES = 16;
+
+// The connection keys of a channel (CS 4.5, A.1), with their defaults.
+struct ConnectionRules {
+    // `reconnect`: the back-off after a connection failure, doubling from
+    // `min` to `max`, from `min` again after the first valid answer.
+    std::int64_t reconnect_min_ns = DEFAULT_RECONNECT_MIN_NS;
+    std::int64_t reconnect_max_ns = DEFAULT_RECONNECT_MAX_NS;
+    // `lost_after_timeouts`: `tcp` only (7.3).
+    std::uint32_t lost_after_timeouts = DEFAULT_LOST_AFTER_TIMEOUTS;
+    // `connect_timeout`: `tcp` and `rtu_over_tcp`.
+    std::int64_t connect_timeout_ns = DEFAULT_CONNECT_TIMEOUT_NS;
+};
+
 struct CompiledChannel {
     std::string name;
     bool enabled = true;
+    TransportKind transport = TransportKind::TCP;
+    // The character format of a serial line (bit rate 0 on a stream).
+    LineTiming line{};
+    ConnectionRules connection{};
+    // `max_pending_writes` (CS 4.6): the order queue of the worker (2.4).
+    std::size_t max_pending_writes = DEFAULT_MAX_PENDING_WRITES;
     Pacing pacing;
     std::vector<CompiledPollGroup> poll_groups;
     std::vector<CompiledDevice> devices;

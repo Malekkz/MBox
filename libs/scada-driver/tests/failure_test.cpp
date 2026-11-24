@@ -43,12 +43,12 @@ void fail(FailureTracker& tracked, std::uint32_t device, int times,
 
 TEST(Failure, ADeviceIsDemotedAfterDemoteAfterFailedRequests) {
     FailureTracker tracked = tracker({{.unit_id = 1, .rules = rules()}});
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     fail(tracked, FIRST, 2, SECOND);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     EXPECT_EQ(tracked.failures(FIRST), 2U);
     EXPECT_TRUE(tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND));
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
     EXPECT_EQ(tracked.probe_due_ns(FIRST), 11 * SECOND);
     EXPECT_FALSE(tracked.polled(FIRST));
 }
@@ -60,9 +60,9 @@ TEST(Failure, AnAnswerEmptiesTheCountAndBusyCountsNeitherWay) {
     EXPECT_EQ(tracked.failures(FIRST), 2U);
     (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, SECOND);
     EXPECT_EQ(tracked.failures(FIRST), 0U);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::RUNNING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::RUNNING);
     fail(tracked, FIRST, 2, SECOND);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::RUNNING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::RUNNING);
 }
 
 TEST(Failure, FailuresWithinStartupGraceDoNotCount) {
@@ -70,9 +70,9 @@ TEST(Failure, FailuresWithinStartupGraceDoNotCount) {
         tracker({{.unit_id = 1, .rules = rules(3, 5 * SECOND)}});
     fail(tracked, FIRST, 10, 4 * SECOND);
     EXPECT_EQ(tracked.failures(FIRST), 0U);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     fail(tracked, FIRST, 3, 5 * SECOND);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
 }
 
 TEST(Failure, DevicesSharingAUnitIdShareOneCount) {
@@ -85,16 +85,16 @@ TEST(Failure, DevicesSharingAUnitIdShareOneCount) {
     (void)tracked.request_ended(SECOND_DEVICE, RequestEnd::FAILED, SECOND);
     EXPECT_EQ(tracked.failures(SECOND_DEVICE), 2U);
     (void)tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
-    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DEMOTED);
-    EXPECT_EQ(tracked.state(OTHER_UNIT), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::DEMOTED);
+    EXPECT_EQ(tracked.state(OTHER_UNIT), DeviceStatus::INITIALISING);
     EXPECT_EQ(tracked.failures(OTHER_UNIT), 0U);
 }
 
 TEST(Failure, ProbesBackOffDoublingToTheMaximumThenRecover) {
     FailureTracker tracked = tracker({{.unit_id = 1, .rules = rules(1)}});
     fail(tracked, FIRST, 1, 0);
-    ASSERT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    ASSERT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
     EXPECT_EQ(tracked.probe_due_ns(FIRST), 10 * SECOND);
     tracked.probe_ended(FIRST, false, 10 * SECOND);
     EXPECT_EQ(tracked.probe_due_ns(FIRST), 30 * SECOND);  // 20 s back-off
@@ -103,7 +103,7 @@ TEST(Failure, ProbesBackOffDoublingToTheMaximumThenRecover) {
     tracked.probe_ended(FIRST, false, 65 * SECOND);
     EXPECT_EQ(tracked.probe_due_ns(FIRST), 100 * SECOND);
     tracked.probe_ended(FIRST, true, 100 * SECOND);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     EXPECT_EQ(tracked.failures(FIRST), 0U);
     // Demoted again: the back-off starts from `backoff` once more.
     fail(tracked, FIRST, 1, 200 * SECOND);
@@ -114,10 +114,10 @@ TEST(Failure, ALostConnectionAndADisabledDevice) {
     FailureTracker tracked =
         tracker({{.unit_id = 1, .rules = rules()},
                  {.unit_id = 2, .rules = rules(), .enabled = false}});
-    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DISABLED);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::DISABLED);
     tracked.lost();
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::CONNECTING);
-    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DISABLED);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::CONNECTING);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::DISABLED);
     // A request of a device that is not polled changes nothing.
     EXPECT_FALSE(tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND));
     EXPECT_EQ(tracked.failures(FIRST), 0U);
@@ -166,7 +166,7 @@ TEST(Failure, OnlyEligibleUnitsAreNeededForTheLoss) {
         2);
     tracked.connected(0);
     fail(tracked, SECOND_DEVICE, 1, SECOND);
-    ASSERT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DEMOTED);
+    ASSERT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::DEMOTED);
     EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     EXPECT_TRUE(tracked.read_timed_out(FIRST, SECOND).lost);
 }
@@ -180,7 +180,7 @@ TEST(Failure, AReconnectEmptiesTheRunAndAResumeKeepsStatesAndCounts) {
     tracked.resumed();
     EXPECT_EQ(tracked.timeout_run(), 0U);
     EXPECT_EQ(tracked.failures(FIRST), 2U);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     tracked.connected(2 * SECOND);
     EXPECT_EQ(tracked.timeout_run(), 0U);
@@ -212,13 +212,13 @@ TEST(Failure, TheTimeOutThatLosesTheConnectionIsNotCountedTowardDemotion) {
     EXPECT_TRUE(third.lost);
     EXPECT_FALSE(third.demoted);
     EXPECT_EQ(tracked.failures(FIRST), 2U);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     tracked.resumed();
     const FailureTracker::TimeoutEnd fourth =
         tracked.read_timed_out(FIRST, 2 * SECOND);
     EXPECT_FALSE(fourth.lost);
     EXPECT_TRUE(fourth.demoted);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
     EXPECT_EQ(tracked.timeout_run(), 1U);
 }
 
@@ -240,8 +240,8 @@ TEST(Failure, ADeadUnitAmongLiveOnesIsDemotedWithoutLosingTheConnection) {
         tracked.read_timed_out(FIRST, SECOND);
     EXPECT_FALSE(third.lost);
     EXPECT_TRUE(third.demoted);
-    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
-    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::RUNNING);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::RUNNING);
 }
 
 TEST(Failure, WithNoEligibleUnitTheRunsLengthAloneDecides) {

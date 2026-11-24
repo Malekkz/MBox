@@ -21,11 +21,14 @@ inline constexpr std::int64_t NS_PER_SECOND = 1'000'000'000;
 // The least margin, which covers the buffering of USB adapters (7.1).
 inline constexpr std::int64_t MIN_MARGIN_NS = 20'000'000;
 
+// The bits of an 8N1 character: start, 8 data, stop.
+inline constexpr std::uint8_t BITS_8N1 = 10;
+
 // A line's character format. A bit rate of 0 is a stream (TCP): no line
 // time.
 struct LineTiming {
     std::uint32_t bit_rate = 0;
-    std::uint8_t bits_per_char = 10;  // start, data, parity, stop
+    std::uint8_t bits_per_char = BITS_8N1;  // start, data, parity, stop
 };
 
 // The bits of one character: 1 start bit, the data bits, a parity bit if

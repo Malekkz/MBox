@@ -80,8 +80,28 @@ std::vector<std::byte> SimBus::answer(std::span<const std::byte> request,
                                  .first = first,
                                  .count = count});
     std::vector<std::byte> out;
+    const auto fault = faults_.find(unit_id);
+    const Fault now_fault =
+        fault == faults_.end() ? Fault::NONE : fault->second;
+    if (now_fault == Fault::SILENT) {
+        return out;
+    }
     append(out, tid, 2);
+    if (now_fault == Fault::GARBAGE) {
+        append(out, unit_id + 1, 1);  // another unit: frame_state says BROKEN
+        append(out, 0, 3);
+        return out;
+    }
     append(out, unit_id, 1);
+    if (now_fault == Fault::BUSY || now_fault == Fault::UNREACHABLE) {
+        append(out,
+               static_cast<std::uint8_t>(now_fault == Fault::BUSY
+                                             ? AnswerStatus::BUSY
+                                             : AnswerStatus::UNREACHABLE),
+               1);
+        append(out, 0, 2);
+        return out;
+    }
     bool mapped = true;
     bool clears = false;
     for (std::uint32_t address = first; address < first + count; ++address) {
