@@ -248,7 +248,9 @@ TEST(References, NamesOfAnInstance) {
     EXPECT_EQ(
         validate({{"templates/meter_a.yaml",
                    "template: meter_a\nprotocol: modbus\n"
-                   "enums:\n  local: { 0: a, 1: b }\n"},
+                   "enums:\n  local: { 0: a, 1: b }\n"
+                   "points:\n  - { name: flow, address: { table: holding, "
+                   "register: 1, type: uint16 } }\n"},
                   {"drivers/modbus/line1.yaml",
                    channel("  - name: ps1.m1\n"
                            "    template: meter_a\n"
