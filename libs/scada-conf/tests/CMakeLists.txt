@@ -7,6 +7,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     node_test.cpp
     path_class_test.cpp
     read_test.cpp
+    references_test.cpp
     rules_test.cpp
     scalar_test.cpp
     schema_examples_test.cpp
