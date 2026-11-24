@@ -61,6 +61,8 @@ enum class Token : std::uint8_t {
 struct Lexeme {
     Token token = Token::END;
     std::uint32_t column = 1;
+    // The byte offset just past the token.
+    std::uint32_t end = 0;
     std::string text;
     std::int64_t integer = 0;
     double real = 0.0;
@@ -99,6 +101,15 @@ public:
 
     // The next token, or nothing with `error` set.
     std::optional<Lexeme> next(ExpressionError& error) {
+        std::optional<Lexeme> lexeme = scan(error);
+        if (lexeme) {
+            lexeme->end = static_cast<std::uint32_t>(pos_);
+        }
+        return lexeme;
+    }
+
+private:
+    std::optional<Lexeme> scan(ExpressionError& error) {
         // Spaces and line ends separate tokens (5.6); a tab is not one.
         while (pos_ < text_.size() &&
                (text_[pos_] == ' ' || text_[pos_] == '\n' ||
@@ -134,7 +145,6 @@ public:
         return operator_token(lexeme, error);
     }
 
-private:
     [[nodiscard]] char peek(std::size_t ahead) const noexcept {
         return pos_ + ahead < text_.size() ? text_[pos_ + ahead] : '\0';
     }
@@ -543,11 +553,19 @@ private:
         return reserved && *reserved == word;
     }
 
+    // A node; its extent runs from its column, or its first child, to its
+    // last child.
     std::size_t add(ExprOp oper, std::uint32_t column,
                     std::vector<std::size_t> children = {}) {
         ExprNode node;
         node.op = oper;
         node.column = column;
+        node.begin = column - 1;
+        node.end = column - 1;
+        for (const std::size_t child : children) {
+            node.begin = std::min(node.begin, expression_.nodes[child].begin);
+            node.end = std::max(node.end, expression_.nodes[child].end);
+        }
         node.children = std::move(children);
         expression_.nodes.push_back(std::move(node));
         return expression_.nodes.size() - 1;
@@ -860,6 +878,7 @@ private:
 
     std::size_t leaf(ExprOp oper) {
         const std::size_t node = add(oper, current_.column);
+        expression_.nodes[node].end = current_.end;
         expression_.nodes[node].text = current_.text;
         expression_.nodes[node].integer = current_.integer;
         expression_.nodes[node].real = current_.real;
@@ -980,6 +999,7 @@ private:
         }
         if (!is_operator("(")) {
             const std::size_t node = add(ExprOp::REFERENCE, name.column);
+            expression_.nodes[node].end = name.end;
             expression_.nodes[node].text = name.text;
             return node;
         }
@@ -1029,11 +1049,13 @@ private:
         if (!is_operator(")")) {
             return fail(current_.column, "a ')' or ',' is missing");
         }
+        const std::uint32_t close = current_.end;
         if (!advance()) {
             return std::nullopt;
         }
         const std::size_t node =
             add(ExprOp::CALL, name.column, std::move(arguments));
+        expression_.nodes[node].end = close;
         expression_.nodes[node].text = lower(name.text);
         return node;
     }

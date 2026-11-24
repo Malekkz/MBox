@@ -212,7 +212,9 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   parser; its seeds hold the contract's examples and every refused
   construct), `schema_fuzz` (stage 3 over any file that parses) and
   `expression_fuzz` (the expression grammar against a second writing of
-  it; its seeds are the cases of conformance test 11 and the limits),
+  it with its own lexer: both must accept the same texts, refuse with the
+  same code and column, and build the same tree; its seeds are the cases
+  of conformance test 11 and the limits),
   `scalar_fuzz` (the scalar forms against a second writing of their
   grammars) and `tree_fuzz` (`validate_tree` over small trees seeded with
   the corpus).

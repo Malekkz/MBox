@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -433,6 +435,90 @@ TEST(Expression, ReservedWords) {
     for (const std::string_view name : {"band", "inputs", "ps1.in", "", "if"}) {
         EXPECT_FALSE(is_reserved_word(name)) << name;
     }
+}
+
+// The tree of `text` as a configuration expression; empty on an error.
+Expression tree_of(std::string_view text,
+                   ExpressionKind kind = ExpressionKind::CONFIGURATION) {
+    ExpressionError error;
+    return parse_expression(text, kind, error).value_or(Expression{});
+}
+
+// Literal values, the columns of the nodes and their extents.
+TEST(Expression, LiteralValues) {
+    EXPECT_EQ(tree_of("1.5").nodes.at(0).real, 1.5);
+    EXPECT_EQ(tree_of("2.5E-1").nodes.at(0).real, 0.25);
+    constexpr std::int64_t TWO_DAYS_MS = 172800000;
+    EXPECT_EQ(tree_of("T#2d").nodes.at(0).integer, TWO_DAYS_MS);
+    EXPECT_EQ(tree_of("x = UNCERTAIN").nodes.at(1).integer, 1);
+    EXPECT_EQ(tree_of("x = UNCERTAIN").nodes.at(1).op, ExprOp::QUALITY);
+    EXPECT_TRUE(is_reserved_word("uncertain"));
+    EXPECT_EQ(tree_of("0x7FFFFFFFFFFFFFFF").nodes.at(0).integer,
+              std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(tree_of("T#9223372036854775807ms").nodes.at(0).integer,
+              std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(code_of("T#9223372036854775808ms"), "CF-528");
+}
+
+TEST(Expression, ColumnsAndExtents) {
+    // a + b * c: the + at 3, the * at 7, the leaves at their characters.
+    const Expression sum = tree_of("a + b * c");
+    const ExprNode& root = sum.nodes.at(sum.root);
+    EXPECT_EQ(root.op, ExprOp::ADD);
+    EXPECT_EQ(root.column, 3U);
+    EXPECT_EQ(sum.nodes.at(root.children.at(0)).column, 1U);
+    EXPECT_EQ(sum.nodes.at(root.children.at(1)).column, 7U);
+    EXPECT_EQ(root.begin, 0U);
+    EXPECT_EQ(root.end, 9U);
+    const Expression call = tree_of("x + abs(y)");
+    const ExprNode& outer = call.nodes.at(call.root);
+    const ExprNode& inner = call.nodes.at(outer.children.at(1));
+    EXPECT_EQ(inner.op, ExprOp::CALL);
+    EXPECT_EQ(inner.column, 5U);
+    EXPECT_EQ(inner.begin, 4U);
+    EXPECT_EQ(inner.end, 10U);
+    const Expression in = tree_of("n IN 1..5");
+    EXPECT_EQ(in.nodes.at(in.root).column, 3U);
+    EXPECT_EQ(in.nodes.at(in.root).end, 9U);
+    const Expression grouped = tree_of("(a + b) * c");
+    EXPECT_EQ(grouped.nodes.at(grouped.root).begin, 1U);
+    EXPECT_EQ(grouped.nodes.at(grouped.root).end, 11U);
+}
+
+// The depth (D-109) and the size limit, each at its last accepted value and
+// one beyond.
+std::string repeated(std::string_view part, std::size_t times) {
+    std::string out;
+    for (std::size_t i = 0; i < times; ++i) {
+        out += part;
+    }
+    return out;
+}
+
+TEST(Expression, TheLimitsAtTheirEdges) {
+    constexpr std::size_t MOST = 31;
+    constexpr std::size_t MOST_NEGATED = 15;
+    EXPECT_EQ(code_of(repeated("(", MOST) + "1" + repeated(")", MOST)),
+              "parsed");
+    EXPECT_EQ(code_of(repeated("(", MOST + 1) + "1" + repeated(")", MOST + 1)),
+              "CF-526");
+    EXPECT_EQ(code_of(repeated("abs(", MOST) + "1" + repeated(")", MOST)),
+              "parsed");
+    EXPECT_EQ(
+        code_of(repeated("abs(", MOST + 1) + "1" + repeated(")", MOST + 1)),
+        "CF-526");
+    EXPECT_EQ(code_of(repeated("-(", MOST_NEGATED) + "1" +
+                      repeated(")", MOST_NEGATED)),
+              "parsed");
+    EXPECT_EQ(code_of(repeated("-(", MOST_NEGATED + 1) + "1" +
+                      repeated(")", MOST_NEGATED + 1)),
+              "CF-526");
+    EXPECT_EQ(code_of("2" + repeated(" ** 2", MOST)), "parsed");
+    EXPECT_EQ(code_of("2" + repeated(" ** 2", MOST + 1)), "CF-526");
+    const std::string at_size = "11" + repeated("+1", 2047);
+    EXPECT_EQ(at_size.size(), MAX_EXPRESSION_BYTES);
+    EXPECT_EQ(code_of(at_size), "parsed");
+    EXPECT_EQ(code_of(at_size + "1"), "CF-526");
 }
 }  // namespace
 }  // namespace scada::conf

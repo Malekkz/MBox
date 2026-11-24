@@ -25,6 +25,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -128,7 +129,18 @@ struct Tok {
     std::size_t column = 0;
     std::string text;
     bool one_segment = false;
+    // A literal's leaf in the tree notation of `tree_text`.
+    std::string value;
 };
+
+// A double as exact text: its hexadecimal form.
+std::string exact(double value) {
+    std::array<char, 64> buffer{};
+    const std::to_chars_result written =
+        std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
+                      std::chars_format::hex);
+    return std::string(buffer.data(), written.ptr);
+}
 
 // The recognizer; `refusal` is set on the first error and ends the parse.
 class Oracle {
@@ -213,7 +225,11 @@ private:
         if (!abuts()) {
             return false;
         }
-        return !large || refuse(LITERAL, start + 1);
+        if (large) {
+            return refuse(LITERAL, start + 1);
+        }
+        tok_.value = "i" + std::to_string(value);
+        return true;
     }
 
     bool lex_number() {
@@ -254,8 +270,13 @@ private:
             return false;
         }
         if (!real) {
-            return decimal(text_.substr(start, whole - start)).has_value() ||
-                   refuse(LITERAL, start + 1);
+            const std::optional<std::uint64_t> value =
+                decimal(text_.substr(start, whole - start));
+            if (!value) {
+                return refuse(LITERAL, start + 1);
+            }
+            tok_.value = "i" + std::to_string(*value);
+            return true;
         }
         return real_in_range(start, mantissa);
     }
@@ -273,6 +294,7 @@ private:
             (value == 0 && nonzero)) {
             return refuse(LITERAL, start + 1);
         }
+        tok_.value = "r" + exact(value);
         return true;
     }
 
@@ -318,6 +340,7 @@ private:
         if (!value || *value > INT_MAX / unit) {
             return refuse(LITERAL, start + 1);
         }
+        tok_.value = "t" + std::to_string(*value * unit);
         return true;
     }
 
@@ -327,19 +350,23 @@ private:
             return refuse(SYNTAX, start + 1);
         }
         ++pos_;
+        std::string unquoted;
         while (true) {
             if (pos_ >= text_.size()) {
                 return refuse(SYNTAX, start + 1);
             }
             if (at(pos_) == '\'' && at(pos_ + 1) == '\'') {
+                unquoted.push_back('\'');
                 pos_ += 2;
             } else if (at(pos_) == '\'') {
                 ++pos_;
                 break;
             } else {
+                unquoted.push_back(at(pos_));
                 ++pos_;
             }
         }
+        tok_.value = "s'" + unquoted + "'";
         return abuts();
     }
 
@@ -373,7 +400,8 @@ private:
         tok_ = Tok{.kind = Kind::END,
                    .column = pos_ + 1,
                    .text = {},
-                   .one_segment = false};
+                   .one_segment = false,
+                   .value = {}};
         if (pos_ >= text_.size()) {
             return true;
         }
@@ -401,6 +429,9 @@ private:
                 return refuse(SYNTAX, start + 1);
             }
             tok_.kind = Kind::PATTERN;
+            tok_.value = "p\"" +
+                         std::string(text_.substr(pos_ + 1, close - pos_ - 1)) +
+                         "\"";
             pos_ = close + 1;
             return true;
         }
@@ -467,11 +498,23 @@ private:
             return false;
         }
         while (operator_of(number)) {
+            const std::string oper = lower(tok_.text);
             if (!next() || !operand(number, depth)) {
                 return false;
             }
+            combine(oper, 2);
         }
         return true;
+    }
+
+    // Replaces the last `count` subtrees by `(oper ...)`.
+    void combine(const std::string& oper, std::size_t count) {
+        std::string node = "(" + oper;
+        for (std::size_t i = trees_.size() - count; i < trees_.size(); ++i) {
+            node += " " + std::move(trees_[i]);
+        }
+        trees_.resize(trees_.size() - count);
+        trees_.push_back(std::move(node) + ")");
     }
 
     // An operand of `number`: the next level, or a unary below the last.
@@ -488,9 +531,11 @@ private:
             return false;
         }
         if (comparison()) {
+            const std::string oper = tok_.text;
             if (!next() || !level(SUM_LEVEL, depth)) {
                 return false;
             }
+            combine(oper, 2);
         } else if (word("IN")) {
             if (kind_ == ExpressionKind::RUN_TIME) {
                 return refuse(SYNTAX, tok_.column);
@@ -498,8 +543,12 @@ private:
             if (!next() || !level(SUM_LEVEL, depth)) {
                 return false;
             }
-            if (is("..") && (!next() || !level(SUM_LEVEL, depth))) {
+            if (!is("..")) {
+                combine("in", 2);
+            } else if (!next() || !level(SUM_LEVEL, depth)) {
                 return false;
+            } else {
+                combine("in-range", 3);
             }
         } else {
             return true;
@@ -515,6 +564,7 @@ private:
         if (!is("-") && !word("NOT")) {
             return power(depth);
         }
+        const std::string oper = is("-") ? "neg" : "not";
         if (depth + 1 >= MAX_DEPTH) {
             return refuse(TOO_BIG, tok_.column);
         }
@@ -524,7 +574,11 @@ private:
         if (is("-") || word("NOT")) {
             return refuse(SYNTAX, tok_.column);
         }
-        return power(depth + 1);
+        if (!power(depth + 1)) {
+            return false;
+        }
+        combine(oper, 1);
+        return true;
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by MAX_DEPTH
@@ -541,7 +595,11 @@ private:
         if (depth + 1 >= MAX_DEPTH) {
             return refuse(TOO_BIG, tok_.column);
         }
-        return unary(depth + 1);
+        if (!unary(depth + 1)) {
+            return false;
+        }
+        combine("**", 2);
+        return true;
     }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by MAX_DEPTH
@@ -549,6 +607,7 @@ private:
         switch (tok_.kind) {
             case Kind::NUMBER:
             case Kind::STRING:
+                trees_.push_back(tok_.value);
                 return next();
             case Kind::NAME:
                 return name(depth);
@@ -571,15 +630,19 @@ private:
     // NOLINTNEXTLINE(misc-no-recursion): bounded by MAX_DEPTH
     bool name(std::size_t depth) {
         if (reserved()) {
-            return in_list(LITERAL_WORDS, upper(tok_.text))
-                       ? next()
-                       : refuse(SYNTAX, tok_.column);
+            const std::string spelled = upper(tok_.text);
+            if (!in_list(LITERAL_WORDS, spelled)) {
+                return refuse(SYNTAX, tok_.column);
+            }
+            trees_.push_back(literal_leaf(spelled));
+            return next();
         }
         const Tok called = tok_;
         if (!next()) {
             return false;
         }
         if (!is("(")) {
+            trees_.push_back("n:" + called.text);
             return true;
         }
         if (!called.one_segment) {
@@ -588,7 +651,24 @@ private:
         if (!in_list(FUNCTION_TABLE, lower(called.text))) {
             return refuse(NOT_FUNCTION, called.column);
         }
-        return arguments(depth);
+        const std::size_t first = trees_.size();
+        if (!arguments(depth)) {
+            return false;
+        }
+        combine("call:" + lower(called.text), trees_.size() - first);
+        return true;
+    }
+
+    // TRUE and FALSE are BOOL 1 and 0; GOOD, UNCERTAIN and BAD the INT
+    // constants 0, 1, 2 (5.6, the table of functions).
+    static std::string literal_leaf(const std::string& word) {
+        if (word == "TRUE" || word == "FALSE") {
+            return word == "TRUE" ? "b1" : "b0";
+        }
+        if (word == "GOOD") {
+            return "q0";
+        }
+        return word == "UNCERTAIN" ? "q1" : "q2";
     }
 
     // The arguments of a call, from its `(`: expressions or pattern strings.
@@ -599,6 +679,9 @@ private:
         }
         if (!is(")")) {
             while (true) {
+                if (tok_.kind == Kind::PATTERN) {
+                    trees_.push_back(tok_.value);
+                }
                 const bool read =
                     tok_.kind == Kind::PATTERN ? next() : expression(depth + 1);
                 if (!read) {
@@ -624,13 +707,14 @@ private:
             return;
         }
         if (is("..")) {
-            if (next()) {
-                level(SUM_LEVEL, 0);
+            if (next() && level(SUM_LEVEL, 0)) {
+                combine("..", 2);
             }
             return;
         }
         pos_ = start;
         tok_ = first;
+        trees_.clear();
         expression(0);
     }
 
@@ -639,7 +723,87 @@ private:
     std::size_t pos_ = 0;
     Tok tok_;
     std::optional<Refusal> refusal_;
+    // The subtrees parsed so far; one, the whole tree, at the end.
+    std::vector<std::string> trees_;
+
+public:
+    // The tree of an accepted text, in the notation of `tree_text`.
+    [[nodiscard]] std::string tree() const {
+        return trees_.size() == 1 ? trees_.front() : std::string("?");
+    }
 };
+
+// The oracle's name of an inner node's operator.
+std::string operator_name(const scada::conf::ExprNode& node) {
+    using scada::conf::ExprOp;
+    constexpr std::array<std::pair<ExprOp, std::string_view>, 22> NAMES = {{
+        {ExprOp::NEGATE, "neg"},       {ExprOp::NOT, "not"},
+        {ExprOp::POWER, "**"},         {ExprOp::MULTIPLY, "*"},
+        {ExprOp::DIVIDE, "/"},         {ExprOp::INT_DIVIDE, "div"},
+        {ExprOp::MODULO, "mod"},       {ExprOp::ADD, "+"},
+        {ExprOp::SUBTRACT, "-"},       {ExprOp::EQUAL, "="},
+        {ExprOp::NOT_EQUAL, "<>"},     {ExprOp::LESS, "<"},
+        {ExprOp::LESS_EQUAL, "<="},    {ExprOp::GREATER, ">"},
+        {ExprOp::GREATER_EQUAL, ">="}, {ExprOp::IN_RANGE, "in-range"},
+        {ExprOp::IN_VALUE, "in"},      {ExprOp::AND, "and"},
+        {ExprOp::OR, "or"},            {ExprOp::XOR, "xor"},
+        {ExprOp::RANGE, ".."},         {ExprOp::CALL, "call"},
+    }};
+    for (const auto& [oper, name] : NAMES) {
+        if (oper == node.op) {
+            return oper == ExprOp::CALL ? "call:" + node.text
+                                        : std::string(name);
+        }
+    }
+    return "?";
+}
+
+// The library's tree in the oracle's notation: a leaf as its kind and
+// value, an inner node as `(operator children...)`. Children come before
+// their parent in the arena, so one pass in order builds every node.
+std::string tree_text(const scada::conf::Expression& tree) {
+    using scada::conf::ExprOp;
+    std::vector<std::string> text(tree.nodes.size());
+    for (std::size_t i = 0; i < tree.nodes.size(); ++i) {
+        const scada::conf::ExprNode& node = tree.nodes[i];
+        std::string name;
+        switch (node.op) {
+            case ExprOp::INTEGER:
+                text[i] = "i" + std::to_string(node.integer);
+                continue;
+            case ExprOp::REAL:
+                text[i] = "r" + exact(node.real);
+                continue;
+            case ExprOp::TIME:
+                text[i] = "t" + std::to_string(node.integer);
+                continue;
+            case ExprOp::STRING:
+                text[i] = "s'" + node.text + "'";
+                continue;
+            case ExprOp::BOOLEAN:
+                text[i] = "b" + std::to_string(node.integer);
+                continue;
+            case ExprOp::QUALITY:
+                text[i] = "q" + std::to_string(node.integer);
+                continue;
+            case ExprOp::REFERENCE:
+                text[i] = "n:" + node.text;
+                continue;
+            case ExprOp::PATTERN:
+                text[i] = "p\"" + node.text + "\"";
+                continue;
+            default:
+                name = operator_name(node);
+                break;
+        }
+        std::string joined = "(" + name;
+        for (const std::size_t child : node.children) {
+            joined += " " + std::move(text[child]);
+        }
+        text[i] = std::move(joined) + ")";
+    }
+    return text.at(tree.root);
+}
 
 }  // namespace
 
@@ -654,10 +818,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         scada::conf::ExpressionError error;
         const std::optional<scada::conf::Expression> expression =
             scada::conf::parse_expression(text, kind, error);
-        const std::optional<Refusal> expected = Oracle(text, kind).run();
+        Oracle oracle(text, kind);
+        const std::optional<Refusal> expected = oracle.run();
         check(expression.has_value() == !expected.has_value());
         if (expression.has_value()) {
             const scada::conf::Expression& tree = *expression;
+            check(tree_text(tree) == oracle.tree());
             check(tree.root < tree.nodes.size());
             for (std::size_t i = 0; i < tree.nodes.size(); ++i) {
                 for (const std::size_t child : tree.nodes[i].children) {

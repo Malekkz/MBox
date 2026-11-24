@@ -74,6 +74,12 @@ struct ExprNode {
     // operator node (`IN` for IN_RANGE and IN_VALUE), of its name for a
     // call, of its low end for a RANGE, of its first character for a leaf.
     std::uint32_t column = 1;
+    // The node's extent in the expression text, as byte offsets [begin,
+    // end): from its first operand, or operator, to its last operand, or
+    // its closing parenthesis for a call. The parentheses around a
+    // sub-expression are not part of it.
+    std::uint32_t begin = 0;
+    std::uint32_t end = 0;
     std::string text;
     std::int64_t integer = 0;
     double real = 0.0;
