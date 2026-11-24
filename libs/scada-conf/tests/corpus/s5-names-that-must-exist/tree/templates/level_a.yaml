@@ -1,5 +1,4 @@
 template: level_a
-extends: level_base
 protocol: modbus
 points:
   - name: level

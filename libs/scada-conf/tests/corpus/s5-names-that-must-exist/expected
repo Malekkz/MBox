@@ -10,5 +10,5 @@ logging.yaml:2:68: CF-310
 tags/ps1.yaml:2:68: CF-310
 tags/ps1.yaml:3:72: CF-310
 tags/ps1.yaml:3:87: CF-310
-templates/level_a.yaml:2:10: CF-310
-templates/level_a.yaml:6:11: CF-310
+templates/level_a.yaml:5:11: CF-310
+templates/level_c.yaml:2:10: CF-310

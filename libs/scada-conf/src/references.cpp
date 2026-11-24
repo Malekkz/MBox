@@ -473,7 +473,12 @@ private:
         std::set<std::string, std::less<>> enums;
         std::map<std::string, ValueType, std::less<>> parameters;
         std::vector<std::string> variables;
+        // False when the chain names a template the tree does not have:
+        // its enumerations and parameters are not known, and the missing
+        // template is the error.
         bool known = true;
+        // False where the expander types the expressions (an instance).
+        bool typed = true;
     };
 
     // The scope of `file`, a template, walking `extends` up to MAX_CHAIN
@@ -609,12 +614,14 @@ private:
             if (const auto found = templates_.find(text(*name));
                 found != templates_.end()) {
                 scope = scope_of(found->second);
+            } else {
+                scope.known = false;
             }
         }
         // An instance's points, defaults and overrides may use the
         // variables of the template's `repeat` blocks (4.5, step 6); their
         // expressions are typed by the expander, which binds them.
-        scope.known = false;
+        scope.typed = false;
         for (const NodeId point : items(device, "points")) {
             check_point(point, scope, {});
         }
@@ -638,7 +645,7 @@ private:
             return;
         }
         if (const std::optional<NodeId> name = find_scalar(point, "enum");
-            name && !scope.enums.contains(text(*name))) {
+            name && scope.known && !scope.enums.contains(text(*name))) {
             need(enums_, "enumeration", *name);
         }
         check_logging_of(point);
@@ -651,7 +658,7 @@ private:
                 }
             }
         }
-        if (scope.known) {
+        if (scope.known && scope.typed) {
             check_expressions(point, scope, variables);
         }
     }

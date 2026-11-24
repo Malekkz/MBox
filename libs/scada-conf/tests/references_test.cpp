@@ -267,6 +267,28 @@ TEST(References, NamesOfAnInstance) {
                "\"missing\" does not exist"}));
 }
 
+// A chain that names a template the tree does not have gives that one
+// error: the enumerations and parameters the missing template would give
+// are not refused as well.
+TEST(References, AMissingTemplateIsOneError) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nextends: meter_base\nprotocol: "
+                   "modbus\n"
+                   "points:\n"
+                   "  - { name: s, enum: state, when: \"has_s\", address: { "
+                   "table: holding, register: 1, type: uint16 } }\n"},
+                  {"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    template: meter_x\n"
+                           "    unit_id: 1\n"
+                           "    overrides: { s: { enum: state } }\n")}}),
+        (Lines{"drivers/modbus/line1.yaml:8:15 CF-310: template \"meter_x\" "
+               "does not exist",
+               "templates/meter_a.yaml:2:10 CF-310: template \"meter_base\" "
+               "does not exist"}));
+}
+
 TEST(References, NamesGivenTwice) {
     EXPECT_EQ(
         validate({{"templates/meter_a.yaml",

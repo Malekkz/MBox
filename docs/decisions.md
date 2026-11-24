@@ -2137,6 +2137,7 @@ Decision: stage 5 runs today on the files as stage 3 read them, and checks only 
 - A function that reads tags (aggregates, `quality`, `age`, `is_good`, the windowed functions, `tag`) is CF-523 in a configuration expression, which has no tags; so is a wrong number of arguments.
 - `round`, `trunc`, `floor` and `ceil` take REAL, as the function table says; `round(3)` is CF-523.
 - Expressions of an instance (its `defaults`, `overrides` and points) are typed by the expander, which knows the variables bound to each point.
+- A chain that names a template the tree does not have (a device's `template`, an `extends`) gives that one CF-310: the enumerations of its points and the names and types of its expressions are not checked, as the missing template might define them.
 What waits:
 - every reference to a tag (outputs, feedback, `local_panel.input`, alarms, block pins, expressions), CF-302 against point tags, CF-311, CF-312, and the names and types of run-time expressions (CF-521 to CF-525, CF-527): slice 7 of #100, after #103;
 - the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map): #103.
