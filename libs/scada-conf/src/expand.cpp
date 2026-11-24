@@ -35,6 +35,7 @@ namespace scada::conf {
 namespace {
 
 constexpr std::uint16_t CF_SIZE_LIMIT = 113;
+constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_EXTENDS = 401;
 constexpr std::uint16_t CF_TAG_NAME_LENGTH = 402;
 constexpr std::uint16_t CF_GENERATED_NAME_LENGTH = 403;
@@ -552,7 +553,9 @@ private:
         return !device_failed_;
     }
 
-    // Step 2: the parameter declarations of the chain, root first.
+    // Step 2: the parameter declarations of the chain, root first. A
+    // declaration may leave its type to a parent (a child that changes a
+    // default); one that no level types is CF-202.
     void collect_parameters(const std::vector<const CheckedFile*>& chain) {
         declarations_.clear();
         for (const CheckedFile* level : chain) {
@@ -563,6 +566,13 @@ private:
             }
             for (const Member& member : params->members) {
                 declare(member);
+            }
+        }
+        for (const auto& [name, declared] : declarations_) {
+            if (declared.type.empty()) {
+                error_at(CF_MISSING_KEY, *declared.file, declared.declaration,
+                         "parameter " + quote_text(name) + " needs type",
+                         "parameter " + name);
             }
         }
     }
@@ -1672,6 +1682,30 @@ private:
 };
 
 }  // namespace
+
+Diagnostic expanded_diagnostic(const ExpandedTree& tree, std::uint16_t code,
+                               NodeId node, std::string message,
+                               std::string detail) {
+    Diagnostic diagnostic{.severity = Severity::ERROR,
+                          .code = code,
+                          .location = tree.document.location(node),
+                          .message = std::move(message),
+                          .notes = {}};
+    const std::uint32_t instance = node < tree.instance_of.size()
+                                       ? tree.instance_of[node]
+                                       : ExpandedTree::NO_INSTANCE;
+    if (instance == ExpandedTree::NO_INSTANCE ||
+        instance >= tree.instances.size() ||
+        tree.instances[instance].file == diagnostic.location.file) {
+        return diagnostic;
+    }
+    diagnostic.notes.push_back(Diagnostic::Note{
+        .kind = "template",
+        .location = std::move(diagnostic.location),
+        .detail = std::move(detail)});
+    diagnostic.location = tree.instances[instance];
+    return diagnostic;
+}
 
 std::optional<ExpandedTree> expand_tree(std::span<const CheckedFile> files,
                                         Diagnostics& diagnostics) {

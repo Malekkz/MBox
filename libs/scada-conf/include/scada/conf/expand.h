@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace scada::conf {
@@ -49,6 +50,15 @@ struct ExpandedTree {
 
     static constexpr std::uint32_t NO_INSTANCE = 0xFFFFFFFF;
 };
+
+// A diagnostic on `node` of `tree` (contract 1.4): at the node when it was
+// written in its instance's own file or belongs to no instance; otherwise at
+// the instance, with a note "from template <file>:<line>:<column>
+// (<detail>)", the part in brackets only with a detail.
+[[nodiscard]] Diagnostic expanded_diagnostic(const ExpandedTree& tree,
+                                             std::uint16_t code, NodeId node,
+                                             std::string message,
+                                             std::string detail = {});
 
 // Expands every device instance of `files`, which passed stage 3. Errors go
 // to `diagnostics`; one that a template's line causes is located at the

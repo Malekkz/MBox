@@ -11,6 +11,7 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "merged_points.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -275,6 +276,9 @@ Result<Validation> validate_and_expand(const std::filesystem::path& root,
             // slice 7 of #100.
             Diagnostics stage5;
             check_references(checked, stage5);
+            if (validation.expanded) {
+                check_merged_points(*validation.expanded, stage5);
+            }
             stage5.move_into(report);
         }
     }
