@@ -3,8 +3,13 @@ scada_add_test(scada-driver-unit-test KIND unit
     golden_samples_test.cpp
     golden_vectors_test.cpp
     golden_write_test.cpp
+    loopback.cpp
+    plan_property_test.cpp
+    plan_test.cpp
     point_rules_test.cpp
     sample_processing_test.cpp
+    scheduling_test.cpp
+    test_protocol.cpp
     tzif_test.cpp
     zone_file_test.cpp
     zone_table_test.cpp

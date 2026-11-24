@@ -5,7 +5,7 @@ The driver framework that every protocol driver and `scada-io` are built on
 `docs/contracts/driver-interface.md` (version 0.6); the configuration keys
 are those of the configuration schemas contract (version 0.6).
 
-The library is built in slices. This is the first:
+The library is built in slices. These are the first two:
 
 | Part | Header | Contract |
 | --- | --- | --- |
@@ -14,10 +14,15 @@ The library is built in slices. This is the first:
 | Processing after decode, staleness | `scada/driver/sample_processing.h` | 5.1 to 5.8, 7.5 |
 | Device local time to UTC, from the unit's zone files | `scada/driver/zone_table.h` | 5.8; CS 4.6 (decision D-130) |
 | Engineering value to raw value for a write; raw patterns | `scada/driver/write_conversion.h` | 8.4; CS 7.2 |
+| The frame protocol interface and the capabilities | `scada/driver/protocol.h` | 2.2, 2.3, 2.8 |
+| The run-time objects of an exchange: connection state, attempt, sample sink | `scada/driver/exchange.h` | 2.2, 3.1 |
+| The compiled channel, device, point and poll group | `scada/driver/compiled.h` | 3.1, 6.1, 6.4, 6.5 |
+| Block planning of reads | `scada/driver/plan.h` | 6.3, 6.5, 6.6, 5.5 |
+| The order of service, pacing, keep-alive | `scada/driver/scheduler.h` | 6.2 to 6.6 |
 
-Not yet here: the protocol interface (2.2), the object model, scheduling,
+Not yet here: failure handling (timeouts, retries, demotion, probes),
 transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-134 record the choices
+change and reload. `docs/decisions.md` D-130 to D-137 record the choices
 the contracts left open.
 
 ## What it does
@@ -45,7 +50,27 @@ the contracts left open.
   (`-ffp-contract=off`, decision D-98), so scaled values have the same bits
   on x86-64 and ARM64.
 
+- `plan_blocks` groups a device's points into the requests of each poll
+  group within the read rules and the limits of each space, with a split
+  form per request and a keep-alive request (D-135). A protocol whose points
+  are spans of numbered units can use it as its `plan`.
+- `Scheduler::take` chooses a channel worker's next request at a given
+  monotonic time: the next step of an exclusive order first, then orders,
+  then due poll groups (a chain of companions in progress first, then by
+  priority and due time), then a keep-alive, within the pacing of each
+  physical unit and of the channel (D-136). Only the channel worker calls
+  it. It does no I/O and allocates nothing; the caller passes the time, so
+  every test is deterministic. A channel the scheduler cannot run is
+  refused once, when it is built (`Scheduler::status`).
+
 ## Known behaviour
+
+- **A list of writes holds its unit.** A list (8.5) is an exclusive
+  sequence: 5 writes at a 10 s write interval hold the unit and the devices
+  that share it for 40 s, with no poll and no keep-alive (D-136).
+- **Orders can starve a chain.** On a busy unit, orders may keep dropping a
+  chain of companions, which then never completes; there is no cap, and the
+  poll group's achieved period shows it (D-136, R7).
 
 - **Counter wraps.** A decrease from at least `limit`/2 to below it is a
   wrap (contract 5.4): it is written GOOD with no flag, whatever
@@ -55,6 +80,8 @@ the contracts left open.
 - **Setpoints are rounded to the raw step.** On the binary64 path with an
   integer raw type, 12.34 on `divide_by: 10` is written as raw 123, which
   reads 12.3; `to_raw_value` returns 12.3 as the value written.
+- **A late poll group does not catch up.** When a cycle ends after the next
+  one was due, the next starts at once, and missed cycles are not sent.
 - **SUBSTITUTED** is not written until tag database contract 1.1 (#89): a
   configured substitute is UNCERTAIN, and incoming flags are masked.
 - **No integer tag on a floating raw type** (CF-504, D-134), other than an
@@ -111,3 +138,11 @@ ctest --preset integration -R scada-driver-zones
 - `zone_file_test.cpp` builds a zone directory in the temporary directory,
   with links inside and out of it, a FIFO and a subdirectory, and reads it
   with `openat2` and with the fallback.
+- The conformance tests of scheduling (9 to 14, the parts that need no
+  failure handling) run the test protocol (`tests/test_protocol.h`, a
+  scripted frame protocol with invented frames) over an in-process loopback
+  (`tests/loopback.h`): simulated devices that answer its frames and log
+  every request with its time, and a loop that drives the scheduler on an
+  injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
+  time. `plan_test.cpp` checks the planner against plans worked out by
+  hand.
