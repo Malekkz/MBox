@@ -107,8 +107,9 @@ constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
     "time_of_day",
     "https_url"};
 
-// The name kind of a name type (below).
+// The name kind of a name type, and texts joined by commas (below).
 std::optional<std::string_view> name_kind(std::string_view type);
+std::string join(const std::vector<std::string>& texts);
 
 // The types that "minimum" and "maximum" apply to.
 constexpr std::array<std::string_view, 7> NUMBER_TYPES = {
@@ -157,6 +158,9 @@ struct SchemaNode {
     bool allows_map = false;
     bool allows_sequence = false;
     bool allows_scalar = false;
+    // The scalar names of "type" given: "string", "integer", "number",
+    // "boolean".
+    std::vector<std::string> scalar_kinds;
     bool has_enum = false;
     bool reserved = false;
     bool secret = false;
@@ -336,6 +340,7 @@ private:
             } else if (name == "string" || name == "integer" ||
                        name == "number" || name == "boolean") {
                 node.allows_scalar = true;
+                node.scalar_kinds.push_back(name);
             } else {
                 return fail(problem, "unknown type " + name, value);
             }
@@ -620,6 +625,20 @@ private:
             return fail(problem, "unknown x-scada-key-type " + node.key_type,
                         where);
         }
+        // The key type applies to the keys that a schema in
+        // "unevaluatedProperties" takes; without one no key is typed.
+        if (!node.key_type.empty() && node.unevaluated != Unevaluated::SCHEMA) {
+            return fail(problem,
+                        "x-scada-key-type needs a schema in "
+                        "unevaluatedProperties",
+                        where);
+        }
+        if (!type_agrees(node)) {
+            return fail(problem,
+                        "type " + join(node.scalar_kinds) +
+                            " disagrees with x-scada-type " + node.scalar_type,
+                        where);
+        }
         if (!check_bounds(node, where, problem)) {
             return false;
         }
@@ -633,14 +652,51 @@ private:
             !node.key_type.empty();
         const bool list_keywords =
             node.items || node.min_items || node.max_items;
-        if (node.kind_given && ((scalar_keywords && !node.allows_scalar) ||
-                                (map_keywords && !node.allows_map) ||
-                                (list_keywords && !node.allows_sequence))) {
+        // With "type", each keyword must apply to a kind it allows;
+        // without it, the keywords must all be of one kind.
+        const int kinds_used = static_cast<int>(scalar_keywords) +
+                               static_cast<int>(map_keywords) +
+                               static_cast<int>(list_keywords);
+        const bool misplaced =
+            node.kind_given ? (scalar_keywords && !node.allows_scalar) ||
+                                  (map_keywords && !node.allows_map) ||
+                                  (list_keywords && !node.allows_sequence)
+                            : kinds_used > 1;
+        if (misplaced) {
             return fail(problem,
                         "a keyword that does not apply to the schema's type",
                         where);
         }
         return true;
+    }
+
+    // True if the scalar names of "type" are those the `x-scada-type` is
+    // written as: "integer" for the integer types, "number" (or "integer")
+    // for decimals and numbers, "boolean" for booleans, "number" and
+    // "string" for a number or a percentage or an expression, "string" for
+    // every other type.
+    static bool type_agrees(const SchemaNode& node) {
+        if (node.scalar_type.empty() || node.scalar_kinds.empty()) {
+            return true;
+        }
+        const std::string& type = node.scalar_type;
+        std::vector<std::string_view> allowed;
+        if (type == "integer" || type == "uint64" || type == "power_of_two") {
+            allowed = {"integer"};
+        } else if (type == "decimal" || type == "number") {
+            allowed = {"number", "integer"};
+        } else if (type == "boolean") {
+            allowed = {"boolean"};
+        } else if (type == "number_or_percentage" ||
+                   type == "number_or_expression") {
+            allowed = {"number", "integer", "string"};
+        } else {
+            allowed = {"string"};
+        }
+        return std::ranges::all_of(
+            node.scalar_kinds, [&allowed](const std::string& kind) {
+                return std::ranges::find(allowed, kind) != allowed.end();
+            });
     }
 
     // "minimum" and "maximum" are numbers and apply to number types;
@@ -706,8 +762,9 @@ public:
         ++error_count_;
         if (diagnostics_ != nullptr) {
             diagnostics_->add(std::move(diagnostic));
-        } else if (held_errors_.size() < Diagnostics::REPORTED_LIMIT) {
+        } else {
             held_errors_.push_back(std::move(diagnostic));
+            trim(false);
         }
     }
 
@@ -716,8 +773,17 @@ public:
         if (types_ != nullptr) {
             types_->set(node, type);
         } else {
-            held_types_.emplace_back(node, type);
+            held_types_[node] = type;
         }
+    }
+
+    // True if `node` has a type here.
+    [[nodiscard]] bool typed(NodeId node) const {
+        if (types_ != nullptr) {
+            return types_->of(node) != ScalarType::NONE;
+        }
+        const auto found = held_types_.find(node);
+        return found != held_types_.end() && found->second != ScalarType::NONE;
     }
 
     [[nodiscard]] std::size_t error_count() const noexcept {
@@ -726,6 +792,7 @@ public:
 
     // Takes what the branch `taken` found, as if found here.
     void take(Outcome& taken) {
+        taken.trim(true);
         const std::size_t unlisted =
             taken.error_count_ - taken.held_errors_.size();
         for (Diagnostic& diagnostic : taken.held_errors_) {
@@ -741,10 +808,23 @@ public:
     }
 
 private:
+    // Keeps the first REPORTED_LIMIT held errors in the order of the report
+    // (contract 1.4), as Diagnostics does, once twice that many are held.
+    void trim(bool force) {
+        if (!force && held_errors_.size() < 2 * Diagnostics::REPORTED_LIMIT) {
+            return;
+        }
+        std::stable_sort(held_errors_.begin(), held_errors_.end(),
+                         reported_before);
+        if (held_errors_.size() > Diagnostics::REPORTED_LIMIT) {
+            held_errors_.resize(Diagnostics::REPORTED_LIMIT);
+        }
+    }
+
     Diagnostics* diagnostics_ = nullptr;
     ScalarTypes* types_ = nullptr;
     std::vector<Diagnostic> held_errors_;
-    std::vector<std::pair<NodeId, ScalarType>> held_types_;
+    std::map<NodeId, ScalarType> held_types_;
     std::size_t error_count_ = 0;
 };
 
@@ -1286,7 +1366,11 @@ private:
         // others leaves the typing to them (D-107).
         const bool composed =
             rules.ref || !rules.all_of.empty() || !rules.one_of.empty();
-        const bool own_type = !composed || !rules.scalar_type.empty();
+        // A schema without an `x-scada-type` types a scalar as STRING only if
+        // nothing typed it in this check, so the order of `allOf` parts does
+        // not matter.
+        const bool own_type =
+            !rules.scalar_type.empty() || (!composed && !out.typed(scalar));
         std::optional<ScalarType> type;
         if (own_type) {
             type = type_scalar(rules, scalar, key, out);
@@ -1448,7 +1532,7 @@ private:
         if (value.style == ScalarStyle::PLAIN) {
             if (rules.scalar_type == "decimal") {
                 if (const std::optional<double> decimal =
-                        parse_decimal(value.text)) {
+                        nearest_binary64(value.text)) {
                     number = Number{*decimal};
                     read = NumberRead::NUMBER;
                 }
@@ -1481,7 +1565,19 @@ private:
         const auto parse = [duration](std::string_view text) {
             return duration ? parse_duration_ms(text) : parse_size_bytes(text);
         };
-        const std::optional<std::uint64_t> parsed = parse(value.text);
+        const UnitRead read = duration ? read_duration_ms(value.text)
+                                       : read_size_bytes(value.text);
+        if (read.form == IntegerForm::TOO_LARGE) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be at most " +
+                      (duration ? std::to_string(MAX_DURATION_MS) + "ms"
+                                : std::string(UINT64_MAX_TEXT) + "B"));
+            return std::nullopt;
+        }
+        const std::optional<std::uint64_t> parsed =
+            read.form == IntegerForm::FITS
+                ? std::optional<std::uint64_t>(read.value)
+                : std::nullopt;
         if (!parsed) {
             error(out, CF_BAD_UNIT_VALUE, scalar,
                   quote_text(value.text) + " is not a valid " +

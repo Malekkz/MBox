@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include <ctime>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -193,7 +195,7 @@ TEST(Schema, NamesBreakingTheirGrammarAreCF212) {
     EXPECT_EQ(check(json, "tag: " + std::string(128, 'a') + "\n"),
               // The quoted value is cut at 64 bytes (D-110).
               Lines{"1:6 CF-212: \"" + std::string(64, 'a') +
-                    "...\" is not a valid tag name"});
+                    "\"... is not a valid tag name"});
 }
 
 TEST(Schema, ReservedKeysAndValuesAreCF210) {
@@ -523,14 +525,22 @@ TEST(Schema, TypesBehindReferencesAndCompositions) {
                                        ScalarType::NONE}));
 }
 
-// B2: typed keys are checked with a sorted set. A quadratic check makes the
-// large map 16 times slower than the small one; the bound leaves room for
-// noise and sanitizers, as both maps run in the same build.
+// The processor time of this thread, which other load does not change.
+std::chrono::nanoseconds thread_time() {
+    timespec now{};
+    static_cast<void>(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now));
+    return std::chrono::seconds(now.tv_sec) +
+           std::chrono::nanoseconds(now.tv_nsec);
+}
+
+// B2: typed keys are checked with a sorted set. From 4,096 to 65,536 keys a
+// linearithmic check takes about 17.5 times as long and a quadratic one 256
+// times; the bound sits between, in processor time of this thread.
 TEST(Schema, TypedKeysAreCheckedInLinearithmicTime) {
-    constexpr std::size_t SMALL = 16384;
+    constexpr std::size_t SMALL = 4096;
     constexpr std::size_t LARGE = 65536;
     constexpr int RUNS = 3;
-    constexpr double MAX_RATIO = 10.0;
+    constexpr double MAX_RATIO = 64.0;
     const SchemaSet set = one_schema(R"({ "type": "object",
         "x-scada-key-type": "integer",
         "unevaluatedProperties": { "type": "string" } })");
@@ -549,12 +559,10 @@ TEST(Schema, TypedKeysAreCheckedInLinearithmicTime) {
         auto best = std::chrono::nanoseconds::max();
         for (int run = 0; run < RUNS; ++run) {
             ScalarTypes types(*document);
-            const auto start = std::chrono::steady_clock::now();
+            const auto start = thread_time();
             set.validate(*document, types, "t.schema.json", "f.yaml",
                          diagnostics);
-            best = std::min(
-                best, std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now() - start));
+            best = std::min(best, thread_time() - start);
         }
         EXPECT_EQ(diagnostics.error_count(), 0U);
         return best;
@@ -655,7 +663,7 @@ TEST(Schema, KeysAndValuesAreQuoted) {
               Lines{"1:1 CF-201: unknown key \"\" in f.yaml"});
     EXPECT_EQ(check(json, "d: " + std::string(65000, 'x') + "\n"),
               Lines{"1:4 CF-206: \"" + std::string(64, 'x') +
-                    "...\" is not a valid duration"});
+                    "\"... is not a valid duration"});
 }
 
 // S1: errors outside a `oneOf` go to the diagnostics at once; a branch
@@ -734,6 +742,113 @@ TEST(Schema, ReferenceCyclesAreRefused) {
         Lines{});
     EXPECT_EQ(check(tree, "child:\n  child:\n    x: 1\n"),
               Lines{"3:5 CF-201: unknown key \"x\" in child.child"});
+}
+
+// --- Delta check of #131 ----------------------------------------------------
+
+constexpr std::string_view PARTS_IN_BOTH_ORDERS = R"({
+  "type": "object",
+  "$defs": { "i": { "type": "integer", "x-scada-type": "integer" } },
+  "properties": {
+    "a": { "allOf": [{ "$ref": "#/$defs/i" }, { "enum": ["1", "5"] }] },
+    "b": { "allOf": [{ "enum": ["1", "5"] }, { "$ref": "#/$defs/i" }] },
+    "c": { "allOf": [{ "$ref": "#/$defs/i" }, { "type": "integer" }] },
+    "d": { "allOf": [{ "type": "integer" }, { "$ref": "#/$defs/i" }] }
+  } })";
+
+// 1: a part without `x-scada-type` does not type over a sibling part, in
+// either order.
+TEST(Schema, AllOfPartsTypeTheSameInEitherOrder) {
+    EXPECT_EQ(root_types(std::string(PARTS_IN_BOTH_ORDERS),
+                         "a: 5\nb: 5\nc: 5\nd: 5\n"),
+              std::vector<ScalarType>(4, ScalarType::INTEGER));
+}
+
+// 2: more keyword checks at compile time.
+TEST(Schema, KeyTypesAndTypesAreCheckedAtCompileTime) {
+    for (
+        const char* json : {
+            R"({ "type": "object", "x-scada-key-type": "integer" })",
+            R"({ "type": "object", "x-scada-key-type": "integer", "unevaluatedProperties": false })",
+            R"({ "properties": { "a": {} }, "items": {} })",
+            R"({ "enum": ["a"], "required": ["a"] })",
+            R"({ "type": "integer", "x-scada-type": "duration" })",
+            R"({ "type": "string", "x-scada-type": "integer" })",
+            R"({ "type": "boolean", "x-scada-type": "number" })",
+        }) {
+        std::string problem;
+        const Result<SchemaSet> set = SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = json}}, problem);
+        EXPECT_FALSE(set.ok()) << json;
+    }
+    for (
+        const char* json : {
+            R"({ "type": ["number", "string"], "x-scada-type": "number_or_percentage" })",
+            R"({ "type": "number", "x-scada-type": "decimal" })",
+            R"({ "properties": { "a": {} }, "required": ["a"] })",
+        }) {
+        std::string problem;
+        const Result<SchemaSet> set = SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = json}}, problem);
+        EXPECT_TRUE(set.ok()) << json << ": " << problem;
+    }
+}
+
+// 3: a duration or a size of the form beyond 64 bits is CF-204, not CF-206.
+TEST(Schema, DurationsAndSizesBeyond64BitsAreOutOfRange) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "d": { "type": "string", "x-scada-type": "duration" },
+        "s": { "type": "string", "x-scada-type": "size" } } })";
+    EXPECT_EQ(check(json, "d: 5124095576030431h\n"),
+              Lines{"1:4 CF-204: d must be at most 9223372036854ms"});
+    EXPECT_EQ(check(json, "d: 18446744073709551616ms\n"),
+              Lines{"1:4 CF-204: d must be at most 9223372036854ms"});
+    EXPECT_EQ(check(json, "s: 16777216TiB\n"),
+              Lines{"1:4 CF-204: s must be at most 18446744073709551615B"});
+    // EiB is not a unit of section 2.2: not of the form.
+    EXPECT_EQ(check(json, "s: 16EiB\n"),
+              Lines{"1:4 CF-206: \"16EiB\" is not a valid size"});
+}
+
+// 5 (N1): a decimal key takes any integer or decimal form whose nearest
+// binary64 is finite (D-107).
+TEST(Schema, DecimalKeysTakeTheNearestBinary64) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "gain": { "type": "number", "x-scada-type": "decimal" } } })";
+    EXPECT_EQ(check(json, "gain: 99999999999999999999999\n"), Lines{});
+    EXPECT_EQ(check(json, "gain: 0x10000000000000000\n"), Lines{});
+    EXPECT_EQ(root_types(json, "gain: 99999999999999999999999\n"),
+              std::vector<ScalarType>{ScalarType::DECIMAL});
+    EXPECT_EQ(check(json, "gain: 1e400\n"),
+              Lines{"1:7 CF-203: gain must be a decimal number"});
+}
+
+// 6 (N2): a capped branch keeps the first errors in report order.
+TEST(Schema, ACappedBranchKeepsTheFirstErrorsInReportOrder) {
+    constexpr std::size_t BAD_ITEMS = 1500;
+    const SchemaSet set = one_schema(R"({ "oneOf": [
+        { "type": "object", "required": ["need"], "properties": {
+            "list": { "type": "array", "items": { "type": "integer", "x-scada-type": "integer" } } } },
+        { "type": "string" } ] })");
+    std::string yaml = "list:\n";
+    for (std::size_t i = 0; i < BAD_ITEMS; ++i) {
+        yaml += "  - x\n";
+    }
+    Diagnostics diagnostics;
+    const std::optional<Document> document =
+        parse_yaml(yaml, "f.yaml", diagnostics);
+    if (!document.has_value()) {
+        ADD_FAILURE() << "no document";
+        return;
+    }
+    ScalarTypes types(*document);
+    set.validate(*document, types, "t.schema.json", "f.yaml", diagnostics);
+    Report report;
+    diagnostics.move_into(report);
+    EXPECT_EQ(report.error_count, BAD_ITEMS + 1);
+    ASSERT_FALSE(report.errors.empty());
+    EXPECT_EQ(format(report.errors.front()),
+              "f.yaml:1:1: error CF-202: f.yaml needs need");
 }
 
 }  // namespace

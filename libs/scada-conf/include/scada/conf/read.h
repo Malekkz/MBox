@@ -24,14 +24,16 @@ namespace scada::conf {
 [[nodiscard]] Result<std::uint64_t> to_uint64(const Document& document,
                                               NodeId node);
 
-// A plain number, integer or decimal, as the nearest binary64.
+// A plain number of the integer form (any size) or the decimal form, as the
+// nearest binary64; INVALID_ARGUMENT for one that is not finite or rounds to
+// zero, as stage 3 refuses it (CF-203).
 [[nodiscard]] Result<double> to_decimal(const Document& document, NodeId node);
 
 // Plain `true` or `false`.
 [[nodiscard]] Result<bool> to_bool(const Document& document, NodeId node);
 
 // A duration of section 2.2 (`100ms`, `5s`), plain or quoted, in
-// nanoseconds.
+// nanoseconds; OUT_OF_RANGE for one of the form beyond int64 nanoseconds.
 [[nodiscard]] Result<std::int64_t> to_duration_ns(const Document& document,
                                                   NodeId node);
 

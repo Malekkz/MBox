@@ -134,14 +134,15 @@ bool has_nonzero_digit(std::string_view text) noexcept {
 }
 
 // Splits `text` into a whole number and a unit from `units`, each with its
-// factor; the value times the factor, or nothing on a bad form or overflow.
+// factor: the value times the factor; TOO_LARGE if it is of the form but
+// passes uint64; NOT_INTEGER for another form.
 template <std::size_t N>
-std::optional<std::uint64_t> number_with_unit(
+UnitRead number_with_unit(
     std::string_view text,
     const std::array<std::pair<std::string_view, std::uint64_t>, N>& units) {
     const std::size_t digits = whole_number_length(text);
     if (digits == 0) {
-        return std::nullopt;
+        return {};
     }
     const std::string_view unit = text.substr(digits);
     for (const auto& [name, factor] : units) {
@@ -152,11 +153,11 @@ std::optional<std::uint64_t> number_with_unit(
             decimal_value(text.substr(0, digits));
         if (!value ||
             *value > std::numeric_limits<std::uint64_t>::max() / factor) {
-            return std::nullopt;
+            return UnitRead{.form = IntegerForm::TOO_LARGE, .value = 0};
         }
-        return *value * factor;
+        return UnitRead{.form = IntegerForm::FITS, .value = *value * factor};
     }
-    return std::nullopt;
+    return {};
 }
 
 }  // namespace
@@ -222,6 +223,29 @@ std::optional<Integer> parse_integer(std::string_view text) {
     return read.value;
 }
 
+std::optional<double> nearest_binary64(std::string_view text) {
+    constexpr double HEX_BASE = 16.0;
+    const IntegerRead integer = read_integer(text);
+    if (integer.form == IntegerForm::FITS) {
+        const auto magnitude = static_cast<double>(integer.value.magnitude);
+        return integer.value.negative ? -magnitude : magnitude;
+    }
+    if (integer.form == IntegerForm::TOO_LARGE && text.starts_with("0x")) {
+        // Rounded once per digit; the digits past the first 16 only scale
+        // the value, which is beyond 2^64 and has a 53-bit significand.
+        double value = 0.0;
+        for (const char chr : text.substr(2)) {
+            value = (value * HEX_BASE) +
+                    static_cast<double>(hex_digit(chr).value_or(0));
+        }
+        if (!std::isfinite(value)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+    return parse_decimal(text);
+}
+
 bool has_decimal_form(std::string_view text) noexcept {
     return is_decimal_text(text);
 }
@@ -271,6 +295,22 @@ std::optional<bool> parse_boolean(std::string_view text) {
 }
 
 std::optional<std::uint64_t> parse_duration_ms(std::string_view text) {
+    const UnitRead read = read_duration_ms(text);
+    if (read.form != IntegerForm::FITS) {
+        return std::nullopt;
+    }
+    return read.value;
+}
+
+std::optional<std::uint64_t> parse_size_bytes(std::string_view text) {
+    const UnitRead read = read_size_bytes(text);
+    if (read.form != IntegerForm::FITS) {
+        return std::nullopt;
+    }
+    return read.value;
+}
+
+UnitRead read_duration_ms(std::string_view text) {
     constexpr std::uint64_t SECOND = 1000;
     constexpr std::uint64_t MINUTE = 60 * SECOND;
     constexpr std::uint64_t HOUR = 60 * MINUTE;
@@ -288,7 +328,7 @@ std::optional<std::uint64_t> parse_duration_ms(std::string_view text) {
     return number_with_unit(text, UNITS);
 }
 
-std::optional<std::uint64_t> parse_size_bytes(std::string_view text) {
+UnitRead read_size_bytes(std::string_view text) {
     constexpr std::uint64_t KIB = 1024;
     constexpr std::uint64_t MIB = KIB * KIB;
     constexpr std::uint64_t GIB = KIB * MIB;

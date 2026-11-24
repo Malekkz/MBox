@@ -155,10 +155,12 @@ std::string quote_text(std::string_view text, std::size_t max_bytes) {
         }
         out.push_back(chr);
     }
+    out.push_back('"');
+    // After the quote, so that a value that ends in `...` is not taken for a
+    // cut one.
     if (cut) {
         out += ELLIPSIS;
     }
-    out.push_back('"');
     return out;
 }
 

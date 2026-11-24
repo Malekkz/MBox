@@ -1,0 +1,8 @@
+i: 1
+either: { a: 7 }
+both: { x: 2, y: ok }
+ints: { -5: a_b }
+flags: { false: x }
+ids: { pump_1: 3 }
+d: 5s
+s: 1KiB

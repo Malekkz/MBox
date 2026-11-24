@@ -80,15 +80,9 @@ Result<double> to_decimal(const Document& document, NodeId node) {
     if (!text) {
         return not_of_form();
     }
-    const IntegerRead integer = read_integer(*text);
-    if (integer.form == IntegerForm::TOO_LARGE) {
-        return out_of_range();
-    }
-    if (integer.form == IntegerForm::FITS) {
-        const auto magnitude = static_cast<double>(integer.value.magnitude);
-        return integer.value.negative ? -magnitude : magnitude;
-    }
-    const std::optional<double> decimal = parse_decimal(*text);
+    // Any scalar of the integer or decimal form whose nearest binary64 is
+    // finite: the written form is not kept here (D-107).
+    const std::optional<double> decimal = nearest_binary64(*text);
     if (!decimal) {
         return not_of_form();
     }
@@ -109,11 +103,14 @@ Result<std::int64_t> to_duration_ns(const Document& document, NodeId node) {
     if (document.kind(node) != NodeKind::SCALAR) {
         return not_of_form();
     }
-    const std::optional<std::uint64_t> milliseconds =
-        parse_duration_ms(document.text(node));
-    if (!milliseconds) {
+    const UnitRead read = read_duration_ms(document.text(node));
+    if (read.form == IntegerForm::NOT_INTEGER) {
         return not_of_form();
     }
+    if (read.form == IntegerForm::TOO_LARGE) {
+        return out_of_range();
+    }
+    const std::optional<std::uint64_t> milliseconds = read.value;
     constexpr auto LIMIT = static_cast<std::uint64_t>(
         std::numeric_limits<std::int64_t>::max() / NANOSECONDS_PER_MILLISECOND);
     if (*milliseconds > LIMIT) {

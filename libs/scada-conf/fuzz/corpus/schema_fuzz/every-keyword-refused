@@ -1,0 +1,24 @@
+i: 9
+u: -1
+p2: 3
+dec: 1e400
+num: 18446744073709551616
+b: yes
+d: 2h
+s: 2GB
+pc: 101%
+np: abc
+ne: 1e400
+t: ""
+names: []
+mode: off
+one: 2
+old: 1
+pw: secret
+url: https://x.example.invalid
+both: { x: 1, y: Bad, z: 0 }
+either: [Bad]
+ints: { 0x1: a, 1: b, x: c }
+flags: { true: a, yes: b }
+ids: { Bad: 1 }
+extra: 1

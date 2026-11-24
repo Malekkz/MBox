@@ -75,8 +75,9 @@ TEST(Read, Int64) {
               StatusCode::OUT_OF_RANGE);
     EXPECT_EQ(code_of(to_uint64(huge.document(), huge.value())),
               StatusCode::OUT_OF_RANGE);
-    EXPECT_EQ(code_of(to_decimal(huge.document(), huge.value())),
-              StatusCode::OUT_OF_RANGE);
+    // A decimal read takes any integer of the form as its nearest binary64
+    // (N1 of the delta check of #131).
+    EXPECT_EQ(to_decimal(huge.document(), huge.value()).value(), 1e20);
     EXPECT_EQ(code_of(to_raw_pattern(huge.document(), huge.value(), 64)),
               StatusCode::OUT_OF_RANGE);
     EXPECT_TRUE(is_integer_form(huge.document(), huge.value()));
@@ -128,6 +129,10 @@ TEST(Read, DurationInNanoseconds) {
     EXPECT_EQ(code_of(to_duration_ns(bad.document(), bad.value())),
               StatusCode::INVALID_ARGUMENT);
     // 300 years do not fit int64 nanoseconds.
+    // Beyond uint64 milliseconds it is still of the form: OUT_OF_RANGE.
+    const OneValue beyond("18446744073709551616ms");
+    EXPECT_EQ(code_of(to_duration_ns(beyond.document(), beyond.value())),
+              StatusCode::OUT_OF_RANGE);
     const OneValue long_time("300y");
     EXPECT_EQ(code_of(to_duration_ns(long_time.document(), long_time.value())),
               StatusCode::OUT_OF_RANGE);

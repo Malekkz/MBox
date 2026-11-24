@@ -53,6 +53,12 @@ struct IntegerRead {
 // refused (1.2: `1e-400`).
 [[nodiscard]] std::optional<double> parse_decimal(std::string_view text);
 
+// The nearest binary64 of a text of the integer form (any size, hex too) or
+// of the decimal form, for `decimal` keys, which do not keep the written form
+// (D-107). Nothing for another text, or a value that is not finite or rounds
+// to zero.
+[[nodiscard]] std::optional<double> nearest_binary64(std::string_view text);
+
 // True if `text` matches the decimal grammar above, whatever its value: an
 // integer of the decimal form matches too.
 [[nodiscard]] bool has_decimal_form(std::string_view text) noexcept;
@@ -68,14 +74,28 @@ using Number = std::variant<Integer, double>;
 // `true` or `false` exactly.
 [[nodiscard]] std::optional<bool> parse_boolean(std::string_view text);
 
+// A duration or a size as read: of its form or not, and if of its form,
+// within uint64 or not, as for integers (D-107).
+struct UnitRead {
+    IntegerForm form = IntegerForm::NOT_INTEGER;
+    // The value when `form` is FITS.
+    std::uint64_t value = 0;
+};
+
 // A duration of section 2.2: a whole number without sign (`0` or no leading
-// zero) and one of `ms`, `s`, `m`, `h`, `d`, `y` (365 days). In milliseconds;
-// a value beyond uint64 is refused.
+// zero) and one of `ms`, `s`, `m`, `h`, `d`, `y` (365 days), in milliseconds.
+// TOO_LARGE for one of the form beyond uint64 milliseconds.
+[[nodiscard]] UnitRead read_duration_ms(std::string_view text);
+
+// The milliseconds of a duration that fits; nothing for any other text.
 [[nodiscard]] std::optional<std::uint64_t> parse_duration_ms(
     std::string_view text);
 
 // A size of section 2.2: a whole number and one of `B`, `KiB`, `MiB`, `GiB`,
-// `TiB`. In bytes; a value beyond uint64 is refused.
+// `TiB`, in bytes. TOO_LARGE for one of the form beyond uint64 bytes.
+[[nodiscard]] UnitRead read_size_bytes(std::string_view text);
+
+// The bytes of a size that fits; nothing for any other text.
 [[nodiscard]] std::optional<std::uint64_t> parse_size_bytes(
     std::string_view text);
 
