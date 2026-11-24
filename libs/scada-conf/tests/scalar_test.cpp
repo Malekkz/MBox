@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <variant>
 
@@ -80,6 +81,25 @@ TEST(Scalar, IntegersOfTheFormThatAreTooLarge) {
     EXPECT_FALSE(parse_integer("18446744073709551616").has_value());
     EXPECT_TRUE(has_decimal_form("1e400"));
     EXPECT_FALSE(parse_decimal("1e400").has_value());
+}
+
+// A hexadecimal integer beyond 64 bits is rounded once, to nearest, ties
+// to even (the lead's follow-up on #131).
+TEST(Scalar, LargeHexIntegersAreCorrectlyRounded) {
+    constexpr double TWO_64 = 18446744073709551616.0;
+    constexpr double ULP_AT_TWO_64 = 4096.0;
+    // 2^64 + 2^11 is half-way between 2^64 and 2^64 + 2^12: ties to even.
+    EXPECT_EQ(nearest_binary64("0x10000000000000800"), TWO_64);
+    // One more unit far below breaks the tie upwards. Rounding at each
+    // digit would give 2^64.
+    EXPECT_EQ(nearest_binary64("0x10000000000000801"), TWO_64 + ULP_AT_TWO_64);
+    // The same, with the lowest digit far down.
+    EXPECT_EQ(nearest_binary64("0x1000000000000080000001"),
+              (TWO_64 + ULP_AT_TWO_64) * 1048576.0);
+    EXPECT_EQ(nearest_binary64("0x00010000000000000800"), TWO_64);
+    // Beyond binary64: nothing.
+    EXPECT_FALSE(nearest_binary64("0x1" + std::string(256, '0')));
+    EXPECT_TRUE(nearest_binary64("0x1" + std::string(255, '0')));
 }
 
 TEST(Scalar, Decimals) {

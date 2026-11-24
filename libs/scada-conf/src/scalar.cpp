@@ -224,20 +224,38 @@ std::optional<Integer> parse_integer(std::string_view text) {
 }
 
 std::optional<double> nearest_binary64(std::string_view text) {
-    constexpr double HEX_BASE = 16.0;
     const IntegerRead integer = read_integer(text);
     if (integer.form == IntegerForm::FITS) {
         const auto magnitude = static_cast<double>(integer.value.magnitude);
         return integer.value.negative ? -magnitude : magnitude;
     }
     if (integer.form == IntegerForm::TOO_LARGE && text.starts_with("0x")) {
-        // Rounded once per digit; the digits past the first 16 only scale
-        // the value, which is beyond 2^64 and has a 53-bit significand.
-        double value = 0.0;
-        for (const char chr : text.substr(2)) {
-            value = (value * HEX_BASE) +
-                    static_cast<double>(hex_digit(chr).value_or(0));
+        // Correctly rounded: the top 64 bits, with the lowest set when any
+        // digit below them is not 0 (a sticky bit, eight bits below the
+        // rounding position of binary64), rounded once, then scaled by a
+        // power of two, which is exact.
+        constexpr std::size_t TOP_DIGITS = 16;
+        constexpr int BITS_PER_DIGIT = 4;
+        std::string_view digits = text.substr(2);
+        digits.remove_prefix(
+            std::min(digits.find_first_not_of('0'), digits.size()));
+        std::uint64_t top = 0;
+        for (const char chr : digits.substr(0, TOP_DIGITS)) {
+            top = (top << BITS_PER_DIGIT) | hex_digit(chr).value_or(0);
         }
+        const std::string_view rest = digits.substr(TOP_DIGITS);
+        // Past 2^1024 no binary64 is finite; this also keeps the shift in
+        // range for any length of text.
+        constexpr std::size_t MAX_REST_DIGITS = 1024 / BITS_PER_DIGIT;
+        if (rest.size() > MAX_REST_DIGITS) {
+            return std::nullopt;
+        }
+        if (rest.find_first_not_of('0') != std::string_view::npos) {
+            top |= 1U;
+        }
+        const double value =
+            std::ldexp(static_cast<double>(top),
+                       static_cast<int>(rest.size()) * BITS_PER_DIGIT);
         if (!std::isfinite(value)) {
             return std::nullopt;
         }

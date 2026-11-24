@@ -1,0 +1,20 @@
+template: inverter
+protocol: modbus
+points:
+  - name: power
+    value_type: int64
+    address: { table: input, register: 10, type: float32 }
+  - name: energy
+    counter: { limit: 1000000, at_limit: wrap }
+    address: { table: input, register: 12, type: float64 }
+  - name: mode
+    value_type: int64
+    enum: { 0: off, 1: on }
+    address: { table: input, register: 16, type: float32 }
+  - name: breaker
+    value_type: int64
+    kind: double_point
+    address: { table: input, register: 18, type: float32 }
+  - name: voltage
+    value_type: float64
+    address: { table: input, register: 20, type: float32 }

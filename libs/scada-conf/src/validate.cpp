@@ -25,6 +25,7 @@ constexpr std::uint16_t CF_STRUCTURED_TEXT = 920;
 constexpr std::uint16_t CF_FILE_NAME = 102;
 constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_FORMAT = 211;
+constexpr std::uint16_t CF_VALUE_TYPE = 504;
 constexpr std::uint16_t CF_INTEGER_SCALING = 517;
 
 // The tree format this version reads (contract section 11).
@@ -214,6 +215,56 @@ void check_integer_scaling(const ParsedFile& file, NodeId point,
     }
 }
 
+// CF-504 (contract 4.7; D-134) where one point object gives both keys: an
+// integer value type, or a counter, on a floating raw type (the address's
+// `type`, Annex A.2). An enumeration and a double point read a floating raw
+// value as a code (5.3, 5.5) and are not refused.
+void check_raw_value_type(const ParsedFile& file, NodeId point,
+                          const std::string& name, Diagnostics& diagnostics) {
+    const Document& document = file.document;
+    const std::optional<NodeId> address = map_entry(document, point, "address");
+    if (!address) {
+        return;
+    }
+    const std::optional<NodeId> raw = document.find(*address, "type");
+    if (!raw) {
+        return;
+    }
+    const std::string raw_type(document.text(*raw));
+    if (raw_type != "float32" && raw_type != "float64") {
+        return;
+    }
+    const std::optional<NodeId> kind = document.find(point, "kind");
+    const std::string kind_text(kind ? document.text(*kind) : "");
+    if (document.find(point, "enum") || kind_text == "double_point") {
+        return;
+    }
+    if (const std::optional<NodeId> value_type =
+            document.find(point, "value_type")) {
+        const std::string type(document.text(*value_type));
+        if (type == "int64" || type == "uint64") {
+            diagnostics.error(
+                CF_VALUE_TYPE, document.location(*value_type),
+                name + ": value_type " + type + " cannot hold " + raw_type);
+        }
+    }
+    std::optional<NodeId> counter_at = document.find(point, "counter");
+    if (!counter_at && kind_text == "counter") {
+        counter_at = kind;
+    }
+    if (counter_at) {
+        diagnostics.error(CF_VALUE_TYPE, document.location(*counter_at),
+                          name + ": a counter cannot hold " + raw_type);
+    }
+}
+
+// The rules of stage 3 for one point object (CF-504, CF-517).
+void check_point(const ParsedFile& file, NodeId point, const std::string& name,
+                 Diagnostics& diagnostics) {
+    check_integer_scaling(file, point, name, diagnostics);
+    check_raw_value_type(file, point, name, diagnostics);
+}
+
 // The name a message gives a point object: its `name`, else "point".
 std::string point_label(const Document& document, NodeId point) {
     const std::optional<NodeId> name = document.find(point, "name");
@@ -231,8 +282,8 @@ void check_points(const ParsedFile& file, NodeId owner,
     const auto each_point = [&](NodeId list) {
         for (const NodeId point : document.items(list)) {
             if (document.kind(point) == NodeKind::MAP) {
-                check_integer_scaling(file, point, point_label(document, point),
-                                      diagnostics);
+                check_point(file, point, point_label(document, point),
+                            diagnostics);
             }
         }
     };
@@ -249,15 +300,14 @@ void check_points(const ParsedFile& file, NodeId owner,
     }
     if (const std::optional<NodeId> defaults =
             map_entry(document, owner, "defaults")) {
-        check_integer_scaling(file, *defaults, "defaults", diagnostics);
+        check_point(file, *defaults, "defaults", diagnostics);
     }
     if (const std::optional<NodeId> overrides =
             map_entry(document, owner, "overrides")) {
         for (const Entry& entry : document.entries(*overrides)) {
             if (document.kind(entry.value) == NodeKind::MAP) {
-                check_integer_scaling(file, entry.value,
-                                      quote_text(document.text(entry.key)),
-                                      diagnostics);
+                check_point(file, entry.value,
+                            quote_text(document.text(entry.key)), diagnostics);
             }
         }
     }

@@ -33,7 +33,10 @@ built in slices; this README lists what each part does now.
   checks each file against its JSON Schema file under `schemas/` (Annex C),
   with CF-2xx codes; also CF-102 (a file name and its name key), CF-111 for
   keys equal once typed, CF-211 (`format`) and the conditional
-  `time.sync.servers` of section 3. Stage 3 checks every file that parsed,
+  `time.sync.servers` of section 3, and CF-504 and CF-517 within one point
+  object. Validation checks one document node at most 25 times with the
+  built-in schemas; a schema set that could pass 64 (nested `oneOf` or
+  `allOf`) does not compile (D-107). Stage 3 checks every file that parsed,
   also when another did not.
 
 Every file type has its schema: `system`, `areas`, `enums`, `logging`,

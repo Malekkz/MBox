@@ -69,6 +69,10 @@ constexpr std::uint16_t CF_SECRET = 214;
 constexpr std::string_view INT64_MIN_TEXT = "-9223372036854775808";
 constexpr std::string_view INT64_MAX_TEXT = "9223372036854775807";
 constexpr std::string_view UINT64_MAX_TEXT = "18446744073709551615";
+// The most times validation may check one document node: the product of
+// nested `oneOf` branches and `allOf` parts along a schema path (D-107).
+constexpr std::size_t MAX_CHECKS_PER_NODE = 64;
+
 // The longest duration whose nanoseconds fit int64 (D-107), in ms.
 constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
 
@@ -182,6 +186,8 @@ struct CompiledSchemas {
     std::vector<SchemaNode> nodes;
     // "<file>" and "<file>#/$defs/<name>" to the schema they name.
     std::map<std::string, SchemaId, std::less<>> names;
+    // The most times validation checks one document node (D-107).
+    std::size_t checks_per_node = 1;
 };
 
 namespace {
@@ -233,7 +239,85 @@ public:
             }
             node.ref = found->second;
         }
-        return refuse_cycles(problem);
+        return refuse_cycles(problem) && bound_checks(problem);
+    }
+
+    // Bounds the work of validation (D-107). `check` checks a node once for
+    // each schema of its "same node" closure ($ref, allOf, oneOf: every
+    // branch in full), and each schema of the closure checks a child with
+    // its own property, item or unevaluated schema. So with
+    //   g(s) = 1 + the g of the closure's targets of s,
+    //   D(s) = the largest B of the schemas below s itself
+    //          + the D of the closure's targets of s,
+    //   B(s) = max(g(s), D(s)),
+    // a document node is checked at most B(root) times. B is found as a
+    // fixed point; a set whose B passes MAX_CHECKS_PER_NODE, a recursive one
+    // through a oneOf or allOf included, does not compile.
+    bool bound_checks(std::string& problem) const {
+        const std::vector<SchemaNode>& nodes = out_->nodes;
+        const std::size_t count = nodes.size();
+        const std::size_t cap = MAX_CHECKS_PER_NODE + 1;
+        std::vector<std::size_t> same(count, 1);
+        std::vector<std::size_t> below(count, 0);
+        std::vector<std::size_t> bound(count, 1);
+        bool changed = true;
+        // Each pass settles at least one more level; more passes than
+        // schemas mean the bound grows without end.
+        for (std::size_t pass = 0; changed && pass <= count + 1; ++pass) {
+            changed = false;
+            for (SchemaId id = 0; id < count; ++id) {
+                std::size_t checks = 1;
+                std::size_t deeper = largest_below(nodes[id], bound);
+                for (const SchemaId target : closure_edges(nodes[id])) {
+                    checks = std::min(checks + same[target], cap);
+                    deeper = std::min(deeper + below[target], cap);
+                }
+                const std::size_t total = std::max(checks, deeper);
+                changed = changed || checks != same[id] ||
+                          deeper != below[id] || total != bound[id];
+                same[id] = checks;
+                below[id] = deeper;
+                bound[id] = total;
+            }
+        }
+        const std::size_t worst =
+            count == 0 ? 1 : *std::ranges::max_element(bound);
+        if (changed || worst > MAX_CHECKS_PER_NODE) {
+            problem = "the schemas could check one node more than " +
+                      std::to_string(MAX_CHECKS_PER_NODE) +
+                      " times (nested oneOf or allOf)";
+            return false;
+        }
+        out_->checks_per_node = worst;
+        return true;
+    }
+
+    // The largest bound of the schemas that `node` itself checks a child
+    // with: its properties, items and unevaluated properties; 0 if none.
+    static std::size_t largest_below(const SchemaNode& node,
+                                     const std::vector<std::size_t>& bound) {
+        std::size_t largest = 0;
+        for (const auto& property : node.properties) {
+            largest = std::max(largest, bound[property.second]);
+        }
+        if (node.items) {
+            largest = std::max(largest, bound[*node.items]);
+        }
+        if (node.unevaluated == Unevaluated::SCHEMA) {
+            largest = std::max(largest, bound[node.unevaluated_schema]);
+        }
+        return largest;
+    }
+
+    // The schemas checked on the same document node as `node`.
+    static std::vector<SchemaId> closure_edges(const SchemaNode& node) {
+        std::vector<SchemaId> out;
+        if (node.ref) {
+            out.push_back(*node.ref);
+        }
+        out.insert(out.end(), node.all_of.begin(), node.all_of.end());
+        out.insert(out.end(), node.one_of.begin(), node.one_of.end());
+        return out;
     }
 
     // A "$ref", "allOf" or "oneOf" chain that comes back to itself would
@@ -2023,6 +2107,10 @@ const SchemaSet& SchemaSet::builtin() {
         return std::move(compiled).value();
     }();
     return INSTANCE;
+}
+
+std::size_t SchemaSet::checks_per_node() const noexcept {
+    return compiled_->checks_per_node;
 }
 
 bool SchemaSet::has(std::string_view schema_file) const {

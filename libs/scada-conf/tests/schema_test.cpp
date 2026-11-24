@@ -878,5 +878,54 @@ TEST(Schema, SpecialTypesFollowTheIntegerRules) {
                                        ScalarType::INTEGER}));
 }
 
+// A `oneOf` of four branches, nested `depth` times around an integer.
+std::string nested_one_of(int depth) {
+    std::string nested = R"({ "type": "integer" })";
+    constexpr int BRANCHES = 4;
+    for (int level = 0; level < depth; ++level) {
+        std::string next = R"({ "oneOf": [ )";
+        for (int branch = 0; branch < BRANCHES; ++branch) {
+            next += branch == 0 ? "" : ", ";
+            next += nested;
+        }
+        next += " ] }";
+        nested = std::move(next);
+    }
+    return nested;
+}
+
+// The bound on nested `oneOf` and `allOf` (D-107): the built-in schemas
+// check one node at most 25 times; a set that could pass 64 does not
+// compile, nor a recursion through a `oneOf`.
+TEST(Schema, NestedOneOfIsBounded) {
+    constexpr std::size_t BUILTIN_CHECKS = 25;
+    EXPECT_EQ(SchemaSet::builtin().checks_per_node(), BUILTIN_CHECKS);
+    // 4 x 4 x 4 branches, each also checked by the level above: more than
+    // 64 checks of the innermost node.
+    const std::string nested = nested_one_of(3);
+    std::string problem;
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = nested}}, problem)
+            .ok());
+    EXPECT_NE(problem.find("more than 64 times"), std::string::npos) << problem;
+    // Two levels of four: 4 + 4 x 4 + 1 checks at most, within the bound.
+    const std::string two_levels =
+        R"({ "oneOf": [ { "oneOf": [ {}, {}, {}, {} ] }, {}, {}, {} ] })";
+    const Result<SchemaSet> fits = SchemaSet::compile(
+        {SchemaSource{.name = "t.schema.json", .text = two_levels}}, problem);
+    ASSERT_TRUE(fits.ok()) << problem;
+    EXPECT_LE(fits.value().checks_per_node(), 64U);
+    // A recursion down the document through a `oneOf` multiplies at every
+    // level: refused.
+    const std::string recursive = R"({ "$ref": "#/$defs/n", "$defs": { "n": {
+        "oneOf": [ { "type": "object", "properties": { "c": { "$ref": "#/$defs/n" } } },
+                   { "type": "object", "properties": { "d": { "$ref": "#/$defs/n" } } } ] } } })";
+    EXPECT_FALSE(
+        SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = recursive}}, problem)
+            .ok());
+}
+
 }  // namespace
 }  // namespace scada::conf
