@@ -4,24 +4,23 @@
 
 #include "scada/conf/expand.h"
 
+#include "config_eval.h"
+#include "expression_site.h"
+#include "expression_types.h"
+#include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
-#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
-#include "config_eval.h"
-#include "expression_site.h"
-#include "expression_types.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -66,6 +65,9 @@ constexpr std::size_t MAX_TAG_NAME_BYTES = 127;
 // A value while it is merged: a copy of a parsed node, or a computed scalar.
 struct Value;
 
+// Member and Value hold each other: their copies recurse, bounded by the
+// nesting limit of 32 (contract 1.3).
+// NOLINTNEXTLINE(misc-no-recursion)
 struct Member {
     std::string key;
     const CheckedFile* key_file = nullptr;
@@ -73,6 +75,10 @@ struct Member {
     std::vector<Value> value;  // exactly one; a vector keeps Value incomplete
 };
 
+// A plain aggregate that the merge reads and writes field by field; its
+// member functions are lookups, not an interface to keep it consistent.
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes)
+// NOLINTNEXTLINE(misc-no-recursion): see Member
 struct Value {
     NodeKind kind = NodeKind::MAP;
     // Where it was written (for a computed scalar, its expression).
@@ -113,8 +119,8 @@ struct Value {
     }
 
     void erase(std::string_view key) {
-        std::erase_if(members,
-                      [key](const Member& member) { return member.key == key; });
+        std::erase_if(
+            members, [key](const Member& member) { return member.key == key; });
     }
 
     [[nodiscard]] std::string_view scalar_text() const {
@@ -132,6 +138,7 @@ struct Value {
         return file->document->location(node);
     }
 };
+// NOLINTEND(misc-non-private-member-variables-in-classes)
 
 // A copy of `node` of `file`.
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
@@ -141,11 +148,11 @@ Value copy_of(const CheckedFile& file, NodeId node) {
     value.kind = document.kind(node);
     if (value.kind == NodeKind::MAP) {
         for (const Entry& entry : document.entries(node)) {
-            value.members.push_back(Member{
-                .key = std::string(document.text(entry.key)),
-                .key_file = &file,
-                .key_node = entry.key,
-                .value = {copy_of(file, entry.value)}});
+            value.members.push_back(
+                Member{.key = std::string(document.text(entry.key)),
+                       .key_file = &file,
+                       .key_node = entry.key,
+                       .value = {copy_of(file, entry.value)}});
         }
     } else if (value.kind == NodeKind::SEQUENCE) {
         for (const NodeId item : document.items(node)) {
@@ -231,29 +238,30 @@ void merge(Value& into, const Value& over, std::string_view parent) {
 // True if `name` matches `pattern` (2.5): `*` any characters within one
 // segment, `?` one character of a segment.
 bool matches(std::string_view pattern, std::string_view name) {
-    std::size_t p = 0;
-    std::size_t n = 0;
+    std::size_t cursor = 0;
+    std::size_t pos = 0;
     std::size_t star = std::string_view::npos;
     std::size_t resume = 0;
-    while (n < name.size()) {
-        if (p < pattern.size() &&
-            (pattern[p] == name[n] || (pattern[p] == '?' && name[n] != '.'))) {
-            ++p;
-            ++n;
-        } else if (p < pattern.size() && pattern[p] == '*') {
-            star = p++;
-            resume = n;
+    while (pos < name.size()) {
+        if (cursor < pattern.size() &&
+            (pattern[cursor] == name[pos] ||
+             (pattern[cursor] == '?' && name[pos] != '.'))) {
+            ++cursor;
+            ++pos;
+        } else if (cursor < pattern.size() && pattern[cursor] == '*') {
+            star = cursor++;
+            resume = pos;
         } else if (star != std::string_view::npos && name[resume] != '.') {
-            p = star + 1;
-            n = ++resume;
+            cursor = star + 1;
+            pos = ++resume;
         } else {
             return false;
         }
     }
-    while (p < pattern.size() && pattern[p] == '*') {
-        ++p;
+    while (cursor < pattern.size() && pattern[cursor] == '*') {
+        ++cursor;
     }
-    return p == pattern.size();
+    return cursor == pattern.size();
 }
 
 // --- Parameters --------------------------------------------------------------
@@ -368,7 +376,7 @@ private:
                     continue;
                 }
                 std::optional<Device> expanded = expand_device(file, device);
-                if (expanded) {
+                if (expanded && instance_) {
                     channel.devices.push_back(std::move(*expanded));
                     channel.instances.push_back(*instance_);
                 }
@@ -379,8 +387,7 @@ private:
         instance_.reset();
     }
 
-    std::optional<Device> expand_device(const CheckedFile& file,
-                                        NodeId node) {
+    std::optional<Device> expand_device(const CheckedFile& file, NodeId node) {
         const Value written = copy_of(file, node);
         const Value* name = written.find("name");
         if (name == nullptr) {
@@ -434,7 +441,8 @@ private:
             if (std::ranges::find(chain, file) != chain.end() ||
                 chain.size() > MAX_PARENTS) {
                 error(CF_EXTENDS, named_by,
-                      "template " + quote_text(chain.front()->source->path_class.stem) +
+                      "template " +
+                          quote_text(chain.front()->source->path_class.stem) +
                           ": extends " +
                           (chain.size() > MAX_PARENTS
                                ? std::string("is deeper than 4 parents")
@@ -481,16 +489,16 @@ private:
             const std::string child = protocol_of(*chain[i]);
             if (!parent.empty() && parent != child) {
                 const Document& document = *chain[i]->document;
-                const NodeId key = *document.find(document.root(), "extends");
+                const NodeId key = document.find(document.root(), "extends")
+                                       .value_or(document.root());
                 error_at(CF_MIXED_TEMPLATES, *chain[i], key,
                          "template " +
                              quote_text(chain[i]->source->path_class.stem) +
                              ": " +
-                             (child.empty()
-                                  ? "a base template cannot extend a "
-                                    "protocol template"
-                                  : "a template cannot extend one of "
-                                    "another protocol"));
+                             (child.empty() ? "a base template cannot extend a "
+                                              "protocol template"
+                                            : "a template cannot extend one of "
+                                              "another protocol"));
                 return false;
             }
         }
@@ -567,9 +575,11 @@ private:
             type != nullptr ? std::string(type->scalar_text()) : std::string();
         declared.file = member.key_file;
         declared.declaration = member.key_node;
-        const auto read = [&spec](std::string_view key) -> std::optional<Value> {
+        const auto read =
+            [&spec](std::string_view key) -> std::optional<Value> {
             const Value* value = spec.find(key);
-            return value ? std::optional<Value>(*value) : std::nullopt;
+            return value != nullptr ? std::optional<Value>(*value)
+                                    : std::nullopt;
         };
         declared.default_value = read("default");
         declared.min = read("min");
@@ -618,7 +628,7 @@ private:
             }
         }
         for (const auto& [name, declared] : declarations_) {
-            const Value* value = given ? given->find(name) : nullptr;
+            const Value* value = given != nullptr ? given->find(name) : nullptr;
             if (value == nullptr && declared.default_value) {
                 value = &*declared.default_value;
             }
@@ -628,8 +638,8 @@ private:
                          "parameter " + name);
                 continue;
             }
-            std::optional<ConfigValue> bound = parameter_value(name, declared,
-                                                               *value);
+            std::optional<ConfigValue> bound =
+                parameter_value(name, declared, *value);
             if (bound) {
                 params_.emplace(name, std::move(*bound));
             }
@@ -659,7 +669,8 @@ private:
                 if (item.kind != NodeKind::SCALAR ||
                     std::ranges::find(declared.values, text) ==
                         declared.values.end()) {
-                    return refuse(quote_text(text) + " is not one of its values");
+                    return refuse(quote_text(text) +
+                                  " is not one of its values");
                 }
                 set.set.push_back(text);
             }
@@ -669,9 +680,9 @@ private:
             return refuse("must be one value of type " + type);
         }
         const std::string text(value.scalar_text());
-        const bool plain = value.computed ||
-                           value.file->document->style(value.node) ==
-                               ScalarStyle::PLAIN;
+        const bool plain =
+            value.computed ||
+            value.file->document->style(value.node) == ScalarStyle::PLAIN;
         if (type == "bool") {
             if (!plain || (text != "true" && text != "false")) {
                 return refuse("must be true or false");
@@ -690,8 +701,7 @@ private:
 
     template <typename Refuse>
     std::optional<ConfigValue> number_value(const std::string& type,
-                                            const std::string& text,
-                                            bool plain,
+                                            const std::string& text, bool plain,
                                             const Parameter& declared,
                                             const Refuse& refuse) {
         std::optional<ConfigValue> number;
@@ -711,23 +721,34 @@ private:
         const double as_real = number->type == ValueType::REAL
                                    ? number->real
                                    : static_cast<double>(number->integer);
-        for (const auto& [bound, above] :
-             {std::pair{&declared.min, false}, std::pair{&declared.max, true}}) {
-            if (!*bound) {
-                continue;
-            }
-            const std::optional<double> limit =
-                parse_decimal(std::string((*bound)->scalar_text()));
-            if (limit && (above ? as_real > *limit : as_real < *limit)) {
-                return refuse(text + " is " + (above ? "above" : "below") +
-                              " its " + (above ? "max " : "min ") +
-                              std::string((*bound)->scalar_text()));
-            }
+        if (const std::optional<std::string> outside =
+                outside_bounds(declared, as_real)) {
+            return refuse(text + *outside);
         }
         if (type == "number" && number->type == ValueType::INT) {
             return ConfigValue::of_real(as_real);
         }
         return number;
+    }
+
+    // " is above its max M" or " is below its min M" when `value` is
+    // outside the declared bounds.
+    static std::optional<std::string> outside_bounds(const Parameter& declared,
+                                                     double value) {
+        for (const auto& [bound, above] : {std::pair{&declared.min, false},
+                                           std::pair{&declared.max, true}}) {
+            if (!*bound) {
+                continue;
+            }
+            const std::string limit_text((*bound)->scalar_text());
+            const std::optional<double> limit = parse_decimal(limit_text);
+            if (limit && (above ? value > *limit : value < *limit)) {
+                return std::string(above ? " is above its max "
+                                         : " is below its min ") +
+                       limit_text;
+            }
+        }
+        return std::nullopt;
     }
 
     static std::optional<std::int64_t> int64_of(const std::string& text) {
@@ -747,8 +768,8 @@ private:
     }
 
     // Step 3.1: the device keys of a level, and its `defaults`.
-    void merge_level_keys(const Value& level, Value& device_keys,
-                          Value& defaults) {
+    static void merge_level_keys(const Value& level, Value& device_keys,
+                                 Value& defaults) {
         for (const std::string_view key :
              {"read", "bit_order", "functions", "device_time", "keepalive",
               "idle_timeout", "on_mismatch"}) {
@@ -840,7 +861,8 @@ private:
         };
         if (const Value* written = root.find("points")) {
             for (const Value& item : written->items) {
-                if (std::optional<Point> point = point_of(item, {}, template_name)) {
+                if (std::optional<Point> point =
+                        point_of(item, {}, template_name)) {
                     add(std::move(*point));
                 }
             }
@@ -860,7 +882,7 @@ private:
     }
 
     // A point of a list, with the variables bound to it.
-    std::optional<Point> point_of(
+    static std::optional<Point> point_of(
         const Value& item,
         const std::map<std::string, std::int64_t, std::less<>>& variables,
         const std::string& template_name) {
@@ -872,8 +894,7 @@ private:
                     .value = item,
                     .bindings = {}};
         for (const auto& [variable, value] : variables) {
-            point.bindings.emplace(variable,
-                                   std::pair{value, template_name});
+            point.bindings.emplace(variable, std::pair{value, template_name});
         }
         if (!variables.empty()) {
             point.name = substituted(point.name, variables);
@@ -917,25 +938,8 @@ private:
         if (range == nullptr) {
             return;
         }
-        std::vector<std::pair<std::string, std::vector<std::int64_t>>> axes;
-        for (const Member& member : range->members) {
-            std::optional<std::vector<std::int64_t>> values =
-                values_of(member.value.front(), member.key);
-            if (!values) {
-                return;
-            }
-            axes.emplace_back(member.key, std::move(*values));
-        }
-        if (axes.empty()) {
-            return;
-        }
-        std::size_t pairs = 1;
-        for (const auto& axis : axes) {
-            pairs *= axis.second.size();
-        }
-        if (pairs > MAX_REPEAT_VALUES) {
-            error(CF_SIZE_LIMIT, *range,
-                  "the values of a repeat block exceed its limit of 65536");
+        const std::optional<Axes> axes = axes_of(*range);
+        if (!axes || axes->empty()) {
             return;
         }
         const Value* points = block.find("points");
@@ -945,7 +949,7 @@ private:
             if (device_failed_) {
                 return;
             }
-            if (axis == axes.size()) {
+            if (axis == axes->size()) {
                 if (when != nullptr && !holds(*when, variables)) {
                     return;
                 }
@@ -960,18 +964,44 @@ private:
                 }
                 return;
             }
-            for (const std::int64_t value : axes[axis].second) {
-                variables[axes[axis].first] = value;
+            for (const std::int64_t value : (*axes)[axis].second) {
+                variables[(*axes)[axis].first] = value;
                 walk(axis + 1);
             }
         };
         walk(0);
     }
 
+    using Axes = std::vector<std::pair<std::string, std::vector<std::int64_t>>>;
+
+    // The variables of a `for` and their values; nothing on an error. Two
+    // variables give at most 65,536 pairs (CF-113).
+    std::optional<Axes> axes_of(const Value& range) {
+        Axes axes;
+        for (const Member& member : range.members) {
+            std::optional<std::vector<std::int64_t>> values =
+                values_of(member.value.front(), member.key);
+            if (!values) {
+                return std::nullopt;
+            }
+            axes.emplace_back(member.key, std::move(*values));
+        }
+        std::size_t pairs = 1;
+        for (const auto& axis : axes) {
+            pairs *= axis.second.size();
+        }
+        if (pairs > MAX_REPEAT_VALUES) {
+            error(CF_SIZE_LIMIT, range,
+                  "the values of a repeat block exceed its limit of 65536");
+            return std::nullopt;
+        }
+        return axes;
+    }
+
     // The values of a `for` range (4.4), checked from its bounds before any
     // is produced (CF-113).
-    std::optional<std::vector<std::int64_t>> values_of(const Value& range,
-                                                       const std::string& name) {
+    std::optional<std::vector<std::int64_t>> values_of(
+        const Value& range, const std::string& name) {
         std::vector<std::pair<std::int64_t, std::int64_t>> runs;
         const auto add_run = [&](const Value& part) {
             std::optional<ConfigValue> value =
@@ -1042,17 +1072,27 @@ private:
             if (inherited != found->bindings.end() &&
                 inherited->second.first != bound.first) {
                 error(CF_BINDINGS, *point.value.find("name"),
-                      "point " + quote_text(point.name) + ": variable " +
-                          variable + " is " +
-                          std::to_string(inherited->second.first) + " in " +
-                          inherited->second.second + " and " +
-                          std::to_string(bound.first) + " in " + template_name,
+                      bindings_message(point.name, variable, inherited->second,
+                                       bound.first, template_name),
                       "point " + point.name);
             } else {
                 found->bindings.insert_or_assign(variable, bound);
             }
         }
         merge(found->value, point.value, "point");
+    }
+
+    static std::string bindings_message(
+        const std::string& point, const std::string& variable,
+        const std::pair<std::int64_t, std::string>& inherited,
+        std::int64_t value, const std::string& template_name) {
+        std::string message = "point " + quote_text(point) + ": variable ";
+        message += variable;
+        message += " is " + std::to_string(inherited.first);
+        message += " in " + inherited.second;
+        message += " and " + std::to_string(value);
+        message += " in " + template_name;
+        return message;
     }
 
     // Step 3.4 (and 4 for an instance): `disable` removes the points it
@@ -1083,9 +1123,8 @@ private:
                 }
             }
             std::size_t index = 0;
-            std::erase_if(points, [&](const Point&) {
-                return matched[index++] != keep;
-            });
+            std::erase_if(
+                points, [&](const Point&) { return matched[index++] != keep; });
         }
     }
 
@@ -1104,7 +1143,8 @@ private:
 
     static std::string template_of(const Value& instance) {
         const Value* name = instance.find("template");
-        return name ? std::string(name->scalar_text()) : std::string();
+        return name != nullptr ? std::string(name->scalar_text())
+                               : std::string();
     }
 
     static std::map<std::string, std::int64_t, std::less<>> bound_to(
@@ -1118,8 +1158,9 @@ private:
 
     // Step 5: the template's `defaults` merged with the instance's, merged
     // under every point.
-    void apply_defaults(const Value& template_defaults, const Value& instance,
-                        std::vector<Point>& points) {
+    static void apply_defaults(const Value& template_defaults,
+                               const Value& instance,
+                               std::vector<Point>& points) {
         Value defaults = template_defaults;
         if (const Value* own = instance.find("defaults")) {
             merge(defaults, *own, "defaults");
@@ -1143,8 +1184,9 @@ private:
             return;
         }
         const Value* address = point.find("address");
-        const Value* raw = address ? address->find("type") : nullptr;
-        const Value* list = raw ? invalid->find(raw->scalar_text()) : nullptr;
+        const Value* raw = address != nullptr ? address->find("type") : nullptr;
+        const Value* list =
+            raw != nullptr ? invalid->find(raw->scalar_text()) : nullptr;
         if (list == nullptr) {
             point.erase("invalid_values");
             return;
@@ -1255,8 +1297,7 @@ private:
                         const Value& site, const std::string& point) {
         const std::string tag = device_name_ + "." + name;
         if (tag.size() > MAX_TAG_NAME_BYTES) {
-            error(code,
-                  site,
+            error(code, site,
                   std::string(code == CF_TAG_NAME_LENGTH ? "tag name "
                                                          : "generated tag ") +
                       quote_text(tag) + " is " + std::to_string(tag.size()) +
@@ -1267,7 +1308,8 @@ private:
 
     // A bit's tag is `<device>.<name>` (5.4): its name is unique among the
     // device's points and bits.
-    void check_bits(const Point& point, std::set<std::string, std::less<>>& names) {
+    void check_bits(const Point& point,
+                    std::set<std::string, std::less<>>& names) {
         const Value* bits = point.value.find("bits");
         if (bits == nullptr) {
             return;
@@ -1356,9 +1398,9 @@ private:
 
     // True if `when` (a boolean or a configuration expression) holds for
     // the parameters and `variables`.
-    bool holds(const Value& when,
-               const std::map<std::string, std::int64_t, std::less<>>&
-                   variables) {
+    bool holds(
+        const Value& when,
+        const std::map<std::string, std::int64_t, std::less<>>& variables) {
         if (when.scalar_type() == ScalarType::BOOLEAN) {
             return when.scalar_text() == "true";
         }
@@ -1446,7 +1488,8 @@ private:
             for (const Channel& channel : expander_->channels_) {
                 write_channel(channel);
             }
-            ok_ = ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
+            ok_ =
+                ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
             if (!ok_) {
                 return std::nullopt;
             }
@@ -1515,14 +1558,16 @@ private:
                 ok_ = ok_ && key("channel", top);
                 write_value(copy_of(file, *written));
             }
-            ok_ = ok_ && key("devices", top) && builder_.begin_sequence(top).ok();
+            ok_ =
+                ok_ && key("devices", top) && builder_.begin_sequence(top).ok();
             for (std::size_t i = 0; i < channel.devices.size(); ++i) {
                 instance_ = static_cast<std::uint32_t>(instances_.size());
                 instances_.push_back(channel.instances[i]);
                 write_device(channel.devices[i]);
                 instance_ = ExpandedTree::NO_INSTANCE;
             }
-            ok_ = ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
+            ok_ =
+                ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
         }
 
         void write_device(const Device& device) {
@@ -1530,13 +1575,16 @@ private:
                 position(*device.keys.file, device.keys.node);
             ok_ = ok_ && builder_.begin_map(top).ok();
             write_members(device.keys);
-            ok_ = ok_ && key("points", top) && builder_.begin_sequence(top).ok();
+            ok_ =
+                ok_ && key("points", top) && builder_.begin_sequence(top).ok();
             for (const Point& point : device.points) {
                 write_value(point.value);
             }
-            ok_ = ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
+            ok_ =
+                ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
         }
 
+        // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit
         void write_members(const Value& map) {
             for (const Member& member : map.members) {
                 const Value& value = member.value.front();

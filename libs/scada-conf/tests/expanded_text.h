@@ -9,6 +9,7 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scada::conf {
@@ -39,6 +40,32 @@ inline std::string flow(const Document& document, NodeId node) {
     return {};
 }
 
+// The value of `key` in the map `node`, which the expanded tree always has.
+inline NodeId child(const Document& document, NodeId node,
+                    std::string_view key) {
+    return document.find(node, key).value_or(node);
+}
+
+// `{<key>: <value>, ...}` of a map, without the keys in `skipped`.
+inline std::string keys_of(const Document& document, NodeId map,
+                           std::string_view skipped,
+                           std::string_view also_skipped = {}) {
+    std::string keys = "{";
+    for (const Entry& entry : document.entries(map)) {
+        const std::string_view key = document.text(entry.key);
+        if (key == skipped || key == also_skipped) {
+            continue;
+        }
+        if (keys.size() > 1) {
+            keys += ", ";
+        }
+        keys += key;
+        keys += ": ";
+        keys += flow(document, entry.value);
+    }
+    return keys + "}";
+}
+
 // Each expanded point as `<device>.<point>: {<keys but name>}`; with
 // `with_devices`, each device first as `<device>: {<its keys but name and
 // points>}`.
@@ -46,39 +73,23 @@ inline std::vector<std::string> points_of(const ExpandedTree& tree,
                                           bool with_devices = false) {
     const Document& document = tree.document;
     std::vector<std::string> lines;
-    const NodeId channels = *document.find(document.root(), "channels");
+    const NodeId channels = child(document, document.root(), "channels");
     for (const NodeId channel : document.items(channels)) {
-        const NodeId devices = *document.find(channel, "devices");
-        for (const NodeId device : document.items(devices)) {
+        for (const NodeId device :
+             document.items(child(document, channel, "devices"))) {
             const std::string prefix(
-                document.text(*document.find(device, "name")));
+                document.text(child(document, device, "name")));
             if (with_devices) {
-                std::string keys;
-                for (const Entry& entry : document.entries(device)) {
-                    const std::string_view key = document.text(entry.key);
-                    if (key == "name" || key == "points") {
-                        continue;
-                    }
-                    keys += (keys.empty() ? "" : ", ") + std::string(key) +
-                            ": " + flow(document, entry.value);
-                }
-                lines.push_back(prefix + ": {" + keys + "}");
+                lines.push_back(prefix + ": " +
+                                keys_of(document, device, "name", "points"));
             }
             for (const NodeId point :
-                 document.items(*document.find(device, "points"))) {
-                std::string keys;
-                for (const Entry& entry : document.entries(point)) {
-                    if (document.text(entry.key) == "name") {
-                        continue;
-                    }
-                    keys += (keys.empty() ? "" : ", ") +
-                            std::string(document.text(entry.key)) + ": " +
-                            flow(document, entry.value);
-                }
-                lines.push_back(
-                    prefix + "." +
-                    std::string(document.text(*document.find(point, "name"))) +
-                    ": {" + keys + "}");
+                 document.items(child(document, device, "points"))) {
+                std::string line = prefix + ".";
+                line += document.text(child(document, point, "name"));
+                line += ": ";
+                line += keys_of(document, point, "name");
+                lines.push_back(std::move(line));
             }
         }
     }

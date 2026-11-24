@@ -61,10 +61,20 @@ Expressions (contract 5.6) are parsed at stage 3 by `parse_expression`
 (`when`, addresses and scaling, `repeat` ranges), each with its own syntax
 codes (CF-520, CF-526, CF-528, CF-529).
 
-Stage 5 runs when stages 1 to 3 found no error. Stage 4, the expansion of
-templates and instances, comes with #103, so stage 5 checks for now what
-needs no expansion (`check_references`, `include/scada/conf/references.h`,
-D-113):
+Stage 4 runs when stages 1 to 3 found no error: `expand_tree`
+(`include/scada/conf/expand.h`, D-114) expands every device instance in the
+merge order of contract 4.5 into one `Document` of the expanded channels,
+devices and points, each value with the file and line it came from. An
+error that a template's line causes is at the instance, with a note
+`from template <file>:<line>:<column>`. `validate_and_expand` gives the
+report and the expanded tree, which the expanded files of contract 13.3 are
+written from (#102). Expansion is linear in the points but for a lookup by
+name: an instance of 65,536 points, made by one `repeat`, and the refusal of
+one of 65,537 took 736 ms together (release build, x86-64,
+`Expand.ThePointLimit`).
+
+Stage 5 runs when stage 4 found no error. It checks for now what needs no
+point tags (`check_references`, `include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's
   protocol, areas, logging policies and aggregate tiers, enumerations (of
   the template's chain or `enums.yaml`), tasks, programs, interlocks,
@@ -178,8 +188,9 @@ anything, and there are no lazy caches.
   grammar (contract 5.6), giving a tree or one located error.
 - `include/scada/conf/schema.h`: `SchemaSet`, the compiled schema files and
   the validator of stage 3.
+- `include/scada/conf/expand.h`: `expand_tree` and `ExpandedTree`, stage 4.
 - `include/scada/conf/references.h`: `check_references`, the part of stage 5
-  that needs no expansion.
+  that needs no point tags.
 - `include/scada/conf/types.h`: `ScalarType` and `ScalarTypes`, the types
   stage 3 gives the scalars of a Document.
 - `include/scada/conf/read.h`: typed reads of a scalar node (`to_int64`,
@@ -245,7 +256,11 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   same tree.
 - `tests/schema_test.cpp`: each keyword of the validator with its code, and
   the built-in schemas against the contract's examples.
+- `tests/expand_test.cpp`: each step of the merge order and each CF-4xx
+  code, with the instance and the template line of its errors.
+- `tests/config_eval_test.cpp`: the values of configuration expressions and
+  the failures that are CF-410.
 - `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
-  that a reference to a tag gives no error before the expander exists.
+  that a reference to a tag gives no error before slice 7 of #100.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

@@ -3,16 +3,18 @@
 // the order of section 1.4, and for a valid tree its expanded points if the
 // case pins them. See corpus/README.md.
 
+#include "expanded_text.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
 #include "scada/conf/validate.h"
-#include "expanded_text.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,10 +79,20 @@ Outcome outcome_of(const fs::path& tree) {
             got.diagnostics.push_back(corpus_line(diagnostic));
         }
     }
-    if (validation.value().expanded) {
-        got.points = points_of(*validation.value().expanded, true);
+    if (const std::optional<ExpandedTree>& expanded =
+            validation.value().expanded) {
+        got.points = points_of(*expanded, true);
     }
     return got;
+}
+
+void check_case(const fs::path& dir) {
+    const Outcome got = outcome_of(dir / "tree");
+    EXPECT_EQ(got.diagnostics, expected_lines(dir / "expected"));
+    // A valid case may pin its expanded points (test 6).
+    if (fs::is_regular_file(dir / "expanded")) {
+        EXPECT_EQ(got.points, expected_lines(dir / "expanded"));
+    }
 }
 
 TEST(Corpus, EveryCaseGivesItsExpectedDiagnostics) {
@@ -91,12 +103,7 @@ TEST(Corpus, EveryCaseGivesItsExpectedDiagnostics) {
         ASSERT_TRUE(fs::is_directory(dir / "tree")) << "no tree/ in " << dir;
         ASSERT_TRUE(fs::is_regular_file(dir / "expected"))
             << "no expected in " << dir;
-        const Outcome got = outcome_of(dir / "tree");
-        EXPECT_EQ(got.diagnostics, expected_lines(dir / "expected"));
-        // A valid case may pin its expanded points (test 6).
-        if (fs::is_regular_file(dir / "expanded")) {
-            EXPECT_EQ(got.points, expected_lines(dir / "expanded"));
-        }
+        check_case(dir);
     }
 }
 

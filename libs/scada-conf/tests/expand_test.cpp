@@ -3,13 +3,11 @@
 // order would give another result, and each CF-4xx code, with its place in
 // the instance and the template line it came from.
 
+#include "expanded_text.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
-#include "scada/conf/expand.h"
-#include "scada/conf/node.h"
 #include "scada/conf/validate.h"
 #include "scada/test/temp_directory.h"
-#include "expanded_text.h"
 
 #include <gtest/gtest.h>
 
@@ -85,10 +83,11 @@ std::string channel(std::string_view devices) {
 
 // One device `ps1.m1` of template `meter_a`, with more keys after it.
 std::string one_device(std::string_view more = {}) {
-    return channel("  - name: ps1.m1\n"
-                   "    template: meter_a\n"
-                   "    unit_id: 1\n" +
-                   std::string(more));
+    return channel(
+        "  - name: ps1.m1\n"
+        "    template: meter_a\n"
+        "    unit_id: 1\n" +
+        std::string(more));
 }
 
 TEST(Expand, AnInstanceGetsTheTemplatesPoints) {
@@ -187,26 +186,24 @@ TEST(Expand, ParameterErrors) {
         "  inputs: { type: int, min: 1, max: 32 }\n"
         "  mode: { type: enum, values: [a, b], default: a }\n"
         "  options: { type: set, values: [meter], default: [] }\n";
-    EXPECT_EQ(
-        expand({{"templates/meter_a.yaml", templates},
-                {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-411: parameter "
-               "\"inputs\" needs a value\n"
-               "  from template templates/meter_a.yaml:4:3 (parameter "
-               "inputs)"}));
-    EXPECT_EQ(
-        expand({{"templates/meter_a.yaml", templates},
-                {"drivers/modbus/line1.yaml",
-                 one_device("    params: { inputs: 40, mode: c, options: "
-                            "[grid], extra: 1 }\n")}}),
-        (Lines{"drivers/modbus/line1.yaml:10:23: error CF-412: parameter "
-               "\"inputs\": 40 is above its max 32",
-               "drivers/modbus/line1.yaml:10:33: error CF-412: parameter "
-               "\"mode\": \"c\" is not one of its values",
-               "drivers/modbus/line1.yaml:10:45: error CF-412: parameter "
-               "\"options\": \"grid\" is not one of its values",
-               "drivers/modbus/line1.yaml:10:53: error CF-412: parameter "
-               "\"extra\": the template has no parameter of this name"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", templates},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-411: parameter "
+                     "\"inputs\" needs a value\n"
+                     "  from template templates/meter_a.yaml:4:3 (parameter "
+                     "inputs)"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", templates},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    params: { inputs: 40, mode: c, options: "
+                                  "[grid], extra: 1 }\n")}}),
+              (Lines{"drivers/modbus/line1.yaml:10:23: error CF-412: parameter "
+                     "\"inputs\": 40 is above its max 32",
+                     "drivers/modbus/line1.yaml:10:33: error CF-412: parameter "
+                     "\"mode\": \"c\" is not one of its values",
+                     "drivers/modbus/line1.yaml:10:45: error CF-412: parameter "
+                     "\"options\": \"grid\" is not one of its values",
+                     "drivers/modbus/line1.yaml:10:53: error CF-412: parameter "
+                     "\"extra\": the template has no parameter of this name"}));
 }
 
 // A child changes a default, never a type (CF-415).
@@ -224,17 +221,16 @@ TEST(Expand, AChildChangesADefaultNotAType) {
                 {"drivers/modbus/line1.yaml", one_device()}}),
         Lines{"ps1.m1.count: {address: {table: holding, register: 6, type: "
               "uint16}}"});
-    EXPECT_EQ(
-        expand({{"templates/base_a.yaml",
-                 "template: base_a\n"
-                 "params: { inputs: { type: int, default: 4 } }\n"},
-                {"templates/meter_a.yaml",
-                 "template: meter_a\nextends: base_a\nprotocol: modbus\n"
-                 "params: { inputs: { type: number, default: 6 } }\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
-        Lines{"drivers/modbus/line1.yaml:7:11: error CF-415: parameter "
-              "\"inputs\" cannot change its type\n"
-              "  from template templates/meter_a.yaml:4:27"});
+    EXPECT_EQ(expand({{"templates/base_a.yaml",
+                       "template: base_a\n"
+                       "params: { inputs: { type: int, default: 4 } }\n"},
+                      {"templates/meter_a.yaml",
+                       "template: meter_a\nextends: base_a\nprotocol: modbus\n"
+                       "params: { inputs: { type: number, default: 6 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-415: parameter "
+                    "\"inputs\" cannot change its type\n"
+                    "  from template templates/meter_a.yaml:4:27"});
 }
 
 // Step 3.2: `repeat` with one and two variables, an irregular list, an
@@ -259,6 +255,7 @@ TEST(Expand, RepeatBlocks) {
                  "      - { name: \"never{n}\", address: { table: holding, "
                  "register: n, type: uint16 } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long lines
         (Lines{"ps1.m1.in1: {address: {table: holding, register: 100, type: "
                "uint16}}",
                "ps1.m1.in2: {address: {table: holding, register: 202, type: "
@@ -376,26 +373,27 @@ TEST(Expand, DefaultsUnderEveryPoint) {
 // exclusive group, and `replace: true` replaces a map.
 TEST(Expand, Overrides) {
     EXPECT_EQ(
-        expand({{"templates/meter_a.yaml",
-                 "template: meter_a\nprotocol: modbus\n"
-                 "points:\n"
-                 "  - name: flow\n"
-                 "    scale: { gain: 2, offset: 1 }\n"
-                 "    alarms: [ { type: high, limit: 4, priority: high }, { "
-                 "type: low, limit: 1, priority: low } ]\n"
-                 "    address: { table: holding, register: 1, type: uint16, "
-                 "word_order: little }\n"
-                 "  - name: level\n"
-                 "    address: { table: holding, register: 3, type: uint16 }\n"},
-                {"drivers/modbus/line1.yaml",
-                 one_device("    overrides:\n"
-                            "      flow:\n"
-                            "        scale: { divide_by: 10 }\n"
-                            "        alarms: [ { type: high, limit: 9, "
-                            "priority: high } ]\n"
-                            "      level:\n"
-                            "        address: { replace: true, table: input, "
-                            "register: 7, type: int16 }\n")}}),
+        expand(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\n"
+              "points:\n"
+              "  - name: flow\n"
+              "    scale: { gain: 2, offset: 1 }\n"
+              "    alarms: [ { type: high, limit: 4, priority: high }, { "
+              "type: low, limit: 1, priority: low } ]\n"
+              "    address: { table: holding, register: 1, type: uint16, "
+              "word_order: little }\n"
+              "  - name: level\n"
+              "    address: { table: holding, register: 3, type: uint16 }\n"},
+             {"drivers/modbus/line1.yaml",
+              one_device("    overrides:\n"
+                         "      flow:\n"
+                         "        scale: { divide_by: 10 }\n"
+                         "        alarms: [ { type: high, limit: 9, "
+                         "priority: high } ]\n"
+                         "      level:\n"
+                         "        address: { replace: true, table: input, "
+                         "register: 7, type: int16 }\n")}}),
         (Lines{"ps1.m1.flow: {scale: {offset: 1, divide_by: 10}, alarms: "
                "[{type: high, limit: 9, priority: high}], address: {table: "
                "holding, register: 1, type: uint16, word_order: little}}",
@@ -489,11 +487,11 @@ TEST(Expand, AnInstanceWithoutATemplate) {
         Lines{"ps1.m1.flow: {address: {table: holding, register: 1, type: "
               "uint16}}"});
     EXPECT_EQ(
-        expand({{"drivers/modbus/line1.yaml",
-                 channel("  - name: ps1.m1\n"
-                         "    unit_id: 1\n"
-                         "    params: { a: 1 }\n"
-                         "    disable: [flow]\n")}}),
+        expand(
+            {{"drivers/modbus/line1.yaml", channel("  - name: ps1.m1\n"
+                                                   "    unit_id: 1\n"
+                                                   "    params: { a: 1 }\n"
+                                                   "    disable: [flow]\n")}}),
         (Lines{"drivers/modbus/line1.yaml:9:5: error CF-201: unknown key "
                "\"params\" in devices[0] (no template)",
                "drivers/modbus/line1.yaml:10:5: error CF-201: unknown key "
@@ -514,26 +512,28 @@ TEST(Expand, TheChain) {
     Files deep{{"drivers/modbus/line1.yaml", one_device()},
                {"templates/meter_a.yaml",
                 "template: meter_a\nextends: t1\nprotocol: modbus\n"}};
-    for (int level = 1; level <= 5; ++level) {
+    // meter_a and five parents t1 to t5: one more than the limit.
+    constexpr int PARENTS = 5;
+    for (int level = 1; level <= PARENTS; ++level) {
         const std::string name = "t" + std::to_string(level);
         deep.emplace("templates/" + name + ".yaml",
                      "template: " + name + "\nprotocol: modbus\n" +
-                         (level < 5 ? "extends: t" +
-                                          std::to_string(level + 1) + "\n"
-                                    : std::string()));
+                         (level < PARENTS
+                              ? "extends: t" + std::to_string(level + 1) + "\n"
+                              : std::string()));
     }
     EXPECT_EQ(expand(deep),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-401: template "
                      "\"meter_a\": extends is deeper than 4 parents\n"
                      "  from template templates/t4.yaml:3:10"}));
     EXPECT_EQ(
-        expand({{"templates/base_a.yaml",
-                 "template: base_a\nextends: meter_b\n"},
-                {"templates/meter_b.yaml",
-                 "template: meter_b\nprotocol: modbus\n"},
-                {"templates/meter_a.yaml",
-                 "template: meter_a\nextends: base_a\nprotocol: modbus\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
+        expand(
+            {{"templates/base_a.yaml", "template: base_a\nextends: meter_b\n"},
+             {"templates/meter_b.yaml",
+              "template: meter_b\nprotocol: modbus\n"},
+             {"templates/meter_a.yaml",
+              "template: meter_a\nextends: base_a\nprotocol: modbus\n"},
+             {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{"drivers/modbus/line1.yaml:7:11: error CF-421: template "
                "\"base_a\": a base template cannot extend a protocol "
                "template\n"
@@ -545,8 +545,7 @@ TEST(Expand, TheChain) {
                "\"meter_a\": a base template has no protocol; a device uses "
                "a template of its channel's"}));
     EXPECT_EQ(
-        expand({{"templates/meter_a.yaml",
-                 "template: meter_a\nprotocol: io\n"},
+        expand({{"templates/meter_a.yaml", "template: meter_a\nprotocol: io\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{"drivers/modbus/line1.yaml:8:15: error CF-420: template "
                "\"meter_a\" is for io, the channel is modbus"}));
@@ -563,10 +562,11 @@ TEST(Expand, TagNameLengths) {
                  "template: meter_a\nprotocol: modbus\nbit_order: lsb0\n"
                  "points:\n"
                  "  - { name: " +
-                     fits + ", address: { table: holding, register: 1, type: "
-                            "uint16 } }\n"
-                            "  - { name: w, tag: false, address: { table: "
-                            "holding, register: 2, type: uint16 }, bits: { 0: " +
+                     fits +
+                     ", address: { table: holding, register: 1, type: "
+                     "uint16 } }\n"
+                     "  - { name: w, tag: false, address: { table: "
+                     "holding, register: 2, type: uint16 }, bits: { 0: " +
                      fits + "q } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{"drivers/modbus/line1.yaml:7:11: error CF-403: generated tag "
@@ -614,17 +614,16 @@ TEST(Expand, APointOfAProtocolTemplateNeedsAnAddress) {
 }
 
 TEST(Expand, AnExpressionThatFailsIsCf410) {
-    EXPECT_EQ(
-        expand({{"templates/meter_a.yaml",
-                 "template: meter_a\nprotocol: modbus\n"
-                 "params: { k: { type: int, default: 0 } }\n"
-                 "points:\n"
-                 "  - { name: flow, address: { table: holding, register: "
-                 "\"100 DIV k\", type: uint16 } }\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-               "\"100 DIV k\": division by zero\n"
-               "  from template templates/meter_a.yaml:5:61"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "params: { k: { type: int, default: 0 } }\n"
+                       "points:\n"
+                       "  - { name: flow, address: { table: holding, register: "
+                       "\"100 DIV k\", type: uint16 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"100 DIV k\": division by zero\n"
+                     "  from template templates/meter_a.yaml:5:61"}));
 }
 
 }  // namespace

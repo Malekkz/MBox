@@ -2178,6 +2178,46 @@ Consequences:
   - `s3-unknown-protocol` is now `s5-unknown-protocol`, with its CF-310;
   - `s3-program-of-section-9-2` is now `s5-program-of-section-9-2`, whose output is not in its tree (its task `normal` is a default task).
 
+## D-114: The expander of templates and instances (stage 4)
+Date: 2026-11-24
+Phase / issue: 2, #103 (P2-06)
+Status: proposed
+
+Context: contract 4.4 and 4.5 give the merge order and the merge rules of an instance; 1.4 puts the expansion in stage 4 and says where its errors are; 13.3 says how a computed value is written. Several details are left open.
+Options: per detail below; the simplest that fits the contract was chosen.
+Decision:
+- **One tree type.** The result is one `Document` (D-111) of the expanded channels, with its `ScalarTypes`, built by `expand_tree` (`expand.h`):
+  - `channels`, each with `protocol`, `file`, the `channel` object as written, and its `devices`;
+  - each device holds its own keys and the template's device keys (`read`, `enums`, `bit_order`, `functions`, `device_time`, `keepalive`, `idle_timeout`, `on_mismatch`, `identify`, `health`, `restart_indication`) under them, and its `points`.
+
+  The keys that steer expansion (`template`, `params`, `defaults`, `overrides`, `disable`, `only`), `when` and every `replace` are gone. A scalar keeps its text, style, position and type. A computed value has the canonical text of 13.3 (an INT in decimal, a REAL as the shortest decimal with a point, a BOOL as `true` or `false`, a TIME as milliseconds and `ms`) and the position of its expression. For each node, `instance_of` gives the device it belongs to, for diagnostics of later stages. `validate_and_expand` gives the report and this tree; #102 writes the expanded files from it.
+- **Where an error is (1.4).** An error whose site is in the instance's own file is there. One whose site is in a template is at the instance's `name` key, with a note `from template <file>:<line>:<column>` (and `(point <name>)` or `(parameter <name>)` where it helps). The same diagnostic is reported once.
+- **What stage 4 leaves to stage 5.** A device whose template, or a template of its chain, the tree does not have, or whose template's protocol this version does not know, is left out without an error: the missing name is CF-310 of stage 5 (D-113). So stage 5 runs, and gives it.
+- **Parameters.**
+  - An instance's parameter that the chain does not declare is CF-412 (`the template has no parameter of this name`); the contract has no other code for it.
+  - A `number` parameter is REAL even when its value is written as an integer.
+  - A child's declaration may give `default`, `min`, `max` and `values` without `type`; giving another `type` is CF-415 at it.
+- **Evaluation.** An expression is evaluated with the parameters and the variables bound to the point.
+  - Its types are checked first, with the type checker of stage 5 (D-113), so a type error is CF-523 with the same message in either stage.
+  - A name that is neither a parameter nor a variable bound to this point is CF-410 (`... is not a parameter and no variable bound to this point`).
+  - CF-410's message is the contract's `expression {expr}: {reason}`, at the offending character (D-109).
+  - `when` of a `repeat` block is evaluated for each value, or pair of values, with its variables; a `when` that gives no BOOL is CF-523.
+  - Alarms hold run-time expressions and are not evaluated here.
+- **`repeat`.** A `for` value is evaluated with the parameters only. Its values are counted from the bounds before any is made (CF-113, `the range of n exceeds its limit of 65536`, and for two variables `the values of a repeat block exceed ...`).
+- **CF-414** is found while points are made, not after: a level whose own points (distinct by CF-416) would pass 65,536 stops there. Memory therefore stays bounded for a `repeat` of 65,536 pairs over many points.
+- **Exclusive groups (4.5)** are keyed by the map they are in:
+  - `scale`: `gain` and `divide_by`;
+  - `address`: `bit`, `field` and the double-point shapes, and `register` and `parts`;
+  - `write`: `value`, `values`, `mask`, and `on` with `off` as one member.
+
+  `on_invalid` and `action` change form by replacing a scalar with a map, which the merge does anyway.
+- **`invalid_values` of `defaults`** (a map by raw type) gives a point that has no list of its own the list of its `address.type`, or none.
+- **`identify` of an instance** is appended to the template's; with no template it is the instance's own.
+- **An instance's own points** are added after step 6, so `defaults` do not reach them, and their `when` is dropped.
+- **Name patterns** of `disable` and `only` follow 2.5: `*` and `?` stay within one segment.
+Reason: each choice is the reading of the contract that needs no new key or code. Errors stay where the user can act on them: at the instance, with the template's line.
+Consequences: tag references and the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map) come in the next pull request of #103 and in slice 7 of #100, and read `ExpandedTree`. CF-1001 (`limits.max_tags`) is the tag set's (#101).
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)
