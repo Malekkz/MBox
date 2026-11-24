@@ -72,6 +72,11 @@ struct Pacing {
 struct CompiledDevice {
     std::string name;
     bool enabled = true;
+    // The physical unit: devices of one channel with the same key are one
+    // device on the wire (3.4: they share a unit id) and share its pacing
+    // and exclusivity (ruling R3). The compile step sets it from the
+    // protocol's unit id.
+    std::uint32_t unit = 0;
     Pacing pacing;
     // `keepalive` (6.5); 0: off.
     std::int64_t keepalive_ns = 0;

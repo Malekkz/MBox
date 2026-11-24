@@ -62,6 +62,7 @@ inline CompiledDevice make_device(const DeviceSpec& spec) {
     CompiledDevice device;
     device.name = spec.name;
     device.enabled = spec.enabled;
+    device.unit = spec.unit_id;
     device.pacing = spec.pacing;
     device.keepalive_ns = spec.keepalive_ns;
     auto binding = std::make_unique<TestDevice>();

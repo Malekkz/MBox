@@ -8,6 +8,7 @@
 
 #include "channel_builder.h"
 #include "loopback.h"
+#include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/plan.h"
@@ -106,6 +107,45 @@ std::size_t sample_count(const Loop& loop) {
         total += event.samples.size();
     }
     return total;
+}
+
+// The first unit of the request each `take` at `times` reads (a poll or a
+// keep-alive); NOT_A_READ for any other choice.
+constexpr std::uint64_t NOT_A_READ = std::numeric_limits<std::uint64_t>::max();
+
+std::vector<std::uint64_t> reads_at(Scheduler& scheduler, const ReadPlan& plan,
+                                    const std::vector<std::int64_t>& times) {
+    std::vector<std::uint64_t> out;
+    out.reserve(times.size());
+    for (const std::int64_t time : times) {
+        const Choice choice = scheduler.take(time);
+        const bool read = choice.kind == Choice::Kind::POLL ||
+                          choice.kind == Choice::Kind::KEEPALIVE;
+        out.push_back(read ? plan.requests[choice.request].first : NOT_A_READ);
+    }
+    return out;
+}
+
+// The start of each cycle of a one-request group, `count` of them, with the
+// worker stalled once from `stall_from` to `stall_to`.
+std::vector<std::int64_t> cycle_starts(Scheduler& scheduler, std::size_t count,
+                                       std::int64_t stall_from,
+                                       std::int64_t stall_to) {
+    std::vector<std::int64_t> starts;
+    std::int64_t now = 0;
+    while (starts.size() < count) {
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::POLL) {
+            starts.push_back(now);
+            now += MILLISECOND;
+            continue;
+        }
+        if (choice.kind != Choice::Kind::WAIT) {
+            break;
+        }
+        now = choice.wake_ns == stall_from ? stall_to : choice.wake_ns;
+    }
+    return starts;
 }
 
 // A bus with registers 0 to 199 mapped on units 1 to 4.
@@ -297,7 +337,7 @@ TEST(Scheduling, NoTwoRequestsToADeviceCloserThanItsInterval) {
     const auto [early, late] = lateness(free, 200 * MILLISECOND);
     EXPECT_GE(early, 0);
     EXPECT_LE(late, EXCHANGE);
-    EXPECT_FALSE(loop.scheduler().pacing_limited(1));
+    EXPECT_FALSE(loop.scheduler().pacing_limited(1, loop.now()));
 }
 
 TEST(Scheduling, WritesFirstKeepTheWriteInterval) {
@@ -346,7 +386,8 @@ TEST(Scheduling, TheChannelSpacingAppliesToEveryDevice) {
 
 TEST(Scheduling, AnUnservablePeriodIsReportedAsAchievedAndLimited) {
     // 4 requests per 200 ms cycle on a device paced at 100 ms: each cycle
-    // takes 400 ms.
+    // takes 400 ms. After 10 s the last 10 periods are all 400 ms (the first
+    // is shorter: it started at once).
     const CompiledChannel channel = make_channel(
         {{.name = "d1",
           .points = adjacent(0, 4),
@@ -355,9 +396,10 @@ TEST(Scheduling, AnUnservablePeriodIsReportedAsAchievedAndLimited) {
     SimBus bus = mapped_bus();
     const TestProtocol protocol;
     Loop loop(channel, protocol, bus, 0, EXCHANGE);
-    loop.run_until(2 * SECOND);
-    EXPECT_EQ(loop.scheduler().achieved_period_ns(FAST), 400 * MILLISECOND);
-    EXPECT_TRUE(loop.scheduler().pacing_limited(0));
+    loop.run_until(10 * SECOND);
+    EXPECT_EQ(loop.scheduler().achieved_period_ns(FAST, loop.now()),
+              400 * MILLISECOND);
+    EXPECT_TRUE(loop.scheduler().pacing_limited(0, loop.now()));
 }
 
 // --- Conformance test 13: keep-alive --------------------------------------
@@ -453,37 +495,70 @@ TEST(Scheduling, AFlagSetBetweenPollsIsReadOnceThenCleared) {
 
 // --- Companions back to back (5.5) ----------------------------------------
 
-TEST(Scheduling, AChainOfCompanionsHasNoOtherRequestToItsDeviceBetween) {
-    // Point 0 at 0 with its companion at 100 (4 units per request: two
-    // requests); an order arrives after the first part of the chain.
-    const CompiledChannel channel = make_channel(
-        {{.name = "d1",
-          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
-        ReadRules{.max_units = 4});
+TEST(Scheduling, AChainOfCompanionsHasNoOtherPollToItsDeviceBetween) {
+    // Point 0 at 0 with its companion at 100, and a point at 50 in the slow
+    // group (4 units per request): nothing of the slow group between the
+    // two parts of the chain, though it is due.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .companions = {1}},
+                                  {.first = 100},
+                                  {.first = 50, .group = SLOW}}}},
+                     ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    const ReadPlan& plan = channel.devices[0].plan;
+    EXPECT_EQ(reads_at(scheduler, plan, {0, MILLISECOND, 2 * MILLISECOND}),
+              (std::vector<std::uint64_t>{0, 100, 50}));
+}
+
+TEST(Scheduling, ANewOrderGoesBeforeTheRestOfAChainWhichStartsAgain) {
+    // The lead's ruling R2: a device paced at 10 s, a chain of three
+    // requests (a value at 0, companions at 100 and 200), an order queued
+    // after the chain's first request: the order goes at the first free
+    // slot (10 s), not after the chain (30 s); the chain is dropped and read
+    // again from its first request.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .companions = {1, 2}},
+                                  {.first = 100},
+                                  {.first = 200}},
+                       .pacing = {.min_request_interval_ns = 10 * SECOND}}},
+                     ReadRules{.max_units = 4});
+    const ReadPlan& plan = channel.devices[0].plan;
+    ASSERT_EQ(plan.by_group[FAST].size(), 3U);
     Scheduler scheduler(channel, 4, 0);
     const Choice first = scheduler.take(0);
     ASSERT_EQ(first.kind, Choice::Kind::POLL);
-    EXPECT_EQ(channel.devices[0].plan.requests[first.request].first, 0U);
+    EXPECT_EQ(plan.requests[first.request].first, 0U);
     ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
-    const Choice second = scheduler.take(MILLISECOND);
-    ASSERT_EQ(second.kind, Choice::Kind::POLL);
-    EXPECT_EQ(channel.devices[0].plan.requests[second.request].first, 100U);
-    EXPECT_EQ(scheduler.take(2 * MILLISECOND).kind, Choice::Kind::ORDER);
+    const Choice wait = scheduler.take(MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 10 * SECOND);
+    const Choice order = scheduler.take(10 * SECOND);
+    ASSERT_EQ(order.kind, Choice::Kind::ORDER);
+    EXPECT_TRUE(order.chain_dropped);
+    EXPECT_EQ(
+        reads_at(scheduler, plan, {20 * SECOND, 30 * SECOND, 40 * SECOND}),
+        (std::vector<std::uint64_t>{0, 100, 200}));
 }
 
 TEST(Scheduling, AnExclusiveOrderHoldsItsDevice) {
-    // A two-step exclusive order (select, then operate) on device 1: no poll
-    // of device 1 between its steps; device 2 is served meanwhile.
+    // A select and operate on device 1 (request interval 5 ms, write
+    // interval 10 ms): no poll of device 1 between its steps; device 2 is
+    // served meanwhile. The lead's ruling R1: the operate follows within
+    // the request interval only (at 5 ms, not 10 ms); the write interval
+    // applies after it.
     const CompiledChannel channel =
         make_channel({{.name = "d1",
                        .unit_id = 1,
                        .points = adjacent(0, 1),
-                       .pacing = {.min_write_interval_ns = 10 * MILLISECOND}},
+                       .pacing = {.min_request_interval_ns = 5 * MILLISECOND,
+                                  .min_write_interval_ns = 10 * MILLISECOND}},
                       {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
                      ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
-    ASSERT_TRUE(scheduler.add_order(
-        OrderTicket{.id = 9, .device = 0, .steps = 2, .exclusive = true}));
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 9, .device = 0, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
     const Choice select = scheduler.take(0);
     ASSERT_EQ(select.kind, Choice::Kind::ORDER);
     EXPECT_EQ(select.step, 0U);
@@ -492,12 +567,81 @@ TEST(Scheduling, AnExclusiveOrderHoldsItsDevice) {
     EXPECT_EQ(other.device, 1U);  // device 2; device 1 is held
     const Choice wait = scheduler.take(2 * MILLISECOND);
     ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
-    EXPECT_EQ(wait.wake_ns, 10 * MILLISECOND);
-    const Choice operate = scheduler.take(10 * MILLISECOND);
+    EXPECT_EQ(wait.wake_ns, 5 * MILLISECOND);
+    const Choice operate = scheduler.take(5 * MILLISECOND);
     ASSERT_EQ(operate.kind, Choice::Kind::ORDER);
     EXPECT_EQ(operate.step, 1U);
-    EXPECT_EQ(scheduler.take(11 * MILLISECOND).device,
-              0U);  // its poll, at last
+    // A write after the operate keeps the write interval from it: 15 ms.
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 10, .device = 0}));
+    const Choice poll = scheduler.take(10 * MILLISECOND);
+    EXPECT_EQ(poll.kind, Choice::Kind::POLL);  // its poll, at last
+    EXPECT_EQ(poll.device, 0U);
+    EXPECT_EQ(scheduler.take(11 * MILLISECOND).wake_ns, 15 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(15 * MILLISECOND).kind, Choice::Kind::ORDER);
+}
+
+TEST(Scheduling, AListOfWritesKeepsTheWriteIntervalBetweenItsWrites) {
+    // R1, the other half: independent writes (8.5) are paced as writes.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = {.min_write_interval_ns = 10 * MILLISECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = 0, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::POLL);
+    EXPECT_EQ(scheduler.take(2 * MILLISECOND).wake_ns, 10 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(10 * MILLISECOND).step, 1U);
+}
+
+TEST(Scheduling, AReadNowNeitherWaitsForNorTakesTheWriteInterval) {
+    // F2: after a write, a READ_NOW goes at once, and a write after it
+    // still counts its interval from the first write.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = {.min_write_interval_ns = 10 * MILLISECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
+    ASSERT_TRUE(scheduler.add_order(
+        OrderTicket{.id = 2, .device = 0, .kind = OrderKind::READ_NOW}));
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 3, .device = 0}));
+    EXPECT_EQ(scheduler.take(MILLISECOND).order, 1U);
+    EXPECT_EQ(scheduler.take(2 * MILLISECOND).order, 2U);
+    EXPECT_EQ(scheduler.take(3 * MILLISECOND).wake_ns, 11 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(11 * MILLISECOND).order, 3U);
+}
+
+TEST(Scheduling, DevicesOfOneUnitShareItsPacingAndExclusivity) {
+    // R3: two devices on unit 7 (request interval 10 ms on one of them) and
+    // one on unit 8. The interval holds across the two of unit 7, and an
+    // exclusive order on one holds the other.
+    const CompiledChannel channel =
+        make_channel({{.name = "a",
+                       .unit_id = 7,
+                       .points = adjacent(0, 1),
+                       .pacing = {.min_request_interval_ns = 10 * MILLISECOND}},
+                      {.name = "b", .unit_id = 7, .points = adjacent(10, 1)},
+                      {.name = "c", .unit_id = 8, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).device, 0U);
+    EXPECT_EQ(scheduler.take(MILLISECOND).device, 2U);  // b waits
+    EXPECT_EQ(scheduler.take(2 * MILLISECOND).wake_ns, 10 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(10 * MILLISECOND).device, 1U);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = 1, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
+    EXPECT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::ORDER);
+    // Device a is due too, but b's selection holds the unit: c goes.
+    EXPECT_EQ(scheduler.take(FAST_PERIOD + MILLISECOND).device, 2U);
+    const Choice operate = scheduler.take(FAST_PERIOD + 10 * MILLISECOND);
+    EXPECT_EQ(operate.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(operate.device, 1U);
+    EXPECT_EQ(scheduler.take(FAST_PERIOD + 20 * MILLISECOND).device, 0U);
 }
 
 TEST(Scheduling, TheOrderQueueIsBoundedAndANewOrderIsRefusedWhenFull) {
@@ -519,6 +663,208 @@ TEST(Scheduling, ADisabledDeviceIsNeverPolledAndAChannelWithoutWorkIsIdle) {
         ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::IDLE);
+}
+
+// --- Committee review of PR 135: K1, K2, K4, F1, F8 -----------------------
+
+TEST(Scheduling, ARefusedKeepAliveUsesItsSplitFormAndLeavesTheCycle) {
+    // K1: a 10 s group; r0 = [0..1] (two clusters: it has a split form),
+    // r1 = [50] side-effect; the keep-alive (2 s) is r0. Its refusal takes
+    // the split form without rewinding the cycle: the side-effect range is
+    // not read again early, the next cycle is still due at 10 s, and the
+    // next keep-alive is the split form's first part.
+    ReadRules rules{.max_units = LARGE};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 50,
+                              .last = 50}};
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .group = SLOW},
+                                  {.first = 1, .group = SLOW},
+                                  {.first = 50, .group = SLOW}},
+                       .keepalive_ns = 2 * SECOND}},
+                     rules);
+    const ReadPlan& plan = channel.devices[0].plan;
+    ASSERT_TRUE(plan.keepalive.has_value());
+    const std::uint32_t merged = plan.keepalive.value_or(0);
+    ASSERT_EQ(plan.requests[merged].split.size(), 2U);
+    EXPECT_EQ(plan.requests[merged].first, 0U);
+    Scheduler scheduler(channel, 4, 0);
+    // The cycle (0, 50), then the keep-alive of [0..1] at 2.001 s.
+    EXPECT_EQ(
+        reads_at(scheduler, plan, {0, MILLISECOND, (2 * SECOND) + MILLISECOND}),
+        (std::vector<std::uint64_t>{0, 50, 0}));
+    EXPECT_TRUE(scheduler.refused(0, merged));
+    const Choice wait = scheduler.take((2 * SECOND) + (2 * MILLISECOND));
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, (4 * SECOND) + MILLISECOND);
+    // The next keep-alive is the split form's first part [0]; the next
+    // cycle, at 10 s, reads [0], [1], then the side-effect range once.
+    EXPECT_EQ(reads_at(scheduler, plan,
+                       {(4 * SECOND) + MILLISECOND, 10 * SECOND,
+                        (10 * SECOND) + MILLISECOND,
+                        (10 * SECOND) + (2 * MILLISECOND)}),
+              (std::vector<std::uint64_t>{0, 0, 1, 50}));
+    const Choice part = scheduler.take(10 * SECOND + 3 * MILLISECOND);
+    EXPECT_EQ(part.kind, Choice::Kind::WAIT);
+}
+
+TEST(Scheduling, AChainWhoseLastRequestIsRefusedEndsWithItsCycle) {
+    // K2: a 1 s group, a value at 0 with its companion at 100 (a chain of
+    // two); the companion's request is refused for good. The channel is not
+    // idle for ever: the group stays due every second.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .group = NORMAL, .companions = {1}},
+                     {.first = 100, .group = NORMAL}}}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    const Choice companion = scheduler.take(MILLISECOND);
+    EXPECT_FALSE(scheduler.refused(0, companion.request));
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::POLL);
+    const Choice wait = scheduler.take(SECOND + MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 2 * SECOND);
+    EXPECT_EQ(scheduler.take(2 * SECOND).kind, Choice::Kind::POLL);
+}
+
+TEST(Scheduling, AStarvedGroupPublishesTheAgeOfItsRunningCycle) {
+    // K4 (b): the fast group of 4 requests at 100 ms pacing never leaves the
+    // device idle, so the slow group of the same device is never read. Its
+    // achieved period is the age of its running cycle, not 0: strict
+    // priority starves it, and the published period shows it.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0},
+                     {.first = 1},
+                     {.first = 2},
+                     {.first = 3},
+                     {.first = 50, .group = SLOW}},
+          .pacing = {.min_request_interval_ns = 100 * MILLISECOND}}},
+        ReadRules{.max_units = 1});
+    SimBus bus = mapped_bus();
+    const TestProtocol protocol;
+    Loop loop(channel, protocol, bus, 0, EXCHANGE);
+    loop.run_until(60 * SECOND);
+    EXPECT_GE(loop.scheduler().achieved_period_ns(SLOW, loop.now()),
+              59 * SECOND);
+    EXPECT_TRUE(loop.scheduler().pacing_limited(0, loop.now()));
+}
+
+TEST(Scheduling, AMetPeriodIsNotPacingLimited) {
+    // K4 (c): two requests 50 ms apart in a 1 s group meet the period: they
+    // wait for the interval, but the device is not pacing-limited, and the
+    // group's period is 1 s.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = adjacent(0, 2, NORMAL),
+          .pacing = {.min_request_interval_ns = 50 * MILLISECOND}}},
+        ReadRules{.max_units = 1});
+    SimBus bus = mapped_bus();
+    const TestProtocol protocol;
+    Loop loop(channel, protocol, bus, 0, EXCHANGE);
+    loop.run_until(12 * SECOND);
+    EXPECT_FALSE(loop.scheduler().pacing_limited(0, loop.now()));
+    EXPECT_EQ(loop.scheduler().achieved_period_ns(NORMAL, loop.now()), SECOND);
+}
+
+TEST(Scheduling, OnePeriodLateAmongTenRaisesTheAverage) {
+    // K4 (a): a 1 s group whose worker stalls once for 2 s: the published
+    // period is the average of the last ten periods (start to start), which
+    // the late one raises, not the last period alone.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1, NORMAL)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    const std::vector<std::int64_t> starts =
+        cycle_starts(scheduler, 13, 4 * SECOND, 6 * SECOND);
+    ASSERT_EQ(starts.size(), 13U);
+    const std::int64_t now = starts.back() + MILLISECOND;
+    (void)scheduler.take(now);  // the last cycle completes
+    // The last ten periods end at the last start.
+    const std::int64_t expected =
+        (starts.back() - starts[starts.size() - 11]) / 10;
+    EXPECT_GT(expected, SECOND);
+    const std::int64_t last_period = starts.back() - starts[starts.size() - 2];
+    EXPECT_LE(last_period, SECOND);
+    EXPECT_EQ(scheduler.achieved_period_ns(NORMAL, now), expected);
+}
+
+TEST(Scheduling, AnOrderCanBeEndedRemovedOrNotSent) {
+    // F1: a list of three writes aborted after its first; a queued order
+    // removed; a select whose connection is lost is not followed by its
+    // operate; a step not sent leaves the pacing as it was.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = {.min_write_interval_ns = 10 * MILLISECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = 0, .kind = OrderKind::WRITE_LIST, .steps = 3}));
+    EXPECT_EQ(scheduler.take(MILLISECOND).order, 1U);
+    scheduler.abort_order(0);
+    EXPECT_EQ(scheduler.take(20 * MILLISECOND).kind, Choice::Kind::WAIT);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 2, .device = 0}));
+    EXPECT_TRUE(scheduler.remove_order(2));
+    EXPECT_FALSE(scheduler.remove_order(2));
+    EXPECT_EQ(scheduler.pending_orders(), 0U);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 3, .device = 0, .kind = OrderKind::SELECT_OPERATE, .steps = 2}));
+    EXPECT_EQ(scheduler.take(30 * MILLISECOND).step, 0U);
+    scheduler.reconnect();
+    EXPECT_EQ(scheduler.take(41 * MILLISECOND).kind, Choice::Kind::WAIT);
+    // A write chosen at 50 ms and not sent: the next write may go at once.
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 4, .device = 0}));
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 5, .device = 0}));
+    EXPECT_EQ(scheduler.take(50 * MILLISECOND).order, 4U);
+    scheduler.not_sent();
+    EXPECT_EQ(scheduler.take(51 * MILLISECOND).order, 5U);
+    // A poll not sent is chosen again.
+    const Choice poll = scheduler.take(SLOW_PERIOD);
+    ASSERT_EQ(poll.kind, Choice::Kind::POLL);
+    scheduler.not_sent();
+    EXPECT_EQ(scheduler.take(SLOW_PERIOD).request, poll.request);
+}
+
+TEST(Scheduling, AMalformedOrderIsRefused) {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    EXPECT_FALSE(scheduler.add_order(OrderTicket{.id = 1, .steps = 2}));
+    EXPECT_FALSE(scheduler.add_order(
+        OrderTicket{.id = 2, .kind = OrderKind::READ_NOW, .steps = 2}));
+    EXPECT_TRUE(scheduler.add_order(
+        OrderTicket{.id = 4, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+}
+
+TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
+    // F8: checked when the scheduler is built, never in `take`.
+    CompiledChannel unsized = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    unsized.devices[0].plan.by_group.pop_back();
+    Scheduler first(unsized, 4, 0);
+    EXPECT_EQ(first.status().code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(first.take(0).kind, Choice::Kind::IDLE);
+    EXPECT_FALSE(first.add_order(OrderTicket{.id = 1}));
+    EXPECT_FALSE(first.refused(0, 0));
+    CompiledChannel negative = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    negative.poll_groups[0].period_ns = -1;
+    EXPECT_FALSE(Scheduler::check(negative).ok());
+    CompiledChannel stray = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    stray.devices[0].plan.by_group[0].push_back(99);
+    EXPECT_FALSE(Scheduler::check(stray).ok());
+    const CompiledChannel good = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    Scheduler scheduler(good, 4, 0);
+    EXPECT_TRUE(scheduler.status().ok());
+    EXPECT_FALSE(scheduler.refused(5, 0));  // no such device
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
