@@ -1,5 +1,6 @@
 #include "scada/conf/validate.h"
 
+#include "merged_points.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
@@ -11,7 +12,6 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
-#include "merged_points.h"
 
 #include <cstdint>
 #include <filesystem>

@@ -1699,10 +1699,10 @@ Diagnostic expanded_diagnostic(const ExpandedTree& tree, std::uint16_t code,
         tree.instances[instance].file == diagnostic.location.file) {
         return diagnostic;
     }
-    diagnostic.notes.push_back(Diagnostic::Note{
-        .kind = "template",
-        .location = std::move(diagnostic.location),
-        .detail = std::move(detail)});
+    diagnostic.notes.push_back(
+        Diagnostic::Note{.kind = "template",
+                         .location = std::move(diagnostic.location),
+                         .detail = std::move(detail)});
     diagnostic.location = tree.instances[instance];
     return diagnostic;
 }

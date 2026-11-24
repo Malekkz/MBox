@@ -633,8 +633,8 @@ Lines merged(std::string_view points, std::string_view more = {},
              std::string_view base = {}) {
     Files files{{"templates/meter_a.yaml",
                  std::string("template: meter_a\nprotocol: modbus\n") +
-                     (base.empty() ? "" : "extends: base_a\n") +
-                     "points:\n" + std::string(points)},
+                     (base.empty() ? "" : "extends: base_a\n") + "points:\n" +
+                     std::string(points)},
                 {"drivers/modbus/line1.yaml", one_device(more)}};
     if (!base.empty()) {
         files.emplace("templates/base_a.yaml",
@@ -766,15 +766,14 @@ TEST(MergedPoints, IncompleteMergedMaps) {
 
 // A parameter that no level of the chain gives a type is CF-202.
 TEST(MergedPoints, AParameterNeedsAType) {
-    EXPECT_EQ(
-        expand({{"templates/meter_a.yaml",
-                 "template: meter_a\nprotocol: modbus\n"
-                 "params: { inputs: { default: 4 } }\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: parameter "
-               "\"inputs\" needs type\n"
-               "  from template templates/meter_a.yaml:3:11 (parameter "
-               "inputs)"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "params: { inputs: { default: 4 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: parameter "
+                     "\"inputs\" needs type\n"
+                     "  from template templates/meter_a.yaml:3:11 (parameter "
+                     "inputs)"}));
 }
 
 // An `io` address needs the keys of its channel's backend (Annex B.2).

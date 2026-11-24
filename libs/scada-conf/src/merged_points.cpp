@@ -12,7 +12,6 @@
 #include "scada/conf/types.h"
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -123,10 +122,9 @@ std::optional<std::pair<Wide, Wide>> raw_range(std::string_view raw,
     }};
     for (const Range& range : RANGES) {
         if (range.name == raw) {
-            return std::pair{wide(range.low),
-                             Wide{.negative = false,
-                                  .magnitude = range.high,
-                                  .overflow = false}};
+            return std::pair{wide(range.low), Wide{.negative = false,
+                                                   .magnitude = range.high,
+                                                   .overflow = false}};
         }
     }
     if (raw == "mod10k") {
@@ -134,9 +132,9 @@ std::optional<std::pair<Wide, Wide>> raw_range(std::string_view raw,
         for (std::uint64_t i = 0; i < mod10k_count; ++i) {
             high *= MOD10K_BASE;
         }
-        return std::pair{wide(0), Wide{.negative = false,
-                                       .magnitude = high - 1,
-                                       .overflow = false}};
+        return std::pair{
+            wide(0),
+            Wide{.negative = false, .magnitude = high - 1, .overflow = false}};
     }
     return std::nullopt;
 }
@@ -151,11 +149,13 @@ public:
         : tree_(&tree), document_(&tree.document), diagnostics_(&diagnostics) {}
 
     void run() {
-        const NodeId channels = child(document_->root(), "channels").value_or(0);
+        const NodeId channels =
+            child(document_->root(), "channels").value_or(0);
         for (const NodeId channel : document_->items(channels)) {
             protocol_ = text_of(channel, "protocol");
             backend_.clear();
-            if (const std::optional<NodeId> written = child(channel, "channel")) {
+            if (const std::optional<NodeId> written =
+                    child(channel, "channel")) {
                 backend_ = text_of(*written, "backend");
             }
             const std::optional<NodeId> devices = child(channel, "devices");
@@ -197,9 +197,8 @@ private:
     }
 
     void error(std::uint16_t code, NodeId node, std::string message) {
-        diagnostics_->add(expanded_diagnostic(*tree_, code, node,
-                                              std::move(message),
-                                              "point " + point_name_));
+        diagnostics_->add(expanded_diagnostic(
+            *tree_, code, node, std::move(message), "point " + point_name_));
     }
 
     // CF-202 for each of `keys` that `map` lacks.
@@ -218,7 +217,8 @@ private:
 
     void check_device(NodeId device) {
         const std::string name = text_of(device, "name");
-        if (const std::optional<NodeId> time = child_map(device, "device_time")) {
+        if (const std::optional<NodeId> time =
+                child_map(device, "device_time")) {
             tag_ = name;
             point_name_.clear();
             check_device_time(*time);
@@ -268,10 +268,12 @@ private:
                 }
             }
         }
-        if (const std::optional<NodeId> invalid = child_map(point, "on_invalid")) {
+        if (const std::optional<NodeId> invalid =
+                child_map(point, "on_invalid")) {
             need(*invalid, "on_invalid", {"substitute"});
         }
-        if (const std::optional<NodeId> time = child_map(point, "device_time")) {
+        if (const std::optional<NodeId> time =
+                child_map(point, "device_time")) {
             check_device_time(*time);
         }
         const std::optional<NodeId> address = child_map(point, "address");
@@ -357,7 +359,7 @@ private:
         if (child(address, "bit")) {
             return "bool";
         }
-        const std::string written = text_of(address, "type");
+        std::string written = text_of(address, "type");
         if (!written.empty()) {
             return written;
         }
@@ -377,7 +379,7 @@ private:
     // The point's value type, given or derived (4.7).
     [[nodiscard]] std::string value_type_of(NodeId point,
                                             const std::string& raw) const {
-        const std::string given = text_of(point, "value_type");
+        std::string given = text_of(point, "value_type");
         if (!given.empty()) {
             return given;
         }
@@ -420,10 +422,12 @@ private:
             return;
         }
         const std::string given = text_of(point, "value_type");
-        if ((given == "int64" || given == "uint64") && !is_code(point)) {
-            error(CF_VALUE_TYPE, *child(point, "value_type"),
-                  quote_text(tag_) + ": value_type " + given +
-                      " cannot hold " + raw);
+        const std::optional<NodeId> given_at = child(point, "value_type");
+        if (given_at && (given == "int64" || given == "uint64") &&
+            !is_code(point)) {
+            error(CF_VALUE_TYPE, *given_at,
+                  quote_text(tag_) + ": value_type " + given + " cannot hold " +
+                      raw);
         }
         std::optional<NodeId> counter = child_map(point, "counter");
         if (!counter && text_of(point, "kind") == "counter") {
@@ -445,7 +449,8 @@ private:
                       " needs an integer scaling; use float64");
         };
         bool integer = true;
-        if (const std::optional<NodeId> exponent = child(point, "exponent_from")) {
+        if (const std::optional<NodeId> exponent =
+                child(point, "exponent_from")) {
             refuse(*exponent);
             integer = false;
         }
@@ -486,11 +491,12 @@ private:
             }
             const std::uint64_t span = std::uint64_t{1} << width;
             if (is_signed(raw)) {
-                return std::pair{
-                    Wide{.negative = true, .magnitude = span / 2,
-                         .overflow = false},
-                    Wide{.negative = false, .magnitude = span / 2 - 1,
-                         .overflow = false}};
+                return std::pair{Wide{.negative = true,
+                                      .magnitude = span / 2,
+                                      .overflow = false},
+                                 Wide{.negative = false,
+                                      .magnitude = span / 2 - 1,
+                                      .overflow = false}};
             }
             return std::pair{wide(0), Wide{.negative = false,
                                            .magnitude = span - 1,
@@ -539,10 +545,13 @@ private:
                       quote_text(tag_) + ": raw x gain + offset can exceed " +
                           type);
             } else {
-                const std::optional<NodeId> written = child(point, "value_type");
+                const std::optional<NodeId> written =
+                    child(point, "value_type");
+                std::string message = quote_text(tag_);
+                message += ": value_type " + type;
+                message += " cannot hold " + raw;
                 error(CF_VALUE_TYPE, written.value_or(address),
-                      quote_text(tag_) + ": value_type " + type +
-                          " cannot hold " + raw);
+                      std::move(message));
             }
             return;
         }
