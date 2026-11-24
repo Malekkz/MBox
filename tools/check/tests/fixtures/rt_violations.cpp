@@ -94,6 +94,40 @@ public:
     int configure(int value) const override;
 };
 
+// `final` is an override too.
+class Sealed final : public Protocol {
+public:
+    int encode(int value) const final;  // expect: scada-rt
+    int configure(int value) const final;
+};
+
+// Below a class that repeated the annotation, the leaf must repeat it too.
+class Leaf : public Repeats {
+public:
+    int encode(int value) const override;  // expect: scada-rt
+};
+
+class AnnotatedLeaf : public Repeats {
+public:
+    SCADA_RT int encode(int value) const override;
+};
+
+// A class template's override is checked in the template itself.
+template <typename Value>
+class Templated : public Protocol {
+public:
+    int encode(int value) const override;  // expect: scada-rt
+    int configure(int value) const override;
+};
+
+// Another signature hides the base's function and overrides nothing: not
+// reported (the compiler's -Woverloaded-virtual is the check for it).
+class Hides : public Repeats {
+public:
+    using Repeats::encode;
+    int encode(long value) const;
+};
+
 // Not real-time: none of these lines is reported by the SCADA_RT check.
 int not_real_time(int value) {
     const std::scoped_lock lock(guard);

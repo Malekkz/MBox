@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -865,6 +866,28 @@ TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
     Scheduler scheduler(good, 4, 0);
     EXPECT_TRUE(scheduler.status().ok());
     EXPECT_FALSE(scheduler.refused(5, 0));  // no such device
+}
+
+TEST(Scheduling, AWriteReachesEncodeAsARequestOfKindWrite) {
+    // F4: a write is a Request of kind WRITE with its raw payload; the
+    // attempt carries the framing and a protocol area. The test protocol
+    // reads only, so it refuses the write and leaves the attempt as given.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    const TestProtocol protocol;
+    ChannelState state;
+    const std::array<std::byte, 2> value{std::byte{0x12}, std::byte{0x34}};
+    Request write{.kind = Request::Kind::WRITE, .first = 0, .count = 1};
+    write.points = {0};
+    write.payload = value;
+    std::array<std::byte, 64> bytes{};
+    TxBuffer out{.bytes = bytes};
+    Attempt attempt{.framing = Framing::SERIAL};
+    const EncodeResult result =
+        protocol.encode(channel.devices[0], state, write, attempt, out);
+    EXPECT_EQ(result.kind, EncodeResult::Kind::REFUSED);
+    EXPECT_EQ(attempt.framing, Framing::SERIAL);
+    EXPECT_EQ(attempt.protocol.size(), ATTEMPT_PROTOCOL_BYTES);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

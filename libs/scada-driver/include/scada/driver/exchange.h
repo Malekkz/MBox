@@ -10,6 +10,7 @@
 #include "scada/common/realtime.h"
 #include "scada/driver/sample_processing.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -33,11 +34,27 @@ private:
     std::uint32_t next_transaction_id_ = 0;
 };
 
+// How frames are carried on the channel (2.2, 7.2, 7.3): what `frame_state`
+// looks for at the start of an answer.
+enum class Framing : std::uint8_t {
+    STREAM = 1,          // `tcp`: a header with a transaction id
+    SERIAL,              // a serial line: the frame alone (RTU)
+    SERIAL_OVER_STREAM,  // `rtu_over_tcp`: serial frames over a stream
+};
+
+// The bytes of an attempt that a protocol keeps for itself.
+inline constexpr std::size_t ATTEMPT_PROTOCOL_BYTES = 16;
+
 // The worker's record of one attempt of a request: every attempt, a retry
 // included, has its own transaction id; the planned request stays
-// immutable (2.2).
+// immutable (2.2). The worker sets `framing` from the channel's transport;
+// `encode` may record in `protocol` what the answer must echo (a write's
+// function, address and quantity, annex A), which `frame_state` and
+// `decode` read back. Nothing in it allocates.
 struct Attempt {
     std::uint32_t transaction_id = 0;
+    Framing framing = Framing::STREAM;
+    std::array<std::byte, ATTEMPT_PROTOCOL_BYTES> protocol{};
 };
 
 // A device's mutable protocol state, owned by the framework's Device and

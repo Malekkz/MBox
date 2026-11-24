@@ -13,8 +13,10 @@
 
 #include "scada/common/status.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace scada::driver {
@@ -68,9 +70,16 @@ struct PlanPoint {
     std::uint64_t count = 1;  // >= 1
 };
 
-// One planned read. Immutable once planned; every attempt of it has its own
-// record (exchange.h, Attempt).
+// One request: a planned read, or one write of an order (2.2). A planned
+// read is immutable once planned; every attempt of it has its own record
+// (exchange.h, Attempt). A write is built by the framework for each step of
+// an order (8.3): its point, its span, and the raw value to write.
 struct Request {
+    enum class Kind : std::uint8_t {
+        READ = 1,
+        WRITE,
+    };
+    Kind kind = Kind::READ;
     std::uint32_t poll_group = 0;
     std::uint32_t space = 0;
     std::uint32_t unit_id = 0;
@@ -93,6 +102,11 @@ struct Request {
     // its points are ABSENT (6.3).
     // NOLINTBEGIN(readability-redundant-member-init): designated initializers may omit it (-Wmissing-field-initializers)
     std::vector<std::uint32_t> split{};
+    // A write: the raw value in the protocol's units, already converted
+    // exactly from the command's value (8.4), `count` units long. It lives
+    // in the order's slot of the framework and is valid during the call
+    // that is passed the request. Empty for a read.
+    std::span<const std::byte> payload{};
     // NOLINTEND(readability-redundant-member-init)
 };
 

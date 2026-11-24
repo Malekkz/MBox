@@ -51,15 +51,17 @@ the contracts left open.
   on x86-64 and ARM64.
 
 - `plan_blocks` groups a device's points into the requests of each poll
-  group within the read rules, with a split form per request and a
-  keep-alive request (D-135). A protocol whose points are spans of numbered
-  units can use it as its `plan`.
+  group within the read rules and the limits of each space, with a split
+  form per request and a keep-alive request (D-135). A protocol whose points
+  are spans of numbered units can use it as its `plan`.
 - `Scheduler::take` chooses a channel worker's next request at a given
-  monotonic time: an exclusive order in progress or a chain of companions
-  first, then new orders, then due poll groups by priority and due time,
-  then a keep-alive, within the pacing of each device and of the channel
-  (D-136). It does no I/O and allocates nothing; the caller passes the time,
-  so every test is deterministic.
+  monotonic time: the next step of an exclusive order first, then orders,
+  then due poll groups (a chain of companions in progress first, then by
+  priority and due time), then a keep-alive, within the pacing of each
+  physical unit and of the channel (D-136). Only the channel worker calls
+  it. It does no I/O and allocates nothing; the caller passes the time, so
+  every test is deterministic. A channel the scheduler cannot run is
+  refused once, when it is built (`Scheduler::status`).
 
 ## Known behaviour
 

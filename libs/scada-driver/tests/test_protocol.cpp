@@ -120,7 +120,9 @@ EncodeResult TestProtocol::encode(const CompiledDevice& device,
                                   ChannelState& channel, const Request& request,
                                   Attempt& attempt,
                                   TxBuffer& out) const noexcept {
-    if (out.bytes.size() < REQUEST_BYTES || request.count == 0 ||
+    // The test protocol reads only: a write cannot be encoded.
+    if (request.kind != Request::Kind::READ ||
+        out.bytes.size() < REQUEST_BYTES || request.count == 0 ||
         request.count > MAX_UNITS) {
         return EncodeResult{};
     }

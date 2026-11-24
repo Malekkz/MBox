@@ -30,7 +30,10 @@ what changed".
 - `rt` also reports an override of a `SCADA_RT` member function that does
   not repeat `SCADA_RT`: the attribute is not inherited, so a protocol's
   `encode`, `frame_state` and `decode` must each carry it (driver interface
-  contract 2.2).
+  contract 2.2). It covers `final`, overrides in class templates and every
+  level below a class that repeated it. It compares an override with the
+  function it overrides directly: a leaf below a class that did not repeat
+  `SCADA_RT` is not reported, but that class is, so the chain is caught.
 - `rt` finds direct calls only. It does not follow calls into other
   functions, and it does not yet know blocking calls, system calls or C++
   stream output (`docs/decisions.md`, D-9).
