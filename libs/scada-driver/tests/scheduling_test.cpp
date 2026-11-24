@@ -12,6 +12,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/plan.h"
+#include "scada/driver/protocol.h"
 #include "scada/driver/scheduler.h"
 #include "test_protocol.h"
 
