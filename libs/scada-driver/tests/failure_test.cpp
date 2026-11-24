@@ -1,0 +1,124 @@
+// Failure accounting (driver interface contract 7.4; conformance test 15,
+// the accounting half): demotion after `demote_after` failed requests,
+// grace, a shared count per unit id, probes at `backoff` doubling to
+// `backoff_max`, recovery.
+
+#include "scada/driver/failure.h"
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <vector>
+
+namespace scada::driver {
+namespace {
+
+constexpr std::int64_t SECOND = 1'000'000'000;
+constexpr std::uint32_t FIRST = 0;
+constexpr std::uint32_t SECOND_DEVICE = 1;
+constexpr std::uint32_t OTHER_UNIT = 2;
+
+FailureTracker tracker(std::vector<FailureTracker::Device> devices) {
+    FailureTracker out(std::move(devices));
+    out.connected(0);
+    return out;
+}
+
+FailureRules rules(std::uint8_t demote_after = 3, std::int64_t grace_ns = 0) {
+    return FailureRules{.demote_after = demote_after,
+                        .backoff_ns = 10 * SECOND,
+                        .backoff_max_ns = 35 * SECOND,
+                        .startup_grace_ns = grace_ns};
+}
+
+void fail(FailureTracker& tracked, std::uint32_t device, int times,
+          std::int64_t at_ns) {
+    for (int index = 0; index < times; ++index) {
+        (void)tracked.request_ended(device, RequestEnd::FAILED, at_ns);
+    }
+}
+
+TEST(Failure, ADeviceIsDemotedAfterDemoteAfterFailedRequests) {
+    FailureTracker tracked = tracker({{.unit_id = 1, .rules = rules()}});
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    fail(tracked, FIRST, 2, SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.failures(FIRST), 2U);
+    EXPECT_TRUE(tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND));
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 11 * SECOND);
+    EXPECT_FALSE(tracked.polled(FIRST));
+}
+
+TEST(Failure, AnAnswerEmptiesTheCountAndBusyCountsNeitherWay) {
+    FailureTracker tracked = tracker({{.unit_id = 1, .rules = rules()}});
+    fail(tracked, FIRST, 2, SECOND);
+    (void)tracked.request_ended(FIRST, RequestEnd::NOT_COUNTED, SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 2U);
+    (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::RUNNING);
+    fail(tracked, FIRST, 2, SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::RUNNING);
+}
+
+TEST(Failure, FailuresWithinStartupGraceDoNotCount) {
+    FailureTracker tracked =
+        tracker({{.unit_id = 1, .rules = rules(3, 5 * SECOND)}});
+    fail(tracked, FIRST, 10, 4 * SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    fail(tracked, FIRST, 3, 5 * SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+}
+
+TEST(Failure, DevicesSharingAUnitIdShareOneCount) {
+    // Two slices of one gateway unit, and a device on another unit: the
+    // dead unit costs demote_after requests once, for both slices.
+    FailureTracker tracked = tracker({{.unit_id = 7, .rules = rules()},
+                                      {.unit_id = 7, .rules = rules()},
+                                      {.unit_id = 8, .rules = rules()}});
+    (void)tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND);
+    (void)tracked.request_ended(SECOND_DEVICE, RequestEnd::FAILED, SECOND);
+    EXPECT_EQ(tracked.failures(SECOND_DEVICE), 2U);
+    (void)tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(OTHER_UNIT), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.failures(OTHER_UNIT), 0U);
+}
+
+TEST(Failure, ProbesBackOffDoublingToTheMaximumThenRecover) {
+    FailureTracker tracked = tracker({{.unit_id = 1, .rules = rules(1)}});
+    fail(tracked, FIRST, 1, 0);
+    ASSERT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 10 * SECOND);
+    tracked.probe_ended(FIRST, false, 10 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 30 * SECOND);  // 20 s back-off
+    tracked.probe_ended(FIRST, false, 30 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 65 * SECOND);  // 35 s: the maximum
+    tracked.probe_ended(FIRST, false, 65 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 100 * SECOND);
+    tracked.probe_ended(FIRST, true, 100 * SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+    // Demoted again: the back-off starts from `backoff` once more.
+    fail(tracked, FIRST, 1, 200 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 210 * SECOND);
+}
+
+TEST(Failure, ALostConnectionAndADisabledDevice) {
+    FailureTracker tracked =
+        tracker({{.unit_id = 1, .rules = rules()},
+                 {.unit_id = 2, .rules = rules(), .enabled = false}});
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DISABLED);
+    tracked.lost();
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::CONNECTING);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DISABLED);
+    // A request of a device that is not polled changes nothing.
+    EXPECT_FALSE(tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND));
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+}
+
+}  // namespace
+}  // namespace scada::driver

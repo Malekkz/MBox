@@ -63,13 +63,13 @@ TEST(Timing, AStreamHasNoLineTimeButKeepsTheMargin) {
 
 TEST(Timing, DeadlinesSaturate) {
     constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
-    EXPECT_EQ(first_byte_deadline_ns(LINE_1200_8E1, MAX - 1, REQUEST_BYTES,
-                                     TIMEOUT),
-              MAX);
+    EXPECT_EQ(
+        first_byte_deadline_ns(LINE_1200_8E1, MAX - 1, REQUEST_BYTES, TIMEOUT),
+        MAX);
     EXPECT_EQ(answer_deadline_ns(LINE_1200_8E1, MAX, ANSWER_BYTES), MAX);
-    EXPECT_EQ(frame_time_ns(LINE_1200_8E1,
-                            std::numeric_limits<std::size_t>::max()),
-              MAX);
+    EXPECT_EQ(
+        frame_time_ns(LINE_1200_8E1, std::numeric_limits<std::size_t>::max()),
+        MAX);
 }
 
 }  // namespace

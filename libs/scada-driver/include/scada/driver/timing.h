@@ -30,9 +30,8 @@ struct LineTiming {
 
 // The bits of one character: 1 start bit, the data bits, a parity bit if
 // any, the stop bits (7.1).
-[[nodiscard]] constexpr std::uint8_t bits_per_char(std::uint8_t data_bits,
-                                                   bool parity,
-                                                   std::uint8_t stop_bits) noexcept {
+[[nodiscard]] constexpr std::uint8_t bits_per_char(
+    std::uint8_t data_bits, bool parity, std::uint8_t stop_bits) noexcept {
     return static_cast<std::uint8_t>(1 + data_bits + (parity ? 1 : 0) +
                                      stop_bits);
 }
@@ -44,10 +43,10 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t frame_time_ns(
     if (line.bit_rate == 0) {
         return 0;
     }
-    const std::uint64_t bits = static_cast<std::uint64_t>(bytes) *
-                               line.bits_per_char;
-    constexpr auto MAX = static_cast<std::uint64_t>(
-        std::numeric_limits<std::int64_t>::max());
+    const std::uint64_t bits =
+        static_cast<std::uint64_t>(bytes) * line.bits_per_char;
+    constexpr auto MAX =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     if (bits > MAX / NS_PER_SECOND) {
         return std::numeric_limits<std::int64_t>::max();
     }
@@ -73,8 +72,8 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t margin_ns(
 }
 
 namespace detail {
-[[nodiscard]] constexpr std::int64_t saturating_add(std::int64_t left,
-                                                    std::int64_t right) noexcept {
+[[nodiscard]] constexpr std::int64_t saturating_add(
+    std::int64_t left, std::int64_t right) noexcept {
     constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
     return left > MAX - right ? MAX : left + right;
 }

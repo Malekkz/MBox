@@ -1,5 +1,6 @@
 scada_add_test(scada-driver-unit-test KIND unit
   SOURCES
+    failure_test.cpp
     golden_samples_test.cpp
     golden_vectors_test.cpp
     golden_write_test.cpp
