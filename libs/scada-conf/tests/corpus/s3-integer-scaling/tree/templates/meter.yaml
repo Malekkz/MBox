@@ -1,0 +1,21 @@
+template: meter
+protocol: modbus
+points:
+  - name: power
+    value_type: int64
+    address: { table: holding, register: 10, type: int16 }
+    scale: { divide_by: 10 }
+  - name: energy
+    value_type: uint64
+    address: { table: holding, register: 12, type: uint32 }
+    scale: { gain: 0.5, offset: 1 }
+  - name: current
+    value_type: int64
+    address: { table: holding, register: 14, type: int16 }
+    exponent_from: { point: exp, direction: multiply }
+  - name: exp
+    address: { table: holding, register: 15, type: int16 }
+  - name: ok
+    value_type: int64
+    address: { table: holding, register: 16, type: int16 }
+    scale: { gain: 10, offset: -5, divide_by: 1 }

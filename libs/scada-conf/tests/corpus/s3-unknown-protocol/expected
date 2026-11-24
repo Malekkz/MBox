@@ -1,0 +1,4 @@
+# A template of a protocol this version does not know is checked against
+# the framework keys alone: its protocol keys give no error at stage 3, and
+# the unknown protocol is one error of stage 5 (D-108). The template is
+# otherwise valid, so the tree passes stage 3.

@@ -1,3 +1,4 @@
 channel:
   name: line2
   type: rtu
+  device: /dev/ttyS1

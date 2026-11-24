@@ -77,6 +77,11 @@ constexpr std::size_t MAX_HOST_NAME = 253;
 // An `https://` URL with a host and no white space.
 [[nodiscard]] bool is_https_url(std::string_view text) noexcept;
 
+// A serial device path (Annex A.1, C): absolute, under `/dev/`, at most 255
+// bytes, without an empty, `.` or `..` component, and free text (no
+// control characters; a space is allowed).
+[[nodiscard]] bool is_device_path(std::string_view text) noexcept;
+
 }  // namespace scada::conf
 
 #endif  // SCADA_CONF_NAMES_H

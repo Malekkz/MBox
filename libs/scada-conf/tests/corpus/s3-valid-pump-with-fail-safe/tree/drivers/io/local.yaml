@@ -1,0 +1,11 @@
+channel: { name: local, backend: gpio, chip: "main-gpio" }
+devices:
+  - name: ps1.pump1
+    points:
+      - name: run_cmd
+        value_type: bool
+        access: rw
+        storage: volatile
+        address: { line: "pump1-run", direction: output, at_start: safe }
+      - name: running
+        address: { line: 7, direction: input, bias: pull_up, debounce: 20ms, active_low: true }

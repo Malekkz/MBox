@@ -1,0 +1,14 @@
+channel: { name: drives, type: tcp, host: 192.0.2.40 }
+devices:
+  - name: ps1.drive1
+    template: drive_a
+    unit_id: 1
+    params: { options: [meter], rated: 11 }
+    only: [speed, "meter.*"]
+  - name: ps1.drive2
+    template: drive_a
+    unit_id: 2
+    params: { options: [meter, brake] }
+    overrides:
+      speed: { max_age: 2s, scale: { replace: true, divide_by: 10 } }
+      meter.power: { address: { word_order: little } }

@@ -20,11 +20,11 @@ namespace scada::conf {
 // - stage 1: paths, file kinds and sizes;
 // - stage 2: the YAML subset of every YAML file; every `.st` file is CF-920,
 //   as structured text is not available in this version (contract 9.3);
-// - stage 3: the schemas of system, areas, enums, logging and tasks files,
-//   CF-102, CF-111 once typed, CF-211 and `time.sync.servers`.
-// Templates, channels, tags, outputs, alarms and programs are parsed but not
-// yet schema-checked; their schemas and the later stages are added by P2-03
-// (#100) slice by slice.
+// - stage 3: the schema of every file type, a channel and a template with
+//   their protocol's (Annexes A and B); CF-102, CF-111 once typed, CF-211,
+//   `time.sync.servers`, the keys an object requires or refuses by the
+//   value of another (rules.h) and CF-517 within one point object.
+// The later stages are added by P2-03 (#100) slice by slice.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is
 // wrong is a report with errors, not a failure.

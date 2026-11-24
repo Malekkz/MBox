@@ -272,6 +272,28 @@ bool is_time_of_day(std::string_view text) noexcept {
     return hours < HOURS_PER_DAY && minutes < MINUTES_PER_HOUR;
 }
 
+bool is_device_path(std::string_view text) noexcept {
+    constexpr std::size_t MAX_PATH = 255;
+    constexpr std::string_view ROOT = "/dev/";
+    if (!text.starts_with(ROOT) || text.size() > MAX_PATH ||
+        !is_free_text(text)) {
+        return false;
+    }
+    // Every component after the root, the last included, is a name.
+    std::string_view rest = text.substr(1);
+    while (true) {
+        const std::size_t end = rest.find('/');
+        const std::string_view part = rest.substr(0, end);
+        if (part.empty() || part == "." || part == "..") {
+            return false;
+        }
+        if (end == std::string_view::npos) {
+            return true;
+        }
+        rest = rest.substr(end + 1);
+    }
+}
+
 bool is_https_url(std::string_view text) noexcept {
     constexpr std::string_view SCHEME = "https://";
     if (!text.starts_with(SCHEME)) {

@@ -4,7 +4,7 @@
   "title": "system.yaml (configuration schemas contract, section 3)",
   "type": "object",
   "properties": {
-    "format": { "type": "integer", "x-scada-type": "integer" },
+    "format": { "description": "Tree format. Default 1", "type": "integer", "x-scada-type": "integer" },
     "unit": {
       "type": "object",
       "properties": {
@@ -17,7 +17,7 @@
     "node": {
       "type": "object",
       "properties": {
-        "role": {
+        "role": { "description": "Default standalone",
           "type": "string",
           "enum": ["standalone", "master", "slave"],
           "x-scada-reserved-values": ["master", "slave"]
@@ -32,15 +32,15 @@
         "sync": {
           "type": "object",
           "properties": {
-            "mode": { "type": "string", "enum": ["ntp", "ptp", "none"] },
+            "mode": { "description": "Default ntp", "type": "string", "enum": ["ntp", "ptp", "none"] },
             "servers": {
               "type": "array",
               "minItems": 1,
               "maxItems": 8,
               "items": { "type": "string", "x-scada-type": "host" }
             },
-            "alarm_offset_ms": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 60000 },
-            "alarm_unsynced_s": { "type": "integer", "x-scada-type": "integer", "minimum": 10, "maximum": 86400 }
+            "alarm_offset_ms": { "description": "In ms. Default 500", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 60000 },
+            "alarm_unsynced_s": { "description": "In s. Default 600", "type": "integer", "x-scada-type": "integer", "minimum": 10, "maximum": 86400 }
           },
           "unevaluatedProperties": false
         }
@@ -51,7 +51,7 @@
     "network": {
       "type": "object",
       "properties": {
-        "hostname": { "type": "string", "x-scada-type": "host_name" },
+        "hostname": { "description": "Default the unit id", "type": "string", "x-scada-type": "host_name" },
         "interfaces": {
           "type": "array",
           "items": {
@@ -73,15 +73,15 @@
     "storage": {
       "type": "object",
       "properties": {
-        "free_space_alarm": { "type": "string", "x-scada-type": "percentage", "minimum": 0, "maximum": 100 },
-        "journal_reserve": { "type": "string", "x-scada-type": "size" }
+        "free_space_alarm": { "description": "Default 10%", "type": "string", "x-scada-type": "percentage", "minimum": 0, "maximum": 100 },
+        "journal_reserve": { "description": "Default 2GiB", "type": "string", "x-scada-type": "size" }
       },
       "unevaluatedProperties": false
     },
     "conf": {
       "type": "object",
       "properties": {
-        "keep_versions": { "type": "integer", "x-scada-type": "integer", "minimum": 5, "maximum": 1000 }
+        "keep_versions": { "description": "Default 50", "type": "integer", "x-scada-type": "integer", "minimum": 5, "maximum": 1000 }
       },
       "unevaluatedProperties": false
     },
@@ -98,8 +98,8 @@
           "x-scada-exclusive": [["certificate", "token"]],
           "unevaluatedProperties": false
         },
-        "order": { "type": "string", "enum": ["newest_first", "oldest_first"] },
-        "rate_limit": { "type": "string", "x-scada-type": "size" },
+        "order": { "description": "Default newest_first", "type": "string", "enum": ["newest_first", "oldest_first"] },
+        "rate_limit": { "description": "Per second", "type": "string", "x-scada-type": "size" },
         "window": {
           "type": "object",
           "properties": {
@@ -117,8 +117,8 @@
       "type": "object",
       "properties": {
         "server": { "type": "string", "x-scada-type": "host" },
-        "port": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 65535 },
-        "tls": { "type": "string", "enum": ["starttls", "implicit"] },
+        "port": { "description": "Default 587", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 65535 },
+        "tls": { "description": "Default starttls", "type": "string", "enum": ["starttls", "implicit"] },
         "username": { "$ref": "common.schema.json#/$defs/text" },
         "password": { "x-scada-secret": true },
         "from": { "$ref": "common.schema.json#/$defs/text" }
@@ -129,33 +129,33 @@
     "limits": {
       "type": "object",
       "properties": {
-        "max_tags": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000000 },
-        "max_devices": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 10000 },
-        "max_devices_per_channel": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 256 },
-        "max_channels": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000 }
+        "max_tags": { "description": "Default 50000", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000000 },
+        "max_devices": { "description": "Default 1000", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 10000 },
+        "max_devices_per_channel": { "description": "Default 247", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 256 },
+        "max_channels": { "description": "Default 300", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 1000 }
       },
       "unevaluatedProperties": false
     },
     "data_plane": {
       "type": "object",
       "properties": {
-        "heartbeat_check_ms": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 60000 },
-        "retain_interval_ms": { "type": "integer", "x-scada-type": "integer", "minimum": 1000, "maximum": 60000 },
-        "generation_change_limit": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "60s" },
+        "heartbeat_check_ms": { "description": "In ms. Default 250", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 60000 },
+        "retain_interval_ms": { "description": "In ms. Default 5000", "type": "integer", "x-scada-type": "integer", "minimum": 1000, "maximum": 60000 },
+        "generation_change_limit": { "description": "Default 5s", "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "60s" },
         "processes": {
           "type": "object",
           "x-scada-key-type": "process_name",
           "unevaluatedProperties": {
             "type": "object",
             "properties": {
-              "heartbeat_timeout_ms": { "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 600000 },
-              "control_attach_grace": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "600s" }
+              "heartbeat_timeout_ms": { "description": "In ms. Default 3000; 500 for a real-time process", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 600000 },
+              "control_attach_grace": { "description": "Default 60s", "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "600s" }
             },
             "unevaluatedProperties": false
           }
         },
-        "event_queue_capacity": { "type": "integer", "x-scada-type": "power_of_two", "minimum": 16, "maximum": 1048576 },
-        "command_queue_capacity": { "type": "integer", "x-scada-type": "power_of_two", "minimum": 16, "maximum": 1048576 }
+        "event_queue_capacity": { "description": "Default 1024", "type": "integer", "x-scada-type": "power_of_two", "minimum": 16, "maximum": 1048576 },
+        "command_queue_capacity": { "description": "Default 1024", "type": "integer", "x-scada-type": "power_of_two", "minimum": 16, "maximum": 1048576 }
       },
       "unevaluatedProperties": false
     },
@@ -166,7 +166,7 @@
           "type": "array",
           "items": { "type": "integer", "x-scada-type": "integer", "minimum": 0, "maximum": 4095 }
         },
-        "io_priority": { "type": "integer", "x-scada-type": "integer", "minimum": 2, "maximum": 98 }
+        "io_priority": { "description": "Default 95", "type": "integer", "x-scada-type": "integer", "minimum": 2, "maximum": 98 }
       },
       "unevaluatedProperties": false
     }

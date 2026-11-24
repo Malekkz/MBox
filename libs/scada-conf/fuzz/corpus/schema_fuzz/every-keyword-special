@@ -1,0 +1,11 @@
+i: 1
+tmpl: pv{n}.voltage
+pat: pv*.v?
+dev: /dev/ttyS0
+res: 100ns
+raw: -1
+rawn: nan
+nb: true
+nt: ps1.flow
+ka: off
+ipl: 192.0.2.10

@@ -804,5 +804,33 @@ TEST(Yaml, TheDefaultTreeLimitAtNAndNPlusOne) {
               "error 1:1 CF-113: the tree exceeds its limit of 4000000 nodes");
 }
 
+// True if the value of `key` in `document`'s root is verbatim.
+bool verbatim_of(const Document& document, std::string_view key) {
+    const std::optional<NodeId> value = document.find(document.root(), key);
+    return value.has_value() && document.verbatim(value.value_or(0));
+}
+
+// A scalar is verbatim when its text is its source on one line, so that a
+// character of it has a column in the file (D-109).
+TEST(Yaml, VerbatimScalars) {
+    const Document document = parsed_document(
+        "a: one line\n"
+        "b: \"quoted\"\n"
+        "c: 'it''s'\n"
+        "d: \"esc\\u0041\"\n"
+        "e: two\n"
+        "  lines\n"
+        "f: |\n"
+        "  block\n"
+        "g: 'single'\n");
+    EXPECT_TRUE(verbatim_of(document, "a"));
+    EXPECT_TRUE(verbatim_of(document, "b"));
+    EXPECT_FALSE(verbatim_of(document, "c"));
+    EXPECT_FALSE(verbatim_of(document, "d"));
+    EXPECT_FALSE(verbatim_of(document, "e"));
+    EXPECT_FALSE(verbatim_of(document, "f"));
+    EXPECT_TRUE(verbatim_of(document, "g"));
+    EXPECT_FALSE(document.verbatim(document.root()));
+}
 }  // namespace
 }  // namespace scada::conf

@@ -1,0 +1,6 @@
+priorities: [p1, p2, p3, p4, p5, p6, p7, p8, p9]
+alarms:
+  - { tag: ps1.level, type: high, priority: p1 }
+  - { tag: ps1.level, type: deviation, limit: 1, priority: p1 }
+  - { type: expression, expr: ps1.a AND ps1.b, priority: p2 }
+  - { type: state, alarm_on: true, priority: p2 }

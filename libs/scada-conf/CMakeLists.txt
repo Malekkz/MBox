@@ -6,11 +6,20 @@
 # the directory.
 set(scada_conf_schemas
   common.schema.json
+  point.schema.json
   system.schema.json
   areas.schema.json
   enums.schema.json
   logging.schema.json
-  tasks.schema.json)
+  tasks.schema.json
+  template.schema.json
+  channel.schema.json
+  modbus.schema.json
+  io.schema.json
+  tags.schema.json
+  outputs.schema.json
+  alarms.schema.json
+  program.schema.json)
 set(scada_conf_schema_entries "")
 foreach(schema IN LISTS scada_conf_schemas)
   set(schema_path "${CMAKE_CURRENT_SOURCE_DIR}/schemas/${schema}")
@@ -29,10 +38,12 @@ configure_file(src/builtin_schemas.cpp.in
 scada_add_library(scada-conf
   SOURCES
     src/diagnostic.cpp
+    src/expression.cpp
     src/names.cpp
     src/node.cpp
     src/path_class.cpp
     src/read.cpp
+    src/rules.cpp
     src/scalar.cpp
     src/schema.cpp
     src/tree_scan.cpp

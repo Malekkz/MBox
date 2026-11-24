@@ -1,0 +1,16 @@
+template: sensor_b
+protocol: modbus
+defaults:
+  invalid_values: { uint17: [0] }
+identify:
+  - { equals: 3 }
+points:
+  - name: level
+    address: { table: holding, register: 70000, type: uint16 }
+  - name: flags
+    address: { table: holding, register: 2, field: [9, 2] }
+    bits: { 64: overflow }
+    quality_from: [ { point: self, map: { 0: [good, bad] } } ]
+repeat:
+  - for: { a: "1..2", b: "1..2", c: "1..2" }
+    points: [ { name: "x{a}" } ]

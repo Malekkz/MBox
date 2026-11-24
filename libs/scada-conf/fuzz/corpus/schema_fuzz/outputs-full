@@ -1,0 +1,4 @@
+interlocks: [ { name: ps1.p, condition: "ps1.l > 0.5", message: m } ]
+outputs:
+  - { name: ps1.s, area: ps1, kind: setpoint, target: ps1.t, feedback: { tag: ps1.f, within: 2.0, settle: 5s }, limits: { min: 0, max: 100, release: { raw: 0x7FFFFFFF } }, interlocks: [ps1.p], safe_state: { value: 0 }, on_control_loss: { action: safe, after: 2s } }
+  - { name: ps1.c, area: ps1, kind: double, target: ps1.r, feedback: ps1.q, interlocks: { on: [ps1.p], off: [] }, safe_state: hold }

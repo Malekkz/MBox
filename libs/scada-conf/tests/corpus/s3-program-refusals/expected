@@ -1,0 +1,5 @@
+# A program refused at stage 3: a block without type, a source of two
+# forms, and an on_bad_input without action. Invented.
+control/ps1_flow.yaml:3:5: CF-202
+control/ps1_flow.yaml:4:45: CF-201
+control/ps1_flow.yaml:5:19: CF-202

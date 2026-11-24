@@ -23,16 +23,23 @@
       "type": "array",
       "items": { "$ref": "#/$defs/identifier" }
     },
-    "logging_settings": {
-      "description": "Section 6: the settings of a logging policy",
+    "logging_keys": {
+      "description": "Section 6: the settings of a logging policy but tiers",
       "type": "object",
       "properties": {
         "mode": { "type": "string", "enum": ["on_change", "periodic", "both"] },
-        "deadband": { "type": ["number", "string"], "x-scada-type": "number_or_percentage", "minimum": 0 },
-        "interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms" },
-        "max_interval": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
-        "raw_retention": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "deadband": { "description": "on_change: least change that gives a sample, in engineering units or a percentage of range. Default 0", "type": ["number", "string"], "x-scada-type": "number_or_percentage" },
+        "interval": { "description": "periodic, both: the sample period; on_change: the least time between two samples", "type": "string", "x-scada-type": "duration", "x-scada-min": "10ms" },
+        "max_interval": { "description": "on_change, both: a sample is forced after this time", "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "raw_retention": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+      }
+    },
+    "logging_settings": {
+      "description": "Section 6: the settings of a logging policy",
+      "allOf": [{ "$ref": "#/$defs/logging_keys" }],
+      "properties": {
         "tiers": {
+          "description": "Tier name to retention; a tier not listed is not kept",
           "type": "object",
           "x-scada-key-type": "tier_name",
           "unevaluatedProperties": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }

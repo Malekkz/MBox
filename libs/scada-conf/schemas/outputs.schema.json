@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "outputs.schema.json",
+  "title": "outputs/*.yaml: outputs and interlocks (configuration schemas contract, sections 7.2 to 7.4)",
+  "type": "object",
+  "properties": {
+    "interlocks": { "type": "array", "items": { "$ref": "#/$defs/interlock" } },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } }
+  },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "tag": { "$ref": "common.schema.json#/$defs/tag_name" },
+    "tag_list": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/tag_name" } },
+    "value_or_raw": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "value": { "type": ["number", "boolean"], "x-scada-type": "number_or_boolean" } },
+          "required": ["value"],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "raw": { "type": ["integer", "string"], "x-scada-type": "raw_pattern" } },
+          "required": ["raw"],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "interlock": {
+      "type": "object",
+      "properties": {
+        "name": { "$ref": "#/$defs/tag" },
+        "condition": { "description": "A BOOL expression: true permits the command", "type": "string", "x-scada-type": "expression" },
+        "message": { "description": "The blocking reason given to the operator", "$ref": "common.schema.json#/$defs/text" },
+        "task": { "description": "Default normal", "$ref": "common.schema.json#/$defs/identifier" }
+      },
+      "required": ["name", "condition", "message"],
+      "unevaluatedProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "name": { "$ref": "#/$defs/tag" },
+        "area": { "$ref": "common.schema.json#/$defs/identifier" },
+        "kind": {
+          "description": "latch is reserved",
+          "type": "string",
+          "enum": ["single", "double", "pulse", "step", "setpoint", "trigger", "latch"],
+          "x-scada-reserved-values": ["latch"]
+        },
+        "on_only": { "description": "Default true for trigger and pulse, else false", "$ref": "point.schema.json#/$defs/boolean" },
+        "target": { "$ref": "#/$defs/tag" },
+        "feedback": {
+          "description": "Required unless no_feedback",
+          "oneOf": [
+            { "$ref": "#/$defs/tag" },
+            {
+              "type": "object",
+              "properties": { "on": { "$ref": "#/$defs/tag" }, "off": { "$ref": "#/$defs/tag" } },
+              "required": ["on", "off"],
+              "unevaluatedProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "tag": { "$ref": "#/$defs/tag" },
+                "within": { "description": "Tolerance in engineering units", "$ref": "point.schema.json#/$defs/number" },
+                "settle": { "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" }
+              },
+              "required": ["tag", "within", "settle"],
+              "unevaluatedProperties": false
+            }
+          ]
+        },
+        "no_feedback": { "type": "boolean", "x-scada-type": "boolean", "enum": ["true"] },
+        "feedback_timeout": { "description": "Default 10s", "type": "string", "x-scada-type": "duration", "x-scada-min": "100ms", "x-scada-max": "10m" },
+        "sbo": { "description": "Default false", "$ref": "point.schema.json#/$defs/boolean" },
+        "select_timeout": { "description": "Default 30s", "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "60s" },
+        "native_select": { "description": "Default at_select", "type": "string", "enum": ["at_select", "at_operate"] },
+        "reason_required": { "description": "Default false", "$ref": "point.schema.json#/$defs/boolean" },
+        "reauth": { "description": "Default false", "$ref": "point.schema.json#/$defs/boolean" },
+        "limits": {
+          "description": "In engineering units",
+          "type": "object",
+          "properties": {
+            "min": { "$ref": "point.schema.json#/$defs/number" },
+            "max": { "$ref": "point.schema.json#/$defs/number" },
+            "ranges": { "description": "[lo, hi] intervals, a union", "type": "array", "items": { "$ref": "point.schema.json#/$defs/range" } },
+            "rate": { "description": "Most change per second", "$ref": "point.schema.json#/$defs/number" },
+            "release": { "$ref": "#/$defs/value_or_raw" }
+          },
+          "unevaluatedProperties": false
+        },
+        "interlocks": {
+          "description": "Required for kinds other than setpoint",
+          "oneOf": [
+            { "$ref": "#/$defs/tag_list" },
+            {
+              "type": "object",
+              "properties": { "on": { "$ref": "#/$defs/tag_list" }, "off": { "$ref": "#/$defs/tag_list" } },
+              "required": ["on", "off"],
+              "unevaluatedProperties": false
+            }
+          ]
+        },
+        "refresh": { "description": "setpoint only. Default none", "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "1d" },
+        "auto_deadband": { "description": "In engineering units. Default 0", "$ref": "point.schema.json#/$defs/number" },
+        "safe_state": {
+          "description": "Required",
+          "oneOf": [
+            { "type": "string", "enum": ["off", "on", "hold"] },
+            { "$ref": "#/$defs/value_or_raw" }
+          ]
+        },
+        "failsafe_retry": { "description": "Default 5s", "type": "string", "x-scada-type": "duration", "x-scada-min": "1s", "x-scada-max": "60s" },
+        "failsafe_max_refusals": { "description": "Default 3", "type": "integer", "x-scada-type": "integer", "minimum": 1, "maximum": 10 },
+        "on_shutdown": { "description": "Default safe for a target of scada-io, else hold", "type": "string", "enum": ["hold", "safe", "release"] },
+        "on_control_loss": {
+          "description": "Default { action: safe, after: 0s } for a target of scada-io; { action: safe, after: 30s } for a remote switching output (a single or double output on a protocol driver, not dangerous, whose safe_state is off or on); else { action: hold }",
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["hold", "safe", "release"] },
+            "after": { "type": "string", "x-scada-type": "duration", "x-scada-min": "0s", "x-scada-max": "10m" }
+          },
+          "required": ["action"],
+          "unevaluatedProperties": false
+        },
+        "on_generation_change": { "description": "Default hold", "type": "string", "enum": ["hold", "safe"] },
+        "task": { "description": "Default the task of the program that drives it, else normal", "$ref": "common.schema.json#/$defs/identifier" },
+        "duration": { "description": "pulse only, where it is refused (CF-720): the device times a pulse", "type": "string", "x-scada-type": "duration", "x-scada-min": "1ms" },
+        "termination_timeout": { "x-scada-reserved": true }
+      },
+      "required": ["name", "area", "kind", "target"],
+      "x-scada-exclusive": [["feedback", "no_feedback"]],
+      "unevaluatedProperties": false
+    }
+  }
+}

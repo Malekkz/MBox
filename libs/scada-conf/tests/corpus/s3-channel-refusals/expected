@@ -1,0 +1,9 @@
+# A channel file's refusals at stage 3: a TCP channel without host and with
+# a serial key, a Modbus device without unit id, an instance without
+# template that gives params, and an override of a name with a variable.
+# Invented.
+drivers/modbus/net1.yaml:2:3: CF-202
+drivers/modbus/net1.yaml:4:3: CF-201
+drivers/modbus/net1.yaml:6:5: CF-202
+drivers/modbus/net1.yaml:10:5: CF-201
+drivers/modbus/net1.yaml:16:7: CF-212

@@ -1,0 +1,3 @@
+# A power meter: floating values with a word order, an exponent register,
+# a counter, invalid markers with actions and a quality rule from a status
+# word (4.7, 5.3). Invented.

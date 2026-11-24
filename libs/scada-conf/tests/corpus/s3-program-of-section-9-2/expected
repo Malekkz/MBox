@@ -1,0 +1,3 @@
+# A function block program (9.2) that passes stage 3. It is not a valid
+# tree: the block library declares no block type before phase 6, so stage 5
+# will refuse its block type (CF-910). Invented.

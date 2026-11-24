@@ -3,6 +3,7 @@
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/rules.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/schema.h"
 #include "scada/conf/tree.h"
@@ -37,10 +38,26 @@ struct ParsedFile {
     ScalarTypes types;
 };
 
-// The schema file of a file type, or nothing if it has none yet. The other
-// file types get their schemas in the next slice of #100.
-std::optional<std::string_view> schema_of(FileType type) {
-    switch (type) {
+// The protocol of a template: its `protocol` key, if this version knows it.
+std::string template_protocol(const Document& document) {
+    const std::optional<NodeId> protocol =
+        document.find(document.root(), "protocol");
+    if (!protocol || document.kind(*protocol) != NodeKind::SCALAR ||
+        !is_known_protocol(document.text(*protocol))) {
+        return {};
+    }
+    return std::string(document.text(*protocol));
+}
+
+// The schema of a file: by its type, and for a channel by its protocol
+// directory, for a template by its `protocol` key (section 4.1). A template
+// whose `protocol` this version does not know is checked against the
+// framework keys alone, with its object open, so that its protocol keys
+// give no error: the unknown protocol is one error, at stage 5 (D-108).
+// Empty for a file without one.
+std::string schema_of(const ParsedFile& file) {
+    const PathClass& path_class = file.source->path_class;
+    switch (path_class.type) {
         case FileType::SYSTEM:
             return "system.schema.json";
         case FileType::AREAS:
@@ -51,9 +68,31 @@ std::optional<std::string_view> schema_of(FileType type) {
             return "logging.schema.json";
         case FileType::TASKS:
             return "tasks.schema.json";
-        default:
-            return std::nullopt;
+        case FileType::TAGS:
+            return "tags.schema.json";
+        case FileType::OUTPUTS:
+            return "outputs.schema.json";
+        case FileType::ALARMS:
+            return "alarms.schema.json";
+        case FileType::PROGRAM:
+            return "program.schema.json";
+        case FileType::CHANNEL:
+            return path_class.protocol + ".schema.json#/$defs/channel_file";
+        case FileType::TEMPLATE:
+            break;
+        case FileType::STRUCTURED_TEXT:
+            return {};
     }
+    const Document& document = file.document;
+    const std::string protocol = template_protocol(document);
+    if (!protocol.empty()) {
+        return protocol + ".schema.json#/$defs/template";
+    }
+    if (document.kind(document.root()) == NodeKind::MAP &&
+        document.find(document.root(), "protocol")) {
+        return "template.schema.json#/$defs/template_keys";
+    }
+    return "template.schema.json";
 }
 
 // Rules of system.yaml that a schema cannot state (section 3).
@@ -135,16 +174,23 @@ void check_name_key(const ParsedFile& file, Diagnostics& diagnostics) {
 // Stage 3 for one file.
 void check_schema(ParsedFile& file, Diagnostics& diagnostics) {
     check_name_key(file, diagnostics);
-    const std::optional<std::string_view> schema =
-        schema_of(file.source->path_class.type);
-    if (!schema) {
+    const std::string schema = schema_of(file);
+    if (schema.empty()) {
         return;
     }
-    SchemaSet::builtin().validate(file.document, file.types, *schema,
+    SchemaSet::builtin().validate(file.document, file.types, schema,
                                   file.source->path, diagnostics);
     if (file.source->path_class.type == FileType::SYSTEM) {
         check_system(file.document, file.types, diagnostics);
     }
+    const FileType type = file.source->path_class.type;
+    std::string protocol;
+    if (type == FileType::CHANNEL) {
+        protocol = file.source->path_class.protocol;
+    } else if (type == FileType::TEMPLATE) {
+        protocol = template_protocol(file.document);
+    }
+    check_file_rules(file.document, file.types, type, protocol, diagnostics);
 }
 
 }  // namespace

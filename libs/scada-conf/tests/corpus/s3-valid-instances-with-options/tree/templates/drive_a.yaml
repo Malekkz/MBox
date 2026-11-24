@@ -1,0 +1,18 @@
+template: drive_a
+protocol: modbus
+bit_order: lsb0
+params:
+  options: { type: set, values: [meter, brake] }
+  rated: { type: number, default: 7.5 }
+points:
+  - name: speed
+    address: { table: holding, register: 10, type: int16 }
+    scale: { gain: "rated / 100" }
+  - name: meter.power
+    when: "'meter' in options"
+    address: { table: holding, register: 300, type: int32 }
+  - name: brake.state
+    when: "'brake' in options"
+    address: { table: holding, register: 310, type: uint16 }
+    bits: { 0: { name: brake.on }, 3: brake.fault }
+    tag: false

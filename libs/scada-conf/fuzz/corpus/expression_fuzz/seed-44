@@ -1,0 +1,1 @@
+moving_avg(x, T#5m) + rate(y, T#1m) - totalise(z, T#1h)

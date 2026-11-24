@@ -1,0 +1,7 @@
+channel: { name: line1, type: rtu, device: /dev/ttyS1 }
+devices:
+  - name: ps1.m1
+    template: meter
+    unit_id: 1
+    overrides:
+      exp: { value_type: int64, scale: { offset: 0.5 } }
