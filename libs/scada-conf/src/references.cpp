@@ -525,8 +525,13 @@ private:
         if (const std::optional<NodeId> params = document.find(root, "params");
             params && document.kind(*params) == NodeKind::MAP) {
             for (const Entry& entry : document.entries(*params)) {
-                // A child's declaration does not change the type (CF-415);
-                // the first, nearest the instance, is kept.
+                // A child may change a default without repeating the type,
+                // and never changes it (CF-415): the type is that of the
+                // nearest declaration that gives one.
+                if (document.kind(entry.value) != NodeKind::MAP ||
+                    !document.find(entry.value, "type")) {
+                    continue;
+                }
                 scope.parameters.try_emplace(
                     std::string(document.text(entry.key)),
                     parameter_type(document, entry.value));

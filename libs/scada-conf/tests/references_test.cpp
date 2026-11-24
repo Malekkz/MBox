@@ -289,6 +289,21 @@ TEST(References, AMissingTemplateIsOneError) {
                "does not exist"}));
 }
 
+// A child that changes only a parameter's default keeps the parent's type.
+TEST(References, AChildsDefaultKeepsTheParametersType) {
+    EXPECT_EQ(
+        validate({{"templates/base_a.yaml",
+                   "template: base_a\n"
+                   "params: { inputs: { type: int, default: 4 } }\n"},
+                  {"templates/meter_a.yaml",
+                   "template: meter_a\nextends: base_a\nprotocol: modbus\n"
+                   "params: { inputs: { default: 6 } }\n"
+                   "points:\n"
+                   "  - { name: count, address: { table: holding, register: "
+                   "\"inputs * 2\", type: uint16 } }\n"}}),
+        Lines{});
+}
+
 TEST(References, NamesGivenTwice) {
     EXPECT_EQ(
         validate({{"templates/meter_a.yaml",
