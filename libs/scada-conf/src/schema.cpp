@@ -19,6 +19,7 @@
 #include "scada/conf/yaml.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -73,7 +75,7 @@ constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
 // The `x-scada-type` names this validator implements (contract Annex C). A
 // schema file with another name does not compile, so that a type not
 // implemented yet cannot check nothing.
-const std::set<std::string, std::less<>> KNOWN_SCALAR_TYPES = {
+constexpr std::array<std::string_view, 30> KNOWN_SCALAR_TYPES = {
     "string",
     "text",
     "identifier",
@@ -109,9 +111,13 @@ const std::set<std::string, std::less<>> KNOWN_SCALAR_TYPES = {
 std::optional<std::string_view> name_kind(std::string_view type);
 
 // The types that "minimum" and "maximum" apply to.
-const std::set<std::string, std::less<>> NUMBER_TYPES = {
+constexpr std::array<std::string_view, 7> NUMBER_TYPES = {
     "integer", "uint64",     "power_of_two",        "decimal",
     "number",  "percentage", "number_or_percentage"};
+
+bool listed(std::span<const std::string_view> list, std::string_view name) {
+    return std::ranges::find(list, name) != list.end();
+}
 
 using SchemaId = std::size_t;
 
@@ -223,15 +229,14 @@ public:
         enum class Mark : std::uint8_t { NEW, ON_PATH, DONE };
         const std::vector<SchemaNode>& nodes = out_->nodes;
         std::vector<Mark> marks(nodes.size(), Mark::NEW);
-        const auto edges = [&nodes](SchemaId id) {
+        const auto edges = [&nodes](SchemaId from) {
+            const SchemaNode& node = nodes[from];
             std::vector<SchemaId> out;
-            if (nodes[id].ref) {
-                out.push_back(*nodes[id].ref);
+            if (node.ref) {
+                out.push_back(*node.ref);
             }
-            out.insert(out.end(), nodes[id].all_of.begin(),
-                       nodes[id].all_of.end());
-            out.insert(out.end(), nodes[id].one_of.begin(),
-                       nodes[id].one_of.end());
+            out.insert(out.end(), node.all_of.begin(), node.all_of.end());
+            out.insert(out.end(), node.one_of.begin(), node.one_of.end());
             return out;
         };
         for (SchemaId start = 0; start < nodes.size(); ++start) {
@@ -242,10 +247,10 @@ public:
             std::vector<std::pair<SchemaId, std::size_t>> stack{{start, 0}};
             marks[start] = Mark::ON_PATH;
             while (!stack.empty()) {
-                auto& [id, next] = stack.back();
-                const std::vector<SchemaId> targets = edges(id);
+                auto& [current, next] = stack.back();
+                const std::vector<SchemaId> targets = edges(current);
                 if (next == targets.size()) {
-                    marks[id] = Mark::DONE;
+                    marks[current] = Mark::DONE;
                     stack.pop_back();
                     continue;
                 }
@@ -442,19 +447,11 @@ private:
         return true;
     }
 
-    // A keyword whose value is a scalar or a list of scalars.
-    bool scalar_keyword(std::string_view name, NodeId value, SchemaNode& node,
-                        std::string& problem, bool& known) const {
-        known = true;
-        if (name == "type") {
-            return compile_type(value, node, problem);
-        }
-        if (name == "x-scada-type") {
-            return scalar_text(value, node.scalar_type, problem);
-        }
-        if (name == "x-scada-key-type") {
-            return scalar_text(value, node.key_type, problem);
-        }
+    // A keyword whose value is a list or a map of names; nothing if `name` is
+    // not one.
+    std::optional<bool> list_keyword(std::string_view name, NodeId value,
+                                     SchemaNode& node,
+                                     std::string& problem) const {
         if (name == "enum") {
             node.has_enum = true;
             return string_list(value, node.enum_texts, problem);
@@ -470,6 +467,40 @@ private:
         }
         if (name == "dependentRequired") {
             return compile_dependent(value, node, problem);
+        }
+        return std::nullopt;
+    }
+
+    // `x-scada-reserved` or `x-scada-secret`: plain `true` or `false`.
+    bool flag_keyword(std::string_view name, NodeId value, SchemaNode& node,
+                      std::string& problem) const {
+        const NodeView flag = at(value);
+        if (flag.kind != NodeKind::SCALAR || flag.style != ScalarStyle::PLAIN ||
+            !parse_boolean(flag.text)) {
+            return fail(problem, std::string(name) + " must be true or false",
+                        value);
+        }
+        (name == "x-scada-reserved" ? node.reserved : node.secret) =
+            flag.text == "true";
+        return true;
+    }
+
+    // A keyword whose value is a scalar or a list of scalars.
+    bool scalar_keyword(std::string_view name, NodeId value, SchemaNode& node,
+                        std::string& problem, bool& known) const {
+        known = true;
+        if (name == "type") {
+            return compile_type(value, node, problem);
+        }
+        if (name == "x-scada-type") {
+            return scalar_text(value, node.scalar_type, problem);
+        }
+        if (name == "x-scada-key-type") {
+            return scalar_text(value, node.key_type, problem);
+        }
+        if (std::optional<bool> done =
+                list_keyword(name, value, node, problem)) {
+            return *done;
         }
         if (name == "minItems" || name == "maxItems") {
             const std::optional<std::size_t> limit = count(value, problem);
@@ -579,7 +610,7 @@ private:
     bool check_keywords(const SchemaNode& node, NodeId where,
                         std::string& problem) const {
         if (!node.scalar_type.empty() &&
-            !KNOWN_SCALAR_TYPES.contains(node.scalar_type)) {
+            !listed(KNOWN_SCALAR_TYPES, node.scalar_type)) {
             return fail(problem, "unknown x-scada-type " + node.scalar_type,
                         where);
         }
@@ -621,7 +652,7 @@ private:
         for (const std::optional<std::string>* bound :
              {&node.minimum, &node.maximum}) {
             if (*bound &&
-                (!NUMBER_TYPES.contains(type) || !parse_number(**bound))) {
+                (!listed(NUMBER_TYPES, type) || !parse_number(**bound))) {
                 return fail(problem,
                             "minimum and maximum take a number, on a number "
                             "type",
@@ -630,14 +661,16 @@ private:
         }
         for (const std::optional<std::string>* bound :
              {&node.scada_min, &node.scada_max}) {
-            if (!*bound) {
+            if (!bound->has_value()) {
                 continue;
             }
+            const std::string text = bound->value_or(std::string());
+            const std::optional<Integer> count = parse_integer(text);
             const bool valid =
-                (type == "duration" && parse_duration_ms(**bound)) ||
-                (type == "size" && parse_size_bytes(**bound)) ||
-                (type == "text" && parse_integer(**bound) &&
-                 !parse_integer(**bound)->negative);
+                (type == "duration" && parse_duration_ms(text)) ||
+                (type == "size" && parse_size_bytes(text)) ||
+                (type == "text" && count.has_value() &&
+                 !count.value_or(Integer{}).negative);
             if (!valid) {
                 return fail(problem,
                             "x-scada-min and x-scada-max take the form of a "

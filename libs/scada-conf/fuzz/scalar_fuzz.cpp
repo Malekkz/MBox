@@ -16,6 +16,7 @@
 #include "scada/conf/read.h"
 #include "scada/conf/scalar.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -30,7 +31,8 @@ namespace {
 
 using scada::conf::IntegerForm;
 
-constexpr unsigned WIDTHS[] = {1, 8, 16, 32, 63, 64};
+constexpr unsigned MAX_WIDTH = 64;
+constexpr std::array<unsigned, 6> WIDTHS = {1, 8, 16, 32, 63, MAX_WIDTH};
 constexpr std::string_view UINT64_MAX_DIGITS = "18446744073709551615";
 constexpr std::size_t MAX_HEX_DIGITS = 16;
 
@@ -176,7 +178,8 @@ void check_reads(std::string_view text) {
         const auto raw = scada::conf::to_raw_pattern(*plain, root, width);
         if (raw.ok()) {
             check(integer.form == IntegerForm::FITS);
-            check(width == 64 || raw.value() < (std::uint64_t{1} << width));
+            check(width == MAX_WIDTH ||
+                  raw.value() < (std::uint64_t{1} << width));
         }
     }
 

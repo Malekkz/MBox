@@ -566,6 +566,26 @@ TEST(Schema, TypedKeysAreCheckedInLinearithmicTime) {
         << "small " << small.count() << " ns, large " << large.count() << " ns";
 }
 
+// The number of keys of `number` and its kin for which an integer of the
+// form beyond 64 bits does not give CF-204.
+std::size_t numbers_out_of_range(const std::string& json) {
+    std::size_t wrong = 0;
+    for (const char* key : {"n", "p", "e"}) {
+        for (const char* text :
+             {"18446744073709551616", "-9223372036854775809"}) {
+            const std::string yaml = std::string(key) + ": " + text + "\n";
+            const Lines expected{"1:4 CF-204: " + std::string(key) +
+                                 " must be between -9223372036854775808 and "
+                                 "18446744073709551615"};
+            if (check(json, yaml) != expected) {
+                ADD_FAILURE() << yaml;
+                ++wrong;
+            }
+        }
+    }
+    return wrong;
+}
+
 // B3: an integer of the integer form that does not fit is CF-204, never
 // CF-203 and never a decimal (D-107).
 TEST(Schema, IntegersTooLargeAreOutOfRange) {
@@ -582,17 +602,7 @@ TEST(Schema, IntegersTooLargeAreOutOfRange) {
     EXPECT_EQ(check(json, "i: 0x10000000000000000\n"),
               Lines{"1:4 CF-204: i must be between -9223372036854775808 and "
                     "9223372036854775807"});
-    for (const char* key : {"n", "p", "e"}) {
-        for (const char* text :
-             {"18446744073709551616", "-9223372036854775809"}) {
-            const std::string yaml = std::string(key) + ": " + text + "\n";
-            EXPECT_EQ(check(json, yaml),
-                      Lines{"1:4 CF-204: " + std::string(key) +
-                            " must be between -9223372036854775808 and "
-                            "18446744073709551615"})
-                << yaml;
-        }
-    }
+    EXPECT_EQ(numbers_out_of_range(json), 0U);
     EXPECT_EQ(root_types(json, "n: 18446744073709551615\n"),
               std::vector<ScalarType>{ScalarType::INTEGER});
     const std::string keys = R"({ "type": "object",
@@ -662,7 +672,10 @@ TEST(Schema, ABranchHoldsAtMostTheReportedLimit) {
     Diagnostics diagnostics;
     const std::optional<Document> document =
         parse_yaml(yaml, "f.yaml", diagnostics);
-    ASSERT_TRUE(document.has_value());
+    if (!document.has_value()) {
+        ADD_FAILURE() << "no document";
+        return;
+    }
     ScalarTypes types(*document);
     set.validate(*document, types, "t.schema.json", "f.yaml", diagnostics);
     Report report;
