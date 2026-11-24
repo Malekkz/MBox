@@ -1,0 +1,3 @@
+# A secret reference is CF-214: secrets are not available in this version
+# (section 2.6).
+system.yaml:11:13: CF-214

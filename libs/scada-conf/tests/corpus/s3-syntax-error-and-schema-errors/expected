@@ -1,0 +1,4 @@
+# Test 5 of section 14: a syntax error in one file (stage 2) still gives the
+# schema errors of the others (stage 3); stage 2's errors come first.
+control/tasks.yaml:2:9: CF-110
+areas.yaml:3:18: CF-203

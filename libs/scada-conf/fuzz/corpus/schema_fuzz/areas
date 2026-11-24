@@ -1,0 +1,8 @@
+areas:
+  ps1:
+    description: Pump station 1
+    authority:
+      default: web
+      local_panel: { input: ps1.panel.local, active: true }
+      local_blocks_auto: true
+    auto_resume: false

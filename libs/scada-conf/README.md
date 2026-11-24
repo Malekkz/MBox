@@ -27,8 +27,20 @@ built in slices; this README lists what each part does now.
   is CF-920 at 1:1, "structured text is not available in this version"
   (contract 9.3).
 
-Not yet: schemas (stage 3) and the cross-file rules (stage 5) follow in later
-slices of #100.
+- Stage 3: types every scalar by the schema of its key (contract 1.2),
+  keeping the types in a `ScalarTypes` table beside each Document (one byte
+  per node, `include/scada/conf/types.h`, D-111), and
+  checks each file against its JSON Schema file under `schemas/` (Annex C),
+  with CF-2xx codes; also CF-102 (a file name and its name key), CF-111 for
+  keys equal once typed, CF-211 (`format`) and the conditional
+  `time.sync.servers` of section 3. Stage 3 checks every file that parsed,
+  also when another did not.
+
+Schemas so far: `system`, `areas`, `enums`, `logging`, `tasks` (with the
+shared `common`). Templates, channels with their protocols, tags, outputs,
+alarms and programs get theirs in the next slice of #100; until then their
+files are parsed but not schema-checked. The cross-file rules (stage 5)
+follow after that.
 
 ## The YAML subset parser
 
@@ -93,8 +105,19 @@ anything, and there are no lazy caches.
   structure costs at most 26 bytes per node: 26 MB at the node limit of a
   file (1,000,000 nodes), 104 MB at the tree's (4,000,000). The text is at
   most the file's bytes, and up to 1.5 times them where escapes such as `\P`
-  give longer characters. Stage 3 and stage 5 keep every file's `Document`
-  until validation ends.
+  give longer characters. Stage 3 and stage 5 keep every file's `Document`,
+  and its table of types (1 byte per node), until validation ends; each
+  file's bytes are freed as soon as it has parsed, so the tree is not held
+  twice.
+- Measured peak (x86-64, the whole of `validate_tree`): 541 MB for a tree at
+  every limit at once: 256 MiB in 37 files, 3,974,081 nodes, and 248 MiB of
+  double-quoted scalars of `\P` escapes, whose text is 1.5 times their
+  input. The same tree with a file of 496,000 schema errors in place of
+  one 4 MB file: 529 MB. Errors cost no memory beyond the first 2,000 of a
+  stage, as stage 3 gives each error to the report at once (a `oneOf`
+  branch holds at most 1,000 and a count). Real trees are a few MB.
+  `scada-conf` runs validation of an untrusted tree under a memory limit of
+  its own sized from this figure (#102).
 
 ## Interfaces
 
@@ -103,6 +126,28 @@ anything, and there are no lazy caches.
 - `include/scada/conf/node.h`: `Document`, `DocumentBuilder`, `Entry`,
   `SourcePosition`, the tree of parsed files.
 - `include/scada/conf/yaml.h`: `parse_yaml`, the subset parser.
+- `include/scada/conf/scalar.h`: the text forms of integers, decimals,
+  booleans, durations, sizes and percentages (contract 1.2, 2.2).
+- `include/scada/conf/names.h`: the name grammars of section 2.1 and the
+  address and time forms the schemas check.
+- `include/scada/conf/schema.h`: `SchemaSet`, the compiled schema files and
+  the validator of stage 3.
+- `include/scada/conf/types.h`: `ScalarType` and `ScalarTypes`, the types
+  stage 3 gives the scalars of a Document.
+- `include/scada/conf/read.h`: typed reads of a scalar node (`to_int64`,
+  `to_uint64`, `to_decimal`, `to_bool`, `to_duration_ns`, `to_raw_pattern`,
+  `is_integer_form`), each a `Result`, for later stages and the drivers.
+
+## The schema files
+
+`schemas/*.schema.json` are JSON Schema 2020-12, one per file type, from the
+tables of the contract, which win where the two disagree (D-69). They are
+read with the YAML subset parser and built into the library at configure
+time (`CMakeLists.txt`). The keywords the validator reads, each with its
+code, and the project keywords `x-scada-*` are listed in contract Annex C;
+to another JSON Schema validator the `x-scada-*` keywords are annotations,
+so it checks structure only. A schema file this validator cannot compile is
+a defect of the software, found by `BuiltinSchemas.AllCompile`.
 - `include/scada/conf/validate.h`: `validate_tree`, the entry point that runs
   the stages.
 - Namespace `scada::conf`; CMake target `scada::conf`.
@@ -125,7 +170,7 @@ gives a report with errors.
 ## How to test it
 
 ```
-ctest --preset dev -R 'scada-conf|path_class_fuzz|yaml_fuzz'
+ctest --preset dev -R 'scada-conf|path_class_fuzz|yaml_fuzz|schema_fuzz'
 ```
 
 - `tests/`: unit tests. `tree_scan_test.cpp` builds trees in a temporary
@@ -136,9 +181,12 @@ ctest --preset dev -R 'scada-conf|path_class_fuzz|yaml_fuzz'
 - `tests/yaml_test.cpp`: every construct of the subset, accepted and refused,
   with its code, line and column, and each parsing limit.
 - `fuzz/`: fuzz targets with their seed corpora (`ctest --preset fuzz` in the
-  `fuzz` build): `path_class_fuzz` (stage 1 paths) and `yaml_fuzz` (the
+  `fuzz` build): `path_class_fuzz` (stage 1 paths), `yaml_fuzz` (the
   parser; its seeds hold the contract's examples and every refused
-  construct). `yaml_fuzz` checks that a parse gives a document or exactly one
-  error inside the input, that no limit is exceeded, that every node lies
-  inside the input, and that a document written back in the subset parses to
-  the same tree.
+  construct) and `schema_fuzz` (stage 3 over any file that parses).
+  `yaml_fuzz` checks that a parse gives a document or exactly one error
+  inside the input, that no limit is exceeded, that every node lies inside
+  the input, and that a document written back in the subset parses to the
+  same tree.
+- `tests/schema_test.cpp`: each keyword of the validator with its code, and
+  the built-in schemas against the contract's examples.

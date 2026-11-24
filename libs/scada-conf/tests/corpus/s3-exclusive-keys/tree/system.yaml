@@ -1,0 +1,12 @@
+unit:
+  id: site-0042
+  name: Test unit
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: none
+upstream:
+  url: https://upstream.example.invalid/api
+  auth:
+    certificate: { secret: upstream_cert }
+    token: { secret: upstream_token }

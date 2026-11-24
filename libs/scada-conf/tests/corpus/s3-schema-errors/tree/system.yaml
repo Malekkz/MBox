@@ -1,0 +1,13 @@
+unit:
+  id: Site-42
+  name: Test unit
+  label: extra
+node:
+  role: master
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: ntp
+limits:
+  max_tags: '50000'
+  max_channels: 1001

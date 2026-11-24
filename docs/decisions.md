@@ -1959,6 +1959,40 @@ Decision: the project's own parser (`libs/scada-conf/src/yaml_parser.cpp`), no d
 Reason: the subset refuses constructs that a general parser accepts quietly, and each refusal needs its own code and column. Every scalar must keep its source text and quoting style (contract 1.2), and every limit must be checked before its work. A library would need a mapping layer for all of that, and would bring code that the project cannot bound or fuzz on its own terms. Without a dependency there is no licence to record.
 Consequences: the parser is a fuzz target (`yaml_fuzz`) with a seed corpus of every refused construct. The README of libscada-conf says plainly that it is a subset parser and lists what it refuses. A test compared its trees with PyYAML (BaseLoader) on 15,000 random documents written in every style PyYAML emits; they were equal. That comparison is not part of the suite, because PyYAML is not a dependency.
 
+## D-107: The schema validator of stage 3, and the choices the key tables left open
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted (the `x-scada-type` keyword and its annotations: the lead, 2026-11-23)
+
+Context: D-69 has the JSON Schema files written from the contract's tables, read by a validator of the project's own with a fixed subset of keywords. The subset cannot state the contract's scalar types (1.2, 2.2), name grammars (2.1), reserved keys and values, secrets, exclusive groups or the key types of maps. Some keys in the tables give a range or a requirement only in words, or not at all.
+Options: the scalar types and ranges in C++ tables beside structure-only schema files; project keywords in the schema files.
+Decision: project keywords, listed with their codes in contract Annex C (0.6): `x-scada-type` (the types of the Annex C table), `x-scada-min` and `x-scada-max`, `x-scada-key-type`, `x-scada-exclusive`, `x-scada-reserved`, `x-scada-reserved-values` and `x-scada-secret`, plus the standard `dependentRequired` for CF-208. Other decisions:
+- The schema files are read with the YAML subset parser and built into the library at configure time.
+- A message names a key by its dotted path from the file's root, with list indexes from 0 (`time.sync.servers[0]`). A missing key is reported at the map, which starts at its first entry.
+- A value that fits no shape of a `oneOf` gets the errors of the shape that takes its kind of node and has the fewest errors; the first of equals wins.
+- Where the tables are silent:
+  - `time.timezone` is checked for the form of an IANA name only. Whether the zone exists on the unit depends on the installed tz database, a distribution path that the tree's validation does not read.
+  - `storage.free_space_alarm` is 0 % to 100 %.
+  - An entry of `network.interfaces` needs `name`, 1 to 15 bytes (the kernel's limit).
+  - `email` needs `server` and `from`; `upstream` needs `url`; `upstream.window` needs `from` and `to`; `authority.local_panel` needs `input` and `active`.
+  - `realtime.cpus` takes 0 to 4,095.
+  - The names of an enumeration are free text.
+  - A `deadband` is at least 0.
+  - Logging durations other than `interval` are at least 1 ms.
+- Rules that stage 3 checks in code are CF-102, CF-211 (`format` other than 1) and "`time.sync.servers` unless the mode is `none`" (CF-202, reported at `time` when `sync` is absent, because the mode defaults to `ntp`).
+Reason: one place per key, the schema file, with types, ranges and codes beside the structure; the files stay valid JSON Schema for an editor or another tool.
+- Integers (the lead's ruling on the review of #131, B3, 2026-11-24): a text reads as an integer in one of three ways: not of the integer form; of the form and within 64 bits; of the form but larger (`read_integer`, `IntegerForm`; `parse_integer` gives the value of the second). A scalar of the integer form that does not fit its key's range is CF-204 everywhere, keys included, never CF-203. Under `number` and its kin, an integer of the form must fit int64 or uint64, else CF-204; it is never read as a decimal ("the written form is kept", contract 1.2). A typed read gives OUT_OF_RANGE for it.
+- Integer forms under `decimal` (the lead's ruling N1, 2026-11-24): a `decimal` key takes any scalar of the integer form (of any size, hex too) or of the decimal form whose nearest binary64 is finite and not rounded to zero, and `to_decimal` gives that nearest value; only another value is refused (CF-203). The "must fit int64 or uint64" rule is for `number` and its two variants, which keep the written form.
+- Durations and sizes of their form beyond uint64 (milliseconds or bytes) are CF-204, as integers are, and `to_duration_ns` gives OUT_OF_RANGE (`read_duration_ms`, `read_size_bytes`). A unit that section 2.2 does not list (`EiB`) is not of the form: CF-206.
+- Types (B1): a scalar typed through `$ref`, `allOf` or `oneOf` keeps the type the referenced schema gave it. A schema without an `x-scada-type` types a scalar as STRING only if nothing typed it in the same check, so the order of `allOf` parts does not matter. A scalar that got an error has no type.
+- The compiler checks keyword values, not only names (S2): an `x-scada-type` or `x-scada-key-type` that the validator does not implement; `minimum` and `maximum` that are not numbers, or on a type that is not a number type; `x-scada-min` and `x-scada-max` not in the form of a duration, a size or (for `text`) a count of bytes; `x-scada-reserved` and `x-scada-secret` other than `true` or `false`; an `x-scada-key-type` without a schema in `unevaluatedProperties`; a `type` other than the one an `x-scada-type` is written as (`integer` for the integer types, `number` or `integer` for `decimal` and `number`, `boolean`, `number` and `string` for a number or a percentage or an expression, `string` for the rest); a keyword that does not apply to the kind of node the schema's `type` allows, or, without `type`, keywords of more than one kind of node. Each makes the schema file not compile, so a type not implemented yet cannot check nothing.
+- A cycle through `$ref`, `allOf` or `oneOf` does not compile (S3); recursion through `properties` or `items` goes down the document and is allowed. A nested `oneOf` checks each branch in full; it is to be bounded before a recursive schema with `oneOf` exists.
+- A duration is at most 9,223,372,036,854 ms, the longest whose nanoseconds fit int64, else CF-204 (S4): a value that validation accepts is readable.
+- Text without `%` where a percentage is expected is CF-203 ("must be a number or a percentage"); text with `%` that does not read is CF-206 (S6). A decimal of the decimal form that is not finite or rounds to zero is CF-203.
+- Messages name a key or a value with `quote_text`, cut at 64 bytes, with `...` after the closing quote so that a value ending in `...` is not taken for a cut one (S5, D-110).
+- Memory (S1): outside a `oneOf` branch every error goes to the stage's diagnostics at once, which keep the first 1,000 and a count; a branch holds at most 1,000, the first in the order of the report (section 1.4), and counts the rest (`Diagnostics::count_unlisted_errors`). A branch also holds a type per scalar it typed; the bound on nested `oneOf` of the next slice is to cover that too.
+Consequences: a new contract type is a new `x-scada-type` name, added to the validator, its known-type table and Annex C together. Templates, channels, tags, outputs, alarms and programs get their schema files in the next slice of #100; until then their files are parsed but not schema-checked.
+
 ## D-110: Text of the tree in diagnostics is escaped and capped
 Date: 2026-11-23
 Phase / issue: 2, #100 (P2-03)
@@ -1989,7 +2023,7 @@ Decision:
 - A node is 20 bytes, a map entry 12 more, a sequence item 4 more, plus the text. At the tree's node limit (4,000,000) the structure is at most 104 MB.
 - Reading a const `Document` from several threads is safe: there are no lazy caches.
 Reason: index access keeps every node in a few arrays, which is small, needs no allocation per node, and makes the document cheap to move. A builder is the one place that enforces the invariants (a key is a scalar, keys are unique, collections are closed), for the parser and the loader alike.
-Consequences: the typed reads of a node (`to_int64` and the like) and the table of types come with stage 3 (slice 3 of #100).
+Consequences: the table of types (`ScalarTypes`, `types.h`) and the typed reads of a node (`read.h`) come with stage 3 (slice 3 of #100). A typed read gives INVALID_ARGUMENT for a node of the wrong kind or form (a quoted scalar is never a number or a boolean, contract 1.2) and OUT_OF_RANGE for a value that does not fit; `to_raw_pattern` takes the register's width, 1 to 64 bits, and gives a negative value as its two's complement in that width (section 2.3). Each file's bytes are freed once it has parsed; the README states the measured peak of a tree at every limit at once.
 
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23

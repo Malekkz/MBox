@@ -1,0 +1,15 @@
+# The example of contract section 3.
+unit:
+  id: site-0042
+  name: Pump Station 1
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: ntp
+    servers: [10.0.0.1, 10.0.0.2]
+    alarm_offset_ms: 500
+    alarm_unsynced_s: 600
+storage:
+  free_space_alarm: 10%
+data_plane:
+  heartbeat_check_ms: 250

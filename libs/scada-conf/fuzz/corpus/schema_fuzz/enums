@@ -1,0 +1,2 @@
+enums:
+  run_state: { 0: stopped, 1: running, 3: fault, -1: unknown, 0x10: x }

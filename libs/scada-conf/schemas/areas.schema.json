@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "areas.schema.json",
+  "title": "areas.yaml (configuration schemas contract, section 7.1)",
+  "type": "object",
+  "properties": {
+    "areas": {
+      "type": "object",
+      "x-scada-key-type": "identifier",
+      "unevaluatedProperties": {
+        "type": "object",
+        "properties": {
+          "description": { "$ref": "common.schema.json#/$defs/text" },
+          "authority": {
+            "type": "object",
+            "properties": {
+              "default": { "type": "string", "enum": ["cli", "web", "api"] },
+              "local_panel": {
+                "type": "object",
+                "properties": {
+                  "input": { "$ref": "common.schema.json#/$defs/tag_name" },
+                  "active": { "type": "boolean", "x-scada-type": "boolean" }
+                },
+                "required": ["input", "active"],
+                "unevaluatedProperties": false
+              },
+              "local_blocks_auto": { "type": "boolean", "x-scada-type": "boolean" }
+            },
+            "unevaluatedProperties": false
+          },
+          "auto_resume": { "type": "boolean", "x-scada-type": "boolean" }
+        },
+        "unevaluatedProperties": false
+      }
+    }
+  },
+  "required": ["areas"],
+  "unevaluatedProperties": false
+}

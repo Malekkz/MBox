@@ -1,0 +1,3 @@
+# templates/flow_meter.yaml
+template: flow_meter_x
+protocol: modbus

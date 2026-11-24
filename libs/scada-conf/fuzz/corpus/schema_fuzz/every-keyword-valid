@@ -1,0 +1,28 @@
+i: 3
+u: 50
+p2: 64
+dec: 2.5
+num: 0x10
+b: true
+d: 100ms
+s: 2MiB
+pc: 50%
+np: 5
+ne: k * 2
+ex: a and b
+t: hello
+names: [ps1.flow, site-1]
+host: ntp.example.invalid
+hn: a.example
+ip: 192.0.2.1
+net: 2001:db8::/32
+tz: Etc/UTC
+at: "06:30"
+url: https://upstream.example.invalid/api
+proc: drv-modbus
+poll: fast
+tier: 15m
+proto: modbus
+point: meter.power
+mode: auto
+one: 1

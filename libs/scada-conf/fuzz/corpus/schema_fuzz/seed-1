@@ -1,0 +1,4 @@
+enums:
+  run_state:
+    16: running
+    0x10: stopped

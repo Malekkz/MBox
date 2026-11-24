@@ -1,0 +1,2 @@
+# A secret key with a plain value is CF-213 (section 2.6).
+system.yaml:11:13: CF-213
