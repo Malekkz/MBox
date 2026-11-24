@@ -81,3 +81,6 @@ TEST(Status, ValueOutsideTheEnumerationIsUnknown) {
 }
 
 }  // namespace
+
+// PROBE ONLY (#138, test 5): fails on purpose so the run is red.
+TEST(ProbeOnly, FailsOnPurpose) { EXPECT_EQ(1, 2); }
