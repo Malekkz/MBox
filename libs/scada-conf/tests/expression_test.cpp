@@ -477,9 +477,9 @@ TEST(Expression, ColumnsAndExtents) {
     EXPECT_EQ(inner.column, 5U);
     EXPECT_EQ(inner.begin, 4U);
     EXPECT_EQ(inner.end, 10U);
-    const Expression in = tree_of("n IN 1..5");
-    EXPECT_EQ(in.nodes.at(in.root).column, 3U);
-    EXPECT_EQ(in.nodes.at(in.root).end, 9U);
+    const Expression range = tree_of("n IN 1..5");
+    EXPECT_EQ(range.nodes.at(range.root).column, 3U);
+    EXPECT_EQ(range.nodes.at(range.root).end, 9U);
     const Expression grouped = tree_of("(a + b) * c");
     EXPECT_EQ(grouped.nodes.at(grouped.root).begin, 1U);
     EXPECT_EQ(grouped.nodes.at(grouped.root).end, 11U);

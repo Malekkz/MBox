@@ -133,13 +133,17 @@ struct Tok {
     std::string value;
 };
 
+// Room for any double in hexadecimal form: sign, "0x1.", 13 digits, "p",
+// exponent sign and 4 digits.
+constexpr std::size_t HEX_DOUBLE_SIZE = 32;
+
 // A double as exact text: its hexadecimal form.
 std::string exact(double value) {
-    std::array<char, 64> buffer{};
+    std::array<char, HEX_DOUBLE_SIZE> buffer{};
     const std::to_chars_result written =
         std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
                       std::chars_format::hex);
-    return std::string(buffer.data(), written.ptr);
+    return {buffer.data(), written.ptr};
 }
 
 // The recognizer; `refusal` is set on the first error and ends the parse.
@@ -737,17 +741,28 @@ public:
 std::string operator_name(const scada::conf::ExprNode& node) {
     using scada::conf::ExprOp;
     constexpr std::array<std::pair<ExprOp, std::string_view>, 22> NAMES = {{
-        {ExprOp::NEGATE, "neg"},       {ExprOp::NOT, "not"},
-        {ExprOp::POWER, "**"},         {ExprOp::MULTIPLY, "*"},
-        {ExprOp::DIVIDE, "/"},         {ExprOp::INT_DIVIDE, "div"},
-        {ExprOp::MODULO, "mod"},       {ExprOp::ADD, "+"},
-        {ExprOp::SUBTRACT, "-"},       {ExprOp::EQUAL, "="},
-        {ExprOp::NOT_EQUAL, "<>"},     {ExprOp::LESS, "<"},
-        {ExprOp::LESS_EQUAL, "<="},    {ExprOp::GREATER, ">"},
-        {ExprOp::GREATER_EQUAL, ">="}, {ExprOp::IN_RANGE, "in-range"},
-        {ExprOp::IN_VALUE, "in"},      {ExprOp::AND, "and"},
-        {ExprOp::OR, "or"},            {ExprOp::XOR, "xor"},
-        {ExprOp::RANGE, ".."},         {ExprOp::CALL, "call"},
+        {ExprOp::NEGATE, "neg"},
+        {ExprOp::NOT, "not"},
+        {ExprOp::POWER, "**"},
+        {ExprOp::MULTIPLY, "*"},
+        {ExprOp::DIVIDE, "/"},
+        {ExprOp::INT_DIVIDE, "div"},
+        {ExprOp::MODULO, "mod"},
+        {ExprOp::ADD, "+"},
+        {ExprOp::SUBTRACT, "-"},
+        {ExprOp::EQUAL, "="},
+        {ExprOp::NOT_EQUAL, "<>"},
+        {ExprOp::LESS, "<"},
+        {ExprOp::LESS_EQUAL, "<="},
+        {ExprOp::GREATER, ">"},
+        {ExprOp::GREATER_EQUAL, ">="},
+        {ExprOp::IN_RANGE, "in-range"},
+        {ExprOp::IN_VALUE, "in"},
+        {ExprOp::AND, "and"},
+        {ExprOp::OR, "or"},
+        {ExprOp::XOR, "xor"},
+        {ExprOp::RANGE, ".."},
+        {ExprOp::CALL, "call"},
     }};
     for (const auto& [oper, name] : NAMES) {
         if (oper == node.op) {
