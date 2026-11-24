@@ -15,6 +15,7 @@
 #include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/scalar.h"
+#include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
 
 #include <algorithm>
