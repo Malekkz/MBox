@@ -66,6 +66,16 @@ public:
         return types_.at(tree_->root);
     }
 
+    // The type of every node, once `run` succeeded.
+    [[nodiscard]] std::vector<ValueType> types() const {
+        std::vector<ValueType> out;
+        out.reserve(types_.size());
+        for (const std::optional<ValueType>& type : types_) {
+            out.push_back(type.value_or(ValueType::INT));
+        }
+        return out;
+    }
+
 private:
     std::optional<ValueType> type_of(const ExprNode& node) {
         switch (node.op) {
@@ -462,10 +472,15 @@ std::string_view value_type_name(ValueType type) noexcept {
     return "?";
 }
 
-std::optional<ValueType> configuration_type(const Expression& tree,
-                                            const NameTypes& names,
-                                            TypeError& error) {
-    return Checker(tree, names, error).run();
+std::optional<ValueType> configuration_type(
+    const Expression& tree, const NameTypes& names, TypeError& error,
+    std::vector<ValueType>* node_types) {
+    Checker checker(tree, names, error);
+    std::optional<ValueType> type = checker.run();
+    if (type && node_types != nullptr) {
+        *node_types = checker.types();
+    }
+    return type;
 }
 
 }  // namespace scada::conf

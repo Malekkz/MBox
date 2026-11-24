@@ -1,5 +1,6 @@
 scada_add_test(scada-conf-unit-test KIND unit
   SOURCES
+    config_eval_test.cpp
     corpus_test.cpp
     diagnostic_test.cpp
     expression_test.cpp
