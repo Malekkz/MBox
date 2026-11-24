@@ -6,8 +6,9 @@
 // counted across poll groups, once per request after its retries; devices
 // that share a unit id share one count. A demoted device is probed every
 // `backoff`, doubling to `backoff_max`; a probe that succeeds recovers it.
-// Pure logic over an injected clock; the worker applies it at each
-// transaction boundary.
+// On `tcp`, a run of consecutive read timeouts that spans every live unit
+// is a lost connection (7.3, R-15). Pure logic over an injected clock; the
+// worker applies it at each transaction boundary.
 
 #include "scada/common/realtime.h"
 
@@ -27,14 +28,19 @@ enum class DeviceState : std::uint8_t {
     REFUSING = 6,
 };
 
+inline constexpr std::int64_t DEFAULT_TIMEOUT_NS = 1'000'000'000;   // 1 s
+inline constexpr std::int64_t DEFAULT_BACKOFF_NS = 10'000'000'000;  // 10 s
+inline constexpr std::int64_t DEFAULT_BACKOFF_MAX_NS =
+    300'000'000'000;  // 300 s
+
 // The failure keys of a device (CS 4.6), with their defaults.
 struct FailureRules {
-    std::int64_t timeout_ns = 1'000'000'000;
+    std::int64_t timeout_ns = DEFAULT_TIMEOUT_NS;
     std::uint8_t retries = 2;
     std::uint8_t busy_retries = 3;
     std::uint8_t demote_after = 3;
-    std::int64_t backoff_ns = 10'000'000'000;
-    std::int64_t backoff_max_ns = 300'000'000'000;
+    std::int64_t backoff_ns = DEFAULT_BACKOFF_NS;
+    std::int64_t backoff_max_ns = DEFAULT_BACKOFF_MAX_NS;
     std::int64_t startup_grace_ns = 0;
 };
 
@@ -53,8 +59,12 @@ public:
         std::uint32_t unit_id = 0;
         FailureRules rules;
         bool enabled = true;
+        bool has_poll_group = true;  // at least one point in a poll group
     };
-    explicit FailureTracker(std::vector<Device> devices);
+    // `lost_after_timeouts` is the channel's key (CS) on `tcp`, and 0 where
+    // read timeouts never close the connection (serial, `rtu_over_tcp`).
+    explicit FailureTracker(std::vector<Device> devices,
+                            std::uint32_t lost_after_timeouts = 0);
 
     // A connection was made at `now_ns`: every enabled device starts its
     // grace and is INITIALISING; counts start from 0 (7.4).
@@ -62,6 +72,29 @@ public:
 
     // The connection is lost: every enabled device is CONNECTING (7.3).
     void lost() noexcept;
+
+    // A close the driver made itself was followed by a reconnect within
+    // `connect_timeout` (7.3): states, counts and grace are kept; only the
+    // run of consecutive timeouts is emptied.
+    void resumed() noexcept;
+
+    // A planned read of a poll group or a keep-alive of `device` timed out
+    // after its retries (7.3): adds one to the run of consecutive timeouts
+    // and records its unit id. Returns true when the connection is lost: the
+    // run holds at least `lost_after_timeouts` requests and its unit ids
+    // include every eligible one (those with a device INITIALISING or
+    // RUNNING that has a poll group). Identity reads, READ_NOW and probes
+    // are not passed here. Always false when the rule is off.
+    SCADA_RT bool read_timed_out(std::uint32_t device) noexcept;
+
+    // Any valid answer from any unit, an exception answer included, empties
+    // the run (7.3).
+    SCADA_RT void answer_seen() noexcept;
+
+    // The requests in the run of consecutive timeouts.
+    [[nodiscard]] std::uint32_t timeout_run() const noexcept {
+        return run_length_;
+    }
 
     // The end of a polled request of `device` at `now_ns`. A failure
     // outside the device's grace adds one to its unit's count; an answer
@@ -102,6 +135,9 @@ private:
     std::vector<Run> runs_;
     std::vector<std::uint32_t> unit_index_;  // per device
     std::vector<std::uint32_t> counts_;      // per distinct unit id
+    std::uint32_t lost_after_ = 0;
+    std::uint32_t run_length_ = 0;
+    std::vector<bool> run_units_;  // per distinct unit id: in the run
 };
 
 }  // namespace scada::driver

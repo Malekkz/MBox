@@ -8,10 +8,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace scada::driver {
 namespace {
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): the counts, unit ids and times are the test data, each worked out by hand beside the rule it checks
 
 constexpr std::int64_t SECOND = 1'000'000'000;
 constexpr std::uint32_t FIRST = 0;
@@ -119,6 +122,78 @@ TEST(Failure, ALostConnectionAndADisabledDevice) {
     EXPECT_FALSE(tracked.request_ended(FIRST, RequestEnd::FAILED, SECOND));
     EXPECT_EQ(tracked.failures(FIRST), 0U);
 }
+
+// --- The run of consecutive read timeouts (7.3, R-15) ---------------------
+
+TEST(Failure, ARunOfTimeoutsOverEveryLiveUnitLosesTheConnection) {
+    // Three units, lost_after_timeouts 4: timeouts of units 1 and 2 alone
+    // never lose it, however many; one of unit 3 completes the set.
+    FailureTracker tracked({{.unit_id = 1, .rules = rules()},
+                            {.unit_id = 2, .rules = rules()},
+                            {.unit_id = 3, .rules = rules()}},
+                           4);
+    tracked.connected(0);
+    for (int index = 0; index < 3; ++index) {
+        EXPECT_FALSE(tracked.read_timed_out(FIRST));
+        EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE));
+    }
+    EXPECT_EQ(tracked.timeout_run(), 6U);
+    EXPECT_TRUE(tracked.read_timed_out(OTHER_UNIT));
+}
+
+TEST(Failure, AnyValidAnswerEmptiesTheRunAndTheRunNeedsItsLength) {
+    FailureTracker tracked(
+        {{.unit_id = 1, .rules = rules()}, {.unit_id = 2, .rules = rules()}},
+        3);
+    tracked.connected(0);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE));  // both units, 2 < 3
+    tracked.answer_seen();
+    EXPECT_EQ(tracked.timeout_run(), 0U);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    EXPECT_TRUE(tracked.read_timed_out(SECOND_DEVICE));
+}
+
+TEST(Failure, OnlyEligibleUnitsAreNeededForTheLoss) {
+    // Unit 2 is demoted and unit 3 has no poll group: neither is eligible,
+    // so unit 1's timeouts alone lose the connection.
+    FailureTracker tracked(
+        {{.unit_id = 1, .rules = rules()},
+         {.unit_id = 2, .rules = rules(1)},
+         {.unit_id = 3, .rules = rules(), .has_poll_group = false}},
+        2);
+    tracked.connected(0);
+    fail(tracked, SECOND_DEVICE, 1, SECOND);
+    ASSERT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DEMOTED);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    EXPECT_TRUE(tracked.read_timed_out(FIRST));
+}
+
+TEST(Failure, AReconnectEmptiesTheRunAndAResumeKeepsStatesAndCounts) {
+    FailureTracker tracked({{.unit_id = 1, .rules = rules()}}, 2);
+    tracked.connected(0);
+    fail(tracked, FIRST, 2, SECOND);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    tracked.resumed();
+    EXPECT_EQ(tracked.timeout_run(), 0U);
+    EXPECT_EQ(tracked.failures(FIRST), 2U);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    tracked.connected(2 * SECOND);
+    EXPECT_EQ(tracked.timeout_run(), 0U);
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+}
+
+TEST(Failure, WithoutTheRuleATimeoutRunNeverLosesTheConnection) {
+    FailureTracker tracked({{.unit_id = 1, .rules = rules()}});
+    tracked.connected(0);
+    for (int index = 0; index < 10; ++index) {
+        EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    }
+}
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace
 }  // namespace scada::driver

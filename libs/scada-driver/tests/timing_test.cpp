@@ -6,20 +6,21 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
 namespace scada::driver {
 namespace {
 
-constexpr std::int64_t MS = 1'000'000;
+constexpr std::int64_t MSEC = 1'000'000;
 constexpr std::uint32_t BAUD_1200 = 1200;
 constexpr std::uint32_t BAUD_19200 = 19200;
 constexpr std::uint32_t BAUD_115200 = 115200;
 constexpr std::uint8_t DATA_BITS = 8;
 constexpr std::size_t REQUEST_BYTES = 8;
 constexpr std::size_t ANSWER_BYTES = 255;
-constexpr std::int64_t TIMEOUT = 300 * MS;
+constexpr std::int64_t TIMEOUT = 300 * MSEC;
 
 constexpr LineTiming LINE_1200_8E1{
     .bit_rate = BAUD_1200, .bits_per_char = bits_per_char(DATA_BITS, true, 1)};
@@ -48,17 +49,18 @@ TEST(Timing, TheMarginIsAtLeastTwentyMilliseconds) {
     // 3.5 x 11 bits at 19,200 bit/s is 2 ms; at 115,200 it is 0.33 ms.
     const LineTiming fast{.bit_rate = BAUD_19200,
                           .bits_per_char = bits_per_char(DATA_BITS, true, 1)};
-    EXPECT_EQ(margin_ns(fast), 20 * MS);
+    EXPECT_EQ(margin_ns(fast), 20 * MSEC);
     const LineTiming faster{.bit_rate = BAUD_115200, .bits_per_char = 10};
-    EXPECT_EQ(margin_ns(faster), 20 * MS);
+    EXPECT_EQ(margin_ns(faster), 20 * MSEC);
 }
 
 TEST(Timing, AStreamHasNoLineTimeButKeepsTheMargin) {
     const LineTiming tcp{};
     EXPECT_EQ(frame_time_ns(tcp, ANSWER_BYTES), 0);
-    EXPECT_EQ(first_byte_deadline_ns(tcp, 5 * MS, REQUEST_BYTES, TIMEOUT),
-              5 * MS + TIMEOUT);
-    EXPECT_EQ(answer_deadline_ns(tcp, 7 * MS, ANSWER_BYTES), 7 * MS + 20 * MS);
+    EXPECT_EQ(first_byte_deadline_ns(tcp, 5 * MSEC, REQUEST_BYTES, TIMEOUT),
+              5 * MSEC + TIMEOUT);
+    EXPECT_EQ(answer_deadline_ns(tcp, 7 * MSEC, ANSWER_BYTES),
+              7 * MSEC + 20 * MSEC);
 }
 
 TEST(Timing, DeadlinesSaturate) {

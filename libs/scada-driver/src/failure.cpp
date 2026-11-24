@@ -18,7 +18,8 @@ std::int64_t later(std::int64_t time, std::int64_t interval) noexcept {
 
 }  // namespace
 
-FailureTracker::FailureTracker(std::vector<Device> devices)
+FailureTracker::FailureTracker(std::vector<Device> devices,
+                               std::uint32_t lost_after_timeouts)
     : devices_(std::move(devices)),
       runs_(devices_.size()),
       unit_index_(devices_.size()) {
@@ -34,6 +35,8 @@ FailureTracker::FailureTracker(std::vector<Device> devices)
                                                      : DeviceState::DISABLED;
     }
     counts_.assign(units.size(), 0);
+    run_units_.assign(units.size(), false);
+    lost_after_ = lost_after_timeouts;
 }
 
 std::uint32_t& FailureTracker::count_of(std::uint32_t device) noexcept {
@@ -46,6 +49,7 @@ std::uint32_t FailureTracker::count_of(std::uint32_t device) const noexcept {
 
 void FailureTracker::connected(std::int64_t now_ns) noexcept {
     std::fill(counts_.begin(), counts_.end(), 0);
+    answer_seen();
     for (std::size_t index = 0; index < devices_.size(); ++index) {
         if (!devices_[index].enabled) {
             continue;
@@ -64,6 +68,39 @@ void FailureTracker::lost() noexcept {
             runs_[index].state = DeviceState::CONNECTING;
         }
     }
+}
+
+void FailureTracker::resumed() noexcept {
+    answer_seen();
+}
+
+bool FailureTracker::read_timed_out(std::uint32_t device) noexcept {
+    if (lost_after_ == 0 || device >= devices_.size()) {
+        return false;
+    }
+    if (run_length_ < std::numeric_limits<std::uint32_t>::max()) {
+        ++run_length_;
+    }
+    run_units_[unit_index_[device]] = true;
+    if (run_length_ < lost_after_) {
+        return false;
+    }
+    // Every eligible unit must be in the run (with none eligible, the run
+    // alone decides, as the contract's rule reads).
+    for (std::uint32_t other = 0; other < devices_.size(); ++other) {
+        if (!polled(other) || !devices_[other].has_poll_group) {
+            continue;
+        }
+        if (!run_units_[unit_index_[other]]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void FailureTracker::answer_seen() noexcept {
+    run_length_ = 0;
+    std::fill(run_units_.begin(), run_units_.end(), false);
 }
 
 bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
