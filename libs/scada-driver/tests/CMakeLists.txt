@@ -10,6 +10,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     sample_processing_test.cpp
     scheduling_test.cpp
     test_protocol.cpp
+    timing_test.cpp
     tzif_test.cpp
     zone_file_test.cpp
     zone_table_test.cpp
