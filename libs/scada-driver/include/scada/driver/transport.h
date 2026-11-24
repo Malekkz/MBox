@@ -31,10 +31,14 @@ enum class IoStatus : std::uint8_t {
 // calls (DI 2.5); the engine calls them outside every SCADA_RT function.
 //
 // Waiting: the engine does not wait while idle. The worker's loop (slice 5)
-// waits on the connection (POLLIN, POLLRDHUP), on the order eventfd of the
-// command thread (slices 6 and 7) and on the time `ChannelEngine::step`
-// returned, in one `poll`, then calls `step` again; `closed_by_peer` is how
-// the engine learns of an idle close (7.3 "Idle close").
+// waits, in one `poll`, on the time `ChannelEngine::step` returned, on the
+// order eventfd of the command thread (slices 6 and 7) and, for a stream
+// only, on `poll_fd()` for POLLRDHUP alone; then it calls `step` again.
+// Never POLLIN: bytes that arrive on an idle connection are read by nobody
+// until the next exchange, so POLLIN would wake the loop at once in every
+// round. A serial port is not waited on: `step` discards what arrived
+// before its next send (7.2). `closed_by_peer` is how the engine learns of
+// an idle close (7.3 "Idle close"; review G4).
 class Transport {
 public:
     Transport() = default;
@@ -50,14 +54,19 @@ public:
     virtual IoStatus connect(std::int64_t deadline_ns) noexcept = 0;
 
     // Closes the connection. `abortive`: unsent and unacknowledged bytes
-    // are discarded (`SO_LINGER` 0, 7.3), and output is flushed first on a
-    // serial port.
+    // are discarded (`SO_LINGER` 0, 7.3); on a serial port, the bytes not
+    // yet sent or read are discarded first (`tcflush`, both queues).
     virtual void close(bool abortive) noexcept = 0;
 
+    // The descriptor the worker's idle wait polls for POLLRDHUP on a stream
+    // (see above); -1 while closed. Not real-time.
+    [[nodiscard]] virtual int poll_fd() const noexcept = 0;
+
     // True when the peer has closed the connection or the port went away,
-    // learnt without blocking (a socket check: POLLRDHUP, or a read of 0).
-    // The engine asks before every send and at every idle boundary, since
-    // a send is accepted after the peer's FIN.
+    // learnt without blocking and without reading: a `poll` of `poll_fd()`
+    // with time-out 0 for POLLRDHUP, POLLHUP or POLLERR, so that no byte of
+    // a later answer is consumed. The engine asks before every send and at
+    // every idle boundary, since a send is accepted after the peer's FIN.
     [[nodiscard]] virtual bool closed_by_peer() noexcept = 0;
 
     // Sends one whole frame: OK, CLOSED, FAILED (nothing sent) or PARTIAL
@@ -74,10 +83,11 @@ public:
                              std::int64_t deadline_ns,
                              std::size_t& received) noexcept = 0;
 
-    // Drops every byte received and not yet read (7.2). Bytes that arrive
-    // later are not affected: the engine discards again before its next
-    // send after a quiet time.
-    virtual void discard_input() noexcept = 0;
+    // Drops every byte received and not yet read (7.2), and returns true
+    // when there was any: the line was not quiet, so the engine keeps
+    // another quiet time before it sends (review G3). Bytes that arrive
+    // later are not affected.
+    virtual bool discard_input() noexcept = 0;
 };
 
 // The two clocks of the worker: CLOCK_MONOTONIC for deadlines and

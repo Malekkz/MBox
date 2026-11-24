@@ -16,6 +16,14 @@ std::int64_t later(std::int64_t time, std::int64_t interval) noexcept {
     return time > MAX - interval ? MAX : time + interval;
 }
 
+// A probe back-off doubled, up to `backoff_max` (7.4).
+std::int64_t doubled(std::int64_t backoff_ns,
+                     const FailureRules& rules) noexcept {
+    return std::min(backoff_ns > rules.backoff_max_ns / 2 ? rules.backoff_max_ns
+                                                          : backoff_ns * 2,
+                    rules.backoff_max_ns);
+}
+
 }  // namespace
 
 FailureTracker::FailureTracker(std::vector<Device> devices,
@@ -132,6 +140,7 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
         // Only a poll that answered resets the probe back-off (Q3): a unit
         // that answers probes but no poll keeps its growing back-off.
         run.backoff_ns = devices_[device].rules.backoff_ns;
+        run.probe_recovered = false;
         return false;
     }
     if (now_ns < run.grace_until_ns) {
@@ -147,6 +156,11 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
             continue;
         }
         Run& demote = runs_[other];
+        if (demote.probe_recovered) {
+            demote.backoff_ns =
+                doubled(demote.backoff_ns, devices_[other].rules);
+            demote.probe_recovered = false;
+        }
         demote.state = DeviceStatus::DEMOTED;
         demote.demoted = true;
         demote.probe_due_ns = later(now_ns, demote.backoff_ns);
@@ -176,12 +190,10 @@ void FailureTracker::probe_ended(std::uint32_t device, bool answered,
         if (answered) {
             run.state = DeviceStatus::INITIALISING;
             run.demoted = false;
+            run.probe_recovered = true;
             continue;
         }
-        run.backoff_ns = std::min(run.backoff_ns > rules.backoff_max_ns / 2
-                                      ? rules.backoff_max_ns
-                                      : run.backoff_ns * 2,
-                                  rules.backoff_max_ns);
+        run.backoff_ns = doubled(run.backoff_ns, rules);
         run.probe_due_ns = later(now_ns, run.backoff_ns);
     }
 }

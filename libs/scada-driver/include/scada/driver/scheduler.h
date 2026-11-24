@@ -84,6 +84,9 @@ struct Choice {
     // samples are published as a poll's; the cycle goes on only if the
     // device recovers.
     bool cycle = false;
+    // A PROBE's time-out: its device's, at most 1 s, shortened to end when
+    // the next poll falls due (review G7); 0 for every other choice.
+    std::int64_t timeout_ns = 0;
 };
 
 class Scheduler {
@@ -186,19 +189,47 @@ public:
     // A probe waits for a poll that falls due within its time-out at most
     // this many time-outs past its own due time (D-138, Q4).
     static constexpr std::int64_t PROBE_FLOOR = 10;
+    // The shortest window before the next due poll that a probe is sent in,
+    // its time-out shortened to the window (G7); a probe whose time-out is
+    // shorter needs its whole time-out.
+    static constexpr std::int64_t PROBE_MIN_WINDOW_NS = 100'000'000;
 
     // A demoted `device` is due for a probe at `due_ns` (7.4); a device
     // whose plan has no probe request is probed by one whole poll cycle
-    // (Choice::cycle, R8). The probe waits
-    // at most `timeout_ns` for its answer. A probe is chosen only when no
-    // order is queued or in progress and no polled device has a retry, a
-    // chain or a request of a started cycle left (6.2 step 5), when no poll
-    // falls due within `timeout_ns` (unless the probe is PROBE_FLOOR
-    // time-outs late), and when no other probe of the channel is in flight;
-    // `probe_done` ends the flight (D-138).
+    // (Choice::cycle, R8). The probe waits at most `timeout_ns` for its
+    // answer. A probe is chosen only when no order is queued or in progress
+    // and no polled device has a retry, a chain or a request of a started
+    // cycle left (6.2 step 5), and when no other probe of the channel is in
+    // flight; `probe_done` ends the flight. When the next poll falls due
+    // within `timeout_ns`, the probe goes only if that leaves at least
+    // PROBE_MIN_WINDOW_NS (or `timeout_ns`, if shorter), with its time-out
+    // ending when that poll falls due (`Choice::timeout_ns`); a probe
+    // PROBE_FLOOR time-outs late goes in the next idle instant with its
+    // whole time-out (D-138, G7). A cycle probe keeps its device's
+    // time-outs: it has no window.
     void set_probe(std::uint32_t device, std::int64_t due_ns,
                    std::int64_t timeout_ns) noexcept;
     void clear_probe(std::uint32_t device) noexcept;
+
+    // `device` is not known to answer: it has not answered since the
+    // connect, or its unit has a failure count (7.4); `timeout_ns` is what
+    // one of its requests may cost. Within a priority, the polls of devices
+    // whose last request was answered go before the polls and retries of the
+    // others, so that dead devices take the line when the live ones leave
+    // it. A held-back poll still goes in its turn once the line has
+    // run FAILING_SPACING of its time-outs since the last failing poll was
+    // sent: dead devices take about a quarter of a busy line, and
+    // are never starved, so their points still go bad (review G5, D-138).
+    SCADA_RT void set_failing(std::uint32_t device, bool failing,
+                              std::int64_t timeout_ns) noexcept;
+    static constexpr std::int64_t FAILING_SPACING = 4;
+
+    // The planned request `request` of `device` rests (`resting`) or is
+    // polled again: a resting request is left out of its group's cycles
+    // (review G8). A chained request never rests: its chain would be cut.
+    // `reconnect` ends every rest.
+    SCADA_RT void rest(std::uint32_t device, std::uint32_t request,
+                       bool resting) noexcept;
     void probe_done() noexcept { probe_in_flight_ = false; }
 
     // Sends the poll request `request` of `device` again as its next
@@ -241,9 +272,10 @@ private:
 
     struct DeviceRun {
         std::vector<GroupState> groups;
-        std::vector<bool> split;   // per request: replaced by its split form
-        std::vector<bool> absent;  // per request: refused, not sent
-        std::uint32_t unit = 0;    // index into units_
+        std::vector<bool> split;    // per request: replaced by its split form
+        std::vector<bool> absent;   // per request: refused, not sent
+        std::vector<bool> resting;  // per request: in its back-off (G8)
+        std::uint32_t unit = 0;     // index into units_
         // A chain of companion requests (5.5) in progress: its group, and
         // where in the group's cycle it started.
         bool chain = false;
@@ -264,6 +296,10 @@ private:
         bool retry = false;
         std::uint32_t retry_request = 0;
         std::int64_t retry_due_ns = 0;
+        // Not RUNNING with an empty failure count: not answered since the
+        // connect, or failing (G5).
+        bool failing = false;
+        std::int64_t failing_timeout_ns = 0;
         std::int64_t probe_timeout_ns = 0;
     };
 
@@ -344,9 +380,11 @@ private:
         std::uint32_t group = 0;
         bool retry = false;
     };
-    using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
-    [[nodiscard]] PollKey key_of(const PollPick& pick) const noexcept;
-    void consider(const PollPick& pick, PollPick& best,
+    using PollKey =
+        std::tuple<bool, std::uint8_t, bool, std::int64_t, std::uint32_t>;
+    [[nodiscard]] PollKey key_of(const PollPick& pick,
+                                 std::int64_t now_ns) const noexcept;
+    void consider(const PollPick& pick, std::int64_t now_ns, PollPick& best,
                   bool& found) const noexcept;
     void consider_groups(std::uint32_t device, std::int64_t now_ns,
                          std::int64_t& wake, PollPick& best,
@@ -376,6 +414,8 @@ private:
     std::int64_t start_ns_ = 0;
     Undo undo_;
     bool probe_in_flight_ = false;
+    std::int64_t last_failing_ns_ = 0;  // a failing device's last poll (G5)
+    bool failing_sent_ = false;
 };
 
 }  // namespace scada::driver

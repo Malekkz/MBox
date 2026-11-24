@@ -172,6 +172,7 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
         }
         device_points = std::max(device_points, device.points.size());
         run.chain.reserve(device.points.size());
+        run.rests.resize(device.plan.requests.size());
         run.published =
             device.enabled ? DeviceStatus::CONNECTING : DeviceStatus::DISABLED;
         tags.device_state(static_cast<std::uint32_t>(index), run.published);
@@ -212,6 +213,9 @@ std::int64_t ChannelEngine::step() noexcept {
     if (now < quiet_until_ns_) {
         return quiet_until_ns_;  // a serial line's silence (7.2)
     }
+    if (discard_before_send_ && !settle(now)) {
+        return quiet_until_ns_;  // bytes came during the quiet time (G3)
+    }
     const Choice choice = scheduler_.take(now);
     switch (choice.kind) {
         case Choice::Kind::IDLE:
@@ -230,6 +234,23 @@ std::int64_t ChannelEngine::step() noexcept {
     exchange(choice);
     publish_states();
     return clock_->monotonic_ns();
+}
+
+bool ChannelEngine::settle(std::int64_t now_ns) noexcept {
+    if (!transport_->discard_input()) {
+        noisy_rounds_ = 0;
+        return true;
+    }
+    if (noisy_rounds_ >= JAM_ROUNDS) {
+        return true;  // jammed: counted once, sent all the same
+    }
+    ++noisy_rounds_;
+    if (noisy_rounds_ == JAM_ROUNDS) {
+        ++counts_.jams;
+        return true;
+    }
+    quiet_until_ns_ = later(now_ns, margin_ns(channel_->line));
+    return false;
 }
 
 void ChannelEngine::next_connect_after_backoff(std::int64_t now_ns) noexcept {
@@ -269,9 +290,13 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         answered_since_connect_ = false;
         quiet_until_ns_ = 0;
         discard_before_send_ = false;
+        noisy_rounds_ = 0;
         carry_ = 0;
         for (DeviceRun& run : devices_) {
             drop_chain(run);  // a chain never spans a connect (P9)
+            // `reconnect` ends every rest: dead blocks are tried again.
+            std::fill(run.rests.begin(), run.rests.end(), RequestRest{});
+            run.any_resting = false;
         }
         scheduler_.reconnect();
         sync_scheduler();
@@ -349,6 +374,27 @@ void ChannelEngine::sync_scheduler() noexcept {
             continue;
         }
         scheduler_.set_polled(device, failures_.polled(device));
+        DeviceRun& run = devices_[device];
+        if (run.any_resting) {
+            // A resting block is polled again at the end of its back-off;
+            // a further failure rests it again, for twice as long (G8).
+            const std::int64_t now = clock_->monotonic_ns();
+            run.any_resting = false;
+            for (std::uint32_t request = 0; request < run.rests.size();
+                 ++request) {
+                RequestRest& rest = run.rests[request];
+                if (rest.resting && now >= rest.until_ns) {
+                    rest.resting = false;
+                    scheduler_.rest(device, request, false);
+                }
+                run.any_resting = run.any_resting || rest.resting;
+            }
+        }
+        scheduler_.set_failing(
+            device,
+            failures_.state(device) != DeviceStatus::RUNNING ||
+                failures_.failures(device) > 0,
+            compiled.failure.timeout_ns);
         // One probe for every demoted device of a unit (Q5).
         if (failures_.probes_for_unit(device)) {
             scheduler_.set_probe(
@@ -404,9 +450,11 @@ void ChannelEngine::fail_points(std::uint32_t device) noexcept {
     }
 }
 
-void ChannelEngine::fail_request(std::uint32_t device,
-                                 const Request& request) noexcept {
-    // The points of a request that failed go bad (5.2, annex A; review P2).
+void ChannelEngine::fail_request(const Choice& choice) noexcept {
+    // The points of a request that failed go bad (5.2, annex A; review P2),
+    // and in a chain the points that depend on them too (5.5, review G1).
+    const Request& request =
+        channel_->devices[choice.device].plan.requests[choice.request];
     sink_count_ = 0;
     for (const std::uint32_t point : request.points) {
         if (sink_count_ < sink_storage_.size()) {
@@ -415,7 +463,7 @@ void ChannelEngine::fail_request(std::uint32_t device,
                 .sample = RawSample{.outcome = Outcome::COMM_FAIL}};
         }
     }
-    process(device, std::span(sink_storage_).first(sink_count_));
+    deliver(choice, std::span(sink_storage_).first(sink_count_));
 }
 
 std::int64_t ChannelEngine::check_staleness(std::int64_t now_ns) noexcept {
@@ -456,7 +504,7 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     }
     if (discard_before_send_) {
         // Bytes that came during the quiet time are no answer (7.2).
-        transport_->discard_input();
+        (void)transport_->discard_input();
         discard_before_send_ = false;
     }
     if (transport_->closed_by_peer()) {
@@ -473,7 +521,11 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     }
     std::int64_t timeout = device.failure.timeout_ns;
     if (choice.kind == Choice::Kind::PROBE) {
+        // At most 1 s (7.4), and ended when the next poll falls due (G7).
         timeout = std::min(timeout, PROBE_TIMEOUT_MAX_NS);
+        if (choice.timeout_ns > 0) {
+            timeout = std::min(timeout, choice.timeout_ns);
+        }
     }
     std::size_t have = 0;
     std::size_t frame_bytes = 0;
@@ -605,8 +657,7 @@ void ChannelEngine::exchange(const Choice& choice) noexcept {
                 failures_.probe_ended(choice.device, false, now);
                 scheduler_.probe_done();
             } else {
-                fail_request(choice.device, channel_->devices[choice.device]
-                                                .plan.requests[choice.request]);
+                fail_request(choice);
             }
             return;
         case End::CLOSED:
@@ -668,6 +719,10 @@ void ChannelEngine::answered(const Choice& choice,
         return;
     }
     (void)failures_.request_ended(device, RequestEnd::ANSWERED, now);
+    if (choice.kind == Choice::Kind::POLL) {
+        run.rests[choice.request] = RequestRest{};  // its block answers (G8)
+        ++run.answers;
+    }
     const bool refused = decoded.kind == DecodeResult::Kind::SPLIT;
     if ((refused && !scheduler_.refused(device, choice.request)) ||
         decoded.kind == DecodeResult::Kind::ABSENT) {
@@ -702,7 +757,7 @@ void ChannelEngine::after_bad_frame(const Request& request, End end) noexcept {
     // A serial line, or serial frames over a stream: discard input and keep
     // the quiet time before the next request to any device, and discard
     // again before that request (7.2, 7.3; review P6).
-    transport_->discard_input();
+    (void)transport_->discard_input();
     discard_before_send_ = true;
     quiet_until_ns_ = later(now, margin_ns(channel_->line));
 }
@@ -741,22 +796,70 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         drop_chain(run);
         return;
     }
-    // A chain with a failed part publishes nothing: what was held is
-    // dropped, and the parts that follow are read but not published (P9).
-    drop_chain(run);
-    run.chain_cut = request.chained;
-    fail_request(device, request);
+    // A failed part of a chain is part of the chain: its points go bad
+    // with it, and the points that depend on them through their companions'
+    // outcome, when the chain's last request is in (5.5, test 8; G1).
+    fail_request(choice);
     if (end == End::BROKEN) {
         (void)failures_.request_ended(device, RequestEnd::FAILED, now);
+        rest_if_dead_block(choice);
         return;
     }
-    // A time-out, or a gateway's "did not respond", which counts as a
-    // time-out of that unit for demotion and for the run (D-12).
+    if (end == End::UNREACHABLE) {
+        // The lead's revised ruling on D-12: the gateway's "did not
+        // respond" counts toward its unit's demotion, without a retry, but
+        // is a valid frame from the gateway: it proves the connection and
+        // empties the run of time-outs like any valid answer (7.3).
+        answered_since_connect_ = true;
+        backoff_ns_ = channel_->connection.reconnect_min_ns;
+        failures_.answer_seen();
+        (void)failures_.request_ended(device, RequestEnd::FAILED, now);
+        rest_if_dead_block(choice);
+        return;
+    }
+    // A time-out counts toward demotion and adds to the run (7.3, 7.4).
     const FailureTracker::TimeoutEnd timed_out =
         failures_.read_timed_out(device, now);
     if (timed_out.lost && connected_) {
         close_own(now, true);  // the run spans every live unit (7.3)
+        return;
     }
+    rest_if_dead_block(choice);
+}
+
+void ChannelEngine::rest_if_dead_block(const Choice& choice) noexcept {
+    if (choice.kind != Choice::Kind::POLL) {
+        return;
+    }
+    const std::uint32_t device = choice.device;
+    DeviceRun& run = devices_[device];
+    const FailureRules& rules = channel_->devices[device].failure;
+    RequestRest& rest = run.rests[choice.request];
+    if (rest.failures == 0) {
+        rest.answers_mark = run.answers;
+    }
+    if (rest.failures < UINT8_MAX) {
+        ++rest.failures;
+    }
+    // The device answered other requests since this one began to fail: a
+    // dead block of a live device, which demotion never ends (G8).
+    if (rest.failures < rules.demote_after ||
+        run.answers == rest.answers_mark || !failures_.polled(device) ||
+        channel_->devices[device].plan.requests[choice.request].chained) {
+        return;
+    }
+    const std::int64_t now = clock_->monotonic_ns();
+    rest.backoff_ns = rest.backoff_ns == 0
+                          ? rules.backoff_ns
+                          : std::min(rest.backoff_ns > rules.backoff_max_ns / 2
+                                         ? rules.backoff_max_ns
+                                         : rest.backoff_ns * 2,
+                                     rules.backoff_max_ns);
+    rest.until_ns = later(now, rest.backoff_ns);
+    rest.resting = true;
+    run.any_resting = true;
+    scheduler_.rest(device, choice.request, true);
+    ++counts_.rests;
 }
 
 void ChannelEngine::deliver(const Choice& choice,

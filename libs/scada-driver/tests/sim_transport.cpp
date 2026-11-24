@@ -56,7 +56,22 @@ IoStatus SimTransport::send(std::span<const std::byte> frame) noexcept {
         --failed_sends_;
         return IoStatus::FAILED;
     }
-    std::vector<std::byte> answer = bus_->answer(frame, clock_->monotonic_ns());
+    const std::int64_t now = clock_->monotonic_ns();
+    if (collisions_ && std::any_of(deliveries_.begin(), deliveries_.end(),
+                                   [&](const Delivery& delivery) {
+                                       return delivery.arrival_ns > now;
+                                   })) {
+        ++collided_;
+        return IoStatus::OK;  // lost on the line
+    }
+    const auto target = static_cast<std::uint8_t>(frame[2]);
+    if (burst_unit_ != 0 && target == burst_unit_) {
+        (void)bus_->answer(frame, now);  // logged, not answered
+        burst_unit_ = 0;
+        noise(now + burst_after_ns_, now + burst_after_ns_ + burst_length_ns_);
+        return IoStatus::OK;
+    }
+    std::vector<std::byte> answer = bus_->answer(frame, now);
     if (answer.empty()) {
         return IoStatus::OK;
     }
@@ -120,11 +135,19 @@ IoStatus SimTransport::receive(std::span<std::byte> into,
     return IoStatus::OK;
 }
 
-void SimTransport::discard_input() noexcept {
+bool SimTransport::discard_input() noexcept {
     const std::int64_t now = clock_->monotonic_ns();
-    std::erase_if(deliveries_, [&](const Delivery& delivery) {
-        return delivery.arrival_ns <= now;
-    });
+    return std::erase_if(deliveries_, [&](const Delivery& delivery) {
+               return delivery.arrival_ns <= now;
+           }) > 0;
+}
+
+void SimTransport::noise(std::int64_t from_ns, std::int64_t to_ns) {
+    constexpr std::int64_t EVERY_NS = 1'000'000;
+    constexpr std::byte NOISE{0xAA};
+    for (std::int64_t time = from_ns; time < to_ns; time += EVERY_NS) {
+        inject({NOISE}, time);
+    }
 }
 
 SCADA_RT void RecordingTags::write_point(

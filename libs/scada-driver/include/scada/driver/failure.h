@@ -115,7 +115,10 @@ public:
     // The end of a polled request of `device` at `now_ns`. A failure
     // outside the device's grace adds one to its unit's count; an answer
     // empties it. Every device of the unit whose own `demote_after` the
-    // count reaches is demoted. An answer makes an INITIALISING device
+    // count reaches is demoted; one that a probe recovered and that no poll
+    // answered since has its back-off doubled first, up to `backoff_max`, so
+    // that a unit that answers probes and no poll does not flap at the same
+    // rate for ever (review G6). An answer makes an INITIALISING device
     // RUNNING. Returns true when some device was demoted by this call.
     SCADA_RT bool request_ended(std::uint32_t device, RequestEnd end,
                                 std::int64_t now_ns) noexcept;
@@ -146,6 +149,8 @@ private:
         std::int64_t backoff_ns = 0;
         std::int64_t probe_due_ns = 0;
         bool demoted = false;  // kept across a lost connection
+        // Recovered by a probe, and no poll answered since (review G6).
+        bool probe_recovered = false;
     };
 
     // Adds the time-out of `device` to the run; true when the connection is

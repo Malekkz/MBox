@@ -63,6 +63,26 @@ TEST(Timing, AStreamHasNoLineTimeButKeepsTheMargin) {
               7 * MSEC + 20 * MSEC);
 }
 
+TEST(Timing, TheInterFrameGapIsFixedAbove19200BitPerSecond) {
+    // 3.5 characters up to 19,200 bit/s, then at least 1.75 ms (G2).
+    EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 9'600}), 3'645'834);
+    EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 19'200}), 1'822'917);
+    EXPECT_EQ(
+        inter_frame_gap_ns(LineTiming{
+            .bit_rate = 38'400, .bits_per_char = bits_per_char(8, true, 1)}),
+        1'750'000);
+    EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 115'200}), 1'750'000);
+    EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 4'000'000}), 1'750'000);
+    // CS `turnaround` on top.
+    EXPECT_EQ(inter_frame_gap_ns(
+                  LineTiming{.bit_rate = 38'400, .turnaround_ns = 5'000'000}),
+              6'750'000);
+    EXPECT_EQ(inter_frame_gap_ns(
+                  LineTiming{.bit_rate = 9'600, .turnaround_ns = 5'000'000}),
+              8'645'834);
+    EXPECT_EQ(inter_frame_gap_ns(LineTiming{}), 0);  // a stream
+}
+
 TEST(Timing, DeadlinesSaturate) {
     constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
     EXPECT_EQ(

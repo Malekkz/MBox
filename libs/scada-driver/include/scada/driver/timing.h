@@ -78,21 +78,31 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t margin_ns(
     return std::max(seven_halves, MIN_MARGIN_NS);
 }
 
+// Above this bit rate the silence between serial frames is fixed rather
+// than 3.5 characters (the serial line rule of the Modbus protocol): the
+// characters become too short for a receiver's timer.
+inline constexpr std::uint32_t FIXED_GAP_ABOVE_BIT_RATE = 19'200;
+inline constexpr std::int64_t FIXED_GAP_NS = 1'750'000;  // 1.75 ms
+
 // The silence a serial line keeps before the next request, from the last
-// byte received (7.2): 3.5 characters at the line's rate plus CS
-// `turnaround`, with no floor (`margin_ns` has the 20 ms floor of a quiet
-// time after a failure); 0 on a stream.
+// byte received (7.2): 3.5 characters at the line's rate, and at least
+// 1.75 ms above 19,200 bit/s, plus CS `turnaround`, with no 20 ms floor
+// (`margin_ns` has the floor of a quiet time after a failure); 0 on a
+// stream (review G2).
 SCADA_RT [[nodiscard]] constexpr std::int64_t inter_frame_gap_ns(
     const LineTiming& line) noexcept {
     constexpr std::size_t HALF_CHARS = 7;
     if (line.bit_rate == 0) {
         return 0;
     }
-    const std::int64_t gap =
+    std::int64_t gap =
         frame_time_ns(LineTiming{.bit_rate = line.bit_rate * 2,
                                  .bits_per_char = line.bits_per_char,
                                  .turnaround_ns = 0},
                       HALF_CHARS);
+    if (line.bit_rate > FIXED_GAP_ABOVE_BIT_RATE) {
+        gap = std::max(gap, FIXED_GAP_NS);
+    }
     constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
     return gap > MAX - line.turnaround_ns ? MAX : gap + line.turnaround_ns;
 }

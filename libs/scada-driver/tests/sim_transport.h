@@ -88,6 +88,21 @@ public:
     void stall_next_receive(std::int64_t stall_ns) noexcept {
         stall_ns_ = stall_ns;
     }
+    // A send while bytes are still arriving collides with them: the request
+    // is lost and the bus never sees it (a half-duplex line).
+    void collisions(bool enabled) noexcept { collisions_ = enabled; }
+    // The next request to `unit_id` gets no answer, but `after_ns` after the
+    // send a burst of bytes starts that lasts `length_ns`, one byte every
+    // millisecond: a late answer, or noise.
+    void late_burst(std::uint8_t unit_id, std::int64_t after_ns,
+                    std::int64_t length_ns) noexcept {
+        burst_unit_ = unit_id;
+        burst_after_ns_ = after_ns;
+        burst_length_ns_ = length_ns;
+    }
+    // Bytes from `from_ns` to `to_ns`, one every millisecond.
+    void noise(std::int64_t from_ns, std::int64_t to_ns);
+    [[nodiscard]] std::size_t collided() const noexcept { return collided_; }
     // The next `count` sends fail with nothing sent.
     void failed_sends(int count) noexcept { failed_sends_ = count; }
 
@@ -105,7 +120,8 @@ public:
     IoStatus receive(std::span<std::byte> into, std::int64_t deadline_ns,
                      std::size_t& received) noexcept override;
     // Drops what has arrived by now; later bytes still arrive.
-    void discard_input() noexcept override;
+    bool discard_input() noexcept override;
+    [[nodiscard]] int poll_fd() const noexcept override { return -1; }
 
     [[nodiscard]] int connects() const noexcept { return connects_; }
     [[nodiscard]] int abortive_closes() const noexcept {
@@ -141,6 +157,11 @@ private:
     std::vector<std::byte> trailing_;
     int close_after_checks_ = 0;
     std::int64_t stall_ns_ = 0;
+    bool collisions_ = false;
+    std::size_t collided_ = 0;
+    std::uint8_t burst_unit_ = 0;
+    std::int64_t burst_after_ns_ = 0;
+    std::int64_t burst_length_ns_ = 0;
 };
 
 // What the engine wrote: the last write of each point, and every device

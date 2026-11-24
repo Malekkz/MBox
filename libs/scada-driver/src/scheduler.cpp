@@ -4,6 +4,7 @@
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/plan.h"
+#include "scada/driver/timing.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -123,11 +124,11 @@ struct Position {
 };
 
 // The next request of a cycle from `group`'s current position, skipping
-// requests refused for good and expanding split forms.
+// requests refused for good or resting (G8) and expanding split forms.
 bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
                const std::vector<bool>& split, const std::vector<bool>& absent,
-               std::size_t next, std::size_t next_split,
-               Position& out) noexcept {
+               const std::vector<bool>& resting, std::size_t next,
+               std::size_t next_split, Position& out) noexcept {
     for (std::size_t index = next; index < list.size(); ++index) {
         const std::uint32_t request = list[index];
         if (split[request]) {
@@ -135,7 +136,8 @@ bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
                 plan.requests[request].split;
             const std::size_t from = index == next ? next_split : 0;
             for (std::size_t part = from; part < parts.size(); ++part) {
-                if (!absent[parts[part]]) {
+                if (!absent[parts[part]] && !resting[request] &&
+                    !resting[parts[part]]) {
                     out = Position{.index = index,
                                    .part = part,
                                    .in_split = true,
@@ -145,7 +147,7 @@ bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
             }
             continue;
         }
-        if (!absent[request]) {
+        if (!absent[request] && !resting[request]) {
             out = Position{.index = index, .request = request};
             return true;
         }
@@ -200,6 +202,7 @@ Scheduler::Scheduler(const CompiledChannel& channel,
         }
         run.split.assign(device.plan.requests.size(), false);
         run.absent.assign(device.plan.requests.size(), false);
+        run.resting.assign(device.plan.requests.size(), false);
         // OWN_UNIT is never shared: each such device is a unit of its own.
         const auto found =
             device.unit == CompiledDevice::OWN_UNIT
@@ -299,7 +302,7 @@ bool Scheduler::peek(std::uint32_t device, std::uint32_t group,
     Position position;
     if (!state.in_cycle ||
         !find_next(plan.by_group[group], plan, run.split, run.absent,
-                   state.next, state.next_split, position)) {
+                   run.resting, state.next, state.next_split, position)) {
         return false;
     }
     request = position.request;
@@ -312,7 +315,7 @@ void Scheduler::advance(std::uint32_t device, std::uint32_t group) noexcept {
     const ReadPlan& plan = channel_->devices[device].plan;
     Position position;
     if (!find_next(plan.by_group[group], plan, run.split, run.absent,
-                   state.next, state.next_split, position)) {
+                   run.resting, state.next, state.next_split, position)) {
         return;
     }
     if (position.in_split) {
@@ -569,20 +572,27 @@ Choice Scheduler::take_retry(std::uint32_t device,
     return choice;
 }
 
-// A chain in progress first, then priority, due time, device order. A retry
-// is its device's next poll and takes its turn in that order, due when the
-// failure was seen (Q1: a dead device does not hold the line).
-Scheduler::PollKey Scheduler::key_of(const PollPick& pick) const noexcept {
+// A chain in progress first, then priority, then devices whose last request
+// was answered before failing ones (G5) unless a failing one waited a whole
+// period, then due time, device order. A retry is its device's next poll
+// and takes its turn in that order, due when the failure was seen (Q1).
+Scheduler::PollKey Scheduler::key_of(const PollPick& pick,
+                                     std::int64_t now_ns) const noexcept {
     const DeviceRun& run = devices_[pick.device];
-    return PollKey{
-        !run.chain, channel_->poll_groups[pick.group].priority,
-        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns,
-        pick.device};
+    const CompiledPollGroup& group = channel_->poll_groups[pick.group];
+    const std::int64_t due =
+        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
+    (void)due;
+    const bool held_back =
+        (run.failing || pick.retry) && failing_sent_ &&
+        now_ns <
+            later(last_failing_ns_, run.failing_timeout_ns * FAILING_SPACING);
+    return PollKey{!run.chain, group.priority, held_back, due, pick.device};
 }
 
-void Scheduler::consider(const PollPick& pick, PollPick& best,
-                         bool& found) const noexcept {
-    if (!found || key_of(pick) < key_of(best)) {
+void Scheduler::consider(const PollPick& pick, std::int64_t now_ns,
+                         PollPick& best, bool& found) const noexcept {
+    if (!found || key_of(pick, now_ns) < key_of(best, now_ns)) {
         best = pick;
         found = true;
     }
@@ -611,7 +621,7 @@ void Scheduler::consider_groups(std::uint32_t device, std::int64_t now_ns,
             continue;
         }
         consider(PollPick{.device = device, .group = group, .retry = false},
-                 best, found);
+                 now_ns, best, found);
     }
 }
 
@@ -637,9 +647,13 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                                         .plan.requests[run.retry_request]
                                         .poll_group;
         consider(PollPick{.device = device, .group = group, .retry = true},
-                 best, found);
+                 now_ns, best, found);
     }
     if (found) {
+        if (devices_[best.device].failing || best.retry) {
+            last_failing_ns_ = now_ns;
+            failing_sent_ = true;
+        }
         out = best.retry ? take_retry(best.device, now_ns)
                          : take_poll(best.device, best.group, now_ns);
     }
@@ -739,13 +753,25 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
             wake = std::min(wake, from);
             continue;
         }
-        // Q4: not when a poll falls due within the probe's time-out, unless
-        // the probe has waited PROBE_FLOOR time-outs past its due time.
+        // Q4, G7: a poll that falls due within the probe's time-out ends
+        // the probe's wait then, if the window is worth a probe; unless the
+        // probe has waited PROBE_FLOOR time-outs past its due time.
         const std::int64_t floor =
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
-        if (next_poll < later(now_ns, run.probe_timeout_ns) && now_ns < floor) {
-            wake = std::min(wake, floor);
-            continue;
+        std::int64_t wait_ns = run.probe_timeout_ns;
+        if (next_poll < later(now_ns, wait_ns) && now_ns < floor) {
+            // The window ends before the quiet time a serial line keeps
+            // after a time-out, so that the poll goes out when due.
+            const std::int64_t quiet = channel_->transport == TransportKind::TCP
+                                           ? 0
+                                           : margin_ns(channel_->line);
+            const std::int64_t window = next_poll - now_ns - quiet;
+            if (window < std::min(wait_ns, PROBE_MIN_WINDOW_NS) ||
+                !compiled.plan.probe.has_value()) {
+                wake = std::min(wake, floor);
+                continue;
+            }
+            wait_ns = window;
         }
         if (!compiled.plan.probe.has_value()) {
             // R8: no request may serve as a probe (all side-effect or
@@ -758,7 +784,8 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
         }
         out = Choice{.kind = Choice::Kind::PROBE,
                      .device = device,
-                     .request = *compiled.plan.probe};
+                     .request = *compiled.plan.probe,
+                     .timeout_ns = wait_ns};
         save_undo(out, 0);
         record(device, false, now_ns);
         probe_in_flight_ = true;
@@ -922,6 +949,7 @@ std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
         DeviceRun& run = devices_[device];
         std::fill(run.split.begin(), run.split.end(), false);
         std::fill(run.absent.begin(), run.absent.end(), false);
+        std::fill(run.resting.begin(), run.resting.end(), false);
         drop_chain(device);
         if (run.order_active) {
             if (count < ended.size()) {
@@ -962,6 +990,22 @@ void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
         devices_[device].probe_due_ns = due_ns;
         devices_[device].probe_timeout_ns =
             std::max<std::int64_t>(timeout_ns, 0);
+    }
+}
+
+void Scheduler::rest(std::uint32_t device, std::uint32_t request,
+                     bool resting) noexcept {
+    if (device < devices_.size() && request < devices_[device].resting.size() &&
+        !channel_->devices[device].plan.requests[request].chained) {
+        devices_[device].resting[request] = resting;
+    }
+}
+
+void Scheduler::set_failing(std::uint32_t device, bool failing,
+                            std::int64_t timeout_ns) noexcept {
+    if (device < devices_.size()) {
+        devices_[device].failing = failing;
+        devices_[device].failing_timeout_ns = timeout_ns;
     }
 }
 

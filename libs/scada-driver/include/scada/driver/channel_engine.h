@@ -65,6 +65,8 @@ struct EngineCounts {
     std::uint64_t resumed = 0;       // own closes followed by a quick reconnect
     std::uint64_t stale_frames = 0;  // frames of other requests dropped
     std::uint64_t chain_overflows = 0;  // chains too long for their buffer
+    std::uint64_t jams = 0;   // serial lines never quiet before a send (G3)
+    std::uint64_t rests = 0;  // dead blocks of live devices put to rest (G8)
 };
 
 class ChannelEngine {
@@ -73,6 +75,12 @@ public:
     // arrives.
     static constexpr std::int64_t NEVER =
         std::numeric_limits<std::int64_t>::max();
+    // Quiet times in a row that found bytes before a send, after which the
+    // line counts as jammed: one is counted in `jams`, and requests are sent
+    // again without waiting until a discard finds the line quiet (G3). At
+    // the 20 ms quiet time this is 5.12 s, longer than the longest answer
+    // at 1,200 bit/s (255 bytes: 2.3 s).
+    static constexpr std::uint32_t JAM_ROUNDS = 256;
 
     // Allocates every buffer, sized for `channel`, which must outlive the
     // engine, as must `protocol`, `transport`, `clock` and `tags`. Every
@@ -127,8 +135,22 @@ private:
         bool polled = false;  // the point is in a poll group
     };
 
+    // A planned request that keeps failing while its device answers others:
+    // a dead block of a live device (review G8).
+    struct RequestRest {
+        std::uint8_t failures = 0;  // in a row, after retries
+        bool resting = false;
+        // The device's `answers` at this run's first failure.
+        std::uint64_t answers_mark = 0;
+        std::int64_t until_ns = 0;
+        std::int64_t backoff_ns = 0;
+    };
+
     struct DeviceRun {
         std::vector<PointRun> points;
+        std::vector<RequestRest> rests;  // per planned request
+        bool any_resting = false;
+        std::uint64_t answers = 0;  // its polls that answered
         DeviceState protocol;       // the protocol's own state (2.2)
         std::size_t max_frame = 0;  // `DeviceCaps::max_frame_bytes`
         DeviceStatus published = DeviceStatus::DISABLED;
@@ -137,8 +159,8 @@ private:
         // Samples of a chain of companions until its last request (5.5).
         std::vector<DeliveredSample> chain;
         bool chain_overflow = false;  // the chain did not fit: not published
-        // A part of the chain failed or was busy: the rest of the chain is
-        // read, and nothing of it published (P9).
+        // A part of the chain was busy: the rest of the chain is read, and
+        // nothing of it published (P9).
         bool chain_cut = false;
     };
 
@@ -158,14 +180,23 @@ private:
     void answered(const Choice& choice, const DecodeResult& decoded) noexcept;
     void failed(const Choice& choice, End end) noexcept;
     void after_bad_frame(const Request& request, End end) noexcept;
+    // A poll request failed after its retries and was counted: it rests for
+    // its own back-off when it failed `demote_after` times in a row while
+    // its device answered other requests in between (G8).
+    void rest_if_dead_block(const Choice& choice) noexcept;
 
     // Empties a device's chain: what it held is never published.
     SCADA_RT static void drop_chain(DeviceRun& run) noexcept;
+    // Before a send after a quiet time: true when the line is quiet (or
+    // jammed); false when bytes were found, with the quiet time restarted.
+    bool settle(std::int64_t now_ns) noexcept;
     SCADA_RT void sync_scheduler() noexcept;
     SCADA_RT void publish_states() noexcept;
     SCADA_RT void fail_points(std::uint32_t device) noexcept;
-    SCADA_RT void fail_request(std::uint32_t device,
-                               const Request& request) noexcept;
+    // The points of the choice's request go bad with COMM_FAIL. In a chain
+    // of companions they are part of the chain, so that its dependents see
+    // their companion's outcome when it is processed (5.5, review G1).
+    SCADA_RT void fail_request(const Choice& choice) noexcept;
     // Returns when a point next goes STALE, or NEVER.
     SCADA_RT std::int64_t check_staleness(std::int64_t now_ns) noexcept;
     SCADA_RT Scan scan(const Request& request, const Attempt& sent,
@@ -206,6 +237,7 @@ private:
     // Input is discarded once more before the next send (7.2: bytes that
     // arrive during a quiet time are not the next answer).
     bool discard_before_send_ = false;
+    std::uint32_t noisy_rounds_ = 0;  // quiet times in a row that found bytes
     // Bytes a stream delivered after the last complete frame, kept at the
     // start of `rx_` for the next answer (Q12).
     std::size_t carry_ = 0;

@@ -298,6 +298,37 @@ TEST(Failure, OneProbeServesEveryDeviceOfAUnit) {
     EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::INITIALISING);
 }
 
+TEST(FailureTracker, AUnitThatAnswersOnlyProbesBacksOffFurtherEachTime) {
+    // G6: demote_after 1, back-off 1 s to 8 s. The probe answers, the next
+    // poll fails: demoted again with the back-off doubled, 2 s, then 4 s,
+    // 8 s, 8 s. A poll that answers resets it to 1 s.
+    FailureRules rules;
+    rules.demote_after = 1;
+    rules.backoff_ns = SECOND;
+    rules.backoff_max_ns = 8 * SECOND;
+    FailureTracker tracker({{.unit_id = 1, .rules = rules}});
+    tracker.connected(0);
+    std::int64_t now = 0;
+    (void)tracker.request_ended(0, RequestEnd::FAILED, now);
+    EXPECT_EQ(tracker.probe_due_ns(0), now + SECOND);
+    // A probe answers, the next poll fails: the wait until the next probe.
+    const auto flap = [&] {
+        now = tracker.probe_due_ns(0);
+        tracker.probe_ended(0, true, now);
+        (void)tracker.request_ended(0, RequestEnd::FAILED, now);
+        return tracker.probe_due_ns(0) - now;
+    };
+    const std::vector<std::int64_t> waits{flap(), flap(), flap(), flap()};
+    EXPECT_EQ(waits, (std::vector<std::int64_t>{2 * SECOND, 4 * SECOND,
+                                                8 * SECOND, 8 * SECOND}));
+    EXPECT_EQ(tracker.state(0), DeviceStatus::DEMOTED);
+    now = tracker.probe_due_ns(0);
+    tracker.probe_ended(0, true, now);
+    (void)tracker.request_ended(0, RequestEnd::ANSWERED, now);
+    (void)tracker.request_ended(0, RequestEnd::FAILED, now);
+    EXPECT_EQ(tracker.probe_due_ns(0), now + SECOND);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace
