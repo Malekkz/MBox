@@ -7,10 +7,14 @@
 // The tree is written to a directory that `mkdtemp` makes under the
 // temporary directory, emptied before each input and removed at exit.
 // Properties: validation never fails on a readable tree; the count is at least
-// the list; every error has a message, and a line given with its column.
+// the list; every error has a message, and a line given with its column; the
+// expanded tree (stage 4) exists exactly when the tree is valid, and each of
+// its nodes names a file of the tree and the device it belongs to.
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
+#include "scada/conf/node.h"
 #include "scada/conf/validate.h"
 
 #include <cstddef>
@@ -19,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -137,6 +142,20 @@ void write_tree(std::string_view input, const std::filesystem::path& root) {
 
 }  // namespace
 
+// Every node of `tree` lies in a file of the tree, has a type table entry,
+// and belongs to no device or to one the tree lists.
+void check_expanded(const scada::conf::ExpandedTree& tree) {
+    const scada::conf::Document& document = tree.document;
+    check(tree.types.size() == document.size());
+    check(tree.instance_of.size() == document.size());
+    for (scada::conf::NodeId node = 0; node < document.size(); ++node) {
+        check(document.position(node).file < document.files().size());
+        const std::uint32_t instance = tree.instance_of[node];
+        check(instance == scada::conf::ExpandedTree::NO_INSTANCE ||
+              instance < tree.instances.size());
+    }
+}
+
 // NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) {
@@ -147,14 +166,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const std::filesystem::path& root = directory.path();
     write_tree(input, root);
 
-    const scada::Result<scada::conf::Report> report =
-        scada::conf::validate_tree(root);
-    check(report.ok());
-    const scada::conf::Report& found = report.value();
+    const scada::Result<scada::conf::Validation> validation =
+        scada::conf::validate_and_expand(root);
+    check(validation.ok());
+    const scada::conf::Report& found = validation.value().report;
     check(found.error_count >= found.errors.size());
     for (const scada::conf::Diagnostic& diagnostic : found.errors) {
         check(!diagnostic.message.empty());
         check(diagnostic.location.line == 0 || diagnostic.location.column > 0);
+    }
+    // The expanded tree exists exactly when the tree is valid, and every node
+    // of it names a file of the tree and a device it belongs to.
+    const std::optional<scada::conf::ExpandedTree>& expanded =
+        validation.value().expanded;
+    check(expanded.has_value() == scada::conf::passed(found));
+    if (expanded) {
+        check_expanded(*expanded);
     }
     return 0;
 }

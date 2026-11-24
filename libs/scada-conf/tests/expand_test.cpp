@@ -576,6 +576,32 @@ TEST(Expand, TagNameLengths) {
                "  from template templates/meter_a.yaml:6:95 (point w)"}));
 }
 
+// 65,536 points are valid; one more is CF-414, found while the points are
+// made, so a `repeat` over many points never builds more than the limit.
+TEST(Expand, ThePointLimit) {
+    const auto with = [](std::string_view range) {
+        return expand(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\n"
+              "repeat:\n"
+              "  - for: { n: \"" +
+                  std::string(range) +
+                  "\" }\n"
+                  "    points:\n"
+                  "      - { name: \"a{n}\", address: { table: holding, "
+                  "register: 1, type: uint16 } }\n"
+                  "      - { name: \"b{n}\", address: { table: holding, "
+                  "register: 2, type: uint16 } }\n"},
+             {"drivers/modbus/line1.yaml", one_device()}});
+    };
+    EXPECT_EQ(with("1..32768").size(), 65536U);
+    EXPECT_EQ(with("1..32769"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-414: template "
+                     "\"meter_a\" expands to more than 65536 points, the "
+                     "limit is 65536\n"
+                     "  from template templates/meter_a.yaml:6:17"}));
+}
+
 TEST(Expand, APointOfAProtocolTemplateNeedsAnAddress) {
     EXPECT_EQ(
         expand({{"templates/meter_a.yaml",

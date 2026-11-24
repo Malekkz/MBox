@@ -817,6 +817,19 @@ private:
         std::vector<Point> own;
         std::set<std::string, std::less<>> names;
         const auto add = [&](Point point) {
+            // The point limit bounds production too: a `repeat` of 65,536
+            // pairs over many points stops at the limit (CF-414). A level's
+            // own points have distinct names, so more of them than the
+            // limit is more points than the limit after merging.
+            if (own.size() >= MAX_POINTS) {
+                if (!device_failed_) {
+                    error(CF_TOO_MANY_POINTS, *point.value.find("name"),
+                          "template " + quote_text(template_name) +
+                              " expands to more than 65536 points, the "
+                              "limit is 65536");
+                }
+                return;
+            }
             if (!names.insert(point.name).second) {
                 error(CF_POINT_TWICE, *point.value.find("name"),
                       "point " + quote_text(point.name) + " is defined twice",
@@ -837,8 +850,11 @@ private:
                 expand_repeat(block, template_name, add);
             }
         }
+        // An index by name, so that joining is O(n log n) in the points.
+        std::map<std::string, std::size_t, std::less<>> index =
+            index_of(points);
         for (Point& point : own) {
-            join(point, template_name, points);
+            join(point, template_name, points, index);
         }
         select(root, template_name, points);
     }
@@ -926,6 +942,9 @@ private:
         const Value* when = block.find("when");
         std::map<std::string, std::int64_t, std::less<>> variables;
         const std::function<void(std::size_t)> walk = [&](std::size_t axis) {
+            if (device_failed_) {
+                return;
+            }
             if (axis == axes.size()) {
                 if (when != nullptr && !holds(*when, variables)) {
                     return;
@@ -1009,12 +1028,15 @@ private:
     // Step 3.3: a point of this level merged into the inherited one of its
     // name, or added; the variables bound to both are joined (CF-422).
     void join(Point& point, const std::string& template_name,
-              std::vector<Point>& points) {
-        const auto found = std::ranges::find(points, point.name, &Point::name);
-        if (found == points.end()) {
+              std::vector<Point>& points,
+              std::map<std::string, std::size_t, std::less<>>& index) {
+        const auto position = index.find(point.name);
+        if (position == index.end()) {
+            index.emplace(point.name, points.size());
             points.push_back(std::move(point));
             return;
         }
+        Point* const found = &points[position->second];
         for (const auto& [variable, bound] : point.bindings) {
             const auto inherited = found->bindings.find(variable);
             if (inherited != found->bindings.end() &&
@@ -1131,14 +1153,25 @@ private:
         *invalid = chosen;
     }
 
+    // The position of each point by its name.
+    static std::map<std::string, std::size_t, std::less<>> index_of(
+        const std::vector<Point>& points) {
+        std::map<std::string, std::size_t, std::less<>> index;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            index.emplace(points[i].name, i);
+        }
+        return index;
+    }
+
     // Step 6: the instance's overrides, and its `identify` appended.
     void apply_overrides(const Value& instance, Value& device_keys,
                          std::vector<Point>& points) {
         if (const Value* overrides = instance.find("overrides")) {
+            const std::map<std::string, std::size_t, std::less<>> index =
+                index_of(points);
             for (const Member& member : overrides->members) {
-                const auto found =
-                    std::ranges::find(points, member.key, &Point::name);
-                if (found == points.end()) {
+                const auto found = index.find(member.key);
+                if (found == index.end()) {
                     error_at(CF_NO_SUCH_POINT, *member.key_file,
                              member.key_node,
                              "point " + quote_text(member.key) +
@@ -1146,7 +1179,8 @@ private:
                                  quote_text(template_of(instance)));
                     continue;
                 }
-                merge(found->value, member.value.front(), "point");
+                merge(points[found->second].value, member.value.front(),
+                      "point");
             }
         }
         if (const Value* own = instance.find("identify")) {
@@ -1169,13 +1203,14 @@ private:
         if (own == nullptr) {
             return;
         }
+        std::map<std::string, std::size_t, std::less<>> index =
+            index_of(device.points);
         for (const Value& item : own->items) {
             std::optional<Point> point = point_of(item, {}, {});
             if (!point) {
                 continue;
             }
-            if (std::ranges::find(device.points, point->name, &Point::name) !=
-                device.points.end()) {
+            if (!index.emplace(point->name, device.points.size()).second) {
                 error(CF_POINT_TWICE, *point->value.find("name"),
                       "point " + quote_text(point->name) + " is defined twice");
                 continue;
