@@ -7,9 +7,10 @@
 // channel. Pure logic over an injected clock: the caller passes the
 // monotonic time, so the same inputs always give the same choices.
 //
-// Probes of demoted devices (6.2, step 5) join with failure handling
-// (7.4), and the orders' content with the command slices; here an order is
-// a ticket with a kind and a number of steps.
+// Failure handling (7.4) sets which devices are polled, asks for retries
+// and for probes of demoted devices (6.2, step 5); the orders' content
+// comes with the command slices: here an order is a ticket with a kind and
+// a number of steps.
 //
 // Threads (2.4): only the channel worker calls a scheduler. The command
 // thread hands orders to the worker through the channel's order queue; the
@@ -63,6 +64,7 @@ struct Choice {
         ORDER,      // step `step` of order `order` on `device`
         POLL,       // request `request` of `device`'s plan
         KEEPALIVE,  // the keep-alive request `request` of `device`
+        PROBE,      // the probe request `request` of demoted `device` (7.4)
     };
     Kind kind = Kind::IDLE;
     std::uint32_t device = 0;
@@ -169,6 +171,29 @@ public:
     [[nodiscard]] bool pacing_limited(std::uint32_t device,
                                       std::int64_t now_ns) const noexcept;
 
+    // Whether `device` is polled (INITIALISING or RUNNING, 3.5). A device
+    // that is not gets no poll, keep-alive or retry, and its chain and retry
+    // are dropped; when it is polled again, every group of it is due at once
+    // and the outage is not an achieved period.
+    void set_polled(std::uint32_t device, bool polled) noexcept;
+
+    // A demoted `device` is due for a probe at `due_ns` (7.4). A probe is
+    // chosen only when no order is queued or in progress and no polled
+    // device has a retry, a chain or a request of a started cycle left (6.2
+    // step 5, D-138), and when no other probe of the channel is in flight;
+    // `probe_done` ends the flight.
+    void set_probe(std::uint32_t device, std::int64_t due_ns) noexcept;
+    void clear_probe(std::uint32_t device) noexcept;
+    void probe_done() noexcept { probe_in_flight_ = false; }
+
+    // Sends the poll request `request` of `device` again as its next
+    // request, before its other polls and within the pacing (7.1: a read is
+    // retried within its poll group's turn). Ignored for a side-effect
+    // request (6.6), an unknown one, or a device that is not polled. An
+    // order step that drops the device's chain drops the retry too: the
+    // chain is read again whole. Never allocates.
+    SCADA_RT void retry(std::uint32_t device, std::uint32_t request) noexcept;
+
     // Orders queued and not yet started.
     [[nodiscard]] std::size_t pending_orders() const noexcept {
         return orders_.size();
@@ -213,6 +238,12 @@ private:
         // Within one `take`: an earlier order of this device waits, so its
         // later orders wait too (arrival order per device).
         bool order_blocked = false;
+        // Failure handling (7.4).
+        bool polled = true;
+        bool probe = false;
+        std::int64_t probe_due_ns = 0;
+        bool retry = false;
+        std::uint32_t retry_request = 0;
     };
 
     // One physical unit: the devices that share its key (R3).
@@ -228,19 +259,23 @@ private:
 
     // What `not_sent` restores.
     struct Undo {
-        bool valid = false;
-        Choice choice;
-        UnitRun unit;
-        bool has_request = false;
+        // Ordered by size, which the padding check asks for.
         std::int64_t last_request_ns = 0;
-        bool has_write = false;
         std::int64_t last_write_ns = 0;
-        std::uint32_t group = 0;
-        GroupState group_state;
-        bool chain = false;
-        std::uint32_t chain_group = 0;
         std::size_t chain_next = 0;
         std::size_t chain_next_split = 0;
+        Choice choice;
+        UnitRun unit;
+        GroupState group_state;
+        std::uint32_t group = 0;
+        std::uint32_t chain_group = 0;
+        std::uint32_t retry_request = 0;
+        bool valid = false;
+        bool has_request = false;
+        bool has_write = false;
+        bool chain = false;
+        bool retry = false;
+        bool probe_in_flight = false;
     };
 
     // The time from which a request (or a write) to `device` is allowed.
@@ -282,10 +317,16 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
+    bool choose_retry(std::int64_t now_ns, Choice& out,
+                      std::int64_t& wake) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
+    [[nodiscard]] bool due_work_pending() const noexcept;
+    bool choose_probe(std::int64_t now_ns, Choice& out,
+                      std::int64_t& wake) noexcept;
+    Choice take_retry(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     const CompiledChannel* channel_;
     Status status_;
@@ -299,6 +340,7 @@ private:
     std::int64_t last_write_ns_ = 0;
     std::int64_t start_ns_ = 0;
     Undo undo_;
+    bool probe_in_flight_ = false;
 };
 
 }  // namespace scada::driver

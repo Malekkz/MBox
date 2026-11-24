@@ -74,8 +74,19 @@ void FailureTracker::resumed() noexcept {
     answer_seen();
 }
 
-bool FailureTracker::read_timed_out(std::uint32_t device) noexcept {
-    if (lost_after_ == 0 || device >= devices_.size()) {
+FailureTracker::TimeoutEnd FailureTracker::read_timed_out(
+    std::uint32_t device, std::int64_t now_ns) noexcept {
+    if (device >= devices_.size()) {
+        return {};
+    }
+    if (add_to_run(device)) {
+        return {.lost = true};  // not counted toward demotion (D-139)
+    }
+    return {.demoted = request_ended(device, RequestEnd::FAILED, now_ns)};
+}
+
+bool FailureTracker::add_to_run(std::uint32_t device) noexcept {
+    if (lost_after_ == 0) {
         return false;
     }
     if (run_length_ < std::numeric_limits<std::uint32_t>::max()) {

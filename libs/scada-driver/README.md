@@ -18,11 +18,13 @@ The library is built in slices. These are the first two:
 | The run-time objects of an exchange: connection state, attempt, sample sink | `scada/driver/exchange.h` | 2.2, 3.1 |
 | The compiled channel, device, point and poll group | `scada/driver/compiled.h` | 3.1, 6.1, 6.4, 6.5 |
 | Block planning of reads | `scada/driver/plan.h` | 6.3, 6.5, 6.6, 5.5 |
-| The order of service, pacing, keep-alive | `scada/driver/scheduler.h` | 6.2 to 6.6 |
+| The order of service, pacing, keep-alive, retries, probes | `scada/driver/scheduler.h` | 6.2 to 6.6, 7.1, 7.4 |
+| The deadlines of an exchange | `scada/driver/timing.h` | 7.1, 7.2 |
+| Device states, demotion, probes' back-off, the run of time-outs | `scada/driver/failure.h` | 3.5, 7.3, 7.4 |
 
-Not yet here: failure handling (timeouts, retries, demotion, probes),
-transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-137 record the choices
+Not yet here: the exchange engine that applies failure handling over a
+transport (in progress, slice 3), transports, the driver process with its threads, commands, the generation
+change and reload. `docs/decisions.md` D-130 to D-139 record the choices
 the contracts left open.
 
 ## What it does

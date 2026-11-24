@@ -78,14 +78,24 @@ public:
     // run of consecutive timeouts is emptied.
     void resumed() noexcept;
 
+    // What a read time-out after its retries did.
+    struct TimeoutEnd {
+        bool lost = false;     // the connection is lost (7.3)
+        bool demoted = false;  // some device was demoted (7.4)
+    };
+
     // A planned read of a poll group or a keep-alive of `device` timed out
-    // after its retries (7.3): adds one to the run of consecutive timeouts
-    // and records its unit id. Returns true when the connection is lost: the
-    // run holds at least `lost_after_timeouts` requests and its unit ids
-    // include every eligible one (those with a device INITIALISING or
-    // RUNNING that has a poll group). Identity reads, READ_NOW and probes
-    // are not passed here. Always false when the rule is off.
-    SCADA_RT bool read_timed_out(std::uint32_t device) noexcept;
+    // after its retries at `now_ns` (7.3, 7.4). First it adds one to the run
+    // of consecutive time-outs and records its unit id; the connection is
+    // lost when the run holds at least `lost_after_timeouts` requests and
+    // its unit ids include every eligible one (those with a device
+    // INITIALISING or RUNNING that has a poll group; with none eligible, the
+    // run's length alone decides). A time-out that loses the connection is
+    // not counted toward demotion (the lead's ruling, D-139); any other is
+    // counted as `request_ended` FAILED does. Identity reads, READ_NOW and
+    // probes are not passed here. With the rule off, only the count.
+    SCADA_RT TimeoutEnd read_timed_out(std::uint32_t device,
+                                       std::int64_t now_ns) noexcept;
 
     // Any valid answer from any unit, an exception answer included, empties
     // the run (7.3).
@@ -126,6 +136,10 @@ private:
         std::int64_t backoff_ns = 0;
         std::int64_t probe_due_ns = 0;
     };
+
+    // Adds the time-out of `device` to the run; true when the connection is
+    // lost.
+    bool add_to_run(std::uint32_t device) noexcept;
 
     // Index into units_ of each device.
     [[nodiscard]] std::uint32_t& count_of(std::uint32_t device) noexcept;

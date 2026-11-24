@@ -1084,6 +1084,168 @@ TEST(Scheduling, AWriteReachesEncodeAsARequestOfKindWrite) {
     EXPECT_EQ(std::bit_cast<std::uint32_t>(out_bytes), echo);
 }
 
+// --- Failure handling: not polled, retries, probes (6.2, 7.1, 7.4) -------
+
+TEST(Scheduling, ADeviceThatIsNotPolledGetsNoPollAndNoKeepAlive) {
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1), .keepalive_ns = SECOND}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::IDLE);
+    EXPECT_EQ(scheduler.take(5 * SECOND).kind, Choice::Kind::IDLE);
+    // Polled again: its groups are due at once.
+    scheduler.set_polled(0, true);
+    const Choice choice = scheduler.take(6 * SECOND);
+    EXPECT_EQ(choice.kind, Choice::Kind::POLL);
+    EXPECT_EQ(choice.request, channel.devices[0].plan.by_group[FAST].front());
+    // The outage is not an achieved period.
+    EXPECT_LT(scheduler.achieved_period_ns(FAST, 6 * SECOND + MILLISECOND),
+              FAST_PERIOD);
+}
+
+TEST(Scheduling, ARetryIsTheDevicesNextRequestWithinItsSpacing) {
+    // Two devices, 10 ms request spacing on d1: d1's failed request is sent
+    // again before anything else of d1, 10 ms after the first attempt, and
+    // d2 is served in between.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = adjacent(0, 1),
+          .pacing = Pacing{.min_request_interval_ns = 10 * MILLISECOND}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_EQ(first.device, 0U);
+    scheduler.retry(0, first.request);
+    const Choice other = scheduler.take(MILLISECOND);
+    EXPECT_EQ(other.kind, Choice::Kind::POLL);
+    EXPECT_EQ(other.device, 1U);
+    const Choice wait = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 10 * MILLISECOND);
+    const Choice again = scheduler.take(10 * MILLISECOND);
+    EXPECT_EQ(again.kind, Choice::Kind::POLL);
+    EXPECT_EQ(again.device, 0U);
+    EXPECT_EQ(again.request, first.request);
+    // Once only: the cycle is complete, the next poll is a period later.
+    EXPECT_EQ(scheduler.take(11 * MILLISECOND).wake_ns, FAST_PERIOD);
+}
+
+TEST(Scheduling, ASideEffectReadIsNeverRetried) {
+    ReadRules rules{.max_units = LARGE};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 0,
+                              .last = 0}};
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}}, rules);
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_TRUE(channel.devices[0].plan.requests[first.request].side_effect);
+    scheduler.retry(0, first.request);
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::WAIT);
+}
+
+TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
+    // A chain's first request failed and is to be retried; an order goes
+    // first (R2, D2) and drops the chain: it is read again whole, once.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    const ReadPlan& plan = channel.devices[0].plan;
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    scheduler.retry(0, first.request);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
+    EXPECT_TRUE(scheduler.take(MILLISECOND).chain_dropped);
+    EXPECT_EQ(reads_at(scheduler, plan,
+                       {2 * MILLISECOND, 3 * MILLISECOND, 4 * MILLISECOND}),
+              (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
+}
+
+TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
+    // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 5 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(0).device, 1U);  // d2's poll
+    const Choice wait = scheduler.take(MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 5 * MILLISECOND);
+    // A due poll of d2 at the same time goes first.
+    EXPECT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::POLL);
+    scheduler.set_probe(0, FAST_PERIOD);
+    const Choice probe = scheduler.take(FAST_PERIOD + MILLISECOND);
+    EXPECT_EQ(probe.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(probe.device, 0U);
+    EXPECT_EQ(probe.request, channel.devices[0].plan.probe.value_or(~0U));
+}
+
+TEST(Scheduling, AtMostOneProbeIsInFlightPerChannel) {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    for (std::uint32_t device = 0; device < 2; ++device) {
+        scheduler.set_polled(device, false);
+        scheduler.set_probe(device, 0);
+    }
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(first.device, 0U);
+    scheduler.clear_probe(0);
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::IDLE);
+    scheduler.probe_done();
+    const Choice second = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(second.device, 1U);
+}
+
+TEST(Scheduling, AProbeNotSentLeavesNoProbeInFlight) {
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
+    EXPECT_EQ(scheduler.not_sent(), std::nullopt);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, NoProbeWhileAnOrderWaits) {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2",
+                       .unit_id = 2,
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = Pacing{.min_write_interval_ns = SECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 1}));
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 2, .device = 1}));
+    // d2's poll, then the second order waits for d2's write spacing: no
+    // probe in that time.
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::POLL);
+    const Choice wait = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, SECOND);
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(SECOND + MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

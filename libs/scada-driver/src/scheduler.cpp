@@ -243,20 +243,23 @@ void Scheduler::record(std::uint32_t device, bool write,
 
 void Scheduler::save_undo(const Choice& choice, std::uint32_t group) noexcept {
     const DeviceRun& run = devices_[choice.device];
-    undo_ = Undo{.valid = true,
+    undo_ = Undo{.last_request_ns = last_request_ns_,
+                 .last_write_ns = last_write_ns_,
+                 .chain_next = run.chain_next,
+                 .chain_next_split = run.chain_next_split,
                  .choice = choice,
                  .unit = units_[run.unit],
-                 .has_request = has_request_,
-                 .last_request_ns = last_request_ns_,
-                 .has_write = has_write_,
-                 .last_write_ns = last_write_ns_,
-                 .group = group,
                  .group_state = group < run.groups.size() ? run.groups[group]
                                                           : GroupState{},
-                 .chain = run.chain,
+                 .group = group,
                  .chain_group = run.chain_group,
-                 .chain_next = run.chain_next,
-                 .chain_next_split = run.chain_next_split};
+                 .retry_request = run.retry_request,
+                 .valid = true,
+                 .has_request = has_request_,
+                 .has_write = has_write_,
+                 .chain = run.chain,
+                 .retry = run.retry,
+                 .probe_in_flight = probe_in_flight_};
 }
 
 bool Scheduler::peek(std::uint32_t device, std::uint32_t group,
@@ -345,6 +348,7 @@ void Scheduler::drop_chain(std::uint32_t device) noexcept {
     state.next = run.chain_next;
     state.next_split = run.chain_next_split;
     run.chain = false;
+    run.retry = false;  // the chain is read again whole
     update_holder(units_[run.unit].holder, device,
                   run.order_active && run.order.exclusive);
 }
@@ -371,10 +375,10 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
 void Scheduler::start_due(std::int64_t now_ns) noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const CompiledDevice& compiled = channel_->devices[device];
-        if (!compiled.enabled) {
+        DeviceRun& run = devices_[device];
+        if (!compiled.enabled || !run.polled) {
             continue;
         }
-        DeviceRun& run = devices_[device];
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
             GroupState& state = run.groups[group];
             std::uint32_t request = 0;
@@ -517,8 +521,40 @@ bool Scheduler::choose_order(std::int64_t now_ns, Choice& out,
 }
 
 bool Scheduler::polls_allowed(std::uint32_t device) const noexcept {
-    return channel_->devices[device].enabled && !unit_exclusive(device) &&
-           !unit_held_by_other(device);
+    return channel_->devices[device].enabled && devices_[device].polled &&
+           !unit_exclusive(device) && !unit_held_by_other(device);
+}
+
+Choice Scheduler::take_retry(std::uint32_t device,
+                             std::int64_t now_ns) noexcept {
+    DeviceRun& run = devices_[device];
+    const std::uint32_t group =
+        channel_->devices[device].plan.requests[run.retry_request].poll_group;
+    const Choice choice{.kind = Choice::Kind::POLL,
+                        .device = device,
+                        .request = run.retry_request};
+    save_undo(choice, group);
+    record(device, false, now_ns);
+    run.groups[group].last_sent_ns = now_ns;
+    run.retry = false;
+    return choice;
+}
+
+bool Scheduler::choose_retry(std::int64_t now_ns, Choice& out,
+                             std::int64_t& wake) noexcept {
+    // A retry is its device's next poll (7.1), before its others.
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        if (!devices_[device].retry || !polls_allowed(device)) {
+            continue;
+        }
+        const std::int64_t from = allowed_from(device, false);
+        if (from <= now_ns) {
+            out = take_retry(device, now_ns);
+            return true;
+        }
+        wake = std::min(wake, from);
+    }
+    return false;
 }
 
 bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
@@ -536,6 +572,9 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
         DeviceRun& run = devices_[device];
         if (!polls_allowed(device)) {
             continue;
+        }
+        if (run.retry) {
+            continue;  // `choose_retry` serves it
         }
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
             GroupState& state = run.groups[group];
@@ -575,7 +614,7 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
         const DeviceRun& run = devices_[device];
         std::uint32_t form = 0;
         if (!compiled.enabled || compiled.keepalive_ns <= 0 ||
-            !compiled.plan.keepalive.has_value() ||
+            !compiled.plan.keepalive.has_value() || !run.polled || run.retry ||
             units_[run.unit].holder != NOBODY || run.order_active ||
             !current_form(device, *compiled.plan.keepalive, form)) {
             continue;
@@ -599,16 +638,74 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
     return false;
 }
 
+bool Scheduler::due_work_pending() const noexcept {
+    if (!orders_.empty()) {
+        return true;
+    }
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (run.order_active) {
+            return true;
+        }
+        if (!run.polled || !channel_->devices[device].enabled) {
+            continue;
+        }
+        if (run.retry || run.chain) {
+            return true;
+        }
+        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+            std::uint32_t request = 0;
+            if (peek(device, group, request)) {
+                return true;  // even one waiting for its spacing (D-138)
+            }
+        }
+    }
+    return false;
+}
+
+bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
+                             std::int64_t& wake) noexcept {
+    // One probe of the channel at a time, and only in time no due request
+    // needs (7.4), so that dead devices never starve the live ones.
+    if (probe_in_flight_ || due_work_pending()) {
+        return false;
+    }
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const CompiledDevice& compiled = channel_->devices[device];
+        const DeviceRun& run = devices_[device];
+        if (!compiled.enabled || !run.probe ||
+            !compiled.plan.probe.has_value() ||
+            units_[run.unit].holder != NOBODY) {
+            continue;
+        }
+        const std::int64_t from =
+            std::max(run.probe_due_ns, allowed_from(device, false));
+        if (from > now_ns) {
+            wake = std::min(wake, from);
+            continue;
+        }
+        out = Choice{.kind = Choice::Kind::PROBE,
+                     .device = device,
+                     .request = *compiled.plan.probe};
+        save_undo(out, 0);
+        record(device, false, now_ns);
+        probe_in_flight_ = true;
+        return true;
+    }
+    return false;
+}
+
 Choice Scheduler::take(std::int64_t now_ns) noexcept {
     undo_.valid = false;
     start_due(now_ns);
     std::int64_t wake = NEVER;
     Choice out;
     // 1. The next step of an exclusive order in progress; 2. orders;
-    // 3. due poll groups; 4. keep-alive (6.2).
+    // 3. retries and due poll groups; 4. keep-alive; 5. a probe (6.2).
     if (choose_exclusive_step(now_ns, out, wake) ||
-        choose_order(now_ns, out, wake) || choose_poll(now_ns, out, wake) ||
-        choose_keepalive(now_ns, out, wake)) {
+        choose_order(now_ns, out, wake) || choose_retry(now_ns, out, wake) ||
+        choose_poll(now_ns, out, wake) || choose_keepalive(now_ns, out, wake) ||
+        choose_probe(now_ns, out, wake)) {
         return out;
     }
     if (wake == NEVER) {
@@ -637,7 +734,10 @@ std::optional<std::uint64_t> Scheduler::not_sent() noexcept {
         end_order(choice.device);
         return choice.order;
     }
+    probe_in_flight_ = undo_.probe_in_flight;
     if (choice.kind == Choice::Kind::POLL) {
+        run.retry = undo_.retry;
+        run.retry_request = undo_.retry_request;
         run.groups[undo_.group] = undo_.group_state;
         run.chain = undo_.chain;
         run.chain_group = undo_.chain_group;
@@ -729,12 +829,52 @@ std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
             ++count;
             end_order(device);
         }
+        run.retry = false;
         for (GroupState& state : run.groups) {
             state.next_split = 0;
         }
     }
+    probe_in_flight_ = false;
     undo_.valid = false;
     return count;
+}
+
+void Scheduler::set_polled(std::uint32_t device, bool polled) noexcept {
+    if (device >= devices_.size() || devices_[device].polled == polled) {
+        return;
+    }
+    DeviceRun& run = devices_[device];
+    drop_chain(device);
+    run.polled = polled;
+    run.retry = false;
+    for (GroupState& state : run.groups) {
+        // Polled again: every group is due at once, and the outage is not
+        // published as an achieved period.
+        state = GroupState{.due_ns = EARLIEST};
+    }
+}
+
+void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns) noexcept {
+    if (device < devices_.size()) {
+        devices_[device].probe = true;
+        devices_[device].probe_due_ns = due_ns;
+    }
+}
+
+void Scheduler::clear_probe(std::uint32_t device) noexcept {
+    if (device < devices_.size()) {
+        devices_[device].probe = false;
+    }
+}
+
+void Scheduler::retry(std::uint32_t device, std::uint32_t request) noexcept {
+    if (device >= devices_.size() || !devices_[device].polled ||
+        request >= channel_->devices[device].plan.requests.size() ||
+        channel_->devices[device].plan.requests[request].side_effect) {
+        return;  // a side-effect read is never sent twice (6.6)
+    }
+    devices_[device].retry = true;
+    devices_[device].retry_request = request;
 }
 
 std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,

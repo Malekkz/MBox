@@ -134,11 +134,11 @@ TEST(Failure, ARunOfTimeoutsOverEveryLiveUnitLosesTheConnection) {
                            4);
     tracked.connected(0);
     for (int index = 0; index < 3; ++index) {
-        EXPECT_FALSE(tracked.read_timed_out(FIRST));
-        EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE));
+        EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+        EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE, SECOND).lost);
     }
     EXPECT_EQ(tracked.timeout_run(), 6U);
-    EXPECT_TRUE(tracked.read_timed_out(OTHER_UNIT));
+    EXPECT_TRUE(tracked.read_timed_out(OTHER_UNIT, SECOND).lost);
 }
 
 TEST(Failure, AnyValidAnswerEmptiesTheRunAndTheRunNeedsItsLength) {
@@ -146,13 +146,14 @@ TEST(Failure, AnyValidAnswerEmptiesTheRunAndTheRunNeedsItsLength) {
         {{.unit_id = 1, .rules = rules()}, {.unit_id = 2, .rules = rules()}},
         3);
     tracked.connected(0);
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
-    EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE));  // both units, 2 < 3
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_FALSE(tracked.read_timed_out(SECOND_DEVICE, SECOND)
+                     .lost);  // both units, 2 < 3
     tracked.answer_seen();
     EXPECT_EQ(tracked.timeout_run(), 0U);
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
-    EXPECT_TRUE(tracked.read_timed_out(SECOND_DEVICE));
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_TRUE(tracked.read_timed_out(SECOND_DEVICE, SECOND).lost);
 }
 
 TEST(Failure, OnlyEligibleUnitsAreNeededForTheLoss) {
@@ -166,20 +167,21 @@ TEST(Failure, OnlyEligibleUnitsAreNeededForTheLoss) {
     tracked.connected(0);
     fail(tracked, SECOND_DEVICE, 1, SECOND);
     ASSERT_EQ(tracked.state(SECOND_DEVICE), DeviceState::DEMOTED);
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
-    EXPECT_TRUE(tracked.read_timed_out(FIRST));
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_TRUE(tracked.read_timed_out(FIRST, SECOND).lost);
 }
 
 TEST(Failure, AReconnectEmptiesTheRunAndAResumeKeepsStatesAndCounts) {
-    FailureTracker tracked({{.unit_id = 1, .rules = rules()}}, 2);
+    // demote_after 5: one broken answer and one time-out count 2.
+    FailureTracker tracked({{.unit_id = 1, .rules = rules(5)}}, 2);
     tracked.connected(0);
-    fail(tracked, FIRST, 2, SECOND);
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    fail(tracked, FIRST, 1, SECOND);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     tracked.resumed();
     EXPECT_EQ(tracked.timeout_run(), 0U);
     EXPECT_EQ(tracked.failures(FIRST), 2U);
     EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
-    EXPECT_FALSE(tracked.read_timed_out(FIRST));
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     tracked.connected(2 * SECOND);
     EXPECT_EQ(tracked.timeout_run(), 0U);
     EXPECT_EQ(tracked.failures(FIRST), 0U);
@@ -189,8 +191,69 @@ TEST(Failure, WithoutTheRuleATimeoutRunNeverLosesTheConnection) {
     FailureTracker tracked({{.unit_id = 1, .rules = rules()}});
     tracked.connected(0);
     for (int index = 0; index < 10; ++index) {
-        EXPECT_FALSE(tracked.read_timed_out(FIRST));
+        EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     }
+}
+
+// --- The lead's ruling on 7.3 (D-139) -------------------------------------
+
+TEST(Failure, TheTimeOutThatLosesTheConnectionIsNotCountedTowardDemotion) {
+    // One unit, lost_after_timeouts 3, demote_after 3. Three time-outs: the
+    // third loses the connection, and the device keeps 2 failures. After
+    // the reconnect, which keeps states and counts (a close the driver made
+    // itself, resumed), the run is empty: the next time-out makes 3 and
+    // demotes it, with the run at 1.
+    FailureTracker tracked({{.unit_id = 1, .rules = rules()}}, 3);
+    tracked.connected(0);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    const FailureTracker::TimeoutEnd third =
+        tracked.read_timed_out(FIRST, SECOND);
+    EXPECT_TRUE(third.lost);
+    EXPECT_FALSE(third.demoted);
+    EXPECT_EQ(tracked.failures(FIRST), 2U);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::INITIALISING);
+    tracked.resumed();
+    const FailureTracker::TimeoutEnd fourth =
+        tracked.read_timed_out(FIRST, 2 * SECOND);
+    EXPECT_FALSE(fourth.lost);
+    EXPECT_TRUE(fourth.demoted);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.timeout_run(), 1U);
+}
+
+TEST(Failure, ADeadUnitAmongLiveOnesIsDemotedWithoutLosingTheConnection) {
+    // Two units, lost_after_timeouts 3, demote_after 3: unit 1 is dead,
+    // unit 2 answers between. The run never spans both units, so the
+    // connection stays, and unit 1 is demoted at its third time-out.
+    FailureTracker tracked(
+        {{.unit_id = 1, .rules = rules()}, {.unit_id = 2, .rules = rules()}},
+        3);
+    tracked.connected(0);
+    for (int index = 0; index < 2; ++index) {
+        EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+        (void)tracked.request_ended(SECOND_DEVICE, RequestEnd::ANSWERED,
+                                    SECOND);
+        tracked.answer_seen();
+    }
+    const FailureTracker::TimeoutEnd third =
+        tracked.read_timed_out(FIRST, SECOND);
+    EXPECT_FALSE(third.lost);
+    EXPECT_TRUE(third.demoted);
+    EXPECT_EQ(tracked.state(FIRST), DeviceState::DEMOTED);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceState::RUNNING);
+}
+
+TEST(Failure, WithNoEligibleUnitTheRunsLengthAloneDecides) {
+    // D-139: both devices without a poll group (keep-alive only): neither is
+    // eligible, and two time-outs lose the connection.
+    FailureTracker tracked(
+        {{.unit_id = 1, .rules = rules(), .has_poll_group = false},
+         {.unit_id = 2, .rules = rules(), .has_poll_group = false}},
+        2);
+    tracked.connected(0);
+    EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    EXPECT_TRUE(tracked.read_timed_out(FIRST, SECOND).lost);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
