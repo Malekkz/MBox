@@ -126,9 +126,9 @@ void check_name_key(const ParsedFile& file, Diagnostics& diagnostics) {
     }
     const std::string text(document.text(*name));
     if (text != file.source->path_class.stem) {
-        diagnostics.error(
-            CF_FILE_NAME, document.location(*name),
-            file.source->path + ": the file name must be " + text + ".yaml");
+        diagnostics.error(CF_FILE_NAME, document.location(*name),
+                          file.source->path + ": the file name must be " +
+                              quote_text(text + ".yaml"));
     }
 }
 

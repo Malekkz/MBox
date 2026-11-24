@@ -1,0 +1,5 @@
+# Two keys of one exclusive group are CF-207 (Annex C, x-scada-exclusive);
+# secret references are CF-214 in this version.
+system.yaml:11:18: CF-214
+system.yaml:12:5: CF-207
+system.yaml:12:12: CF-214

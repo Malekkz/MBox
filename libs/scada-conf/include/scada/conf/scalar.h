@@ -29,8 +29,23 @@ struct Integer {
 [[nodiscard]] std::optional<std::uint64_t> as_uint64(
     const Integer& value) noexcept;
 
-// `-?(0|[1-9][0-9]*)` or `0x[0-9a-fA-F]+` (no sign on hex), with a magnitude
-// of at most 2^64 - 1.
+// How a text reads as an integer (D-107): not of the integer form; of the
+// form, with a magnitude of at most 2^64 - 1; of the form but larger. An
+// integer of the form that does not fit its key's range is CF-204, never
+// CF-203 and never a decimal.
+enum class IntegerForm : std::uint8_t { NOT_INTEGER, FITS, TOO_LARGE };
+
+struct IntegerRead {
+    IntegerForm form = IntegerForm::NOT_INTEGER;
+    // The value when `form` is FITS.
+    Integer value;
+};
+
+// `-?(0|[1-9][0-9]*)` or `0x[0-9a-fA-F]+` (no sign on hex), of any size.
+[[nodiscard]] IntegerRead read_integer(std::string_view text);
+
+// The value of an integer of the form whose magnitude is at most 2^64 - 1;
+// nothing for any other text (`read_integer` tells the two apart).
 [[nodiscard]] std::optional<Integer> parse_integer(std::string_view text);
 
 // `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?`, read as the nearest
@@ -38,10 +53,16 @@ struct Integer {
 // refused (1.2: `1e-400`).
 [[nodiscard]] std::optional<double> parse_decimal(std::string_view text);
 
+// True if `text` matches the decimal grammar above, whatever its value: an
+// integer of the decimal form matches too.
+[[nodiscard]] bool has_decimal_form(std::string_view text) noexcept;
+
 // A number keeps its written form (1.2): `10` is an Integer, `10.0` a double.
 using Number = std::variant<Integer, double>;
 
-// An integer if the text is one, else a decimal.
+// An integer if the text is of the integer form and fits 64 bits, else a
+// decimal. An integer of the form that is too large is nothing: it is never
+// read as a decimal.
 [[nodiscard]] std::optional<Number> parse_number(std::string_view text);
 
 // `true` or `false` exactly.

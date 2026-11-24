@@ -69,6 +69,17 @@ TEST(Read, Int64) {
     const OneValue over("9223372036854775808");
     EXPECT_EQ(code_of(to_int64(over.document(), over.value())),
               StatusCode::OUT_OF_RANGE);
+    // Beyond 64 bits it is still of the integer form: OUT_OF_RANGE (B3).
+    const OneValue huge("99999999999999999999");
+    EXPECT_EQ(code_of(to_int64(huge.document(), huge.value())),
+              StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(code_of(to_uint64(huge.document(), huge.value())),
+              StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(code_of(to_decimal(huge.document(), huge.value())),
+              StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(code_of(to_raw_pattern(huge.document(), huge.value(), 64)),
+              StatusCode::OUT_OF_RANGE);
+    EXPECT_TRUE(is_integer_form(huge.document(), huge.value()));
     const OneValue quoted("'12'");
     EXPECT_EQ(code_of(to_int64(quoted.document(), quoted.value())),
               StatusCode::INVALID_ARGUMENT);

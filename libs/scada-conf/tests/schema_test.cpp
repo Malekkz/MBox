@@ -10,6 +10,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -90,7 +93,7 @@ TEST(Schema, AValidMapGivesNothing) {
 TEST(Schema, UnknownAndMissingKeys) {
     EXPECT_EQ(check(std::string(OBJECT_AB), "b: x\nc: 1\n"),
               (Lines{"1:1 CF-202: f.yaml needs a",
-                     "2:1 CF-201: unknown key c in f.yaml"}));
+                     "2:1 CF-201: unknown key \"c\" in f.yaml"}));
 }
 
 TEST(Schema, IntegersArePlainAndInRange) {
@@ -140,15 +143,15 @@ TEST(Schema, DurationsSizesAndPercentages) {
     EXPECT_EQ(check(json, "d: 5s\ns: 2GiB\np: 10%\n"), Lines{});
     EXPECT_EQ(check(json, "d: '5s'\n"), Lines{});
     EXPECT_EQ(check(json, "d: 1.5s\n"),
-              Lines{"1:4 CF-206: 1.5s is not a valid duration"});
+              Lines{"1:4 CF-206: \"1.5s\" is not a valid duration"});
     EXPECT_EQ(check(json, "d: 61s\n"),
               Lines{"1:4 CF-204: d must be between 10ms and 60s"});
     EXPECT_EQ(check(json, "s: 2GB\n"),
-              Lines{"1:4 CF-206: 2GB is not a valid size"});
+              Lines{"1:4 CF-206: \"2GB\" is not a valid size"});
     EXPECT_EQ(check(json, "p: 101%\n"),
               Lines{"1:4 CF-204: p must be between 0 and 100"});
     EXPECT_EQ(check(json, "p: 10\n"),
-              Lines{"1:4 CF-206: 10 is not a valid percentage"});
+              Lines{"1:4 CF-203: p must be a percentage"});
 }
 
 TEST(Schema, NumbersKeepTheirWrittenForm) {
@@ -181,15 +184,16 @@ TEST(Schema, NamesBreakingTheirGrammarAreCF212) {
         "tag": { "type": "string", "x-scada-type": "tag_name" } } })";
     EXPECT_EQ(check(json, "id: pump_1\ntag: ps1.pump-2.flow\n"), Lines{});
     EXPECT_EQ(check(json, "id: Pump\n"),
-              Lines{"1:5 CF-212: Pump is not a valid identifier name"});
+              Lines{"1:5 CF-212: \"Pump\" is not a valid identifier name"});
     EXPECT_EQ(check(json, "id: " + std::string(32, 'a') + "\n"),
-              Lines{"1:5 CF-212: " + std::string(32, 'a') +
-                    " is not a valid identifier name"});
+              Lines{"1:5 CF-212: \"" + std::string(32, 'a') +
+                    "\" is not a valid identifier name"});
     EXPECT_EQ(check(json, "tag: ps1..flow\n"),
-              Lines{"1:6 CF-212: ps1..flow is not a valid tag name"});
+              Lines{"1:6 CF-212: \"ps1..flow\" is not a valid tag name"});
     EXPECT_EQ(check(json, "tag: " + std::string(128, 'a') + "\n"),
-              Lines{"1:6 CF-212: " + std::string(128, 'a') +
-                    " is not a valid tag name"});
+              // The quoted value is cut at 64 bytes (D-110).
+              Lines{"1:6 CF-212: \"" + std::string(64, 'a') +
+                    "...\" is not a valid tag name"});
 }
 
 TEST(Schema, ReservedKeysAndValuesAreCF210) {
@@ -199,9 +203,10 @@ TEST(Schema, ReservedKeysAndValuesAreCF210) {
     EXPECT_EQ(check(json, "scan_group: fast\n"),
               Lines{"1:1 CF-210: scan_group is reserved and not available in "
                     "this version"});
-    EXPECT_EQ(check(json, "role: listen\n"),
-              Lines{"1:7 CF-210: role: listen is reserved and not available "
-                    "in this version"});
+    EXPECT_EQ(
+        check(json, "role: listen\n"),
+        Lines{"1:7 CF-210: role: \"listen\" is reserved and not available "
+              "in this version"});
 }
 
 TEST(Schema, SecretsAreRefusedInPhase2) {
@@ -248,11 +253,11 @@ TEST(Schema, IntegerKeysAndDuplicatesAfterTyping) {
         "unevaluatedProperties": { "type": "string", "x-scada-type": "identifier" } })";
     EXPECT_EQ(check(json, "0: stopped\n3: fault\n-1: unknown\n"), Lines{});
     EXPECT_EQ(check(json, "16: a\n0x10: b\n"),
-              Lines{"2:1 CF-111: duplicate key 0x10"});
+              Lines{"2:1 CF-111: duplicate key \"0x10\""});
     EXPECT_EQ(check(json, "'01': a\n"),
-              Lines{"1:1 CF-203: key 01 in f.yaml must be an integer"});
+              Lines{"1:1 CF-203: key \"01\" in f.yaml must be an integer"});
     EXPECT_EQ(check(json, "x: a\n"),
-              Lines{"1:1 CF-203: key x in f.yaml must be an integer"});
+              Lines{"1:1 CF-203: key \"x\" in f.yaml must be an integer"});
 }
 
 TEST(Schema, BooleanKeys) {
@@ -261,7 +266,7 @@ TEST(Schema, BooleanKeys) {
         "unevaluatedProperties": { "type": "integer", "x-scada-type": "integer" } })";
     EXPECT_EQ(check(json, "true: 0\nfalse: 1\n"), Lines{});
     EXPECT_EQ(check(json, "yes: 0\n"),
-              Lines{"1:1 CF-203: key yes in f.yaml must be true or false"});
+              Lines{"1:1 CF-203: key \"yes\" in f.yaml must be true or false"});
 }
 
 // Annex C: a key with several shapes is a `oneOf`; the errors reported are
@@ -290,7 +295,7 @@ TEST(Schema, AllOfPartsShareOneObject) {
       "unevaluatedProperties": false })";
     EXPECT_EQ(check(json, "name: a\nbaud: 9600\n"), Lines{});
     EXPECT_EQ(check(json, "name: a\nparity: even\n"),
-              Lines{"2:1 CF-201: unknown key parity in f.yaml"});
+              Lines{"2:1 CF-201: unknown key \"parity\" in f.yaml"});
 }
 
 TEST(Schema, ReferencesWithinAndAcrossFiles) {
@@ -359,7 +364,7 @@ TEST(BuiltinSchemas, SystemRefusals) {
     const std::string base =
         "unit: { id: site-0042, name: x }\ntime: { timezone: Etc/UTC }\n";
     EXPECT_EQ(builtin("system.schema.json", base + "node: { role: master }\n"),
-              Lines{"3:15 CF-210: node.role: master is reserved and not "
+              Lines{"3:15 CF-210: node.role: \"master\" is reserved and not "
                     "available in this version"});
     EXPECT_EQ(builtin("system.schema.json",
                       base + "data_plane: { event_queue_capacity: 1000 }\n"),
@@ -367,14 +372,14 @@ TEST(BuiltinSchemas, SystemRefusals) {
                     "power of two"});
     EXPECT_EQ(builtin("system.schema.json",
                       base + "data_plane: { processes: { web: {} } }\n"),
-              Lines{"3:28 CF-212: web is not a valid process name"});
+              Lines{"3:28 CF-212: \"web\" is not a valid process name"});
     EXPECT_EQ(builtin("system.schema.json",
                       base + "email: { server: mail, from: x, password: p }\n"),
               Lines{"3:43 CF-213: email.password must be a secret reference"});
     EXPECT_EQ(
         builtin("system.schema.json", "unit: { id: Site }\n"),
         (Lines{"1:1 CF-202: f.yaml needs time", "1:7 CF-202: unit needs name",
-               "1:13 CF-212: Site is not a valid unit id name"}));
+               "1:13 CF-212: \"Site\" is not a valid unit id name"}));
 }
 
 // Every key of section 3. Secret references are refused in phase 2.
@@ -472,7 +477,250 @@ TEST(BuiltinSchemas, Enumerations) {
               Lines{});
     EXPECT_EQ(
         builtin("enums.schema.json", "enums:\n  run_state: { 1: a, 0x1: b }\n"),
-        Lines{"2:22 CF-111: duplicate key 0x1"});
+        Lines{"2:22 CF-111: duplicate key \"0x1\""});
+}
+
+// --- Review of #131 ----------------------------------------------------------
+
+// The types stage 3 gives the values of the root map of `yaml`, in order.
+std::vector<ScalarType> root_types(const std::string& json,
+                                   std::string_view yaml) {
+    const SchemaSet set = one_schema(json);
+    Diagnostics diagnostics;
+    const std::optional<Document> document =
+        parse_yaml(yaml, "f.yaml", diagnostics);
+    if (!document.has_value()) {
+        ADD_FAILURE() << "no document";
+        return {};
+    }
+    ScalarTypes types(*document);
+    set.validate(*document, types, "t.schema.json", "f.yaml", diagnostics);
+    std::vector<ScalarType> out;
+    for (const Entry& entry : document->entries(document->root())) {
+        out.push_back(types.of(entry.value));
+    }
+    return out;
+}
+
+constexpr std::string_view TYPED_BEHIND_REFERENCES = R"({
+  "type": "object",
+  "$defs": { "i": { "type": "integer", "x-scada-type": "integer", "maximum": 9 } },
+  "properties": {
+    "a": { "$ref": "#/$defs/i" },
+    "b": { "allOf": [{ "$ref": "#/$defs/i" }] },
+    "c": { "oneOf": [{ "$ref": "#/$defs/i" }, { "type": "array" }] }
+  } })";
+
+// B1: a scalar typed through `$ref`, `allOf` or `oneOf` keeps the type the
+// referenced schema gave it; one that got an error has none.
+TEST(Schema, TypesBehindReferencesAndCompositions) {
+    const std::string json(TYPED_BEHIND_REFERENCES);
+    EXPECT_EQ(root_types(json, "a: 5\nb: 6\nc: 7\n"),
+              (std::vector<ScalarType>{ScalarType::INTEGER, ScalarType::INTEGER,
+                                       ScalarType::INTEGER}));
+    EXPECT_EQ(root_types(json, "a: 50\nb: 60\nc: 70\n"),
+              (std::vector<ScalarType>{ScalarType::NONE, ScalarType::NONE,
+                                       ScalarType::NONE}));
+}
+
+// B2: typed keys are checked with a sorted set. A quadratic check makes the
+// large map 16 times slower than the small one; the bound leaves room for
+// noise and sanitizers, as both maps run in the same build.
+TEST(Schema, TypedKeysAreCheckedInLinearithmicTime) {
+    constexpr std::size_t SMALL = 16384;
+    constexpr std::size_t LARGE = 65536;
+    constexpr int RUNS = 3;
+    constexpr double MAX_RATIO = 10.0;
+    const SchemaSet set = one_schema(R"({ "type": "object",
+        "x-scada-key-type": "integer",
+        "unevaluatedProperties": { "type": "string" } })");
+    const auto fastest = [&set](std::size_t keys) {
+        std::string yaml;
+        for (std::size_t i = 0; i < keys; ++i) {
+            yaml += std::to_string(i) + ": x\n";
+        }
+        Diagnostics diagnostics;
+        const std::optional<Document> document =
+            parse_yaml(yaml, "f.yaml", diagnostics);
+        if (!document.has_value()) {
+            ADD_FAILURE() << "no document";
+            return std::chrono::nanoseconds::max();
+        }
+        auto best = std::chrono::nanoseconds::max();
+        for (int run = 0; run < RUNS; ++run) {
+            ScalarTypes types(*document);
+            const auto start = std::chrono::steady_clock::now();
+            set.validate(*document, types, "t.schema.json", "f.yaml",
+                         diagnostics);
+            best = std::min(
+                best, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - start));
+        }
+        EXPECT_EQ(diagnostics.error_count(), 0U);
+        return best;
+    };
+    const auto small = fastest(SMALL);
+    const auto large = fastest(LARGE);
+    EXPECT_LT(static_cast<double>(large.count()),
+              MAX_RATIO * static_cast<double>(small.count()))
+        << "small " << small.count() << " ns, large " << large.count() << " ns";
+}
+
+// B3: an integer of the integer form that does not fit is CF-204, never
+// CF-203 and never a decimal (D-107).
+TEST(Schema, IntegersTooLargeAreOutOfRange) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "i": { "type": "integer", "x-scada-type": "integer" },
+        "u": { "type": "integer", "x-scada-type": "uint64" },
+        "n": { "type": "number", "x-scada-type": "number" },
+        "p": { "type": "string", "x-scada-type": "number_or_percentage" },
+        "e": { "type": "string", "x-scada-type": "number_or_expression" } } })";
+    EXPECT_EQ(check(json, "u: 18446744073709551615\n"), Lines{});
+    EXPECT_EQ(check(json, "u: 18446744073709551616\n"),
+              Lines{"1:4 CF-204: u must be between 0 and "
+                    "18446744073709551615"});
+    EXPECT_EQ(check(json, "i: 0x10000000000000000\n"),
+              Lines{"1:4 CF-204: i must be between -9223372036854775808 and "
+                    "9223372036854775807"});
+    for (const char* key : {"n", "p", "e"}) {
+        for (const char* text :
+             {"18446744073709551616", "-9223372036854775809"}) {
+            const std::string yaml = std::string(key) + ": " + text + "\n";
+            EXPECT_EQ(check(json, yaml),
+                      Lines{"1:4 CF-204: " + std::string(key) +
+                            " must be between -9223372036854775808 and "
+                            "18446744073709551615"})
+                << yaml;
+        }
+    }
+    EXPECT_EQ(root_types(json, "n: 18446744073709551615\n"),
+              std::vector<ScalarType>{ScalarType::INTEGER});
+    const std::string keys = R"({ "type": "object",
+        "x-scada-key-type": "integer",
+        "unevaluatedProperties": { "type": "string" } })";
+    EXPECT_EQ(check(keys, "9223372036854775808: x\n"),
+              Lines{"1:1 CF-204: key \"9223372036854775808\" in f.yaml must "
+                    "be between -9223372036854775808 and "
+                    "9223372036854775807"});
+}
+
+// S6: text without `%` is not a percentage (CF-203); a decimal of the form
+// that is not finite is not a number (CF-203).
+TEST(Schema, NumbersPercentagesAndExpressions) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "d": { "type": "string", "x-scada-type": "number_or_percentage" },
+        "e": { "type": "string", "x-scada-type": "number_or_expression" } } })";
+    EXPECT_EQ(check(json, "d: abc\n"),
+              Lines{"1:4 CF-203: d must be a number or a percentage"});
+    EXPECT_EQ(check(json, "d: \"5\"\n"),
+              Lines{"1:4 CF-203: d must be a number or a percentage"});
+    EXPECT_EQ(check(json, "d: 5x%\n"),
+              Lines{"1:4 CF-206: \"5x%\" is not a valid percentage"});
+    EXPECT_EQ(check(json, "e: 1e400\n"),
+              Lines{"1:4 CF-203: e must be a number or an expression; this "
+                    "one is not finite or rounds to zero"});
+    EXPECT_EQ(
+        root_types(json, "d: 5\ne: k * 2\n"),
+        (std::vector<ScalarType>{ScalarType::INTEGER, ScalarType::EXPRESSION}));
+}
+
+// S4: a duration that validation accepts fits int64 nanoseconds.
+TEST(Schema, DurationsFitNanoseconds) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "d": { "type": "string", "x-scada-type": "duration" } } })";
+    EXPECT_EQ(check(json, "d: 292y\n"), Lines{});
+    EXPECT_EQ(check(json, "d: 293y\n"),
+              Lines{"1:4 CF-204: d must be at most 9223372036854ms"});
+    EXPECT_EQ(check(json, "d: 18446744073709551615ms\n"),
+              Lines{"1:4 CF-204: d must be at most 9223372036854ms"});
+}
+
+// S5: keys and values are quoted, and a long value is cut so the message
+// keeps its end.
+TEST(Schema, KeysAndValuesAreQuoted) {
+    const std::string json = R"({ "type": "object", "properties": {
+        "d": { "type": "string", "x-scada-type": "duration" } },
+        "unevaluatedProperties": false })";
+    EXPECT_EQ(check(json, "'': 1\n"),
+              Lines{"1:1 CF-201: unknown key \"\" in f.yaml"});
+    EXPECT_EQ(check(json, "d: " + std::string(65000, 'x') + "\n"),
+              Lines{"1:4 CF-206: \"" + std::string(64, 'x') +
+                    "...\" is not a valid duration"});
+}
+
+// S1: errors outside a `oneOf` go to the diagnostics at once; a branch
+// holds at most 1,000 and counts the rest.
+TEST(Schema, ABranchHoldsAtMostTheReportedLimit) {
+    constexpr std::size_t BAD_ITEMS = 1500;
+    const SchemaSet set = one_schema(R"({ "oneOf": [
+        { "type": "array", "items": { "type": "integer", "x-scada-type": "integer" } },
+        { "type": "string" } ] })");
+    std::string yaml;
+    for (std::size_t i = 0; i < BAD_ITEMS; ++i) {
+        yaml += "- x\n";
+    }
+    Diagnostics diagnostics;
+    const std::optional<Document> document =
+        parse_yaml(yaml, "f.yaml", diagnostics);
+    ASSERT_TRUE(document.has_value());
+    ScalarTypes types(*document);
+    set.validate(*document, types, "t.schema.json", "f.yaml", diagnostics);
+    Report report;
+    diagnostics.move_into(report);
+    EXPECT_EQ(report.error_count, BAD_ITEMS);
+    EXPECT_EQ(report.errors.size(), Diagnostics::REPORTED_LIMIT);
+}
+
+// S2: a keyword's value is checked when the schema compiles.
+TEST(Schema, KeywordValuesAreCheckedAtCompileTime) {
+    for (
+        const char* json : {
+            R"({ "type": "string", "x-scada-type": "intger" })",
+            R"({ "type": "object", "x-scada-key-type": "integr" })",
+            R"({ "type": "integer", "x-scada-type": "integer", "minimum": "five" })",
+            R"({ "type": "string", "x-scada-type": "duration", "x-scada-min": "10 ms" })",
+            R"({ "type": "string", "x-scada-type": "duration", "x-scada-max": "1hour" })",
+            R"({ "type": "string", "x-scada-type": "duration", "minimum": 1 })",
+            R"({ "type": "integer", "x-scada-type": "integer", "x-scada-min": "1s" })",
+            R"({ "type": "object", "enum": ["a"] })",
+            R"({ "type": "string", "x-scada-reserved": "yes" })",
+            R"({ "type": "string", "items": { "type": "string" } })",
+            R"({ "type": "array", "required": ["a"] })",
+        }) {
+        std::string problem;
+        const Result<SchemaSet> set = SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = json}}, problem);
+        EXPECT_FALSE(set.ok()) << json;
+        EXPECT_FALSE(problem.empty()) << json;
+    }
+}
+
+// S3: a cycle through `$ref`, `allOf` or `oneOf` does not compile;
+// recursion through `properties` does, and validates nested input.
+TEST(Schema, ReferenceCyclesAreRefused) {
+    for (
+        const char* json : {
+            R"({ "$ref": "#/$defs/x", "$defs": { "x": { "$ref": "#/$defs/x" } } })",
+            R"({ "$defs": { "x": { "allOf": [{ "$ref": "#/$defs/y" }] },
+                             "y": { "oneOf": [{ "$ref": "#/$defs/x" }] } },
+                  "$ref": "#/$defs/x" })",
+        }) {
+        std::string problem;
+        const Result<SchemaSet> set = SchemaSet::compile(
+            {SchemaSource{.name = "t.schema.json", .text = json}}, problem);
+        EXPECT_FALSE(set.ok()) << json;
+        EXPECT_NE(problem.find("cycle"), std::string::npos) << problem;
+    }
+    const std::string tree = R"({ "$ref": "#/$defs/node", "$defs": { "node": {
+        "type": "object",
+        "properties": { "name": { "type": "string" },
+                        "child": { "$ref": "#/$defs/node" } },
+        "unevaluatedProperties": false } } })";
+    EXPECT_EQ(
+        check(tree, "name: a\nchild:\n  name: b\n  child:\n    name: c\n"),
+        Lines{});
+    EXPECT_EQ(check(tree, "child:\n  child:\n    x: 1\n"),
+              Lines{"3:5 CF-201: unknown key \"x\" in child.child"});
 }
 
 }  // namespace

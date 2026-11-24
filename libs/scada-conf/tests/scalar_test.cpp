@@ -62,6 +62,26 @@ TEST(Scalar, TheWholeRangeOfUint64) {
     EXPECT_FALSE(as_uint64(parse_integer("-1").value_or(Integer{})));
 }
 
+// B3 of the review of #131: three results (D-107).
+TEST(Scalar, IntegersOfTheFormThatAreTooLarge) {
+    EXPECT_EQ(read_integer("18446744073709551615").form, IntegerForm::FITS);
+    EXPECT_EQ(read_integer("18446744073709551616").form,
+              IntegerForm::TOO_LARGE);
+    EXPECT_EQ(read_integer("-18446744073709551616").form,
+              IntegerForm::TOO_LARGE);
+    EXPECT_EQ(read_integer("0xFFFFFFFFFFFFFFFF").form, IntegerForm::FITS);
+    EXPECT_EQ(read_integer("0x10000000000000000").form, IntegerForm::TOO_LARGE);
+    EXPECT_EQ(read_integer("0x").form, IntegerForm::NOT_INTEGER);
+    EXPECT_EQ(read_integer("0xg").form, IntegerForm::NOT_INTEGER);
+    EXPECT_EQ(read_integer("1.0").form, IntegerForm::NOT_INTEGER);
+    EXPECT_EQ(read_integer("010").form, IntegerForm::NOT_INTEGER);
+    // Too large, it is never read as a decimal.
+    EXPECT_FALSE(parse_number("18446744073709551616").has_value());
+    EXPECT_FALSE(parse_integer("18446744073709551616").has_value());
+    EXPECT_TRUE(has_decimal_form("1e400"));
+    EXPECT_FALSE(parse_decimal("1e400").has_value());
+}
+
 TEST(Scalar, Decimals) {
     constexpr double TENTH = 0.1;
     constexpr double THOUSAND = 1e3;

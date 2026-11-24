@@ -112,9 +112,12 @@ anything, and there are no lazy caches.
 - Measured peak (x86-64, the whole of `validate_tree`): 541 MB for a tree at
   every limit at once: 256 MiB in 37 files, 3,974,081 nodes, and 248 MiB of
   double-quoted scalars of `\P` escapes, whose text is 1.5 times their
-  input. Real trees are a few MB. `scada-conf` runs validation of an
-  untrusted tree under a memory limit of its own sized from this figure
-  (#102).
+  input. The same tree with a file of 496,000 schema errors in place of
+  one 4 MB file: 529 MB. Errors cost no memory beyond the first 2,000 of a
+  stage, as stage 3 gives each error to the report at once (a `oneOf`
+  branch holds at most 1,000 and a count). Real trees are a few MB.
+  `scada-conf` runs validation of an untrusted tree under a memory limit of
+  its own sized from this figure (#102).
 
 ## Interfaces
 

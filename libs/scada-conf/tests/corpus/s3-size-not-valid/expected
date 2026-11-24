@@ -1,0 +1,2 @@
+# A size without a valid unit is CF-206 (section 2.2).
+system.yaml:10:15: CF-206

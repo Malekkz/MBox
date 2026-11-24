@@ -1,0 +1,2 @@
+# A value outside the key's enumeration is CF-205 (Annex C, enum).
+system.yaml:9:9: CF-205

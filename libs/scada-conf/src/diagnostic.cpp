@@ -136,13 +136,27 @@ std::string printable(std::string_view text, std::size_t max_bytes) {
     return out;
 }
 
-std::string quote_text(std::string_view text) {
+std::string quote_text(std::string_view text, std::size_t max_bytes) {
     std::string out = "\"";
+    bool cut = false;
+    if (text.size() > max_bytes) {
+        std::size_t end = max_bytes;
+        // Back to the start of a character.
+        while (end > 0 && (static_cast<unsigned char>(text[end]) &
+                           utf8::CONTINUATION_MASK) == utf8::CONTINUATION) {
+            --end;
+        }
+        text = text.substr(0, end);
+        cut = true;
+    }
     for (const char chr : text) {
         if (chr == '\\' || chr == '"') {
             out.push_back('\\');
         }
         out.push_back(chr);
+    }
+    if (cut) {
+        out += ELLIPSIS;
     }
     out.push_back('"');
     return out;

@@ -1,5 +1,6 @@
 #include "scada/conf/scalar.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -183,24 +184,46 @@ std::optional<std::uint64_t> as_uint64(const Integer& value) noexcept {
     return value.magnitude;
 }
 
-std::optional<Integer> parse_integer(std::string_view text) {
+IntegerRead read_integer(std::string_view text) {
     if (text.starts_with("0x")) {
-        const std::optional<std::uint64_t> value = hex_value(text.substr(2));
-        if (!value) {
-            return std::nullopt;
+        const std::string_view digits = text.substr(2);
+        if (digits.empty() || !std::ranges::all_of(digits, [](char chr) {
+                return hex_digit(chr).has_value();
+            })) {
+            return {};
         }
-        return Integer{.negative = false, .magnitude = *value};
+        const std::optional<std::uint64_t> value = hex_value(digits);
+        if (!value) {
+            return IntegerRead{.form = IntegerForm::TOO_LARGE, .value = {}};
+        }
+        return IntegerRead{
+            .form = IntegerForm::FITS,
+            .value = Integer{.negative = false, .magnitude = *value}};
     }
     const bool negative = text.starts_with('-');
     const std::string_view digits = negative ? text.substr(1) : text;
     if (digits.empty() || whole_number_length(digits) != digits.size()) {
-        return std::nullopt;
+        return {};
     }
     const std::optional<std::uint64_t> value = decimal_value(digits);
     if (!value) {
+        return IntegerRead{.form = IntegerForm::TOO_LARGE, .value = {}};
+    }
+    return IntegerRead{
+        .form = IntegerForm::FITS,
+        .value = Integer{.negative = negative, .magnitude = *value}};
+}
+
+std::optional<Integer> parse_integer(std::string_view text) {
+    const IntegerRead read = read_integer(text);
+    if (read.form != IntegerForm::FITS) {
         return std::nullopt;
     }
-    return Integer{.negative = negative, .magnitude = *value};
+    return read.value;
+}
+
+bool has_decimal_form(std::string_view text) noexcept {
+    return is_decimal_text(text);
 }
 
 std::optional<double> parse_decimal(std::string_view text) {
@@ -224,8 +247,12 @@ std::optional<double> parse_decimal(std::string_view text) {
 }
 
 std::optional<Number> parse_number(std::string_view text) {
-    if (const std::optional<Integer> integer = parse_integer(text)) {
-        return Number{*integer};
+    const IntegerRead integer = read_integer(text);
+    if (integer.form == IntegerForm::FITS) {
+        return Number{integer.value};
+    }
+    if (integer.form == IntegerForm::TOO_LARGE) {
+        return std::nullopt;
     }
     if (const std::optional<double> decimal = parse_decimal(text)) {
         return Number{*decimal};

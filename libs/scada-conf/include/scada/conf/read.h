@@ -43,7 +43,8 @@ namespace scada::conf {
                                                    NodeId node,
                                                    unsigned width_bits);
 
-// True if `node` is a plain scalar written as an integer (section 1.2): `10`
+// True if `node` is a plain scalar written as an integer (section 1.2), of
+// any size: `10`
 // and `0x10`, not `10.0` or `'10'`. For CF-517 (an integer scaling).
 [[nodiscard]] bool is_integer_form(const Document& document, NodeId node);
 

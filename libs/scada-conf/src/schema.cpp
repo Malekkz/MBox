@@ -64,6 +64,55 @@ constexpr std::uint16_t CF_BAD_NAME = 212;
 constexpr std::uint16_t CF_NOT_A_SECRET = 213;
 constexpr std::uint16_t CF_SECRET = 214;
 
+constexpr std::string_view INT64_MIN_TEXT = "-9223372036854775808";
+constexpr std::string_view INT64_MAX_TEXT = "9223372036854775807";
+constexpr std::string_view UINT64_MAX_TEXT = "18446744073709551615";
+// The longest duration whose nanoseconds fit int64 (D-107), in ms.
+constexpr std::uint64_t MAX_DURATION_MS = 9223372036854;
+
+// The `x-scada-type` names this validator implements (contract Annex C). A
+// schema file with another name does not compile, so that a type not
+// implemented yet cannot check nothing.
+const std::set<std::string, std::less<>> KNOWN_SCALAR_TYPES = {
+    "string",
+    "text",
+    "identifier",
+    "tag_name",
+    "point_name",
+    "device_name",
+    "poll_group_name",
+    "tier_name",
+    "protocol_name",
+    "unit_id",
+    "process_name",
+    "integer",
+    "uint64",
+    "power_of_two",
+    "decimal",
+    "number",
+    "boolean",
+    "duration",
+    "size",
+    "percentage",
+    "number_or_percentage",
+    "expression",
+    "number_or_expression",
+    "host",
+    "host_name",
+    "ip_address",
+    "cidr",
+    "time_zone",
+    "time_of_day",
+    "https_url"};
+
+// The name kind of a name type (below).
+std::optional<std::string_view> name_kind(std::string_view type);
+
+// The types that "minimum" and "maximum" apply to.
+const std::set<std::string, std::less<>> NUMBER_TYPES = {
+    "integer", "uint64",     "power_of_two",        "decimal",
+    "number",  "percentage", "number_or_percentage"};
+
 using SchemaId = std::size_t;
 
 enum class Unevaluated : std::uint8_t { ALLOWED, REFUSED, SCHEMA };
@@ -163,6 +212,54 @@ public:
                 return false;
             }
             node.ref = found->second;
+        }
+        return refuse_cycles(problem);
+    }
+
+    // A "$ref", "allOf" or "oneOf" chain that comes back to itself would
+    // make validation recurse without end; recursion through "properties"
+    // or "items" goes down the document and stays allowed (D-107).
+    bool refuse_cycles(std::string& problem) const {
+        enum class Mark : std::uint8_t { NEW, ON_PATH, DONE };
+        const std::vector<SchemaNode>& nodes = out_->nodes;
+        std::vector<Mark> marks(nodes.size(), Mark::NEW);
+        const auto edges = [&nodes](SchemaId id) {
+            std::vector<SchemaId> out;
+            if (nodes[id].ref) {
+                out.push_back(*nodes[id].ref);
+            }
+            out.insert(out.end(), nodes[id].all_of.begin(),
+                       nodes[id].all_of.end());
+            out.insert(out.end(), nodes[id].one_of.begin(),
+                       nodes[id].one_of.end());
+            return out;
+        };
+        for (SchemaId start = 0; start < nodes.size(); ++start) {
+            if (marks[start] != Mark::NEW) {
+                continue;
+            }
+            // Depth first with an explicit stack: (node, next edge).
+            std::vector<std::pair<SchemaId, std::size_t>> stack{{start, 0}};
+            marks[start] = Mark::ON_PATH;
+            while (!stack.empty()) {
+                auto& [id, next] = stack.back();
+                const std::vector<SchemaId> targets = edges(id);
+                if (next == targets.size()) {
+                    marks[id] = Mark::DONE;
+                    stack.pop_back();
+                    continue;
+                }
+                const SchemaId target = targets[next++];
+                if (marks[target] == Mark::ON_PATH) {
+                    problem =
+                        nodes[target].file + ": a $ref, allOf or oneOf cycle";
+                    return false;
+                }
+                if (marks[target] == Mark::NEW) {
+                    marks[target] = Mark::ON_PATH;
+                    stack.emplace_back(target, 0);
+                }
+            }
         }
         return true;
     }
@@ -380,8 +477,15 @@ private:
             return limit.has_value();
         }
         if (name == "x-scada-reserved" || name == "x-scada-secret") {
+            const NodeView flag = at(value);
+            if (flag.kind != NodeKind::SCALAR ||
+                flag.style != ScalarStyle::PLAIN || !parse_boolean(flag.text)) {
+                return fail(problem,
+                            std::string(name) + " must be true or false",
+                            value);
+            }
             (name == "x-scada-reserved" ? node.reserved : node.secret) =
-                at(value).text == "true";
+                flag.text == "true";
             return true;
         }
         std::optional<std::string>* text_slot = nullptr;
@@ -461,8 +565,87 @@ private:
                 return std::nullopt;
             }
         }
+        if (!check_keywords(node, schema, problem)) {
+            return std::nullopt;
+        }
         out_->nodes[self] = std::move(node);
         return self;
+    }
+
+    // The values of the keywords of one schema object, once all are read:
+    // a type that the validator knows, bounds that read in the type's own
+    // form, and keywords that apply to the kind of node the schema takes
+    // (D-107). A schema file that breaks one is a defect of this software.
+    bool check_keywords(const SchemaNode& node, NodeId where,
+                        std::string& problem) const {
+        if (!node.scalar_type.empty() &&
+            !KNOWN_SCALAR_TYPES.contains(node.scalar_type)) {
+            return fail(problem, "unknown x-scada-type " + node.scalar_type,
+                        where);
+        }
+        if (!node.key_type.empty() && node.key_type != "integer" &&
+            node.key_type != "boolean" && node.key_type != "string" &&
+            !name_kind(node.key_type)) {
+            return fail(problem, "unknown x-scada-key-type " + node.key_type,
+                        where);
+        }
+        if (!check_bounds(node, where, problem)) {
+            return false;
+        }
+        const bool scalar_keywords = node.has_enum || node.const_text ||
+                                     !node.scalar_type.empty() ||
+                                     !node.reserved_values.empty();
+        const bool map_keywords =
+            !node.properties.empty() || !node.required.empty() ||
+            node.unevaluated != Unevaluated::ALLOWED ||
+            !node.exclusive.empty() || !node.dependent_required.empty() ||
+            !node.key_type.empty();
+        const bool list_keywords =
+            node.items || node.min_items || node.max_items;
+        if (node.kind_given && ((scalar_keywords && !node.allows_scalar) ||
+                                (map_keywords && !node.allows_map) ||
+                                (list_keywords && !node.allows_sequence))) {
+            return fail(problem,
+                        "a keyword that does not apply to the schema's type",
+                        where);
+        }
+        return true;
+    }
+
+    // "minimum" and "maximum" are numbers and apply to number types;
+    // "x-scada-min" and "x-scada-max" are in the form of a duration or a
+    // size, or a count of bytes for text.
+    bool check_bounds(const SchemaNode& node, NodeId where,
+                      std::string& problem) const {
+        const std::string& type = node.scalar_type;
+        for (const std::optional<std::string>* bound :
+             {&node.minimum, &node.maximum}) {
+            if (*bound &&
+                (!NUMBER_TYPES.contains(type) || !parse_number(**bound))) {
+                return fail(problem,
+                            "minimum and maximum take a number, on a number "
+                            "type",
+                            where);
+            }
+        }
+        for (const std::optional<std::string>* bound :
+             {&node.scada_min, &node.scada_max}) {
+            if (!*bound) {
+                continue;
+            }
+            const bool valid =
+                (type == "duration" && parse_duration_ms(**bound)) ||
+                (type == "size" && parse_size_bytes(**bound)) ||
+                (type == "text" && parse_integer(**bound) &&
+                 !parse_integer(**bound)->negative);
+            if (!valid) {
+                return fail(problem,
+                            "x-scada-min and x-scada-max take the form of a "
+                            "duration, a size or a count of bytes for text",
+                            where);
+            }
+        }
+        return true;
     }
 
     CompiledSchemas* out_;
@@ -472,12 +655,64 @@ private:
 
 // --- Validation -------------------------------------------------------------
 
-// What checking one node against one schema found. Kept apart until it is
-// known to count, so that a `oneOf` branch that is not taken leaves no
-// trace.
-struct Outcome {
-    std::vector<Diagnostic> errors;
-    std::vector<std::pair<NodeId, ScalarType>> types;
+// Where checking puts what it finds. At the top of a file, errors go to the
+// file's Diagnostics at once and types to its table, so memory does not grow
+// with the number of errors. Inside a `oneOf` branch they are held until the
+// branch is known to count, so that a branch that is not taken leaves no
+// trace: at most REPORTED_LIMIT errors, and a count of the rest (D-107).
+class Outcome {
+public:
+    // Held, for a `oneOf` branch.
+    Outcome() = default;
+
+    // Given at once to `diagnostics` and `types`.
+    Outcome(Diagnostics& diagnostics, ScalarTypes& types) noexcept
+        : diagnostics_(&diagnostics), types_(&types) {}
+
+    void error(Diagnostic diagnostic) {
+        ++error_count_;
+        if (diagnostics_ != nullptr) {
+            diagnostics_->add(std::move(diagnostic));
+        } else if (held_errors_.size() < Diagnostics::REPORTED_LIMIT) {
+            held_errors_.push_back(std::move(diagnostic));
+        }
+    }
+
+    // Records the type of `node`; a later call for the same node wins.
+    void type(NodeId node, ScalarType type) {
+        if (types_ != nullptr) {
+            types_->set(node, type);
+        } else {
+            held_types_.emplace_back(node, type);
+        }
+    }
+
+    [[nodiscard]] std::size_t error_count() const noexcept {
+        return error_count_;
+    }
+
+    // Takes what the branch `taken` found, as if found here.
+    void take(Outcome& taken) {
+        const std::size_t unlisted =
+            taken.error_count_ - taken.held_errors_.size();
+        for (Diagnostic& diagnostic : taken.held_errors_) {
+            error(std::move(diagnostic));
+        }
+        error_count_ += unlisted;
+        if (diagnostics_ != nullptr) {
+            diagnostics_->count_unlisted_errors(unlisted);
+        }
+        for (const auto& [node, type_of_node] : taken.held_types_) {
+            type(node, type_of_node);
+        }
+    }
+
+private:
+    Diagnostics* diagnostics_ = nullptr;
+    ScalarTypes* types_ = nullptr;
+    std::vector<Diagnostic> held_errors_;
+    std::vector<std::pair<NodeId, ScalarType>> held_types_;
+    std::size_t error_count_ = 0;
 };
 
 std::string join(const std::vector<std::string>& texts) {
@@ -625,15 +860,9 @@ public:
           file_label_(file_label) {}
 
     void run(SchemaId root, Diagnostics& diagnostics) {
-        Outcome outcome;
+        Outcome outcome(diagnostics, *types_);
         std::set<std::string> evaluated;
         check(root, document_->root(), {}, outcome, evaluated);
-        for (Diagnostic& error : outcome.errors) {
-            diagnostics.add(std::move(error));
-        }
-        for (const auto& [node, type] : outcome.types) {
-            types_->set(node, type);
-        }
     }
 
 private:
@@ -657,11 +886,11 @@ private:
 
     void error(Outcome& out, std::uint16_t code, NodeId where,
                std::string message) const {
-        out.errors.push_back(Diagnostic{.severity = Severity::ERROR,
-                                        .code = code,
-                                        .location = document_->location(where),
-                                        .message = std::move(message),
-                                        .notes = {}});
+        out.error(Diagnostic{.severity = Severity::ERROR,
+                             .code = code,
+                             .location = document_->location(where),
+                             .message = std::move(message),
+                             .notes = {}});
     }
 
     static std::string child_path(const std::string& path,
@@ -680,6 +909,7 @@ private:
             check_secret(node_id, path, out);
             return;
         }
+        const std::size_t errors_before = out.error_count();
         if (rules.ref) {
             check(*rules.ref, node_id, path, out, evaluated);
         }
@@ -701,6 +931,10 @@ private:
             check_sequence(rules, node_id, path, out);
         } else {
             check_scalar(rules, node_id, path, out);
+            // A scalar that got an error has no type (D-107).
+            if (out.error_count() > errors_before) {
+                out.type(node_id, ScalarType::NONE);
+            }
         }
     }
 
@@ -784,7 +1018,7 @@ private:
             const bool better =
                 !best || (admits && !best_admits) ||
                 (admits == best_admits &&
-                 outcomes[i].errors.size() < outcomes[*best].errors.size());
+                 outcomes[i].error_count() < outcomes[*best].error_count());
             if (better) {
                 best = i;
                 best_admits = admits;
@@ -793,11 +1027,7 @@ private:
         // The first branch that passes, else, among the branches that take
         // a node of this kind, the one with the fewest errors (the first of
         // equals): its errors are the most specific.
-        Outcome& taken = outcomes.at(best.value_or(0));
-        out.errors.insert(out.errors.end(), taken.errors.begin(),
-                          taken.errors.end());
-        out.types.insert(out.types.end(), taken.types.begin(),
-                         taken.types.end());
+        out.take(outcomes.at(best.value_or(0)));
         evaluated.insert(keys.at(best.value_or(0)).begin(),
                          keys.at(best.value_or(0)).end());
     }
@@ -898,7 +1128,7 @@ private:
                            const std::set<std::string>& evaluated) {
         // Keys typed by "x-scada-key-type" that are equal after typing are
         // CF-111 (contract 1.2; D-106).
-        std::vector<std::pair<std::string, NodeId>> typed_keys;
+        std::set<std::string, std::less<>> typed_keys;
         for (std::size_t i = 0; i < document_->entry_count(map); ++i) {
             const NodeId key = key_of(map, i);
             const std::string& text = node(key).text;
@@ -907,7 +1137,7 @@ private:
             }
             if (rules.unevaluated == Unevaluated::REFUSED) {
                 error(out, CF_UNKNOWN_KEY, key,
-                      "unknown key " + text + " in " + label(path));
+                      "unknown key " + quote_text(text) + " in " + label(path));
                 continue;
             }
             const std::optional<std::string> canonical =
@@ -915,15 +1145,11 @@ private:
             if (!canonical) {
                 continue;
             }
-            const auto same = std::ranges::find_if(
-                typed_keys, [&canonical](const auto& entry) {
-                    return entry.first == *canonical;
-                });
-            if (same != typed_keys.end()) {
-                error(out, CF_DUPLICATE_KEY, key, "duplicate key " + text);
+            if (!typed_keys.insert(*canonical).second) {
+                error(out, CF_DUPLICATE_KEY, key,
+                      "duplicate key " + quote_text(text));
                 continue;
             }
-            typed_keys.emplace_back(*canonical, key);
             std::set<std::string> inner;
             check(rules.unevaluated_schema, value_of(map, i),
                   child_path(path, text), out, inner);
@@ -938,41 +1164,51 @@ private:
         const NodeView text_node = node(key);
         const std::string& text = text_node.text;
         if (key_type.empty() || key_type == "string") {
-            out.types.emplace_back(key, ScalarType::STRING);
+            out.type(key, ScalarType::STRING);
             return text;
         }
         const bool plain = text_node.style == ScalarStyle::PLAIN;
         if (key_type == "integer") {
-            const std::optional<Integer> value =
-                plain ? parse_integer(text) : std::nullopt;
-            if (!value || !as_int64(*value)) {
+            const IntegerRead read = plain ? read_integer(text) : IntegerRead{};
+            if (read.form == IntegerForm::NOT_INTEGER) {
                 error(out, CF_WRONG_TYPE, key,
-                      "key " + text + " in " + label(path) +
+                      "key " + quote_text(text) + " in " + label(path) +
                           " must be an integer");
                 return std::nullopt;
             }
-            out.types.emplace_back(key, ScalarType::INTEGER);
-            return std::to_string(as_int64(*value).value_or(0));
+            const std::optional<std::int64_t> value =
+                read.form == IntegerForm::FITS ? as_int64(read.value)
+                                               : std::nullopt;
+            if (!value) {
+                error(out, CF_OUT_OF_RANGE, key,
+                      "key " + quote_text(text) + " in " + label(path) +
+                          " must be between " + std::string(INT64_MIN_TEXT) +
+                          " and " + std::string(INT64_MAX_TEXT));
+                return std::nullopt;
+            }
+            out.type(key, ScalarType::INTEGER);
+            return std::to_string(*value);
         }
         if (key_type == "boolean") {
             const std::optional<bool> value =
                 plain ? parse_boolean(text) : std::nullopt;
             if (!value) {
                 error(out, CF_WRONG_TYPE, key,
-                      "key " + text + " in " + label(path) +
+                      "key " + quote_text(text) + " in " + label(path) +
                           " must be true or false");
                 return std::nullopt;
             }
-            out.types.emplace_back(key, ScalarType::BOOLEAN);
+            out.type(key, ScalarType::BOOLEAN);
             return text;
         }
         const std::optional<std::string_view> kind = name_kind(key_type);
         if (kind && !name_matches(key_type, text)) {
             error(out, CF_BAD_NAME, key,
-                  text + " is not a valid " + std::string(*kind) + " name");
+                  quote_text(text) + " is not a valid " + std::string(*kind) +
+                      " name");
             return std::nullopt;
         }
-        out.types.emplace_back(key, ScalarType::STRING);
+        out.type(key, ScalarType::STRING);
         return text;
     }
 
@@ -1009,14 +1245,21 @@ private:
         if (std::ranges::find(rules.reserved_values, value.text) !=
             rules.reserved_values.end()) {
             error(out, CF_RESERVED, scalar,
-                  key + ": " + value.text +
+                  key + ": " + quote_text(value.text) +
                       " is reserved and not available in this version");
             return;
         }
-        const std::optional<ScalarType> type =
-            type_scalar(rules, scalar, key, out);
-        if (!type) {
-            return;
+        // A schema without a type of its own that refers to or composes
+        // others leaves the typing to them (D-107).
+        const bool composed =
+            rules.ref || !rules.all_of.empty() || !rules.one_of.empty();
+        const bool own_type = !composed || !rules.scalar_type.empty();
+        std::optional<ScalarType> type;
+        if (own_type) {
+            type = type_scalar(rules, scalar, key, out);
+            if (!type) {
+                return;
+            }
         }
         if (rules.const_text && value.text != *rules.const_text &&
             !same_number(rules, value.text, *rules.const_text)) {
@@ -1029,7 +1272,9 @@ private:
                   key + " must be one of " + join(rules.enum_texts));
             return;
         }
-        out.types.emplace_back(scalar, *type);
+        if (type) {
+            out.type(scalar, *type);
+        }
     }
 
     static bool is_integer_type(std::string_view type) {
@@ -1076,26 +1321,30 @@ private:
                                            const std::string& key,
                                            Outcome& out) {
         const NodeView value = node(scalar);
-        const std::optional<Integer> parsed = value.style == ScalarStyle::PLAIN
-                                                  ? parse_integer(value.text)
-                                                  : std::nullopt;
-        const bool fits = parsed && (rules.scalar_type == "uint64"
-                                         ? as_uint64(*parsed).has_value()
-                                         : as_int64(*parsed).has_value());
-        if (!parsed) {
+        const IntegerRead read = value.style == ScalarStyle::PLAIN
+                                     ? read_integer(value.text)
+                                     : IntegerRead{};
+        if (read.form == IntegerForm::NOT_INTEGER) {
             error(out, CF_WRONG_TYPE, scalar, key + " must be an integer");
             return std::nullopt;
         }
-        if (!fits) {
-            error(out, CF_OUT_OF_RANGE, scalar,
-                  key + " must be between " +
-                      rules.minimum.value_or(rules.scalar_type == "uint64"
-                                                 ? "0"
-                                                 : "-9223372036854775808") +
-                      " and " +
-                      rules.maximum.value_or(rules.scalar_type == "uint64"
-                                                 ? "18446744073709551615"
-                                                 : "9223372036854775807"));
+        const std::optional<Integer> parsed =
+            read.form == IntegerForm::FITS ? std::optional<Integer>(read.value)
+                                           : std::nullopt;
+        const bool fits = parsed && (rules.scalar_type == "uint64"
+                                         ? as_uint64(*parsed).has_value()
+                                         : as_int64(*parsed).has_value());
+        if (!parsed || !fits) {
+            error(
+                out, CF_OUT_OF_RANGE, scalar,
+                key + " must be between " +
+                    rules.minimum.value_or(rules.scalar_type == "uint64"
+                                               ? "0"
+                                               : std::string(INT64_MIN_TEXT)) +
+                    " and " +
+                    rules.maximum.value_or(rules.scalar_type == "uint64"
+                                               ? std::string(UINT64_MAX_TEXT)
+                                               : std::string(INT64_MAX_TEXT)));
             return std::nullopt;
         }
         if (!number_in_range(rules, Number{*parsed}, scalar, key, out)) {
@@ -1113,33 +1362,79 @@ private:
         return ScalarType::INTEGER;
     }
 
+    // What a plain text gives as a number of `number` and its kin (D-107).
+    enum class NumberRead : std::uint8_t { NONE, NUMBER, REFUSED };
+
+    // Reads `text` as a number: an integer of the integer form, which must
+    // fit int64 or uint64, else a decimal of the decimal form, which must be
+    // finite. NONE, with no error, for a text of neither form; REFUSED, with
+    // the error given, for one of a form that does not fit.
+    NumberRead read_number(std::string_view text, NodeId scalar,
+                           const std::string& key, std::string_view phrase,
+                           Outcome& out, Number& number) {
+        const IntegerRead integer = read_integer(text);
+        if (integer.form != IntegerForm::NOT_INTEGER) {
+            const bool fits =
+                integer.form == IntegerForm::FITS &&
+                (as_int64(integer.value) || as_uint64(integer.value));
+            if (!fits) {
+                error(out, CF_OUT_OF_RANGE, scalar,
+                      key + " must be between " + std::string(INT64_MIN_TEXT) +
+                          " and " + std::string(UINT64_MAX_TEXT));
+                return NumberRead::REFUSED;
+            }
+            number = Number{integer.value};
+            return NumberRead::NUMBER;
+        }
+        if (!has_decimal_form(text)) {
+            return NumberRead::NONE;
+        }
+        const std::optional<double> decimal = parse_decimal(text);
+        if (!decimal) {
+            error(out, CF_WRONG_TYPE, scalar,
+                  key + " must be " + std::string(phrase) +
+                      "; this one is not finite or rounds to zero");
+            return NumberRead::REFUSED;
+        }
+        number = Number{*decimal};
+        return NumberRead::NUMBER;
+    }
+
+    static ScalarType type_of(const Number& number) {
+        return std::holds_alternative<Integer>(number) ? ScalarType::INTEGER
+                                                       : ScalarType::DECIMAL;
+    }
+
     std::optional<ScalarType> type_number(const SchemaNode& rules,
                                           NodeId scalar, const std::string& key,
                                           Outcome& out) {
         const NodeView value = node(scalar);
-        const bool plain = value.style == ScalarStyle::PLAIN;
-        const bool decimal_only = rules.scalar_type == "decimal";
-        std::optional<Number> parsed;
-        if (plain) {
-            if (decimal_only) {
+        const std::string phrase = type_phrase(rules.scalar_type);
+        Number number;
+        NumberRead read = NumberRead::NONE;
+        if (value.style == ScalarStyle::PLAIN) {
+            if (rules.scalar_type == "decimal") {
                 if (const std::optional<double> decimal =
                         parse_decimal(value.text)) {
-                    parsed = Number{*decimal};
+                    number = Number{*decimal};
+                    read = NumberRead::NUMBER;
                 }
             } else {
-                parsed = parse_number(value.text);
+                read =
+                    read_number(value.text, scalar, key, phrase, out, number);
             }
         }
-        if (!parsed) {
-            error(out, CF_WRONG_TYPE, scalar,
-                  key + " must be " + type_phrase(rules.scalar_type));
+        if (read == NumberRead::REFUSED) {
             return std::nullopt;
         }
-        if (!number_in_range(rules, *parsed, scalar, key, out)) {
+        if (read == NumberRead::NONE) {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be " + phrase);
             return std::nullopt;
         }
-        return std::holds_alternative<Integer>(*parsed) ? ScalarType::INTEGER
-                                                        : ScalarType::DECIMAL;
+        if (!number_in_range(rules, number, scalar, key, out)) {
+            return std::nullopt;
+        }
+        return type_of(number);
     }
 
     // Durations and sizes, with "x-scada-min" and "x-scada-max" of the same
@@ -1156,8 +1451,16 @@ private:
         const std::optional<std::uint64_t> parsed = parse(value.text);
         if (!parsed) {
             error(out, CF_BAD_UNIT_VALUE, scalar,
-                  value.text + " is not a valid " +
+                  quote_text(value.text) + " is not a valid " +
                       (duration ? "duration" : "size"));
+            return std::nullopt;
+        }
+        // A duration that validation accepts is readable in int64
+        // nanoseconds (D-107).
+        if (duration && *parsed > MAX_DURATION_MS) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be at most " + std::to_string(MAX_DURATION_MS) +
+                      "ms");
             return std::nullopt;
         }
         const std::optional<std::uint64_t> min =
@@ -1179,20 +1482,30 @@ private:
                                               Outcome& out) {
         const NodeView value = node(scalar);
         const bool or_number = rules.scalar_type == "number_or_percentage";
+        const std::string phrase = type_phrase(rules.scalar_type);
         if (or_number && value.style == ScalarStyle::PLAIN) {
-            if (const std::optional<Number> number = parse_number(value.text)) {
-                return number_in_range(rules, *number, scalar, key, out)
-                           ? std::optional<ScalarType>(
-                                 std::holds_alternative<Integer>(*number)
-                                     ? ScalarType::INTEGER
-                                     : ScalarType::DECIMAL)
+            Number number;
+            const NumberRead read =
+                read_number(value.text, scalar, key, phrase, out, number);
+            if (read == NumberRead::REFUSED) {
+                return std::nullopt;
+            }
+            if (read == NumberRead::NUMBER) {
+                return number_in_range(rules, number, scalar, key, out)
+                           ? std::optional<ScalarType>(type_of(number))
                            : std::nullopt;
             }
+        }
+        // Text without `%` is not a percentage at all (CF-203); text with
+        // it that does not read is a bad percentage (CF-206).
+        if (!value.text.ends_with('%')) {
+            error(out, CF_WRONG_TYPE, scalar, key + " must be " + phrase);
+            return std::nullopt;
         }
         const std::optional<double> percent = parse_percentage(value.text);
         if (!percent) {
             error(out, CF_BAD_UNIT_VALUE, scalar,
-                  value.text + " is not a valid percentage");
+                  quote_text(value.text) + " is not a valid percentage");
             return std::nullopt;
         }
         if (!number_in_range(rules, Number{*percent}, scalar, key, out)) {
@@ -1261,11 +1574,14 @@ private:
         }
         if (type == "number_or_expression") {
             if (value.style == ScalarStyle::PLAIN) {
-                if (const std::optional<Number> number =
-                        parse_number(value.text)) {
-                    return std::holds_alternative<Integer>(*number)
-                               ? ScalarType::INTEGER
-                               : ScalarType::DECIMAL;
+                Number number;
+                const NumberRead read = read_number(
+                    value.text, scalar, key, type_phrase(type), out, number);
+                if (read == NumberRead::REFUSED) {
+                    return std::nullopt;
+                }
+                if (read == NumberRead::NUMBER) {
+                    return type_of(number);
                 }
             }
             return ScalarType::EXPRESSION;
@@ -1286,8 +1602,8 @@ private:
         if (const std::optional<std::string_view> kind = name_kind(type)) {
             if (!name_matches(type, value.text)) {
                 error(out, CF_BAD_NAME, scalar,
-                      value.text + " is not a valid " + std::string(*kind) +
-                          " name");
+                      quote_text(value.text) + " is not a valid " +
+                          std::string(*kind) + " name");
                 return std::nullopt;
             }
             return ScalarType::STRING;

@@ -62,10 +62,17 @@ constexpr std::size_t MAX_DIAGNOSTIC_TEXT_BYTES = 1024;
 [[nodiscard]] std::string printable(
     std::string_view text, std::size_t max_bytes = MAX_DIAGNOSTIC_TEXT_BYTES);
 
+// The most bytes of a file's text that `quote_text` puts in a message, so
+// that the rest of the message stays within MAX_DIAGNOSTIC_TEXT_BYTES.
+constexpr std::size_t MAX_QUOTED_BYTES = 64;
+
 // Returns `text` in double quotes, with `\` and `"` written `\\` and `\"`,
-// so that a quoted piece of a file in a message has an unambiguous end. For
-// keys and values in messages; `Diagnostics::add` then makes it printable.
-[[nodiscard]] std::string quote_text(std::string_view text);
+// so that a quoted piece of a file in a message has an unambiguous end. Text
+// over `max_bytes` is cut before a whole character and ends in `...` inside
+// the quotes. For keys and values in messages; `Diagnostics::add` then makes
+// it printable.
+[[nodiscard]] std::string quote_text(std::string_view text,
+                                     std::size_t max_bytes = MAX_QUOTED_BYTES);
 
 // Returns the code as written, for example "CF-101" or "CW-510".
 [[nodiscard]] std::string code_text(const Diagnostic& diagnostic);
@@ -118,6 +125,12 @@ public:
     // `printable`: every diagnostic passes here, so that no text of a file
     // reaches a report unescaped.
     void add(Diagnostic diagnostic);
+
+    // Counts `count` errors that were found but not kept, for a caller that
+    // capped its own list before adding (a `oneOf` branch, D-107).
+    void count_unlisted_errors(std::size_t count) noexcept {
+        error_count_ += count;
+    }
 
     // How many errors and warnings were added, also those beyond the limit.
     [[nodiscard]] std::size_t error_count() const noexcept {

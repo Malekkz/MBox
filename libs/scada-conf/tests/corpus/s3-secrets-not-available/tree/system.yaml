@@ -1,0 +1,11 @@
+unit:
+  id: site-0042
+  name: Test unit
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: none
+email:
+  server: mail.example.invalid
+  from: Test unit
+  password: { secret: smtp_password }

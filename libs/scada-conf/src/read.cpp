@@ -35,19 +35,28 @@ std::optional<std::string_view> plain_text(const Document& document,
     return document.text(node);
 }
 
-std::optional<Integer> plain_integer(const Document& document, NodeId node) {
+// A plain integer: INVALID_ARGUMENT if the scalar is not of the integer
+// form, OUT_OF_RANGE if it is but does not fit 64 bits (D-107).
+Result<Integer> plain_integer(const Document& document, NodeId node) {
     const std::optional<std::string_view> text = plain_text(document, node);
-    return text ? parse_integer(*text) : std::nullopt;
+    const IntegerRead read = text ? read_integer(*text) : IntegerRead{};
+    if (read.form == IntegerForm::NOT_INTEGER) {
+        return not_of_form();
+    }
+    if (read.form == IntegerForm::TOO_LARGE) {
+        return out_of_range();
+    }
+    return read.value;
 }
 
 }  // namespace
 
 Result<std::int64_t> to_int64(const Document& document, NodeId node) {
-    const std::optional<Integer> value = plain_integer(document, node);
-    if (!value) {
-        return not_of_form();
+    const Result<Integer> value = plain_integer(document, node);
+    if (!value.ok()) {
+        return value.status();
     }
-    const std::optional<std::int64_t> fits = as_int64(*value);
+    const std::optional<std::int64_t> fits = as_int64(value.value());
     if (!fits) {
         return out_of_range();
     }
@@ -55,11 +64,11 @@ Result<std::int64_t> to_int64(const Document& document, NodeId node) {
 }
 
 Result<std::uint64_t> to_uint64(const Document& document, NodeId node) {
-    const std::optional<Integer> value = plain_integer(document, node);
-    if (!value) {
-        return not_of_form();
+    const Result<Integer> value = plain_integer(document, node);
+    if (!value.ok()) {
+        return value.status();
     }
-    const std::optional<std::uint64_t> fits = as_uint64(*value);
+    const std::optional<std::uint64_t> fits = as_uint64(value.value());
     if (!fits) {
         return out_of_range();
     }
@@ -71,9 +80,13 @@ Result<double> to_decimal(const Document& document, NodeId node) {
     if (!text) {
         return not_of_form();
     }
-    if (const std::optional<Integer> integer = parse_integer(*text)) {
-        const auto magnitude = static_cast<double>(integer->magnitude);
-        return integer->negative ? -magnitude : magnitude;
+    const IntegerRead integer = read_integer(*text);
+    if (integer.form == IntegerForm::TOO_LARGE) {
+        return out_of_range();
+    }
+    if (integer.form == IntegerForm::FITS) {
+        const auto magnitude = static_cast<double>(integer.value.magnitude);
+        return integer.value.negative ? -magnitude : magnitude;
     }
     const std::optional<double> decimal = parse_decimal(*text);
     if (!decimal) {
@@ -116,10 +129,11 @@ Result<std::uint64_t> to_raw_pattern(const Document& document, NodeId node,
         return Status(StatusCode::INVALID_ARGUMENT,
                       "a raw pattern is 1 to 64 bits wide");
     }
-    const std::optional<Integer> value = plain_integer(document, node);
-    if (!value) {
-        return not_of_form();
+    const Result<Integer> read = plain_integer(document, node);
+    if (!read.ok()) {
+        return read.status();
     }
+    const Integer* value = &read.value();
     const std::uint64_t mask = width_bits == MAX_WIDTH
                                    ? std::numeric_limits<std::uint64_t>::max()
                                    : (std::uint64_t{1} << width_bits) - 1;
@@ -142,8 +156,7 @@ bool is_integer_form(const Document& document, NodeId node) {
     if (!text) {
         return false;
     }
-    const std::optional<Integer> value = parse_integer(*text);
-    return value.has_value();
+    return read_integer(*text).form != IntegerForm::NOT_INTEGER;
 }
 
 }  // namespace scada::conf
