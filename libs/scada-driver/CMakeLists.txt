@@ -8,15 +8,17 @@ set(SCADA_ZONEINFO_DIR "/usr/share/zoneinfo" CACHE PATH
 
 scada_add_library(scada-driver
   SOURCES
+    src/plan.cpp
     src/point_rules.cpp
     src/raw_value.cpp
     src/sample_processing.cpp
+    src/scheduler.cpp
     src/tzif.cpp
     src/utf8.cpp
     src/write_conversion.cpp
     src/zone_file.cpp
     src/zone_table.cpp
-  DEPENDS scada::common scada::tag)
+  DEPENDS scada::common scada::conf scada::tag)
 
 target_compile_definitions(libscada-driver PRIVATE
   "SCADA_ZONEINFO_DIR=\"${SCADA_ZONEINFO_DIR}\"")

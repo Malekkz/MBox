@@ -194,6 +194,14 @@ RT_RULES = [
          _uses(_RT, "pthread_mutex_lock", "pthread_mutex_timedlock",
                "pthread_mutex_trylock"),
          "mutex lock in a SCADA_RT function"),
+    # An attribute is not inherited by an override (driver interface
+    # contract 2.2): a protocol's encode, frame_state and decode must each
+    # repeat the annotation.
+    Rule("scada-rt",
+         f"cxxMethodDecl({_ANY}, isOverride(), "
+         'unless(hasAttr("attr::Annotate")), '
+         'forEachOverridden(cxxMethodDecl(hasAttr("attr::Annotate"))))',
+         "an override of a SCADA_RT function must repeat SCADA_RT"),
 ]
 
 

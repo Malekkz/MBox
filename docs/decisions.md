@@ -2060,3 +2060,52 @@ Options: route the nearest integer through the integer scaling, on read and writ
 Decision: refused. INT64 or UINT64 cannot hold a floating raw value (its fractions, NaN, a float32 up to 3.4e38), so it is CF-504: `validate_point_rules` refuses it, the processing writes BAD with OUT_OF_RANGE for one that reaches it anyway, and `to_raw_value` refuses the write. An enumeration and a double point keep reading a floating raw value as a code within 0.001 (CS 5.3, 5.5); an enumeration writes its code exactly. A counter on a floating raw type is refused too. `PointRules::raw_kind` carries the raw type for the check.
 Reason: a rounding of a measured value hidden inside an integer tag is what CS 4.7's derived type avoids; the refusal keeps read and write inverse without a rule the contract does not state.
 Consequences: a template that wants an integer from a floating register writes `value_type: float64`, or the protocol's integer type. The fuzz target checks every accepted write by reading its raw value back through the processing.
+
+## D-135: The framework's block planner: segments, clusters, split forms and keep-alive
+Date: 2026-11-24
+Phase / issue: 2, #104 (P2-07), slice 2
+Status: accepted
+
+Context: driver interface contract 6.3 gives the rules of a read plan (largest request, largest gap, the four kinds of range, never split a value, never separate a point from its companions, a split form per request) and 5.5 says a point and its companions are read "in one poll of one poll group, back to back with no other request to that device between them (one request when they fit in one)". It leaves open the grain of the split form, what is read of a range a point touches, and which request is the keep-alive.
+Options: for the split form, one request per point, per run of points without a bridged gap, or per cluster (a point with its companions); for a range, read only the units of the points in it, or the whole range; for the keep-alive, a dedicated one-unit read or a planned request.
+Decision: `plan_blocks` (scada/driver/plan.h), which a protocol whose points are spans of numbered units can use as its whole `plan`:
+- A point that touches an atomic, side-effect or exclusive range is planned with the whole range, so that a range read whole is read whole; points of one place that overlap are planned together.
+- A cluster (a point and its companions) whose segments fit one request is merged with its neighbours in address order where the next fits: within `max_units` and `max_values`, a gap of at most `max_gap` units that touches no range of any kind (so a bridge never reads a no-read range, a side-effect range or part of an atomic one), never with an exclusive request, never across spaces, unit ids or poll groups. A cluster that does not fit becomes a chain of requests marked `chained`, sent back to back; it is not merged with other clusters.
+- The split form of a request of several clusters is one request per cluster: after a refusal, the points of a cluster that is refused again are ABSENT and the others are read. A request of one cluster, or one that touches a side-effect range (CS A.4: never split), has none; refused, its points are ABSENT.
+- The keep-alive and the probe are the shortest planned request outside every side-effect and exclusive range; a device whose every request touches one has none.
+- Rules the compile step should refuse (overlapping ranges of different kinds, a point in a no-read range, a span or atomic range above `max_units`, a side-effect range of two poll groups) give INVALID_ARGUMENT, never a plan.
+Reason: the cluster is the smallest unit the contract lets a plan split, so its split form is the most precise; reading a whole range is the only reading of "always in one request" that holds for every point set; a planned request is a real read the device serves, which a dedicated keep-alive may not be.
+Consequences: a device with many single-point clusters behind one refused merged read gets many split requests until the next reconnect (6.3: "the rest keep the split plan until reconnect"). Protocols may plan otherwise; Modbus (#105, #106) is expected to use this planner.
+
+## D-136: The scheduler's cycles, ties and published periods
+Date: 2026-11-24
+Phase / issue: 2, #104 (P2-07), slice 2
+Status: accepted
+
+Context: driver interface contract 6.2 orders the worker's choices (orders in progress, new orders, due poll groups by priority then due time, keep-alive, probes) and 6.4 says a paced device does not delay its neighbours, and that the achieved period of each poll group (`sys.drv.<channel>.period.<group>`) and `sys.dev.<device>.pacing_limited` are published. It does not say when a late cycle's next one is due, how ties are broken, or what the achieved period of a channel's group is when its devices differ.
+Options: one cycle per channel and poll group, or one per device and poll group; a late cycle catching up in a burst, or starting again from its completion.
+Decision: `Scheduler` (scada/driver/scheduler.h):
+- Each device has its own cycle of each poll group, first due when the scheduler starts, so a paced device never holds up the others. A cycle sends the group's planned requests in plan order, each once. The next cycle is due a period after the last one was due, or at once when that time has already passed: a late group never sends missed cycles in a burst.
+- Ties: priority, then due time, then device order.
+- An exclusive order's next step and the rest of a chain of companions come first for their device, and nothing else is sent to that device between their steps; other devices are served meanwhile. Other orders run in arrival order; a device's later orders wait behind its earlier ones.
+- Every request keeps the device's and the channel's request intervals, and every write also the write intervals.
+- The achieved period of a poll group is the time between the starts of a device's two last cycles, and the channel's is the longest of its devices'. `pacing_limited` is true when pacing held back a due request of the device in its current cycle.
+- The order queue is the channel's `max_pending_writes`, reserved at construction; a full queue refuses the order, which the command thread answers BUSY (8.8).
+Reason: per-device cycles are what 6.4's second rule needs; restarting a late cycle at its completion keeps a slow device's load at what its pacing allows; the longest period is the one the runtime comparison with the configured period must see (reference 7.5).
+Consequences: probes of demoted devices (6.2 step 5) and the dead-device part of conformance test 12 come with failure handling (slice 3); the orders' content with the command slices (6, 7).
+
+## D-137: Shapes of the protocol interface that the contract leaves to the implementation
+Date: 2026-11-24
+Phase / issue: 2, #104 (P2-07), slice 2
+Status: accepted
+
+Context: driver interface contract 2.2 gives the frame protocol's calls and their result types, and names DriverConfig, ConfigErrors, SampleSink, TxBuffer, Attempt, ChannelState, DeviceState and ProtocolData without defining them.
+Options: for each, the smallest shape that the calls of 2.2 and 2.3 need (no allocation, no lock and no system call in encode, frame_state and decode).
+Decision:
+- `DriverConfig` is the configuration tree of libscada-conf (`scada::conf::Document` and the root node of the driver's part; ruling (i) of the lead, D-111), and `ConfigErrors` is `scada::conf::Diagnostics`.
+- `SampleSink` is a concrete class over a buffer the framework sizes for the request with the most points: `add` stores a sample or, when full, counts it; nothing allocates. `TxBuffer` is a span sized from the device's `max_frame_bytes`.
+- `ProtocolData` is a base class with a virtual destructor, read back with `protocol_data<T>`, a static downcast to the type the protocol's own `configure` stored.
+- `plan` receives `out.by_group` already sized for the channel's poll groups, since the device does not know them.
+- The test protocol of the conformance tests is compiled in code; its `configure` returns UNSUPPORTED until the framework's compile step arrives (slice 8).
+Reason: each is the smallest shape the calls need; a virtual sink would put a virtual call per sample on the worker for no gain.
+Consequences: none beyond the protocol libraries' (#105, #106) use of these types.

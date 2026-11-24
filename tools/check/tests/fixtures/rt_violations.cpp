@@ -74,6 +74,26 @@ SCADA_RT int allocate_in_lambda(int value) {
     return *make();
 }
 
+// An override does not inherit the annotation; it must repeat it.
+class Protocol {
+public:
+    virtual ~Protocol() = default;
+    SCADA_RT virtual int encode(int value) const = 0;
+    virtual int configure(int value) const = 0;
+};
+
+class Forgets : public Protocol {
+public:
+    int encode(int value) const override;  // expect: scada-rt
+    int configure(int value) const override;
+};
+
+class Repeats : public Protocol {
+public:
+    SCADA_RT int encode(int value) const override;
+    int configure(int value) const override;
+};
+
 // Not real-time: none of these lines is reported by the SCADA_RT check.
 int not_real_time(int value) {
     const std::scoped_lock lock(guard);
