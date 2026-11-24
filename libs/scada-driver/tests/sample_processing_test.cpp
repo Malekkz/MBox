@@ -875,6 +875,81 @@ TEST(SampleProcessing, DivideByOneOnAnIntegerTagIsExact) {
     EXPECT_EQ(write.value.i, FIRST_VALUE + OFFSET_MINUS_3);
 }
 
+// A floating raw value on an integer tag: BAD, and refused by the rules.
+void expect_floating_raw_refused(const PointRules& rules) {
+    Point point(rules);
+    const TagWrite write = point
+                               .feed(RawSample{.outcome = Outcome::VALUE,
+                                               .raw = raw_float32(4.0F)},
+                                     SECOND)
+                               .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::OUT_OF_RANGE));
+    EXPECT_TRUE(has(write.flags, QualityFlag::NOT_INIT));
+    EXPECT_FALSE(validate_point_rules(rules).ok());
+}
+
+TEST(SampleProcessing, FloatingRawOnAnIntegerTagIsBadScaledOrNot) {
+    // CF-504 (decision D-134): an INT64 or UINT64 value is never read from
+    // a floating raw type; with `gain: 10` the raw 4.0 would otherwise be 4
+    // where an int16 raw 4 gives 40.
+    constexpr std::int64_t GAIN_10 = 10;
+    for (const TagType type : {TagType::INT64, TagType::UINT64}) {
+        PointRules rules;
+        rules.tag_type = type;
+        rules.raw_kind = RawKind::FLOAT;
+        expect_floating_raw_refused(rules);
+        rules.scale = ScaleRule{.form = ScaleRule::Form::GAIN,
+                                .integer = true,
+                                .gain_i = GAIN_10,
+                                .gain = static_cast<double>(GAIN_10)};
+        expect_floating_raw_refused(rules);
+    }
+}
+
+TEST(SampleProcessing, AnUncertainCompanionDegradesAQualityRule) {
+    // `quality_from` on a companion read UNCERTAIN: the rule's GOOD result
+    // is at most UNCERTAIN, with the companion's flags (decision D-131).
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.quality_rules.push_back(
+        QualityRule{.companion = 0, .entries = {{.key = 0, .mark = {}}}});
+    Point point(rules);
+    const CompanionInput uncertain{
+        .outcome = Outcome::VALUE,
+        .raw = raw_unsigned(0, INT16),
+        .mark = {.quality = Quality::UNCERTAIN,
+                 .flags = flags({QualityFlag::TEST})}};
+    const TagWrite write = point.value(2, SECOND, {&uncertain, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(write.flags, QualityFlag::TEST));
+    EXPECT_EQ(write.value.i, 2);
+}
+
+TEST(SampleProcessing, AnUncertainCompanionDegradesAHealthRule) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.health.push_back(
+        HealthRule{.companion = 0, .good = {1}, .comm_fail = true});
+    Point point(rules);
+    const CompanionInput uncertain{
+        .outcome = Outcome::VALUE,
+        .raw = raw_unsigned(1, INT16),
+        .mark = {.quality = Quality::UNCERTAIN,
+                 .flags = flags({QualityFlag::BLOCKED})}};
+    const TagWrite write = point.value(2, SECOND, {&uncertain, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(write.flags, QualityFlag::BLOCKED));
+    // A health point that is UNCERTAIN and not good is still BAD.
+    const CompanionInput down{
+        .outcome = Outcome::VALUE,
+        .raw = raw_unsigned(0, INT16),
+        .mark = {.quality = Quality::UNCERTAIN, .flags = 0}};
+    const TagWrite lost = point.value(2, SECOND, {&down, 1}).tag;
+    EXPECT_EQ(lost.quality, Quality::BAD);
+    EXPECT_TRUE(has(lost.flags, QualityFlag::COMM_FAIL));
+}
+
 // --- Bits --------------------------------------------------------------------
 
 TEST(SampleProcessing, BitsKeepTheirValuesWhenTheWordMatchedAMarker) {

@@ -168,26 +168,28 @@ std::optional<Encoded> encode_binary(const WriteRules& rules,
             if (rounded < -limit || rounded >= limit) {
                 return std::nullopt;
             }
-            return Encoded{.raw = raw_signed(static_cast<std::int64_t>(rounded),
-                                             rules.raw_width),
-                           .sent = rounded};
+            // `sent` is the integer as the read sees it: a request that
+            // rounds to -0.0 is sent as 0, which reads back as +0.0.
+            const auto integer = static_cast<std::int64_t>(rounded);
+            return Encoded{.raw = raw_signed(integer, rules.raw_width),
+                           .sent = static_cast<double>(integer)};
         }
         case RawKind::UNSIGNED: {
             const double rounded = std::round(raw);
             if (rounded < 0.0 || rounded >= power_of_two(rules.raw_width)) {
                 return std::nullopt;
             }
-            return Encoded{
-                .raw = raw_unsigned(static_cast<std::uint64_t>(rounded),
-                                    rules.raw_width),
-                .sent = rounded};
+            const auto integer = static_cast<std::uint64_t>(rounded);
+            return Encoded{.raw = raw_unsigned(integer, rules.raw_width),
+                           .sent = static_cast<double>(integer)};
         }
         case RawKind::BOOL: {
             const double rounded = std::round(raw);
             if (rounded != 0.0 && rounded != 1.0) {
                 return std::nullopt;
             }
-            return Encoded{.raw = raw_bool(rounded == 1.0), .sent = rounded};
+            return Encoded{.raw = raw_bool(rounded == 1.0),
+                           .sent = rounded == 1.0 ? 1.0 : 0.0};
         }
         case RawKind::FLOAT:
             if (rules.raw_width == FLOAT32_WIDTH) {
@@ -285,6 +287,11 @@ std::optional<WriteValue> to_raw_value(const WriteRules& rules,
             return std::nullopt;
         }
         return integer_path(rules, value);
+    }
+    if (rules.raw_kind == RawKind::FLOAT) {
+        // A floating raw type on an integer value type is CF-504 (decision
+        // D-134); only an enumeration writes its code to one.
+        return std::nullopt;
     }
     if (!is_integer_path(rules)) {
         // An integer tag with any other scaling is CF-517 (decision D-133):

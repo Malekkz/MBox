@@ -17,7 +17,7 @@ The library is built in slices. This is the first:
 
 Not yet here: the protocol interface (2.2), the object model, scheduling,
 transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-133 record the choices
+change and reload. `docs/decisions.md` D-130 to D-134 record the choices
 the contracts left open.
 
 ## What it does
@@ -57,14 +57,27 @@ the contracts left open.
   reads 12.3; `to_raw_value` returns 12.3 as the value written.
 - **SUBSTITUTED** is not written until tag database contract 1.1 (#89): a
   configured substitute is UNCERTAIN, and incoming flags are masked.
+- **No integer tag on a floating raw type** (CF-504, D-134), other than an
+  enumeration or a double point: the rules are refused, a read is BAD with
+  OUT_OF_RANGE and a write is refused. Use `value_type: float64`.
 
 ## Zone files
 
 Device local times are converted with the unit's compiled zone files
 (TZif): the directory named by the environment variable `TZDIR`, else the
 one the CMake option `SCADA_ZONEINFO_DIR` sets (default
-`/usr/share/zoneinfo`). A target image must carry them there. They are read
-when a configuration is compiled.
+`/usr/share/zoneinfo`); either must be an absolute path. A target image must
+carry them there. They are read when a configuration is compiled.
+
+- A zone name is an IANA name; `localtime`, `posixrules` and names under
+  `posix/` or `right/` are refused.
+- The file is opened beneath the directory (`openat2` with
+  `RESOLVE_BENEATH`, Linux 5.6 and later). A link inside the directory, as
+  zone aliases are installed, is followed; a link that leads out of it, or
+  an absolute link, is refused. Where `openat2` is not available the path is
+  resolved and checked in user space (D-130).
+- A file without a footer rule makes every time after its last transition
+  uncertain.
 
 ## Testing
 
@@ -87,5 +100,10 @@ ctest --preset integration -R scada-driver-zones
   `Australia/Lord_Howe`, `Europe/Dublin` and `Etc/GMT-3`; a machine without
   them fails the tests, it does not skip them.
 - Fuzz targets: `sample_processing_fuzz` (samples, rule fields, a local
-  zone, the write conversion) and `tzif_fuzz` (the zone file reader and the
-  TZ string parser).
+  zone, the write conversion; every accepted write is read back through the
+  processing and must give the value written) and `tzif_fuzz` (the zone file
+  reader and the TZ string parser; transitions ordered, offsets within
+  RFC 9636's bounds, an instant converts back to itself).
+- `zone_file_test.cpp` builds a zone directory in the temporary directory,
+  with links inside and out of it, a FIFO and a subdirectory, and reads it
+  with `openat2` and with the fallback.

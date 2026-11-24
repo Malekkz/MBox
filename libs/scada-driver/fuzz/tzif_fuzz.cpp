@@ -2,11 +2,13 @@
 // string parser: zone files are outside input (decision D-130). The input
 // is read as a TZ string and as a zone file; a file that is accepted builds
 // a table, which converts local times at the ends of int64 and inside the
-// table. A file the table accepts and the reader refuses aborts.
+// table. A file the table accepts and the reader refuses aborts, and so
+// does a table that breaks the properties of `check_zone`.
 
 #include "../src/tzif.h"
 #include "scada/driver/zone_table.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +16,62 @@
 #include <limits>
 #include <span>
 #include <string>
+
+namespace {
+
+constexpr std::int64_t NS_PER_S = 1'000'000'000;
+constexpr std::int64_t DAY = 86'400;
+constexpr std::int64_t FIRST_S = 2 * DAY;                   // 1970-01-03
+constexpr std::int64_t LAST_S = 4'133'894'400 - (2 * DAY);  // 2100-12-30
+constexpr std::size_t MAX_CHECKED = 64;
+
+// Properties of an accepted file and its table: transitions strictly
+// increasing and offsets within RFC 9636's bounds; inside the table every
+// conversion moves a local time by an offset within those bounds; and an
+// instant between two transitions, written as local time with the offset
+// the file gives it, converts back to itself (or, in a repeated hour, to an
+// earlier instant, marked uncertain).
+void check_zone(const scada::driver::detail::TzifZone& zone,
+                const scada::driver::ZoneTable& table) {
+    using scada::driver::detail::TZIF_MAX_OFFSET_S;
+    using scada::driver::detail::TZIF_MIN_OFFSET_S;
+    const auto& times = zone.transitions_s;
+    if (zone.offsets_s.size() != times.size()) {
+        std::abort();
+    }
+    for (std::size_t index = 0; index < times.size(); ++index) {
+        if ((index > 0 && times[index] <= times[index - 1]) ||
+            zone.offsets_s[index] < TZIF_MIN_OFFSET_S ||
+            zone.offsets_s[index] > TZIF_MAX_OFFSET_S) {
+            std::abort();
+        }
+    }
+    const std::size_t count = std::min(times.size(), MAX_CHECKED);
+    for (std::size_t index = 0; index + 1 < count; ++index) {
+        for (const std::int64_t delta :
+             {std::int64_t{0}, std::int64_t{1},
+              (times[index + 1] - times[index]) / 2}) {
+            const std::int64_t instant = times[index] + delta;
+            if (instant < FIRST_S || instant >= LAST_S ||
+                instant >= times[index + 1]) {
+                continue;
+            }
+            const std::int64_t local = instant + zone.offsets_s[index];
+            const scada::driver::UtcTime back = table.to_utc(local * NS_PER_S);
+            const std::int64_t moved = local * NS_PER_S - back.utc_ns;
+            if (moved < std::int64_t{TZIF_MIN_OFFSET_S} * NS_PER_S ||
+                moved > std::int64_t{TZIF_MAX_OFFSET_S} * NS_PER_S) {
+                std::abort();
+            }
+            if (back.uncertain ? back.utc_ns > instant * NS_PER_S
+                               : back.utc_ns != instant * NS_PER_S) {
+                std::abort();
+            }
+        }
+    }
+}
+
+}  // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
@@ -44,5 +102,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     if (!zone.ok()) {
         std::abort();  // from_tzif accepted what parse_tzif refuses
     }
+    check_zone(zone.value(), table.value());
     return 0;
 }

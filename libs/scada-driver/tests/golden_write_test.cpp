@@ -2,8 +2,10 @@
 // point's rules give the raw value, or a refusal (driver interface contract
 // 8.4, conformance test 5; configuration schemas contract 7.2).
 
+#include "sample_helpers.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/raw_value.h"
+#include "scada/driver/sample_processing.h"
 #include "scada/driver/tag_value.h"
 #include "scada/driver/write_conversion.h"
 #include "scada/tag/types.h"
@@ -45,6 +47,8 @@ RawValue converted(const WriteRules& rules, const TagValue& value) {
 }
 
 constexpr std::uint8_t INT16 = 16;
+constexpr std::uint8_t FLOAT32_BITS = 32;
+constexpr std::uint8_t FLOAT64_BITS = 64;
 constexpr std::uint64_t DIVIDE_BY_10 = 10;
 constexpr double GAIN_0_1 = 0.1;
 constexpr std::uint64_t SIGN_BIT_32 = 0x8000'0000U;
@@ -199,6 +203,76 @@ TEST(GoldenWrite, EnumerationWritesADefinedCode) {
     EXPECT_FALSE(to_raw_value(rules, int64_value(2)).has_value());
 }
 
+// --- A floating raw type on an integer value type (CF-504, D-134) -------
+
+// The tag the raw value of a write reads back as, through the processing.
+TagWrite read_back(const PointRules& rules, const RawValue& raw) {
+    PointState state = test::fresh_state(rules);
+    return test::processed(rules, state,
+                           RawSample{.outcome = Outcome::VALUE, .raw = raw}, {},
+                           SampleTimes{})
+        .tag;
+}
+
+TEST(GoldenWrite, FloatingRawTypeOnAnIntegerValueTypeIsRefused) {
+    constexpr std::int64_t GAIN_10 = 10;
+    const ScaleRule gain{.integer = true,
+                         .gain_i = GAIN_10,
+                         .gain = static_cast<double>(GAIN_10)};
+    for (const ScaleRule* scale :
+         {static_cast<const ScaleRule*>(nullptr), &gain}) {
+        EXPECT_FALSE(to_raw_value(setpoint(TagType::INT64, RawKind::FLOAT,
+                                           FLOAT32_BITS, scale),
+                                  int64_value(40))
+                         .has_value());
+        EXPECT_FALSE(to_raw_value(setpoint(TagType::UINT64, RawKind::FLOAT,
+                                           FLOAT64_BITS, scale),
+                                  uint64_value(40))
+                         .has_value());
+    }
+}
+
+TEST(GoldenWrite, IntegerScalingReadsBackWhatWasWritten) {
+    // `gain: 10` on an int16: a write of 40 is raw 4, which reads 40.
+    constexpr std::int64_t GAIN_10 = 10;
+    const ScaleRule scale{.integer = true,
+                          .gain_i = GAIN_10,
+                          .gain = static_cast<double>(GAIN_10)};
+    const WriteValue written = converted_value(
+        setpoint(TagType::INT64, RawKind::SIGNED, INT16, &scale),
+        int64_value(40));
+    EXPECT_EQ(written.raw.number_i, 4);
+    PointRules rules;
+    rules.tag_type = TagType::INT64;
+    rules.raw_kind = RawKind::SIGNED;
+    rules.scale = scale;
+    const TagWrite read = read_back(rules, written.raw);
+    EXPECT_EQ(read.quality, tag::Quality::GOOD);
+    EXPECT_EQ(read.value.i, written.written.i);
+}
+
+TEST(GoldenWrite, EnumerationOnAFloatingRawTypeReadsBackItsCode) {
+    // An enumeration writes its code to a float32 register; the read takes
+    // the code back (CS 5.5).
+    const std::array<std::int64_t, 3> codes{0, 1, 3};
+    WriteRules rules =
+        setpoint(TagType::INT64, RawKind::FLOAT, FLOAT32_BITS, nullptr);
+    rules.has_enum = true;
+    rules.enum_codes = codes;
+    const WriteValue written = converted_value(rules, int64_value(3));
+    EXPECT_EQ(
+        std::bit_cast<std::uint32_t>(static_cast<float>(written.raw.number_f)),
+        std::bit_cast<std::uint32_t>(3.0F));
+    PointRules point;
+    point.tag_type = TagType::INT64;
+    point.raw_kind = RawKind::FLOAT;
+    point.has_enum = true;
+    point.enum_codes = {0, 1, 3};
+    const TagWrite read = read_back(point, written.raw);
+    EXPECT_EQ(read.quality, tag::Quality::GOOD);
+    EXPECT_EQ(read.value.i, 3);
+}
+
 TEST(GoldenWrite, StringIsNotWritable) {
     const WriteRules rules =
         setpoint(TagType::STRING, RawKind::STRING, 0, nullptr);
@@ -290,6 +364,21 @@ TEST(GoldenWrite, EdgesOfTheWidths) {
                         uint64_value(std::numeric_limits<std::uint64_t>::max()))
                   .number_u,
               std::numeric_limits<std::uint64_t>::max());
+}
+
+TEST(GoldenWrite, NegativeZeroOnAnIntegerRawIsWrittenAsPlusZero) {
+    // Raw 0 reads back as +0.0; `written` is what the read gives (8.4), not
+    // the sign of the request. Found by the fuzz target's read-back.
+    for (const RawKind kind : {RawKind::SIGNED, RawKind::UNSIGNED}) {
+        for (const double request : {-0.0, -0.3}) {
+            const WriteValue result = converted_value(
+                setpoint(TagType::FLOAT64, kind, INT16, nullptr),
+                float64_value(request));
+            EXPECT_EQ(result.raw.pattern, 0U);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(result.written.f), 0U)
+                << request;
+        }
+    }
 }
 
 TEST(GoldenWrite, Float32UnderflowAndNegativeZero) {

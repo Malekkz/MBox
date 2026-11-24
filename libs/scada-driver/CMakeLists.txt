@@ -14,6 +14,7 @@ scada_add_library(scada-driver
     src/tzif.cpp
     src/utf8.cpp
     src/write_conversion.cpp
+    src/zone_file.cpp
     src/zone_table.cpp
   DEPENDS scada::common scada::tag)
 

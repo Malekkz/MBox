@@ -12,6 +12,8 @@
 
 #include "scada/driver/zone_table.h"
 
+#include "tzif_builder.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -33,6 +35,8 @@ constexpr std::int64_t SECOND = 1'000'000'000;
 constexpr std::int64_t HOUR_S = 3600;
 constexpr std::int64_t DAY_S = 86'400;
 constexpr std::int64_t SCAN_STEP_S = DAY_S;
+// The footers below have intervals of an hour or two.
+constexpr std::int64_t SHORT_SCAN_STEP_S = HOUR_S / 2;
 constexpr std::int64_t SEARCH_S = 27 * HOUR_S;  // more than any offset change
 constexpr std::int64_t QUARTER_S = std::int64_t{91} * DAY_S;
 constexpr std::int64_t FIRST_S = 2 * DAY_S;               // 1970-01-03
@@ -73,9 +77,10 @@ std::vector<std::string> zone_names(const std::filesystem::path& root) {
     return out;
 }
 
-void use_zone(const std::string& name) {
+// Sets TZ: `:name` for a zone file, or a POSIX TZ string as it stands.
+void use_zone(const std::string& tz_value) {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): single-threaded test
-    ::setenv("TZ", (":" + name).c_str(), 1);
+    ::setenv("TZ", tz_value.c_str(), 1);
     ::tzset();  // NOLINT(concurrency-mt-unsafe): single-threaded test
 }
 
@@ -143,17 +148,18 @@ struct Probes {
     std::set<std::int64_t> offsets;
 };
 
-Probes probes_of_zone() {
+// `step` is the scan's step: an offset in force for less than a step can be
+// missed, so a zone with such intervals needs a shorter one.
+Probes probes_of_zone(std::int64_t step) {
     Probes probes;
     std::int64_t previous = offset_at(FIRST_S);
     probes.offsets.insert(previous);
-    for (std::int64_t at = FIRST_S; at < LAST_S; at += SCAN_STEP_S) {
-        const std::int64_t offset = offset_at(at + SCAN_STEP_S);
+    for (std::int64_t at = FIRST_S; at < LAST_S; at += step) {
+        const std::int64_t offset = offset_at(at + step);
         if (offset == previous) {
             continue;
         }
-        const std::int64_t change =
-            change_between(at, at + SCAN_STEP_S, previous);
+        const std::int64_t change = change_between(at, at + step, previous);
         for (const std::int64_t base : {change + previous, change + offset}) {
             for (const std::int64_t delta :
                  {-HOUR_S - 1, std::int64_t{-1}, std::int64_t{0},
@@ -176,10 +182,13 @@ struct Tally {
     std::size_t failures = 0;
 };
 
-// Checks one zone against the C library, adding to `tally`.
-void check_zone(const std::string& name, const ZoneTable& table, Tally& tally) {
-    use_zone(name);
-    const Probes probes = probes_of_zone();
+// Checks one zone (`tz_value` as TZ takes it) against the C library, adding to
+// `tally`.
+void check_zone(const std::string& tz_value, const ZoneTable& table,
+                Tally& tally, std::int64_t step = SCAN_STEP_S) {
+    use_zone(tz_value);
+    const std::string& name = tz_value;
+    const Probes probes = probes_of_zone(step);
     for (const std::int64_t local_s : probes.locals) {
         if (local_s < FIRST_S || local_s >= LAST_S) {
             continue;
@@ -206,7 +215,7 @@ TEST(ZoneTableAllZones, AgreesWithTheCLibraryInEveryZone) {
     for (const std::string& name : zones) {
         const auto table = ZoneTable::build(name);
         ASSERT_TRUE(table.ok()) << name << ": " << table.status().message();
-        check_zone(name, table.value(), tally);
+        check_zone(":" + name, table.value(), tally);
     }
     ::unsetenv("TZ");  // NOLINT(concurrency-mt-unsafe): single-threaded test
     EXPECT_EQ(tally.failures, 0U)
@@ -214,6 +223,34 @@ TEST(ZoneTableAllZones, AgreesWithTheCLibraryInEveryZone) {
         << " zones";
     RecordProperty("local_times", static_cast<int>(tally.checked));
     RecordProperty("zones", static_cast<int>(zones.size()));
+}
+
+TEST(ZoneTableAllZones, DegenerateFooterRulesAgreeWithTheCLibrary) {
+    // Rules no zone of the database uses today, read by the C library from
+    // the same TZ string: a start and an end at one instant, a start and an
+    // end on one day in that order and the other, times outside 0 to 24 h.
+    // Daylight time all year (`EST5EDT,0/0,J365/25`, RFC 9636 3.3.1) is
+    // checked in zone_table_test.cpp against the RFC instead: glibc 2.39
+    // gives standard time from 00:00 UTC on 1 January to the rule's start.
+    const std::vector<std::string> footers{
+        "EST5EDT,M3.2.0/2,M3.2.0/3", "<-03>3<-02>,J60/0,J60/0",
+        "<-03>3<-02>,J60/1,J60/0", "<-03>3<-02>,M3.5.0/-2,M10.5.0/-1",
+        "<+01>-1<+02>,M3.5.0/167,M10.5.0/-167"};
+    Tally tally;
+    for (const std::string& footer : footers) {
+        test::TzifSpec spec;
+        spec.offsets = {0};
+        spec.footer = footer;
+        const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+        ASSERT_TRUE(table.ok()) << footer << ": " << table.status().message();
+        Tally one;
+        check_zone(footer, table.value(), one, SHORT_SCAN_STEP_S);
+        EXPECT_EQ(one.failures, 0U)
+            << footer << ": of " << one.checked << " local times";
+        tally.checked += one.checked;
+    }
+    ::unsetenv("TZ");  // NOLINT(concurrency-mt-unsafe): single-threaded test
+    RecordProperty("local_times", static_cast<int>(tally.checked));
 }
 
 }  // namespace

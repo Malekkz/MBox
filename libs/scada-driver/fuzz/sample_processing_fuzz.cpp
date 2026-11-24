@@ -233,12 +233,68 @@ void check(const TagWrite& write) {
     }
 }
 
+// Equal values, a FLOAT64 by its bits.
+bool same_value(const scada::driver::TagValue& got,
+                const scada::driver::TagValue& want) {
+    if (got.type != want.type) {
+        return false;
+    }
+    switch (want.type) {
+        case TagType::BOOL:
+            return got.b == want.b;
+        case TagType::INT64:
+            return got.i == want.i;
+        case TagType::UINT64:
+            return got.u == want.u;
+        case TagType::FLOAT64:
+            return std::bit_cast<std::uint64_t>(got.f) ==
+                   std::bit_cast<std::uint64_t>(want.f);
+        case TagType::STRING:
+            return true;  // never written
+    }
+    return false;
+}
+
+// The raw value of a write, read back by the processing with the same
+// rules, gives the value the write reports as written (contract 8.4; CS 4.7:
+// read and write of an integer value type are exact inverses).
+void check_read_back(const scada::driver::WriteRules& write,
+                     const scada::driver::WriteValue& converted) {
+    PointRules read;
+    read.tag_type = write.tag_type;
+    read.raw_kind = write.raw_kind;
+    read.invert = write.invert;
+    if (write.scale != nullptr) {
+        read.scale = *write.scale;
+    }
+    read.has_enum = write.has_enum;
+    read.enum_codes.assign(write.enum_codes.begin(), write.enum_codes.end());
+    if (!scada::driver::validate_point_rules(read).ok()) {
+        return;  // the compile step refuses these rules
+    }
+    PointState state;
+    scada::driver::init_point_state(state, read.tag_type);
+    scada::driver::reset_point_state(state, read.tag_type, 0);
+    ProcessedSample out;
+    scada::driver::process_sample(
+        read, state, RawSample{.outcome = Outcome::VALUE, .raw = converted.raw},
+        {}, scada::driver::SampleTimes{}, out);
+    if (out.tag.quality != Quality::GOOD ||
+        !same_value(out.tag.value, converted.written)) {
+        std::abort();
+    }
+}
+
 void check_conversions(const RawValue& raw,
                        std::span<const std::uint8_t> header) {
     const PointRules rules = rules_from(header);
     const scada::driver::WriteRules write{
         .tag_type = rules.tag_type,
-        .raw_kind = static_cast<RawKind>(1U + (header[0] % 4U)),
+        // The point's raw type is the sample's, so that the width fits it;
+        // a string or time raw value takes one from the header.
+        .raw_kind = raw.kind == RawKind::STRING || raw.kind == RawKind::TIME
+                        ? static_cast<RawKind>(1U + (header[0] % 4U))
+                        : raw.kind,
         .raw_width = raw.width,
         .invert = (header[1] & 1U) != 0,
         .scale = rules.scale.has_value() ? &*rules.scale : nullptr,
@@ -264,6 +320,7 @@ void check_conversions(const RawValue& raw,
              converted->written.u != value.u)) {
             std::abort();
         }
+        check_read_back(write, *converted);
     }
     (void)scada::driver::raw_from_pattern(raw.kind, raw.width, raw.pattern);
 }

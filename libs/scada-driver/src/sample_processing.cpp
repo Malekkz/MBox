@@ -254,6 +254,15 @@ struct Work {
     std::uint16_t time_flags = 0;
 };
 
+// An UNCERTAIN companion makes what is read from it at most UNCERTAIN, with
+// its flags; any other companion that is read adds nothing (decision D-131).
+QualityMark uncertain_companion(const CompanionInput& companion) noexcept {
+    return companion.mark.quality == Quality::UNCERTAIN
+               ? QualityMark{.quality = Quality::UNCERTAIN,
+                             .flags = companion_flags(companion)}
+               : GOOD_MARK;
+}
+
 // A companion the value depends on (exponent, time): usable when it was
 // read with a value that is not BAD; an UNCERTAIN one makes the value at
 // most UNCERTAIN (contract 5.5; decision D-131).
@@ -265,11 +274,7 @@ std::optional<CompanionInput> usable_companion(Work& work,
         work.mark = worse(work.mark, bad(companion_flags(companion)));
         return std::nullopt;
     }
-    if (companion.mark.quality == Quality::UNCERTAIN) {
-        work.mark =
-            worse(work.mark, QualityMark{.quality = Quality::UNCERTAIN,
-                                         .flags = companion_flags(companion)});
-    }
+    work.mark = worse(work.mark, uncertain_companion(companion));
     return companion;
 }
 
@@ -293,6 +298,7 @@ QualityMark quality_from_rules(const Work& work) noexcept {
                 mark = worse(mark, bad(companion_flags(companion)));
                 continue;
             }
+            mark = worse(mark, uncertain_companion(companion));
             raw = companion.raw;
         }
         const std::optional<std::int64_t> key =
@@ -326,6 +332,7 @@ QualityMark health_mark(const Work& work) noexcept {
                 key_of(companion.raw, rule.has_field, rule.lo, rule.hi);
             good = key.has_value() &&
                    std::binary_search(rule.good.begin(), rule.good.end(), *key);
+            mark = worse(mark, uncertain_companion(companion));
         }
         if (!good) {
             mark = worse(
@@ -418,18 +425,10 @@ bool scale_value(Work& work) noexcept {
         return integer_scale(work);
     }
     if (integer_tag) {
-        // A floating raw value on an integer tag without a scale: read as
-        // its nearest integer (CS 5.5).
-        const std::optional<std::int64_t> code = near_integer(raw.number_f);
-        if (!code.has_value() ||
-            (rules.tag_type == TagType::UINT64 && *code < 0)) {
-            work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
-            return false;
-        }
-        work.value = rules.tag_type == TagType::INT64
-                         ? int64_value(*code)
-                         : uint64_value(static_cast<std::uint64_t>(*code));
-        return true;
+        // A floating raw value on an integer value type is CF-504 (decision
+        // D-134): it is never read as an integer, scaled or not.
+        work.mark = worse(work.mark, bad(flag(QualityFlag::OUT_OF_RANGE)));
+        return false;
     }
     std::optional<double> number;
     if (rules.exponent.has_value()) {

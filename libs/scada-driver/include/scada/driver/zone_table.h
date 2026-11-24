@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -34,7 +35,8 @@ struct UtcTime {
     std::int64_t utc_ns = 0;
     // The local time was in a repeated hour (converted with the earlier
     // offset, the first occurrence), in a skipped hour (moved forward by the
-    // offset change), or outside the table.
+    // offset change), outside the table, or after the last transition of a
+    // zone file that has no rule for later times (decision D-130).
     bool uncertain = false;
 };
 
@@ -76,9 +78,18 @@ private:
         std::int64_t offset_ns = 0;
     };
 
+    // `to_utc` within the table, without the check of
+    // `certain_until_utc_ns_`.
+    SCADA_RT [[nodiscard]] UtcTime convert(
+        std::int64_t local_ns) const noexcept;
+
     std::vector<Interval> intervals_;
     // The end of the table's last year (UTC).
     std::int64_t end_utc_ns_ = 0;
+    // From this instant on the file states no offset: its last transition
+    // when it has no footer rule (RFC 9636 3.3).
+    std::int64_t certain_until_utc_ns_ =
+        std::numeric_limits<std::int64_t>::max();
 };
 
 // True when `name` may name a zone file: 1 to ZONE_NAME_MAX_BYTES bytes of

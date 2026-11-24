@@ -4,6 +4,7 @@
 #include "scada/driver/point_rules.h"
 
 #include "scada/common/status.h"
+#include "scada/driver/raw_value.h"
 #include "scada/tag/types.h"
 
 #include <gtest/gtest.h>
@@ -49,6 +50,37 @@ TEST(PointRules, ValidRulesPass) {
     integer.scale = ScaleRule{
         .form = ScaleRule::Form::DIVIDE_BY, .integer = true, .divide_by = 1};
     EXPECT_TRUE(validate_point_rules(integer).ok());
+}
+
+TEST(PointRules, FloatingRawTypeOnAnIntegerValueTypeIsRefused) {
+    // CF-504 (decision D-134): an enumeration and a double point read a
+    // floating raw value as a code (CS 5.3, 5.5); any other INT64 or UINT64
+    // point is refused, a counter included. FLOAT64 takes any raw type.
+    for (const TagType type : {TagType::INT64, TagType::UINT64}) {
+        PointRules plain;
+        plain.tag_type = type;
+        plain.raw_kind = RawKind::FLOAT;
+        EXPECT_EQ(validate_point_rules(plain).code(),
+                  StatusCode::INVALID_ARGUMENT);
+        PointRules counter = plain;
+        counter.counter = CounterRule{};
+        EXPECT_FALSE(validate_point_rules(counter).ok());
+    }
+    PointRules enumeration;
+    enumeration.tag_type = TagType::INT64;
+    enumeration.raw_kind = RawKind::FLOAT;
+    enumeration.has_enum = true;
+    enumeration.enum_codes = {0, 1};
+    EXPECT_TRUE(validate_point_rules(enumeration).ok());
+    PointRules double_point;
+    double_point.tag_type = TagType::INT64;
+    double_point.raw_kind = RawKind::FLOAT;
+    double_point.double_point = DoublePointRule{};
+    EXPECT_TRUE(validate_point_rules(double_point).ok());
+    PointRules floating;
+    floating.tag_type = TagType::FLOAT64;
+    floating.raw_kind = RawKind::FLOAT;
+    EXPECT_TRUE(validate_point_rules(floating).ok());
 }
 
 TEST(PointRules, EachFaultIsRefused) {

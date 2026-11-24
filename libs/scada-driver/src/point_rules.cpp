@@ -2,6 +2,7 @@
 
 #include "scada/common/static_string.h"
 #include "scada/common/status.h"
+#include "scada/driver/raw_value.h"
 #include "scada/tag/types.h"
 
 #include <algorithm>
@@ -110,6 +111,10 @@ Status validate_point_rules(const PointRules& rules) noexcept {
         ((rules.scale.has_value() && !is_integer_scaling(*rules.scale)) ||
          rules.exponent.has_value())) {
         return refused("integer value type needs an integer scaling (CF-517)");
+    }
+    if (is_integer_tag(rules.tag_type) && rules.raw_kind == RawKind::FLOAT &&
+        !rules.has_enum && !rules.double_point.has_value()) {
+        return refused("integer value type on a floating raw type (CF-504)");
     }
     if ((rules.device_time.local && rules.device_time.zone == nullptr) ||
         (rules.companion_time.local && rules.companion_time.zone == nullptr)) {

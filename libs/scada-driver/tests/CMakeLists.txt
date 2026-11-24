@@ -6,6 +6,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     point_rules_test.cpp
     sample_processing_test.cpp
     tzif_test.cpp
+    zone_file_test.cpp
     zone_table_test.cpp
   DEPENDS scada::driver)
 # The tests compute expected values with the same arithmetic as the library

@@ -21,16 +21,27 @@
 #     raw_range=<min>:<max>           `raw_range`
 #     enum=<code>,<code>...           an enumeration
 #     invert                          a BOOL point read inverted
+#     exponent=multiply|divide        `exponent_from` the sample's companion
+#     time_from=synced|unknown        `source_time_from` the companion (UTC)
+#     device_time=synced|unknown      a time value's `device_time` (UTC)
+#     counter=<limit>:<wrap|saturate>:<accept|hold|reset>   a counter
+#     double_point=<raw>:<code>,...   `kind: double_point` with `states`
+#     substitute=<0xhex>:<value>      an invalid marker with `substitute`
+#     keep_last=<0xhex>               an invalid marker with `keep_last`
+#     max_age=<seconds>               `max_age`
 #
-#   sample <rules> raw=<raw> [bytes=... binding=...] -> value=<value> quality=<Q> flags=<F>,...
-#     A fresh point after attach processes one answer with VALUE, at a
-#     receive time stamped by the driver.
+#   sample <rules> raw=<raw>... [companion=<raw>] [bytes=... binding=...] -> value=<value> quality=<Q> flags=<F>,... [source_time=<ns>]
+#     A fresh point after attach processes one answer with VALUE per
+#     `raw=`, in order, one second apart, at receive times stamped by the
+#     driver; the last answer's result is compared. A companion is read
+#     with VALUE and GOOD for every answer.
 #
 #   write <rules> raw_type=<kind>:<width> value=<value> -> raw=<0xhex> written=<value>
 #   write <rules> raw_type=<kind>:<width> value=<value> -> refused
 #
 #   <raw>   signed:<width>:<decimal> | unsigned:<width>:<decimal or 0xhex>
 #           | float32:<0xbits> | float64:<0xbits> | bool:<0|1>
+#           | time:<nanoseconds since 1970, UTC>
 #   <value> int64:<decimal> | uint64:<decimal> | float64:<0xbits> | bool:<0|1>
 #   <kind>  signed | unsigned | float | bool
 #   <Q>     GOOD | UNCERTAIN | BAD; <F> the flag names of tag database 6, or -
@@ -57,6 +68,18 @@ rules setpoint_kw tag=float64 gain=0.1
 rules setpoint_pct tag=float64 divide_by=10
 rules setpoint_offset tag=float64 gain=0.1 offset=-40
 rules float_target tag=float64
+rules energy_exp tag=float64 exponent=multiply
+rules energy_div tag=float64 exponent=divide
+rules stamped tag=int64 time_from=synced
+rules stamped_unknown tag=int64 time_from=unknown
+rules event_time tag=int64 device_time=synced
+rules event_time_unknown tag=int64 device_time=unknown
+rules pulses tag=uint64 counter=65535:wrap:accept
+rules pulses_hold tag=uint64 counter=65535:wrap:hold
+rules pulses_saturate tag=uint64 counter=9999:saturate:accept
+rules breaker tag=int64 double_point=10:1,20:2,30:0
+rules temp_substitute tag=float64 gain=0.1 substitute=0x8000:float64:0xBFF0000000000000
+rules temp_keep tag=float64 gain=0.1 keep_last=0x7FFF max_age=10
 
 # --- Samples: markers on the pattern (step 1) -------------------------------
 
@@ -109,3 +132,27 @@ write float_target raw_type=float:32 value=float64:0x3FB999999999999A -> raw=0x3
 write float_target raw_type=float:32 value=float64:0x7FF8000000000000 -> refused
 write float_target raw_type=float:32 value=float64:0x48078287F49C4A1D -> refused
 write flag_inverted raw_type=bool:1 value=bool:1 -> raw=0x0 written=bool:1
+
+# --- Companions (5.5), times (5.8), counters and double points (5.4),
+# --- substitute and keep_last (5.3) ----------------------------------------
+
+sample energy_exp raw=signed:16:123 companion=signed:16:2 -> value=float64:0x40C8060000000000 quality=GOOD flags=LOCAL_TIME
+sample energy_div raw=unsigned:32:12345 companion=signed:16:3 -> value=float64:0x4028B0A3D70A3D71 quality=GOOD flags=LOCAL_TIME
+sample energy_exp raw=signed:16:123 companion=signed:16:21 -> value=float64:0x0 quality=BAD flags=OUT_OF_RANGE,NOT_INIT,LOCAL_TIME
+sample stamped raw=signed:16:5 companion=time:1700000000000000000 -> value=int64:5 quality=GOOD flags=- source_time=1700000000000000000
+sample stamped_unknown raw=signed:16:5 companion=time:1700000000000000000 -> value=int64:5 quality=GOOD flags=TIME_UNCERTAIN source_time=1700000000000000000
+sample event_time raw=time:1700000000123456789 -> value=int64:1700000000123456789 quality=GOOD flags=LOCAL_TIME
+sample event_time_unknown raw=time:1700000000123456789 -> value=int64:1700000000123456789 quality=GOOD flags=TIME_UNCERTAIN,LOCAL_TIME
+sample pulses raw=unsigned:16:65000 raw=unsigned:16:10 -> value=uint64:10 quality=GOOD flags=LOCAL_TIME
+sample pulses_hold raw=unsigned:16:1000 raw=unsigned:16:900 -> value=uint64:1000 quality=UNCERTAIN flags=LOCAL_TIME
+sample pulses_hold raw=unsigned:16:1000 raw=unsigned:16:900 raw=unsigned:16:1001 -> value=uint64:1001 quality=GOOD flags=LOCAL_TIME
+sample pulses_saturate raw=unsigned:16:9998 raw=unsigned:16:9999 -> value=uint64:9999 quality=GOOD flags=OVERFLOW,LOCAL_TIME
+sample breaker raw=unsigned:16:20 -> value=int64:2 quality=GOOD flags=LOCAL_TIME
+sample breaker raw=unsigned:16:30 -> value=int64:0 quality=GOOD flags=LOCAL_TIME
+sample breaker raw=unsigned:16:11 -> value=int64:3 quality=BAD flags=OUT_OF_RANGE,LOCAL_TIME
+sample temp_substitute raw=unsigned:16:0x8000 -> value=float64:0xBFF0000000000000 quality=UNCERTAIN flags=LOCAL_TIME
+sample temp_keep raw=signed:16:215 raw=signed:16:32767 -> value=float64:0x4035800000000000 quality=UNCERTAIN flags=STALE,LOCAL_TIME
+# Never read: nothing to hold, and nothing stale.
+sample temp_keep raw=signed:16:32767 -> value=float64:0x0 quality=BAD flags=NOT_INIT,LOCAL_TIME
+# Held for 10 s (max_age), BAD with STALE on the answer 11 s after the read.
+sample temp_keep raw=signed:16:215 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 raw=signed:16:32767 -> value=float64:0x4035800000000000 quality=BAD flags=STALE,LOCAL_TIME

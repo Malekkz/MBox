@@ -1,16 +1,11 @@
 #include "scada/driver/zone_table.h"
 
-#include "scada/common/fd.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "tzif.h"
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "zone_file.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -24,6 +19,8 @@
 #ifndef SCADA_ZONEINFO_DIR
 #error "SCADA_ZONEINFO_DIR must be set by the build (CMake option)"
 #endif
+static_assert(std::string_view(SCADA_ZONEINFO_DIR).starts_with('/'),
+              "SCADA_ZONEINFO_DIR must be an absolute path");
 
 namespace scada::driver {
 
@@ -61,6 +58,8 @@ constexpr std::ptrdiff_t SEARCH_WINDOW = 2;
 struct Change {
     std::int64_t at_s = 0;
     std::int32_t offset_s = 0;
+    bool daylight = false;  // the start of daylight time, by a rule
+    int year = 0;           // the year of the rule that gave it
 };
 
 // The changes a TZ string gives from `first_year` to `last_year`.
@@ -74,16 +73,42 @@ std::vector<Change> rule_changes(const detail::TzString& rule, int first_year,
         // The start is read in standard time, the end in daylight time.
         changes.push_back(Change{
             .at_s = detail::rule_instant_s(rule.start, year, rule.std_offset_s),
-            .offset_s = rule.dst_offset_s});
+            .offset_s = rule.dst_offset_s,
+            .daylight = true,
+            .year = year});
         changes.push_back(Change{
             .at_s = detail::rule_instant_s(rule.end, year, rule.dst_offset_s),
-            .offset_s = rule.std_offset_s});
+            .offset_s = rule.std_offset_s,
+            .daylight = false,
+            .year = year});
     }
+    // A total order, so that equal instants decide the same way every time
+    // (decision D-130): by instant, then by the year of the rule, then the
+    // start before the end. An end that meets the next year's start gives
+    // daylight time all year (RFC 9636 3.3.1, `EST5EDT,0/0,J365/25`); a
+    // start and an end of one year at one instant give no daylight time, as
+    // the C library reads them.
     std::sort(changes.begin(), changes.end(),
               [](const Change& left, const Change& right) {
-                  return left.at_s < right.at_s;
+                  if (left.at_s != right.at_s) {
+                      return left.at_s < right.at_s;
+                  }
+                  if (left.year != right.year) {
+                      return left.year < right.year;
+                  }
+                  return left.daylight && !right.daylight;
               });
-    return changes;
+    // One change per instant: the last of those at it.
+    std::vector<Change> unique;
+    unique.reserve(changes.size());
+    for (const Change& change : changes) {
+        if (!unique.empty() && unique.back().at_s == change.at_s) {
+            unique.back() = change;
+        } else {
+            unique.push_back(change);
+        }
+    }
+    return unique;
 }
 
 // The offset of `zone` just after `at_s` by the rule alone.
@@ -107,42 +132,24 @@ std::int32_t rule_offset_at(const detail::TzString& rule,
     return offset;
 }
 
+// The end of what a file without a footer rule states: its last transition
+// (the table's start, for a file without one), within the table.
+std::int64_t last_stated_ns(const detail::TzifZone& zone, std::int64_t first_s,
+                            std::int64_t end_s) noexcept {
+    return zone.transitions_s.empty()
+               ? first_s * NS_PER_S
+               : std::clamp(zone.transitions_s.back(), first_s, end_s) *
+                     NS_PER_S;
+}
+
 Result<std::vector<std::byte>> read_zone_file(std::string_view zone_name) {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read on the loader thread; no thread of a service sets the environment
     const char* configured = std::getenv("TZDIR");
     const std::string directory = (configured != nullptr && *configured != '\0')
                                       ? std::string(configured)
                                       : std::string(SCADA_ZONEINFO_DIR);
-    const std::string path = directory + "/" + std::string(zone_name);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
-    const Fd file(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY));
-    if (!file.valid()) {
-        return errno == ENOENT
-                   ? Status(StatusCode::NOT_FOUND, "time zone not found")
-                   : Status(StatusCode::IO_ERROR,
-                            "time zone file not readable");
-    }
-    struct stat info {};
-    if (::fstat(file.get(), &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_size < 0 ||
-        static_cast<std::uint64_t>(info.st_size) > detail::TZIF_MAX_BYTES) {
-        return Status(StatusCode::DATA_CORRUPT, "zone file not valid");
-    }
-    std::vector<std::byte> bytes(static_cast<std::size_t>(info.st_size));
-    std::size_t done = 0;
-    while (done < bytes.size()) {
-        const ssize_t got =
-            ::read(file.get(), std::span(bytes).subspan(done).data(),
-                   bytes.size() - done);
-        if (got < 0 && errno == EINTR) {
-            continue;
-        }
-        if (got <= 0) {
-            return Status(StatusCode::IO_ERROR, "time zone file not readable");
-        }
-        done += static_cast<std::size_t>(got);
-    }
-    return bytes;
+    return detail::read_zone_file_beneath(directory, zone_name,
+                                          detail::BeneathMethod::AUTOMATIC);
 }
 
 }  // namespace
@@ -171,7 +178,11 @@ bool is_zone_name(std::string_view name) noexcept {
         }
         ++component;
     }
-    return true;
+    // Names the system chooses rather than the database (`localtime`,
+    // `posixrules`), and the copies on other time scales.
+    const std::string_view first = name.substr(0, name.find('/'));
+    return name != "localtime" && name != "posixrules" && first != "posix" &&
+           first != "right";
 }
 
 Result<ZoneTable> ZoneTable::build(std::string_view zone_name) noexcept {
@@ -224,8 +235,11 @@ Result<ZoneTable> ZoneTable::from_tzif(
                 zone.transitions_s.back() <= first_s) {
                 offset = rule_offset_at(rule, first_s);
             }
-            for (const Change& change : rule_changes(
-                     rule, ZONE_TABLE_FIRST_YEAR, ZONE_TABLE_LAST_YEAR)) {
+            // One year beyond each end, so that a change at the edge of
+            // the table meets its neighbour of the next year.
+            for (const Change& change :
+                 rule_changes(rule, ZONE_TABLE_FIRST_YEAR - 1,
+                              ZONE_TABLE_LAST_YEAR + 1)) {
                 if (change.at_s > last_s && change.at_s < end_s) {
                     changes.push_back(change);
                 }
@@ -240,6 +254,9 @@ Result<ZoneTable> ZoneTable::from_tzif(
 
         ZoneTable table;
         table.end_utc_ns_ = end_s * NS_PER_S;
+        if (!zone.footer.has_value()) {
+            table.certain_until_utc_ns_ = last_stated_ns(zone, first_s, end_s);
+        }
         table.intervals_.push_back(Interval{
             .begin_utc_ns = first_s * NS_PER_S,
             .offset_ns = static_cast<std::int64_t>(offset) * NS_PER_S});
@@ -260,6 +277,14 @@ Result<ZoneTable> ZoneTable::from_tzif(
 }
 
 UtcTime ZoneTable::to_utc(std::int64_t local_ns) const noexcept {
+    UtcTime time = convert(local_ns);
+    if (time.utc_ns >= certain_until_utc_ns_) {
+        time.uncertain = true;
+    }
+    return time;
+}
+
+UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
     if (intervals_.empty()) {
         return UtcTime{.utc_ns = local_ns, .uncertain = false};
     }

@@ -39,6 +39,7 @@ using tag::TagType;
 
 constexpr std::int64_t RECEIVE_NS = 1'800'000'000'000'000'000;
 constexpr std::int64_t MONO_NS = 5'000'000'000;
+constexpr std::int64_t NS_PER_S = 1'000'000'000;
 constexpr int HEX = 16;
 constexpr int DECIMAL = 10;
 
@@ -146,23 +147,35 @@ std::optional<TagValue> value_of(std::string_view text) {
     return std::nullopt;
 }
 
-std::optional<RawValue> raw_of(std::string_view text) {
-    const std::vector<std::string> parts = split(text, ':');
-    if (parts.size() == 2 && parts[0] == "float32") {
+// A raw value written as `<kind>:<number>`: float32, float64, bool, time.
+std::optional<RawValue> raw_of_two(const std::vector<std::string>& parts) {
+    if (parts[0] == "float32") {
         const auto bits = integer<std::uint32_t>(parts[1]);
         return bits.has_value()
                    ? std::optional(raw_float32(std::bit_cast<float>(*bits)))
                    : std::nullopt;
     }
-    if (parts.size() == 2 && parts[0] == "float64") {
+    if (parts[0] == "float64") {
         const auto bits = integer<std::uint64_t>(parts[1]);
         return bits.has_value()
                    ? std::optional(raw_float64(std::bit_cast<double>(*bits)))
                    : std::nullopt;
     }
-    if (parts.size() == 2 && parts[0] == "bool" &&
-        (parts[1] == "0" || parts[1] == "1")) {
+    if (parts[0] == "bool" && (parts[1] == "0" || parts[1] == "1")) {
         return raw_bool(parts[1] == "1");
+    }
+    if (parts[0] == "time") {
+        const auto device_ns = integer<std::int64_t>(parts[1]);
+        return device_ns.has_value() ? std::optional(raw_time(*device_ns))
+                                     : std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<RawValue> raw_of(std::string_view text) {
+    const std::vector<std::string> parts = split(text, ':');
+    if (parts.size() == 2) {
+        return raw_of_two(parts);
     }
     if (parts.size() == 3) {
         const auto width = integer<unsigned>(parts[1]);
@@ -254,6 +267,117 @@ std::optional<TagType> tag_type_named(const std::string& name) {
     return found == TYPES.end() ? std::nullopt : std::optional(found->second);
 }
 
+// The keys that read a companion (slot 0 of a companion list of one):
+// `exponent=multiply|divide`, `time_from=synced|unknown`; and a point's own
+// device time, `device_time=synced|unknown` (UTC).
+bool companion_key(const std::string& key, const std::string& value,
+                   PointRules& rules) {
+    constexpr std::uint32_t COMPANION_POINT = 1;
+    if (key == "exponent" && (value == "multiply" || value == "divide")) {
+        rules.companions = {COMPANION_POINT};
+        rules.exponent =
+            ExponentRule{.companion = 0, .divide = value == "divide"};
+        return true;
+    }
+    if (key == "time_from" && (value == "synced" || value == "unknown")) {
+        rules.companions = {COMPANION_POINT};
+        rules.time_companion = 0;
+        rules.companion_time = DeviceTimeRule{.synced = value == "synced"};
+        return true;
+    }
+    if (key == "device_time" && (value == "synced" || value == "unknown")) {
+        rules.device_time = DeviceTimeRule{.synced = value == "synced"};
+        return true;
+    }
+    return false;
+}
+
+// `counter=<limit>:<wrap|saturate>:<accept|hold|reset>`.
+bool counter_key(const std::vector<std::string>& parts, PointRules& rules) {
+    static const std::map<std::string, CounterRule::OnDecrease> ACTIONS{
+        {"accept", CounterRule::OnDecrease::ACCEPT},
+        {"hold", CounterRule::OnDecrease::HOLD},
+        {"reset", CounterRule::OnDecrease::RESET}};
+    const auto limit = integer<std::uint64_t>(parts[0]);
+    const auto action = ACTIONS.find(parts[2]);
+    if (!limit.has_value() || action == ACTIONS.end() ||
+        (parts[1] != "wrap" && parts[1] != "saturate")) {
+        return false;
+    }
+    rules.counter = CounterRule{.limit = *limit,
+                                .saturate = parts[1] == "saturate",
+                                .on_decrease = action->second};
+    return true;
+}
+
+// `double_point=<raw>:<code>,...`.
+bool double_point_key(const std::string& value, PointRules& rules) {
+    DoublePointRule rule;
+    for (const std::string& entry : split(value, ',')) {
+        const std::vector<std::string> pair = split(entry, ':');
+        const auto raw =
+            pair.size() == 2 ? integer<std::int64_t>(pair[0]) : std::nullopt;
+        const auto code =
+            pair.size() == 2 ? integer<std::uint8_t>(pair[1]) : std::nullopt;
+        if (!raw.has_value() || !code.has_value() ||
+            *code > static_cast<std::uint8_t>(DoublePoint::BAD_STATE)) {
+            return false;
+        }
+        rule.states.push_back(
+            {.raw = *raw, .code = static_cast<DoublePoint>(*code)});
+    }
+    std::sort(rule.states.begin(), rule.states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.raw < right.raw;
+              });
+    rules.double_point = rule;
+    return true;
+}
+
+// The keys whose result depends on earlier answers: `counter=<limit>:
+// wrap|saturate:accept|hold|reset`, `double_point=<raw>:<code>,...`,
+// `substitute=<0xhex>:<value>`, `keep_last=<0xhex>`, `max_age=<seconds>`.
+bool history_key(const std::string& key, const std::string& value,
+                 PointRules& rules) {
+    const std::vector<std::string> parts = split(value, ':');
+    if (key == "counter") {
+        return parts.size() == 3 && counter_key(parts, rules);
+    }
+    if (key == "double_point") {
+        return double_point_key(value, rules);
+    }
+    if (key == "substitute" && parts.size() == 3) {
+        const auto pattern = integer<std::uint64_t>(parts[0]);
+        const auto substitute = value_of(parts[1] + ":" + parts[2]);
+        if (!pattern.has_value() || !substitute.has_value()) {
+            return false;
+        }
+        rules.markers.push_back(
+            InvalidMarker{.pattern = *pattern,
+                          .action = InvalidAction::SUBSTITUTE,
+                          .substitute = *substitute});
+        return true;
+    }
+    if (key == "keep_last") {
+        const auto pattern = integer<std::uint64_t>(value);
+        if (!pattern.has_value()) {
+            return false;
+        }
+        rules.markers.push_back(InvalidMarker{
+            .pattern = *pattern, .action = InvalidAction::KEEP_LAST});
+        return true;
+    }
+    if (key == "max_age") {
+        const auto seconds = integer<std::int64_t>(value);
+        if (!seconds.has_value()) {
+            return false;
+        }
+        rules.max_age_ns = *seconds * NS_PER_S;
+        return true;
+    }
+    return false;
+}
+
 // One `key=value` of a `rules` line that is not a scale; false when it does
 // not parse.
 bool other_key(const std::string& key, const std::string& value,
@@ -296,7 +420,7 @@ bool other_key(const std::string& key, const std::string& value,
         rules.invert = true;
         return true;
     }
-    return false;
+    return companion_key(key, value, rules) || history_key(key, value, rules);
 }
 
 std::optional<NamedRules> rules_of(const std::vector<std::string>& fields) {
@@ -391,26 +515,77 @@ std::string result_field(const std::map<std::string, std::string>& results,
     return found == results.end() ? std::string() : found->second;
 }
 
+// Every `raw=` field before the arrow, in order.
+std::vector<std::optional<RawValue>> raws_of(
+    const std::vector<std::string>& fields, std::size_t end) {
+    std::vector<std::optional<RawValue>> out;
+    for (std::size_t index = 2; index < end; ++index) {
+        if (fields[index].starts_with("raw=")) {
+            out.push_back(raw_of(fields[index].substr(4)));
+        }
+    }
+    return out;
+}
+
+// One answer a second to a fresh point after attach, with VALUE; the last
+// one's result.
+ProcessedSample last_result(const PointRules& rules,
+                            const std::vector<std::optional<RawValue>>& raws,
+                            const std::vector<CompanionInput>& companions) {
+    PointState state = test::fresh_state(rules);
+    ProcessedSample out;
+    for (std::size_t index = 0; index < raws.size(); ++index) {
+        const auto offset = static_cast<std::int64_t>(index) * NS_PER_S;
+        out =
+            test::processed(rules, state,
+                            RawSample{.outcome = Outcome::VALUE,
+                                      .raw = raws[index].value_or(RawValue{})},
+                            companions,
+                            SampleTimes{.receive_time_ns = RECEIVE_NS + offset,
+                                        .receive_mono_ns = MONO_NS + offset});
+    }
+    return out;
+}
+
+bool all_parsed(const std::vector<std::optional<RawValue>>& raws) {
+    return !raws.empty() &&
+           std::all_of(raws.begin(), raws.end(),
+                       [](const auto& raw) { return raw.has_value(); });
+}
+
 void run_sample(const PointRules& rules, const std::vector<std::string>& fields,
                 std::size_t arrow, int line) {
-    const std::optional<RawValue> raw =
-        raw_of(field_value(fields, arrow, "raw"));
+    const std::vector<std::optional<RawValue>> raws = raws_of(fields, arrow);
+    const std::string companion_text = field_value(fields, arrow, "companion");
+    const std::optional<RawValue> companion_raw =
+        companion_text.empty() ? std::nullopt : raw_of(companion_text);
     const auto results = results_of(fields, arrow);
     const auto want_value = value_of(result_field(results, "value"));
     const auto want_quality = quality_named(result_field(results, "quality"));
     const auto want_flags = flags_of(result_field(results, "flags"));
-    if (!raw.has_value() || !want_value.has_value() ||
-        !want_quality.has_value() || !want_flags.has_value()) {
+    const std::string source_text = result_field(results, "source_time");
+    const auto want_source = integer<std::int64_t>(source_text);
+    const bool parsed = all_parsed(raws) &&
+                        (companion_text.empty() || companion_raw.has_value()) &&
+                        (source_text.empty() || want_source.has_value()) &&
+                        want_value.has_value() && want_quality.has_value() &&
+                        want_flags.has_value();
+    if (!parsed) {
         ADD_FAILURE() << "line " << line << " does not parse";
         return;
     }
-    PointState state = test::fresh_state(rules);
-    const ProcessedSample out = test::processed(
-        rules, state, RawSample{.outcome = Outcome::VALUE, .raw = *raw}, {},
-        SampleTimes{.receive_time_ns = RECEIVE_NS, .receive_mono_ns = MONO_NS});
+    std::vector<CompanionInput> companions;
+    if (companion_raw.has_value()) {
+        companions.push_back(
+            CompanionInput{.outcome = Outcome::VALUE, .raw = *companion_raw});
+    }
+    const ProcessedSample out = last_result(rules, raws, companions);
     EXPECT_TRUE(same(out.tag.value, *want_value)) << "line " << line;
     EXPECT_EQ(out.tag.quality, *want_quality) << "line " << line;
     EXPECT_EQ(out.tag.flags, *want_flags) << "line " << line;
+    if (want_source.has_value()) {
+        EXPECT_EQ(out.tag.source_time_ns, *want_source) << "line " << line;
+    }
 }
 
 std::optional<RawKind> raw_kind_named(const std::string& name) {

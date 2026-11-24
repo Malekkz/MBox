@@ -199,5 +199,72 @@ TEST(ZoneTable, HalfHourOffsetSkippedHalfHour) {
               (LOCAL_0215_S * SECOND) - ((5 * HOUR) + HALF_HOUR));
 }
 
+constexpr std::int32_t MINUS_5_S = -5 * PLUS_ONE_S;
+constexpr std::int32_t PLUS_10_S = 10 * PLUS_ONE_S;
+constexpr std::int64_t DAYLIGHT_WEST_S = 4 * HOUR_S;  // EDT, UTC-4
+constexpr std::int64_t DAYLIGHT_EAST_S = 11 * HOUR_S;
+constexpr std::int64_t JUL01_1988_1200 = 583'761'600;
+constexpr std::int64_t JAN01_2027_0030 = 1'798'763'400;
+constexpr std::int64_t DEC31_2026_2330 = 1'798'759'800;
+
+ZoneTable footer_only(std::int32_t standard_s, const char* footer) {
+    test::TzifSpec spec;
+    spec.offsets = {standard_s};
+    spec.footer = footer;
+    Result<ZoneTable> table = ZoneTable::from_tzif(test::build_tzif(spec));
+    EXPECT_TRUE(table.ok()) << footer;
+    return table.ok() ? table.value() : ZoneTable{};
+}
+
+TEST(ZoneTable, DaylightTimeAllYearIsNeverStandardTime) {
+    // RFC 9636 3.3.1: `EST5EDT,0/0,J365/25` is daylight time all year. The
+    // end of each year meets the start of the next at one instant; ordered
+    // the other way round it gave whole years of standard time, certain.
+    const ZoneTable table = footer_only(MINUS_5_S, "EST5EDT,0/0,J365/25");
+    for (const std::int64_t local_s :
+         {JUL01_1988_1200, JUL01_1200, JAN01_2027_0030, DEC31_2026_2330,
+          JAN15_1200}) {
+        const UtcTime time = table.to_utc(local_s * SECOND);
+        EXPECT_EQ(time.utc_ns, (local_s + DAYLIGHT_WEST_S) * SECOND) << local_s;
+        EXPECT_FALSE(time.uncertain) << local_s;
+    }
+    EXPECT_EQ(table.interval_count(), 1U);
+}
+
+TEST(ZoneTable, DaylightTimeAllYearEastOfUtcReachesTheEndOfTheTable) {
+    // East of UTC the end of 2100 falls inside the table; it meets the start
+    // of 2101, so the last hours of the table are daylight time too.
+    const ZoneTable table = footer_only(PLUS_10_S, "<+10>-10<+11>,0/0,J365/25");
+    EXPECT_EQ(table.to_utc(JAN01_2027_0030 * SECOND).utc_ns,
+              (JAN01_2027_0030 - DAYLIGHT_EAST_S) * SECOND);
+    EXPECT_EQ(table.interval_count(), 1U);
+}
+
+TEST(ZoneTable, WithoutAFooterTimesAfterTheLastTransitionAreUncertain) {
+    // RFC 9636 3.3: an empty footer gives no rule for later times.
+    constexpr std::int64_t CHANGE_S = 1'700'000'000;  // 2023-11-14
+    test::TzifSpec spec;
+    spec.transitions = {CHANGE_S};
+    spec.type_of = {1};
+    spec.offsets = {PLUS_ONE_S, PLUS_6_S};
+    spec.footer = "";
+    const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_TRUE(table.ok());
+    constexpr std::int64_t JUL01_2020_1200 = 1'593'604'800;
+    const UtcTime before = table.value().to_utc(JUL01_2020_1200 * SECOND);
+    EXPECT_FALSE(before.uncertain);
+    EXPECT_EQ(before.utc_ns, (JUL01_2020_1200 - PLUS_ONE_S) * SECOND);
+    const UtcTime after = table.value().to_utc(JUL01_1200 * SECOND);
+    EXPECT_TRUE(after.uncertain);
+    EXPECT_EQ(after.utc_ns, (JUL01_1200 - PLUS_6_S) * SECOND);
+    // With no transition either, nothing is certain.
+    test::TzifSpec bare;
+    bare.offsets = {PLUS_ONE_S};
+    bare.footer = "";
+    const auto none = ZoneTable::from_tzif(test::build_tzif(bare));
+    ASSERT_TRUE(none.ok());
+    EXPECT_TRUE(none.value().to_utc(JUL01_1200 * SECOND).uncertain);
+}
+
 }  // namespace
 }  // namespace scada::driver
