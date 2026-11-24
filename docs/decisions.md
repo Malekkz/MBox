@@ -1930,3 +1930,64 @@ Options: line 0 for "no line"; line 1, column 1; a diagnostic without a location
 Decision: a diagnostic about a whole file, a directory or the tree points at line 1, column 1 of that path. The 20,000 limit counts every entry of the tree, refused ones (links, FIFOs, unknown names) too, except the directories the tree may hold (at most 8 besides the root); a tree limit points at the entry that passed it. A directory is listed only as far as the limit plus those 8 directories, and a limit passed while listing points at that directory, `.` for the root, so the work of stage 1 is bounded whatever the tree holds. The scan reads directories depth first in byte order of their paths and stops when a tree limit is passed, so the same tree always stops at the same place.
 Reason: 1-based locations keep one format for every diagnostic and every tool that reads it. Counting only regular files would leave the time spent on other entries unbounded; counting the tree's own directories would refuse a tree of exactly 20,000 files, which the contract allows.
 Consequences: an invalid entry costs one of the 20,000, so a tree with many refused entries stops early with CF-113; it is refused either way.
+
+## D-106: The YAML subset parser is the project's own; how it reports
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted (parser choice: the lead, 2026-11-23)
+
+Context: D-70 leaves the parser of the YAML subset, a new dependency or not, to #100. Configuration schemas contract 1.1 and 1.4 ask for a refusal with a code, line and column for every construct outside the subset, and 1.3 for limits checked before the work they bound. The contract leaves open some details of how a refusal is reported.
+Options: libyaml 0.2.5 (MIT), event API with marks, plus a layer that maps its events onto the subset's errors; rapidyaml (MIT), which builds the whole tree before anything can be checked; a parser of the subset written for the project.
+Decision: the project's own parser (`libs/scada-conf/src/yaml_parser.cpp`), no dependency. It is recursive descent, and every collection it enters is checked against the depth limit first, so recursion is bounded. The reporting rules are these:
+- The first refusal ends the parse of its file; a file gives at most one stage 2 error.
+- Columns count characters (code points), not bytes. The offset in CF-114's message counts bytes from 0.
+- A byte order mark is CF-110 ("a byte order mark"). Invalid UTF-8, a NUL, a CR without LF, C0 and C1 control characters and DEL are CF-114 anywhere. A tab is CF-114 outside a comment, a quoted scalar or a block scalar's content: indentation, separation and plain scalars use spaces only.
+- An escape giving U+0000 (`\0`, `\x00`) is CF-110. Other escapes of YAML 1.2 are accepted; the schema decides whether a control character may stand in a value (contract 2.1).
+- `null`, `Null`, `NULL` and `~` as plain values, an empty value and an empty sequence item are CF-112. As keys, and quoted, they are text.
+- A single-pair mapping inside a flow sequence (`[a: b]`) is CF-110: the subset's flow mappings are written in braces.
+- Two keys of one map with equal text are CF-111 in stage 2. Keys that are equal only after typing (`16` and `0x10`, contract 1.2) are CF-111 in stage 3, which types them.
+- The nesting depth counts collections: the root collection is at depth 1, and 33 nested collections are CF-113.
+- An empty file, or one of comments only, is an empty map; the schema then reports what it needs.
+- A `.st` file is not parsed: structured text is not available in this version, and every `control/*.st` file is CF-920 at 1:1, "structured text is not available in this version" (contract 9.3, 0.6; the lead, 2026-11-23). A program that is not run must not look accepted. The structured-text parser is phase 6.
+- U+FFFE and U+FFFF are CF-114, as YAML 1.2 does not allow them.
+- Indentation is counted in spaces, also on a continuation line of a quoted scalar; a tab may follow the indentation there. A tab where the indentation is still due is a tab in indentation: CF-114 at the tab (contract 1.1; the lead, 2026-11-24).
+- Every line inside a flow collection is indented more than the key or the sequence item that holds it. A closing bracket that is not is CF-110 with its own message: indent the bracket, or write the collection as a block (the lead, 2026-11-23). A block collection would also do, so the rule costs nothing.
+- A key is on one line, in flow collections too, although YAML 1.2 allows a plain key over several lines in a flow mapping.
+- A document marker at the start of a line is CF-110 inside a root block scalar too.
+- The scalar limit holds for the value as it will be: lines are counted before they are stored, trailing white space of a line is not counted, and empty lines are kept as a count, so that no input makes the parser hold more than the limit for one scalar.
+- Duplicate keys are found with an ordered set in the document builder (D-111), not a hash table with a fixed seed. A message names a key in double quotes, so that an empty key stays visible.
+Reason: the subset refuses constructs that a general parser accepts quietly, and each refusal needs its own code and column. Every scalar must keep its source text and quoting style (contract 1.2), and every limit must be checked before its work. A library would need a mapping layer for all of that, and would bring code that the project cannot bound or fuzz on its own terms. Without a dependency there is no licence to record.
+Consequences: the parser is a fuzz target (`yaml_fuzz`) with a seed corpus of every refused construct. The README of libscada-conf says plainly that it is a subset parser and lists what it refuses. A test compared its trees with PyYAML (BaseLoader) on 15,000 random documents written in every style PyYAML emits; they were equal. That comparison is not part of the suite, because PyYAML is not a dependency.
+
+## D-110: Text of the tree in diagnostics is escaped and capped
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted (the lead's review of #130, 2026-11-23)
+
+Context: messages quote keys, values and paths of the tree (contract section 10). The tree is outside input (an imported archive, reference 12.7). Text with a line break can forge a second diagnostic line; a terminal escape or a character that reorders text (U+202E) can change what an operator sees. A 64 KiB scalar would make a 64 KiB message.
+Options: escape when a report is printed; escape when a diagnostic is collected.
+Decision: `Diagnostics::add`, which every diagnostic passes through from stage 1 on, makes its message, paths, note kinds and details printable with one function, `printable`:
+- line feed, carriage return and tab as `\n`, `\r`, `\t`; other C0 control characters, DEL and bytes that are not valid UTF-8 as `\xNN`;
+- as `\uNNNN`, or `\UNNNNNNNN` above U+FFFF: the C1 control characters; the invisible and bidirectional characters U+00AD, U+061C, U+180E, U+200B to U+200F, U+2028 to U+202E, U+2060 to U+2064, U+2066 to U+2069, U+FEFF and U+FFF9 to U+FFFB; the non-characters U+FDD0 to U+FDEF and U+nFFFE and U+nFFFF of every plane; the tag characters U+E0000 to U+E007F;
+- a backslash is kept, so that `printable` leaves text it has made printable as it is. A key or value that a message quotes goes through `quote_text`, which writes it in double quotes with `\` and `"` escaped, so that a quoted piece has an unambiguous end;
+- each text is cut at 1,024 bytes, before a whole character or escape, and ends in `...`.
+Reason: one place, before any consumer (the command line, the API, the journal), so no consumer can forget it. Keeping the backslash in `printable` is what lets a message hold escaped pieces from `quote_text` without escaping them twice; a backslash cannot drive a terminal.
+Consequences: a report holds only printable text; a consumer prints it as it is.
+
+## D-111: The node type: an immutable Document built by a DocumentBuilder
+Date: 2026-11-23
+Phase / issue: 2, #100 (P2-03)
+Status: accepted (the lead's review of #130, ruling 7, 2026-11-23; agreed with #104, whose driver reads the same type)
+
+Context: the parsed tree is read by the stages of validation and, through the loader of the expanded file (contract 13.3), by the drivers (#104). The first node type had a public mutable `Document`, accessors that throw (`.at()`), a linear `find` and 72 bytes per node.
+Options: nodes as objects with pointers to their children; nodes in arrays of one Document, read by index.
+Decision:
+- A `Document` is immutable. Only a `DocumentBuilder` makes one: `add_file`, `scalar`, `key`, `begin_map` / `end_map`, `begin_sequence` / `end_sequence`, `finish`. Misuse and a duplicate key are returned as a status, not thrown.
+- Nodes are read by `NodeId`: `kind`, `style`, `text`, `position` (file index, line, column) and `location` (with the file's name); a map's `entries` and a sequence's `items` are spans. No accessor throws; an id of another document ends the process (a programmer error), and a moved-from document must not be read.
+- The type a schema gives a scalar is not in the node: stage 3 keeps it in a table beside the document, indexed by `NodeId`, 1 byte per node (the lead, 2026-11-24), so the document stays immutable.
+- `find` is a binary search over each map's keys, sorted once by the builder: O(log n), for consumers that look keys up per point.
+- A node is 20 bytes, a map entry 12 more, a sequence item 4 more, plus the text. At the tree's node limit (4,000,000) the structure is at most 104 MB.
+- Reading a const `Document` from several threads is safe: there are no lazy caches.
+Reason: index access keeps every node in a few arrays, which is small, needs no allocation per node, and makes the document cheap to move. A builder is the one place that enforces the invariants (a key is a scalar, keys are unique, collections are closed), for the parser and the loader alike.
+Consequences: the typed reads of a node (`to_int64` and the like) and the table of types come with stage 3 (slice 3 of #100).
+

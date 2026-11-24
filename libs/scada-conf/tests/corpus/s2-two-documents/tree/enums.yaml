@@ -1,0 +1,4 @@
+enums:
+  run_state: { 0: stopped, 1: running }
+---
+enums: {}

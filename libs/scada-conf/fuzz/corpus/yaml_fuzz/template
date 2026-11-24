@@ -1,0 +1,13 @@
+template: flow_meter_x
+protocol: modbus
+points:
+  - name: flow
+    address: { table: holding, register: 100, type: float32, word_order: big }
+    scale: { gain: 1.0, offset: 0.0 }
+    alarms:
+      - { type: high, limit: 450, deadband: 5, on_delay: 10s, priority: medium }
+repeat:
+  - for: { n: "1..inputs" }
+    points:
+      - name: "pv{n}.voltage"
+        address: { table: holding, register: "if(n <= 24, 1000 + 2 * (n - 1), 0)", type: int16 }

@@ -1,0 +1,3 @@
+# A closing bracket not indented more than its key is CF-110, with its own
+# message (contract 1.1).
+areas.yaml:5:5: CF-110

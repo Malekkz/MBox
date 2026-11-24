@@ -1,0 +1,3 @@
+# A tab where a quoted line's indentation is due is CF-114 at the tab
+# (contract 1.1).
+areas.yaml:4:1: CF-114
