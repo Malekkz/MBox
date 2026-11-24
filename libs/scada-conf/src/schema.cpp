@@ -8,6 +8,7 @@
 
 #include "scada/conf/schema.h"
 
+#include "expression_site.h"
 #include "scada/common/panic.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -18,7 +19,6 @@
 #include "scada/conf/scalar.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
-#include "expression_site.h"
 
 #include <algorithm>
 #include <array>

@@ -16,7 +16,15 @@
 namespace scada::conf {
 
 // The value types of 5.6, and RANGE for `a..b`.
-enum class ValueType : std::uint8_t { BOOL, INT, REAL, TIME, STRING, SET, RANGE };
+enum class ValueType : std::uint8_t {
+    BOOL,
+    INT,
+    REAL,
+    TIME,
+    STRING,
+    SET,
+    RANGE
+};
 
 // The name of a type as messages write it: "BOOL", "INT".
 [[nodiscard]] std::string_view value_type_name(ValueType type) noexcept;

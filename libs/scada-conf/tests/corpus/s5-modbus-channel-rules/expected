@@ -1,0 +1,6 @@
+# The protocol rules of a Modbus channel (Annex A.1, CF-622): 7 data bits
+# on RTU, a loopback and a multicast host. A documentation address
+# (192.0.2.20) is a valid host. Invented.
+drivers/modbus/line1.yaml:6:14: CF-622
+drivers/modbus/net1.yaml:4:9: CF-622
+drivers/modbus/net2.yaml:4:9: CF-622

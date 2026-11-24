@@ -22,8 +22,8 @@ constexpr unsigned char UTF8_CONTINUATION = 0x80;
 ExpressionSite expression_site(const Document& document, NodeId scalar,
                                std::uint32_t column) {
     const std::string_view text = document.text(scalar);
-    const std::size_t offset = std::min<std::size_t>(
-        column > 0 ? column - 1 : 0, text.size());
+    const std::size_t offset =
+        std::min<std::size_t>(column > 0 ? column - 1 : 0, text.size());
     std::size_t line = 1;
     std::size_t character = 1;
     for (std::size_t i = 0; i < offset; ++i) {

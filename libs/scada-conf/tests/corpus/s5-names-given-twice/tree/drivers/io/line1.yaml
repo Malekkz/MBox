@@ -1,0 +1,1 @@
+channel: { name: line1, backend: gpio, chip: main-gpio }

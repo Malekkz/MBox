@@ -59,13 +59,29 @@ Expressions (contract 5.6) are parsed at stage 3 by `parse_expression`
 (`include/scada/conf/expression.h`): run-time expressions (`expr`,
 `suppress_when`, interlock `condition`) and configuration expressions
 (`when`, addresses and scaling, `repeat` ranges), each with its own syntax
-codes (CF-520, CF-526, CF-528, CF-529). Their names and types are checked
-against the expanded tree in stage 5.
+codes (CF-520, CF-526, CF-528, CF-529).
+
+Stage 5 runs when stages 1 to 3 found no error. Stage 4, the expansion of
+templates and instances, comes with #103, so stage 5 checks for now what
+needs no expansion (`check_references`, `include/scada/conf/references.h`,
+D-113):
+- names that must exist (CF-310): templates and `extends`, a template's
+  protocol, areas, logging policies and aggregate tiers, enumerations (of
+  the template's chain or `enums.yaml`), tasks, programs, interlocks,
+  outputs, alarm priorities and classes;
+- names given twice: channels, devices and interlocks (CF-303), and the tags
+  of tag files and interlocks (CF-301, CF-302);
+- the Modbus channel rules of Annex A.1 (CF-622);
+- the types of a template's configuration expressions (CF-523), and a name
+  in them that no parameter or variable of the chain has (CF-310).
+
+A reference to a tag gives no error yet: point tags exist only once
+instances are expanded, so those references, and the names and types of
+run-time expressions, are checked in slice 7 of #100, after #103.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
-not validate before phase 6. The cross-file rules (stage 5) follow in later
-slices of #100.
+not validate before phase 6.
 
 ## The YAML subset parser
 
@@ -159,6 +175,8 @@ anything, and there are no lazy caches.
   grammar (contract 5.6), giving a tree or one located error.
 - `include/scada/conf/schema.h`: `SchemaSet`, the compiled schema files and
   the validator of stage 3.
+- `include/scada/conf/references.h`: `check_references`, the part of stage 5
+  that needs no expansion.
 - `include/scada/conf/types.h`: `ScalarType` and `ScalarTypes`, the types
   stage 3 gives the scalars of a Document.
 - `include/scada/conf/read.h`: typed reads of a scalar node (`to_int64`,
@@ -224,3 +242,7 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   same tree.
 - `tests/schema_test.cpp`: each keyword of the validator with its code, and
   the built-in schemas against the contract's examples.
+- `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
+  that a reference to a tag gives no error before the expander exists.
+- `tests/expression_types_test.cpp`: each row of the operator and function
+  tables of contract 5.6 for configuration expressions.

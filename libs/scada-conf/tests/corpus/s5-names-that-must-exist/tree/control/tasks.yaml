@@ -1,0 +1,2 @@
+tasks:
+  normal: { period: 1s, programs: [ps1_level] }

@@ -2110,6 +2110,39 @@ Limits (the lead's review of #140):
 Reason: a change of base changes what the pull request merges, and a draft made ready is the point where reviewers rely on the run; both must be tested as a push is. A title edit must not re-run the pipeline, cancel a run, or turn a red pull request green.
 Consequences: a title edit shows a few skipped checks named by their templates (`${{ needs.events.outputs.prefix }}...`) on the pull request; a red pull request stays red, because its real checks keep their names (probe test 5). The probe pull request that tested this is named in its pull request for the owner to delete.
 
+## D-113: What stage 5 checks before the expander exists
+Date: 2026-11-24
+Phase / issue: 2, #100 (P2-03), slice 6
+Status: proposed
+
+Context: stage 5 checks names, references and cross-file rules "of the expanded tree" (contract 1.4). The expander is #103 and comes after this slice (the lead, 2026-11-24, on #100 and #103). Point tags (`<device>.<point>`), names that `repeat` makes, and the bindings of `repeat` variables exist only once instances are expanded.
+Options: wait for the expander; check now only what expansion cannot change, and leave every tag reference unchecked.
+Decision: stage 5 runs today on the files as stage 3 read them, and checks only what no expansion can change:
+- names that must exist (CF-310, `{kind} {name} does not exist`):
+  - `template` of a device and `extends` of a template;
+  - a template's `protocol`, at its key (D-108);
+  - areas, logging policies (`logging`, `policy`, `default_policy`) and aggregate tiers (`tiers` keys; `1m` and `1h` when `logging.yaml` gives no `aggregate_tiers`);
+  - enumerations: a template's point looks in the `enums` of its chain, then in `enums.yaml`; an instance's in its template's chain;
+  - tasks, programs (`tasks.yaml`), interlocks (`interlocks` of an output, also `on` and `off`), outputs (`output` of a block);
+  - alarm priorities and classes, with the defaults of section 8 when no file gives the list, and the keys of `max_shelve`.
+- names given twice: a channel (also in two protocols' directories), a device (across channels) and an interlock (CF-303, "first at file:line"). The tags of tag files and interlocks: CF-301 in `sys`, CF-302 when given twice. A template, program, area, policy, task or enumeration cannot be given twice: file names and map keys are unique already.
+- the Modbus channel rules of Annex A.1 (CF-622): `data_bits: 7` on `rtu`; a `host` that is a loopback (127.0.0.0/8, `::1`), multicast (224.0.0.0/4, `ff00::/8`) or the broadcast address (255.255.255.255). A subnet's broadcast address cannot be known from the address alone.
+- the types of a template's configuration expressions, by the tables of 5.6:
+  - `when` must give BOOL;
+  - an expression under an address or a scaling must give a number;
+  - a `for` value must give a range or an INT, over parameters only.
+
+  Parameters are typed by their declaration: `int` INT, `number` REAL, `bool` BOOL, `string` and `enum` STRING, `set` SET. A `repeat` variable is INT.
+- A name in such an expression that no parameter of the chain and no `repeat` variable of the chain has is CF-310 (`parameter or variable {name} does not exist`). The contract gives no code; CF-310 is "a reference that does not resolve". Any `repeat` variable of the chain is accepted in a point, because merging may join the point to one a `repeat` made (4.5, step 3.2); whether it is bound there is the expander's (CF-410).
+- A function that reads tags (aggregates, `quality`, `age`, `is_good`, the windowed functions, `tag`) is CF-523 in a configuration expression, which has no tags; so is a wrong number of arguments.
+- `round`, `trunc`, `floor` and `ceil` take REAL, as the function table says; `round(3)` is CF-523.
+- Expressions of an instance (its `defaults`, `overrides` and points) are typed by the expander, which knows the variables bound to each point.
+What waits:
+- every reference to a tag (outputs, feedback, `local_panel.input`, alarms, block pins, expressions), CF-302 against point tags, CF-311, CF-312, and the names and types of run-time expressions (CF-521 to CF-525, CF-527): slice 7 of #100, after #103;
+- the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map): #103.
+Reason: an error now must stay an error once the expander exists, and a name that only expansion makes must not be refused before it can exist. Every check above reads names that expansion neither makes nor removes.
+Consequences: a tree whose tag references are wrong passes stage 5 until slice 7. A unit test (`AReferenceToATagGivesNoErrorYet`) pins that, so slice 7 changes it on purpose. The corpus case `s3-unknown-protocol` is now `s5-unknown-protocol`, with its CF-310. `s3-program-of-section-9-2` is now `s5-program-of-section-9-2`: its task and output are not in its tree.
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)

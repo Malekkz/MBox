@@ -1,0 +1,2 @@
+alarms:
+  - { tag: ps1.lt1.level, type: high, limit: 80, priority: urgent, area: ps1 }

@@ -34,13 +34,12 @@ ValueType wider(ValueType lhs, ValueType rhs) noexcept {
 // The functions of 5.6 that read tags, which a configuration expression has
 // none of.
 constexpr std::array<std::string_view, 12> TAG_FUNCTIONS = {
-    "sum",      "avg",  "min_of",   "max_of", "count_good", "moving_avg",
-    "rate",     "totalise", "quality", "age",  "is_good",    "tag"};
+    "sum",  "avg",      "min_of",  "max_of", "count_good", "moving_avg",
+    "rate", "totalise", "quality", "age",    "is_good",    "tag"};
 
 // The functions of one REAL or INT argument that give REAL.
 constexpr std::array<std::string_view, 10> REAL_FUNCTIONS = {
-    "sqrt", "exp", "ln",   "log10", "sin",
-    "cos",  "tan", "asin", "acos",  "atan"};
+    "sqrt", "exp", "ln", "log10", "sin", "cos", "tan", "asin", "acos", "atan"};
 
 // The functions of one REAL argument that give INT.
 constexpr std::array<std::string_view, 4> ROUNDING_FUNCTIONS = {
@@ -54,17 +53,17 @@ bool listed(std::span<const std::string_view> names,
 class Checker {
 public:
     Checker(const Expression& tree, const NameTypes& names, TypeError& error)
-        : tree_(tree), names_(names), error_(error) {}
+        : tree_(&tree), names_(&names), error_(&error) {}
 
     std::optional<ValueType> run() {
-        types_.resize(tree_.nodes.size());
-        for (std::size_t i = 0; i < tree_.nodes.size(); ++i) {
-            types_[i] = type_of(tree_.nodes[i]);
+        types_.resize(tree_->nodes.size());
+        for (std::size_t i = 0; i < tree_->nodes.size(); ++i) {
+            types_[i] = type_of(tree_->nodes[i]);
             if (!types_[i]) {
                 return std::nullopt;
             }
         }
-        return types_.at(tree_.root);
+        return types_.at(tree_->root);
     }
 
 private:
@@ -95,7 +94,7 @@ private:
     }
 
     std::optional<ValueType> reference(const ExprNode& node) {
-        const std::optional<ValueType> type = names_(node.text);
+        const std::optional<ValueType> type = (*names_)(node.text);
         if (!type) {
             return fail(CF_NO_SUCH_NAME, node,
                         "parameter or variable " + quote_text(node.text) +
@@ -106,7 +105,8 @@ private:
 
     [[nodiscard]] ValueType child(const ExprNode& node,
                                   std::size_t index) const {
-        return *types_.at(node.children.at(index));
+        // Children come first in the arena, so each has its type here.
+        return types_.at(node.children.at(index)).value_or(ValueType::INT);
     }
 
     std::optional<ValueType> operation(const ExprNode& node) {
@@ -130,7 +130,8 @@ private:
                 return quotient(node);
             case ExprOp::INT_DIVIDE:
             case ExprOp::MODULO:
-                return integers(node, node.op == ExprOp::MODULO ? "MOD" : "DIV");
+                return integers(node,
+                                node.op == ExprOp::MODULO ? "MOD" : "DIV");
             case ExprOp::POWER:
                 return numbers(node, "**", ValueType::REAL);
             case ExprOp::EQUAL:
@@ -159,10 +160,10 @@ private:
     std::optional<ValueType> logical(const ExprNode& node,
                                      std::string_view name) {
         for (const std::size_t operand : node.children) {
-            if (*types_.at(operand) != ValueType::BOOL) {
+            const ValueType type = types_.at(operand).value_or(ValueType::BOOL);
+            if (type != ValueType::BOOL) {
                 return mismatch(node, std::string(name) + " needs BOOL, not " +
-                                          std::string(value_type_name(
-                                              *types_.at(operand))));
+                                          std::string(value_type_name(type)));
             }
         }
         return ValueType::BOOL;
@@ -206,8 +207,9 @@ private:
         if (lhs == ValueType::TIME && is_number(rhs)) {
             return ValueType::TIME;
         }
-        return pair_mismatch(node, "/", "numbers, two TIMEs, or a TIME and a "
-                                        "number");
+        return pair_mismatch(node, "/",
+                             "numbers, two TIMEs, or a TIME and a "
+                             "number");
     }
 
     std::optional<ValueType> integers(const ExprNode& node,
@@ -232,7 +234,8 @@ private:
         const ValueType rhs = child(node, 1);
         if (lhs == rhs || (is_number(lhs) && is_number(rhs))) {
             if (lhs == ValueType::SET || lhs == ValueType::RANGE) {
-                return pair_mismatch(node, node.op == ExprOp::EQUAL ? "=" : "<>",
+                return pair_mismatch(node,
+                                     node.op == ExprOp::EQUAL ? "=" : "<>",
                                      "two values of one type");
             }
             return ValueType::BOOL;
@@ -262,9 +265,9 @@ private:
     std::optional<ValueType> in_range(const ExprNode& node) {
         for (std::size_t i = 0; i < node.children.size(); ++i) {
             if (child(node, i) != ValueType::INT) {
-                return mismatch(node, "IN with a range needs INTs, not " +
-                                          std::string(value_type_name(
-                                              child(node, i))));
+                return mismatch(
+                    node, "IN with a range needs INTs, not " +
+                              std::string(value_type_name(child(node, i))));
             }
         }
         return ValueType::BOOL;
@@ -281,15 +284,15 @@ private:
     std::optional<ValueType> call(const ExprNode& node) {
         const std::string& name = node.text;
         if (listed(TAG_FUNCTIONS, name)) {
-            return mismatch(node, name + " reads tags, and a configuration "
-                                         "expression has none");
+            return mismatch(node, name +
+                                      " reads tags, and a configuration "
+                                      "expression has none");
         }
         if (name == "if") {
             return conditional(node);
         }
         if (name == "limit" || name == "min" || name == "max") {
-            return numeric_call(node, name == "limit" ? 3 : 2,
-                                name != "limit");
+            return numeric_call(node, name == "limit" ? 3 : 2, name != "limit");
         }
         if (name == "abs") {
             return abs_call(node);
@@ -336,9 +339,9 @@ private:
             return std::nullopt;
         }
         if (child(node, 0) != ValueType::BOOL) {
-            return mismatch(node, "if needs a BOOL condition, not " +
-                                      std::string(value_type_name(
-                                          child(node, 0))));
+            return mismatch(node,
+                            "if needs a BOOL condition, not " +
+                                std::string(value_type_name(child(node, 0))));
         }
         const ValueType then = child(node, 1);
         const ValueType otherwise = child(node, 2);
@@ -381,8 +384,7 @@ private:
 
     // A call of `count` arguments, each of type `argument` or, when it is
     // not given, a number.
-    std::optional<ValueType> typed_call(const ExprNode& node,
-                                        std::size_t count,
+    std::optional<ValueType> typed_call(const ExprNode& node, std::size_t count,
                                         std::optional<ValueType> argument,
                                         ValueType result) {
         if (!count_is(node, count, false)) {
@@ -403,23 +405,19 @@ private:
     std::optional<ValueType> argument_mismatch(const ExprNode& node,
                                                std::size_t index,
                                                const std::string& wanted) {
-        return mismatch(node, node.text + " needs " + wanted +
-                                  " as argument " + std::to_string(index + 1) +
-                                  ", not " +
-                                  std::string(value_type_name(
-                                      child(node, index))));
+        return mismatch(node,
+                        node.text + " needs " + wanted + " as argument " +
+                            std::to_string(index + 1) + ", not " +
+                            std::string(value_type_name(child(node, index))));
     }
 
     std::optional<ValueType> pair_mismatch(const ExprNode& node,
                                            std::string_view name,
                                            std::string_view wanted) {
-        return mismatch(node, std::string(name) + " needs " +
-                                  std::string(wanted) + ", not " +
-                                  std::string(value_type_name(
-                                      child(node, 0))) +
-                                  " and " +
-                                  std::string(value_type_name(
-                                      child(node, 1))));
+        return mismatch(
+            node, std::string(name) + " needs " + std::string(wanted) +
+                      ", not " + std::string(value_type_name(child(node, 0))) +
+                      " and " + std::string(value_type_name(child(node, 1))));
     }
 
     std::optional<ValueType> mismatch(const ExprNode& node,
@@ -429,14 +427,14 @@ private:
 
     std::optional<ValueType> fail(std::uint16_t code, const ExprNode& node,
                                   std::string message) {
-        error_ = TypeError{
+        *error_ = TypeError{
             .code = code, .column = node.column, .message = std::move(message)};
         return std::nullopt;
     }
 
-    const Expression& tree_;
-    const NameTypes& names_;
-    TypeError& error_;
+    const Expression* tree_;
+    const NameTypes* names_;
+    TypeError* error_;
     std::vector<std::optional<ValueType>> types_;
 };
 

@@ -16,7 +16,7 @@
 #include <map>
 #include <optional>
 #include <string>
-#include <utility>
+#include <string_view>
 #include <vector>
 
 namespace scada::conf {
@@ -150,7 +150,8 @@ TEST(References, LoggingPoliciesAndTiers) {
                    "1h: 1y } } }\n"
                    "  - { name: a.c, type: internal, value_type: int64, "
                    "logging: counters }\n"}}),
-        (Lines{"tags/site.yaml:3:62 CF-310: logging policy \"counters\" does not exist"}));
+        (Lines{"tags/site.yaml:3:62 CF-310: logging policy \"counters\" does "
+               "not exist"}));
 }
 
 TEST(References, AlarmPrioritiesClassesAndAreas) {
@@ -204,6 +205,7 @@ TEST(References, OutputsInterlocksAndPrograms) {
               "    no_feedback: true\n"
               "    interlocks: { on: [ps1.ok], off: [ps1.wet] }\n"
               "    safe_state: off\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"control/ps1_pump.yaml:5:46 CF-310: output \"ps1.fan.cmd\" "
                "does not exist",
                "control/tasks.yaml:2:46 CF-310: program \"ps1_fan\" does not "
@@ -346,11 +348,17 @@ TEST(References, ProtocolRulesOfAModbusChannel) {
               Lines{"drivers/modbus/line1.yaml:6:14 CF-622: channel.data_bits: "
                     "7 data bits are Modbus ASCII, which is not available in "
                     "this version"});
-    const auto host = [](std::string_view address) {
-        return validate({{"drivers/modbus/net1.yaml",
-                          "channel:\n  name: net1\n  type: tcp\n  host: \"" +
-                              std::string(address) + "\"\n"}});
-    };
+}
+
+// The diagnostics of a Modbus TCP channel to `address`.
+Lines tcp_channel_to(std::string_view address) {
+    return validate({{"drivers/modbus/net1.yaml",
+                      "channel:\n  name: net1\n  type: tcp\n  host: \"" +
+                          std::string(address) + "\"\n"}});
+}
+
+TEST(References, AModbusDeviceIsNeverAtALoopbackMulticastOrBroadcastHost) {
+    const auto host = tcp_channel_to;
     EXPECT_EQ(host("127.0.0.1"),
               Lines{"drivers/modbus/net1.yaml:4:9 CF-622: channel.host: "
                     "\"127.0.0.1\" is a loopback address"});
@@ -406,6 +414,7 @@ TEST(References, TypesOfConfigurationExpressions) {
               "    points:\n"
               "      - { name: \"p{n}\", address: { table: holding, "
               "register: \"100 + n\", type: uint16 } }\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"templates/meter_a.yaml:8:30 CF-523: expression: the value "
                "must be BOOL, not INT at column 8",
                "templates/meter_a.yaml:9:60 CF-523: expression: the value "

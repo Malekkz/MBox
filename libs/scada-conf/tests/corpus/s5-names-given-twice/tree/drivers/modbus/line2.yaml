@@ -1,0 +1,7 @@
+channel:
+  name: line2
+  type: rtu
+  device: /dev/serial/by-path/platform-serial2
+  baud: 9600
+devices:
+  - { name: ps1.lt1, template: level_a, unit_id: 1 }

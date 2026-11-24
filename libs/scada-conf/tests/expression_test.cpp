@@ -418,14 +418,18 @@ TEST(Expression, MistakesGetTheirHints) {
     EXPECT_EQ(parse("inv.1.p"), "CF-520 at 4: unexpected character \".\"");
     // An operator word written as a function; NOT(a) is NOT with its
     // operand in parentheses.
-    EXPECT_EQ(run_time("mod(a, 2)"), "CF-520 at 1: \"mod\" is not a function: MOD is an "
+    EXPECT_EQ(run_time("mod(a, 2)"),
+              "CF-520 at 1: \"mod\" is not a function: MOD is an "
               "operator, written a MOD b");
     EXPECT_EQ(parse("not(a)"), "(not a)");
-    EXPECT_EQ(parse("in(a)"), "CF-520 at 1: \"in\" is not a function: IN is an "
+    EXPECT_EQ(parse("in(a)"),
+              "CF-520 at 1: \"in\" is not a function: IN is an "
               "operator, written a IN s");
     // A character that shows as a space, or as nothing, is named.
-    EXPECT_EQ(run_time("a\xC2\xA0+ b"), "CF-520 at 2: unexpected character U+00A0");
-    EXPECT_EQ(run_time("a +\xEF\xBB\xBF b"), "CF-520 at 4: unexpected character U+FEFF");
+    EXPECT_EQ(run_time("a\xC2\xA0+ b"),
+              "CF-520 at 2: unexpected character U+00A0");
+    EXPECT_EQ(run_time("a +\xEF\xBB\xBF b"),
+              "CF-520 at 4: unexpected character U+FEFF");
 }
 
 // IN with a range leaves no RANGE node behind it.

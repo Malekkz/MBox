@@ -150,12 +150,13 @@ public:
 
     // True if the next character after spaces and line ends is `chr`.
     [[nodiscard]] bool next_is(char chr) const noexcept {
-        std::size_t at = pos_;
-        while (at < text_.size() && (text_[at] == ' ' || text_[at] == '\n' ||
-                                     text_[at] == '\r')) {
-            ++at;
+        std::size_t next = pos_;
+        while (next < text_.size() &&
+               (text_[next] == ' ' || text_[next] == '\n' ||
+                text_[next] == '\r')) {
+            ++next;
         }
-        return at < text_.size() && text_[at] == chr;
+        return next < text_.size() && text_[next] == chr;
     }
 
 private:
@@ -542,10 +543,9 @@ private:
             return false;
         }
         std::size_t start = pos_;
-        while (start > 0 && (is_letter(text_[start - 1]) ||
-                             is_digit(text_[start - 1]) ||
-                             text_[start - 1] == '_' ||
-                             text_[start - 1] == '.')) {
+        while (start > 0 &&
+               (is_letter(text_[start - 1]) || is_digit(text_[start - 1]) ||
+                text_[start - 1] == '_' || text_[start - 1] == '.')) {
             --start;
         }
         return start < pos_ && (is_letter(text_[start]) || text_[start] == '_');
@@ -1147,8 +1147,8 @@ private:
         }
         return quote_text(current_.text) + " is a reserved word" +
                (kind_ == ExpressionKind::RUN_TIME
-                    ? "; a tag of this name is written tag(\"" +
-                          current_.text + "\")"
+                    ? "; a tag of this name is written tag(\"" + current_.text +
+                          "\")"
                     : "; a parameter or variable cannot have this name");
     }
 

@@ -6,14 +6,14 @@
 
 #include "scada/conf/references.h"
 
+#include "expression_site.h"
+#include "expression_types.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
 #include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
-#include "expression_site.h"
-#include "expression_types.h"
 
 #include <array>
 #include <cstddef>
@@ -54,9 +54,9 @@ constexpr std::array<std::string_view, 2> DEFAULT_CLASSES = {"process",
 class Definitions {
 public:
     // Adds `name`; the place of its first definition if it was there.
-    std::optional<Location> add(std::string_view name, Location where) {
+    std::optional<Location> add(std::string_view name, const Location& where) {
         const auto [entry, added] =
-            names_.try_emplace(std::string(name), std::move(where));
+            names_.try_emplace(std::string(name), where);
         if (added) {
             return std::nullopt;
         }
@@ -89,8 +89,8 @@ std::optional<std::array<unsigned, 4>> ipv4_parts(std::string_view text) {
         if (chr == '.') {
             ++part;
         } else {
-            parts.at(part) = parts.at(part) * DECIMAL +
-                             static_cast<unsigned>(chr - '0');
+            parts.at(part) =
+                parts.at(part) * DECIMAL + static_cast<unsigned>(chr - '0');
         }
     }
     return parts;
@@ -136,7 +136,7 @@ std::optional<std::string> refused_host(std::string_view host) {
 class Checker {
 public:
     Checker(std::span<const CheckedFile> files, Diagnostics& diagnostics)
-        : files_(files), diagnostics_(diagnostics) {}
+        : files_(files), diagnostics_(&diagnostics) {}
 
     void run() {
         for (const CheckedFile& file : files_) {
@@ -209,8 +209,8 @@ private:
     }
 
     void error(std::uint16_t code, NodeId node, std::string message) {
-        diagnostics_.error(code, document_->location(node),
-                           std::move(message));
+        diagnostics_->error(code, document_->location(node),
+                            std::move(message));
     }
 
     // CF-310 when the scalar `node` names nothing in `names`.
@@ -224,8 +224,8 @@ private:
                   " does not exist");
     }
 
-    void need_key(const Definitions& names, std::string_view kind,
-                  NodeId map, std::string_view key) {
+    void need_key(const Definitions& names, std::string_view kind, NodeId map,
+                  std::string_view key) {
         if (const std::optional<NodeId> node = find_scalar(map, key)) {
             need(names, kind, *node);
         }
@@ -301,7 +301,8 @@ private:
             }
         }
         for (const NodeId device : items(root(), "devices")) {
-            if (const std::optional<NodeId> name = find_scalar(device, "name")) {
+            if (const std::optional<NodeId> name =
+                    find_scalar(device, "name")) {
                 define(devices_, "device", *name);
             }
         }
@@ -351,7 +352,8 @@ private:
             }
         }
         for (const NodeId output : items(root(), "outputs")) {
-            if (const std::optional<NodeId> name = find_scalar(output, "name")) {
+            if (const std::optional<NodeId> name =
+                    find_scalar(output, "name")) {
                 outputs_.add(text(*name), document_->location(*name));
             }
         }
@@ -437,9 +439,9 @@ private:
         if (const std::optional<NodeId> protocol =
                 find_scalar(root(), "protocol");
             protocol && !is_known_protocol(text(*protocol))) {
-            error(CF_NO_SUCH, *protocol,
-                  "protocol " + quote_text(text(*protocol)) +
-                      " does not exist");
+            error(
+                CF_NO_SUCH, *protocol,
+                "protocol " + quote_text(text(*protocol)) + " does not exist");
         }
         const Scope scope = scope_of(file_);
         for (const NodeId point : items(root(), "points")) {
@@ -457,7 +459,8 @@ private:
                 check_point(point, scope, variables);
             }
         }
-        if (const std::optional<NodeId> defaults = find_map(root(), "defaults")) {
+        if (const std::optional<NodeId> defaults =
+                find_map(root(), "defaults")) {
             check_point(*defaults, scope, scope.variables);
         }
     }
@@ -524,7 +527,8 @@ private:
                     parameter_type(document, entry.value));
             }
         }
-        if (const std::optional<NodeId> repeat = document.find(root, "repeat")) {
+        if (const std::optional<NodeId> repeat =
+                document.find(root, "repeat")) {
             for (const NodeId block : document.items(*repeat)) {
                 const std::optional<NodeId> range =
                     document.kind(block) == NodeKind::MAP
@@ -543,10 +547,9 @@ private:
     // The type of a parameter's value in an expression (5.6): `number` is
     // REAL, `string` and `enum` STRING, `set` SET.
     static ValueType parameter_type(const Document& document, NodeId param) {
-        const std::optional<NodeId> type =
-            document.kind(param) == NodeKind::MAP
-                ? document.find(param, "type")
-                : std::nullopt;
+        const std::optional<NodeId> type = document.kind(param) == NodeKind::MAP
+                                               ? document.find(param, "type")
+                                               : std::nullopt;
         const std::string_view name =
             type ? document.text(*type) : std::string_view();
         if (name == "int") {
@@ -581,7 +584,8 @@ private:
             return;
         }
         const std::optional<NodeId> kind = find_scalar(*channel, "type");
-        if (const std::optional<NodeId> bits = find_scalar(*channel, "data_bits");
+        if (const std::optional<NodeId> bits =
+                find_scalar(*channel, "data_bits");
             bits && kind && text(*kind) == "rtu" && text(*bits) == "7") {
             error(CF_PROTOCOL_RULE, *bits,
                   "channel.data_bits: 7 data bits are Modbus ASCII, which is "
@@ -599,7 +603,8 @@ private:
 
     void check_device(NodeId device) {
         Scope scope;
-        if (const std::optional<NodeId> name = find_scalar(device, "template")) {
+        if (const std::optional<NodeId> name =
+                find_scalar(device, "template")) {
             need(template_names_, "template", *name);
             if (const auto found = templates_.find(text(*name));
                 found != templates_.end()) {
@@ -613,7 +618,8 @@ private:
         for (const NodeId point : items(device, "points")) {
             check_point(point, scope, {});
         }
-        if (const std::optional<NodeId> defaults = find_map(device, "defaults")) {
+        if (const std::optional<NodeId> defaults =
+                find_map(device, "defaults")) {
             check_point(*defaults, scope, {});
         }
         if (const std::optional<NodeId> overrides =
@@ -724,7 +730,8 @@ private:
     }
 
     void check_alarm_file() {
-        if (const std::optional<NodeId> shelve = find_map(root(), "max_shelve")) {
+        if (const std::optional<NodeId> shelve =
+                find_map(root(), "max_shelve")) {
             for (const Entry& entry : document_->entries(*shelve)) {
                 need(priorities_, "alarm priority", entry.key);
             }
@@ -739,7 +746,8 @@ private:
                 find_scalar(root(), "default_policy")) {
             need_policy(*name);
         }
-        if (const std::optional<NodeId> policies = find_map(root(), "policies")) {
+        if (const std::optional<NodeId> policies =
+                find_map(root(), "policies")) {
             for (const Entry& entry : document_->entries(*policies)) {
                 check_settings(entry.value);
             }
@@ -789,6 +797,7 @@ private:
     }
 
     // A `for` value: a range, a list of integers and ranges, or one INT.
+    // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
     void check_for_value(NodeId value, const Scope& scope) {
         if (document_->kind(value) == NodeKind::SEQUENCE) {
             for (const NodeId item : document_->items(value)) {
@@ -824,6 +833,7 @@ private:
         }
     }
 
+    // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
     void check_numbers_below(NodeId node, const Scope& scope,
                              const std::vector<std::string>& variables) {
         switch (document_->kind(node)) {
@@ -930,12 +940,12 @@ private:
         if (problem.code == CF_TYPE_MISMATCH) {
             message += site.where;
         }
-        diagnostics_.error(problem.code, std::move(site.location),
-                           std::move(message));
+        diagnostics_->error(problem.code, std::move(site.location),
+                            std::move(message));
     }
 
     std::span<const CheckedFile> files_;
-    Diagnostics& diagnostics_;
+    Diagnostics* diagnostics_;
     const CheckedFile* file_ = nullptr;
     const Document* document_ = nullptr;
 
