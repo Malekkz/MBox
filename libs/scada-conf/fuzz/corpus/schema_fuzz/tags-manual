@@ -1,0 +1,2 @@
+tags:
+  - { name: ps1.tank.low, type: manual, value_type: bool, area: ps1, initial: false }

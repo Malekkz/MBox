@@ -169,6 +169,32 @@ TEST(Scalar, DurationsRefused) {
     }
 }
 
+// The resolution of an epoch value (Annex A.2), in nanoseconds; beyond int64
+// it is too large, as a duration is (D-107).
+TEST(Scalar, Resolutions) {
+    constexpr std::uint64_t MILLISECOND = 1000000;
+    EXPECT_EQ(read_resolution_ns("1s").value, 1000 * MILLISECOND);
+    EXPECT_EQ(read_resolution_ns("1ms").value, MILLISECOND);
+    EXPECT_EQ(read_resolution_ns("1ns").value, 1U);
+    const UnitRead largest = read_resolution_ns("9223372036854775807ns");
+    EXPECT_EQ(largest.form, IntegerForm::FITS);
+    EXPECT_EQ(largest.value, static_cast<std::uint64_t>(
+                                 std::numeric_limits<std::int64_t>::max()));
+    EXPECT_EQ(read_resolution_ns("9223372036854775808ns").form,
+              IntegerForm::TOO_LARGE);
+    EXPECT_EQ(read_resolution_ns("18446744073709551616ns").form,
+              IntegerForm::TOO_LARGE);
+}
+
+TEST(Scalar, ResolutionsRefused) {
+    for (const std::string_view text :
+         {"0ns", "01ns", "0x10ns", "2ms", "2s", "1us", "ns", "-1ns", " 1ns",
+          "1ns ", "1NS"}) {
+        EXPECT_EQ(read_resolution_ns(text).form, IntegerForm::NOT_INTEGER)
+            << text;
+    }
+}
+
 TEST(Scalar, SizesOfSection22) {
     constexpr std::uint64_t TWO_GIB = 2ULL * 1024 * 1024 * 1024;
     constexpr std::uint64_t ONE_TIB = 1024ULL * 1024 * 1024 * 1024;

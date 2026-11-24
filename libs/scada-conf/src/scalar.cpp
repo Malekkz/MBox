@@ -328,6 +328,29 @@ std::optional<std::uint64_t> parse_size_bytes(std::string_view text) {
     return read.value;
 }
 
+UnitRead read_resolution_ns(std::string_view text) {
+    constexpr std::uint64_t MILLISECOND = 1000000;
+    constexpr std::uint64_t SECOND = 1000 * MILLISECOND;
+    if (text == "1s") {
+        return UnitRead{.form = IntegerForm::FITS, .value = SECOND};
+    }
+    if (text == "1ms") {
+        return UnitRead{.form = IntegerForm::FITS, .value = MILLISECOND};
+    }
+    constexpr std::array<std::pair<std::string_view, std::uint64_t>, 1> UNITS{
+        {{"ns", 1}}};
+    UnitRead read = number_with_unit(text, UNITS);
+    if (read.form == IntegerForm::FITS && read.value == 0) {
+        return {};
+    }
+    if (read.form == IntegerForm::FITS &&
+        read.value > static_cast<std::uint64_t>(
+                         std::numeric_limits<std::int64_t>::max())) {
+        return UnitRead{.form = IntegerForm::TOO_LARGE, .value = 0};
+    }
+    return read;
+}
+
 UnitRead read_duration_ms(std::string_view text) {
     constexpr std::uint64_t SECOND = 1000;
     constexpr std::uint64_t MINUTE = 60 * SECOND;

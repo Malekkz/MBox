@@ -132,5 +132,21 @@ TEST(Names, ZonesTimesAndUrls) {
     EXPECT_FALSE(is_https_url("https://upstream.example.invalid/a b"));
 }
 
+TEST(Names, DevicePaths) {
+    EXPECT_TRUE(is_device_path("/dev/ttyS1"));
+    EXPECT_TRUE(is_device_path("/dev/serial/by-id/usb adapter 1"));
+    EXPECT_TRUE(is_device_path("/dev/" + std::string(250, 'a')));
+    EXPECT_FALSE(is_device_path("/dev/" + std::string(251, 'a')));
+    EXPECT_FALSE(is_device_path("/dev/"));
+    EXPECT_FALSE(is_device_path("/dev"));
+    EXPECT_FALSE(is_device_path("/dev//a"));
+    EXPECT_FALSE(is_device_path("/dev/a/"));
+    EXPECT_FALSE(is_device_path("/dev/./a"));
+    EXPECT_FALSE(is_device_path("/dev/a/.."));
+    EXPECT_FALSE(is_device_path("/devices/a"));
+    EXPECT_FALSE(is_device_path("/dev/a\tb"));
+    EXPECT_FALSE(is_device_path("/dev/a\nb"));
+}
+
 }  // namespace
 }  // namespace scada::conf

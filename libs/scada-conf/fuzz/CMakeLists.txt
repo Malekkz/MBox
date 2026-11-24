@@ -21,3 +21,11 @@ scada_add_fuzz_target(schema_fuzz
 scada_add_fuzz_target(scalar_fuzz
   SOURCES scalar_fuzz.cpp
   DEPENDS scada::conf)
+
+# `validate_tree` over a small tree written to a temporary directory: every
+# stage together, the rules of stage 3 included. Its seeds are the trees of
+# the conformance corpus, each file as its path, a line feed and its content,
+# separated by NUL bytes.
+scada_add_fuzz_target(tree_fuzz
+  SOURCES tree_fuzz.cpp
+  DEPENDS scada::conf)

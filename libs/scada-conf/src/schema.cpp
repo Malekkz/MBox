@@ -293,9 +293,15 @@ public:
         const std::size_t worst =
             count == 0 ? 1 : *std::ranges::max_element(bound);
         if (changed || worst > MAX_CHECKS_PER_NODE) {
-            problem = "the schemas could check one node more than " +
-                      std::to_string(MAX_CHECKS_PER_NODE) +
-                      " times (nested oneOf or allOf)";
+            problem =
+                "the schemas could check one node more than " +
+                std::to_string(MAX_CHECKS_PER_NODE) +
+                " times: nested oneOf or allOf, or a schema that reaches "
+                "itself through properties, items or unevaluatedProperties "
+                "and also refers through $ref, allOf or oneOf to a schema "
+                "with keys or items of its own; such a recursion needs a "
+                "bound per child key, which this validator does not have "
+                "(D-107)";
             return false;
         }
         out_->checks_per_node = worst;
@@ -789,7 +795,8 @@ private:
         // An expression's text may be a literal number or boolean (5.6).
         if (type == "string" || type == "expression" ||
             type == "config_expression") {
-            return true;
+            return std::ranges::find(node.scalar_kinds, "string") !=
+                   node.scalar_kinds.end();
         }
         std::vector<std::string_view> allowed;
         if (type == "integer" || type == "uint64" || type == "power_of_two") {
@@ -1094,42 +1101,6 @@ bool name_matches(std::string_view type, std::string_view text) {
 
 // An absolute path under /dev/ without `..` or empty components, at most
 // 255 bytes (Annex A.1).
-bool is_device_path(std::string_view text) {
-    constexpr std::size_t MAX_PATH = 255;
-    if (!text.starts_with("/dev/") || text.size() > MAX_PATH ||
-        text.ends_with('/') || !is_free_text(text) ||
-        text.find(' ') != std::string_view::npos) {
-        return false;
-    }
-    std::size_t start = 1;
-    while (start < text.size()) {
-        const std::size_t end = text.find('/', start);
-        const std::string_view part = text.substr(
-            start, end == std::string_view::npos ? std::string_view::npos
-                                                 : end - start);
-        if (part.empty() || part == "." || part == "..") {
-            return false;
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return true;
-}
-
-// The resolution of an epoch value (Annex A.2): `1s`, `1ms` or `<n>ns`.
-bool is_resolution(std::string_view text) {
-    if (text == "1s" || text == "1ms") {
-        return true;
-    }
-    if (!text.ends_with("ns")) {
-        return false;
-    }
-    const std::optional<Integer> count =
-        parse_integer(text.substr(0, text.size() - 2));
-    return count && !count->negative && count->magnitude > 0;
-}
 
 // Text forms that are strings with a grammar, refused with CF-203 and the
 // phrase given.
@@ -1162,7 +1133,9 @@ std::optional<std::pair<bool, std::string_view>> text_form(
                               "an absolute path under /dev/");
     }
     if (type == "resolution") {
-        return std::make_pair(is_resolution(text), "1s, 1ms or <n>ns");
+        return std::make_pair(
+            read_resolution_ns(text).form != IntegerForm::NOT_INTEGER,
+            "1s, 1ms or <n>ns");
     }
     return std::nullopt;
 }
@@ -2121,8 +2094,10 @@ private:
                                            Outcome& out) {
         const std::string& type = rules.scalar_type;
         const NodeView value = node(scalar);
+        const bool plain_nan =
+            value.text == "nan" && value.style == ScalarStyle::PLAIN;
         if (type == "raw_pattern" ||
-            (type == "raw_pattern_or_nan" && value.text != "nan")) {
+            (type == "raw_pattern_or_nan" && !plain_nan)) {
             return type_raw_pattern(scalar, key, out)
                 .value_or(ScalarType::NONE);
         }
@@ -2146,6 +2121,13 @@ private:
         }
         if (type == "ip_literal_host") {
             return type_ip_literal_host(scalar, key, out);
+        }
+        if (type == "resolution" &&
+            read_resolution_ns(value.text).form == IntegerForm::TOO_LARGE) {
+            error(out, CF_OUT_OF_RANGE, scalar,
+                  key + " must be between 1ns and " +
+                      std::string(INT64_MAX_TEXT) + "ns");
+            return ScalarType::NONE;
         }
         return std::nullopt;
     }
