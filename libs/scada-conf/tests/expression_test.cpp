@@ -411,6 +411,21 @@ TEST(Expression, MistakesGetTheirHints) {
     // A character beyond ASCII is shown whole.
     EXPECT_EQ(run_time("a \xC3\xA9 b"),
               "CF-520 at 3: unexpected character \"\xC3\xA9\"");
+    // The tag("...") hint only follows a name, and only where tags are.
+    EXPECT_EQ(run_time("1. + a"), "CF-520 at 2: unexpected character \".\"");
+    EXPECT_EQ(run_time(".5 + a"), "CF-520 at 1: unexpected character \".\"");
+    EXPECT_EQ(run_time("1.5.2"), "CF-520 at 4: unexpected character \".\"");
+    EXPECT_EQ(parse("inv.1.p"), "CF-520 at 4: unexpected character \".\"");
+    // An operator word written as a function; NOT(a) is NOT with its
+    // operand in parentheses.
+    EXPECT_EQ(run_time("mod(a, 2)"), "CF-520 at 1: \"mod\" is not a function: MOD is an "
+              "operator, written a MOD b");
+    EXPECT_EQ(parse("not(a)"), "(not a)");
+    EXPECT_EQ(parse("in(a)"), "CF-520 at 1: \"in\" is not a function: IN is an "
+              "operator, written a IN s");
+    // A character that shows as a space, or as nothing, is named.
+    EXPECT_EQ(run_time("a\xC2\xA0+ b"), "CF-520 at 2: unexpected character U+00A0");
+    EXPECT_EQ(run_time("a +\xEF\xBB\xBF b"), "CF-520 at 4: unexpected character U+FEFF");
 }
 
 // IN with a range leaves no RANGE node behind it.
