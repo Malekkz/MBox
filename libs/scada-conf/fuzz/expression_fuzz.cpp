@@ -343,11 +343,32 @@ private:
         return abuts();
     }
 
+    // A name: segments joined by a "." that a segment follows.
+    void lex_name(std::size_t start) {
+        tok_.kind = Kind::NAME;
+        tok_.one_segment = true;
+        while (true) {
+            while (segment_char(at(pos_))) {
+                ++pos_;
+            }
+            if (at(pos_) != '.' || !segment_start(at(pos_ + 1))) {
+                break;
+            }
+            tok_.one_segment = false;
+            ++pos_;
+        }
+        tok_.text = std::string(text_.substr(start, pos_ - start));
+    }
+
     // The next token into `tok_`; false with the refusal set.
     bool next() {
-        while (pos_ < text_.size() && std::string_view(" \t\n\r").find(
+        // Spaces and line ends separate tokens; a tab is refused.
+        while (pos_ < text_.size() && std::string_view(" \n\r").find(
                                           at(pos_)) != std::string_view::npos) {
             ++pos_;
+        }
+        if (pos_ < text_.size() && at(pos_) == '\t') {
+            return refuse(SYNTAX, pos_ + 1);
         }
         tok_ = Tok{.kind = Kind::END,
                    .column = pos_ + 1,
@@ -367,19 +388,7 @@ private:
             return lex_time();
         }
         if (segment_start(chr)) {
-            tok_.kind = Kind::NAME;
-            tok_.one_segment = true;
-            while (true) {
-                while (segment_char(at(pos_))) {
-                    ++pos_;
-                }
-                if (at(pos_) != '.' || !segment_start(at(pos_ + 1))) {
-                    break;
-                }
-                tok_.one_segment = false;
-                ++pos_;
-            }
-            tok_.text = std::string(text_.substr(start, pos_ - start));
+            lex_name(start);
             return true;
         }
         if (chr == '\'') {

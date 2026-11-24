@@ -520,5 +520,50 @@ TEST(Rules, IntegerScalingAtItsEdge) {
               Lines{"6:25 CF-517: \"p\": value_type uint64 needs an integer "
                     "scaling; use float64"});
 }
+
+// A parameter or `repeat` variable named like a reserved word of
+// expressions is CF-212 at its declaration (5.6): `100 + bad` would read
+// the literal BAD.
+TEST(Rules, ReservedWordsAreNotParameterOrVariableNames) {
+    EXPECT_EQ(
+        check_template("template: t\nprotocol: modbus\n"
+                       "params: { bad: { type: int, default: 8 }, in: { type: "
+                       "int }, inputs: { type: int } }\n"
+                       "repeat:\n"
+                       "  - for: { true: \"1..2\", n: \"1..inputs\" }\n"
+                       "    points: [ { name: \"p{n}\" } ]\n"),
+        (Lines{"3:11 CF-212: \"bad\" is not a valid parameter name: it is a "
+               "reserved word of expressions",
+               "3:43 CF-212: \"in\" is not a valid parameter name: it is a "
+               "reserved word of expressions",
+               "5:12 CF-212: \"true\" is not a valid variable name: it is a "
+               "reserved word of expressions"}));
+}
+
+// An expression error is at its character in the file, columns counted in
+// characters, when the scalar is its source on one line; in a block or
+// escaped scalar it is at the scalar, with the line and column within the
+// expression's text in the message (D-109).
+TEST(Rules, ExpressionErrorsAreWhereTheyAre) {
+    EXPECT_EQ(
+        check_template("template: t\nprotocol: modbus\n"
+                       "points:\n"
+                       "  - { name: p, when: \"x = '\xC3\xA9' + * 2\" }\n"),
+        Lines{"4:33 CF-520: expression: unexpected \"*\" at column 11"});
+    EXPECT_EQ(check(FileType::TAGS, "tags.schema.json", "",
+                    "tags:\n"
+                    "  - name: a.b\n"
+                    "    type: virtual\n"
+                    "    expr: |\n"
+                    "      a > 1 AND\n"
+                    "      b < < 2\n"),
+              Lines{"4:11 CF-520: expression: unexpected \"<\" at line 2, "
+                    "column 5 of the expression's text"});
+    EXPECT_EQ(check(FileType::TAGS, "tags.schema.json", "",
+                    "tags: [ { name: a.b, type: virtual, expr: \"a +\\u0020* "
+                    "1\" } ]\n"),
+              Lines{"1:43 CF-520: expression: unexpected \"*\" at line 1, "
+                    "column 5 of the expression's text"});
+}
 }  // namespace
 }  // namespace scada::conf

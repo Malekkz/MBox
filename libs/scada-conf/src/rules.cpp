@@ -8,6 +8,7 @@
 #include "scada/conf/rules.h"
 
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expression.h"
 #include "scada/conf/node.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
@@ -32,6 +33,7 @@ constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_WRONG_TYPE = 203;
 constexpr std::uint16_t CF_OUT_OF_RANGE = 204;
 constexpr std::uint16_t CF_NOT_ALLOWED = 205;
+constexpr std::uint16_t CF_BAD_NAME = 212;
 constexpr std::uint16_t CF_INTEGER_SCALING = 517;
 
 // The data bits of a Modbus RTU frame, and those of ASCII (Annex A.1).
@@ -204,6 +206,9 @@ private:
     // --- Templates and channels ------------------------------------------
 
     void check_template(NodeId root) {
+        if (const std::optional<NodeId> params = find_map(root, "params")) {
+            refuse_reserved_names(*params, "parameter");
+        }
         check_point_list(root, "points", "points");
         for_each_map(root, "repeat", "repeat",
                      [this](NodeId block, const std::string& path) {
@@ -222,8 +227,24 @@ private:
                      });
     }
 
+    // A parameter or a `repeat` variable named like a reserved word of
+    // expressions (`bad`, `in`) is CF-212 at its name (5.6): `100 + bad`
+    // would read the literal BAD, 2.
+    void refuse_reserved_names(NodeId map, std::string_view kind) const {
+        for (const Entry& entry : document_->entries(map)) {
+            const std::string_view name = document_->text(entry.key);
+            if (is_reserved_word(name)) {
+                error(CF_BAD_NAME, entry.key,
+                      quote_text(name) + " is not a valid " +
+                          std::string(kind) +
+                          " name: it is a reserved word of expressions");
+            }
+        }
+    }
+
     void check_repeat(NodeId block, const std::string& path) {
         if (const std::optional<NodeId> variables = find_map(block, "for")) {
+            refuse_reserved_names(*variables, "variable");
             const std::size_t count = document_->entry_count(*variables);
             if (count < 1 || count > 2) {
                 error(CF_OUT_OF_RANGE, *variables,

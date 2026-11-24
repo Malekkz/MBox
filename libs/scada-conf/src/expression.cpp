@@ -5,6 +5,7 @@
 
 #include "scada/conf/expression.h"
 #include "scada/conf/diagnostic.h"
+#include "utf8.h"
 
 #include <algorithm>
 #include <array>
@@ -98,10 +99,16 @@ public:
 
     // The next token, or nothing with `error` set.
     std::optional<Lexeme> next(ExpressionError& error) {
+        // Spaces and line ends separate tokens (5.6); a tab is not one.
         while (pos_ < text_.size() &&
-               (text_[pos_] == ' ' || text_[pos_] == '\t' ||
-                text_[pos_] == '\n' || text_[pos_] == '\r')) {
+               (text_[pos_] == ' ' || text_[pos_] == '\n' ||
+                text_[pos_] == '\r')) {
             ++pos_;
+        }
+        if (pos_ < text_.size() && text_[pos_] == '\t') {
+            fail(error, CF_SYNTAX, pos_,
+                 "a tab is not allowed in an expression; use spaces");
+            return std::nullopt;
         }
         Lexeme lexeme;
         lexeme.column = static_cast<std::uint32_t>(pos_ + 1);
@@ -421,8 +428,36 @@ private:
             }
         }
         fail(error, CF_SYNTAX, pos_,
-             "unexpected character " + quote_text(std::string(1, text_[pos_])));
+             "unexpected character " + quote_text(character()) + hint());
         return std::nullopt;
+    }
+
+    // The whole character at `pos_`: one byte, or a UTF-8 sequence.
+    [[nodiscard]] std::string character() const {
+        const std::optional<std::pair<std::size_t, std::uint32_t>> decoded =
+            utf8::decode(text_, pos_);
+        const std::size_t length = decoded ? decoded->first : 1;
+        return std::string(text_.substr(pos_, length));
+    }
+
+    // The right spelling of a character another language uses here.
+    [[nodiscard]] std::string hint() const {
+        switch (text_[pos_]) {
+            case '!':
+                return peek(1) == '=' ? "; \"not equal\" is written <>"
+                                      : "; negation is written NOT";
+            case '&':
+                return "; \"and\" is written AND";
+            case '|':
+                return "; \"or\" is written OR";
+            case '%':
+                return "; the remainder is written MOD";
+            case '.':
+                return "; a tag name with a segment that starts with a digit "
+                       "or holds - is written tag(\"...\")";
+            default:
+                return {};
+        }
     }
 
     std::string_view text_;
@@ -710,14 +745,15 @@ private:
         if (!is_operator("..")) {
             return add(ExprOp::IN_VALUE, column, {left, *first});
         }
-        const std::optional<std::size_t> span = range(*first, depth);
-        if (!span) {
+        // The range's ends become the operands: no RANGE node is left over.
+        if (!advance()) {
             return std::nullopt;
         }
-        const std::vector<std::size_t> bounds =
-            expression_.nodes[*span].children;
-        return add(ExprOp::IN_RANGE, column,
-                   {left, bounds.at(0), bounds.at(1)});
+        const std::optional<std::size_t> high = add_expr(depth);
+        if (!high) {
+            return std::nullopt;
+        }
+        return add(ExprOp::IN_RANGE, column, {left, *first, *high});
     }
 
     // add_expr = mul_expr { ( "+" | "-" ) mul_expr }
@@ -874,12 +910,20 @@ private:
                 if (is_operator("(")) {
                     return parenthesis(depth);
                 }
-                return fail(current_.column,
-                            "unexpected " + describe(current_));
+                return fail(
+                    current_.column,
+                    "unexpected " + describe(current_) +
+                        (is_operator("=") ? "; equality is written with one ="
+                                          : ""));
             case Token::PATTERN:
                 return fail(current_.column,
                             "a pattern string is allowed only as the argument "
-                            "of a function");
+                            "of a function" +
+                                std::string(kind_ == ExpressionKind::RUN_TIME
+                                                ? "; a run-time expression "
+                                                  "has no text values"
+                                                : "; a text is written in "
+                                                  "single quotes ('auto')"));
             case Token::END:
                 return fail(current_.column, "an operand is missing");
         }
@@ -898,6 +942,10 @@ private:
         if (!inner) {
             return std::nullopt;
         }
+        if (is_operator("..")) {
+            return fail(current_.column,
+                        "a range is written without parentheses: n IN 1..5");
+        }
         if (!is_operator(")")) {
             return fail(current_.column, "a ')' is missing");
         }
@@ -912,8 +960,14 @@ private:
         if (const std::optional<std::string> word = reserved_word(current_)) {
             const std::optional<std::size_t> literal = literal_word(*word);
             if (!literal) {
-                return fail(current_.column,
-                            quote_text(current_.text) + " is a reserved word");
+                return fail(
+                    current_.column,
+                    quote_text(current_.text) + " is a reserved word" +
+                        (kind_ == ExpressionKind::RUN_TIME
+                             ? "; a tag of this name is written tag(\"" +
+                                   current_.text + "\")"
+                             : "; a parameter or variable cannot have this "
+                               "name"));
             }
             if (!advance()) {
                 return std::nullopt;
@@ -992,6 +1046,18 @@ private:
 };
 
 }  // namespace
+
+bool is_reserved_word(std::string_view name) noexcept {
+    constexpr std::array<std::string_view, 12> WORDS = {
+        "AND", "OR",   "XOR",   "NOT",  "MOD",       "DIV",
+        "IN",  "TRUE", "FALSE", "GOOD", "UNCERTAIN", "BAD"};
+    return std::ranges::any_of(WORDS, [name](std::string_view word) {
+        return name.size() == word.size() &&
+               std::ranges::equal(name, word, [](char lhs, char rhs) {
+                   return std::toupper(static_cast<unsigned char>(lhs)) == rhs;
+               });
+    });
+}
 
 bool is_expression_function(std::string_view name) noexcept {
     // Function names are case-insensitive (5.6); the longest is 10 bytes.

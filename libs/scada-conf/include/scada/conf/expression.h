@@ -70,7 +70,9 @@ enum class ExprOp : std::uint8_t {
 
 struct ExprNode {
     ExprOp op = ExprOp::INTEGER;
-    // 1-based column of the node's first character in the expression text.
+    // 1-based byte column in the expression text: of its operator for an
+    // operator node (`IN` for IN_RANGE and IN_VALUE), of its name for a
+    // call, of its low end for a RANGE, of its first character for a leaf.
     std::uint32_t column = 1;
     std::string text;
     std::int64_t integer = 0;
@@ -92,6 +94,11 @@ struct ExpressionError {
     std::uint32_t column = 1;
     std::string message;
 };
+
+// True if `name` (any case) is a reserved word of 5.6: AND, OR, XOR, NOT,
+// MOD, DIV, IN, TRUE, FALSE, GOOD, UNCERTAIN, BAD. A parameter or `repeat`
+// variable of such a name is refused (CF-212).
+[[nodiscard]] bool is_reserved_word(std::string_view name) noexcept;
 
 // True if `name` (any case) is a function of the table of 5.6.
 [[nodiscard]] bool is_expression_function(std::string_view name) noexcept;

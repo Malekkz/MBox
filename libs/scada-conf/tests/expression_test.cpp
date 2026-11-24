@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -216,8 +217,11 @@ TEST(Expression, CallsAndPatterns) {
     EXPECT_EQ(run_time("IF(c, 1, 0)"), "if(c 1 0)");
 }
 
+// Spaces and line ends separate tokens; a tab is not one (5.6).
 TEST(Expression, SpacesAndLineEndsSeparateTokens) {
-    EXPECT_EQ(run_time("a\n  AND\tb"), "(and a b)");
+    EXPECT_EQ(run_time("a\n  AND\r\nb"), "(and a b)");
+    EXPECT_EQ(run_time("a AND\tb"),
+              "CF-520 at 6: a tab is not allowed in an expression; use spaces");
 }
 
 // --- Cases of test 11 that are CF-520, CF-528 and CF-529 ----------------
@@ -248,7 +252,8 @@ TEST(Expression, SyntaxErrorsNameTheirColumn) {
     EXPECT_EQ(parse("3x"), R"(CF-520 at 2: "3" is followed directly by "x")");
     EXPECT_EQ(parse("NOT NOT a"),
               "CF-520 at 5: only one unary operator is allowed in a row");
-    EXPECT_EQ(parse("a == b"), R"(CF-520 at 4: unexpected "=")");
+    EXPECT_EQ(parse("a == b"),
+              R"(CF-520 at 4: unexpected "="; equality is written with one =)");
 }
 
 TEST(Expression, ConfigurationFormsAreRefusedAtRunTime) {
@@ -365,6 +370,69 @@ TEST(Expression, ACallNeedsAOneSegmentNameAndParenthesis) {
     // Reserved words are reserved only as a whole one-segment name.
     EXPECT_EQ(run_time("not.x AND ps1.or"), "(and not.x ps1.or)");
     EXPECT_EQ(code_of("in + 1"), "CF-520");
+}
+
+// A mistake a commissioning engineer makes gets the right spelling.
+TEST(Expression, MistakesGetTheirHints) {
+    EXPECT_EQ(run_time("inv.1.p"),
+              R"(CF-520 at 4: unexpected character "."; a tag name with a )"
+              R"(segment that starts with a digit or holds - is written )"
+              R"(tag("..."))");
+    EXPECT_EQ(run_time("in > 5"),
+              R"(CF-520 at 1: "in" is a reserved word; a tag of this name is )"
+              R"(written tag("in"))");
+    EXPECT_EQ(parse("in > 5"),
+              R"(CF-520 at 1: "in" is a reserved word; a parameter or )"
+              R"(variable cannot have this name)");
+    EXPECT_EQ(parse("mode = \"auto\""),
+              "CF-520 at 8: a pattern string is allowed only as the argument "
+              "of a function; a text is written in single quotes ('auto')");
+    EXPECT_EQ(run_time("mode = \"auto\""),
+              "CF-520 at 8: a pattern string is allowed only as the argument "
+              "of a function; a run-time expression has no text values");
+    EXPECT_EQ(run_time("a != b"),
+              R"(CF-520 at 3: unexpected character "!"; "not equal" is )"
+              R"(written <>)");
+    EXPECT_EQ(run_time("a && b"),
+              R"(CF-520 at 3: unexpected character "&"; "and" is written AND)");
+    EXPECT_EQ(run_time("a || b"),
+              R"(CF-520 at 3: unexpected character "|"; "or" is written OR)");
+    EXPECT_EQ(run_time("a % 2"),
+              R"(CF-520 at 3: unexpected character "%"; the remainder is )"
+              R"(written MOD)");
+    EXPECT_EQ(run_time("!a"),
+              R"(CF-520 at 1: unexpected character "!"; negation is written )"
+              R"(NOT)");
+    EXPECT_EQ(parse("a IN (1..5)"),
+              "CF-520 at 8: a range is written without parentheses: n IN "
+              "1..5");
+    // A character beyond ASCII is shown whole.
+    EXPECT_EQ(run_time("a \xC3\xA9 b"),
+              "CF-520 at 3: unexpected character \"\xC3\xA9\"");
+}
+
+// IN with a range leaves no RANGE node behind it.
+TEST(Expression, InWithARangeHasNoOrphanNode) {
+    ExpressionError error;
+    const std::optional<Expression> tree =
+        parse_expression("n IN 1..5", ExpressionKind::CONFIGURATION, error);
+    ASSERT_TRUE(tree.has_value());
+    const Expression found = tree.value_or(Expression{});
+    EXPECT_EQ(found.nodes.size(), 4U);
+    EXPECT_TRUE(std::ranges::none_of(found.nodes, [](const ExprNode& node) {
+        return node.op == ExprOp::RANGE;
+    }));
+}
+
+TEST(Expression, ReservedWords) {
+    for (const std::string_view word :
+         {"and", "OR", "Xor", "not", "mod", "div", "in", "true", "False",
+          "good", "UNCERTAIN", "bad"}) {
+        EXPECT_TRUE(is_reserved_word(word)) << word;
+    }
+    for (const std::string_view name : {"band", "inputs", "ps1.in", "", "if"}) {
+        EXPECT_FALSE(is_reserved_word(name)) << name;
+    }
 }
 }  // namespace
 }  // namespace scada::conf

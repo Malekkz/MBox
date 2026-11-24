@@ -102,6 +102,13 @@ public:
 
     [[nodiscard]] SourcePosition position(NodeId node) const noexcept;
 
+    // True if a scalar's text is its source characters, on the line of its
+    // position: a plain or quoted scalar on one line with no escape, folded
+    // break or doubled quote. The text then starts at the position's column,
+    // or one column later for a quoted scalar, so a character of the text
+    // has a column in the file (D-109). False for anything else.
+    [[nodiscard]] bool verbatim(NodeId node) const noexcept;
+
     // The position of `node` with its file's name, for a diagnostic.
     [[nodiscard]] Location location(NodeId node) const;
 
@@ -153,6 +160,8 @@ private:
     // map) in byte order of their keys.
     std::vector<std::uint32_t> sorted_;
     std::vector<NodeId> items_;
+    // One bit per node: `verbatim`.
+    std::vector<bool> verbatim_;
     NodeId root_ = 0;
 };
 
@@ -178,8 +187,10 @@ public:
     Result<FileIndex> add_file(std::string name);
 
     // Adds a scalar as a sequence item, a map's value or the root.
+    // `verbatim`: its text is its source characters on one line (see
+    // Document::verbatim).
     Result<NodeId> scalar(std::string_view text, ScalarStyle style,
-                          SourcePosition where);
+                          SourcePosition where, bool verbatim = false);
 
     // Adds the key of the next entry of the innermost map. ALREADY_EXISTS if
     // the map has a key of the same text; the builder stays usable for no
