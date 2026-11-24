@@ -25,6 +25,9 @@ constexpr std::int64_t FIRST_S = 2 * DAY;                   // 1970-01-03
 constexpr std::int64_t LAST_S = 4'133'894'400 - (2 * DAY);  // 2100-12-30
 constexpr std::size_t MAX_CHECKED = 64;
 
+void check_round_trips(const scada::driver::detail::TzifZone& zone,
+                       const scada::driver::ZoneTable& table);
+
 // Properties of an accepted file and its table: transitions strictly
 // increasing and offsets within RFC 9636's bounds; inside the table every
 // conversion moves a local time by an offset within those bounds; and an
@@ -46,6 +49,16 @@ void check_zone(const scada::driver::detail::TzifZone& zone,
             std::abort();
         }
     }
+    check_round_trips(zone, table);
+}
+
+// Instants between two transitions inside the table, written as local
+// time with the offset the file gives them, convert back (see check_zone).
+void check_round_trips(const scada::driver::detail::TzifZone& zone,
+                       const scada::driver::ZoneTable& table) {
+    using scada::driver::detail::TZIF_MAX_OFFSET_S;
+    using scada::driver::detail::TZIF_MIN_OFFSET_S;
+    const auto& times = zone.transitions_s;
     const std::size_t count = std::min(times.size(), MAX_CHECKED);
     for (std::size_t index = 0; index + 1 < count; ++index) {
         // Only transitions inside the table: a file may hold any instant,
