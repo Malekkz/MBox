@@ -234,8 +234,8 @@ private:
     std::int64_t backoff_ns_ = 0;
     std::int64_t next_connect_ns_ = 0;
     std::int64_t quiet_until_ns_ = 0;
-    // Input is discarded once more before the next send (7.2: bytes that
-    // arrive during a quiet time are not the next answer).
+    // Input is discarded by `settle` at every step until the next send
+    // (7.2: bytes that arrive during a quiet time are not the next answer).
     bool discard_before_send_ = false;
     std::uint32_t noisy_rounds_ = 0;  // quiet times in a row that found bytes
     // Bytes a stream delivered after the last complete frame, kept at the

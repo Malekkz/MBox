@@ -205,8 +205,8 @@ public:
     // PROBE_MIN_WINDOW_NS (or `timeout_ns`, if shorter), with its time-out
     // ending when that poll falls due (`Choice::timeout_ns`); a probe
     // PROBE_FLOOR time-outs late goes in the next idle instant with its
-    // whole time-out (D-138, G7). A cycle probe keeps its device's
-    // time-outs: it has no window.
+    // whole time-out (D-138, G7). A cycle probe has no window: its first
+    // request, the probe, waits its whole probe time-out.
     void set_probe(std::uint32_t device, std::int64_t due_ns,
                    std::int64_t timeout_ns) noexcept;
     void clear_probe(std::uint32_t device) noexcept;

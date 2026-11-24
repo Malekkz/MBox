@@ -107,6 +107,14 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t inter_frame_gap_ns(
     return gap > MAX - line.turnaround_ns ? MAX : gap + line.turnaround_ns;
 }
 
+// The quiet time of a serial line after a time-out or a broken answer:
+// the margin (at least 20 ms), and never less than the silence after an
+// answer, `turnaround` included (7.2; review H2).
+SCADA_RT [[nodiscard]] constexpr std::int64_t quiet_time_ns(
+    const LineTiming& line) noexcept {
+    return std::max(margin_ns(line), inter_frame_gap_ns(line));
+}
+
 namespace detail {
 // left + right, clamped to the range of std::int64_t either way (Q13).
 [[nodiscard]] constexpr std::int64_t saturating_add(

@@ -60,6 +60,7 @@ std::vector<FailureTracker::Device> tracked_devices(
                 return !group.empty();
             });
         out.push_back({.unit_id = device.unit,
+                       .own_unit = device.unit == CompiledDevice::OWN_UNIT,
                        .rules = device.failure,
                        .enabled = device.enabled,
                        .has_poll_group = polls});
@@ -111,10 +112,18 @@ Status check_keys(const CompiledChannel& channel) noexcept {
         connection.connect_timeout_ns <= 0) {
         return invalid("reconnect or connect_timeout not above 0");
     }
-    if (channel.line.bits_per_char == 0 || channel.line.turnaround_ns < 0) {
+    // CS: `baud` 300 to 4,000,000 (0 is a stream), `turnaround` 0 to 1 s.
+    constexpr std::uint32_t MIN_BIT_RATE = 300;
+    constexpr std::uint32_t MAX_BIT_RATE = 4'000'000;
+    constexpr std::int64_t MAX_TURNAROUND_NS = 1'000'000'000;
+    const LineTiming& line = channel.line;
+    if (line.bits_per_char == 0 || line.turnaround_ns < 0 ||
+        line.turnaround_ns > MAX_TURNAROUND_NS ||
+        (line.bit_rate != 0 &&
+         (line.bit_rate < MIN_BIT_RATE || line.bit_rate > MAX_BIT_RATE))) {
         return invalid(
-            "a line without bits per character, or a negative "
-            "turnaround");
+            "a line without bits per character, a bit rate outside 300 to "
+            "4,000,000, or a turnaround outside 0 to 1 s");
     }
     for (const CompiledDevice& device : channel.devices) {
         const FailureRules& rules = device.failure;
@@ -249,7 +258,7 @@ bool ChannelEngine::settle(std::int64_t now_ns) noexcept {
         ++counts_.jams;
         return true;
     }
-    quiet_until_ns_ = later(now_ns, margin_ns(channel_->line));
+    quiet_until_ns_ = later(now_ns, quiet_time_ns(channel_->line));
     return false;
 }
 
@@ -502,11 +511,9 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
         encoded.length > out.bytes.size()) {
         return End::NOT_SENT;
     }
-    if (discard_before_send_) {
-        // Bytes that came during the quiet time are no answer (7.2).
-        (void)transport_->discard_input();
-        discard_before_send_ = false;
-    }
+    // `settle` dropped what came during the quiet time in this same step,
+    // just before this send (7.2, G3).
+    discard_before_send_ = false;
     if (transport_->closed_by_peer()) {
         return End::CLOSED;  // checked before a write (7.3)
     }
@@ -696,7 +703,11 @@ void ChannelEngine::answered(const Choice& choice,
         // the reconnect back-off (7.3; the lead's ruling R10).
         failures_.probe_ended(device, true, now);
         scheduler_.probe_done();
-        if (choice.cycle && decoded.kind != DecodeResult::Kind::BUSY) {
+        if (choice.cycle && decoded.kind == DecodeResult::Kind::BUSY) {
+            // A busy part cuts its chain, as a poll's does (H4).
+            drop_chain(run);
+            run.chain_cut = request.chained;
+        } else if (choice.cycle) {
             // A whole poll cycle as a probe (R8): published as a poll.
             deliver(choice, std::span(sink_storage_).first(sink_count_));
         }
@@ -759,7 +770,7 @@ void ChannelEngine::after_bad_frame(const Request& request, End end) noexcept {
     // again before that request (7.2, 7.3; review P6).
     (void)transport_->discard_input();
     discard_before_send_ = true;
-    quiet_until_ns_ = later(now, margin_ns(channel_->line));
+    quiet_until_ns_ = later(now, quiet_time_ns(channel_->line));
 }
 
 void ChannelEngine::failed(const Choice& choice, End end) noexcept {
@@ -781,7 +792,7 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     // connection (7.1, 6.6).
     const bool retryable =
         end == End::TIMEOUT ||
-        (end == End::BROKEN && channel_->transport == TransportKind::SERIAL);
+        (end == End::BROKEN && channel_->transport != TransportKind::TCP);
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
         ++run.attempts;

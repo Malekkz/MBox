@@ -61,6 +61,9 @@ public:
     // One entry per device: its unit id and rules. Allocates.
     struct Device {
         std::uint32_t unit_id = 0;
+        // A unit of its own (`CompiledDevice::OWN_UNIT`): shares its count
+        // with no other device, whatever `unit_id` says (review H5).
+        bool own_unit = false;
         FailureRules rules;
         bool enabled = true;
         bool has_poll_group = true;  // at least one point in a poll group

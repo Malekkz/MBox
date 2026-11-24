@@ -101,6 +101,10 @@ IoStatus SimTransport::receive(std::span<std::byte> into,
     if (!open_ || peer_closed_) {
         return IoStatus::CLOSED;
     }
+    if (empty_read_) {
+        empty_read_ = false;
+        return IoStatus::OK;  // a read of 0 bytes
+    }
     if (stall_ns_ > 0) {
         clock_->advance_to(clock_->monotonic_ns() + stall_ns_);
         stall_ns_ = 0;

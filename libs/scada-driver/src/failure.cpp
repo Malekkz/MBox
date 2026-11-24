@@ -33,8 +33,10 @@ FailureTracker::FailureTracker(std::vector<Device> devices,
       unit_index_(devices_.size()) {
     std::vector<std::uint32_t> units;
     for (std::size_t index = 0; index < devices_.size(); ++index) {
-        const auto found =
-            std::find(units.begin(), units.end(), devices_[index].unit_id);
+        const auto found = devices_[index].own_unit
+                               ? units.end()
+                               : std::find(units.begin(), units.end(),
+                                           devices_[index].unit_id);
         unit_index_[index] = static_cast<std::uint32_t>(found - units.begin());
         if (found == units.end()) {
             units.push_back(devices_[index].unit_id);

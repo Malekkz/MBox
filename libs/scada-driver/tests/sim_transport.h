@@ -103,6 +103,9 @@ public:
     // Bytes from `from_ns` to `to_ns`, one every millisecond.
     void noise(std::int64_t from_ns, std::int64_t to_ns);
     [[nodiscard]] std::size_t collided() const noexcept { return collided_; }
+    // The next receive returns OK with no byte: a read of 0, the peer's
+    // close as a socket reports it.
+    void empty_read() noexcept { empty_read_ = true; }
     // The next `count` sends fail with nothing sent.
     void failed_sends(int count) noexcept { failed_sends_ = count; }
 
@@ -158,6 +161,7 @@ private:
     int close_after_checks_ = 0;
     std::int64_t stall_ns_ = 0;
     bool collisions_ = false;
+    bool empty_read_ = false;
     std::size_t collided_ = 0;
     std::uint8_t burst_unit_ = 0;
     std::int64_t burst_after_ns_ = 0;
