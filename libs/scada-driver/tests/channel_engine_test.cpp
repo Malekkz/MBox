@@ -1505,23 +1505,29 @@ TEST(ChannelEngine, AProbesAnswerDoesNotResetTheReconnectBackOff) {
     EXPECT_GE(rig.transport.connect_times()[4] - probe_at, 8 * SECOND);
 }
 
+// The writes of the point of a side-effect-only device (R8) by its cycle
+// probe when the unit comes back, `busy` or answering: the difference
+// between just after the probe and just before it.
+int written_by_a_cycle_probe(bool busy) {
+    Rig rig(side_effect_only(TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    const int before = rig.tags.point(0, 0).writes;
+    rig.bus.fault(1, busy ? Fault::BUSY : Fault::NONE);
+    rig.bus.set(1, 0, 0, 3);
+    const std::int64_t probe_at = rig.engine.failures().probe_due_ns(0);
+    rig.run_until(probe_at + 5 * MILLISECOND);
+    EXPECT_NE(rig.state(0), DeviceStatus::DEMOTED);
+    return rig.tags.point(0, 0).writes - before;
+}
+
 TEST(ChannelEngine, ACycleProbePublishesItsSamplesAndABusyOneNothing) {
     // H6, R8: the probe of a device with no probe request is its poll cycle,
     // whose answer is published at once; a busy answer recovers the device
     // and writes nothing.
-    for (const bool busy : {false, true}) {
-        Rig rig(side_effect_only(TransportKind::SERIAL), 1);
-        rig.bus.fault(1, Fault::SILENT);
-        rig.run_until(500 * MILLISECOND);
-        ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
-        const int written = rig.tags.point(0, 0).writes;
-        rig.bus.fault(1, busy ? Fault::BUSY : Fault::NONE);
-        rig.bus.set(1, 0, 0, 3);
-        const std::int64_t probe_at = rig.engine.failures().probe_due_ns(0);
-        rig.run_until(probe_at + 5 * MILLISECOND);
-        EXPECT_NE(rig.state(0), DeviceStatus::DEMOTED);
-        EXPECT_EQ(rig.tags.point(0, 0).writes, busy ? written : written + 1);
-    }
+    EXPECT_EQ(written_by_a_cycle_probe(false), 1);
+    EXPECT_EQ(written_by_a_cycle_probe(true), 0);
 }
 
 TEST(ChannelEngine, AProbeTheProtocolCannotEncodeCountsAsFailed) {
@@ -1576,24 +1582,25 @@ TEST(ChannelEngine, APollsAnswerEmptiesTheRun) {
     EXPECT_LE(rig.engine.failures().timeout_run(), 1U);
 }
 
+// Whether an engine accepts a serial line of `bit_rate` and `turnaround`.
+bool line_accepted(std::uint32_t bit_rate, std::int64_t turnaround_ns) {
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 5), TransportKind::SERIAL);
+    channel.line.bit_rate = bit_rate;
+    channel.line.turnaround_ns = turnaround_ns;
+    const Rig rig(std::move(channel), 1);
+    return rig.engine.status().ok();
+}
+
 TEST(ChannelEngine, LineKeysOutsideTheSchemasRangesAreRefused) {
     // H7: CS `baud` 300 to 4,000,000 (0 a stream), `turnaround` 0 to 1 s.
-    const auto status_with = [](std::uint32_t bit_rate,
-                                std::int64_t turnaround_ns) {
-        CompiledChannel channel =
-            channel_of(1, quick_failure(0, 5), TransportKind::SERIAL);
-        channel.line.bit_rate = bit_rate;
-        channel.line.turnaround_ns = turnaround_ns;
-        Rig rig(std::move(channel), 1);
-        return rig.engine.status().ok();
-    };
-    EXPECT_TRUE(status_with(300, 0));
-    EXPECT_TRUE(status_with(4'000'000, SECOND));
-    EXPECT_TRUE(status_with(0, 0));
-    EXPECT_FALSE(status_with(299, 0));
-    EXPECT_FALSE(status_with((1U << 31U) + 1U, 0));
-    EXPECT_FALSE(status_with(9'600, SECOND + 1));
-    EXPECT_FALSE(status_with(9'600, std::numeric_limits<std::int64_t>::max()));
+    EXPECT_TRUE(line_accepted(300, 0) && line_accepted(4'000'000, SECOND) &&
+                line_accepted(0, 0));
+    EXPECT_FALSE(line_accepted(299, 0));
+    EXPECT_FALSE(line_accepted((1U << 31U) + 1U, 0));
+    EXPECT_FALSE(line_accepted(9'600, SECOND + 1));
+    EXPECT_FALSE(
+        line_accepted(9'600, std::numeric_limits<std::int64_t>::max()));
 }
 
 TEST(ChannelEngine, BytesAfterTheQuietTimeAreDroppedBeforeTheNextSend) {
