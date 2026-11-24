@@ -2075,7 +2075,7 @@ Limits (the lead's review of #140):
 - Because the name behaviour is observed, probe test 5 (a title edit after a red run leaves the real checks red) must be repeated when the checks become required on `main`.
 - `events` must not be a required check: it succeeds in a run that tests nothing. The seven checks meant to be required are those of the README's table.
 - New commits on the base branch send no event to the pull request, so they start no run; the next push does.
-- A title and a base changed together are one `edited` event with both keys, and it runs every job (probe test 6).
+- A title and a base changed together are two `edited` events, one per field: the base event runs every job, and the title event runs none and cancels nothing (probe test 6 on #139: one request changed both; run 45443341858 was the full run, run 45443343088 skipped every job, and the earlier run 45443328296 was cancelled by the base run as any real run of the same group is).
 - When a base branch is deleted, GitHub retargets its pull requests itself. Whether that event carries `changes.base` is not verified; if it does not, the result is no run, not a false success.
 - The robust shape, a reusable workflow called by two small ones, is a separate issue: it renames every check, so it comes before required checks are set.
 Reason: a change of base changes what the pull request merges, and a draft made ready is the point where reviewers rely on the run; both must be tested as a push is. A title edit must not re-run the pipeline, cancel a run, or turn a red pull request green.
