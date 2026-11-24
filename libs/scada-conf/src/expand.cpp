@@ -13,6 +13,7 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "config_eval.h"
+#include "expression_site.h"
 #include "expression_types.h"
 
 #include <algorithm>
@@ -313,10 +314,17 @@ private:
 
     void error_at(std::uint16_t code, const CheckedFile& file, NodeId node,
                   std::string message, std::string detail = {}) {
+        error_in(code, file, file.document->location(node), std::move(message),
+                 std::move(detail));
+    }
+
+    void error_in(std::uint16_t code, const CheckedFile& file,
+                  Location location, std::string message,
+                  std::string detail = {}) {
         failed_ = true;
         Diagnostic diagnostic{.severity = Severity::ERROR,
                               .code = code,
-                              .location = file.document->location(node),
+                              .location = std::move(location),
                               .message = std::move(message),
                               .notes = {}};
         if (channel_ != nullptr && &file != channel_ && instance_) {
@@ -1356,7 +1364,19 @@ private:
         std::optional<ConfigValue> result =
             evaluate_configuration(*tree, bindings, problem);
         if (!result) {
-            error(problem.code, value, problem.message);
+            // At the offending character, as for a syntax error (D-109).
+            ExpressionSite site = expression_site(*value.file->document,
+                                                  value.node, problem.column);
+            std::string message = problem.message;
+            constexpr std::string_view PREFIX = "expression: ";
+            if (problem.code == CF_EVALUATION && message.starts_with(PREFIX)) {
+                message = "expression " + quote_text(text) + ": " +
+                          message.substr(PREFIX.size());
+            } else {
+                message += site.where;
+            }
+            error_in(problem.code, *value.file, std::move(site.location),
+                     std::move(message));
         }
         return result;
     }
