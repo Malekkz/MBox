@@ -322,6 +322,7 @@ private:
                   Location location, std::string message,
                   std::string detail = {}) {
         failed_ = true;
+        device_failed_ = true;
         Diagnostic diagnostic{.severity = Severity::ERROR,
                               .code = code,
                               .location = std::move(location),
@@ -387,12 +388,18 @@ private:
         }
         instance_ = name->location();
         device_name_ = std::string(name->scalar_text());
+        device_failed_ = false;
         params_.clear();
         Device device{.keys = written, .points = {}};
         for (const std::string_view key :
              {"template", "params", "defaults", "overrides", "disable", "only",
               "points"}) {
             device.keys.erase(key);
+        }
+        // With a template, the instance's `identify` is appended to the
+        // template's (step 6), not merged over it.
+        if (written.find("template") != nullptr) {
+            device.keys.erase("identify");
         }
         if (const Value* reference = written.find("template")) {
             std::optional<std::vector<const CheckedFile*>> chain =
@@ -524,7 +531,7 @@ private:
             merge_level_keys(root, device_keys, defaults);
             expand_level(*level, root, device.points);
         }
-        if (failed_) {
+        if (device_failed_) {
             return false;
         }
         keep_present(instance, device.points);
@@ -534,7 +541,7 @@ private:
         Value keys = device_keys;
         merge(keys, device.keys, "");
         device.keys = std::move(keys);
-        return !failed_;
+        return !device_failed_;
     }
 
     // Step 2: the parameter declarations of the chain, root first.
@@ -627,7 +634,7 @@ private:
                 params_.emplace(name, std::move(*bound));
             }
         }
-        return !failed_;
+        return !device_failed_;
     }
 
     // The value of a parameter, checked against its declaration (CF-412).
@@ -1570,6 +1577,8 @@ private:
     std::vector<Channel> channels_;
     std::set<std::string> reported_;
     bool failed_ = false;
+    // An error in the instance being expanded, which ends its steps.
+    bool device_failed_ = false;
 
     // The instance being expanded.
     const CheckedFile* channel_ = nullptr;

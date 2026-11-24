@@ -1,0 +1,5 @@
+template: inv_x2
+extends: inv_x
+protocol: modbus
+points:
+  - { name: model_code, when: "model = 'x2'", address: { table: holding, register: 9, type: uint16 } }

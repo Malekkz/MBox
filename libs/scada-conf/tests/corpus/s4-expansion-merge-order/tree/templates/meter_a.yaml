@@ -1,0 +1,18 @@
+template: meter_a
+extends: meter_base
+protocol: modbus
+disable: ["dc.*"]
+defaults:
+  poll_group: slow
+  max_age: 30s
+  address: { table: holding, type: uint16, word_order: little }
+identify:
+  - { address: { table: holding, register: 1, type: uint16 }, equals: 7 }
+points:
+  - { name: v1, scale: { gain: 2, offset: 1 }, address: { register: 10 } }
+  - { name: v2, address: { register: 11 }, alarms: [ { type: high, limit: 250, priority: high }, { type: low, limit: 200, priority: low } ] }
+  - { name: v3, address: { register: 12 } }
+repeat:
+  - for: { n: "1..2" }
+    points:
+      - { name: "i{n}", unit: A, address: { register: "20 + n" } }

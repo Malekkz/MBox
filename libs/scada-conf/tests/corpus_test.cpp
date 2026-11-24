@@ -1,10 +1,12 @@
 // The conformance corpus of configuration schemas contract section 14: each
 // case is a tree and the list of (file, line, column, code) it must give, in
-// the order of section 1.4. See corpus/README.md.
+// the order of section 1.4, and for a valid tree its expanded points if the
+// case pins them. See corpus/README.md.
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/validate.h"
+#include "expanded_text.h"
 
 #include <gtest/gtest.h>
 
@@ -52,20 +54,31 @@ std::string corpus_line(const Diagnostic& diagnostic) {
            code_text(diagnostic);
 }
 
-std::vector<std::string> diagnostics_of(const fs::path& tree) {
-    const Result<Report> report = validate_tree(tree);
-    EXPECT_TRUE(report.ok()) << report.status().message();
-    std::vector<std::string> got;
-    if (!report.ok()) {
+// The diagnostics of a tree as the corpus pins them, and its expanded
+// points when it is valid.
+struct Outcome {
+    std::vector<std::string> diagnostics;
+    std::vector<std::string> points;
+};
+
+Outcome outcome_of(const fs::path& tree) {
+    const Result<Validation> validation = validate_and_expand(tree);
+    EXPECT_TRUE(validation.ok()) << validation.status().message();
+    Outcome got;
+    if (!validation.ok()) {
         return got;
     }
-    for (const Diagnostic& diagnostic : report.value().errors) {
-        got.push_back(corpus_line(diagnostic));
+    const Report& report = validation.value().report;
+    for (const Diagnostic& diagnostic : report.errors) {
+        got.diagnostics.push_back(corpus_line(diagnostic));
     }
-    if (passed(report.value())) {
-        for (const Diagnostic& diagnostic : report.value().warnings) {
-            got.push_back(corpus_line(diagnostic));
+    if (passed(report)) {
+        for (const Diagnostic& diagnostic : report.warnings) {
+            got.diagnostics.push_back(corpus_line(diagnostic));
         }
+    }
+    if (validation.value().expanded) {
+        got.points = points_of(*validation.value().expanded, true);
     }
     return got;
 }
@@ -78,8 +91,12 @@ TEST(Corpus, EveryCaseGivesItsExpectedDiagnostics) {
         ASSERT_TRUE(fs::is_directory(dir / "tree")) << "no tree/ in " << dir;
         ASSERT_TRUE(fs::is_regular_file(dir / "expected"))
             << "no expected in " << dir;
-        EXPECT_EQ(diagnostics_of(dir / "tree"),
-                  expected_lines(dir / "expected"));
+        const Outcome got = outcome_of(dir / "tree");
+        EXPECT_EQ(got.diagnostics, expected_lines(dir / "expected"));
+        // A valid case may pin its expanded points (test 6).
+        if (fs::is_regular_file(dir / "expanded")) {
+            EXPECT_EQ(got.points, expected_lines(dir / "expanded"));
+        }
     }
 }
 

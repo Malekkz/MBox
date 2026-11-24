@@ -1,0 +1,11 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.inv1, template: inv_x2b, unit_id: 1 }
+  - name: ps1.inv2
+    template: inv_x2b
+    unit_id: 2
+    params: { strings: 4, gain: 0.5, has_temp: false, model: x2, phase: single, options: [meter] }

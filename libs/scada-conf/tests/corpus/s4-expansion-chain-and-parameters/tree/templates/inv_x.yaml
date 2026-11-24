@@ -1,0 +1,7 @@
+template: inv_x
+extends: inv_core
+protocol: modbus
+params:
+  gain: { default: 0.01 }
+points:
+  - { name: power, unit: W }

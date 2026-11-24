@@ -1,0 +1,16 @@
+# Expanded points (contract 14, test 6): a base template and four protocol
+# templates (extends to depth 4); each level's keys win over those above it
+# (step 3), so power is in W from inv_x and energy in MWh from inv_x2b,
+# where the opposite order would keep kW and kWh. A child changes a
+# parameter's default (gain 0.01). Parameters of every type decide the
+# `when` of temp, phases, meter.power and model_code. Invented.
+ps1.inv1: {unit_id: 1}
+ps1.inv1.power: {unit: W, description: Active power, scale: {gain: 0.1}, address: {table: holding, register: 100, type: int32}}
+ps1.inv1.energy: {unit: MWh, address: {table: holding, register: 102, type: uint32}}
+ps1.inv1.temp: {unit: degC, address: {table: input, register: 1, type: int16}}
+ps1.inv1.phases: {address: {table: input, register: 2, type: uint16}}
+ps1.inv2: {unit_id: 2}
+ps1.inv2.power: {unit: W, description: Active power, scale: {gain: 5.0}, address: {table: holding, register: 100, type: int32}}
+ps1.inv2.energy: {unit: MWh, address: {table: holding, register: 102, type: uint32}}
+ps1.inv2.meter.power: {address: {table: holding, register: 300, type: int32}}
+ps1.inv2.model_code: {address: {table: holding, register: 9, type: uint16}}

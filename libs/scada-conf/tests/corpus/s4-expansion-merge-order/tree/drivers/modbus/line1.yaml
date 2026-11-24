@@ -1,0 +1,20 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - name: ps1.m1
+    template: meter_a
+    unit_id: 1
+    only: ["v*", "i?"]
+    defaults: { poll_group: fast }
+    overrides:
+      v1: { scale: { divide_by: 10 } }
+      v2: { max_age: 5s, alarms: [ { type: high, limit: 240, priority: high } ] }
+      v3: { address: { replace: true, table: input, register: 3, type: int16 } }
+      i2: { address: { register: "500 + n" } }
+    identify:
+      - { address: { table: holding, register: 2, type: uint16 }, equals: 9 }
+    points:
+      - { name: extra, address: { table: holding, register: 90, type: uint16 } }

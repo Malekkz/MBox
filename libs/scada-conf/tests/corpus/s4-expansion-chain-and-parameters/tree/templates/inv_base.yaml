@@ -1,0 +1,6 @@
+template: inv_base
+description: Signals of an invented inverter family
+points:
+  - { name: power, unit: kW, description: Active power }
+  - { name: energy, unit: kWh }
+  - { name: temp, unit: degC }

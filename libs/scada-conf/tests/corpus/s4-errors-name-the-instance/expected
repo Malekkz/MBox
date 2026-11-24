@@ -1,0 +1,8 @@
+# An error inside an expanded instance is at the instance, with the
+# template's line as a note, which the corpus does not pin (contract 14,
+# test 7; 1.4): two instances whose parameter makes the template's
+# expression fail (CF-410) give one error each, and an override of a point
+# the template does not have is CF-413 at its key. ps1.m1 is valid. Invented.
+drivers/modbus/line1.yaml:8:13: CF-410
+drivers/modbus/line1.yaml:9:13: CF-410
+drivers/modbus/line1.yaml:10:65: CF-413

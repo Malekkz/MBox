@@ -1,0 +1,5 @@
+template: inv_x2b
+extends: inv_x2
+protocol: modbus
+points:
+  - { name: energy, unit: MWh }

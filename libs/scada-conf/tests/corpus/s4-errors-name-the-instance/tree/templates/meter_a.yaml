@@ -1,0 +1,6 @@
+template: meter_a
+protocol: modbus
+params:
+  scale: { type: int, default: 1 }
+points:
+  - { name: flow, address: { table: holding, register: "1000 DIV scale", type: uint16 } }

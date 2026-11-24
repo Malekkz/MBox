@@ -9,6 +9,7 @@
 #include "scada/conf/node.h"
 #include "scada/conf/validate.h"
 #include "scada/test/temp_directory.h"
+#include "expanded_text.h"
 
 #include <gtest/gtest.h>
 
@@ -33,63 +34,6 @@ using Files = std::map<std::string, std::string>;
 constexpr std::string_view SYSTEM =
     "unit: { id: site-0042, name: Test unit }\n"
     "time: { timezone: Etc/UTC, sync: { mode: none } }\n";
-
-// A value of the expanded tree in flow style, as one line.
-// NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
-std::string flow(const Document& document, NodeId node) {
-    switch (document.kind(node)) {
-        case NodeKind::SCALAR:
-            return std::string(document.text(node));
-        case NodeKind::SEQUENCE: {
-            std::string out = "[";
-            for (const NodeId item : document.items(node)) {
-                out += (out.size() > 1 ? ", " : "") + flow(document, item);
-            }
-            return out + "]";
-        }
-        case NodeKind::MAP: {
-            std::string out = "{";
-            for (const Entry& entry : document.entries(node)) {
-                out += (out.size() > 1 ? ", " : "") +
-                       std::string(document.text(entry.key)) + ": " +
-                       flow(document, entry.value);
-            }
-            return out + "}";
-        }
-    }
-    return {};
-}
-
-// Each expanded point as `<device>.<point>: {<keys but name>}`.
-Lines points_of(const ExpandedTree& tree) {
-    const Document& document = tree.document;
-    Lines lines;
-    const NodeId channels = *document.find(document.root(), "channels");
-    for (const NodeId channel : document.items(channels)) {
-        const NodeId devices = *document.find(channel, "devices");
-        for (const NodeId device : document.items(devices)) {
-            const std::string prefix(
-                document.text(*document.find(device, "name")));
-            for (const NodeId point :
-                 document.items(*document.find(device, "points"))) {
-                std::string keys;
-                for (const Entry& entry : document.entries(point)) {
-                    if (document.text(entry.key) == "name") {
-                        continue;
-                    }
-                    keys += (keys.empty() ? "" : ", ") +
-                            std::string(document.text(entry.key)) + ": " +
-                            flow(document, entry.value);
-                }
-                lines.push_back(
-                    prefix + "." +
-                    std::string(document.text(*document.find(point, "name"))) +
-                    ": {" + keys + "}");
-            }
-        }
-    }
-    return lines;
-}
 
 // Validates and expands the tree of `files` with a system.yaml: its errors
 // in the form of contract 1.4 (with their notes), or its expanded points.
@@ -530,6 +474,30 @@ TEST(Expand, InstancePointsAndNamesGivenTwice) {
         (Lines{"drivers/modbus/line1.yaml:7:11: error CF-416: point \"flow\" "
                "is defined twice\n"
                "  from template templates/meter_a.yaml:6:13 (point flow)"}));
+}
+
+// An instance without a template lists its points; `params`, `disable`
+// and `only` are refused (4.5), by stage 3, before expansion.
+TEST(Expand, AnInstanceWithoutATemplate) {
+    EXPECT_EQ(
+        expand({{"drivers/modbus/line1.yaml",
+                 channel("  - name: ps1.m1\n"
+                         "    unit_id: 1\n"
+                         "    points:\n"
+                         "      - { name: flow, address: { table: holding, "
+                         "register: 1, type: uint16 } }\n")}}),
+        Lines{"ps1.m1.flow: {address: {table: holding, register: 1, type: "
+              "uint16}}"});
+    EXPECT_EQ(
+        expand({{"drivers/modbus/line1.yaml",
+                 channel("  - name: ps1.m1\n"
+                         "    unit_id: 1\n"
+                         "    params: { a: 1 }\n"
+                         "    disable: [flow]\n")}}),
+        (Lines{"drivers/modbus/line1.yaml:9:5: error CF-201: unknown key "
+               "\"params\" in devices[0] (no template)",
+               "drivers/modbus/line1.yaml:10:5: error CF-201: unknown key "
+               "\"disable\" in devices[0] (no template)"}));
 }
 
 // 4.3: a cycle, more than 4 parents, and templates of the wrong kind.

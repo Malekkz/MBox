@@ -1,0 +1,7 @@
+template: io_base
+params:
+  inputs: { type: int, min: 0, max: 32, default: 3 }
+repeat:
+  - for: { n: "1..inputs" }
+    points:
+      - { name: "in{n}", description: Input }

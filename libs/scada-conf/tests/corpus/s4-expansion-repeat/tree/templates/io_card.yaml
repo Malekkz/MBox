@@ -1,0 +1,14 @@
+template: io_card
+extends: io_base
+protocol: modbus
+repeat:
+  - for: { n: "1..inputs" }
+    points:
+      - { name: "in{n}", address: { table: discrete, register: "if(n <= 2, n - 1, 10 + n)", type: bool } }
+  - for: { c: "1..2", k: [1, "3..4"] }
+    when: "c = 1 OR k > 3"
+    points:
+      - { name: "card{c}.ch{k}", address: { table: input, register: "100 * c + k", type: uint16 } }
+  - for: { n: "25..inputs" }
+    points:
+      - { name: "spare{n}", address: { table: input, register: n, type: uint16 } }
