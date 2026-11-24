@@ -38,20 +38,6 @@ enum class ScalarStyle : std::uint8_t {
     FOLDED,   // `>`
 };
 
-// The type a scalar was given by its schema (section 1.2), or NONE if no
-// schema typed it.
-enum class ScalarType : std::uint8_t {
-    NONE,
-    STRING,
-    INTEGER,
-    DECIMAL,
-    BOOLEAN,
-    DURATION,
-    SIZE,
-    PERCENTAGE,
-    EXPRESSION,
-};
-
 // The index of a node in its Document.
 using NodeId = std::uint32_t;
 
@@ -80,12 +66,16 @@ struct Entry {
 // Owns the nodes of one or more parsed files. Nodes refer to each other by
 // NodeId and never point into another Document.
 //
-// Memory: 24 bytes per node, 12 bytes per map entry, 4 bytes per sequence
+// Memory: 20 bytes per node, 12 bytes per map entry, 4 bytes per sequence
 // item, plus the bytes of every scalar's text and the file names.
 //
 // Every accessor taking a NodeId expects an id of this Document (below
 // `size()`); any other id ends the process, as a programmer error that
-// outside input cannot cause. No accessor throws.
+// outside input cannot cause. No accessor throws. A Document that was moved
+// from holds no nodes and must not be read: `kind(root())` ends the process.
+//
+// The type a schema gives a scalar (stage 3) is not stored here: the
+// Document stays immutable, and stage 3 keeps its types beside it, by NodeId.
 class Document {
 public:
     Document(const Document&) = default;
@@ -104,10 +94,6 @@ public:
 
     // How a scalar was written; PLAIN for a collection.
     [[nodiscard]] ScalarStyle style(NodeId node) const noexcept;
-
-    // The type the schema gave a scalar; NONE for a collection or an untyped
-    // scalar.
-    [[nodiscard]] ScalarType resolved(NodeId node) const noexcept;
 
     // A scalar's value: the text as written for a plain scalar (lines folded
     // into one), the unquoted and unescaped text otherwise. Empty for a
@@ -153,7 +139,6 @@ private:
         FileIndex file = 0;
         NodeKind kind = NodeKind::SCALAR;
         ScalarStyle style = ScalarStyle::PLAIN;
-        ScalarType resolved = ScalarType::NONE;
     };
 
     Document() = default;
@@ -194,8 +179,7 @@ public:
 
     // Adds a scalar as a sequence item, a map's value or the root.
     Result<NodeId> scalar(std::string_view text, ScalarStyle style,
-                          SourcePosition where,
-                          ScalarType resolved = ScalarType::NONE);
+                          SourcePosition where);
 
     // Adds the key of the next entry of the innermost map. ALREADY_EXISTS if
     // the map has a key of the same text; the builder stays usable for no
@@ -247,7 +231,7 @@ private:
 
     Status fail(Status status) noexcept;
     Result<NodeId> add(NodeKind kind, ScalarStyle style, SourcePosition where,
-                       ScalarType resolved, std::string_view text);
+                       std::string_view text);
     Status place_value(NodeId node) noexcept;
     Status end(NodeKind kind);
 

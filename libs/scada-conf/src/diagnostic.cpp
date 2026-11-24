@@ -3,6 +3,7 @@
 #include "utf8.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -19,33 +20,50 @@ constexpr unsigned char FIRST_PRINTABLE = 0x20;
 constexpr unsigned char ASCII_DEL = 0x7F;
 constexpr unsigned char FIRST_NON_ASCII = 0x80;
 constexpr std::uint32_t LAST_C1 = 0x9F;
-constexpr std::uint32_t LEFT_TO_RIGHT_MARK = 0x200E;
-constexpr std::uint32_t RIGHT_TO_LEFT_MARK = 0x200F;
-constexpr std::uint32_t LINE_SEPARATOR = 0x2028;
-constexpr std::uint32_t RIGHT_TO_LEFT_OVERRIDE = 0x202E;
-constexpr std::uint32_t LEFT_TO_RIGHT_ISOLATE = 0x2066;
-constexpr std::uint32_t POP_DIRECTIONAL_ISOLATE = 0x2069;
-constexpr std::uint32_t BYTE_ORDER_MARK = 0xFEFF;
-constexpr std::uint32_t NON_CHARACTER_FFFE = 0xFFFE;
-constexpr std::uint32_t NON_CHARACTER_FFFF = 0xFFFF;
+constexpr std::uint32_t LAST_BMP = 0xFFFF;
+constexpr std::uint32_t PLANE_LOW_BITS = 0xFFFE;
+constexpr unsigned BYTE_DIGITS = 2;
+constexpr unsigned BMP_DIGITS = 4;
+constexpr unsigned FULL_DIGITS = 8;
 constexpr std::string_view ELLIPSIS = "...";
 constexpr std::string_view HEX_DIGITS = "0123456789ABCDEF";
 constexpr unsigned NIBBLE_BITS = 4;
 constexpr std::uint32_t NIBBLE_MASK = 0xF;
 
+// A range of code points, both ends included.
+struct CodeRange {
+    std::uint32_t first;
+    std::uint32_t last;
+};
+
+// Characters that are invisible, reorder text or are not characters, beyond
+// the C0 and C1 controls (D-110).
+constexpr std::array<CodeRange, 11> HIDDEN = {{
+    {.first = 0x00AD, .last = 0x00AD},    // soft hyphen
+    {.first = 0x061C, .last = 0x061C},    // Arabic letter mark
+    {.first = 0x180E, .last = 0x180E},    // Mongolian vowel separator
+    {.first = 0x200B, .last = 0x200F},    // zero-width characters, marks
+    {.first = 0x2028, .last = 0x202E},    // separators, embeddings
+    {.first = 0x2060, .last = 0x2064},    // word joiner, invisible operators
+    {.first = 0x2066, .last = 0x2069},    // isolates
+    {.first = 0xFDD0, .last = 0xFDEF},    // non-characters
+    {.first = 0xFEFF, .last = 0xFEFF},    // byte order mark
+    {.first = 0xFFF9, .last = 0xFFFB},    // interlinear annotation
+    {.first = 0xE0000, .last = 0xE007F},  // tag characters
+}};
+
 bool needs_escape(std::uint32_t code_point) noexcept {
-    return code_point <= LAST_C1 ||
-           (code_point >= LEFT_TO_RIGHT_MARK &&
-            code_point <= RIGHT_TO_LEFT_MARK) ||
-           (code_point >= LINE_SEPARATOR &&
-            code_point <= RIGHT_TO_LEFT_OVERRIDE) ||
-           (code_point >= LEFT_TO_RIGHT_ISOLATE &&
-            code_point <= POP_DIRECTIONAL_ISOLATE) ||
-           code_point == BYTE_ORDER_MARK || code_point == NON_CHARACTER_FFFE ||
-           code_point == NON_CHARACTER_FFFF;
+    // U+nFFFE and U+nFFFF of every plane are non-characters.
+    if (code_point <= LAST_C1 ||
+        (code_point & PLANE_LOW_BITS) == PLANE_LOW_BITS) {
+        return true;
+    }
+    return std::ranges::any_of(HIDDEN, [code_point](const CodeRange& range) {
+        return code_point >= range.first && code_point <= range.last;
+    });
 }
 
-// `\x` or `\u` and `digits` hexadecimal digits of `value`.
+// `\` and `kind`, then `digits` hexadecimal digits of `value`.
 std::string hex_escape(char kind, std::uint32_t value, unsigned digits) {
     std::string out = {'\\', kind};
     for (unsigned i = digits; i > 0; --i) {
@@ -55,17 +73,19 @@ std::string hex_escape(char kind, std::uint32_t value, unsigned digits) {
     return out;
 }
 
+// `\uNNNN` for a character of the basic plane, `\UNNNNNNNN` above it.
+std::string code_point_escape(std::uint32_t code_point) {
+    return code_point <= LAST_BMP ? hex_escape('u', code_point, BMP_DIGITS)
+                                  : hex_escape('U', code_point, FULL_DIGITS);
+}
+
 // The printable form of the character or byte at `text[where]`, and how
 // many bytes of `text` it stands for.
 std::pair<std::string, std::size_t> printable_at(std::string_view text,
                                                  std::size_t where) {
-    constexpr unsigned BYTE_DIGITS = 2;
-    constexpr unsigned CODE_POINT_DIGITS = 4;
     const auto byte = static_cast<unsigned char>(text[where]);
     if (byte < FIRST_NON_ASCII) {
         switch (byte) {
-            case '\\':
-                return {"\\\\", 1};
             case '\n':
                 return {"\\n", 1};
             case '\r':
@@ -85,8 +105,7 @@ std::pair<std::string, std::size_t> printable_at(std::string_view text,
         return {hex_escape('x', byte, BYTE_DIGITS), 1};
     }
     if (needs_escape(decoded->second)) {
-        return {hex_escape('u', decoded->second, CODE_POINT_DIGITS),
-                decoded->first};
+        return {code_point_escape(decoded->second), decoded->first};
     }
     return {std::string(text.substr(where, decoded->first)), decoded->first};
 }
@@ -114,6 +133,18 @@ std::string printable(std::string_view text, std::size_t max_bytes) {
             return out;
         }
     }
+    return out;
+}
+
+std::string quote_text(std::string_view text) {
+    std::string out = "\"";
+    for (const char chr : text) {
+        if (chr == '\\' || chr == '"') {
+            out.push_back('\\');
+        }
+        out.push_back(chr);
+    }
+    out.push_back('"');
     return out;
 }
 

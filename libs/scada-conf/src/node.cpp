@@ -22,7 +22,7 @@ namespace scada::conf {
 namespace {
 
 // The size of a node record, which node.h and the README state.
-constexpr std::size_t RECORD_BYTES = 24;
+constexpr std::size_t RECORD_BYTES = 20;
 
 constexpr std::size_t MAX_INDEX = std::numeric_limits<std::uint32_t>::max();
 
@@ -32,7 +32,7 @@ constexpr std::size_t MAX_INDEX = std::numeric_limits<std::uint32_t>::max();
 
 const Document::Record& Document::record(NodeId node) const noexcept {
     // The memory figure of node.h and the README.
-    static_assert(sizeof(Record) == RECORD_BYTES, "a node is 24 bytes");
+    static_assert(sizeof(Record) == RECORD_BYTES, "a node is 20 bytes");
     if (node >= nodes_.size()) {
         panic("Document: a node id of another document");
     }
@@ -45,10 +45,6 @@ NodeKind Document::kind(NodeId node) const noexcept {
 
 ScalarStyle Document::style(NodeId node) const noexcept {
     return record(node).style;
-}
-
-ScalarType Document::resolved(NodeId node) const noexcept {
-    return record(node).resolved;
 }
 
 std::string_view Document::text(NodeId node) const noexcept {
@@ -161,7 +157,7 @@ Status DocumentBuilder::place_value(NodeId node) noexcept {
 }
 
 Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
-                                    SourcePosition where, ScalarType resolved,
+                                    SourcePosition where,
                                     std::string_view text) {
     if (!failure_.ok()) {
         return failure_;
@@ -182,8 +178,7 @@ Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
                             .column = where.column,
                             .file = where.file,
                             .kind = kind,
-                            .style = style,
-                            .resolved = resolved};
+                            .style = style};
     if (kind == NodeKind::SCALAR) {
         record.first = static_cast<std::uint32_t>(document_.text_.size());
         record.count = static_cast<std::uint32_t>(text.size());
@@ -194,10 +189,8 @@ Result<NodeId> DocumentBuilder::add(NodeKind kind, ScalarStyle style,
 }
 
 Result<NodeId> DocumentBuilder::scalar(std::string_view text, ScalarStyle style,
-                                       SourcePosition where,
-                                       ScalarType resolved) {
-    const Result<NodeId> node =
-        add(NodeKind::SCALAR, style, where, resolved, text);
+                                       SourcePosition where) {
+    const Result<NodeId> node = add(NodeKind::SCALAR, style, where, text);
     if (!node.ok()) {
         return node;
     }
@@ -217,8 +210,7 @@ Result<NodeId> DocumentBuilder::key(std::string_view text, ScalarStyle style,
         return fail(Status(StatusCode::FAILED_PRECONDITION,
                            "DocumentBuilder: a key where none is due"));
     }
-    const Result<NodeId> node =
-        add(NodeKind::SCALAR, style, where, ScalarType::NONE, text);
+    const Result<NodeId> node = add(NodeKind::SCALAR, style, where, text);
     if (!node.ok()) {
         return node;
     }
@@ -234,7 +226,7 @@ Result<NodeId> DocumentBuilder::key(std::string_view text, ScalarStyle style,
 
 Result<NodeId> DocumentBuilder::begin_map(SourcePosition where) {
     const Result<NodeId> node =
-        add(NodeKind::MAP, ScalarStyle::PLAIN, where, ScalarType::NONE, {});
+        add(NodeKind::MAP, ScalarStyle::PLAIN, where, {});
     if (!node.ok()) {
         return node;
     }
@@ -251,8 +243,8 @@ Result<NodeId> DocumentBuilder::begin_map(SourcePosition where) {
 }
 
 Result<NodeId> DocumentBuilder::begin_sequence(SourcePosition where) {
-    const Result<NodeId> node = add(NodeKind::SEQUENCE, ScalarStyle::PLAIN,
-                                    where, ScalarType::NONE, {});
+    const Result<NodeId> node =
+        add(NodeKind::SEQUENCE, ScalarStyle::PLAIN, where, {});
     if (!node.ok()) {
         return node;
     }

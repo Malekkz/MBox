@@ -11,7 +11,8 @@ built in slices; this README lists what each part does now.
   1,000 of each and a count (section 1.3). Every message, path and note is
   made printable when it is added (D-110): text of a file that holds a line
   break, a terminal escape or a character that reorders text is shown as
-  visible escapes (`\n`, `\x1B`, `\u202E`), and cut at 1,024 bytes.
+  visible escapes (`\n`, `\x1B`, `\u202E`), and cut at 1,024 bytes. A key or
+  value quoted in a message has its `\` and `"` escaped (`quote_text`).
 - Stage 1 of validation (section 1.4): reads a tree without following links
   and without opening anything outside its root, and refuses paths the
   contract does not list (CF-101), a missing `system.yaml` (CF-103) and files
@@ -78,18 +79,19 @@ and later the loader of the expanded file, section 13.3). Reading a const
 `Document` from several threads at once is safe: no accessor changes
 anything, and there are no lazy caches.
 
-- Nodes are `NodeId`s. `kind`, `style`, `resolved` (the type stage 3 gives a
-  scalar), `text`, `position` (file index, line, column) and `location`
-  (with the file's name). `entries` of a map and `items` of a sequence are
+- Nodes are `NodeId`s. `kind`, `style`, `text`, `position` (file index,
+  line, column) and `location` (with the file's name). The type a schema
+  gives a scalar is kept by stage 3 beside the Document, by NodeId. `entries` of a map and `items` of a sequence are
   spans, in the order of the file; on another kind of node they are empty.
   No accessor throws; an id of another document ends the process, as a
-  programmer error that input cannot cause.
+  programmer error that input cannot cause. A moved-from Document must not
+  be read.
 - `find(map, key)` is a binary search over the map's keys sorted once at
   build time: O(log n) in the map's entries.
-- Memory: 24 bytes per node, 12 bytes per map entry, 4 bytes per sequence
+- Memory: 20 bytes per node, 12 bytes per map entry, 4 bytes per sequence
   item, and the bytes of the scalars' text. A map entry is two nodes, so the
-  structure costs at most 30 bytes per node: 30 MB at the node limit of a
-  file (1,000,000 nodes), 120 MB at the tree's (4,000,000). The text is at
+  structure costs at most 26 bytes per node: 26 MB at the node limit of a
+  file (1,000,000 nodes), 104 MB at the tree's (4,000,000). The text is at
   most the file's bytes, and up to 1.5 times them where escapes such as `\P`
   give longer characters. Stage 3 and stage 5 keep every file's `Document`
   until validation ends.

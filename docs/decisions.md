@@ -1950,7 +1950,7 @@ Decision: the project's own parser (`libs/scada-conf/src/yaml_parser.cpp`), no d
 - An empty file, or one of comments only, is an empty map; the schema then reports what it needs.
 - A `.st` file is not parsed: structured text is not available in this version, and every `control/*.st` file is CF-920 at 1:1, "structured text is not available in this version" (contract 9.3, 0.6; the lead, 2026-11-23). A program that is not run must not look accepted. The structured-text parser is phase 6.
 - U+FFFE and U+FFFF are CF-114, as YAML 1.2 does not allow them.
-- Indentation is counted in spaces, also on a continuation line of a quoted scalar; a tab may follow the indentation there.
+- Indentation is counted in spaces, also on a continuation line of a quoted scalar; a tab may follow the indentation there. A tab where the indentation is still due is a tab in indentation: CF-114 at the tab (contract 1.1; the lead, 2026-11-24).
 - Every line inside a flow collection is indented more than the key or the sequence item that holds it. A closing bracket that is not is CF-110 with its own message: indent the bracket, or write the collection as a block (the lead, 2026-11-23). A block collection would also do, so the rule costs nothing.
 - A key is on one line, in flow collections too, although YAML 1.2 allows a plain key over several lines in a flow mapping.
 - A document marker at the start of a line is CF-110 inside a root block scalar too.
@@ -1966,8 +1966,12 @@ Status: accepted (the lead's review of #130, 2026-11-23)
 
 Context: messages quote keys, values and paths of the tree (contract section 10). The tree is outside input (an imported archive, reference 12.7). Text with a line break can forge a second diagnostic line; a terminal escape or a character that reorders text (U+202E) can change what an operator sees. A 64 KiB scalar would make a 64 KiB message.
 Options: escape when a report is printed; escape when a diagnostic is collected.
-Decision: `Diagnostics::add`, which every diagnostic passes through from stage 1 on, makes its message, paths, note kinds and details printable with one function, `printable`: `\` as `\\`; line feed, carriage return and tab as `\n`, `\r`, `\t`; other C0 control characters, DEL and bytes that are not valid UTF-8 as `\xNN`; C1 control characters, U+2028, U+2029, the bidirectional controls (U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), U+FEFF, U+FFFE and U+FFFF as `\uNNNN`. Each text is cut at 1,024 bytes, before a whole character or escape, and ends in `...`.
-Reason: one place, before any consumer (the command line, the API, the journal), so no consumer can forget it. The escapes are visible and unambiguous because the backslash is escaped too.
+Decision: `Diagnostics::add`, which every diagnostic passes through from stage 1 on, makes its message, paths, note kinds and details printable with one function, `printable`:
+- line feed, carriage return and tab as `\n`, `\r`, `\t`; other C0 control characters, DEL and bytes that are not valid UTF-8 as `\xNN`;
+- as `\uNNNN`, or `\UNNNNNNNN` above U+FFFF: the C1 control characters; the invisible and bidirectional characters U+00AD, U+061C, U+180E, U+200B to U+200F, U+2028 to U+202E, U+2060 to U+2064, U+2066 to U+2069, U+FEFF and U+FFF9 to U+FFFB; the non-characters U+FDD0 to U+FDEF and U+nFFFE and U+nFFFF of every plane; the tag characters U+E0000 to U+E007F;
+- a backslash is kept, so that `printable` leaves text it has made printable as it is. A key or value that a message quotes goes through `quote_text`, which writes it in double quotes with `\` and `"` escaped, so that a quoted piece has an unambiguous end;
+- each text is cut at 1,024 bytes, before a whole character or escape, and ends in `...`.
+Reason: one place, before any consumer (the command line, the API, the journal), so no consumer can forget it. Keeping the backslash in `printable` is what lets a message hold escaped pieces from `quote_text` without escaping them twice; a backslash cannot drive a terminal.
 Consequences: a report holds only printable text; a consumer prints it as it is.
 
 ## D-111: The node type: an immutable Document built by a DocumentBuilder
@@ -1979,10 +1983,11 @@ Context: the parsed tree is read by the stages of validation and, through the lo
 Options: nodes as objects with pointers to their children; nodes in arrays of one Document, read by index.
 Decision:
 - A `Document` is immutable. Only a `DocumentBuilder` makes one: `add_file`, `scalar`, `key`, `begin_map` / `end_map`, `begin_sequence` / `end_sequence`, `finish`. Misuse and a duplicate key are returned as a status, not thrown.
-- Nodes are read by `NodeId`: `kind`, `style`, `resolved` (the type stage 3 gives a scalar), `text`, `position` (file index, line, column) and `location` (with the file's name); a map's `entries` and a sequence's `items` are spans. No accessor throws; an id of another document ends the process (a programmer error).
+- Nodes are read by `NodeId`: `kind`, `style`, `text`, `position` (file index, line, column) and `location` (with the file's name); a map's `entries` and a sequence's `items` are spans. No accessor throws; an id of another document ends the process (a programmer error), and a moved-from document must not be read.
+- The type a schema gives a scalar is not in the node: stage 3 keeps it in a table beside the document, indexed by `NodeId`, 1 byte per node (the lead, 2026-11-24), so the document stays immutable.
 - `find` is a binary search over each map's keys, sorted once by the builder: O(log n), for consumers that look keys up per point.
-- A node is 24 bytes, a map entry 12 more, a sequence item 4 more, plus the text. At the tree's node limit (4,000,000) the structure is at most 120 MB.
+- A node is 20 bytes, a map entry 12 more, a sequence item 4 more, plus the text. At the tree's node limit (4,000,000) the structure is at most 104 MB.
 - Reading a const `Document` from several threads is safe: there are no lazy caches.
 Reason: index access keeps every node in a few arrays, which is small, needs no allocation per node, and makes the document cheap to move. A builder is the one place that enforces the invariants (a key is a scalar, keys are unique, collections are closed), for the parser and the loader alike.
-Consequences: the typed reads of a node (`to_int64` and the like) and the type a schema gives a scalar come with stage 3 (slice 3 of #100).
+Consequences: the typed reads of a node (`to_int64` and the like) and the table of types come with stage 3 (slice 3 of #100).
 

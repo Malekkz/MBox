@@ -29,10 +29,7 @@ Document sample() {
     good = good && builder.add_file("two.yaml").ok();
     good = good && builder.begin_map(at(1, 1)).ok();
     good = good && builder.key("b", ScalarStyle::PLAIN, at(1, 1)).ok();
-    good =
-        good &&
-        builder.scalar("1", ScalarStyle::PLAIN, at(1, 4), ScalarType::INTEGER)
-            .ok();
+    good = good && builder.scalar("1", ScalarStyle::PLAIN, at(1, 4)).ok();
     good = good && builder.key("a", ScalarStyle::PLAIN, at(2, 1)).ok();
     good = good && builder.begin_sequence(at(2, 4)).ok();
     good = good && builder.scalar("x", ScalarStyle::PLAIN, at(2, 3)).ok();
@@ -65,7 +62,6 @@ TEST(Node, ABuiltDocumentKeepsOrderTextAndPositions) {
     EXPECT_EQ(document.text(entries[0].key), "b");
     EXPECT_EQ(document.text(entries[1].key), "a");
     EXPECT_EQ(document.text(entries[2].key), "c");
-    EXPECT_EQ(document.resolved(entries[0].value), ScalarType::INTEGER);
     const NodeId list = entries[1].value;
     ASSERT_EQ(document.items(list).size(), 2U);
     EXPECT_EQ(document.entry_count(list), 2U);

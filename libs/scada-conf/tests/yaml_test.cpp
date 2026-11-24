@@ -681,19 +681,25 @@ TEST(Yaml, MessagesEscapeTheTextOfTheFile) {
     EXPECT_EQ(parse("\"\": 1\n'': 2\n"),
               "error 2:1 CF-111: duplicate key \"\"");
     EXPECT_EQ(parse("\"\":\n"), "error 1:1 CF-112: \"\" has no value");
+    // A quote or a backslash in a key is escaped inside its quotes.
+    EXPECT_EQ(parse("'x\"': 1\n'x\"': 2\n"),
+              "error 2:1 CF-111: duplicate key \"x\\\"\"");
+    EXPECT_EQ(parse("'x\\y':\n"), "error 1:1 CF-112: \"x\\\\y\" has no value");
 }
 
 // S2: a closing bracket at its key's indentation has its own message.
 TEST(Yaml, AClosingBracketAtItsKeysIndentation) {
     constexpr std::string_view MESSAGE =
-        "CF-110: a closing bracket not indented more than its key is not "
-        "allowed in configuration files; indent the bracket, or write the "
-        "collection as a block";
+        "CF-110: a closing bracket not indented more than the key or sequence "
+        "item that holds it is not allowed in configuration files; indent the "
+        "bracket, or write the collection as a block";
     EXPECT_EQ(parse("ports: [\n  502,\n]\n"),
               "error 3:1 " + std::string(MESSAGE));
     EXPECT_EQ(parse("a:\n  b: {\n    c: 1\n  }\n"),
               "error 4:3 " + std::string(MESSAGE));
     EXPECT_EQ(parse("ports: [\n  502,\n ]\n"), "{ports: [502]}");
+    // The same under a sequence item.
+    EXPECT_EQ(parse("- [\n  1,\n]\n"), "error 3:1 " + std::string(MESSAGE));
 }
 
 // N1 to N5 of the review.
@@ -720,9 +726,17 @@ TEST(Yaml, NonCharacters) {
 }
 
 TEST(Yaml, TheIndentationOfAQuotedLineIsCountedInSpaces) {
-    EXPECT_EQ(code_at("a: 'x\n\ty'\n"), "error 2:2 CF-110");
+    // A tab where the indentation is due is CF-114 at the tab (contract
+    // 1.1).
+    EXPECT_EQ(parse("a: \"x\n\ty\"\n"),
+              "error 2:1 CF-114: invalid character at byte 6");
+    EXPECT_EQ(code_at("a: 'x\n\ty'\n"), "error 2:1 CF-114");
+    EXPECT_EQ(code_at("k: ['a\n\tb']\n"), "error 2:1 CF-114");
+    // Not indented at all is CF-110.
+    EXPECT_EQ(code_at("a: 'x\ny'\n"), "error 2:1 CF-110");
     EXPECT_EQ(parse("a: 'x\n \ty'\n"), "{a: 'x y'}");
-    EXPECT_EQ(code_at("a: [\n 'x\n\ty']\n"), "error 3:2 CF-110");
+    EXPECT_EQ(code_at("a: [\n 'x\n\ty']\n"), "error 3:1 CF-114");
+    EXPECT_EQ(parse("a: \"x\n \ty\"\n"), "{a: \"x y\"}");
 }
 
 TEST(Yaml, MessagesOfBlockScalarIndicators) {

@@ -89,15 +89,6 @@ bool is_null_word(std::string_view text) noexcept {
     return text == "null" || text == "Null" || text == "NULL" || text == "~";
 }
 
-// A key as a message names it: in double quotes, so that an empty key or one
-// with spaces stays visible. Diagnostics makes the text printable.
-std::string named_key(std::string_view key) {
-    std::string out = "\"";
-    out += key;
-    out += '"';
-    return out;
-}
-
 // A scalar read but not yet added to the document.
 struct Scalar {
     std::string text;
@@ -513,7 +504,7 @@ private:
         if (!added.ok() &&
             added.status().code() == StatusCode::ALREADY_EXISTS) {
             return fail(CF_DUPLICATE, key.start,
-                        "duplicate key " + named_key(key.text));
+                        "duplicate key " + quote_text(key.text));
         }
         built(added);
         return true;
@@ -670,7 +661,7 @@ private:
             }
             advance();
             if (!add_key(key) || !count_entry(entries, key_at) ||
-                !parse_map_value(indent, depth, key_at, named_key(key.text))) {
+                !parse_map_value(indent, depth, key_at, quote_text(key.text))) {
                 return false;
             }
             if (next_indent_ < indent) {
@@ -1030,12 +1021,14 @@ private:
         skip_line_break();
         std::size_t empty_lines = 0;
         std::int64_t spaces = 0;
+        Mark after_spaces = mark_;
         while (true) {
             spaces = 0;
             while (peek() == ' ') {
                 advance();
                 ++spaces;
             }
+            after_spaces = mark_;
             while (peek() == ' ' || peek() == '\t') {
                 advance();
             }
@@ -1050,6 +1043,11 @@ private:
         }
         if (mark_.column == 1 && is_document_marker()) {
             return fail_syntax(mark_, "a document marker");
+        }
+        // A tab where the indentation is still due is a tab in indentation
+        // (contract 1.1).
+        if (spaces <= parent_indent && byte_at(after_spaces.pos) == '\t') {
+            return fail_character(after_spaces);
         }
         if (spaces <= parent_indent) {
             return fail_syntax(mark_,
@@ -1462,10 +1460,10 @@ private:
             }
             if (indent <= parent_indent && (peek() == ']' || peek() == '}')) {
                 return fail(CF_SYNTAX, mark_,
-                            "a closing bracket not indented more than its "
-                            "key is not allowed in configuration files; "
-                            "indent the bracket, or write the collection as "
-                            "a block");
+                            "a closing bracket not indented more than the key "
+                            "or sequence item that holds it is not allowed in "
+                            "configuration files; indent the bracket, or "
+                            "write the collection as a block");
             }
             if (indent <= parent_indent) {
                 return fail_syntax(mark_,
@@ -1563,7 +1561,7 @@ private:
             !skip_flow_space_in(parent_indent, start, UNCLOSED)) {
             return false;
         }
-        const std::string owner = named_key(key.text);
+        const std::string owner = quote_text(key.text);
         if (peek() == ',' || peek() == '}') {
             return fail_no_value(key_at, owner);
         }

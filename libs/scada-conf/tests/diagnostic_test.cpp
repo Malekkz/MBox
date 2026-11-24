@@ -208,7 +208,9 @@ TEST(Diagnostic, PrintableEscapesWhatCouldDriveATerminal) {
               "x\\nsystem.yaml:1:1: error CF-101: y");
     EXPECT_EQ(printable("\x1b[2J\x1b]0;title\x07"),
               "\\x1B[2J\\x1B]0;title\\x07");
-    EXPECT_EQ(printable("a\\nb"), "a\\\\nb");
+    // A backslash is kept, so printable text stays as it is.
+    EXPECT_EQ(printable("a\\nb"), "a\\nb");
+    EXPECT_EQ(printable(printable("x\ny\x1b")), "x\\ny\\x1B");
     EXPECT_EQ(printable("\r\t\x7f"), "\\r\\t\\x7F");
     // Invalid UTF-8, a C1 control character, and characters that reorder
     // or hide text.
@@ -223,6 +225,37 @@ TEST(Diagnostic, PrintableEscapesWhatCouldDriveATerminal) {
     // Other characters are kept.
     EXPECT_EQ(printable("\xc3\xa9t\xc3\xa9 \xe2\x82\xac"),
               "\xc3\xa9t\xc3\xa9 \xe2\x82\xac");
+}
+
+TEST(Diagnostic, PrintableEscapesInvisibleCharacters) {
+    // F1 of the review of #130. Written byte by byte, so that this file
+    // holds none of them.
+    const std::vector<std::pair<std::string, std::string>> hidden = {
+        {{'\xc2', '\xad'}, "\\u00AD"},
+        {{'\xd8', '\x9c'}, "\\u061C"},
+        {{'\xe1', '\xa0', '\x8e'}, "\\u180E"},
+        {{'\xe2', '\x80', '\x8b'}, "\\u200B"},
+        {{'\xe2', '\x80', '\x8d'}, "\\u200D"},
+        {{'\xe2', '\x81', '\xa0'}, "\\u2060"},
+        {{'\xe2', '\x81', '\xa4'}, "\\u2064"},
+        {{'\xef', '\xb7', '\x90'}, "\\uFDD0"},
+        {{'\xef', '\xb7', '\xaf'}, "\\uFDEF"},
+        {{'\xef', '\xbf', '\xb9'}, "\\uFFF9"},
+        {{'\xef', '\xbf', '\xbb'}, "\\uFFFB"},
+        {{'\xef', '\xbf', '\xbe'}, "\\uFFFE"},
+        {{'\xf0', '\x9f', '\xbf', '\xbf'}, "\\U0001FFFF"},
+        {{'\xf4', '\x8f', '\xbf', '\xbe'}, "\\U0010FFFE"},
+        {{'\xf3', '\xa0', '\x80', '\x80'}, "\\U000E0000"},
+        {{'\xf3', '\xa0', '\x81', '\xbf'}, "\\U000E007F"},
+    };
+    for (const auto& [text, escaped] : hidden) {
+        EXPECT_EQ(printable(text), escaped);
+    }
+    // Neighbours are kept: U+00AE, U+200A, U+FDCF, U+FFFC, U+1F600.
+    const std::string kept = {'\xc2', '\xae', '\xe2', '\x80', '\x8a',
+                              '\xef', '\xb7', '\x8f', '\xef', '\xbf',
+                              '\xbc', '\xf0', '\x9f', '\x98', '\x80'};
+    EXPECT_EQ(printable(kept), kept);
 }
 
 TEST(Diagnostic, PrintableCapsTheLength) {
