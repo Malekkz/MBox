@@ -33,6 +33,7 @@ FailureTracker::FailureTracker(std::vector<Device> devices,
         }
         runs_[index].state = devices_[index].enabled ? DeviceStatus::CONNECTING
                                                      : DeviceStatus::DISABLED;
+        runs_[index].backoff_ns = devices_[index].rules.backoff_ns;
     }
     counts_.assign(units.size(), 0);
     run_units_.assign(units.size(), false);
@@ -48,24 +49,26 @@ std::uint32_t FailureTracker::count_of(std::uint32_t device) const noexcept {
 }
 
 void FailureTracker::connected(std::int64_t now_ns) noexcept {
-    std::fill(counts_.begin(), counts_.end(), 0);
+    // A reconnect keeps failure counts and demotion (7.3; PR 137 review,
+    // P1 and Q2): a dead device is not polled again, nor its cost paid
+    // again, because the connection came back.
     answer_seen();
     for (std::size_t index = 0; index < devices_.size(); ++index) {
         if (!devices_[index].enabled) {
             continue;
         }
         Run& run = runs_[index];
-        run.state = DeviceStatus::INITIALISING;
+        run.state =
+            run.demoted ? DeviceStatus::DEMOTED : DeviceStatus::INITIALISING;
         run.grace_until_ns =
             later(now_ns, devices_[index].rules.startup_grace_ns);
-        run.backoff_ns = devices_[index].rules.backoff_ns;
     }
 }
 
 void FailureTracker::lost() noexcept {
     for (std::size_t index = 0; index < devices_.size(); ++index) {
         if (devices_[index].enabled) {
-            runs_[index].state = DeviceStatus::CONNECTING;
+            runs_[index].state = DeviceStatus::CONNECTING;  // `demoted` kept
         }
     }
 }
@@ -126,6 +129,9 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
     if (end == RequestEnd::ANSWERED) {
         count_of(device) = 0;
         run.state = DeviceStatus::RUNNING;
+        // Only a poll that answered resets the probe back-off (Q3): a unit
+        // that answers probes but no poll keeps its growing back-off.
+        run.backoff_ns = devices_[device].rules.backoff_ns;
         return false;
     }
     if (now_ns < run.grace_until_ns) {
@@ -142,7 +148,7 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
         }
         Run& demote = runs_[other];
         demote.state = DeviceStatus::DEMOTED;
-        demote.backoff_ns = devices_[other].rules.backoff_ns;
+        demote.demoted = true;
         demote.probe_due_ns = later(now_ns, demote.backoff_ns);
         demoted = true;
     }
@@ -155,19 +161,43 @@ void FailureTracker::probe_ended(std::uint32_t device, bool answered,
         runs_[device].state != DeviceStatus::DEMOTED) {
         return;
     }
-    Run& run = runs_[device];
-    const FailureRules& rules = devices_[device].rules;
+    // One probe serves every demoted device of the unit: they share the
+    // failure count (3.4; Q5).
     if (answered) {
         count_of(device) = 0;
-        run.state = DeviceStatus::INITIALISING;
-        run.backoff_ns = rules.backoff_ns;
-        return;
     }
-    run.backoff_ns = std::min(run.backoff_ns > rules.backoff_max_ns / 2
-                                  ? rules.backoff_max_ns
-                                  : run.backoff_ns * 2,
-                              rules.backoff_max_ns);
-    run.probe_due_ns = later(now_ns, run.backoff_ns);
+    for (std::uint32_t other = 0; other < devices_.size(); ++other) {
+        Run& run = runs_[other];
+        if (unit_index_[other] != unit_index_[device] ||
+            run.state != DeviceStatus::DEMOTED) {
+            continue;
+        }
+        const FailureRules& rules = devices_[other].rules;
+        if (answered) {
+            run.state = DeviceStatus::INITIALISING;
+            run.demoted = false;
+            continue;
+        }
+        run.backoff_ns = std::min(run.backoff_ns > rules.backoff_max_ns / 2
+                                      ? rules.backoff_max_ns
+                                      : run.backoff_ns * 2,
+                                  rules.backoff_max_ns);
+        run.probe_due_ns = later(now_ns, run.backoff_ns);
+    }
+}
+
+bool FailureTracker::probes_for_unit(std::uint32_t device) const noexcept {
+    if (device >= devices_.size() ||
+        runs_[device].state != DeviceStatus::DEMOTED) {
+        return false;
+    }
+    for (std::uint32_t other = 0; other < device; ++other) {
+        if (unit_index_[other] == unit_index_[device] &&
+            runs_[other].state == DeviceStatus::DEMOTED) {
+            return false;
+        }
+    }
+    return true;
 }
 
 DeviceStatus FailureTracker::state(std::uint32_t device) const noexcept {

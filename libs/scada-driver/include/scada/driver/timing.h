@@ -29,6 +29,9 @@ inline constexpr std::uint8_t BITS_8N1 = 10;
 struct LineTiming {
     std::uint32_t bit_rate = 0;
     std::uint8_t bits_per_char = BITS_8N1;  // start, data, parity, stop
+    // CS `turnaround`: silence on top of the 3.5 characters before the next
+    // request, from the last byte received.
+    std::int64_t turnaround_ns = 0;
 };
 
 // The bits of one character: 1 start bit, the data bits, a parity bit if
@@ -69,9 +72,29 @@ SCADA_RT [[nodiscard]] constexpr std::int64_t margin_ns(
         line.bit_rate == 0
             ? 0
             : frame_time_ns(LineTiming{.bit_rate = line.bit_rate * 2,
-                                       .bits_per_char = line.bits_per_char},
+                                       .bits_per_char = line.bits_per_char,
+                                       .turnaround_ns = 0},
                             HALF_CHARS);
     return std::max(seven_halves, MIN_MARGIN_NS);
+}
+
+// The silence a serial line keeps before the next request, from the last
+// byte received (7.2): 3.5 characters at the line's rate plus CS
+// `turnaround`, with no floor (`margin_ns` has the 20 ms floor of a quiet
+// time after a failure); 0 on a stream.
+SCADA_RT [[nodiscard]] constexpr std::int64_t inter_frame_gap_ns(
+    const LineTiming& line) noexcept {
+    constexpr std::size_t HALF_CHARS = 7;
+    if (line.bit_rate == 0) {
+        return 0;
+    }
+    const std::int64_t gap =
+        frame_time_ns(LineTiming{.bit_rate = line.bit_rate * 2,
+                                 .bits_per_char = line.bits_per_char,
+                                 .turnaround_ns = 0},
+                      HALF_CHARS);
+    constexpr std::int64_t MAX = std::numeric_limits<std::int64_t>::max();
+    return gap > MAX - line.turnaround_ns ? MAX : gap + line.turnaround_ns;
 }
 
 namespace detail {

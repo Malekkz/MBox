@@ -105,7 +105,12 @@ TEST(Failure, ProbesBackOffDoublingToTheMaximumThenRecover) {
     tracked.probe_ended(FIRST, true, 100 * SECOND);
     EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     EXPECT_EQ(tracked.failures(FIRST), 0U);
-    // Demoted again: the back-off starts from `backoff` once more.
+    // Demoted again before any poll answered: the back-off is kept (Q3).
+    fail(tracked, FIRST, 1, 150 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 185 * SECOND);
+    tracked.probe_ended(FIRST, true, 185 * SECOND);
+    // A poll answers: the back-off is `backoff` again.
+    (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, 186 * SECOND);
     fail(tracked, FIRST, 1, 200 * SECOND);
     EXPECT_EQ(tracked.probe_due_ns(FIRST), 210 * SECOND);
 }
@@ -182,9 +187,10 @@ TEST(Failure, AReconnectEmptiesTheRunAndAResumeKeepsStatesAndCounts) {
     EXPECT_EQ(tracked.failures(FIRST), 2U);
     EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
     EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
+    // A reconnect empties the run but keeps the count (PR 137 review, P1).
     tracked.connected(2 * SECOND);
     EXPECT_EQ(tracked.timeout_run(), 0U);
-    EXPECT_EQ(tracked.failures(FIRST), 0U);
+    EXPECT_EQ(tracked.failures(FIRST), 3U);
 }
 
 TEST(Failure, WithoutTheRuleATimeoutRunNeverLosesTheConnection) {
@@ -254,6 +260,42 @@ TEST(Failure, WithNoEligibleUnitTheRunsLengthAloneDecides) {
     tracked.connected(0);
     EXPECT_FALSE(tracked.read_timed_out(FIRST, SECOND).lost);
     EXPECT_TRUE(tracked.read_timed_out(FIRST, SECOND).lost);
+}
+
+// --- PR 137 review: a reconnect keeps demotion; one probe per unit --------
+
+TEST(Failure, AReconnectKeepsDemotionAndCounts) {
+    // Q2: a demoted device stays demoted across a lost connection, with its
+    // probe schedule; another device's count is kept.
+    FailureTracker tracked(
+        {{.unit_id = 1, .rules = rules(1)}, {.unit_id = 2, .rules = rules()}});
+    tracked.connected(0);
+    fail(tracked, FIRST, 1, SECOND);
+    fail(tracked, SECOND_DEVICE, 2, SECOND);
+    ASSERT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
+    tracked.lost();
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::CONNECTING);
+    tracked.connected(2 * SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::DEMOTED);
+    EXPECT_EQ(tracked.probe_due_ns(FIRST), 11 * SECOND);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::INITIALISING);
+    EXPECT_EQ(tracked.failures(SECOND_DEVICE), 2U);
+}
+
+TEST(Failure, OneProbeServesEveryDeviceOfAUnit) {
+    // Q5: two slices of one unit are demoted together; the first probes for
+    // both, and its answer recovers both.
+    FailureTracker tracked = tracker(
+        {{.unit_id = 7, .rules = rules(1)}, {.unit_id = 7, .rules = rules(1)}});
+    fail(tracked, FIRST, 1, SECOND);
+    ASSERT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::DEMOTED);
+    EXPECT_TRUE(tracked.probes_for_unit(FIRST));
+    EXPECT_FALSE(tracked.probes_for_unit(SECOND_DEVICE));
+    tracked.probe_ended(FIRST, false, 11 * SECOND);
+    EXPECT_EQ(tracked.probe_due_ns(SECOND_DEVICE), 31 * SECOND);
+    tracked.probe_ended(FIRST, true, 31 * SECOND);
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
+    EXPECT_EQ(tracked.state(SECOND_DEVICE), DeviceStatus::INITIALISING);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

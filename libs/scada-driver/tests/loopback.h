@@ -54,6 +54,11 @@ public:
         GARBAGE,      // a frame of another unit: broken
     };
     void fault(std::uint8_t unit_id, Fault fault) { faults_[unit_id] = fault; }
+    // Requests of `unit_id` from register `first` up get no answer: a device
+    // that answers one block and never another.
+    void silent_from(std::uint8_t unit_id, std::uint32_t first) {
+        silent_from_[unit_id] = first;
+    }
 
     // The answer to one request frame at `now_ns`; logs it.
     std::vector<std::byte> answer(std::span<const std::byte> request,
@@ -73,6 +78,7 @@ private:
     std::map<Key, std::uint16_t> registers_;
     std::map<Key, bool> clears_;
     std::map<std::uint8_t, Fault> faults_;
+    std::map<std::uint8_t, std::uint32_t> silent_from_;
     std::vector<LoggedRequest> log_;
     std::size_t side_effect_reads_ = 0;
 };

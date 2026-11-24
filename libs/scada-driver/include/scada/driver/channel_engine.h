@@ -55,14 +55,15 @@ public:
 // Counts of the engine, for the diagnostics of 11.1 and for the tests.
 struct EngineCounts {
     std::uint64_t requests = 0;      // frames sent
-    std::uint64_t timeouts = 0;      // attempts with no first byte in time
+    std::uint64_t timeouts = 0;      // attempts with no answer in time
     std::uint64_t broken = 0;        // broken answers
     std::uint64_t retries = 0;       // attempts beyond the first
     std::uint64_t connects = 0;      // successful connects
+    std::uint64_t refused = 0;       // connects the peer refused
     std::uint64_t losses = 0;        // connections lost (all devices failed)
     std::uint64_t own_closes = 0;    // closes the driver made itself (7.3)
     std::uint64_t resumed = 0;       // own closes followed by a quick reconnect
-    std::uint64_t stale_frames = 0;  // answers of earlier requests dropped
+    std::uint64_t stale_frames = 0;  // frames of other requests dropped
 };
 
 class ChannelEngine {
@@ -83,12 +84,15 @@ public:
 
     [[nodiscard]] Status status() const noexcept { return status_; }
 
-    // One transaction boundary: checks staleness, connects when due, or
-    // takes the next choice and runs its exchange to the end (the transport
-    // waits). Returns the monotonic time of the next step: now, a later
-    // time to wait for (pacing, a due group, the back-off, the quiet time,
-    // a point's `max_age`), or NEVER. Never allocates.
-    SCADA_RT std::int64_t step() noexcept;
+    // One transaction boundary: checks staleness, applies the rules of a
+    // lost connection when a close's `connect_timeout` has passed, connects
+    // when due, learns of a peer's close, or takes the next choice and runs
+    // its exchange to the end. Returns the monotonic time of the next step:
+    // now, a later time to wait for (pacing, a due group, the back-off, the
+    // quiet time, a point's `max_age`), or NEVER. Never allocates. Not
+    // real-time: the transport blocks up to its deadlines and makes system
+    // calls (DI 2.5).
+    std::int64_t step() noexcept;
 
     [[nodiscard]] const FailureTracker& failures() const noexcept {
         return failures_;
@@ -105,11 +109,12 @@ private:
     // How one attempt ended.
     enum class End : std::uint8_t {
         ANSWER = 1,   // a complete, decoded answer: `decoded`
-        TIMEOUT,      // no first byte by the first deadline
+        TIMEOUT,      // no byte of its answer by the first deadline
         BROKEN,       // a broken frame, an overflow, or the answer deadline
-        CLOSED,       // the peer closed the connection
-        SEND_FAILED,  // the frame was not taken whole
+        CLOSED,       // the peer closed the connection, or it failed
+        PARTIAL,      // the frame was not taken whole
         NOT_SENT,     // encode refused the request
+        UNREACHABLE,  // a gateway's answer that its unit did not respond
     };
 
     // What the bytes received so far are.
@@ -126,33 +131,36 @@ private:
         std::size_t max_frame = 0;  // `DeviceCaps::max_frame_bytes`
         DeviceStatus published = DeviceStatus::DISABLED;
         std::uint32_t attempts = 0;  // failed attempts of the request
-        std::uint32_t busy = 0;      // busy answers in a row
         bool comm_failed = false;    // its points were written COMM_FAIL
         // Samples of a chain of companions until its last request (5.5).
         std::vector<DeliveredSample> chain;
     };
 
-    SCADA_RT std::int64_t try_connect(std::int64_t now_ns) noexcept;
-    SCADA_RT void lose(std::int64_t now_ns) noexcept;
-    SCADA_RT void close_own(std::int64_t now_ns) noexcept;
-    SCADA_RT void sync_scheduler(std::int64_t now_ns) noexcept;
+    // The exchange and the connection: not real-time, since they reach the
+    // transport (DI 2.5); the processing they call is.
+    std::int64_t try_connect(std::int64_t now_ns) noexcept;
+    void lose(std::int64_t now_ns) noexcept;
+    void apply_loss() noexcept;
+    void close_own(std::int64_t now_ns, bool lost) noexcept;
+    void next_connect_after_backoff(std::int64_t now_ns) noexcept;
+    End attempt(const Choice& choice, DecodeResult& decoded) noexcept;
+    End wait_answer(const Request& request, const Attempt& sent,
+                    std::size_t request_bytes, std::size_t expected_max,
+                    std::int64_t timeout_ns, std::size_t& frame_bytes) noexcept;
+    void exchange(const Choice& choice) noexcept;
+    void answered(const Choice& choice, const DecodeResult& decoded) noexcept;
+    void failed(const Choice& choice, End end) noexcept;
+    void after_bad_frame(const Request& request, End end) noexcept;
+
+    SCADA_RT void sync_scheduler() noexcept;
     SCADA_RT void publish_states() noexcept;
     SCADA_RT void fail_points(std::uint32_t device) noexcept;
+    SCADA_RT void fail_request(std::uint32_t device,
+                               const Request& request) noexcept;
     // Returns when a point next goes STALE, or NEVER.
     SCADA_RT std::int64_t check_staleness(std::int64_t now_ns) noexcept;
-
-    SCADA_RT End attempt(const Choice& choice, DecodeResult& decoded) noexcept;
-    SCADA_RT End wait_answer(const Request& request, const Attempt& sent,
-                             std::size_t request_bytes,
-                             std::size_t expected_max, std::int64_t timeout_ns,
-                             std::size_t& frame_bytes) noexcept;
     SCADA_RT Scan scan(const Request& request, const Attempt& sent,
                        std::size_t& have, std::size_t& frame_bytes) noexcept;
-    SCADA_RT void exchange(const Choice& choice) noexcept;
-    SCADA_RT void answered(const Choice& choice,
-                           const DecodeResult& decoded) noexcept;
-    SCADA_RT void failed(const Choice& choice, End end) noexcept;
-    SCADA_RT void after_bad_frame(const Request& request, End end) noexcept;
     SCADA_RT void deliver(const Choice& choice,
                           std::span<const DeliveredSample> samples) noexcept;
     SCADA_RT void process(std::uint32_t device,
@@ -177,14 +185,18 @@ private:
     ProcessedSample processed_;
     EngineCounts counts_;
     bool connected_ = false;
-    bool ever_connected_ = false;
-    // A close the driver made itself, and when (7.3, R-17).
+    // A close the driver made itself, and when (7.3, R-17): the rules of a
+    // lost connection apply when `connect_timeout` passes without the
+    // reconnect, whatever the connect does after.
     bool own_close_ = false;
     std::int64_t own_close_ns_ = 0;
     bool answered_since_connect_ = false;
     std::int64_t backoff_ns_ = 0;
     std::int64_t next_connect_ns_ = 0;
     std::int64_t quiet_until_ns_ = 0;
+    // Input is discarded once more before the next send (7.2: bytes that
+    // arrive during a quiet time are not the next answer).
+    bool discard_before_send_ = false;
 };
 
 }  // namespace scada::driver

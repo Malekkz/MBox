@@ -71,6 +71,11 @@ the contracts left open.
 - **A list of writes holds its unit.** A list (8.5) is an exclusive
   sequence: 5 writes at a 10 s write interval hold the unit and the devices
   that share it for 40 s, with no poll and no keep-alive (D-136).
+- **Probes use the idle time.** A probe goes only when no request waits
+  and none falls due within its time-out, unless it waited 10 time-outs
+  (D-138). Measured: one live unit in a 1 s group and 20 dead ones on a
+  serial line keep a live period of at most 1.003 s; the probes take 49 %
+  of the line, all of it idle time.
 - **Orders can starve a chain.** On a busy unit, orders may keep dropping a
   chain of companions, which then never completes; there is no cap, and the
   poll group's achieved period shows it (D-136, R7).

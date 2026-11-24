@@ -161,12 +161,28 @@ std::int64_t ChannelEngine::step() noexcept {
     if (!status_.ok()) {
         return NEVER;
     }
-    if (!connected_) {
-        return std::min(try_connect(now), stale_due);
+    const std::int64_t own_deadline =
+        later(own_close_ns_, channel_->connection.connect_timeout_ns);
+    if (!connected_ && own_close_ && now > own_deadline) {
+        // A close of our own not followed by a reconnect within
+        // `connect_timeout`: the rules of a lost connection apply now,
+        // whatever the connect does after (7.3, R-17; review P1).
+        apply_loss();
     }
-    sync_scheduler(now);
+    if (!connected_) {
+        std::int64_t next = std::min(try_connect(now), stale_due);
+        if (own_close_) {
+            next = std::min(next, later(own_deadline, 1));
+        }
+        return next;
+    }
+    if (transport_->closed_by_peer()) {
+        lose(now);  // an idle close (7.3)
+        return std::min(next_connect_ns_, stale_due);
+    }
+    sync_scheduler();
     if (now < quiet_until_ns_) {
-        return quiet_until_ns_;  // a serial line's quiet time (7.2)
+        return quiet_until_ns_;  // a serial line's silence (7.2)
     }
     const Choice choice = scheduler_.take(now);
     switch (choice.kind) {
@@ -188,6 +204,15 @@ std::int64_t ChannelEngine::step() noexcept {
     return clock_->monotonic_ns();
 }
 
+void ChannelEngine::next_connect_after_backoff(std::int64_t now_ns) noexcept {
+    const ConnectionRules& rules = channel_->connection;
+    next_connect_ns_ = later(now_ns, backoff_ns_);
+    backoff_ns_ = std::min(backoff_ns_ > rules.reconnect_max_ns / 2
+                               ? rules.reconnect_max_ns
+                               : backoff_ns_ * 2,
+                           rules.reconnect_max_ns);
+}
+
 std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     if (now_ns < next_connect_ns_) {
         return next_connect_ns_;
@@ -197,80 +222,82 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         transport_->connect(later(now_ns, rules.connect_timeout_ns));
     const std::int64_t now = clock_->monotonic_ns();
     if (status == IoStatus::OK) {
-        connected_ = true;
-        ever_connected_ = true;
-        ++counts_.connects;
-        channel_state_.reset();
-        // A close the driver made itself, reconnected within
-        // `connect_timeout` of it: states, counts and tags are kept (7.3).
         if (own_close_ &&
             now <= later(own_close_ns_, rules.connect_timeout_ns)) {
+            // Back within `connect_timeout` of a close of our own: states,
+            // counts and tags are kept (7.3, R-17).
             failures_.resumed();
             ++counts_.resumed;
         } else {
-            failures_.connected(now);
+            if (own_close_) {
+                apply_loss();  // back, but too late (review P1)
+            }
+            failures_.connected(now);  // keeps counts and demotion
         }
         own_close_ = false;
+        connected_ = true;
+        ++counts_.connects;
+        channel_state_.reset();
         answered_since_connect_ = false;
         quiet_until_ns_ = 0;
+        discard_before_send_ = false;
         scheduler_.reconnect();
+        sync_scheduler();
         publish_states();
         return now;
     }
-    if (own_close_) {
-        // Not back within `connect_timeout`: the rules of a lost connection
-        // apply (R-17).
-        own_close_ = false;
-        failures_.lost();
-        scheduler_.reconnect();
-        ++counts_.losses;
+    if (status == IoStatus::REFUSED) {
+        ++counts_.refused;
     }
-    // CONNECTING with COMM_FAIL (conformance test 16).
-    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
-        if (channel_->devices[device].enabled) {
-            fail_points(device);
+    if (!own_close_) {
+        // CONNECTING with COMM_FAIL (conformance test 16).
+        for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+            if (channel_->devices[device].enabled) {
+                fail_points(device);
+            }
         }
     }
-    next_connect_ns_ = later(now, backoff_ns_);
-    backoff_ns_ = std::min(backoff_ns_ > rules.reconnect_max_ns / 2
-                               ? rules.reconnect_max_ns
-                               : backoff_ns_ * 2,
-                           rules.reconnect_max_ns);
+    next_connect_after_backoff(now);
     publish_states();
     return next_connect_ns_;
+}
+
+void ChannelEngine::apply_loss() noexcept {
+    own_close_ = false;
+    ++counts_.losses;
+    failures_.lost();
+    scheduler_.reconnect();
+    for (DeviceRun& run : devices_) {
+        run.chain.clear();
+        run.attempts = 0;
+    }
+    // Every device is CONNECTING: `publish_states` writes their points BAD
+    // with COMM_FAIL, all at once (conformance test 16).
+    publish_states();
 }
 
 void ChannelEngine::lose(std::int64_t now_ns) noexcept {
     transport_->close(false);
     connected_ = false;
-    own_close_ = false;
-    ++counts_.losses;
-    failures_.lost();
-    scheduler_.reconnect();
-    // Every device is CONNECTING now: `publish_states` writes their points
-    // BAD with COMM_FAIL, all at once (conformance test 16).
-    for (DeviceRun& run : devices_) {
-        run.chain.clear();
-        run.attempts = 0;
-    }
-    const ConnectionRules& rules = channel_->connection;
-    next_connect_ns_ = later(now_ns, backoff_ns_);
-    backoff_ns_ = std::min(backoff_ns_ > rules.reconnect_max_ns / 2
-                               ? rules.reconnect_max_ns
-                               : backoff_ns_ * 2,
-                           rules.reconnect_max_ns);
-    publish_states();
+    apply_loss();
+    next_connect_after_backoff(now_ns);
 }
 
-void ChannelEngine::close_own(std::int64_t now_ns) noexcept {
+void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
     transport_->close(true);
     connected_ = false;
     ++counts_.own_closes;
-    own_close_ = true;
-    own_close_ns_ = now_ns;
     for (DeviceRun& run : devices_) {
         run.chain.clear();  // a chain cut by the close publishes nothing
         run.attempts = 0;
+    }
+    if (lost) {
+        // The run of time-outs found the connection lost (7.3, R-15): its
+        // rules apply at once, and the values go bad (review P1, D-139).
+        apply_loss();
+    } else {
+        own_close_ = true;
+        own_close_ns_ = now_ns;
     }
     // At once, but a second close before any valid answer waits for the
     // back-off (7.3).
@@ -278,22 +305,21 @@ void ChannelEngine::close_own(std::int64_t now_ns) noexcept {
         next_connect_ns_ = now_ns;
         return;
     }
-    const ConnectionRules& rules = channel_->connection;
-    next_connect_ns_ = later(now_ns, backoff_ns_);
-    backoff_ns_ = std::min(backoff_ns_ > rules.reconnect_max_ns / 2
-                               ? rules.reconnect_max_ns
-                               : backoff_ns_ * 2,
-                           rules.reconnect_max_ns);
+    next_connect_after_backoff(now_ns);
 }
 
-void ChannelEngine::sync_scheduler(std::int64_t /*now_ns*/) noexcept {
+void ChannelEngine::sync_scheduler() noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
-        if (!channel_->devices[device].enabled) {
+        const CompiledDevice& compiled = channel_->devices[device];
+        if (!compiled.enabled) {
             continue;
         }
         scheduler_.set_polled(device, failures_.polled(device));
-        if (failures_.state(device) == DeviceStatus::DEMOTED) {
-            scheduler_.set_probe(device, failures_.probe_due_ns(device));
+        // One probe for every demoted device of a unit (Q5).
+        if (failures_.probes_for_unit(device)) {
+            scheduler_.set_probe(
+                device, failures_.probe_due_ns(device),
+                std::min(compiled.failure.timeout_ns, PROBE_TIMEOUT_MAX_NS));
         } else {
             scheduler_.clear_probe(device);
         }
@@ -336,6 +362,20 @@ void ChannelEngine::fail_points(std::uint32_t device) noexcept {
     }
 }
 
+void ChannelEngine::fail_request(std::uint32_t device,
+                                 const Request& request) noexcept {
+    // The points of a request that failed go bad (5.2, annex A; review P2).
+    sink_count_ = 0;
+    for (const std::uint32_t point : request.points) {
+        if (sink_count_ < sink_storage_.size()) {
+            sink_storage_[sink_count_++] = DeliveredSample{
+                .point = point,
+                .sample = RawSample{.outcome = Outcome::COMM_FAIL}};
+        }
+    }
+    process(device, std::span(sink_storage_).first(sink_count_));
+}
+
 std::int64_t ChannelEngine::check_staleness(std::int64_t now_ns) noexcept {
     std::int64_t next = NEVER;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
@@ -372,14 +412,22 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
         encoded.length > out.bytes.size()) {
         return End::NOT_SENT;
     }
+    if (discard_before_send_) {
+        // Bytes that came during the quiet time are no answer (7.2).
+        transport_->discard_input();
+        discard_before_send_ = false;
+    }
+    if (transport_->closed_by_peer()) {
+        return End::CLOSED;  // checked before a write (7.3)
+    }
     const IoStatus status =
         transport_->send(std::span(tx_).first(encoded.length));
     ++counts_.requests;
-    if (status == IoStatus::CLOSED) {
-        return End::CLOSED;
+    if (status == IoStatus::PARTIAL) {
+        return End::PARTIAL;
     }
     if (status != IoStatus::OK) {
-        return End::SEND_FAILED;
+        return End::CLOSED;  // nothing sent: the connection failed
     }
     std::int64_t timeout = device.failure.timeout_ns;
     if (choice.kind == Choice::Kind::PROBE) {
@@ -391,12 +439,20 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     if (end != End::ANSWER) {
         return end;
     }
+    if (channel_->transport == TransportKind::SERIAL) {
+        // The silence before the next request, from the last byte (7.2).
+        quiet_until_ns_ =
+            later(clock_->monotonic_ns(), inter_frame_gap_ns(channel_->line));
+    }
     SampleSink sink(sink_storage_);
     decoded = protocol_->decode(device, run.protocol, request, sent,
                                 std::span(rx_).first(frame_bytes), sink);
     sink_count_ = sink.samples().size();
-    return decoded.kind == DecodeResult::Kind::BROKEN ? End::BROKEN
-                                                      : End::ANSWER;
+    if (decoded.kind == DecodeResult::Kind::BROKEN) {
+        return End::BROKEN;
+    }
+    return decoded.kind == DecodeResult::Kind::UNREACHABLE ? End::UNREACHABLE
+                                                           : End::ANSWER;
 }
 
 ChannelEngine::End ChannelEngine::wait_answer(
@@ -407,7 +463,7 @@ ChannelEngine::End ChannelEngine::wait_answer(
     std::int64_t deadline = first_byte_deadline_ns(line, clock_->monotonic_ns(),
                                                    request_bytes, timeout_ns);
     std::size_t have = 0;
-    bool first_byte = false;
+    bool started = false;  // the first byte of this request's answer is in
     for (;;) {
         if (have >= rx_.size()) {
             return End::BROKEN;  // more than `max_frame_bytes` (7.1)
@@ -415,25 +471,29 @@ ChannelEngine::End ChannelEngine::wait_answer(
         std::size_t got = 0;
         const IoStatus status =
             transport_->receive(std::span(rx_).subspan(have), deadline, got);
-        if (status == IoStatus::CLOSED) {
-            return End::CLOSED;
+        if (status == IoStatus::TIMEOUT ||
+            (status == IoStatus::OK && got == 0)) {
+            return started ? End::BROKEN : End::TIMEOUT;
         }
-        if (status != IoStatus::OK || got == 0) {
-            return have == 0 && !first_byte ? End::TIMEOUT : End::BROKEN;
-        }
-        if (!first_byte) {
-            first_byte = true;
-            deadline =
-                answer_deadline_ns(line, clock_->monotonic_ns(), expected_max);
+        if (status != IoStatus::OK) {
+            return End::CLOSED;  // closed, or failed (review Q8)
         }
         have += got;
         switch (scan(request, sent, have, frame_bytes)) {
-            case Scan::MORE:
-                break;
             case Scan::COMPLETE:
                 return End::ANSWER;
             case Scan::BROKEN:
                 return End::BROKEN;
+            case Scan::MORE:
+                break;
+        }
+        // Only bytes that may start this request's answer start its second
+        // stage; a stale frame dropped whole leaves the first deadline
+        // (2.2, 7.2; review P3).
+        if (!started && have > 0) {
+            started = true;
+            deadline =
+                answer_deadline_ns(line, clock_->monotonic_ns(), expected_max);
         }
     }
 }
@@ -477,14 +537,19 @@ void ChannelEngine::exchange(const Choice& choice) noexcept {
             // Every device of the channel at once, no retries (7.3).
             lose(now);
             return;
-        case End::SEND_FAILED:
-            close_own(now);  // a frame not taken whole (7.3)
+        case End::PARTIAL:
+            if (channel_->transport == TransportKind::SERIAL) {
+                failed(choice, End::TIMEOUT);  // as a time-out (7.2, Q7)
+            } else {
+                close_own(now, false);  // a frame not taken whole (7.3)
+            }
             return;
         case End::ANSWER:
             answered(choice, decoded);
             return;
         case End::TIMEOUT:
         case End::BROKEN:
+        case End::UNREACHABLE:
             failed(choice, end);
             return;
     }
@@ -497,43 +562,28 @@ void ChannelEngine::answered(const Choice& choice,
     const CompiledDevice& compiled = channel_->devices[device];
     const Request& request = compiled.plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
-    const bool probe = choice.kind == Choice::Kind::PROBE;
-    // Any valid answer, an exception included: the back-off starts from
-    // `min` again (7.3) and the run of time-outs is empty.
+    // A valid answer: the reconnect back-off starts from `min` again (7.3).
     answered_since_connect_ = true;
     backoff_ns_ = channel_->connection.reconnect_min_ns;
-    failures_.answer_seen();
-    if (decoded.kind == DecodeResult::Kind::UNREACHABLE) {
-        // A gateway that cannot reach the unit: a failure of that unit only
-        // (7.4, annex A), not of the line.
-        failed(choice, End::ANSWER);
-        return;
-    }
-    if (probe) {
-        // The device answered: it is alive, busy or not (7.4).
+    run.attempts = 0;
+    if (choice.kind == Choice::Kind::PROBE) {
+        // The device answered, busy or not: it is alive (7.4). A probe
+        // neither adds to the run of time-outs nor empties it (7.3).
         failures_.probe_ended(device, true, now);
         scheduler_.probe_done();
-        run.attempts = 0;
-        run.busy = 0;
         return;
     }
+    failures_.answer_seen();
     if (decoded.kind == DecodeResult::Kind::BUSY) {
-        // Busy neither fails nor answers, up to `busy_retries` times in a
-        // row; then it counts as failed (CS 4.6).
-        ++run.busy;
-        RequestEnd end = RequestEnd::NOT_COUNTED;
-        if (run.busy > compiled.failure.busy_retries) {
-            run.busy = 0;
-            end = RequestEnd::FAILED;
-        }
-        (void)failures_.request_ended(device, end, now);
+        // Busy never counts and is never retried (7.4, annex A, test 19;
+        // the lead's ruling on D-12): the points keep their values, STALE
+        // by `max_age`.
+        (void)failures_.request_ended(device, RequestEnd::NOT_COUNTED, now);
         if (!request.chained) {
             run.chain.clear();
         }
         return;
     }
-    run.attempts = 0;
-    run.busy = 0;
     (void)failures_.request_ended(device, RequestEnd::ANSWERED, now);
     const bool refused = decoded.kind == DecodeResult::Kind::SPLIT;
     if ((refused && !scheduler_.refused(device, choice.request)) ||
@@ -554,7 +604,7 @@ void ChannelEngine::answered(const Choice& choice,
 }
 
 void ChannelEngine::after_bad_frame(const Request& request, End end) noexcept {
-    if (end == End::ANSWER) {
+    if (end == End::UNREACHABLE) {
         return;  // a valid frame: only its unit failed
     }
     const std::int64_t now = clock_->monotonic_ns();
@@ -562,13 +612,15 @@ void ChannelEngine::after_bad_frame(const Request& request, End end) noexcept {
         // A broken frame on a stream, or a lost side-effect read, closes
         // the connection (7.3).
         if (end == End::BROKEN || request.side_effect) {
-            close_own(now);
+            close_own(now, false);
         }
         return;
     }
     // A serial line, or serial frames over a stream: discard input and keep
-    // the quiet time before the next request to any device (7.2, 7.3).
+    // the quiet time before the next request to any device, and discard
+    // again before that request (7.2, 7.3; review P6).
     transport_->discard_input();
+    discard_before_send_ = true;
     quiet_until_ns_ = later(now, margin_ns(channel_->line));
 }
 
@@ -578,40 +630,48 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const CompiledDevice& compiled = channel_->devices[device];
     const Request& request = compiled.plan.requests[choice.request];
     const bool probe = choice.kind == Choice::Kind::PROBE;
-    if (end == End::TIMEOUT) {
-        ++counts_.timeouts;
-    } else if (end == End::BROKEN) {
+    if (end == End::BROKEN) {
         ++counts_.broken;
+    } else {
+        ++counts_.timeouts;
     }
     after_bad_frame(request, end);
     const std::int64_t now = clock_->monotonic_ns();
-    // A read is tried again within its group's turn, never a side-effect
-    // one, never a probe, never over a closed connection (7.1, 6.6).
-    if (connected_ && !probe && !request.side_effect &&
+    // The lead's ruling on D-12: a time-out is retried, and on a serial
+    // line a broken frame; an exception answer never (a gateway has waited
+    // already); never a side-effect read, a probe, or over a closed
+    // connection (7.1, 6.6).
+    const bool retryable =
+        end == End::TIMEOUT ||
+        (end == End::BROKEN && channel_->transport == TransportKind::SERIAL);
+    if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
         ++run.attempts;
         ++counts_.retries;
-        scheduler_.retry(device, choice.request);
+        scheduler_.retry(device, choice.request, now);
         return;
     }
     run.attempts = 0;
-    if (!request.chained) {
-        run.chain.clear();  // a chain whose end failed publishes nothing
-    }
     if (probe) {
         failures_.probe_ended(device, false, now);
         scheduler_.probe_done();
         return;
     }
-    if (end == End::TIMEOUT) {
-        const FailureTracker::TimeoutEnd timed_out =
-            failures_.read_timed_out(device, now);
-        if (timed_out.lost && connected_) {
-            close_own(now);  // the run spans every live unit (7.3, D-139)
-        }
+    if (!request.chained) {
+        run.chain.clear();  // a chain whose end failed publishes nothing
+    }
+    fail_request(device, request);
+    if (end == End::BROKEN) {
+        (void)failures_.request_ended(device, RequestEnd::FAILED, now);
         return;
     }
-    (void)failures_.request_ended(device, RequestEnd::FAILED, now);
+    // A time-out, or a gateway's "did not respond", which counts as a
+    // time-out of that unit for demotion and for the run (D-12).
+    const FailureTracker::TimeoutEnd timed_out =
+        failures_.read_timed_out(device, now);
+    if (timed_out.lost && connected_) {
+        close_own(now, true);  // the run spans every live unit (7.3)
+    }
 }
 
 void ChannelEngine::deliver(const Choice& choice,

@@ -71,10 +71,12 @@ public:
                             std::uint32_t lost_after_timeouts = 0);
 
     // A connection was made at `now_ns`: every enabled device starts its
-    // grace and is INITIALISING; counts start from 0 (7.4).
+    // grace and is INITIALISING, but a demoted one is DEMOTED again with its
+    // probe schedule; failure counts are kept (7.3, 7.4).
     void connected(std::int64_t now_ns) noexcept;
 
-    // The connection is lost: every enabled device is CONNECTING (7.3).
+    // The connection is lost: every enabled device is CONNECTING (7.3); a
+    // demoted one stays demoted for the next connect.
     void lost() noexcept;
 
     // A close the driver made itself was followed by a reconnect within
@@ -118,9 +120,10 @@ public:
     SCADA_RT bool request_ended(std::uint32_t device, RequestEnd end,
                                 std::int64_t now_ns) noexcept;
 
-    // The end of a probe of a demoted `device` (7.4): an answer recovers it
-    // to INITIALISING with its back-off reset; a failure doubles its
-    // back-off, up to `backoff_max`.
+    // The end of a probe of a demoted `device` (7.4), for every demoted
+    // device of its unit: an answer recovers them to INITIALISING and
+    // empties the count; a failure doubles their back-off, up to
+    // `backoff_max`. The back-off is reset only by a poll that answered.
     SCADA_RT void probe_ended(std::uint32_t device, bool answered,
                               std::int64_t now_ns) noexcept;
 
@@ -132,6 +135,9 @@ public:
     [[nodiscard]] std::uint32_t failures(std::uint32_t device) const noexcept;
     // The device is polled: INITIALISING or RUNNING.
     [[nodiscard]] bool polled(std::uint32_t device) const noexcept;
+    // The device is the demoted device that probes for its unit: the first
+    // demoted one of the unit, in device order.
+    [[nodiscard]] bool probes_for_unit(std::uint32_t device) const noexcept;
 
 private:
     struct Run {
@@ -139,6 +145,7 @@ private:
         std::int64_t grace_until_ns = 0;
         std::int64_t backoff_ns = 0;
         std::int64_t probe_due_ns = 0;
+        bool demoted = false;  // kept across a lost connection
     };
 
     // Adds the time-out of `device` to the run; true when the connection is

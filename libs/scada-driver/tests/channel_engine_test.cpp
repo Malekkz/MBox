@@ -215,8 +215,9 @@ TEST(ChannelEngine, ALostConnectionFailsEveryDeviceAtOnce) {
     rig.run_until(400 * MILLISECOND);
     EXPECT_TRUE(connecting_with_comm_fail(rig, 0));
     EXPECT_TRUE(connecting_with_comm_fail(rig, 1));
-    // No retries spent: one request found the connection gone.
-    EXPECT_EQ(rig.engine.counts().requests, requests + 1);
+    // No retries spent, and no request sent: the engine asks the transport
+    // before a write and at each boundary (7.3 "Idle close").
+    EXPECT_EQ(rig.engine.counts().requests, requests);
     EXPECT_EQ(rig.engine.counts().retries, 0U);
 }
 
@@ -400,18 +401,22 @@ TEST(ChannelEngine, AGatewayThatCannotReachAUnitDemotesThatUnitOnly) {
     EXPECT_EQ(rig.engine.counts().losses, 0U);
 }
 
-TEST(ChannelEngine, BusyAnswersDoNotDemoteUntilBusyRetriesRunOut) {
-    // busy_retries 3, demote_after 1: three busy answers in a row neither
-    // fail nor answer; the fourth counts as failed and demotes.
-    FailureRules rules = quick_failure(0, 1);
+TEST(ChannelEngine, BusyAnswersNeverDemoteAndAreNotRetried) {
+    // Conformance test 19, DI 7.4 and the lead's ruling on D-12: busy
+    // neither fails nor answers, whatever `busy_retries` says; one request
+    // per poll, no retry, no demotion, the tag untouched.
+    FailureRules rules = quick_failure(2, 1);
     rules.busy_retries = 3;
     Rig rig(channel_of(1, rules, TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
     rig.bus.fault(1, Fault::BUSY);
-    rig.run_until(3 * FAST_PERIOD - MILLISECOND);  // polls at 0, 200, 400
-    EXPECT_EQ(requests_of(rig.bus, 1), 3U);
-    EXPECT_NE(rig.state(0), DeviceStatus::DEMOTED);
-    rig.run_until(3 * FAST_PERIOD + 10 * MILLISECOND);
-    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    rig.run_until(20 * FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(requests_of(rig.bus, 1), 20U);
+    EXPECT_EQ(rig.engine.counts().retries, 0U);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
 }
 
 // --- Conformance test 17: STALE -------------------------------------------
@@ -430,6 +435,269 @@ TEST(ChannelEngine, StaleAfterMaxAgeClearedByTheNextGoodRead) {
     rig.run_until(10 * SECOND + 10 * MILLISECOND);
     EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::STALE));
     EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+// --- PR 137 review: P1 a lost connection is never skipped -----------------
+
+// True when every point of the first `devices` devices is BAD with
+// COMM_FAIL.
+bool all_comm_failed(const Rig& rig, std::uint32_t devices) {
+    for (std::uint32_t device = 0; device < devices; ++device) {
+        if (rig.tags.point(device, 0).quality != tag::Quality::BAD ||
+            !rig.tags.has_flag(device, 0, Flag::COMM_FAIL)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TEST(ChannelEngine, ThreeSilentUnitsBehindAnAcceptingPeerGoBad) {
+    // TCP, three silent units behind a peer that accepts every connect,
+    // demote_after 5: the run of time-outs loses the connection, the values
+    // go bad, and the counts kept across reconnects demote the units.
+    Rig rig(channel_of(3, quick_failure(0, 5), TransportKind::TCP), 3);
+    for (std::uint8_t unit = 1; unit <= 3; ++unit) {
+        rig.bus.fault(unit, Fault::SILENT);
+    }
+    rig.run_until(60 * SECOND);
+    EXPECT_GT(rig.engine.counts().losses, 0U);
+    EXPECT_TRUE(all_comm_failed(rig, 3));
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+}
+
+TEST(ChannelEngine, AGatewayWithADeadBusLosesTheConnection) {
+    // The gateway answers "did not respond" for every unit: each counts as
+    // a time-out for the run (D-12), which loses the connection; at 150 s no
+    // tag is GOOD.
+    Rig rig(channel_of(3, quick_failure(2, 5), TransportKind::TCP), 3);
+    for (std::uint8_t unit = 1; unit <= 3; ++unit) {
+        rig.bus.fault(unit, Fault::UNREACHABLE);
+    }
+    rig.run_until(150 * SECOND);
+    EXPECT_GT(rig.engine.counts().losses, 0U);
+    EXPECT_TRUE(all_comm_failed(rig, 3));
+    EXPECT_EQ(rig.engine.counts().retries, 0U);  // never retried
+}
+
+TEST(ChannelEngine, ASingleDeadUnitGoesBadAndIsDemotedAcrossReconnects) {
+    // One dead unit, demote_after 10, lost_after_timeouts 3: every third
+    // time-out loses the connection, the two before it count, and the count
+    // survives the reconnects: demoted, and BAD long before 200 s.
+    Rig rig(channel_of(1, quick_failure(0, 10), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(20 * SECOND);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+    rig.run_until(200 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+}
+
+TEST(ChannelEngine, EveryTimeOutLosesTheConnectionWithLostAfterOne) {
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 10), TransportKind::TCP);
+    channel.connection.lost_after_timeouts = 1;
+    Rig rig(std::move(channel), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(SECOND);
+    EXPECT_GT(rig.engine.counts().losses, 0U);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+}
+
+TEST(ChannelEngine, AnOwnCloseNotBackWithinConnectTimeoutIsALoss) {
+    // connect_timeout 500 ms, back-off from 1 s: a garbage frame closes the
+    // connection twice; the second time no answer came since the connect,
+    // so the reconnect waits 1 s, and at 500 ms the loss applies: COMM_FAIL
+    // while the reconnect waits, though it then succeeds.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(2, 10), TransportKind::TCP);
+    channel.connection.connect_timeout_ns = 500 * MILLISECOND;
+    Rig rig(std::move(channel), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.run_until(FAST_PERIOD + 100 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().resumed, 1U);  // the first: back at once
+    EXPECT_EQ(rig.engine.counts().losses, 0U);
+    // The second close, at the next poll (400 ms), with no answer since the
+    // connect: the reconnect waits 1 s, the loss applies after 500 ms.
+    rig.run_until(2 * FAST_PERIOD + 499 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().losses, 0U);
+    rig.run_until(2 * FAST_PERIOD + 600 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().losses, 1U);
+    EXPECT_TRUE(all_comm_failed(rig, 1));
+}
+
+TEST(ChannelEngine, AReconnectKeepsADemotedDeviceDemoted) {
+    // Q2: a demoted device is not polled again after a lost connection: no
+    // burst of its retries after the reconnect.
+    Rig rig(channel_of(2, quick_failure(2, 1), TransportKind::SERIAL), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    const std::size_t before = requests_of(rig.bus, 1);
+    rig.transport.close_by_peer();
+    rig.run_until(3 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_LE(requests_of(rig.bus, 1), before + 1);  // a probe at most
+}
+
+// --- P2: a request that fails writes its points bad -----------------------
+
+TEST(ChannelEngine, APartOfADeviceThatNeverAnswersGoesBad) {
+    // A device of two blocks: registers 0 and 150, the second never
+    // answered. The first stays GOOD; the second is BAD with COMM_FAIL
+    // after its retries, though the device answers and is never demoted.
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0}, {.first = 150}}}},
+                     ReadRules{.max_units = 4});
+    channel.transport = TransportKind::SERIAL;
+    channel.devices[0].failure = quick_failure(1, 3);
+    Rig rig(std::move(channel), 1);
+    rig.bus.silent_from(1, 100);
+    rig.run_until(SECOND);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.tags.point(0, 1).quality, tag::Quality::BAD);
+    EXPECT_TRUE(rig.tags.has_flag(0, 1, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+}
+
+// --- P3: a stale frame does not start the second stage --------------------
+
+TEST(ChannelEngine, ALateAnswerIsDroppedAndTheRetryWaitsItsOwnDeadline) {
+    // TCP, time-out 100 ms, the unit answers after 150 ms: each attempt's
+    // answer arrives during the next attempt as a stale frame and is
+    // dropped; the attempt waits to its own first deadline and times out.
+    // No broken frame, no close (`lost_after_timeouts` 10 keeps the run of
+    // time-outs out of it).
+    CompiledChannel channel =
+        channel_of(1, quick_failure(2, 10), TransportKind::TCP);
+    channel.connection.lost_after_timeouts = 10;
+    Rig rig(std::move(channel), 1);
+    rig.transport.latency(1, 150 * MILLISECOND);
+    rig.run_until(SECOND);
+    EXPECT_GT(rig.engine.counts().stale_frames, 0U);
+    EXPECT_EQ(rig.engine.counts().broken, 0U);
+    EXPECT_EQ(rig.transport.abortive_closes(), 0);
+    EXPECT_GT(rig.engine.counts().timeouts, 0U);
+}
+
+TEST(ChannelEngine, AFrameWithAnotherTransactionIdIsDroppedAndTheAnswerTaken) {
+    // A stray frame of another transaction arrives before the answer: it is
+    // dropped, and the answer that follows is read GOOD.
+    Rig rig(channel_of(1, quick_failure(2, 10), TransportKind::TCP), 1);
+    rig.bus.set(1, 0, 0, 7);
+    rig.transport.latency(1, 5 * MILLISECOND);
+    // tid 0x7FFF, unit 1, OK, 1 unit, value 99: no request has that id.
+    rig.transport.inject(
+        {std::byte{0x7F}, std::byte{0xFF}, std::byte{1}, std::byte{0},
+         std::byte{0}, std::byte{1}, std::byte{0}, std::byte{99}},
+        MILLISECOND);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().stale_frames, 1U);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 7);
+}
+
+// --- P6: the silence of a serial line -------------------------------------
+
+TEST(ChannelEngine, ASerialLineKeepsThreeAndAHalfCharactersAfterAGoodAnswer) {
+    // 9,600 bit/s 8E1: 3.5 characters are 4.01 ms; with `turnaround` 2 ms
+    // the next request waits 6.01 ms after the last byte of the answer.
+    CompiledChannel channel =
+        channel_of(2, quick_failure(0, 5), TransportKind::SERIAL);
+    channel.line = LineTiming{.bit_rate = 9600,
+                              .bits_per_char = bits_per_char(8, true, 1),
+                              .turnaround_ns = 2 * MILLISECOND};
+    Rig rig(std::move(channel), 2);
+    rig.run_until(50 * MILLISECOND);
+    const std::vector<std::int64_t> first = times_of(rig.bus, 1);
+    const std::vector<std::int64_t> second = times_of(rig.bus, 2);
+    ASSERT_FALSE(first.empty());
+    ASSERT_FALSE(second.empty());
+    const std::int64_t gap = inter_frame_gap_ns(rig.channel.line);
+    EXPECT_EQ(gap, 4'010'417 + 2 * MILLISECOND);
+    EXPECT_GE(second.front() - (first.front() + LATENCY), gap);
+}
+
+TEST(ChannelEngine, BytesDuringTheQuietTimeAreNotTheNextAnswer) {
+    // A time-out of unit 1, then noise arrives during the quiet time: it is
+    // discarded before the next request, whose answer is read GOOD.
+    Rig rig(channel_of(2, quick_failure(0, 5), TransportKind::SERIAL), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.bus.set(2, 0, 0, 5);
+    rig.transport.inject({std::byte{0x55}, std::byte{0x55}, std::byte{0x55}},
+                         110 * MILLISECOND);
+    rig.run_until(200 * MILLISECOND);
+    EXPECT_EQ(rig.engine.counts().broken, 0U);
+    EXPECT_EQ(rig.tags.point(1, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.tags.point(1, 0).value, 5);
+}
+
+TEST(ChannelEngine, APartialSendOnASerialLineIsATimeOut) {
+    // Q7: not a close; the request is tried again.
+    Rig rig(channel_of(1, quick_failure(2, 5), TransportKind::SERIAL), 1);
+    rig.transport.partial_sends(1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    EXPECT_EQ(rig.transport.abortive_closes(), 0);
+    EXPECT_EQ(rig.engine.counts().retries, 1U);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+// --- Q1: a retry takes its turn -------------------------------------------
+
+TEST(ChannelEngine, ARetryWaitsForTheOtherDevicesDueAtTheSameTime) {
+    // Dead unit 1 (retries 2) and live unit 2 in one group: unit 2 is read
+    // between unit 1's first attempt and its retry.
+    Rig rig(channel_of(2, quick_failure(2, 5), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    const std::vector<std::int64_t> dead = times_of(rig.bus, 1);
+    const std::vector<std::int64_t> live = times_of(rig.bus, 2);
+    ASSERT_GE(dead.size(), 2U);
+    ASSERT_FALSE(live.empty());
+    EXPECT_LT(live.front(), dead[1]);
+}
+
+// --- Q4: the probe budget, measured ---------------------------------------
+
+// The share of line time the probes of `dead` units took from `from_ns` to
+// `to_ns`, each probe holding the line for its time-out.
+double probe_share(const SimBus& bus, std::uint8_t dead, std::int64_t from_ns,
+                   std::int64_t to_ns, std::int64_t timeout_ns) {
+    std::int64_t busy = 0;
+    for (const LoggedRequest& request : bus.log()) {
+        if (request.unit_id >= 2 && request.unit_id <= dead + 1 &&
+            request.time_ns >= from_ns && request.time_ns < to_ns) {
+            busy += timeout_ns;
+        }
+    }
+    return static_cast<double>(busy) / static_cast<double>(to_ns - from_ns);
+}
+
+TEST(ChannelEngine, TheProbeBudgetKeepsTheLivePeriod) {
+    // One live unit in a 1 s group and 20 dead ones behind a serial line,
+    // time-out 100 ms, back-off 1 s to 4 s. A probe goes only when no poll
+    // falls due within its time-out, unless it waited 10 time-outs: the
+    // live unit's period stays within one probe of 1 s (measured: 1.003 s),
+    // and the probes, which use the idle time only, take 49 % of the line
+    // here (D-138).
+    CompiledChannel channel =
+        channel_of(21, quick_failure(0, 1), TransportKind::SERIAL, 1);
+    Rig rig(std::move(channel), 21);
+    for (std::uint8_t unit = 2; unit <= 21; ++unit) {
+        rig.bus.fault(unit, Fault::SILENT);
+    }
+    rig.run_until(310 * SECOND);
+    const std::int64_t worst =
+        longest_gap_after(times_of(rig.bus, 1), 10 * SECOND);
+    const double share =
+        probe_share(rig.bus, 20, 10 * SECOND, 310 * SECOND, 100 * MILLISECOND);
+    EXPECT_LE(worst, SECOND + 100 * MILLISECOND + 25 * MILLISECOND);
+    EXPECT_LE(share, 0.60);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

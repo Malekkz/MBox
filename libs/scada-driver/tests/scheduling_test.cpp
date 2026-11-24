@@ -1144,7 +1144,7 @@ TEST(Scheduling, ARetryIsTheDevicesNextRequestWithinItsSpacing) {
     const Choice first = scheduler.take(0);
     ASSERT_EQ(first.kind, Choice::Kind::POLL);
     ASSERT_EQ(first.device, 0U);
-    scheduler.retry(0, first.request);
+    scheduler.retry(0, first.request, 0);
     const Choice other = scheduler.take(MILLISECOND);
     EXPECT_EQ(other.kind, Choice::Kind::POLL);
     EXPECT_EQ(other.device, 1U);
@@ -1171,7 +1171,7 @@ TEST(Scheduling, ASideEffectReadIsNeverRetried) {
     const Choice first = scheduler.take(0);
     ASSERT_EQ(first.kind, Choice::Kind::POLL);
     ASSERT_TRUE(channel.devices[0].plan.requests[first.request].side_effect);
-    scheduler.retry(0, first.request);
+    scheduler.retry(0, first.request, 0);
     EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::WAIT);
 }
 
@@ -1185,7 +1185,7 @@ TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
     const ReadPlan& plan = channel.devices[0].plan;
     Scheduler scheduler(channel, 4, 0);
     const Choice first = scheduler.take(0);
-    scheduler.retry(0, first.request);
+    scheduler.retry(0, first.request, 0);
     ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
     EXPECT_TRUE(scheduler.take(MILLISECOND).chain_dropped);
     EXPECT_EQ(reads_at(scheduler, plan,
@@ -1201,14 +1201,14 @@ TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
                      ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_polled(0, false);
-    scheduler.set_probe(0, 5 * MILLISECOND);
+    scheduler.set_probe(0, 5 * MILLISECOND, 0);
     EXPECT_EQ(scheduler.take(0).device, 1U);  // d2's poll
     const Choice wait = scheduler.take(MILLISECOND);
     EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
     EXPECT_EQ(wait.wake_ns, 5 * MILLISECOND);
     // A due poll of d2 at the same time goes first.
     EXPECT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::POLL);
-    scheduler.set_probe(0, FAST_PERIOD);
+    scheduler.set_probe(0, FAST_PERIOD, 0);
     const Choice probe = scheduler.take(FAST_PERIOD + MILLISECOND);
     EXPECT_EQ(probe.kind, Choice::Kind::PROBE);
     EXPECT_EQ(probe.device, 0U);
@@ -1223,7 +1223,7 @@ TEST(Scheduling, AtMostOneProbeIsInFlightPerChannel) {
     Scheduler scheduler(channel, 4, 0);
     for (std::uint32_t device = 0; device < 2; ++device) {
         scheduler.set_polled(device, false);
-        scheduler.set_probe(device, 0);
+        scheduler.set_probe(device, 0, 0);
     }
     const Choice first = scheduler.take(0);
     ASSERT_EQ(first.kind, Choice::Kind::PROBE);
@@ -1241,7 +1241,7 @@ TEST(Scheduling, AProbeNotSentLeavesNoProbeInFlight) {
         {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_polled(0, false);
-    scheduler.set_probe(0, 0);
+    scheduler.set_probe(0, 0, 0);
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
     EXPECT_EQ(scheduler.not_sent(), std::nullopt);
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
@@ -1257,7 +1257,7 @@ TEST(Scheduling, NoProbeWhileAnOrderWaits) {
                      ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_polled(0, false);
-    scheduler.set_probe(0, 0);
+    scheduler.set_probe(0, 0, 0);
     ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 1}));
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
     ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 2, .device = 1}));

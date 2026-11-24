@@ -53,18 +53,37 @@ public:
         refusals_ = count;
         refuse_ns_ = refuse_ns;
     }
+    // Each connect takes `delay_ns`: past its deadline it is a TIMEOUT.
+    void connect_delay(std::int64_t delay_ns) noexcept {
+        connect_delay_ns_ = delay_ns;
+    }
     // The peer closes the connection now.
     void close_by_peer() noexcept { peer_closed_ = true; }
     // The next `count` connects are accepted and closed by the peer at once.
     void close_on_connect(int count) noexcept { closing_connects_ = count; }
+    // Unit `unit_id` answers after `latency_ns` instead of the default.
+    void latency(std::uint8_t unit_id, std::int64_t latency_ns) {
+        latencies_[unit_id] = latency_ns;
+    }
+    // Bytes that arrive at `arrival_ns` on their own: a stale frame, a late
+    // answer, noise during a quiet time.
+    void inject(std::vector<std::byte> bytes, std::int64_t arrival_ns) {
+        deliveries_.push_back(
+            {.arrival_ns = arrival_ns, .bytes = std::move(bytes)});
+    }
+    // The next `count` sends are taken only in part.
+    void partial_sends(int count) noexcept { partial_sends_ = count; }
 
     IoStatus connect(std::int64_t deadline_ns) noexcept override;
     void close(bool abortive) noexcept override;
-    SCADA_RT IoStatus send(std::span<const std::byte> frame) noexcept override;
-    SCADA_RT IoStatus receive(std::span<std::byte> into,
-                              std::int64_t deadline_ns,
-                              std::size_t& received) noexcept override;
-    SCADA_RT void discard_input() noexcept override { pending_.clear(); }
+    [[nodiscard]] bool closed_by_peer() noexcept override {
+        return open_ && peer_closed_;
+    }
+    IoStatus send(std::span<const std::byte> frame) noexcept override;
+    IoStatus receive(std::span<std::byte> into, std::int64_t deadline_ns,
+                     std::size_t& received) noexcept override;
+    // Drops what has arrived by now; later bytes still arrive.
+    void discard_input() noexcept override;
 
     [[nodiscard]] int connects() const noexcept { return connects_; }
     [[nodiscard]] int abortive_closes() const noexcept {
@@ -76,19 +95,26 @@ public:
     }
 
 private:
+    struct Delivery {
+        std::int64_t arrival_ns = 0;
+        std::vector<std::byte> bytes;
+    };
+
     SimBus* bus_;
     SimClock* clock_;
     std::int64_t latency_ns_;
+    std::map<std::uint8_t, std::int64_t> latencies_;
     bool open_ = false;
     bool peer_closed_ = false;
     int refusals_ = 0;
-    int closing_connects_ = 0;
     std::int64_t refuse_ns_ = 0;
+    std::int64_t connect_delay_ns_ = 0;
+    int closing_connects_ = 0;
+    int partial_sends_ = 0;
     int connects_ = 0;
     int abortive_closes_ = 0;
     std::vector<std::int64_t> connect_times_;
-    std::vector<std::byte> pending_;
-    std::int64_t arrival_ns_ = 0;
+    std::vector<Delivery> deliveries_;  // in order of arrival
 };
 
 // What the engine wrote: the last write of each point, and every device

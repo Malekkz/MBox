@@ -29,6 +29,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <vector>
 
 namespace scada::driver {
@@ -177,22 +178,33 @@ public:
     // and the outage is not an achieved period.
     void set_polled(std::uint32_t device, bool polled) noexcept;
 
-    // A demoted `device` is due for a probe at `due_ns` (7.4). A probe is
-    // chosen only when no order is queued or in progress and no polled
-    // device has a retry, a chain or a request of a started cycle left (6.2
-    // step 5, D-138), and when no other probe of the channel is in flight;
-    // `probe_done` ends the flight.
-    void set_probe(std::uint32_t device, std::int64_t due_ns) noexcept;
+    // A probe waits for a poll that falls due within its time-out at most
+    // this many time-outs past its own due time (D-138, Q4).
+    static constexpr std::int64_t PROBE_FLOOR = 10;
+
+    // A demoted `device` is due for a probe at `due_ns` (7.4), which waits
+    // at most `timeout_ns` for its answer. A probe is chosen only when no
+    // order is queued or in progress and no polled device has a retry, a
+    // chain or a request of a started cycle left (6.2 step 5), when no poll
+    // falls due within `timeout_ns` (unless the probe is PROBE_FLOOR
+    // time-outs late), and when no other probe of the channel is in flight;
+    // `probe_done` ends the flight (D-138).
+    void set_probe(std::uint32_t device, std::int64_t due_ns,
+                   std::int64_t timeout_ns) noexcept;
     void clear_probe(std::uint32_t device) noexcept;
     void probe_done() noexcept { probe_in_flight_ = false; }
 
     // Sends the poll request `request` of `device` again as its next
     // request, before its other polls and within the pacing (7.1: a read is
-    // retried within its poll group's turn). Ignored for a side-effect
-    // request (6.6), an unknown one, or a device that is not polled. An
-    // order step that drops the device's chain drops the retry too: the
-    // chain is read again whole. Never allocates.
-    SCADA_RT void retry(std::uint32_t device, std::uint32_t request) noexcept;
+    // retried within its poll group's turn). It takes its turn among the
+    // other devices' polls by its group's priority, due at `now_ns`, the
+    // time of the failure (3.4: one device's failure delays the others by
+    // one request at most). Ignored for a side-effect request (6.6), an
+    // unknown one, or a device that is not polled. An order step that drops
+    // the device's chain drops the retry too: the chain is read again
+    // whole. Never allocates.
+    SCADA_RT void retry(std::uint32_t device, std::uint32_t request,
+                        std::int64_t now_ns) noexcept;
 
     // Orders queued and not yet started.
     [[nodiscard]] std::size_t pending_orders() const noexcept {
@@ -244,6 +256,8 @@ private:
         std::int64_t probe_due_ns = 0;
         bool retry = false;
         std::uint32_t retry_request = 0;
+        std::int64_t retry_due_ns = 0;
+        std::int64_t probe_timeout_ns = 0;
     };
 
     // One physical unit: the devices that share its key (R3).
@@ -317,13 +331,25 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
-    bool choose_retry(std::int64_t now_ns, Choice& out,
-                      std::int64_t& wake) noexcept;
+    // A candidate poll: the next request of a group, or a retry.
+    struct PollPick {
+        std::uint32_t device = 0;
+        std::uint32_t group = 0;
+        bool retry = false;
+    };
+    using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
+    [[nodiscard]] PollKey key_of(const PollPick& pick) const noexcept;
+    void consider(const PollPick& pick, PollPick& best,
+                  bool& found) const noexcept;
+    void consider_groups(std::uint32_t device, std::int64_t now_ns,
+                         std::int64_t& wake, PollPick& best,
+                         bool& found) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
     [[nodiscard]] bool due_work_pending() const noexcept;
+    [[nodiscard]] std::int64_t next_poll_due_ns() const noexcept;
     bool choose_probe(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
     Choice take_retry(std::uint32_t device, std::int64_t now_ns) noexcept;
