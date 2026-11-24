@@ -12,6 +12,7 @@
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expression.h"
 #include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/scalar.h"
@@ -65,6 +66,11 @@ constexpr std::uint16_t CF_RESERVED = 210;
 constexpr std::uint16_t CF_BAD_NAME = 212;
 constexpr std::uint16_t CF_NOT_A_SECRET = 213;
 constexpr std::uint16_t CF_SECRET = 214;
+constexpr std::uint16_t CF_EXPRESSION_SYNTAX = 520;
+
+// The continuation bytes of UTF-8, which do not start a character.
+constexpr unsigned char UTF8_CONTINUATION_MASK = 0xC0;
+constexpr unsigned char UTF8_CONTINUATION = 0x80;
 
 constexpr std::string_view INT64_MIN_TEXT = "-9223372036854775808";
 constexpr std::string_view INT64_MAX_TEXT = "9223372036854775807";
@@ -1918,8 +1924,11 @@ private:
         if (type == "percentage" || type == "number_or_percentage") {
             return type_percentage(rules, scalar, key, out);
         }
-        if (type == "expression" || type == "config_expression") {
-            return ScalarType::EXPRESSION;
+        if (type == "expression") {
+            return type_expression(scalar, ExpressionKind::RUN_TIME, out);
+        }
+        if (type == "config_expression") {
+            return type_expression(scalar, ExpressionKind::CONFIGURATION, out);
         }
         if (const std::optional<ScalarType> special =
                 type_special(rules, scalar, key, out)) {
@@ -1947,7 +1956,7 @@ private:
                                                         Outcome& out) {
         const NodeView value = node(scalar);
         if (value.style != ScalarStyle::PLAIN) {
-            return ScalarType::EXPRESSION;
+            return type_expression(scalar, ExpressionKind::CONFIGURATION, out);
         }
         Number number;
         const NumberRead read =
@@ -1957,7 +1966,7 @@ private:
             return std::nullopt;
         }
         if (read == NumberRead::NONE) {
-            return ScalarType::EXPRESSION;
+            return type_expression(scalar, ExpressionKind::CONFIGURATION, out);
         }
         const bool integer_only = !rules.scalar_kinds.empty() &&
                                   listed_text(rules.scalar_kinds, "integer") &&
@@ -1971,6 +1980,63 @@ private:
             return std::nullopt;
         }
         return type_of(number);
+    }
+
+    // An expression's text, checked for its syntax (5.6, D-109). Its names
+    // and types are checked against the tree in stage 5.
+    std::optional<ScalarType> type_expression(NodeId scalar,
+                                              ExpressionKind kind,
+                                              Outcome& out) {
+        ExpressionError problem;
+        const std::string_view text = document_->text(scalar);
+        if (parse_expression(text, kind, problem)) {
+            return ScalarType::EXPRESSION;
+        }
+        out.error(expression_diagnostic(scalar, text, problem));
+        return std::nullopt;
+    }
+
+    // Where an expression error is (D-109): at the offending character in
+    // the file when the scalar's text is its source on one line; otherwise
+    // at the scalar, with the line and column within the expression's text
+    // in the message. Columns count characters (contract 1.1).
+    [[nodiscard]] Diagnostic expression_diagnostic(
+        NodeId scalar, std::string_view text,
+        const ExpressionError& problem) const {
+        const std::size_t offset =
+            std::min<std::size_t>(problem.column - 1, text.size());
+        std::size_t line = 1;
+        std::size_t column = 1;
+        for (std::size_t i = 0; i < offset; ++i) {
+            const auto byte = static_cast<unsigned char>(text[i]);
+            if (byte == '\n') {
+                ++line;
+                column = 1;
+            } else if ((byte & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION) {
+                ++column;
+            }
+        }
+        Location location = document_->location(scalar);
+        std::string where = " at column " + std::to_string(column);
+        if (document_->verbatim(scalar)) {
+            const bool quoted =
+                document_->style(scalar) == ScalarStyle::SINGLE_QUOTED ||
+                document_->style(scalar) == ScalarStyle::DOUBLE_QUOTED;
+            location.column +=
+                static_cast<std::uint32_t>(column - 1 + (quoted ? 1 : 0));
+        } else {
+            where = " at line " + std::to_string(line) + ", column " +
+                    std::to_string(column) + " of the expression's text";
+        }
+        std::string message = problem.message;
+        if (problem.code == CF_EXPRESSION_SYNTAX) {
+            message = "expression: " + problem.message + where;
+        }
+        return Diagnostic{.severity = Severity::ERROR,
+                          .code = problem.code,
+                          .location = std::move(location),
+                          .message = std::move(message),
+                          .notes = {}};
     }
 
     static bool listed_text(const std::vector<std::string>& list,
@@ -1988,7 +2054,7 @@ private:
                                      ? read_integer(value.text)
                                      : IntegerRead{};
         if (read.form == IntegerForm::NOT_INTEGER) {
-            return ScalarType::EXPRESSION;
+            return type_expression(scalar, ExpressionKind::FOR_VALUE, out);
         }
         if (read.form == IntegerForm::TOO_LARGE || !as_int64(read.value)) {
             error(out, CF_OUT_OF_RANGE, scalar,

@@ -1,0 +1,9 @@
+template: meter
+protocol: modbus
+points:
+  - name: a
+    when: "1..5"
+    address: { table: holding, register: "9223372036854775808 + 1" }
+repeat:
+  - for: { n: "1..2..3" }
+    points: [ { name: "b{n}", address: { table: holding, register: "n" } } ]

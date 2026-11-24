@@ -55,6 +55,13 @@ checked against the framework keys alone. Maps that merging completes (a
 point in `defaults` or `overrides`, an address, every map of a point) are
 not refused at stage 3 for a key they lack; each takes `replace: true`.
 
+Expressions (contract 5.6) are parsed at stage 3 by `parse_expression`
+(`include/scada/conf/expression.h`): run-time expressions (`expr`,
+`suppress_when`, interlock `condition`) and configuration expressions
+(`when`, addresses and scaling, `repeat` ranges), each with its own syntax
+codes (CF-520, CF-526, CF-528, CF-529). Their names and types are checked
+against the expanded tree in stage 5.
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6. The cross-file rules (stage 5) follow in later
@@ -148,6 +155,8 @@ anything, and there are no lazy caches.
   booleans, durations, sizes and percentages (contract 1.2, 2.2).
 - `include/scada/conf/names.h`: the name grammars of section 2.1 and the
   address and time forms the schemas check.
+- `include/scada/conf/expression.h`: the lexer and parser of the expression
+  grammar (contract 5.6), giving a tree or one located error.
 - `include/scada/conf/schema.h`: `SchemaSet`, the compiled schema files and
   the validator of stage 3.
 - `include/scada/conf/types.h`: `ScalarType` and `ScalarTypes`, the types
@@ -188,7 +197,7 @@ gives a report with errors.
 ## How to test it
 
 ```
-ctest --preset dev -R 'scada-conf|path_class_fuzz|yaml_fuzz|schema_fuzz'
+ctest --preset dev -R 'scada-conf|_fuzz-corpus'
 ```
 
 - `tests/`: unit tests. `tree_scan_test.cpp` builds trees in a temporary
@@ -201,7 +210,14 @@ ctest --preset dev -R 'scada-conf|path_class_fuzz|yaml_fuzz|schema_fuzz'
 - `fuzz/`: fuzz targets with their seed corpora (`ctest --preset fuzz` in the
   `fuzz` build): `path_class_fuzz` (stage 1 paths), `yaml_fuzz` (the
   parser; its seeds hold the contract's examples and every refused
-  construct) and `schema_fuzz` (stage 3 over any file that parses).
+  construct), `schema_fuzz` (stage 3 over any file that parses) and
+  `expression_fuzz` (the expression grammar against a second writing of
+  it with its own lexer: both must accept the same texts, refuse with the
+  same code and column, and build the same tree; its seeds are the cases
+  of conformance test 11 and the limits),
+  `scalar_fuzz` (the scalar forms against a second writing of their
+  grammars) and `tree_fuzz` (`validate_tree` over small trees seeded with
+  the corpus).
   `yaml_fuzz` checks that a parse gives a document or exactly one error
   inside the input, that no limit is exceeded, that every node lies inside
   the input, and that a document written back in the subset parses to the

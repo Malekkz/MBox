@@ -1,0 +1,17 @@
+# Each syntax rule of 5.6 at stage 3, at the offending character of the
+# file: abutting tokens, IN at run time, a pattern string outside a call, a
+# lone reserved word, a time unit in capitals, the depth (32 parentheses)
+# and the size (4,097 bytes) of CF-526. In a block scalar the error is at
+# the scalar, with its line and column in the expression's text in the
+# message (D-109). A parameter and a variable named like reserved words are
+# CF-212 at their names. Invented.
+tags/site.yaml:2:44: CF-520
+tags/site.yaml:3:45: CF-520
+tags/site.yaml:4:42: CF-520
+tags/site.yaml:5:43: CF-520
+tags/site.yaml:6:60: CF-520
+tags/site.yaml:7:75: CF-526
+tags/site.yaml:10:12: CF-526
+tags/site.yaml:13:11: CF-520
+templates/sensor_e.yaml:4:3: CF-212
+templates/sensor_e.yaml:9:12: CF-212

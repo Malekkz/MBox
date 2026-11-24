@@ -1,0 +1,7 @@
+tags:
+  - name: site.ok
+    type: virtual
+    expr: sum("ps1.inv*.power") / 2
+  - name: site.chained
+    type: virtual
+    expr: a < b < c
