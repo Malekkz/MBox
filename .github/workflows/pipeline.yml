@@ -18,10 +18,10 @@ permissions:
 # A new push to a pull request replaces the run of the previous push. A run
 # that tests nothing (see `events`) has a group of its own, so that it never
 # cancels a real run. This is the one condition outside `events`: the
-# workflow's concurrency cannot read a job's output, so it states the same
-# test, which must agree with the step `decide`.
+# workflow's concurrency cannot read a job's output, so it writes the same
+# expression as the step `decide`, character for character.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'edited' && !github.event.changes.base) && '-edit' || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'edited' && github.event.changes.base == null) && '-edit' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -31,9 +31,10 @@ jobs:
   # a skipped check never takes the place of a real check of the same commit
   # (GitHub reads the latest check of a name, and a skipped required check
   # counts as passed): GitHub does not evaluate the name of a job its `if`
-  # skips, so the check shows the name's template, never a real name.
-  # `prefix` marks a job that runs anyway in such a run (`check`, if
-  # `events` failed).
+  # skips, so the check shows the name's template, never a real name
+  # (observed, not documented: D-112). `prefix` is the fallback should GitHub
+  # ever evaluate such a name with the `needs` context: the names would then
+  # read `(not run) check` and so on, still never a real name.
   events:
     name: events
     runs-on: ubuntu-24.04
@@ -45,10 +46,9 @@ jobs:
       - name: Decide whether this run tests anything
         id: decide
         env:
-          ACTION: ${{ github.event.action }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
+          TEXT_ONLY: ${{ github.event.action == 'edited' && github.event.changes.base == null }}
         run: |
-          if [ "${ACTION}" = edited ] && [ "${BASE_CHANGED}" != true ]; then
+          if [ "${TEXT_ONLY}" = true ]; then
             echo "run=false" >> "${GITHUB_OUTPUT}"
             echo "prefix=(not run) " >> "${GITHUB_OUTPUT}"
             echo "An edit of the title or the description: no job runs."

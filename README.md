@@ -157,6 +157,11 @@ else:
 | `fuzz` | Every fuzz target for 60 s | x86-64 |
 | `model check` | herd7 builds; `ctest --preset model` (conformance test 4) | x86-64 |
 
+A first job, `events`, decides whether the run tests anything; every other
+job needs it. `events` must not be a required check, because it succeeds in
+a run that tests nothing. The checks meant to be required are the seven of
+the table.
+
 The `check` target runs in five further jobs, which `check` sums up
 (decision D-68). `check (format, banned, rt)` runs the formatter, the
 banned-function and the `SCADA_RT` checks on every file, once, and the
