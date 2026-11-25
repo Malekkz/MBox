@@ -23,9 +23,10 @@ The library is built in slices. These are the first two:
 | Device states, demotion, probes' back-off, the run of time-outs | `scada/driver/failure.h` | 3.5, 7.3, 7.4 |
 | What the engine needs of a connection and of time | `scada/driver/transport.h` | 7.1 to 7.3 |
 | The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
+| The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
 
-Not yet here: the real TCP and serial transports (slice 4), the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-140 record the choices
+Not yet here: the driver process with its threads, commands, the generation
+change and reload. `docs/decisions.md` D-130 to D-141 record the choices
 the contracts left open.
 
 ## What it does
@@ -153,9 +154,10 @@ carry them there. They are read when a configuration is compiled.
 ## Testing
 
 ```
-cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test
+cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test \
+  scada-driver-transport-test scada-driver-test-sim
 ctest --preset unit -R 'scada-driver|sample_processing|tzif'
-ctest --preset integration -R scada-driver-zones
+ctest --preset integration -R 'scada-driver-(zones|transport)'
 ```
 
 - The golden vectors are in `tests/golden/driver-vectors.txt`, a data file
@@ -194,3 +196,15 @@ ctest --preset integration -R scada-driver-zones
   be silent, busy, unreachable behind its gateway or answer garbage;
   connects can be refused and the peer can close. `failure_test.cpp` and
   `timing_test.cpp` check the accounting and the deadlines alone.
+- `scada-driver-transport-test` (integration) runs the real transports
+  across the boundary. A channel engine reads a device through
+  `scada-driver-test-sim`, the test protocol's simulator in its own process
+  (`tests/test_sim_main.cpp`; contract 14), over a TCP socket on 127.0.0.1
+  and over a pseudo-terminal pair; the simulator reports every request and
+  answer with its monotonic time, so the test checks the silence before
+  each serial request. The rest runs against peers the test holds: a
+  refused and a closed connection, a partial send, the abortive close, the
+  socket options, a port opened twice, a rate and a parity the port does
+  not take, paths that are not ports. A pseudo-terminal has no bit rate or
+  parity (7.2): line timing is tested on the target board (#41). Every wait
+  is on a condition with a time-out; nothing sleeps.

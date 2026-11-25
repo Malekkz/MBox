@@ -2,8 +2,8 @@
 #define SCADA_DRIVER_TRANSPORT_H
 
 // What the channel engine needs of a connection and of time (driver
-// interface contract 7.1 to 7.3). The real TCP and serial transports come
-// with slice 4 and keep the rules stated here; the conformance tests drive a
+// interface contract 7.1 to 7.3). The real TCP and serial transports
+// (connections.h) keep the rules stated here; the conformance tests drive a
 // simulated one on an injected clock, so every deadline is exact and
 // nothing sleeps.
 

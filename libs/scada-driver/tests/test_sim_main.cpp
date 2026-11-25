@@ -1,0 +1,293 @@
+// The test protocol's simulator as a process of its own, for the
+// integration tests of the real transports (driver interface contract 14:
+// "a separate process that serves simulated devices over the real
+// transport (a TCP port, a pseudo-terminal pair)"). It answers with the
+// in-process SimBus (loopback.h) and reports, on standard output, its
+// endpoint and every request and answer with its CLOCK_MONOTONIC time
+// (item 11), which the test reads; the clock is the same for both
+// processes. The Modbus simulators of #105 and #106 add the control socket
+// and the faults of items 2 to 10; this one has the few the transport
+// tests need, set on the command line:
+//
+//   scada-driver-test-sim (--tcp | --pty)
+//       [--map UNIT SPACE FIRST LAST] [--set UNIT SPACE ADDRESS VALUE]
+//       [--silent UNIT] [--close-after ANSWERS]
+//
+// Output lines: `tcp PORT` or `pty PATH` once ready; `request TIME UNIT
+// FIRST` when a request's last byte was read; `answer TIME` just before its
+// answer was written; `closed` when it closed a connection after
+// `--close-after` answers (it then accepts the next one).
+
+#include "loopback.h"
+#include "scada/common/clock.h"
+#include "test_protocol.h"
+
+#include <array>
+#include <cerrno>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+namespace {
+
+using scada::driver::test::REQUEST_BYTES;
+using scada::driver::test::SimBus;
+
+constexpr int EXIT_USAGE = 2;
+constexpr std::size_t READ_CHUNK = 512;
+constexpr std::size_t PATH_CAPACITY = 128;
+
+// Writes one line to standard output at once, so that the test sees it
+// when it is written.
+void say(std::string_view line) {
+    std::string text(line);
+    text.push_back('\n');
+    std::span<const char> rest(text);
+    while (!rest.empty()) {
+        const ssize_t wrote = ::write(STDOUT_FILENO, rest.data(), rest.size());
+        if (wrote < 0 && errno == EINTR) {
+            continue;
+        }
+        if (wrote <= 0) {
+            std::_Exit(1);  // the test has gone
+        }
+        rest = rest.subspan(static_cast<std::size_t>(wrote));
+    }
+}
+
+template <class T>
+std::optional<T> number(std::string_view text) {
+    T value{};
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+struct Options {
+    bool tcp = false;
+    bool pty = false;
+    std::optional<std::size_t> close_after;
+};
+
+// The `count` numbers after `args[index]`; empty when they are not there.
+std::vector<std::uint32_t> numbers_after(std::span<char*> args,
+                                         std::size_t index, std::size_t count) {
+    std::vector<std::uint32_t> values;
+    if (args.size() - index <= count) {
+        return values;
+    }
+    for (char* const arg : args.subspan(index + 1, count)) {
+        const auto value = number<std::uint32_t>(arg);
+        if (!value) {
+            return {};
+        }
+        values.push_back(*value);
+    }
+    return values;
+}
+
+// Applies the option at `args[index]` that takes numbers, and moves `index`
+// past them; false on a malformed one.
+bool apply(std::span<char*> args, std::size_t& index, SimBus& bus,
+           Options& options) {
+    const std::string_view arg = args[index];
+    const std::size_t count = arg == "--map" || arg == "--set" ? 4 : 1;
+    const std::vector<std::uint32_t> values = numbers_after(args, index, count);
+    if (values.empty()) {
+        return false;
+    }
+    index += count;
+    const auto unit = static_cast<std::uint8_t>(values[0]);
+    if (arg == "--map") {
+        bus.map(unit, static_cast<std::uint8_t>(values[1]), values[2],
+                values[3]);
+    } else if (arg == "--set") {
+        bus.set(unit, static_cast<std::uint8_t>(values[1]), values[2],
+                static_cast<std::uint16_t>(values[3]));
+    } else if (arg == "--silent") {
+        bus.fault(unit, SimBus::Fault::SILENT);
+    } else if (arg == "--close-after") {
+        options.close_after = values[0];
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Reads the options into `bus`; false on a malformed command line.
+bool parse(std::span<char*> args, SimBus& bus, Options& options) {
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        const std::string_view arg = args[index];
+        if (arg == "--tcp") {
+            options.tcp = true;
+        } else if (arg == "--pty") {
+            options.pty = true;
+        } else if (!apply(args, index, bus, options)) {
+            return false;
+        }
+    }
+    return options.tcp != options.pty;
+}
+
+bool write_all(int descriptor, std::span<const std::byte> bytes) {
+    std::span<const std::byte> rest = bytes;
+    while (!rest.empty()) {
+        const ssize_t wrote = ::write(descriptor, rest.data(), rest.size());
+        if (wrote < 0 && (errno == EINTR || errno == EAGAIN)) {
+            pollfd entry{.fd = descriptor, .events = POLLOUT, .revents = 0};
+            (void)::poll(&entry, 1, -1);
+            continue;
+        }
+        if (wrote <= 0) {
+            return false;
+        }
+        rest = rest.subspan(static_cast<std::size_t>(wrote));
+    }
+    return true;
+}
+
+// Takes the whole requests out of `pending` and answers each on `fd`.
+// Returns the answers written.
+std::size_t serve(std::vector<std::byte>& pending, SimBus& bus,
+                  int descriptor) {
+    std::size_t answered = 0;
+    while (pending.size() >= REQUEST_BYTES) {
+        const std::span<const std::byte> request =
+            std::span(pending).first(REQUEST_BYTES);
+        const std::int64_t now = scada::monotonic_ns();
+        const auto unit = std::to_integer<unsigned>(request[2]);
+        const auto first = (std::to_integer<std::uint32_t>(request[5]) << 24U) |
+                           (std::to_integer<std::uint32_t>(request[6]) << 16U) |
+                           (std::to_integer<std::uint32_t>(request[7]) << 8U) |
+                           std::to_integer<std::uint32_t>(request[8]);
+        say("request " + std::to_string(now) + " " + std::to_string(unit) +
+            " " + std::to_string(first));
+        const std::vector<std::byte> answer = bus.answer(request, now);
+        pending.erase(
+            pending.begin(),
+            pending.begin() + static_cast<std::ptrdiff_t>(REQUEST_BYTES));
+        if (answer.empty()) {
+            continue;  // a silent unit
+        }
+        // Stamped before the write: the driver cannot have read a byte of
+        // the answer before this time.
+        const std::int64_t written = scada::monotonic_ns();
+        if (!write_all(descriptor, answer)) {
+            return answered;
+        }
+        say("answer " + std::to_string(written));
+        ++answered;
+    }
+    return answered;
+}
+
+// Reads what `descriptor` has; false at an end of file or an error.
+bool take_input(int descriptor, std::vector<std::byte>& pending) {
+    std::array<std::byte, READ_CHUNK> chunk{};
+    const ssize_t got = ::read(descriptor, chunk.data(), chunk.size());
+    if (got < 0 && (errno == EINTR || errno == EAGAIN)) {
+        return true;
+    }
+    if (got <= 0) {
+        return false;
+    }
+    pending.insert(pending.end(), chunk.begin(),
+                   chunk.begin() + static_cast<std::ptrdiff_t>(got));
+    return true;
+}
+
+int run_tcp(SimBus& bus, const Options& options) {
+    const int listener = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listener < 0) {
+        return 1;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    (void)::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    address.sin_port = 0;
+    socklen_t length = sizeof(address);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    auto* generic = reinterpret_cast<sockaddr*>(&address);
+    if (::bind(listener, generic, sizeof(address)) != 0 ||
+        ::listen(listener, 1) != 0 ||
+        ::getsockname(listener, generic, &length) != 0) {
+        return 1;
+    }
+    say("tcp " + std::to_string(ntohs(address.sin_port)));
+    for (;;) {
+        const int client = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        if (client < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return 1;
+        }
+        std::vector<std::byte> pending;
+        std::size_t answered = 0;
+        while (take_input(client, pending)) {
+            answered += serve(pending, bus, client);
+            if (options.close_after && answered >= *options.close_after) {
+                break;
+            }
+        }
+        ::close(client);
+        if (options.close_after) {
+            say("closed");
+        }
+    }
+}
+
+int run_pty(SimBus& bus) {
+    const int master = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    std::array<char, PATH_CAPACITY> path{};
+    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0 ||
+        ::ptsname_r(master, path.data(), path.size()) != 0) {
+        return 1;
+    }
+    // The simulator holds the other end open too, so that the master does
+    // not see a hang-up before the transport opens it, or between two of
+    // its connects.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+    const int held = ::open(path.data(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (held < 0) {
+        return 1;
+    }
+    say(std::string("pty ") + path.data());
+    std::vector<std::byte> pending;
+    while (take_input(master, pending)) {
+        (void)serve(pending, bus, master);
+    }
+    return 1;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    SimBus bus;
+    Options options;
+    const std::span<char*> args(argv, static_cast<std::size_t>(argc));
+    if (args.size() < 2 || !parse(args.subspan(1), bus, options)) {
+        say("usage: scada-driver-test-sim (--tcp | --pty) [--map U S F L] "
+            "[--set U S A V] [--silent U] [--close-after N]");
+        return EXIT_USAGE;
+    }
+    return options.tcp ? run_tcp(bus, options) : run_pty(bus);
+}
