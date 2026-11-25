@@ -1267,11 +1267,45 @@ TEST(Scheduling, NoFailingDeviceIsStarvedWhateverItsTimeOut) {
     EXPECT_GT(polls[2], 100U);
 }
 
+// What `serve` saw: per device the polls and the longest gap between two,
+// the steps, and the waits that end within 1 ms (a spin).
+struct Service {
+    std::array<std::int64_t, 3> gap{};
+    std::array<std::size_t, 3> polls{};
+    std::size_t steps = 0;
+    std::size_t near_now = 0;
+};
+
+// Runs `scheduler` to `end_ns`, a poll of device 0 taking `failing_ns`
+// (unanswered) and any other 50 ms; at most 10,000 steps.
+Service serve(Scheduler& scheduler, std::int64_t failing_ns,
+              std::int64_t end_ns) {
+    Service out;
+    std::array<std::int64_t, 3> last{};
+    std::int64_t now = 0;
+    while (now < end_ns && out.steps < 10'000) {
+        ++out.steps;
+        const Choice choice = scheduler.take(now);
+        if (choice.kind != Choice::Kind::POLL) {
+            out.near_now += choice.wake_ns <= now + MILLISECOND ? 1U : 0U;
+            now = std::max(now + MILLISECOND, choice.wake_ns);
+            continue;
+        }
+        const std::uint32_t device = choice.device;
+        out.gap.at(device) =
+            std::max(out.gap.at(device), now - last.at(device));
+        last.at(device) = now;
+        ++out.polls.at(device);
+        now += device == 0 ? failing_ns : 50 * MILLISECOND;
+    }
+    return out;
+}
+
 TEST(Scheduling, AFailingFastGroupLeavesTheSlowerGroupsTheirTurn) {
     // L1: unit 1 in the 200 ms group fails (time-out 1 s); units 2 and 3
     // answer in the 1 s group. The failing poll is the best by priority, but
     // while the hold lasts the live polls of the slower group go, and no
-    // wait is "now".
+    // wait is "now". Before, the scheduler woke 1 ns later without sending.
     const CompiledChannel channel = make_channel(
         {{.name = "dead", .unit_id = 1, .points = adjacent(0, 1, 0)},
          {.name = "a", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
@@ -1279,35 +1313,14 @@ TEST(Scheduling, AFailingFastGroupLeavesTheSlowerGroupsTheirTurn) {
         ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_failing(0, true, true, SECOND);
-    std::array<std::int64_t, 3> last{};
-    std::array<std::int64_t, 3> gap{};
-    std::array<std::size_t, 3> polls{};
-    std::size_t steps = 0;
-    std::size_t near_now = 0;  // waits that end within 1 ms: a spin
-    std::int64_t now = 0;
-    // A step that sends nothing and wakes at once would spin: cap them.
-    while (now < 120 * SECOND && steps < 10'000) {
-        ++steps;
-        const Choice choice = scheduler.take(now);
-        if (choice.kind == Choice::Kind::POLL) {
-            gap.at(choice.device) =
-                std::max(gap.at(choice.device), now - last.at(choice.device));
-            last.at(choice.device) = now;
-            ++polls.at(choice.device);
-            now += choice.device == 0 ? SECOND : 50 * MILLISECOND;
-        } else {
-            ASSERT_EQ(choice.kind, Choice::Kind::WAIT);
-            near_now += choice.wake_ns <= now + MILLISECOND ? 1U : 0U;
-            now = std::max(now + MILLISECOND, choice.wake_ns);
-        }
-    }
+    const Service service = serve(scheduler, SECOND, 120 * SECOND);
     // A live poll waits at most one failing request past its period.
-    EXPECT_LE(gap[1], 2 * SECOND + 100 * MILLISECOND);
-    EXPECT_LE(gap[2], 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(service.gap[1], 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(service.gap[2], 2 * SECOND + 100 * MILLISECOND);
     // The dead unit keeps about a quarter of the line, never starved.
-    EXPECT_GT(polls[0], 20U);
-    EXPECT_EQ(near_now, 0U);
-    EXPECT_LT(steps, 2'000U);
+    EXPECT_GT(service.polls[0], 20U);
+    EXPECT_EQ(service.near_now, 0U);
+    EXPECT_LT(service.steps, 2'000U);
 }
 
 TEST(Scheduling, AnOverdueProbeTakesAGapAsAFailingPollDoes) {

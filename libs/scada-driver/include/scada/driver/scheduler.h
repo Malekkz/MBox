@@ -408,9 +408,9 @@ private:
     // The best live and the best failing pick of one `take` (L1).
     struct Candidates {
         PollPick live;
-        PollKey live_key{};
+        PollKey live_key;
         PollPick failing;
-        FailKey failing_key{};
+        FailKey failing_key;
         bool has_live = false;
         bool has_failing = false;
     };

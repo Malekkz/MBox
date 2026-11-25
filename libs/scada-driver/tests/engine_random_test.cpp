@@ -364,6 +364,42 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
     return out;
 }
 
+// Notes the first request for each register of a unit since its mode
+// changed, from the bus's log from `seen` on, and checks invariant 6 on the
+// requests for a value; `last_value` is per unit the last such request.
+void scan(const Harness& run, std::vector<UnitState>& units,
+          std::vector<std::int64_t>& last_value, std::size_t& seen,
+          std::vector<std::string>& violations) {
+    const std::vector<LoggedRequest>& log = run.bus.log();
+    for (; seen < log.size(); ++seen) {
+        const LoggedRequest& request = log[seen];
+        UnitState& state = units[request.unit_id];
+        std::int64_t* first = &state.first_value_ns;
+        if (request.first == COMPANION_REGISTER) {
+            first = &state.first_companion_ns;
+        } else if (request.first == BLOCK_REGISTER) {
+            first = &state.first_block_ns;
+        }
+        if (*first < 0 && request.time_ns >= state.since_ns) {
+            *first = request.time_ns;
+        }
+        if (request.first != VALUE_REGISTER) {
+            continue;
+        }
+        std::int64_t& last = last_value[request.unit_id];
+        if (state.mode == Mode::ANSWERS &&
+            last >= state.since_ns + recover_bound(run, request.unit_id) &&
+            request.time_ns - last > live_gap_bound(run, request.unit_id)) {
+            violations.push_back("unit " + std::to_string(request.unit_id) +
+                                 " answering and its value not asked from " +
+                                 std::to_string(last / MILLISECOND) + " to " +
+                                 std::to_string(request.time_ns / MILLISECOND) +
+                                 " ms");
+        }
+        last = request.time_ns;
+    }
+}
+
 // One seed: the engine's steps run, and every violation.
 std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     constexpr std::int64_t END = 120 * SECOND;
@@ -398,34 +434,7 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
                                  " ms: " + std::to_string(taken) + " steps");
             break;
         }
-        const std::vector<LoggedRequest>& log = run.bus.log();
-        for (; seen < log.size(); ++seen) {
-            const LoggedRequest& request = log[seen];
-            UnitState& state = units[request.unit_id];
-            std::int64_t* first = &state.first_value_ns;
-            if (request.first == COMPANION_REGISTER) {
-                first = &state.first_companion_ns;
-            } else if (request.first == BLOCK_REGISTER) {
-                first = &state.first_block_ns;
-            }
-            if (*first < 0 && request.time_ns >= state.since_ns) {
-                *first = request.time_ns;
-            }
-            if (request.first != VALUE_REGISTER) {
-                continue;
-            }
-            std::int64_t& last = last_value[request.unit_id];
-            if (state.mode == Mode::ANSWERS &&
-                last >= state.since_ns + recover_bound(run, request.unit_id) &&
-                request.time_ns - last > live_gap_bound(run, request.unit_id)) {
-                violations.push_back(
-                    "unit " + std::to_string(request.unit_id) +
-                    " answering and its value not asked from " +
-                    std::to_string(last / MILLISECOND) + " to " +
-                    std::to_string(request.time_ns / MILLISECOND) + " ms");
-            }
-            last = request.time_ns;
-        }
+        scan(run, units, last_value, seen, violations);
         for (std::string& violation : check(run, units, now)) {
             violations.push_back(std::move(violation));
         }
