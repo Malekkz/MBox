@@ -1,6 +1,8 @@
 // How dead devices share a line with live ones, with the default failure
 // keys (CS 4.6: time-out 1 s, retries 2, demote_after 3, back-off 10 s to
-// 300 s): the figures of decision D-138 and the review of PR 137 (G5, G7).
+// 300 s): the figures of decision D-138, in the contract's order of service
+// (DI 6.2), and the known limits it leaves (serving answering devices first
+// is #147).
 // Driven on the simulated transport and an injected clock, so nothing
 // sleeps; each case simulates up to 40 minutes. Only `ctest --preset perf`
 // runs it.
@@ -240,53 +242,51 @@ void print(const char* name, const Figures& figures) {
 }
 
 TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
-    // The case of the delta check: 250 units at 38,400 bit/s, every fifth
-    // dead; unit 5 returns at 30 min. Live polls go first within their
-    // priority (G5), so the live keep about their period while the dead are
-    // still being counted, and the dead take the time the live leave.
+    // 250 units at 38,400 bit/s, every fifth dead; unit 5 returns at 30 min.
+    // In the contract's order the dead take their turns like any due
+    // request until they are demoted: a known limit (D-138, #147). Measured:
+    // COMM_FAIL by 54 s (J2), all DEMOTED at 464 s, a worst live gap of
+    // 102.8 s, the returned unit RUNNING 267 s after its return.
     const Figures figures = measure(250, 38'400);
     print("250 units, 50 dead", figures);
-    // The last dead unit's first attempt comes after the 49 others', each a
-    // 1 s time-out; it is COMM_FAIL 3 s after it (J2).
     EXPECT_GT(figures.bad_ns, 0);
-    EXPECT_LE(figures.bad_ns, 90 * SECOND);
-    // The dead take only gaps longer than their time-out, or one turn in 4
-    // time-outs (K3): demotion is slow, their values are bad long before.
+    EXPECT_LE(figures.bad_ns, 60 * SECOND);
     EXPECT_GT(figures.all_demoted_ns, 0);
-    EXPECT_LE(figures.all_demoted_ns, 30 * MINUTE);
-    EXPECT_LE(figures.start_gap_ns, 2 * SECOND);
-    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.all_demoted_ns, 10 * MINUTE);
+    EXPECT_LE(figures.start_gap_ns, 110 * SECOND);
+    EXPECT_LE(figures.live_gap_ns, 110 * SECOND);
     EXPECT_GE(figures.back_running_ns, 0);
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
 
 TEST(LinePerf, FiftyOfTwoHundredFiftyUnitsDieTogether) {
     // J2, J4: the same line, all 250 answering until 2 min; then every
-    // fifth dies. Their first attempts go in their normal turn, each a
-    // 1 s time-out; each dead unit is COMM_FAIL one period after its own
-    // first time-out (J2), and the live wait while the first attempts run.
+    // fifth dies. Each dead unit is COMM_FAIL one period after its own first
+    // time-out (J2); the dead hold the line until they are demoted, the
+    // known limit (measured: COMM_FAIL by 54 s after the death, all DEMOTED
+    // at 584 s, a worst live gap of 102.8 s after the death, 1.0 s before).
     const Figures figures = measure(250, 38'400, 2 * MINUTE);
     print("250 units, 50 die together at 2 min", figures);
     EXPECT_GT(figures.bad_ns, 0);
     EXPECT_LE(figures.bad_ns, 60 * SECOND);
-    // J4: the 50 first attempts, 1 s each, hold the live once (51.7 s).
-    EXPECT_LE(figures.death_gap_ns, 55 * SECOND);
-    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.start_gap_ns, 1 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.death_gap_ns, 110 * SECOND);
+    EXPECT_LE(figures.live_gap_ns, 110 * SECOND);
 }
 
 TEST(LinePerf, FiftyDeadOfAFasterGroupAmongTwoHundredFiftyUnits) {
-    // L1: the first case with the dead units in the 200 ms group, of a
-    // higher priority than the live ones' 1 s group. The failing polls wait
-    // behind the live ones whatever their priority, and the live keep about
-    // their period (before L1 they waited until the dead were DEMOTED).
+    // The first case with the dead units in the 200 ms group, of a higher
+    // priority than the live ones' 1 s group: by priority the dead go first
+    // until they are demoted (measured: COMM_FAIL by 54 s, all DEMOTED at
+    // 460 s, a worst live gap of 52.1 s, the returned unit RUNNING 260 s
+    // after its return).
     const Figures figures = measure(250, 38'400, 0, FAST);
     print("250 units, 50 dead in the 200 ms group", figures);
     EXPECT_GT(figures.bad_ns, 0);
-    EXPECT_LE(figures.bad_ns, 90 * SECOND);
+    EXPECT_LE(figures.bad_ns, 60 * SECOND);
     EXPECT_GT(figures.all_demoted_ns, 0);
-    EXPECT_LE(figures.all_demoted_ns, 30 * MINUTE);
-    EXPECT_LE(figures.start_gap_ns, 2 * SECOND + 100 * MILLISECOND);
-    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.all_demoted_ns, 10 * MINUTE);
+    EXPECT_LE(figures.live_gap_ns, 60 * SECOND);
     EXPECT_GE(figures.back_running_ns, 0);
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
@@ -296,9 +296,12 @@ TEST(LinePerf, FiveDeadAmongTwentyFiveUnits) {
     // unit 5 returns at 30 min. Probes go in the windows before the next
     // due poll, their time-out ended there (G7); a windowed probe that gets
     // no answer is no failure, so each back-off ends with a floor probe of
-    // the whole 1 s, which holds one poll at most (J1).
+    // the whole 1 s, which holds one poll at most (J1). Until the dead are
+    // demoted they take their turns like any due request (measured: a live
+    // gap of 10.3 s at the start, 1.76 s after).
     const Figures figures = measure(25, 19'200);
     print("25 units, 5 dead", figures);
+    EXPECT_LE(figures.start_gap_ns, 12 * SECOND);
     EXPECT_GT(figures.all_demoted_ns, 0);
     EXPECT_LE(figures.all_demoted_ns, 4 * MINUTE);
     EXPECT_LE(figures.bad_ns, 10 * SECOND);
