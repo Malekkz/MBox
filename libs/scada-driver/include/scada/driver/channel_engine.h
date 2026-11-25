@@ -214,8 +214,8 @@ private:
     SCADA_RT void fail_request(const Choice& choice) noexcept;
     // Returns when a point next goes STALE, or NEVER.
     SCADA_RT std::int64_t check_staleness(std::int64_t now_ns) noexcept;
-    // Writes COMM_FAIL to the points of a request whose retries are still
-    // held back when its verdict falls due (J2); returns the next such
+    // Writes COMM_FAIL to the points of a request whose retries still wait
+    // for their turn when its verdict falls due (J2); returns the next such
     // time, or NEVER.
     SCADA_RT std::int64_t check_verdicts(std::int64_t now_ns) noexcept;
     SCADA_RT Scan scan(const Request& request, const Attempt& sent,

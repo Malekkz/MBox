@@ -704,8 +704,8 @@ TEST(ChannelEngine, APartialSendOnASerialLineIsATimeOut) {
 
 TEST(ChannelEngine, ARetryWaitsForTheOtherDevicesDueAtTheSameTime) {
     // Dead unit 1 (retries 2) and live unit 2 in one group: unit 2 is read
-    // between unit 1's first attempt and its retry, which waits for a gap
-    // longer than its time-out (K3).
+    // between unit 1's first attempt and its retry, which is due when the
+    // failure is seen, after unit 2's poll (Q1).
     Rig rig(channel_of(2, quick_failure(2, 5), TransportKind::TCP), 2);
     rig.bus.fault(1, Fault::SILENT);
     rig.run_until(2 * FAST_PERIOD);
@@ -1700,7 +1700,7 @@ std::vector<std::int64_t> first_comm_fail(Rig& rig, std::uint32_t first,
 TEST(ChannelEngine, DeadUnitsGoBadWithinTheirVerdictTimeOnABusyLine) {
     // J2: 10 live units that take 25 ms each fill a 200 ms group; 5 others,
     // RUNNING, die together at 1 s (time-out 100 ms, retries 2). Their
-    // retries are held back behind the live polls (G5), but each dead
+    // retries wait behind the live polls due before them, but each dead
     // unit's point is COMM_FAIL at the latest one period (200 ms, here also
     // the retries' 2 x 100 ms) after its first time-out. Without the rule
     // they are still GOOD at 6 s.

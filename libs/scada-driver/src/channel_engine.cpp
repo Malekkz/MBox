@@ -507,8 +507,8 @@ std::int64_t ChannelEngine::check_verdicts(std::int64_t now_ns) noexcept {
             next = std::min(next, run.verdict_ns);
             continue;
         }
-        // Retries still held back: the points go bad now, and the retries
-        // go on as attempts to recover (J2). Demotion still counts the
+        // Retries still waiting for their turn: the points go bad now, and the
+        // retries go on as attempts to recover (J2). Demotion still counts the
         // request once, when its attempts end.
         run.verdict_pending = false;
         fail_points_of(
@@ -840,8 +840,9 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
         if (run.attempts == 0 && choice.kind == Choice::Kind::POLL) {
-            // The verdict does not wait for held-back retries (G5): one
-            // period of the group, or the retries' time-outs if longer.
+            // The verdict does not wait for retries that wait for their
+            // turn: one period of the group, or the retries' time-outs if
+            // longer (J2).
             const std::int64_t period =
                 channel_->poll_groups[request.poll_group].period_ns;
             run.verdict_pending = true;
