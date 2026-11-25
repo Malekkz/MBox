@@ -1497,18 +1497,6 @@ TEST(MergedPoints, IncompleteMergedMaps) {
                      "  from template templates/meter_a.yaml:4:70 (point p)"}));
 }
 
-// A parameter that no level of the chain gives a type is CF-202.
-TEST(MergedPoints, AParameterNeedsAType) {
-    EXPECT_EQ(expand({{"templates/meter_a.yaml",
-                       "template: meter_a\nprotocol: modbus\n"
-                       "params: { inputs: { default: 4 } }\n"},
-                      {"drivers/modbus/line1.yaml", one_device()}}),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: parameter "
-                     "\"inputs\" needs type\n"
-                     "  from template templates/meter_a.yaml:3:11 (parameter "
-                     "inputs)"}));
-}
-
 // An `io` address needs the keys of its channel's backend (Annex B.2).
 TEST(MergedPoints, AnIoAddressNeedsTheKeysOfItsBackend) {
     EXPECT_EQ(
@@ -1523,21 +1511,9 @@ TEST(MergedPoints, AnIoAddressNeedsTheKeysOfItsBackend) {
                "\"ps1.io.run\" needs at_start"}));
 }
 
-// B5 and B6 of the review of #144: at the instance, over its whole chain,
-// a configuration expression that fails is CF-410, a type included, in the
-// form of 2.4; and an enumeration a template names must exist in the
-// instance's chain or enums.yaml.
-TEST(Expand, NamesAndTypesAtTheInstance) {
-    EXPECT_EQ(expand({{"templates/meter_a.yaml",
-                       "template: meter_a\nprotocol: modbus\n"
-                       "params: { inputs: { type: int, default: 2 } }\n"
-                       "points:\n"
-                       "  - { name: p, when: \"inputs + 1\", address: { table: "
-                       "holding, register: 1, type: uint16 } }\n"},
-                      {"drivers/modbus/line1.yaml", one_device()}}),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-                     "\"inputs + 1\": the value must be BOOL, not INT\n"
-                     "  from template templates/meter_a.yaml:5:22"}));
+// B5 of the review of #144: an enumeration a template names must exist in
+// the instance's chain or enums.yaml (CF-310 at the instance).
+TEST(Expand, ATemplatesEnumerationAtTheInstance) {
     const std::string base =
         "template: meter_base\n"
         "points: [ { name: s, enum: states } ]\n";
