@@ -244,6 +244,49 @@ Member* member_of_key(Value& map, const Member& member) {
     return nullptr;
 }
 
+// The text by which a key is one key (`same_key`): an integer key by its
+// value, any other by its text.
+std::string key_identity(const Member& member) {
+    if (integer_key(member)) {
+        if (const std::optional<Integer> value = parse_integer(member.key)) {
+            return std::string(value->negative && value->magnitude != 0 ? "-"
+                                                                        : "") +
+                   std::to_string(value->magnitude);
+        }
+    }
+    return "'" + member.key;
+}
+
+void merge(Value& into, const Value& over, std::string_view parent);
+
+// `merge` of two maps without exclusive groups, by an index of the keys of
+// `into`: a map of n keys over one of n keys is O(n log n), not O(n^2) (T1
+// of the review of #146).
+// NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
+void merge_by_index(Value& into, const Value& over) {
+    std::map<std::string, std::size_t> index;
+    for (std::size_t i = 0; i < into.members.size(); ++i) {
+        index.emplace(key_identity(into.members[i]), i);
+    }
+    for (const Member& member : over.members) {
+        if (member.key == "replace") {
+            continue;
+        }
+        const auto found = index.find(key_identity(member));
+        if (found == index.end()) {
+            index.emplace(key_identity(member), into.members.size());
+            into.members.push_back(member);
+            continue;
+        }
+        Member& existing = into.members[found->second];
+        // The child's spelling of an integer key is kept with its value.
+        existing.key = member.key;
+        existing.key_file = member.key_file;
+        existing.key_node = member.key_node;
+        merge(existing.value.front(), member.value.front(), member.key);
+    }
+}
+
 // Merges `over` into `into` (4.5, "How two values merge"): maps key by key,
 // the keys of `over` winning; a map with `replace: true`, and any other
 // value, replaces what was there whole. `parent` is the key of the maps.
@@ -252,6 +295,10 @@ void merge(Value& into, const Value& over, std::string_view parent) {
     if (into.kind != NodeKind::MAP || over.kind != NodeKind::MAP ||
         is_replacing(over)) {
         into = over;
+        return;
+    }
+    if (exclusive_groups(parent).empty()) {
+        merge_by_index(into, over);
         return;
     }
     for (const Member& member : over.members) {
@@ -556,6 +603,17 @@ private:
         return device;
     }
 
+    // The root of a template, copied once for the run, not twice per
+    // instance (T2 of the review of #146); levels only read it.
+    const Value& root_of(const CheckedFile& file) {
+        auto found = roots_.find(&file);
+        if (found == roots_.end()) {
+            found = roots_.emplace(&file, copy_of(file, file.document->root()))
+                        .first;
+        }
+        return found->second;
+    }
+
     // --- The templates alone ----------------------------------------------
 
     // What a template gets wrong whatever its instance: its chain (CF-401,
@@ -570,7 +628,7 @@ private:
         if (document.kind(document.root()) != NodeKind::MAP) {
             return;
         }
-        const Value root = copy_of(file, document.root());
+        const Value& root = root_of(file);
         const std::string& name = file.source->path_class.stem;
         Value reference;
         reference.kind = NodeKind::SCALAR;
@@ -797,7 +855,7 @@ private:
             return false;
         }
         for (const CheckedFile* level : chain) {
-            const Value root = copy_of(*level, level->document->root());
+            const Value& root = root_of(*level);
             merge_level_keys(root, device_keys, defaults);
             expand_level(*level, root, points);
         }
@@ -810,7 +868,7 @@ private:
     void collect_parameters(const std::vector<const CheckedFile*>& chain) {
         declarations_.clear();
         for (const CheckedFile* level : chain) {
-            const Value root = copy_of(*level, level->document->root());
+            const Value& root = root_of(*level);
             const Value* params = root.find("params");
             if (params == nullptr) {
                 continue;
@@ -878,8 +936,11 @@ private:
 
     bool bind_parameters(const Value& instance) {
         const Value* given = instance.find("params");
+        // By name, not a search per declaration (T1 of the review of #146).
+        std::map<std::string_view, const Value*> values;
         if (given != nullptr) {
             for (const Member& member : given->members) {
+                values.emplace(member.key, member.value.data());
                 if (!declarations_.contains(member.key)) {
                     error_at(CF_BAD_VALUE, *member.key_file, member.key_node,
                              "parameter " + quote_text(member.key) +
@@ -889,7 +950,9 @@ private:
             }
         }
         for (const auto& [name, declared] : declarations_) {
-            const Value* value = given != nullptr ? given->find(name) : nullptr;
+            const auto found = values.find(name);
+            const Value* value =
+                found != values.end() ? found->second : nullptr;
             if (value == nullptr && declared.default_value) {
                 value = &*declared.default_value;
             }
@@ -979,11 +1042,8 @@ private:
             return refuse(type == "int" ? "must be an integer"
                                         : "must be a number");
         }
-        const double as_real = number->type == ValueType::REAL
-                                   ? number->real
-                                   : static_cast<double>(number->integer);
         if (const std::optional<std::string> outside =
-                outside_bounds(declared, as_real)) {
+                outside_bounds(declared, *number)) {
             return refuse(text + *outside);
         }
         // A `number` keeps its written form, as everywhere in the
@@ -994,16 +1054,31 @@ private:
 
     // " is above its max M" or " is below its min M" when `value` is
     // outside the declared bounds.
+    // An INT and an integer bound are compared as integers, so that no
+    // binary64 rounding lets a value past its bound (T3 of the review of
+    // #146); anything else as binary64.
     static std::optional<std::string> outside_bounds(const Parameter& declared,
-                                                     double value) {
+                                                     const ConfigValue& value) {
         for (const auto& [bound, above] : {std::pair{&declared.min, false},
                                            std::pair{&declared.max, true}}) {
             if (!*bound) {
                 continue;
             }
             const std::string limit_text((*bound)->scalar_text());
-            const std::optional<double> limit = parse_decimal(limit_text);
-            if (limit && (above ? value > *limit : value < *limit)) {
+            bool outside = false;
+            const std::optional<std::int64_t> integer_limit =
+                int64_of(limit_text);
+            if (value.type == ValueType::INT && integer_limit) {
+                outside = above ? value.integer > *integer_limit
+                                : value.integer < *integer_limit;
+            } else if (const std::optional<double> limit =
+                           nearest_binary64(limit_text)) {
+                const double real = value.type == ValueType::REAL
+                                        ? value.real
+                                        : static_cast<double>(value.integer);
+                outside = above ? real > *limit : real < *limit;
+            }
+            if (outside) {
                 return std::string(above ? " is above its max "
                                          : " is below its min ") +
                        limit_text;
@@ -1048,8 +1123,15 @@ private:
                            .value = {Value::map_at(enums->file, enums->node)}});
                 kept = device_keys.find("enums");
             }
+            // One pass, not one erase per table (T1 of the review of #146).
+            std::set<std::string_view> replaced;
             for (const Member& table : enums->members) {
-                kept->erase(table.key);
+                replaced.insert(table.key);
+            }
+            std::erase_if(kept->members, [&replaced](const Member& old) {
+                return replaced.contains(old.key);
+            });
+            for (const Member& table : enums->members) {
                 kept->members.push_back(table);
             }
         }
@@ -1400,13 +1482,26 @@ private:
                 continue;
             }
             std::vector<bool> matched(points.size(), false);
+            // A plain name is looked up, a pattern matched against every
+            // point: n names over n points is O(n log n), not O(n^2) (T1 of
+            // the review of #146).
+            const std::map<std::string, std::size_t, std::less<>> by_name =
+                index_of(points);
             for (const Value& entry : list->items) {
                 const std::string_view pattern = entry.scalar_text();
                 bool any = false;
-                for (std::size_t i = 0; i < points.size(); ++i) {
-                    if (matches(pattern, points[i].name)) {
-                        matched[i] = true;
+                if (pattern.find_first_of("*?") == std::string_view::npos) {
+                    if (const auto found = by_name.find(pattern);
+                        found != by_name.end()) {
+                        matched[found->second] = true;
                         any = true;
+                    }
+                } else {
+                    for (std::size_t i = 0; i < points.size(); ++i) {
+                        if (matches(pattern, points[i].name)) {
+                            matched[i] = true;
+                            any = true;
+                        }
                     }
                 }
                 if (!any) {
@@ -2100,6 +2195,7 @@ private:
     Diagnostics* diagnostics_;
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     std::set<const CheckedFile*> faulty_templates_;
+    std::map<const CheckedFile*, Value> roots_;
     // What is being evaluated, for the detail of a CF-410.
     std::string context_;
     // The diagnostics until the end of the run, and the first of each cause
