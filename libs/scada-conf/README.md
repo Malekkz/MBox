@@ -66,7 +66,8 @@ Stage 4 runs when stages 1 to 3 found no error: `expand_tree`
 merge order of contract 4.5 into one `Document` of the expanded channels,
 devices and points, each value with the file and line it came from. An
 error that a template's line causes is at the instance, with a note
-`from template <file>:<line>:<column>`. `validate_and_expand` gives the
+`from template <file>:<line>:<column>`; a template's own faults are at the
+template, once, whether or not an instance uses it. `validate_and_expand` gives the
 report and the expanded tree, which the expanded files of contract 13.3 are
 written from (#102). Expansion is linear in the points but for a lookup by
 name: an instance of 65,536 points, made by one `repeat`, and the refusal of

@@ -61,11 +61,16 @@ struct ExpandedTree {
                                              std::string detail = {});
 
 // Expands every device instance of `files`, which passed stage 3. Errors go
-// to `diagnostics`; one that a template's line causes is located at the
-// instance, with a note "from template <file>:<line>:<column>" (1.4). A
-// device whose template the tree does not have, or whose chain names one,
-// is left out without an error: the missing name is CF-310 of stage 5.
-// Nothing when an error was found.
+// to `diagnostics`. A template's own faults (its chain, its parameters'
+// types, two written points of one name, a base template's addresses,
+// `when` in its defaults) are at the template, once, whether or not an
+// instance uses it, and its instances are not expanded. An error that a
+// template's line causes in an instance is located at the instance, with a
+// note "from template <file>:<line>:<column> (<detail>)" (1.4); one cause
+// met by several instances is one error at the first, "(and N more
+// instances)". A device whose template the tree does not have, or whose
+// chain names one, is left out without an error: the missing name is CF-310
+// of stage 5. Nothing when an error was found.
 [[nodiscard]] std::optional<ExpandedTree> expand_tree(
     std::span<const CheckedFile> files, Diagnostics& diagnostics);
 

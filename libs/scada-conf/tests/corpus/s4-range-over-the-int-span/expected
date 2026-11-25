@@ -1,0 +1,4 @@
+# A range over the whole INT span has 2^64 values: CF-113 from its bounds,
+# before any value is made (4.4; B1 of the review of #146). Its count must
+# not wrap to 0. Invented.
+drivers/modbus/line1.yaml:7:13: CF-113

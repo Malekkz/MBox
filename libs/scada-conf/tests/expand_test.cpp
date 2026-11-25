@@ -896,6 +896,7 @@ TEST(Expand, NamesMadeByExpansion) {
                  "holding, register: \"20 + n\", type: uint16 } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{
+            // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long lines
             "drivers/modbus/line1.yaml:7:11: error CF-212: \"s{n}\" is not a "
             "valid point name: {n} names no variable bound to this point\n  "
             "from template templates/meter_a.yaml:5:13 (point s{n})",
@@ -1062,6 +1063,34 @@ TEST(Expand, ATemplatesFaultOnceAndOneCauseOnce) {
         (Lines{"drivers/modbus/line1.yaml:7:13: error CF-410: expression \"100 "
                "DIV k\": division by zero (and 3 more instances)\n  from "
                "template templates/meter_a.yaml:5:58 (point p; k = 0)"}));
+}
+
+// The rulings O-4 and O-7 on #146, as the code reads them: `AND` evaluates
+// both sides, and a second `for` variable's range sees the parameters only.
+TEST(Expand, BothSidesOfAndAndTheSecondRange) {
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "params: { k: { type: int, default: 0 } }\n"
+                       "points:\n"
+                       "  - { name: p, when: \"false AND 1 DIV k = 0\", "
+                       "address: { table: holding, register: 1, type: uint16 "
+                       "} }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"false AND 1 DIV k = 0\": division by zero\n  from "
+                     "template templates/meter_a.yaml:5:35 (point p; k = 0)"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "repeat:\n"
+                       "  - for: { n: \"1..2\", k: \"1..n\" }\n"
+                       "    points:\n"
+                       "      - { name: \"p{n}_{k}\", address: { table: "
+                       "holding, register: \"n + k\", type: uint16 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"1..n\": \"n\" is not a parameter and no variable bound "
+                     "to this point\n  from template "
+                     "templates/meter_a.yaml:4:30 (variable k)"}));
 }
 
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a

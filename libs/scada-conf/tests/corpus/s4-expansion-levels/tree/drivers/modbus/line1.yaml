@@ -1,0 +1,8 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.p1, template: pump_b, unit_id: 1, disable: [speed] }
+  - { name: ps1.p2, template: pump_b, unit_id: 2, params: { has_aux: true }, only: [state, aux] }

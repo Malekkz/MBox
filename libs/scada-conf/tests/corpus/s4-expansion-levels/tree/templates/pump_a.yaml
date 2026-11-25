@@ -1,0 +1,18 @@
+template: pump_a
+extends: pump_base
+protocol: modbus
+params:
+  has_aux: { type: bool, default: false }
+enums:
+  states: { 2: tripped }
+defaults: { poll_group: fast }
+identify:
+  - { address: { table: holding, register: 1, type: uint16 }, equals: 7 }
+points:
+  - { name: state, address: { table: holding, register: 10, type: uint16 } }
+  - { name: speed, address: { table: holding, register: 11, type: uint16 } }
+  - { name: fault, address: { table: holding, register: 12, type: uint16, bit: 3 } }
+  - { name: energy, address: { table: holding, register: 13, type: uint32 } }
+  - { name: aux, when: has_aux, address: { table: holding, register: 14, type: uint16 } }
+  - { name: spare, address: { table: holding, register: 15, type: uint16 } }
+only: [state, speed, fault, energy, aux]

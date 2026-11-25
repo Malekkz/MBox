@@ -2179,49 +2179,66 @@ Consequences:
   - `s3-program-of-section-9-2` is now `s5-program-of-section-9-2`, whose output is not in its tree (its task `normal` is a default task).
 
 ## D-114: The expander of templates and instances (stage 4)
-Date: 2026-11-24
+Date: 2026-11-24; revised 2026-11-25 for the review of #146
 Phase / issue: 2, #103 (P2-06)
 Status: proposed
 
-Context: contract 4.4 and 4.5 give the merge order and the merge rules of an instance; 1.4 puts the expansion in stage 4 and says where its errors are; 13.3 says how a computed value is written. Several details are left open.
-Options: per detail below; the simplest that fits the contract was chosen.
+Context: contract 4.4 and 4.5 give the merge order and the merge rules of an instance; 1.4 puts the expansion in stage 4 and says where its errors are; 13.3 says how a computed value is written. Several details are left open. The review of #146 found eleven faults and ruled on nine open points (O-1 to O-9, all on #136).
+Options: per detail below; the simplest that fits the contract was chosen, or the lead's ruling where one was given.
 Decision:
 - **One tree type.** The result is one `Document` (D-111) of the expanded channels, with its `ScalarTypes`, built by `expand_tree` (`expand.h`):
   - `channels`, each with `protocol`, `file`, the `channel` object as written, and its `devices`;
   - each device holds its own keys and the template's device keys (`read`, `enums`, `bit_order`, `functions`, `device_time`, `keepalive`, `idle_timeout`, `on_mismatch`, `identify`, `health`, `restart_indication`) under them, and its `points`.
 
   The keys that steer expansion (`template`, `params`, `defaults`, `overrides`, `disable`, `only`), `when` and every `replace` are gone. A scalar keeps its text, style, position and type. A computed value has the canonical text of 13.3 (an INT in decimal, a REAL as the shortest decimal with a point, a BOOL as `true` or `false`, a TIME as milliseconds and `ms`) and the position of its expression. For each node, `instance_of` gives the device it belongs to, for diagnostics of later stages. `validate_and_expand` gives the report and this tree; #102 writes the expanded files from it.
-- **Where an error is (1.4).** An error whose site is in the instance's own file is there. One whose site is in a template is at the instance's `name` key, with a note `from template <file>:<line>:<column>` (and `(point <name>)` or `(parameter <name>)` where it helps). The same diagnostic is reported once.
+- **Where an error is (1.4).**
+  - An error whose site is in the instance's own file is there.
+  - One whose site is in a template is at the instance's `name` key, with a note `from template <file>:<line>:<column> (<detail>)`. The detail names the point, the parameter or `identify`; for CF-410 it adds each name the expression used with its value, as `(point s3; n = 3)` (S2 of the review of #146).
+  - The same diagnostic is reported once. One cause in a template met by several instances (one code, one template position, one message) is one error, at the first instance, with ` (and N more instances)` after its message (the ruling O-6).
+- **A template's own faults (O-6)** are found once, at the template, before any instance and whether or not an instance uses it:
+  - its chain: a cycle (CF-401 at the `extends` that closes it, for each template of the cycle), more than 4 parents (CF-401 at its own `extends`), a base and a protocol template mixed (CF-421);
+  - its parameters along the chain: a changed type (CF-415), a declaration that no level types (CF-202, `parameter "<name>" needs type`);
+  - two written points of one name in it (CF-416);
+  - a base template's `address` (of a point, a `repeat` block's point or `defaults`), `read` or `identify` (CF-421, `template "<name>": a base template has no <key>`; B11);
+  - `when` in its `defaults` (CF-419).
+
+  An instance of a template with such a fault, or with one in its chain, is not expanded: its errors would repeat the template's. What depends on parameters stays per instance.
 - **What stage 4 leaves to stage 5.** A device whose template, or a template of its chain, the tree does not have, or whose template's protocol this version does not know, is left out without an error: the missing name is CF-310 of stage 5 (D-113). So stage 5 runs, and gives it.
 - **Parameters.**
   - An instance's parameter that the chain does not declare is CF-412 (`the template has no parameter of this name`); the contract has no other code for it.
-  - A `number` parameter is REAL even when its value is written as an integer.
+  - A `number` parameter keeps its written form: written as an integer it is an INT, with a point or an exponent a REAL (the ruling O-9). Stage 5 types a `number` parameter as REAL at the template, as it may be one; the expander checks each value at the instance.
   - A child's declaration may give `default`, `min`, `max` and `values` without `type`; giving another `type` is CF-415 at it.
-  - A declaration that no level of the chain gives a `type` is CF-202 (`parameter "<name>" needs type`).
+  - A `repeat` variable with the name of a parameter of the chain is refused at the instance: CF-412, `parameter "<name>": a repeat variable cannot have its name`, at the variable (the ruling O-3). Through step 3.3 a child's variable would otherwise change a parent's expression that meant the parameter. CF-412 is the code whose message names a parameter.
+- **Step 4 (O-1, O-5; B2 to B4).** A point exists when its own `when` and the `when` of each `repeat` block that made it hold. Each block's `when` is carried on the points it makes and decided at step 4 with the point's variables, so a child that refines a point of an absent option does not bring it back, and `disable` matches it whatever the option. Then the instance's `disable` or `only`. Without a template, steps 1 to 3 are empty and the instance's points enter step 4, so their `when`, the instance's `defaults` and `overrides` apply. With a template, the instance's own points are added after step 6 (no default reaches them) and their `when` is decided with the parameters. A consequence: the points of a block whose `when` is false count toward CF-414 at step 3.
+- **`when` in `defaults` or `overrides`** is CF-419 (`when cannot be given in defaults`, `... in overrides`; 4.4, B10), at the template (O-6) or the instance.
 - **Evaluation.** An expression is evaluated with the parameters and the variables bound to the point, over the instance's whole chain (B5 of the review of #144).
   - Its types are checked first, with the type checker of stage 5 (D-113).
   - Every failure is CF-410, in the contract's form `expression {expr}: {reason}` (2.4, 10.4; B6), at the offending character (D-109). This covers a type error, a `when` that gives no BOOL, and a name that is neither a parameter nor a variable bound to this point (`... is not a parameter and no variable bound to this point`).
   - CF-523 stays only for a `for` value that gives no range or INT (5.6).
-  - Every expression of a point's keys and of `identify` is a number (2.4), as stage 5 types a template's (D-113). A value that is not an INT or a REAL is CF-410 `expression {expr}: the value must be a number, not {type}`, so an override never writes `register: true`.
-  - `identify` of the device, the template's with the instance's appended, is evaluated with the parameters and no variable.
-  - `when` of a `repeat` block is evaluated for each value, or pair of values, with its variables.
-  - A `repeat` variable hides a parameter of the same name in the expressions it reaches; the contract does not say which wins. The expander and stage 5 both look up the variables first.
+  - Every expression of a point's keys and of `identify` is a number (2.4), as stage 5 types a template's (D-113): `the value must be a number, not {type}`. A key the schema types as an integer (`register`, `bit`, `divide_by`) takes an INT: `the value must be an INT, not REAL` (B9). Stage 3 marks such an expression `INTEGER_EXPRESSION`. The range of a computed value (`register: "70000"`, `divide_by` 0) is the merged-point checks' (the second pull request of #103).
+  - `identify` of the device, the template's with the instance's appended, is evaluated with the parameters and no variable (B8).
+  - `AND` and `OR` evaluate both sides (the ruling O-4): `false AND 1 DIV k = 0` with k = 0 is CF-410.
   - Alarms hold run-time expressions and are not evaluated here, wherever they stand: on a point or on a bit (B2 of the review of #144).
   - In a block scalar or an escaped string, which has no place in the file for a character, the message adds the place within the expression's text, as for CF-520 (D-109).
-- **`repeat`.** A `for` value is evaluated with the parameters only. Its values are counted from the bounds before any is made (CF-113, `the range of n exceeds its limit of 65536`, and for two variables `the values of a repeat block exceed ...`).
+- **`repeat`.** A `for` value is evaluated with the parameters only; a second variable's range does not see the first (the ruling O-7). Its values are counted from the bounds before any is made, each run's span refused before it is added so that the count cannot wrap (B1): CF-113, `the range of n exceeds its limit of 65536`, and for two variables `the values of a repeat block exceed ...`.
 - **CF-414** is found while points are made, not after: a level whose own points (distinct by CF-416) would pass 65,536 stops there. Memory therefore stays bounded for a `repeat` of 65,536 pairs over many points.
+- **Names made by expansion (step 8, B7)** follow 2.1: a point or bit name that does not is CF-212 `"<name>" is not a valid point name`, and where a `{...}` is left, `: {x} names no variable bound to this point`. Its length is CF-402 or CF-403.
+- **The merge (4.5).**
+  - Maps are merged key by key. Two keys of the integer form are one key by their value (`15` and `0xF` of `bits`, an inline `enum`, `states`); the child's spelling and value win (B6). No key the schema types as a name has the integer form.
+  - `replace: true` on a point's map replaces it whole, the defaults under it too, and the map stays so through later levels until the end (the ruling O-2).
+  - A template's `disable` matches any point so far, also of its own level (the ruling O-8).
+  - A child's `enums` table replaces the inherited table of the same name whole (4.5, step 3.1).
 - **Exclusive groups (4.5)** are keyed by the map they are in:
   - `scale`: `gain` and `divide_by`;
   - `address`: `bit`, `field` and the double-point shapes, and `register` and `parts`;
   - `write`: `value`, `values`, `mask`, and `on` with `off` as one member.
 
   `on_invalid` and `action` change form by replacing a scalar with a map, which the merge does anyway.
-- **`invalid_values` of `defaults`** (a map by raw type) gives a point that has no list of its own the list of its raw type, or none. The raw type is `address.type`, or the protocol's default: for Modbus, `bool` for one bit, coils and discrete inputs, `uint16` otherwise.
-- **`identify` of an instance** is appended to the template's; with no template it is the instance's own.
-- **An instance's own points** are added after step 6, so `defaults` do not reach them, and their `when` is dropped.
+- **`invalid_values` of `defaults`** (a map by raw type) gives a point that has no list of its own the list of its raw type, or none. It is picked after step 6, which may change the raw type (B5). The raw type is `address.type`, or the protocol's default: for Modbus, `bool` for one bit, coils and discrete inputs, `uint16` otherwise.
+- **`identify` of an instance** is appended to the template's; a level's `identify` replaces the one above; with no template it is the instance's own.
 - **Name patterns** of `disable` and `only` follow 2.5: `*` and `?` stay within one segment.
-Reason: each choice is the reading of the contract that needs no new key or code. Errors stay where the user can act on them: at the instance, with the template's line.
-Consequences: tag references and the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map) come in the next pull request of #103 and in slice 7 of #100, and read `ExpandedTree`. CF-1001 (`limits.max_tags`) is the tag set's (#101).
+Reason: each choice is the reading of the contract that needs no new key or code, or the lead's ruling. Errors stay where the user can act on them: a template's at the template, an instance's at the instance with the template's line, and one cause once.
+Consequences: tag references and the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map, the ranges of computed values) come in the next pull request of #103 and in slice 7 of #100, and read `ExpandedTree`. CF-1001 (`limits.max_tags`) is the tag set's (#101). A template that no instance uses is now checked for its own faults, not for its names (D-113).
 
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23

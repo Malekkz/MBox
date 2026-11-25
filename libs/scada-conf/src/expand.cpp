@@ -213,12 +213,14 @@ bool same_key(std::string_view left, std::string_view right) {
     if (left == right) {
         return true;
     }
-    const std::optional<Integer> a = parse_integer(left);
-    const std::optional<Integer> b = parse_integer(right);
-    if (!a || !b || a->magnitude != b->magnitude) {
+    const std::optional<Integer> left_value = parse_integer(left);
+    const std::optional<Integer> right_value = parse_integer(right);
+    if (!left_value || !right_value ||
+        left_value->magnitude != right_value->magnitude) {
         return false;
     }
-    return a->magnitude == 0 || a->negative == b->negative;
+    return left_value->magnitude == 0 ||
+           left_value->negative == right_value->negative;
 }
 
 // The member of `map` whose key is `key` by `same_key`.
@@ -638,22 +640,24 @@ private:
 
     // CF-419: presence is decided before `defaults` and `overrides` are
     // merged (4.4). `owner` is a `defaults` map, or with `key` "overrides"
-    // the map of a point's overrides.
+    // the map of the points' overrides.
     void refuse_when(const Value* owner, std::string_view key) {
         if (owner == nullptr || owner->kind != NodeKind::MAP) {
             return;
         }
-        if (key == "overrides") {
-            for (const Member& member : owner->members) {
-                refuse_when(&member.value.front(), "point overrides");
-            }
+        if (key != "overrides") {
+            refuse_when_in(*owner, key);
             return;
         }
-        if (const Value* when = owner->find("when")) {
-            error(
-                CF_WHEN_MERGED, *when,
-                "when cannot be given in " +
-                    std::string(key == "point overrides" ? "overrides" : key));
+        for (const Member& member : owner->members) {
+            refuse_when_in(member.value.front(), key);
+        }
+    }
+
+    void refuse_when_in(const Value& map, std::string_view key) {
+        if (const Value* when = map.find("when")) {
+            error(CF_WHEN_MERGED, *when,
+                  "when cannot be given in " + std::string(key));
         }
     }
 
@@ -1254,6 +1258,30 @@ private:
         return axes;
     }
 
+    // The number of values of `runs`, or nothing above the limit. Each
+    // run's span is at most 2^64 - 1 in uint64, so it is refused before it
+    // is added: `high - low + 1` of the whole INT span wraps to 0 (B1 of
+    // the review of #146).
+    static std::optional<std::uint64_t> count_of(
+        const std::vector<std::pair<std::int64_t, std::int64_t>>& runs) {
+        std::uint64_t count = 0;
+        for (const auto& [low, high] : runs) {
+            if (high < low) {
+                continue;
+            }
+            const std::uint64_t span = static_cast<std::uint64_t>(high) -
+                                       static_cast<std::uint64_t>(low);
+            if (span >= MAX_REPEAT_VALUES) {
+                return std::nullopt;
+            }
+            count += span + 1;
+            if (count > MAX_REPEAT_VALUES) {
+                return std::nullopt;
+            }
+        }
+        return count;
+    }
+
     // The values of a `for` range (4.4), checked from its bounds before any
     // is produced (CF-113).
     std::optional<std::vector<std::int64_t>> values_of(
@@ -1287,34 +1315,14 @@ private:
         } else if (!add_run(range)) {
             return std::nullopt;
         }
-        // Each run's span is at most 2^64 - 1 in uint64, so it is refused
-        // before it is added: `high - low + 1` of the whole INT span wraps
-        // to 0 (B1 of the review of #146).
-        std::uint64_t count = 0;
-        bool too_many = false;
-        for (const auto& [low, high] : runs) {
-            if (high < low) {
-                continue;
-            }
-            const std::uint64_t span = static_cast<std::uint64_t>(high) -
-                                       static_cast<std::uint64_t>(low);
-            if (span >= MAX_REPEAT_VALUES) {
-                too_many = true;
-                break;
-            }
-            count += span + 1;
-            if (count > MAX_REPEAT_VALUES) {
-                too_many = true;
-                break;
-            }
-        }
-        if (too_many) {
+        const std::optional<std::uint64_t> count = count_of(runs);
+        if (!count) {
             error(CF_SIZE_LIMIT, range,
                   "the range of " + name + " exceeds its limit of 65536");
             return std::nullopt;
         }
         std::vector<std::int64_t> values;
-        values.reserve(static_cast<std::size_t>(count));
+        values.reserve(static_cast<std::size_t>(*count));
         for (const auto& [low, high] : runs) {
             for (std::int64_t value = low; value <= high; ++value) {
                 values.push_back(value);
@@ -1803,71 +1811,84 @@ private:
             }
             return nullptr;
         };
-        // The point, and each name the expression used with its value (S2
-        // of the review of #146): `point s3; n = 3`.
-        const auto detail = [this, &tree, &bindings]() {
-            std::string out = context_;
-            std::set<std::string, std::less<>> seen;
-            std::string values;
-            for (const ExprNode& node : tree->nodes) {
-                if (node.op != ExprOp::REFERENCE ||
-                    !seen.insert(node.text).second) {
-                    continue;
-                }
-                if (const ConfigValue* bound = bindings(node.text)) {
-                    values += (values.empty() ? "" : ", ") + node.text + " = " +
-                              canonical_text(*bound);
-                }
-            }
-            if (!values.empty()) {
-                out += (out.empty() ? "" : "; ") + values;
-            }
-            return out;
-        };
         EvalError problem;
         std::optional<ConfigValue> result =
             evaluate_configuration(*tree, bindings, problem);
         if (!result) {
-            // At the offending character, as for a syntax error (D-109).
-            ExpressionSite site = expression_site(*value.file->document,
-                                                  value.node, problem.column);
             // Every failure of a configuration expression, a type that
             // does not fit included, is CF-410 in the form of 2.4 and 10.4
-            // (B6 of the review of #144).
+            // (B6 of the review of #144), at the offending character.
             std::string reason = problem.message;
             constexpr std::string_view PREFIX = "expression: ";
             if (reason.starts_with(PREFIX)) {
                 reason = reason.substr(PREFIX.size());
             }
-            // In a block scalar or an escaped string, the place is given
-            // within the text, as for CF-520 (D-109).
-            if (!value.file->document->verbatim(value.node)) {
-                reason += site.where;
-            }
-            error_in(CF_EVALUATION, *value.file, std::move(site.location),
-                     "expression " + quote_text(text) + ": " + reason,
-                     detail());
-        } else if ((wanted == Wanted::INT && result->type != ValueType::INT) ||
-                   (wanted == Wanted::NUMBER &&
-                    result->type != ValueType::INT &&
-                    result->type != ValueType::REAL)) {
-            ExpressionSite site =
-                expression_site(*value.file->document, value.node,
-                                tree->nodes.at(tree->root).column);
-            std::string reason =
+            report_evaluation(value, problem.column, reason,
+                              detail_of(*tree, bindings));
+            return result;
+        }
+        if (!fits(result->type, wanted)) {
+            report_evaluation(
+                value, tree->nodes.at(tree->root).column,
                 std::string(wanted == Wanted::INT
                                 ? "the value must be an INT, not "
                                 : "the value must be a number, not ") +
-                std::string(value_type_name(result->type));
-            if (!value.file->document->verbatim(value.node)) {
-                reason += site.where;
-            }
-            error_in(CF_EVALUATION, *value.file, std::move(site.location),
-                     "expression " + quote_text(text) + ": " + reason,
-                     detail());
+                    std::string(value_type_name(result->type)),
+                detail_of(*tree, bindings));
             return std::nullopt;
         }
         return result;
+    }
+
+    static bool fits(ValueType type, Wanted wanted) noexcept {
+        switch (wanted) {
+            case Wanted::ANY:
+                return true;
+            case Wanted::NUMBER:
+                return type == ValueType::INT || type == ValueType::REAL;
+            case Wanted::INT:
+                return type == ValueType::INT;
+        }
+        return false;
+    }
+
+    // CF-410 at `column` of the expression of `value` (D-109); in a block
+    // scalar or an escaped string, the place is given within the text, as
+    // for CF-520.
+    void report_evaluation(const Value& value, std::uint32_t column,
+                           std::string reason, std::string detail) {
+        ExpressionSite site =
+            expression_site(*value.file->document, value.node, column);
+        if (!value.file->document->verbatim(value.node)) {
+            reason += site.where;
+        }
+        error_in(
+            CF_EVALUATION, *value.file, std::move(site.location),
+            "expression " + quote_text(value.scalar_text()) + ": " + reason,
+            std::move(detail));
+    }
+
+    // The point, and each name the expression used with its value (S2 of
+    // the review of #146): `point s3; n = 3`.
+    [[nodiscard]] std::string detail_of(const Expression& tree,
+                                        const Bindings& bindings) const {
+        std::string out = context_;
+        std::set<std::string, std::less<>> seen;
+        std::string values;
+        for (const ExprNode& node : tree.nodes) {
+            if (node.op != ExprOp::REFERENCE ||
+                !seen.insert(node.text).second) {
+                continue;
+            }
+            if (const ConfigValue* bound = bindings(node.text)) {
+                values += (values.empty() ? "" : ", ") + node.text + " = " +
+                          canonical_text(*bound);
+            }
+        }
+        if (!values.empty()) {
+            out += (out.empty() ? "" : "; ") + values;
+        }
+        return out;
     }
 
     // --- The Document ------------------------------------------------------
