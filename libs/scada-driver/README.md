@@ -71,30 +71,25 @@ the contracts left open.
 - **A list of writes holds its unit.** A list (8.5) is an exclusive
   sequence: 5 writes at a 10 s write interval hold the unit and the devices
   that share it for 40 s, with no poll and no keep-alive (D-136).
-- **Live devices go first; the dead get the rest.** Whatever the poll
-  groups' priorities, devices that answer are polled before failing ones
-  and, once one has failed, ones not yet answered; the failing ones go by
-  due time, the oldest first. The hold ends for the channel 4 time-outs
-  of the last failing request after it was sent, and then the oldest
-  failing poll goes; until then a failing poll uses a gap only if it is
-  longer than its time-out. With the default keys, 250 units at
-  38,400 bit/s with 50 dead keep a worst live gap of 2.0 s (1 s group);
-  the dead are COMM_FAIL within 77 s and all demoted after 1,674 s (D-138;
-  `ctest --preset perf`). A device's state tag can thus show RUNNING for
-  minutes after its points are COMM_FAIL: refuse a write on the points'
-  COMM_FAIL, not on DEMOTED.
+- **The contract's order of service; dead devices are a known limit.**
+  Orders first, then a chain in progress, then priority, then due time; a
+  retry takes its turn in that order (DI 6.2). Until a dead device is
+  demoted, its attempts, each up to its time-out, take their turns like any
+  due request and delay the live devices of its priority and below; a dead
+  device of a faster group keeps the slower groups waiting. The figures are
+  in D-138 (`ctest --preset perf`); serving answering devices first is
+  #147. A device's state tag can show RUNNING for minutes after its points
+  are COMM_FAIL: refuse a write on the points' COMM_FAIL, not on DEMOTED.
 - **Probes use the windows between polls.** A probe goes when no request
   waits, its time-out ended before the next due poll if the window is at
   least 100 ms; one such probe per due time, and its time-out is no
   failure. Else, and after it, the probe waits up to 10 time-outs and then
   goes with its whole time-out (1 s at most), holding one poll, also on a
-  line where a request is always due (D-138).
+  line where a request is always due, where it takes one turn as a due
+  poll (D-138).
 - **Dead values go bad on time.** A poll's points are COMM_FAIL at the
   latest one period (or its retries' time-outs, if longer) after its first
-  time-out, even while its retries wait behind live devices (D-140).
-- **Units that die together cost one long gap.** Each is asked once in its
-  normal turn before it is known to be dead: 50 units with a 1 s time-out
-  hold the live ones once for about 51 s (D-138).
+  time-out, however long its retries wait for their turn (D-140).
 - **A dead block of a live device rests.** A request that keeps failing
   while its device answers others is polled once per back-off (10 s,
   doubling to 300 s, by default); its points stay BAD. A request of a chain

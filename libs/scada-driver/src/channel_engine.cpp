@@ -408,12 +408,6 @@ void ChannelEngine::sync_scheduler() noexcept {
                 run.any_resting = run.any_resting || rest.resting;
             }
         }
-        // Failed: a failure count, or an attempt that timed out and waits
-        // for its retry (the count comes only when the attempts end).
-        scheduler_.set_failing(
-            device, failures_.state(device) != DeviceStatus::RUNNING,
-            failures_.failures(device) > 0 || devices_[device].attempts > 0,
-            compiled.failure.timeout_ns);
         // One probe for every demoted device of a unit (Q5).
         if (failures_.probes_for_unit(device)) {
             scheduler_.set_probe(
@@ -513,8 +507,8 @@ std::int64_t ChannelEngine::check_verdicts(std::int64_t now_ns) noexcept {
             next = std::min(next, run.verdict_ns);
             continue;
         }
-        // Retries still held back: the points go bad now, and the retries
-        // go on as attempts to recover (J2). Demotion still counts the
+        // Retries still waiting for their turn: the points go bad now, and the
+        // retries go on as attempts to recover (J2). Demotion still counts the
         // request once, when its attempts end.
         run.verdict_pending = false;
         fail_points_of(
@@ -845,9 +839,12 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         (end == End::BROKEN && channel_->transport != TransportKind::TCP);
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
-        if (run.attempts == 0 && choice.kind == Choice::Kind::POLL) {
-            // The verdict does not wait for held-back retries (G5): one
-            // period of the group, or the retries' time-outs if longer.
+        if (run.attempts == 0 && (choice.kind == Choice::Kind::POLL ||
+                                  choice.kind == Choice::Kind::KEEPALIVE)) {
+            // The verdict does not wait for retries that wait for their
+            // turn: one period of the group, or the retries' time-outs if
+            // longer (J2), whether the first attempt was a poll or a
+            // keep-alive (review M1).
             const std::int64_t period =
                 channel_->poll_groups[request.poll_group].period_ns;
             run.verdict_pending = true;
