@@ -165,15 +165,6 @@ std::string repeat_when(int values, const std::string& when) {
            "holding, register: 1, type: uint16 } }\n";
 }
 
-// `n < 0 OR n < 0 OR ...` of `terms` terms (E1 of the review of #146).
-std::string false_terms(int terms) {
-    std::string text = "n < 0";
-    for (int term = 1; term < terms; ++term) {
-        text += " OR n < 0";
-    }
-    return text;
-}
-
 // meter_a with a SET parameter `s` of `items` values, all given by default,
 // and a `repeat` of 10 values whose `when` is `when`.
 std::string with_set(int items, const std::string& when) {
@@ -331,34 +322,6 @@ TEST(Expand, WhatIsKeptPastTheLimit) {
 }
 
 }  // namespace
-// E1 of the review of #146: an expression is parsed once for all its
-// evaluations, and typed again only when a name changes type. The
-// reviewer's tree, 30 instances of a `repeat` whose `when` has 400 terms,
-// has two expressions (the `for` value and the `when`): two parses, where a
-// parse per evaluation made 30 x 51.
-TEST(Expand, AnExpressionIsParsedOncePerSite) {
-    const Expanded small = expand_limited(
-        {{"templates/meter_a.yaml", repeat_when(50, false_terms(400))},
-         {"drivers/modbus/line1.yaml", instances(30)}},
-        {});
-    EXPECT_EQ(small.lines, Lines{});
-    EXPECT_EQ(small.error_count, 0U);
-    EXPECT_EQ(small.counts.parses, 2U);
-    EXPECT_EQ(small.counts.typings, 2U);
-    // At its full size the evaluations pass the work budget at the first
-    // instance: refused at once, with still two parses.
-    const Expanded full = expand_limited(
-        {{"templates/meter_a.yaml", repeat_when(65536, false_terms(400))},
-         {"drivers/modbus/line1.yaml", instances(30)}},
-        {});
-    EXPECT_EQ(
-        full.lines,
-        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the points "
-               "and repeat values made for the tree exceed their limit "
-               "of 4000000\n  from template templates/meter_a.yaml:5:11"}));
-    EXPECT_EQ(full.counts.parses, 2U);
-}
-
 // The weight of an evaluation in the work budget is its expression's nodes
 // (E1 of the review of #146). With 10 values, each node more in `when` costs
 // 12: one in each of the 10 evaluations, one in its parse and one in its

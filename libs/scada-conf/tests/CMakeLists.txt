@@ -33,3 +33,6 @@ scada_add_test(scada-conf-limits-test KIND unit
 scada_add_test(scada-conf-tree-limits-test KIND unit
   SOURCES tree_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-expression-limits-test KIND unit
+  SOURCES expression_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
