@@ -917,38 +917,42 @@ TEST(References, AnUnknownNameIsNoVariable) {
         Lines{});
 }
 
-// B9 and the ruling O-9 on #146 at stage 5: a `number` parameter is an INT
-// or a REAL by the written form of its nearest default; without one it is
-// left to the instance. A key the schema types as an integer takes an INT.
-TEST(References, ANumberParameterByItsDefault) {
-    const auto meter = [](std::string_view params) {
-        return "template: meter_a\nprotocol: modbus\nparams: { " +
-               std::string(params) +
-               " }\n"
-               "points:\n"
-               "  - { name: p, address: { table: holding, register: \"b + "
-               "2\", type: uint16 } }\n";
+// B9, the ruling O-9 and B12 of the delta review of #146: a `number`
+// parameter is an INT or a REAL by what each instance writes, so stage 5
+// does not type it at the template, whatever its default; an integer key
+// takes an INT, which the expander checks on each instance's value.
+TEST(References, ANumberParameterIsTypedAtTheInstance) {
+    const auto tree = [](std::string_view declared, std::string_view given) {
+        return validate(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\nparams: { g: { type: "
+              "number" +
+                  std::string(declared) +
+                  " } }\n"
+                  "points:\n"
+                  "  - { name: p, address: { table: holding, register: g, "
+                  "type: uint16 } }\n"},
+             {"drivers/modbus/line1.yaml",
+              channel("  - { name: ps1.m1, template: meter_a, unit_id: 1" +
+                      std::string(given) + " }\n")}});
     };
+    // A REAL default that no instance uses.
+    EXPECT_EQ(tree(", default: 0.5", ", params: { g: 2 }"), Lines{});
+    // An INT default, and an instance that gives a REAL.
+    EXPECT_EQ(tree(", default: 4", ", params: { g: 2.5 }"),
+              Lines{"drivers/modbus/line1.yaml:7:13 CF-410: expression \"g\": "
+                    "the value must be an INT, not REAL"});
+    // An instance that takes a REAL default.
+    EXPECT_EQ(tree(", default: 0.5", ""),
+              Lines{"drivers/modbus/line1.yaml:7:13 CF-410: expression \"g\": "
+                    "the value must be an INT, not REAL"});
+    // No instance: nothing is typed at the template.
     EXPECT_EQ(validate({{"templates/meter_a.yaml",
-                         meter("b: { type: number, default: 40 }")}}),
-              Lines{});
-    EXPECT_EQ(
-        validate({{"templates/meter_a.yaml", meter("b: { type: number }")}}),
-        Lines{});
-    EXPECT_EQ(validate({{"templates/meter_a.yaml",
-                         meter("b: { type: number, default: 1.5 }")}}),
-              Lines{"templates/meter_a.yaml:5:56 CF-410: expression \"b + "
-                    "2\": the value must be an INT, not REAL"});
-    // A child's default is the nearest.
-    EXPECT_EQ(validate({{"templates/base_a.yaml",
-                         "template: base_a\nprotocol: modbus\n"
-                         "params: { b: { type: number, default: 1.5 } }\n"},
-                        {"templates/meter_a.yaml",
-                         "template: meter_a\nextends: base_a\nprotocol: "
-                         "modbus\nparams: { b: { default: 4 } }\n"
+                         "template: meter_a\nprotocol: modbus\nparams: { g: "
+                         "{ type: number, default: 0.5 } }\n"
                          "points:\n"
-                         "  - { name: p, address: { table: holding, "
-                         "register: \"b + 2\", type: uint16 } }\n"}}),
+                         "  - { name: p, address: { table: holding, register: "
+                         "g, type: uint16 }, scale: { divide_by: g } }\n"}}),
               Lines{});
 }
 

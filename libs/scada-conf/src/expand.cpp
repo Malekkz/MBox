@@ -692,9 +692,7 @@ private:
         apply_overrides(written, device_keys, device.points);
         if (reference != nullptr) {
             // With a template, after step 6: no default reaches them.
-            const std::size_t first = device.points.size();
-            add_instance_points(written, device);
-            keep_present_from(first, device.points);
+            add_instance_points(written, device, true);
         }
         // After step 6, which may change a raw type (B5 of the review of
         // #146).
@@ -1624,9 +1622,7 @@ private:
                 const std::string_view pattern = entry.scalar_text();
                 if (!mark_matches(pattern, points, by_name, matched)) {
                     error(CF_NO_SUCH_POINT, entry,
-                          "point " + quote_text(pattern) +
-                              " does not exist in template " +
-                              quote_text(template_name));
+                          no_such_point(pattern, template_name));
                 }
             }
             std::size_t index = 0;
@@ -1659,20 +1655,23 @@ private:
         return any;
     }
 
+    // CF-413: `point {name} does not exist in template {template}`, and
+    // for a device without a template `... : the device has no template`
+    // (S10 of the delta review of #146).
+    static std::string no_such_point(std::string_view name,
+                                     const std::string& template_name) {
+        if (template_name.empty()) {
+            return "point " + quote_text(name) +
+                   " does not exist: the device has no template";
+        }
+        return "point " + quote_text(name) + " does not exist in template " +
+               quote_text(template_name);
+    }
+
     // Step 4: a point whose `when`, or the `when` of a block that made it,
     // is false does not exist; then the instance's `disable` or `only`.
     void keep_present(const Value& instance, std::vector<Point>& points) {
-        keep_present_from(0, points);
-        select(instance, template_of(instance), points);
-    }
-
-    // The `when` part of step 4 for the points from `first` on.
-    void keep_present_from(std::size_t first, std::vector<Point>& points) {
-        std::size_t position = 0;
-        std::erase_if(points, [this, first, &position](Point& point) {
-            if (position++ < first) {
-                return false;
-            }
+        std::erase_if(points, [this](Point& point) {
             context_ = "point " + point.name;
             const std::map<std::string, std::int64_t, std::less<>> variables =
                 bound_to(point);
@@ -1686,6 +1685,7 @@ private:
             point.conditions.clear();
             return !present;
         });
+        select(instance, template_of(instance), points);
     }
 
     static std::string template_of(const Value& instance) {
@@ -1782,9 +1782,7 @@ private:
                 if (found == index.end()) {
                     error_at(CF_NO_SUCH_POINT, *member.key_file,
                              member.key_node,
-                             "point " + quote_text(member.key) +
-                                 " does not exist in template " +
-                                 quote_text(template_of(instance)));
+                             no_such_point(member.key, template_of(instance)));
                     continue;
                 }
                 merge(points[found->second].value, member.value.front(),
@@ -1806,7 +1804,12 @@ private:
     }
 
     // An instance's own points: after step 6, a name that exists is CF-416.
-    void add_instance_points(const Value& instance, Device& device) {
+    // With `decide_when` (an instance of a template), a point's `when` is
+    // decided first, with the parameters: a point that does not exist does
+    // not collide with a template's point of its name (S10 of the delta
+    // review of #146). Without a template, the points enter step 4.
+    void add_instance_points(const Value& instance, Device& device,
+                             bool decide_when = false) {
         const Value* own = instance.find("points");
         if (own == nullptr) {
             return;
@@ -1817,6 +1820,15 @@ private:
             std::optional<Point> point = point_of(item, {}, {});
             if (!point) {
                 continue;
+            }
+            if (decide_when) {
+                context_ = "point " + point->name;
+                const Value* when = point->value.find("when");
+                const bool present = when == nullptr || holds(*when, {});
+                point->value.erase("when");
+                if (!present) {
+                    continue;
+                }
             }
             if (!index.emplace(point->name, device.points.size()).second) {
                 error(CF_POINT_TWICE, *point->value.find("name"),
@@ -1897,39 +1909,55 @@ private:
                 continue;
             }
             const std::string text(name->scalar_text());
+            // An invalid name is one error, not also one per value of a
+            // block that repeats it.
+            if (!check_name_grammar(text, *name, point.name, true)) {
+                continue;
+            }
             if (!names.insert(text).second) {
                 error(CF_POINT_TWICE, *name,
                       "point " + quote_text(text) + " is defined twice",
                       "point " + point.name);
                 continue;
             }
-            if (check_name_grammar(text, *name, point.name)) {
-                check_tag_name(CF_GENERATED_NAME_LENGTH, text, *name,
-                               point.name);
-            }
+            check_tag_name(CF_GENERATED_NAME_LENGTH, text, *name, point.name);
         }
     }
 
     // Step 8: a point or bit name made by expansion follows 2.1 (CF-212;
     // 1.4, stage 4): `s{n}` outside a block, `x.{n}` with n = -1. Its
-    // length is CF-402 or CF-403. A `{...}` left in the name names no
-    // variable bound to the point, which the message says (B7 of the
-    // review of #146).
+    // length is CF-402 or CF-403 (B7 of the review of #146).
+    // - A `{...}` left in a point name names no variable bound to the
+    //   point. The message gives the name as written, so that a block's
+    //   values make one error per definition, not one per value (S10 of
+    //   the delta review).
+    // - A bit name takes no variables (4.4 replaces them in point names
+    //   only; the schema types a bit's name as `point_name`, S9).
     bool check_name_grammar(const std::string& name, const Value& site,
-                            const std::string& point) {
+                            const std::string& point, bool bit = false) {
         if (is_tag_name(name, std::numeric_limits<std::size_t>::max())) {
             return true;
         }
-        std::string message = quote_text(name) + " is not a valid point name";
         const std::size_t open = name.find('{');
         const std::size_t close = open == std::string::npos
                                       ? std::string::npos
                                       : name.find('}', open);
-        if (close != std::string::npos) {
-            message += ": " + name.substr(open, close - open + 1) +
-                       " names no variable bound to this point";
+        std::string message;
+        std::string detail = "point " + point;
+        if (close == std::string::npos) {
+            message = quote_text(name) + " is not a valid point name";
+        } else if (bit) {
+            message = quote_text(name) +
+                      " is not a valid point name: a bit name takes no "
+                      "variables";
+        } else {
+            const std::string written(site.file->document->text(site.node));
+            message = quote_text(written) + " is not a valid point name: " +
+                      name.substr(open, close - open + 1) +
+                      " names no variable bound to this point";
+            detail.clear();
         }
-        error(CF_BAD_NAME, site, message, "point " + point);
+        error(CF_BAD_NAME, site, message, std::move(detail));
         return false;
     }
 

@@ -1008,23 +1008,15 @@ TEST(Expand, NamesMadeByExpansion) {
                  "      - { name: \"t{n}.u{x}\", address: { table: "
                  "holding, register: \"20 + n\", type: uint16 } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{
-            // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long lines
-            "drivers/modbus/line1.yaml:7:11: error CF-212: \"s{n}\" is not a "
-            "valid point name: {n} names no variable bound to this point\n  "
-            "from template templates/meter_a.yaml:5:13 (point s{n})",
-            "drivers/modbus/line1.yaml:7:11: error CF-212: \"x.-1\" is not a "
-            "valid point name\n  from template templates/meter_a.yaml:9:17 "
-            "(point x.-1)",
-            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t-1.u{x}\" is not "
-            "a valid point name: {x} names no variable bound to this point\n  "
-            "from template templates/meter_a.yaml:10:17 (point t-1.u{x})",
-            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t0.u{x}\" is not "
-            "a valid point name: {x} names no variable bound to this point\n  "
-            "from template templates/meter_a.yaml:10:17 (point t0.u{x})",
-            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t1.u{x}\" is not "
-            "a valid point name: {x} names no variable bound to this point\n  "
-            "from template templates/meter_a.yaml:10:17 (point t1.u{x})"}));
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-212: \"s{n}\" is not "
+               "a valid point name: {n} names no variable bound to this "
+               "point\n  from template templates/meter_a.yaml:5:13",
+               "drivers/modbus/line1.yaml:7:11: error CF-212: \"x.-1\" is not "
+               "a valid point name\n  from template "
+               "templates/meter_a.yaml:9:17 (point x.-1)",
+               "drivers/modbus/line1.yaml:7:11: error CF-212: \"t{n}.u{x}\" is "
+               "not a valid point name: {x} names no variable bound to this "
+               "point\n  from template templates/meter_a.yaml:10:17"}));
 }
 
 // B8: `identify` names what exists: a name that no parameter gives is
@@ -1204,6 +1196,49 @@ TEST(Expand, BothSidesOfAndAndTheSecondRange) {
                      "\"1..n\": \"n\" is not a parameter and no variable bound "
                      "to this point\n  from template "
                      "templates/meter_a.yaml:4:30 (variable k)"}));
+}
+
+// S9 of the delta review of #146: a bit name takes no variables (4.4
+// replaces them in point names only), so a bit in a `repeat` block is the
+// same tag for every value; `{n}` in it is CF-212, once, with that reason.
+TEST(Expand, ABitNameTakesNoVariables) {
+    const auto with_bit = [](std::string_view bit) {
+        return one_template(
+            "bit_order: lsb0\nrepeat:\n  - for: { n: \"1..2\" }\n    points:\n"
+            "      - { name: \"w{n}\", tag: false, address: { table: holding, "
+            "register: \"n\", type: uint16 }, bits: { 0: \"" +
+            std::string(bit) + "\" } }\n");
+    };
+    EXPECT_EQ(with_bit("run{n}"),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-212: "
+                    "\"run{n}\" is not a valid point name: a bit name takes "
+                    "no variables\n"
+                    "  from template templates/meter_a.yaml:7:106 (point w1)"});
+    EXPECT_EQ(with_bit("run"),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-416: point "
+                    "\"run\" is defined twice\n"
+                    "  from template templates/meter_a.yaml:7:106 (point w2)"});
+}
+
+// S10 of the delta review of #146: CF-413 on a device without a template
+// says so; an instance's point whose `when` is false does not exist, so it
+// does not collide with the template's point of its name (CF-416).
+TEST(Expand, AnAbsentPointCollidesWithNothing) {
+    EXPECT_EQ(expand({{"drivers/modbus/line1.yaml",
+                       channel("  - name: d1\n    unit_id: 1\n"
+                               "    overrides: { q: { unit: V } }\n"
+                               "    points:\n"
+                               "      - { name: p, address: { table: holding, "
+                               "register: 1, type: uint16 } }\n")}}),
+              Lines{"drivers/modbus/line1.yaml:9:18: error CF-413: point \"q\" "
+                    "does not exist: the device has no template"});
+    EXPECT_EQ(
+        one_template("points:\n  - { name: p, " + std::string(ADDRESS) + " }\n",
+                     "    points:\n"
+                     "      - { name: p, when: \"false\", address: { "
+                     "table: holding, register: 9, type: uint16 } }\n"),
+        Lines{"ps1.m1.p: {address: {table: holding, register: 1, type: "
+              "uint16}}"});
 }
 
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a

@@ -507,11 +507,9 @@ private:
         // True for a device without template: a name in an expression is
         // an error here, as nothing can define it.
         bool bare = false;
-        // While the chain is walked, child first: the `number` parameters,
-        // and the nearest default of each parameter, INT if written as an
-        // integer (the ruling O-9 on #146).
+        // While the chain is walked: the `number` parameters, which are
+        // not typed here (`type_numbers`).
         std::set<std::string, std::less<>> numbers;
-        std::map<std::string, bool, std::less<>> integer_default;
     };
 
     // The scope of `file`, a template, walking `extends` up to MAX_CHAIN
@@ -550,21 +548,14 @@ private:
         return scope;
     }
 
-    // A `number` parameter is an INT or a REAL by the written form of its
-    // default, as the expander reads its value; without a default it is
-    // not known here, and the expander checks the instance's value.
+    // A `number` parameter is an INT or a REAL by what each instance
+    // writes (the ruling O-9 on #146), so it is not typed at the template:
+    // the expander checks each instance's value (B12 of the delta review).
     static void type_numbers(Scope& scope) {
         for (const std::string& name : scope.numbers) {
-            const auto found = scope.integer_default.find(name);
-            if (found == scope.integer_default.end()) {
-                scope.parameters.erase(name);
-            } else {
-                scope.parameters[name] =
-                    found->second ? ValueType::INT : ValueType::REAL;
-            }
+            scope.parameters.erase(name);
         }
         scope.numbers.clear();
-        scope.integer_default.clear();
     }
 
     // The scope of a device's own points, defaults and overrides, one per
@@ -618,12 +609,6 @@ private:
                 continue;
             }
             const std::string name(document.text(entry.key));
-            if (const std::optional<NodeId> written =
-                    document.find(entry.value, "default")) {
-                scope.integer_default.try_emplace(
-                    name, read_integer(document.text(*written)).form !=
-                              IntegerForm::NOT_INTEGER);
-            }
             // A child may change a default without repeating the type, and
             // never changes it (CF-415): the type is that of the nearest
             // declaration that gives one.
