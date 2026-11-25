@@ -11,9 +11,11 @@
 //    same bound (DI 5.5, G1, H1, K1).
 // 5. The engine never spins: it takes at most SPIN_STEPS steps in any 100 ms
 //    of simulated time (review L1: a wait 1 ns ahead, nothing sent).
-// 6. A unit that answers has its value asked within its period plus the
-//    hold of failing polls and the reconnect bounds, whatever the groups and
-//    priorities of the dead units (L1).
+// 6. A unit that answers has its value asked within the bound of the
+//    contract's order of service (DI 6.2 step 3): its period, plus each
+//    request sent meanwhile that goes before it, an unanswered one at most
+//    its time-out and an answered one of the same or a higher priority its
+//    exchange, plus one request already on the line.
 //
 // Each seed builds its own channel (transport, line, failure keys, chains,
 // poll groups per unit, a second block in another group) and its own faults
@@ -27,7 +29,6 @@
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
-#include "scada/driver/scheduler.h"
 #include "scada/tag/types.h"
 #include "sim_transport.h"
 #include "test_protocol.h"
@@ -53,6 +54,7 @@ constexpr std::uint32_t VALUE_REGISTER = 0;
 constexpr std::uint32_t COMPANION_REGISTER = 20;
 constexpr std::uint32_t BLOCK_REGISTER = 40;
 constexpr std::size_t SPIN_STEPS = 2'000;
+constexpr std::int64_t SAMPLE = 100 * MILLISECOND;  // the run's sampling
 
 // What a unit does from a time on.
 enum class Mode : std::uint8_t {
@@ -258,17 +260,6 @@ std::int64_t recover_bound(const Harness& run, std::uint8_t unit) {
            3 * SECOND;
 }
 
-// The longest time between two requests for the value of a unit that
-// answers (invariant 6): its period; the first attempts of the units that
-// stopped, one each; the hold of failing polls and probes (FAILING_SPACING
-// of the longest time-out, and that time-out); slack.
-std::int64_t live_gap_bound(const Harness& run, std::uint8_t unit) {
-    const std::int64_t longest = longest_timeout(run);
-    return period_of(run, unit - 1U, 0) +
-           (run.scenario.units + Scheduler::FAILING_SPACING + 2) * longest +
-           SECOND;
-}
-
 struct UnitState {
     Mode mode = Mode::ANSWERS;
     std::int64_t since_ns = 0;
@@ -325,8 +316,98 @@ std::vector<std::string> check(const Harness& run,
     return out;
 }
 
+// The mode of `unit` at `time_ns`, or a sample later: a mode applies from
+// the sample at its time, which the run reaches up to one sample late.
+Mode mode_at(const Scenario& scenario, std::uint8_t unit, std::int64_t time_ns,
+             std::int64_t sample_ns = SAMPLE) {
+    Mode mode = Mode::ANSWERS;
+    for (const Scenario::Event& event : scenario.events) {
+        if (event.unit == unit && event.time_ns <= time_ns + sample_ns) {
+            mode = event.mode;
+        }
+    }
+    return mode;
+}
+
+// Whether the unit leaves `request` unanswered in `mode`.
+bool unanswered(Mode mode, std::uint32_t first) {
+    return mode == Mode::SILENT ||
+           (mode == Mode::COMPANION_SILENT && first == COMPANION_REGISTER) ||
+           (mode == Mode::BLOCK_SILENT && first == BLOCK_REGISTER);
+}
+
+// The priority of the group that reads register `first` of `unit`.
+std::uint8_t priority_of(const Harness& run, std::uint8_t unit,
+                         std::uint32_t first) {
+    const std::uint32_t device = unit - 1U;
+    std::uint32_t point = 0;
+    if (first == COMPANION_REGISTER) {
+        point = 1;
+    } else if (first == BLOCK_REGISTER) {
+        point = run.scenario.block[device];
+    }
+    const CompiledChannel& channel = run.scenario.channel;
+    return channel
+        .poll_groups[channel.devices[device].points[point].poll_group.value_or(
+            0)]
+        .priority;
+}
+
+// What one exchange of an answered request may hold the line: the latency,
+// the frames and the quiet time at the slowest rate.
+constexpr std::int64_t EXCHANGE_SLACK = 50 * MILLISECOND;
+
+// The line time that the requests sent between `from_ns` and `to_ns` may
+// take before a request of `unit` at priority `own` in the contract's order
+// of service (DI 6.2 step 3): an unanswered request at most its time-out,
+// an answered one of the same or a higher priority, or of `unit` itself,
+// its exchange; each with the quiet time.
+std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
+                      std::int64_t from_ns, std::int64_t to_ns) {
+    std::int64_t ahead = 0;
+    // An answered request of the same priority goes before it only when due
+    // earlier: once per other unit and register in the gap.
+    std::vector<std::pair<std::uint8_t, std::uint32_t>> same;
+    for (const LoggedRequest& request : run.bus.log()) {
+        if (request.time_ns <= from_ns || request.time_ns >= to_ns) {
+            continue;
+        }
+        const std::uint32_t device = request.unit_id - 1U;
+        const Mode mode =
+            mode_at(run.scenario, request.unit_id, request.time_ns, SAMPLE);
+        const std::uint8_t priority =
+            priority_of(run, request.unit_id, request.first);
+        const std::pair<std::uint8_t, std::uint32_t> key{request.unit_id,
+                                                         request.first};
+        if (unanswered(mode, request.first)) {
+            ahead += run.scenario.channel.devices[device].failure.timeout_ns +
+                     EXCHANGE_SLACK;
+        } else if (request.unit_id == unit || priority < own ||
+                   (priority == own &&
+                    std::find(same.begin(), same.end(), key) == same.end())) {
+            ahead += run.scenario.latency_ns[device] + EXCHANGE_SLACK;
+            if (priority == own) {
+                same.push_back(key);
+            }
+        }
+    }
+    return ahead;
+}
+
+// Invariant 6 for the gap from `from_ns` to `to_ns` between two requests
+// for the value of `unit`: its period, the requests ahead of it, and one
+// request already on the line.
+std::int64_t live_gap_bound(const Harness& run, std::uint8_t unit,
+                            std::int64_t from_ns, std::int64_t to_ns) {
+    return period_of(run, unit - 1U, 0) + longest_timeout(run) +
+           EXCHANGE_SLACK + SECOND +
+           ahead_ns(run, unit, priority_of(run, unit, VALUE_REGISTER), from_ns,
+                    to_ns);
+}
+
 // Invariant 2 over the whole run: the longest silence of the bus towards
-// any unit, from 2 s on.
+// any unit, from 2 s on: its back-off, period and reconnect bounds, and
+// the requests ahead of it in the contract's order.
 std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
     std::vector<std::string> out;
     const ConnectionRules& connection = run.scenario.channel.connection;
@@ -343,12 +424,25 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
                                    rules.timeout_ns * 10 +
                                    connection.reconnect_max_ns +
                                    connection.connect_timeout_ns + 5 * SECOND;
+        // The unit's group of the highest priority: the requests ahead of
+        // that one count (the contract's order, DI 6.2 step 3).
+        std::uint8_t own = UINT8_MAX;
+        for (const std::uint32_t first :
+             {VALUE_REGISTER, COMPANION_REGISTER, BLOCK_REGISTER}) {
+            if ((first != COMPANION_REGISTER ||
+                 run.scenario.chained[unit - 1U]) &&
+                (first != BLOCK_REGISTER ||
+                 run.scenario.block[unit - 1U] != 0)) {
+                own = std::min(own, priority_of(run, unit, first));
+            }
+        }
         std::int64_t last = 0;
         for (const LoggedRequest& request : run.bus.log()) {
             if (request.unit_id != unit) {
                 continue;
             }
-            if (request.time_ns - last > bound) {
+            if (request.time_ns - last >
+                bound + ahead_ns(run, unit, own, last, request.time_ns)) {
                 out.push_back("unit " + std::to_string(unit) +
                               " not asked from " +
                               std::to_string(last / MILLISECOND) + " to " +
@@ -356,7 +450,7 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
             }
             last = request.time_ns;
         }
-        if (end_ns - last > bound) {
+        if (end_ns - last > bound + ahead_ns(run, unit, own, last, end_ns)) {
             out.push_back("unit " + std::to_string(unit) + " not asked after " +
                           std::to_string(last / MILLISECOND));
         }
@@ -389,7 +483,8 @@ void scan(const Harness& run, std::vector<UnitState>& units,
         std::int64_t& last = last_value[request.unit_id];
         if (state.mode == Mode::ANSWERS &&
             last >= state.since_ns + recover_bound(run, request.unit_id) &&
-            request.time_ns - last > live_gap_bound(run, request.unit_id)) {
+            request.time_ns - last >
+                live_gap_bound(run, request.unit_id, last, request.time_ns)) {
             violations.push_back("unit " + std::to_string(request.unit_id) +
                                  " answering and its value not asked from " +
                                  std::to_string(last / MILLISECOND) + " to " +
@@ -403,7 +498,6 @@ void scan(const Harness& run, std::vector<UnitState>& units,
 // One seed: the engine's steps run, and every violation.
 std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     constexpr std::int64_t END = 120 * SECOND;
-    constexpr std::int64_t SAMPLE = 100 * MILLISECOND;
     Harness run(scenario_of(seed, END));
     std::vector<UnitState> units(run.scenario.units + 1U);
     std::vector<std::string> violations;

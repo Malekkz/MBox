@@ -214,22 +214,6 @@ public:
                    std::int64_t timeout_ns) noexcept;
     void clear_probe(std::uint32_t device) noexcept;
 
-    // `device` is not known to answer: it has not answered since the
-    // connect, or its unit has a failure count (7.4); `timeout_ns` is what
-    // one of its requests may cost. The polls of devices whose last request
-    // was answered go before the polls and retries of the others, whatever
-    // their priorities, so that dead devices take the line when the live
-    // ones leave it (L1). The hold ends for the whole channel FAILING_SPACING
-    // time-outs of the last failing poll or probe after it was sent; then the
-    // failing polls go by due time, the oldest first: dead devices take about a
-    // quarter of a busy line, none is starved, and their points still go
-    // bad (review G5, K3; D-138).
-    // `failed`: its unit has a failure count; only such a device, or one
-    // with a retry, starts a hold and waits for a window as described.
-    SCADA_RT void set_failing(std::uint32_t device, bool failing, bool failed,
-                              std::int64_t timeout_ns) noexcept;
-    static constexpr std::int64_t FAILING_SPACING = 4;
-
     // The planned request `request` of `device` rests (`resting`) or is
     // polled again: a resting request is left out of its group's cycles
     // (review G8). A request of a chain of companions, first, middle or
@@ -295,7 +279,6 @@ private:
         // Failure handling (7.4).
         std::int64_t probe_due_ns = 0;
         std::int64_t retry_due_ns = 0;
-        std::int64_t failing_timeout_ns = 0;
         std::int64_t probe_timeout_ns = 0;
         std::vector<GroupState> groups;
         // An order whose steps have started.
@@ -315,10 +298,6 @@ private:
         bool polled = true;
         bool probe = false;
         bool retry = false;
-        // Not RUNNING with an empty failure count: not answered since the
-        // connect, or failing (G5).
-        bool failing = false;
-        bool failed = false;  // its unit has a failure count (K3)
         // A windowed probe was sent for this due time: the next one waits for
         // the floor, with its whole time-out (J1).
         bool windowed_tried = false;
@@ -395,56 +374,36 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
-    // A candidate poll: the next request of a group, or a retry.
+    // A candidate poll: the next request of a group, a retry, or a probe
+    // past its floor.
     struct PollPick {
         std::uint32_t device = 0;
         std::uint32_t group = 0;
         bool retry = false;
+        bool probe = false;
     };
-    // The chain first, then priority, due time, device (live picks).
+    // A chain in progress first, then priority, due time, device (DI 6.2
+    // step 3).
     using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
-    // Due time, device (failing picks: the oldest first, K3).
-    using FailKey = std::pair<std::int64_t, std::uint32_t>;
-    // The best live and the best failing pick of one `take` (L1).
-    struct Candidates {
-        PollPick live;
-        PollKey live_key;
-        PollPick failing;
-        FailKey failing_key;
-        bool has_live = false;
-        bool has_failing = false;
-    };
-    // A suspect's pick that continues no chain: it waits behind the live.
-    [[nodiscard]] bool failing_pick(const PollPick& pick) const noexcept;
-    void consider(const PollPick& pick, Candidates& candidates) const noexcept;
+    void consider(const PollPick& pick, PollKey& best_key, PollPick& best,
+                  bool& found) const noexcept;
     void consider_groups(std::uint32_t device, std::int64_t now_ns,
-                         std::int64_t& wake, Candidates& candidates) noexcept;
+                         std::int64_t& wake, PollKey& best_key, PollPick& best,
+                         bool& found) noexcept;
+    // A probe past its floor is a candidate as a due poll of its device's
+    // group of the highest priority, due at its floor (J3).
+    void consider_overdue_probe(std::uint32_t device, std::int64_t now_ns,
+                                PollKey& best_key, PollPick& best,
+                                bool& found) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
-    bool take_failing(const PollPick& pick, std::int64_t now_ns,
-                      Choice& out) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
     [[nodiscard]] bool due_work_pending() const noexcept;
     [[nodiscard]] std::int64_t next_poll_due_ns() const noexcept;
-    // A probe past its floor takes the turn of a held-back failing poll,
-    // under the same spacing, so that a saturated line still probes (J3).
-    bool choose_overdue_probe(std::int64_t now_ns, Choice& out) noexcept;
     // The pick continues a chain of companions: one is in progress, or it
     // is the retry of a part of one (its last part included).
     [[nodiscard]] bool chain_open(const PollPick& pick) const noexcept;
-    // `device` has failed, has a retry, or has not answered since the
-    // connect while some device has failed: its polls wait behind the
-    // others while a hold lasts (G5, K3).
-    [[nodiscard]] bool suspect(std::uint32_t device, bool retry) const noexcept;
-    // A failing poll or a probe that may cost `timeout_ns` was sent: the
-    // others wait FAILING_SPACING of it.
-    void hold_failing(std::int64_t now_ns, std::int64_t timeout_ns) noexcept;
-    // When the next poll of a device known to answer can go (its due time
-    // or its pacing; now or past when one is due), or NEVER.
-    [[nodiscard]] std::int64_t next_live_poll_due_ns() const noexcept;
-    // The oldest due time of a failing device's poll or retry, or NEVER.
-    [[nodiscard]] std::int64_t oldest_failing_due_ns() const noexcept;
     // Takes the probe of `device` with time-out `wait_ns`.
     bool take_probe(std::uint32_t device, std::int64_t now_ns,
                     std::int64_t wait_ns, bool windowed, Choice& out) noexcept;
@@ -452,6 +411,9 @@ private:
                       std::int64_t& wake) noexcept;
     bool start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
                            Choice& out) noexcept;
+    // The device's group of the highest priority that has requests.
+    [[nodiscard]] std::optional<std::uint32_t> first_group(
+        std::uint32_t device) const noexcept;
     Choice take_retry(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     const CompiledChannel* channel_;
@@ -467,11 +429,6 @@ private:
     std::int64_t start_ns_ = 0;
     Undo undo_;
     bool probe_in_flight_ = false;
-    // Until when the polls of failing devices wait behind the others: the
-    // last failing poll or probe sent, plus FAILING_SPACING of its time-out
-    // (G5, K3).
-    std::int64_t failing_release_ns_ = 0;
-    std::uint32_t failed_devices_ = 0;  // devices with a failure count
 };
 
 }  // namespace scada::driver

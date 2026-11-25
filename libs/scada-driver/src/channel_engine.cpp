@@ -408,12 +408,6 @@ void ChannelEngine::sync_scheduler() noexcept {
                 run.any_resting = run.any_resting || rest.resting;
             }
         }
-        // Failed: a failure count, or an attempt that timed out and waits
-        // for its retry (the count comes only when the attempts end).
-        scheduler_.set_failing(
-            device, failures_.state(device) != DeviceStatus::RUNNING,
-            failures_.failures(device) > 0 || devices_[device].attempts > 0,
-            compiled.failure.timeout_ns);
         // One probe for every demoted device of a unit (Q5).
         if (failures_.probes_for_unit(device)) {
             scheduler_.set_probe(

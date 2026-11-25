@@ -1234,140 +1234,12 @@ TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
               (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
 }
 
-TEST(Scheduling, NoFailingDeviceIsStarvedWhateverItsTimeOut) {
-    // K3: a saturated 100 ms group with one answering device (90 ms each)
-    // and two failing ones, time-outs 50 ms and 3 s, for one hour. The hold
-    // of failing polls ends for the whole channel, and the oldest-due
-    // failing poll goes first: both failing devices keep being polled.
-    CompiledChannel channel =
-        make_channel({{.name = "live", .unit_id = 1, .points = adjacent(0, 1)},
-                      {.name = "fast", .unit_id = 2, .points = adjacent(0, 1)},
-                      {.name = "slow", .unit_id = 3, .points = adjacent(0, 1)}},
-                     ReadRules{.max_units = LARGE});
-    channel.poll_groups[0].period_ns = 100 * MILLISECOND;
-    Scheduler scheduler(channel, 4, 0);
-    scheduler.set_failing(1, true, true, 50 * MILLISECOND);
-    scheduler.set_failing(2, true, true, 3 * SECOND);
-    const std::array<std::int64_t, 3> cost{90 * MILLISECOND, 50 * MILLISECOND,
-                                           3 * SECOND};
-    std::array<std::size_t, 3> polls{};
-    std::int64_t now = 0;
-    while (now < 3600 * SECOND) {
-        const Choice choice = scheduler.take(now);
-        if (choice.kind == Choice::Kind::POLL) {
-            ++polls.at(choice.device);
-            now += cost.at(choice.device);
-        } else if (choice.kind == Choice::Kind::WAIT) {
-            now = std::max(now + 1, choice.wake_ns);
-        } else {
-            now += MILLISECOND;
-        }
-    }
-    EXPECT_GT(polls[0], 20'000U);
-    EXPECT_GT(polls[1], 100U);
-    EXPECT_GT(polls[2], 100U);
-}
-
-// What `serve` saw: per device the polls and the longest gap between two,
-// the steps, and the waits that end within 1 ms (a spin).
-struct Service {
-    std::array<std::int64_t, 3> gap{};
-    std::array<std::size_t, 3> polls{};
-    std::size_t steps = 0;
-    std::size_t near_now = 0;
-};
-
-// Runs `scheduler` to `end_ns`, a poll of device 0 taking `failing_ns`
-// (unanswered) and any other 50 ms; at most 10,000 steps.
-Service serve(Scheduler& scheduler, std::int64_t failing_ns,
-              std::int64_t end_ns) {
-    Service out;
-    std::array<std::int64_t, 3> last{};
-    std::int64_t now = 0;
-    while (now < end_ns && out.steps < 10'000) {
-        ++out.steps;
-        const Choice choice = scheduler.take(now);
-        if (choice.kind != Choice::Kind::POLL) {
-            out.near_now += choice.wake_ns <= now + MILLISECOND ? 1U : 0U;
-            now = std::max(now + MILLISECOND, choice.wake_ns);
-            continue;
-        }
-        const std::uint32_t device = choice.device;
-        out.gap.at(device) =
-            std::max(out.gap.at(device), now - last.at(device));
-        last.at(device) = now;
-        ++out.polls.at(device);
-        now += device == 0 ? failing_ns : 50 * MILLISECOND;
-    }
-    return out;
-}
-
-TEST(Scheduling, AFailingFastGroupLeavesTheSlowerGroupsTheirTurn) {
-    // L1: unit 1 in the 200 ms group fails (time-out 1 s); units 2 and 3
-    // answer in the 1 s group. The failing poll is the best by priority, but
-    // while the hold lasts the live polls of the slower group go, and no
-    // wait is "now". Before, the scheduler woke 1 ns later without sending.
-    const CompiledChannel channel = make_channel(
-        {{.name = "dead", .unit_id = 1, .points = adjacent(0, 1, 0)},
-         {.name = "a", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
-         {.name = "b", .unit_id = 3, .points = adjacent(0, 1, NORMAL)}},
-        ReadRules{.max_units = LARGE});
-    Scheduler scheduler(channel, 4, 0);
-    scheduler.set_failing(0, true, true, SECOND);
-    const Service service = serve(scheduler, SECOND, 120 * SECOND);
-    // A live poll waits at most one failing request past its period.
-    EXPECT_LE(service.gap[1], 2 * SECOND + 100 * MILLISECOND);
-    EXPECT_LE(service.gap[2], 2 * SECOND + 100 * MILLISECOND);
-    // The dead unit keeps about a quarter of the line, never starved.
-    EXPECT_GT(service.polls[0], 20U);
-    EXPECT_EQ(service.near_now, 0U);
-    EXPECT_LT(service.steps, 2'000U);
-}
-
-TEST(Scheduling, AnOverdueProbeTakesAGapAsAFailingPollDoes) {
-    // Found by the random test: "dead" fails in the 200 ms group (time-out
-    // 300 ms, so a request of it is always due) and takes every gap of the
-    // live 1 s group, so the hold never ends; "demoted" waits for a probe (100
-    // ms). The probe, past its floor, uses a gap longer than its time-out as
-    // the failing poll does, and the two take the turns by age (J3, K3).
-    // Before, the probe waited for the hold to end, and never went.
-    const CompiledChannel channel = make_channel(
-        {{.name = "dead", .unit_id = 1, .points = adjacent(0, 1, FAST)},
-         {.name = "demoted", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
-         {.name = "live", .unit_id = 3, .points = adjacent(0, 1, NORMAL)}},
-        ReadRules{.max_units = LARGE});
-    Scheduler scheduler(channel, 4, 0);
-    scheduler.set_failing(0, true, true, 300 * MILLISECOND);
-    scheduler.set_polled(1, false);
-    scheduler.set_probe(1, 0, 100 * MILLISECOND);
-    std::size_t probes = 0;
-    std::size_t dead = 0;
-    std::int64_t now = 0;
-    for (std::size_t step = 0; step < 10'000 && now < 30 * SECOND; ++step) {
-        const Choice choice = scheduler.take(now);
-        if (choice.kind == Choice::Kind::PROBE) {
-            ++probes;
-            now += 100 * MILLISECOND;  // unanswered
-            scheduler.probe_done();
-            scheduler.set_probe(1, now + SECOND, 100 * MILLISECOND);
-        } else if (choice.kind == Choice::Kind::POLL) {
-            dead += choice.device == 0 ? 1U : 0U;
-            now += choice.device == 0 ? 300 * MILLISECOND : 10 * MILLISECOND;
-        } else {
-            now = std::max(now + MILLISECOND, choice.wake_ns);
-        }
-    }
-    EXPECT_GE(probes, 10U);
-    EXPECT_GT(dead, 20U);
-}
-
-TEST(Scheduling, AnOverdueProbeNeverTakesTheTurnOfADueLivePoll) {
-    // Found by the perf test: 20 demoted devices whose probes are past
-    // their floor, a live device in the 200 ms group, a failing one. While
-    // the hold lasts and the live poll is due, the live poll goes; a probe
-    // uses only a gap longer than its time-out. Before the fix a due live
-    // poll counted as no live poll at all, and the probes, each renewing
-    // the hold, took every turn.
+TEST(Scheduling, AnOverdueProbeTakesOneTurnInTheOrderOfService) {
+    // J3 without the hold: 20 demoted devices whose probes are past their
+    // floor, and a live device in the 200 ms group, always due. A probe past
+    // its floor goes as a due poll of its device's group, due at its floor:
+    // the probes are sent, and the live device waits at most one probe
+    // time-out past its period.
     std::vector<DeviceSpec> specs{
         {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
         {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
@@ -1379,7 +1251,6 @@ TEST(Scheduling, AnOverdueProbeNeverTakesTheTurnOfADueLivePoll) {
     const CompiledChannel channel =
         make_channel(specs, ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
-    scheduler.set_failing(1, true, true, 100 * MILLISECOND);
     for (std::uint32_t device = 2; device < 22; ++device) {
         scheduler.set_polled(device, false);
         scheduler.set_probe(device, 0, 100 * MILLISECOND);
