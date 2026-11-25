@@ -839,10 +839,12 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         (end == End::BROKEN && channel_->transport != TransportKind::TCP);
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
-        if (run.attempts == 0 && choice.kind == Choice::Kind::POLL) {
+        if (run.attempts == 0 && (choice.kind == Choice::Kind::POLL ||
+                                  choice.kind == Choice::Kind::KEEPALIVE)) {
             // The verdict does not wait for retries that wait for their
             // turn: one period of the group, or the retries' time-outs if
-            // longer (J2).
+            // longer (J2), whether the first attempt was a poll or a
+            // keep-alive (review M1).
             const std::int64_t period =
                 channel_->poll_groups[request.poll_group].period_ns;
             run.verdict_pending = true;

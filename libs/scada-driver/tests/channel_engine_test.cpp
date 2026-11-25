@@ -1733,6 +1733,62 @@ TEST(ChannelEngine, DeadUnitsGoBadWithinTheirVerdictTimeOnABusyLine) {
     EXPECT_GT(rig.engine.counts().early_verdicts, 0U);
 }
 
+// M1: the time from d1's first request after it goes silent at `silent_ns`
+// to its point's COMM_FAIL. Nine units read one point each in the 1 s
+// group; d1 keeps its unit alive every 300 ms (time-out 200 ms, retries 2:
+// verdict bound max(1 s, 2 x 200 ms) = 1 s); the other eight take 100 ms
+// each, so a retry of d1, due at its failure, waits behind their polls
+// due before it (DI 6.2), about 800 ms.
+std::int64_t keepalive_verdict_ns(std::int64_t silent_ns) {
+    std::vector<DeviceSpec> specs{{.name = "d1",
+                                   .unit_id = 1,
+                                   .points = adjacent(0, 1, NORMAL),
+                                   .keepalive_ns = 300 * MILLISECOND}};
+    for (std::uint8_t unit = 2; unit <= 9; ++unit) {
+        specs.push_back({.name = "d" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, NORMAL)});
+    }
+    CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure =
+        FailureRules{.timeout_ns = 200 * MILLISECOND,
+                     .write_timeout_ns = 200 * MILLISECOND,
+                     .retries = 2,
+                     .demote_after = 3};
+    Rig rig(std::move(channel), 9);
+    for (std::uint8_t unit = 2; unit <= 9; ++unit) {
+        rig.transport.latency(unit, 100 * MILLISECOND);
+    }
+    rig.run_until(silent_ns);
+    rig.bus.fault(1, Fault::SILENT);
+    const std::vector<std::int64_t> bad_at =
+        first_comm_fail(rig, 0, 1, silent_ns + 8 * SECOND);
+    const std::vector<std::int64_t> sent = times_of(rig.bus, 1);
+    const auto first =
+        std::find_if(sent.begin(), sent.end(),
+                     [&](std::int64_t time) { return time > silent_ns; });
+    EXPECT_NE(first, sent.end());
+    EXPECT_GT(bad_at[0], 0);
+    return first == sent.end() ? 0 : bad_at[0] - *first;
+}
+
+TEST(ChannelEngine, AKeepAliveTimeOutArmsTheVerdictToo) {
+    // M1: whether d1's first request after its death is a poll or a
+    // keep-alive (silent at ten offsets within one period), its point is
+    // COMM_FAIL within the bound of that first time-out: 200 ms, the 1 s
+    // bound, the exchange on the line then (100 ms) and the sampling. Before,
+    // a keep-alive's time-out armed nothing, and the point waited for the
+    // end of its retries, about 2.2 s.
+    for (std::int64_t offset = 0; offset < SECOND;
+         offset += 100 * MILLISECOND) {
+        EXPECT_LE(keepalive_verdict_ns(3 * SECOND + offset),
+                  200 * MILLISECOND + SECOND + 130 * MILLISECOND)
+            << "silent at " << (3 * SECOND + offset) / MILLISECOND << " ms";
+    }
+}
+
 TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
     // J3: 30 units that take 40 ms each fill a 1 s group, so a request is
     // always due. Units 26 to 30 are dead; unit 30 returns at 1,800 s: its

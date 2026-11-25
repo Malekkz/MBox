@@ -11,6 +11,9 @@
 //    same bound (DI 5.5, G1, H1, K1).
 // 5. The engine never spins: it takes at most SPIN_STEPS steps in any 100 ms
 //    of simulated time (review L1: a wait 1 ns ahead, nothing sent).
+// 7. Every wake the engine returns is not before its step began, and a
+//    failed chained part's own points are COMM_FAIL within the J2 bound
+//    (review M2).
 // 6. A unit that answers has its value asked within the bound of the
 //    contract's order of service (DI 6.2 step 3): its period, plus each
 //    request sent meanwhile that goes before it, an unanswered one at most
@@ -298,6 +301,13 @@ std::vector<std::string> check(const Harness& run,
                           " value GOOD with its companion silent at " +
                           std::to_string(now_ns / MILLISECOND));
         }
+        // The failed chained part itself, written at once (J2; review M2).
+        if (state.mode == Mode::COMPANION_SILENT &&
+            good_past_bound(run, device, 1, state.first_companion_ns, now_ns)) {
+            out.push_back("unit " + std::to_string(unit) +
+                          " silent companion GOOD at " +
+                          std::to_string(now_ns / MILLISECOND));
+        }
         if (state.mode == Mode::BLOCK_SILENT &&
             good_past_bound(run, device, block, state.first_block_ns, now_ns)) {
             out.push_back("unit " + std::to_string(unit) +
@@ -495,6 +505,32 @@ void scan(const Harness& run, std::vector<UnitState>& units,
     }
 }
 
+// Steps the engine until the clock passes `end_ns`, as `run_engine` does,
+// and checks that every wake it returns is not before the step began
+// (invariant 7; review M2). Returns the steps taken.
+std::size_t run_checked(Harness& run, std::int64_t end_ns,
+                        std::vector<std::string>& violations) {
+    constexpr std::size_t MAX_STEPS = 1'000'000;
+    std::size_t steps = 0;
+    while (run.clock.monotonic_ns() <= end_ns && steps < MAX_STEPS) {
+        const std::int64_t start = run.clock.monotonic_ns();
+        const std::int64_t next = run.engine.step();
+        ++steps;
+        if (next < start) {
+            violations.push_back("a wake " +
+                                 std::to_string((start - next) / MILLISECOND) +
+                                 " ms before its step at " +
+                                 std::to_string(start / MILLISECOND) + " ms");
+        }
+        if (next > end_ns) {
+            run.clock.advance_to(end_ns + 1);
+            break;
+        }
+        run.clock.advance_to(next);  // never back
+    }
+    return steps;
+}
+
 // One seed: the engine's steps run, and every violation.
 std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     constexpr std::int64_t END = 120 * SECOND;
@@ -518,7 +554,7 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
                                  .first_companion_ns = -1};
             ++next_event;
         }
-        const std::size_t taken = run_engine(run.engine, run.clock, now);
+        const std::size_t taken = run_checked(run, now, violations);
         steps += taken;
         busiest = std::max(busiest, taken);
         if (taken > SPIN_STEPS) {
