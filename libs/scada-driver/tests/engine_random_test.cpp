@@ -97,92 +97,75 @@ struct Scenario {
 // SplitMix64 with our own arithmetic: the standard distributions differ
 // between standard libraries, so the same seed would build other channels
 // on other builds (review M3).
-struct Random {
-    std::uint64_t state = 0;
+class Random {
+public:
+    explicit Random(std::uint64_t seed) noexcept : state_(seed) {}
     std::uint64_t next() noexcept {
-        state += 0x9E3779B97F4A7C15ULL;
-        std::uint64_t value = state;
+        state_ += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t value = state_;
         value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
         value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
         return value ^ (value >> 31U);
     }
+
+private:
+    std::uint64_t state_;
 };
 
+// A number from `low` to `high`, both included (`low` <= `high`, a small
+// range).
 std::int64_t pick(Random& random, std::int64_t low, std::int64_t high) {
+    if (high <= low) {
+        return low;
+    }
     const auto span = static_cast<std::uint64_t>(high - low) + 1U;
     return low + static_cast<std::int64_t>(random.next() % span);
 }
 
-Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
-    Random random{seed};
-    Scenario out;
-    out.units = static_cast<std::uint8_t>(pick(random, 2, 6));
-    std::vector<DeviceSpec> specs;
-    for (std::uint8_t unit = 1; unit <= out.units; ++unit) {
-        // fast, normal or slow (default groups: 200 ms, 1 s, 10 s, by
-        // priority), mostly the first two.
-        const auto group = static_cast<std::uint32_t>(
-            std::min<std::int64_t>(pick(random, 0, 4), 2) % 3);
-        const bool chain = pick(random, 0, 2) == 0;
-        const bool third = chain && pick(random, 0, 1) == 0;
-        out.chained.push_back(chain);
-        out.third.push_back(third);
-        std::vector<PointSpec> points{
-            {.first = VALUE_REGISTER, .group = group}};
-        if (chain) {
-            points[0].companions = {1};
-            points.push_back({.first = COMPANION_REGISTER, .group = group});
-        }
-        if (third) {
-            points[1].companions = {2};
-            points.push_back({.first = THIRD_REGISTER, .group = group});
-        }
-        std::uint32_t block = 0;
-        if (pick(random, 0, 2) == 0) {
-            block = static_cast<std::uint32_t>(points.size());
-            points.push_back({.first = BLOCK_REGISTER,
-                              .group = (group + static_cast<std::uint32_t>(
-                                                    pick(random, 1, 2))) %
-                                       3});
-        }
-        out.block.push_back(block);
-        DeviceSpec spec{.name = "d" + std::to_string(unit),
-                        .unit_id = unit,
-                        .points = points};
-        if (pick(random, 0, 2) == 0) {
-            spec.keepalive_ns = pick(random, 2, 20) * 100 * MILLISECOND;
-        }
-        if (pick(random, 0, 3) == 0) {
-            spec.pacing.min_request_interval_ns =
-                pick(random, 1, 10) * 10 * MILLISECOND;
-        }
-        specs.push_back(spec);
-        out.latency_ns.push_back(pick(random, 1, 40) * MILLISECOND);
+// The spec of unit `unit`: its points, chain, second block, keep-alive and
+// pacing; notes them in `out`.
+DeviceSpec unit_spec(Random& random, std::uint8_t unit, Scenario& out) {
+    // fast, normal or slow (default groups: 200 ms, 1 s, 10 s, by
+    // priority), mostly the first two.
+    const auto group = static_cast<std::uint32_t>(
+        std::min<std::int64_t>(pick(random, 0, 4), 2) % 3);
+    const bool chain = pick(random, 0, 2) == 0;
+    const bool third = chain && pick(random, 0, 1) == 0;
+    out.chained.push_back(chain);
+    out.third.push_back(third);
+    std::vector<PointSpec> points{{.first = VALUE_REGISTER, .group = group}};
+    if (chain) {
+        points[0].companions = {1};
+        points.push_back({.first = COMPANION_REGISTER, .group = group});
     }
-    out.shared = pick(random, 0, 3) == 0;
-    if (out.shared) {
-        specs.push_back({.name = "shared",
-                         .unit_id = 1,
-                         .points = {{.first = SHARED_REGISTER, .group = 1}}});
+    if (third) {
+        points[1].companions = {2};
+        points.push_back({.first = THIRD_REGISTER, .group = group});
     }
-    out.channel = make_channel(specs, ReadRules{.max_units = 4});
-    if (out.shared && pick(random, 0, 1) == 0) {
-        out.own_unit = true;
-        out.channel.devices.back().unit = CompiledDevice::OWN_UNIT;
+    std::uint32_t block = 0;
+    if (pick(random, 0, 2) == 0) {
+        block = static_cast<std::uint32_t>(points.size());
+        points.push_back(
+            {.first = BLOCK_REGISTER,
+             .group =
+                 (group + static_cast<std::uint32_t>(pick(random, 1, 2))) % 3});
     }
-    constexpr std::array<TransportKind, 3> KINDS{
-        TransportKind::SERIAL, TransportKind::TCP, TransportKind::RTU_OVER_TCP};
-    out.channel.transport =
-        KINDS.at(static_cast<std::size_t>(pick(random, 0, 2)));
-    if (out.channel.transport == TransportKind::SERIAL) {
-        constexpr std::array<std::uint32_t, 3> RATES{9'600, 19'200, 38'400};
-        out.channel.line.bit_rate =
-            RATES.at(static_cast<std::size_t>(pick(random, 0, 2)));
+    out.block.push_back(block);
+    DeviceSpec spec{
+        .name = "d" + std::to_string(unit), .unit_id = unit, .points = points};
+    if (pick(random, 0, 2) == 0) {
+        spec.keepalive_ns = pick(random, 2, 20) * 100 * MILLISECOND;
     }
-    out.channel.connection.reconnect_min_ns =
-        pick(random, 2, 10) * 100 * MILLISECOND;
-    out.channel.connection.reconnect_max_ns = 2 * SECOND;
-    out.channel.connection.connect_timeout_ns = 500 * MILLISECOND;
+    if (pick(random, 0, 3) == 0) {
+        spec.pacing.min_request_interval_ns =
+            pick(random, 1, 10) * 10 * MILLISECOND;
+    }
+    out.latency_ns.push_back(pick(random, 1, 40) * MILLISECOND);
+    return spec;
+}
+
+// The failure keys of every device, and the quality rules of the chains.
+void set_keys(Random& random, Scenario& out) {
     for (std::size_t device = 0; device < out.channel.devices.size();
          ++device) {
         FailureRules& rules = out.channel.devices[device].failure;
@@ -209,6 +192,10 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
                             .otherwise = {.quality = tag::Quality::GOOD}});
         }
     }
+}
+
+// The units' modes over time, and the transport faults.
+void add_events(Random& random, Scenario& out, std::int64_t end_ns) {
     for (std::int64_t time = 2 * SECOND; time < end_ns;
          time += pick(random, 1, 6) * SECOND) {
         const auto unit = static_cast<std::uint8_t>(pick(random, 1, out.units));
@@ -230,6 +217,42 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
          time += pick(random, 20, 60) * SECOND) {
         out.transport_faults.push_back(time);
     }
+}
+
+Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
+    Random random{seed};
+    Scenario out;
+    out.units = static_cast<std::uint8_t>(pick(random, 2, 6));
+    std::vector<DeviceSpec> specs;
+    for (std::uint8_t unit = 1; unit <= out.units; ++unit) {
+        specs.push_back(unit_spec(random, unit, out));
+    }
+    out.shared = pick(random, 0, 3) == 0;
+    if (out.shared) {
+        specs.push_back({.name = "shared",
+                         .unit_id = 1,
+                         .points = {{.first = SHARED_REGISTER, .group = 1}}});
+    }
+    out.channel = make_channel(specs, ReadRules{.max_units = 4});
+    if (out.shared && pick(random, 0, 1) == 0) {
+        out.own_unit = true;
+        out.channel.devices.back().unit = CompiledDevice::OWN_UNIT;
+    }
+    constexpr std::array<TransportKind, 3> KINDS{
+        TransportKind::SERIAL, TransportKind::TCP, TransportKind::RTU_OVER_TCP};
+    out.channel.transport =
+        KINDS.at(static_cast<std::size_t>(pick(random, 0, 2)));
+    if (out.channel.transport == TransportKind::SERIAL) {
+        constexpr std::array<std::uint32_t, 3> RATES{9'600, 19'200, 38'400};
+        out.channel.line.bit_rate =
+            RATES.at(static_cast<std::size_t>(pick(random, 0, 2)));
+    }
+    out.channel.connection.reconnect_min_ns =
+        pick(random, 2, 10) * 100 * MILLISECOND;
+    out.channel.connection.reconnect_max_ns = 2 * SECOND;
+    out.channel.connection.connect_timeout_ns = 500 * MILLISECOND;
+    set_keys(random, out);
+    add_events(random, out, end_ns);
     return out;
 }
 
@@ -341,6 +364,32 @@ std::int64_t fault_slack(const Harness& run, std::int64_t from_ns,
                          std::int64_t to_ns);
 std::uint8_t unit_priority(const Harness& run, std::uint8_t unit);
 
+// Invariant 3 for a unit that answers since `state.since_ns`: RUNNING
+// within its probe back-off and reconnect bounds plus the requests ahead.
+bool recovered(const Harness& run, std::uint8_t unit, const UnitState& state,
+               std::int64_t now_ns) {
+    const std::uint32_t device = unit - 1U;
+    // From its return, or from the last transport fault, after
+    // which every device reconnects (7.3).
+    std::int64_t since = state.since_ns;
+    for (const std::int64_t fault : run.scenario.transport_faults) {
+        if (fault <= now_ns) {
+            since = std::max(since, fault);
+        }
+    }
+    // Plus the requests ahead of it meanwhile (DI 6.2 step 3).
+    // The cheap tests first: the sum is over the log.
+    if (run.engine.failures().state(device) != DeviceStatus::RUNNING &&
+        now_ns > since + recover_bound(run, unit) &&
+        now_ns >
+            since + recover_bound(run, unit) +
+                ahead_ns(run, unit, unit_priority(run, unit), since, now_ns) +
+                fault_slack(run, since, now_ns)) {
+        return false;
+    }
+    return true;
+}
+
 // Checks invariants 1, 3 and 4 at `now_ns`; returns the violations.
 std::vector<std::string> check(const Harness& run,
                                const std::vector<UnitState>& units,
@@ -387,27 +436,11 @@ std::vector<std::string> check(const Harness& run,
                           " block silent and GOOD at " +
                           std::to_string(now_ns / MILLISECOND));
         }
-        if (state.mode == Mode::ANSWERS) {
-            // From its return, or from the last transport fault, after
-            // which every device reconnects (7.3).
-            std::int64_t since = state.since_ns;
-            for (const std::int64_t fault : run.scenario.transport_faults) {
-                if (fault <= now_ns) {
-                    since = std::max(since, fault);
-                }
-            }
-            // Plus the requests ahead of it meanwhile (DI 6.2 step 3).
-            // The cheap tests first: the sum is over the log.
-            if (run.engine.failures().state(device) != DeviceStatus::RUNNING &&
-                now_ns > since + recover_bound(run, unit) &&
-                now_ns > since + recover_bound(run, unit) +
-                             ahead_ns(run, unit, unit_priority(run, unit),
-                                      since, now_ns) +
-                             fault_slack(run, since, now_ns)) {
-                out.push_back("unit " + std::to_string(unit) +
-                              " answering and not RUNNING at " +
-                              std::to_string(now_ns / MILLISECOND));
-            }
+        if (state.mode == Mode::ANSWERS &&
+            !recovered(run, unit, state, now_ns)) {
+            out.push_back("unit " + std::to_string(unit) +
+                          " answering and not RUNNING at " +
+                          std::to_string(now_ns / MILLISECOND));
         }
     }
     return out;
