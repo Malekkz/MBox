@@ -30,6 +30,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -68,6 +69,9 @@ constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
 // The other instances a merged error names (S7 of the delta review).
 constexpr std::size_t NAMED_INSTANCES = 10;
+// The nodes of parsed expressions kept for later evaluations, about 33 MB;
+// past it the cache is emptied (E1 of the review of #146).
+constexpr std::size_t MAX_COMPILED_NODES = 250'000;
 // Most bytes of a tag name (2.1, #119).
 constexpr std::size_t MAX_TAG_NAME_BYTES = 127;
 
@@ -526,6 +530,9 @@ private:
         if (counts_ != nullptr) {
             counts_->kept_texts = reported_.size();
             counts_->causes = causes_.size();
+            counts_->parses = parses_;
+            counts_->typings = typings_;
+            counts_->written_text = writer_.text_bytes();
         }
         // The others by name, the first 10 (S7 of the delta review of
         // #146); the note's values are those of the instance the error is
@@ -680,6 +687,7 @@ private:
         device_failed_ = false;
         made_nodes_ = 0;
         params_.clear();
+        param_weights_.clear();
         Device device{.keys = written, .points = {}};
         // `identify` is the template's with the instance's appended (step
         // 6), written with the device keys.
@@ -1110,6 +1118,7 @@ private:
             std::optional<ConfigValue> bound =
                 parameter_value(name, declared, *value);
             if (bound) {
+                param_weights_.emplace(name, weight_of(*bound));
                 params_.emplace(name, std::move(*bound));
             }
         }
@@ -1514,8 +1523,14 @@ private:
     // The work of the expansion: every point made, written or generated,
     // kept or not, and every `repeat` value evaluated counts one (the
     // ruling S1 on #146, D3 of the delta review); false past the limit.
-    bool count_work(const Value& site) {
-        if (++work_ <= limits_.work) {
+    // `units` above one weight an expression by its nodes (E1 of the
+    // review of #146), so that the budget bounds the real work.
+    bool count_work(const Value& site, std::size_t units = 1) {
+        if (stopped_) {
+            return false;
+        }
+        work_ = units > SIZE_MAX - work_ ? SIZE_MAX : work_ + units;
+        if (work_ <= limits_.work) {
             return true;
         }
         error(CF_SIZE_LIMIT, site,
@@ -2185,15 +2200,127 @@ private:
     // a key the schema types as an integer (B9 of the review of #146).
     enum class Wanted : std::uint8_t { ANY, NUMBER, INT };
 
+    // An expression of the source, parsed once for all its evaluations
+    // (E1 of the review of #146), with its types for the last types of the
+    // names they read.
+    struct Compiled {
+        std::optional<Expression> tree;
+        // Each name the expression reads and how many times it does.
+        std::map<std::string, std::size_t, std::less<>> references;
+        bool typed = false;
+        bool type_ok = false;
+        // The names the typing read and their types then; the types hold
+        // while each name keeps its type.
+        std::vector<std::pair<std::string, std::optional<ValueType>>> read;
+        std::vector<ValueType> types;
+        EvalError type_error;
+    };
+    using SiteKey = std::tuple<const Document*, NodeId, ExpressionKind>;
+
+    // The parse of `value`'s expression; nothing past the work budget. A
+    // parse counts its nodes toward the work, as an evaluation does, so
+    // that the cache may be cleared at its bound without unbounded work.
+    Compiled* compiled(const Value& value, ExpressionKind kind) {
+        const SiteKey key{value.file->document, value.node, kind};
+        if (const auto found = compiled_.find(key); found != compiled_.end()) {
+            return &found->second;
+        }
+        Compiled site;
+        ExpressionError syntax;
+        site.tree = parse_expression(value.scalar_text(), kind, syntax);
+        ++parses_;
+        const std::size_t nodes = site.tree ? site.tree->nodes.size() : 1;
+        if (site.tree) {
+            for (const ExprNode& node : site.tree->nodes) {
+                if (node.op == ExprOp::REFERENCE) {
+                    ++site.references[node.text];
+                }
+            }
+        }
+        if (!count_work(value, std::max<std::size_t>(1, nodes))) {
+            return nullptr;
+        }
+        if (compiled_nodes_ + nodes > MAX_COMPILED_NODES) {
+            compiled_.clear();
+            compiled_nodes_ = 0;
+        }
+        compiled_nodes_ += nodes;
+        return &compiled_.emplace(key, std::move(site)).first->second;
+    }
+
+    // What an evaluation of `site` costs toward the work (E1 of the review
+    // of #146): one per node, and for each reference to a parameter the
+    // weight of the value it copies, so that a reference to a set of 65,536
+    // strings is not one unit.
+    [[nodiscard]] std::size_t evaluation_cost(const Compiled& site) const {
+        std::size_t cost = std::max<std::size_t>(1, site.tree->nodes.size());
+        for (const auto& [name, count] : site.references) {
+            const auto found = param_weights_.find(name);
+            if (found == param_weights_.end()) {
+                continue;
+            }
+            const std::size_t weight =
+                found->second > SIZE_MAX / count ? SIZE_MAX
+                                                 : found->second * count;
+            cost = weight > SIZE_MAX - cost ? SIZE_MAX : cost + weight;
+        }
+        return cost;
+    }
+
+    // The weight of a parameter's value: its set's items and a unit per 64
+    // bytes of its text, what a reference copies.
+    static std::size_t weight_of(const ConfigValue& value) {
+        constexpr std::size_t BYTES_PER_UNIT = 64;
+        std::size_t bytes = value.text.size();
+        for (const std::string& item : value.set) {
+            bytes += item.size();
+        }
+        return value.set.size() + bytes / BYTES_PER_UNIT;
+    }
+
+    // Types `site` for `bindings` unless the names it read keep their
+    // types; a typing counts its nodes toward the work.
+    bool type_site(Compiled& site, const Value& value,
+                   const Bindings& bindings) {
+        if (site.typed && std::ranges::all_of(site.read, [&](const auto& name) {
+                const ConfigValue* bound = bindings(name.first);
+                return (bound == nullptr ? std::nullopt
+                                         : std::optional(bound->type)) ==
+                       name.second;
+            })) {
+            return true;
+        }
+        if (!count_work(value, std::max<std::size_t>(1, site.tree->nodes.size()))) {
+            return false;
+        }
+        site.read.clear();
+        const Bindings recording =
+            [&site, &bindings](std::string_view name) -> const ConfigValue* {
+            const ConfigValue* bound = bindings(name);
+            site.read.emplace_back(
+                std::string(name), bound == nullptr
+                                       ? std::nullopt
+                                       : std::optional<ValueType>(bound->type));
+            return bound;
+        };
+        site.types.clear();
+        site.type_ok = type_for_evaluation(*site.tree, recording, site.types,
+                                           site.type_error);
+        site.typed = true;
+        ++typings_;
+        return true;
+    }
+
     std::optional<ConfigValue> evaluate(
         const Value& value,
         const std::map<std::string, std::int64_t, std::less<>>& variables,
         ExpressionKind kind, Wanted wanted = Wanted::ANY) {
-        ExpressionError syntax;
         const std::string text(value.scalar_text());
-        const std::optional<Expression> tree =
-            parse_expression(text, kind, syntax);
-        if (!tree) {
+        Compiled* site = compiled(value, kind);
+        if (site == nullptr) {
+            return std::nullopt;
+        }
+        if (!site->tree) {
             // Stage 3 parsed every scalar it typed as an expression, so this
             // is a fault of the validator, never passed in silence (T5 of
             // the review of #146).
@@ -2201,6 +2328,10 @@ private:
                   "expression " + quote_text(text) +
                       ": its text does not parse at expansion, which is an "
                       "internal error of the validator");
+            return std::nullopt;
+        }
+        const Expression& tree = *site->tree;
+        if (!count_work(value, evaluation_cost(*site))) {
             return std::nullopt;
         }
         std::map<std::string, ConfigValue, std::less<>> local;
@@ -2217,9 +2348,13 @@ private:
             }
             return nullptr;
         };
-        EvalError problem;
+        if (!type_site(*site, value, bindings)) {
+            return std::nullopt;
+        }
+        EvalError problem = site->type_error;
         std::optional<ConfigValue> result =
-            evaluate_configuration(*tree, bindings, problem);
+            site->type_ok ? evaluate_typed(tree, site->types, bindings, problem)
+                          : std::nullopt;
         if (!result) {
             // Every failure of a configuration expression, a type that
             // does not fit included, is CF-410 in the form of 2.4 and 10.4
@@ -2230,17 +2365,17 @@ private:
                 reason = reason.substr(PREFIX.size());
             }
             report_evaluation(value, problem.column, reason,
-                              detail_of(*tree, bindings));
+                              detail_of(tree, bindings));
             return result;
         }
         if (!fits(result->type, wanted)) {
             report_evaluation(
-                value, tree->nodes.at(tree->root).column,
+                value, tree.nodes.at(tree.root).column,
                 std::string(wanted == Wanted::INT
                                 ? "the value must be an INT, not "
                                 : "the value must be a number, not ") +
                     std::string(value_type_name(result->type)),
-                detail_of(*tree, bindings));
+                detail_of(tree, bindings));
             return std::nullopt;
         }
         return result;
@@ -2530,6 +2665,12 @@ private:
     std::uint64_t tags_ = 0;
     std::size_t made_nodes_ = 0;
     std::size_t work_ = 0;
+    // The expressions parsed, at most MAX_COMPILED_NODES nodes of them, and
+    // the parses and typings done (for tests of E1 of the review of #146).
+    std::map<SiteKey, Compiled> compiled_;
+    std::size_t compiled_nodes_ = 0;
+    std::size_t parses_ = 0;
+    std::size_t typings_ = 0;
 
     // The instance being expanded.
     const CheckedFile* channel_ = nullptr;
@@ -2537,6 +2678,7 @@ private:
     std::string device_name_;
     std::map<std::string, Parameter, std::less<>> declarations_;
     std::map<std::string, ConfigValue, std::less<>> params_;
+    std::map<std::string, std::size_t, std::less<>> param_weights_;
 };
 
 }  // namespace

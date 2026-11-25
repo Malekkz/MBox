@@ -13,6 +13,7 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -137,49 +138,28 @@ const RealFunction* real_function(std::string_view name) {
     return nullptr;
 }
 
+constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
+
+// "parameter or variable "n" does not exist" from the type check, as the
+// expander's message for a name nothing binds here.
+std::string unbound(const std::string& message) {
+    const std::size_t quote = message.find('"');
+    const std::string name =
+        quote == std::string::npos ? message : message.substr(quote);
+    const std::size_t end = name.find(" does not exist");
+    return "expression: " + name.substr(0, end) +
+           " is not a parameter and no variable bound to this point";
+}
+
 class Evaluator {
 public:
-    Evaluator(const Expression& tree, const Bindings& bindings,
-              EvalError& error)
-        : tree_(&tree), bindings_(&bindings), error_(&error) {}
+    Evaluator(const Expression& tree, std::span<const ValueType> types,
+              const Bindings& bindings, EvalError& error)
+        : tree_(&tree), types_(types), bindings_(&bindings), error_(&error) {}
 
-    std::optional<ConfigValue> run() {
-        const NameTypes names =
-            [this](std::string_view name) -> std::optional<ValueType> {
-            const ConfigValue* value = (*bindings_)(name);
-            if (value == nullptr) {
-                return std::nullopt;
-            }
-            return value->type;
-        };
-        TypeError type_error;
-        if (!configuration_type(*tree_, names, type_error, &types_)) {
-            // A name nothing binds here is the expander's CF-410: whether it
-            // exists at all was checked against the chain.
-            *error_ = EvalError{.code = type_error.code == CF_TYPE_MISMATCH
-                                            ? CF_TYPE_MISMATCH
-                                            : CF_EVALUATION,
-                                .column = type_error.column,
-                                .message = type_error.code == CF_TYPE_MISMATCH
-                                               ? type_error.message
-                                               : unbound(type_error.message)};
-            return std::nullopt;
-        }
-        return value_of(tree_->root);
-    }
+    std::optional<ConfigValue> run() { return value_of(tree_->root); }
 
 private:
-    static constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
-
-    static std::string unbound(const std::string& message) {
-        // "parameter or variable "n" does not exist" from the type check.
-        const std::size_t quote = message.find('"');
-        const std::string name =
-            quote == std::string::npos ? message : message.substr(quote);
-        const std::size_t end = name.find(" does not exist");
-        return "expression: " + name.substr(0, end) +
-               " is not a parameter and no variable bound to this point";
-    }
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by the parser's depth, 32
     std::optional<ConfigValue> value_of(std::size_t index) {
@@ -451,7 +431,7 @@ private:
             }
             // INT and REAL branches give REAL (5.6): the type of the call.
             if (chosen->type == ValueType::INT &&
-                types_.at(index) == ValueType::REAL) {
+                index < types_.size() && types_[index] == ValueType::REAL) {
                 return ConfigValue::of_real(
                     static_cast<double>(chosen->integer));
             }
@@ -630,10 +610,10 @@ private:
     }
 
     const Expression* tree_;
+    // The type of every node, from the type check.
+    std::span<const ValueType> types_;
     const Bindings* bindings_;
     EvalError* error_;
-    // The type of every node, from the type check.
-    std::vector<ValueType> types_;
 };
 
 }  // namespace
@@ -666,10 +646,45 @@ ConfigValue ConfigValue::of_string(std::string value) {
     return result;
 }
 
+bool type_for_evaluation(const Expression& tree, const Bindings& bindings,
+                         std::vector<ValueType>& types, EvalError& error) {
+    const NameTypes names =
+        [&bindings](std::string_view name) -> std::optional<ValueType> {
+        const ConfigValue* value = bindings(name);
+        if (value == nullptr) {
+            return std::nullopt;
+        }
+        return value->type;
+    };
+    TypeError type_error;
+    if (configuration_type(tree, names, type_error, &types)) {
+        return true;
+    }
+    // A name nothing binds here is the expander's CF-410: whether it exists
+    // at all was checked against the chain.
+    const bool mismatch = type_error.code == CF_TYPE_MISMATCH;
+    error = EvalError{
+        .code = mismatch ? CF_TYPE_MISMATCH : CF_EVALUATION,
+        .column = type_error.column,
+        .message = mismatch ? type_error.message : unbound(type_error.message)};
+    return false;
+}
+
+std::optional<ConfigValue> evaluate_typed(const Expression& tree,
+                                          std::span<const ValueType> types,
+                                          const Bindings& bindings,
+                                          EvalError& error) {
+    return Evaluator(tree, types, bindings, error).run();
+}
+
 std::optional<ConfigValue> evaluate_configuration(const Expression& tree,
                                                   const Bindings& bindings,
                                                   EvalError& error) {
-    return Evaluator(tree, bindings, error).run();
+    std::vector<ValueType> types;
+    if (!type_for_evaluation(tree, bindings, types, error)) {
+        return std::nullopt;
+    }
+    return evaluate_typed(tree, types, bindings, error);
 }
 
 std::string canonical_text(const ConfigValue& value) {

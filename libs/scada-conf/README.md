@@ -83,18 +83,30 @@ finished and then dropped. What an instance makes before step 4, and the
 defaults merged under its points before step 5, count toward the node
 limit, so memory is bounded by the limit, not by the tree's instances.
 Every point made, written or generated, and every `repeat` value evaluated
-count toward a work budget of 4,000,000. The diagnostics kept are at most
-2,000, past which an error is counted only.
+count toward a work budget of 4,000,000, so instances times template
+points is at most 4,000,000, whatever `only`, `disable` or `when` keep.
+An expression is parsed once for all its evaluations, typed again only
+when a name it reads changes type, and an evaluation costs its nodes in
+the budget (a reference to a parameter also the size of its value), so
+the budget bounds the work of evaluation too. The diagnostics kept are at
+most 2,000, past which an error is counted only.
 
 The bound, measured on the worst accepted trees (release build, x86-64,
-the whole of `validate_and_expand`): a peak of 670 MB, for 5 `repeat`
-blocks of 65,536 points whose `when` is false (made, then removed at step
-4), and 641 MB for one instance of 3,997,723 expanded nodes; the longest
-run, 10.2 s, for 61 instances of a template of 65,536 written points that
-each keep one (`only`), just under the work budget. A tree past a limit is
-refused within that: 100 instances of a 65,536-point `repeat` at the node
-limit, 20,000 instances whose expressions fail at 18 MB, as 100 errors
-that each name the other instances.
+the whole of `validate_and_expand`):
+- memory: a peak of 858 MB (838 MiB) for one instance of 62,000 points,
+  each with an alarm `expr` of 4,056 bytes and 36 `invalid_values` (252
+  MiB of text, 3,844,027 nodes); 670 MB for 5 `repeat` blocks of 65,536
+  points whose `when` is false; 641 MB for one instance of 3,997,723
+  nodes;
+- time: 10.7 s for 61 instances of a template of 65,536 written points
+  that each keep one (`only`), just under the work budget; with
+  expressions of 4,096 bytes, 0.4 s (900 evaluations of one `when`).
+
+A tree past a limit is refused within that: a `when` of 400 terms over
+65,536 values in 30 instances in 0.4 s (it took 729 s when every
+evaluation parsed its text again), 100 instances of a 65,536-point
+`repeat` at the node limit, 20,000 instances whose expressions fail at
+18 MB, as 100 errors that each name the other instances.
 
 Stage 5 runs when stage 4 found no error. It checks what needs no point
 tags (`check_references`, `include/scada/conf/references.h`, D-113):

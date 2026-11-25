@@ -167,6 +167,14 @@ TEST(ConfigEval, Edges) {
         {"-9223372036854775807 - 1", "-9223372036854775808 INT"},
         {"-9223372036854775807 - 1 - 1",
          "CF-410 at 26: expression: the result does not fit INT"},
+        // Both conditions of a subtraction (E4 of the review of #146): a
+        // negative subtrahend past the top, a positive one past the bottom.
+        {"9223372036854775806 - (-1)", "9223372036854775807 INT"},
+        {"9223372036854775807 - (-1)",
+         "CF-410 at 21: expression: the result does not fit INT"},
+        {"0 - (-9223372036854775807)", "9223372036854775807 INT"},
+        {"1 - (-9223372036854775807)",
+         "CF-410 at 3: expression: the result does not fit INT"},
         {"-(-9223372036854775807 - 1)",
          "CF-410 at 1: expression: the result does not fit INT"},
         {"(-9223372036854775807 - 1) DIV -1",

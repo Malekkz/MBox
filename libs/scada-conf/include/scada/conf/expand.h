@@ -86,6 +86,14 @@ struct ExpandLimits {
 struct ExpandCounts {
     std::size_t kept_texts = 0;
     std::size_t causes = 0;
+    // The parses and typings of configuration expressions: one parse per
+    // expression of the source while the cache of parsed expressions holds
+    // them, a typing again only when a name changes type.
+    std::size_t parses = 0;
+    std::size_t typings = 0;
+    // The bytes of text written into the document when the expansion
+    // ended: past the text limit, at most one point more than the limit.
+    std::size_t written_text = 0;
 };
 
 // A computed value (13.3) is a scalar of style PLAIN with its canonical

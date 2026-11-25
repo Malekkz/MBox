@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -155,6 +156,25 @@ std::string instances(int count, std::string_view more = {}) {
     return channel(devices);
 }
 
+
+// A template of one `repeat` over `values` values whose block `when` is
+// `when`, making one point per value.
+std::string repeat_when(int values, const std::string& when) {
+    return "template: meter_a\nprotocol: modbus\nrepeat:\n  - for: { n: \"1.." +
+           std::to_string(values) + "\" }\n    when: \"" + when +
+           "\"\n    points:\n      - { name: \"p{n}\", address: { table: "
+           "holding, register: 1, type: uint16 } }\n";
+}
+
+// `n < 0 OR n < 0 OR ...` of `terms` terms (E1 of the review of #146).
+std::string false_terms(int terms) {
+    std::string text = "n < 0";
+    for (int term = 1; term < terms; ++term) {
+        text += " OR n < 0";
+    }
+    return text;
+}
+
 }  // namespace
 
 // The nodes written: a device's keys count, not only what an instance
@@ -189,12 +209,18 @@ TEST(Expand, TheTextOfTheTree) {
                 ", description: " + description +
                 ", address: { table: holding, register: 1, type: uint16 } }\n";
     }
-    EXPECT_EQ(expand_limited({{"templates/meter_a.yaml", text},
-                              {"drivers/modbus/line1.yaml", instances(2)}},
-                             {.text_bytes = 2000})
-                  .lines,
+    const Expanded expanded =
+        expand_limited({{"templates/meter_a.yaml", text},
+                        {"drivers/modbus/line1.yaml", instances(2)}},
+                       {.text_bytes = 2000});
+    EXPECT_EQ(expanded.lines,
               (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the "
                      "expanded tree exceeds its limit of 2000 bytes of text"}));
+    // The writer stops at the point that passes the limit (E4 of the review
+    // of #146): a point here is about 130 bytes, the device about 5,200.
+    constexpr std::size_t ONE_POINT_MORE = 2000 + 200;
+    EXPECT_GT(expanded.counts.written_text, 2000U);
+    EXPECT_LE(expanded.counts.written_text, ONE_POINT_MORE);
 }
 
 // `limits.max_tags` at N passes and at N + 1 stops the expansion, so a
@@ -291,4 +317,74 @@ TEST(Expand, WhatIsKeptPastTheLimit) {
 }
 
 }  // namespace
+// E1 of the review of #146: an expression is parsed once for all its
+// evaluations, and typed again only when a name changes type. The
+// reviewer's tree, 30 instances of a `repeat` whose `when` has 400 terms,
+// has two expressions (the `for` value and the `when`): two parses, where a
+// parse per evaluation made 30 x 51.
+TEST(Expand, AnExpressionIsParsedOncePerSite) {
+    const Expanded small = expand_limited(
+        {{"templates/meter_a.yaml", repeat_when(50, false_terms(400))},
+         {"drivers/modbus/line1.yaml", instances(30)}},
+        {});
+    EXPECT_EQ(small.lines, Lines{});
+    EXPECT_EQ(small.error_count, 0U);
+    EXPECT_EQ(small.counts.parses, 2U);
+    EXPECT_EQ(small.counts.typings, 2U);
+    // At its full size the evaluations pass the work budget at the first
+    // instance: refused at once, with still two parses.
+    const Expanded full = expand_limited(
+        {{"templates/meter_a.yaml", repeat_when(65536, false_terms(400))},
+         {"drivers/modbus/line1.yaml", instances(30)}},
+        {});
+    EXPECT_EQ(full.lines,
+              (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the points "
+                     "and repeat values made for the tree exceed their limit "
+                     "of 4000000\n  from template templates/meter_a.yaml:5:11"}));
+    EXPECT_EQ(full.counts.parses, 2U);
+}
+
+// The weight of an evaluation in the work budget is its expression's nodes
+// (E1 of the review of #146). With 10 values, each node more in `when` costs
+// 12: one in each of the 10 evaluations, one in its parse and one in its
+// typing. So the budget at which the tree passes moves by 12 per node.
+TEST(Expand, AnEvaluationCostsItsNodes) {
+    // 65 = the `for` value "1..10" (3 nodes: parsed, typed, evaluated: 9),
+    // 10 values, 10 points made, and `n > 0` (3 nodes) parsed and typed (6)
+    // and evaluated 10 times (30).
+    constexpr std::size_t EDGE = 65;
+    const auto passes = [](const std::string& when, std::size_t work) {
+        return expand_limited({{"templates/meter_a.yaml", repeat_when(10, when)},
+                               {"drivers/modbus/line1.yaml", instances(1)}},
+                              {.work = work})
+                   .error_count == 0;
+    };
+    // `n > 0` has 3 nodes, `n + 0 > 0` 5, `n + 0 + 0 > 0` 7.
+    EXPECT_TRUE(passes("n > 0", EDGE));
+    EXPECT_FALSE(passes("n > 0", EDGE - 1));
+    EXPECT_TRUE(passes("n + 0 > 0", EDGE + 24));
+    EXPECT_FALSE(passes("n + 0 > 0", EDGE + 23));
+    EXPECT_TRUE(passes("n + 0 + 0 > 0", EDGE + 48));
+    EXPECT_FALSE(passes("n + 0 + 0 > 0", EDGE + 47));
+}
+
+// E4 of the review of #146: what an instance makes counts with what is
+// already written. One instance writes 1,127 nodes; the second, under a
+// limit of 1,700, passes it while it makes its points, at the point where
+// the two together pass it (template line 56), not only once it is written.
+TEST(Expand, WhatIsMadeCountsWithWhatIsWritten) {
+    EXPECT_EQ(expand_limited({{"templates/meter_a.yaml", written_points(100)},
+                              {"drivers/modbus/line1.yaml", instances(1)}},
+                             {.nodes = 1127})
+                  .error_count,
+              0U);
+    EXPECT_EQ(expand_limited({{"templates/meter_a.yaml", written_points(100)},
+                              {"drivers/modbus/line1.yaml", instances(2)}},
+                             {.nodes = 1700})
+                  .lines,
+              (Lines{"drivers/modbus/line1.yaml:8:13: error CF-113: the "
+                     "expanded tree exceeds its limit of 1700 nodes\n"
+                     "  from template templates/meter_a.yaml:56:13"}));
+}
+
 }  // namespace scada::conf
