@@ -777,17 +777,17 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
         }
         // Checked at the simulated clock, which a step leaves at the end of
         // the exchange it ran, past the loop's time (review P2).
-        const std::int64_t at = run.clock.monotonic_ns();
+        const std::int64_t clock_ns = run.clock.monotonic_ns();
         for (std::uint8_t unit = 1; unit <= run.scenario.units; ++unit) {
             std::vector<std::int64_t>& flips = run.demoted_flips[unit];
             const bool demoted =
                 run.engine.failures().state(unit - 1U) == DeviceStatus::DEMOTED;
             if (demoted != (flips.size() % 2 == 1)) {
-                flips.push_back(at);
+                flips.push_back(clock_ns);
             }
         }
         scan(run, units, last_value, seen, violations);
-        for (std::string& violation : check(run, units, at)) {
+        for (std::string& violation : check(run, units, clock_ns)) {
             violations.push_back(std::move(violation));
         }
     }

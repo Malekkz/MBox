@@ -1262,17 +1262,19 @@ TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
     std::int64_t now = 0;
     for (std::size_t step = 0; step < 20'000 && now < 60 * SECOND; ++step) {
         const Choice choice = scheduler.take(now);
+        const bool live =
+            choice.kind == Choice::Kind::POLL && choice.device == 0;
+        if (live) {
+            worst = std::max(worst, now - last_live);
+            last_live = now;
+        }
         if (choice.kind == Choice::Kind::PROBE) {
             ++probes;
             now += 100 * MILLISECOND;  // unanswered; due again at once
             scheduler.probe_done();
             scheduler.set_probe(choice.device, now, 100 * MILLISECOND);
         } else if (choice.kind == Choice::Kind::POLL) {
-            if (choice.device == 0) {
-                worst = std::max(worst, now - last_live);
-                last_live = now;
-            }
-            now += choice.device == 0 ? FAST_PERIOD : 100 * MILLISECOND;
+            now += live ? FAST_PERIOD : 100 * MILLISECOND;
         } else {
             now = std::max(now + MILLISECOND, choice.wake_ns);
         }
