@@ -735,8 +735,17 @@ bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
     if (probe_in_flight_ || !orders_.empty()) {
         return false;
     }
+    // A chain of companions in progress anywhere on the channel goes first
+    // (DI 6.2 step 3): a floor probe between its parts would read the value
+    // and its companion a probe time-out apart (review Q1).
+    for (const DeviceRun& run : devices_) {
+        if (run.chain) {
+            return false;
+        }
+    }
     // The oldest probe past its floor, of a device whose unit is free.
-    std::optional<std::uint32_t> oldest;
+    bool found = false;
+    std::uint32_t chosen = 0;
     std::int64_t oldest_floor = NEVER;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
@@ -752,11 +761,12 @@ bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
             continue;
         }
         if (floor < oldest_floor) {
-            oldest = device;
+            found = true;
+            chosen = device;
             oldest_floor = floor;
         }
     }
-    if (!oldest.has_value()) {
+    if (!found) {
         return false;
     }
     // At most one probe past its floor in any PROBE_FLOOR time-outs of line
@@ -767,8 +777,8 @@ bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
         wake = std::min(wake, floor_release_ns_);
         return false;
     }
-    const std::int64_t timeout_ns = devices_[*oldest].probe_timeout_ns;
-    if (!take_probe(*oldest, now_ns, timeout_ns, false, out)) {
+    const std::int64_t timeout_ns = devices_[chosen].probe_timeout_ns;
+    if (!take_probe(chosen, now_ns, timeout_ns, false, out)) {
         return false;
     }
     floor_release_ns_ = later(now_ns, timeout_ns * (PROBE_FLOOR + 1));
