@@ -398,7 +398,13 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
     // time missed its period because of pacing (11.1).
     // E4: the cycle ended when its last request was handed out, not at the
     // `take` that finds it complete.
-    const std::int64_t next_due = later(state.due_ns, period_ns);
+    // A cycle due at EARLIEST (a device polled again, `set_polled`) is
+    // followed a period after it started, not at once: else a returned
+    // device is polled twice in a row, side-effect reads included (6.6;
+    // review P1).
+    const std::int64_t base =
+        state.due_ns == EARLIEST ? state.cycle_start_ns : state.due_ns;
+    const std::int64_t next_due = later(base, period_ns);
     state.limited = state.waited && state.last_sent_ns > next_due;
     state.in_cycle = false;
     state.due_ns = std::max(next_due, now_ns);
@@ -574,19 +580,12 @@ Choice Scheduler::take_retry(std::uint32_t device,
 
 // One order (DI 6.2 step 3): a chain in progress first, then priority, then
 // due time, device order. A retry is its device's next poll, due when the
-// failure was seen (Q1). A probe past its floor takes one turn in the same
-// order, as a due poll of its device's group of the highest priority, due
-// at its floor, so that a returned unit is found on a line where a request
-// is always due (J3).
+// failure was seen (Q1).
 void Scheduler::consider(const PollPick& pick, PollKey& best_key,
                          PollPick& best, bool& found) const noexcept {
     const DeviceRun& run = devices_[pick.device];
-    std::int64_t due = 0;
-    if (pick.probe) {
-        due = later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
-    } else {
-        due = pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
-    }
+    const std::int64_t due =
+        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
     const PollKey key{!chain_open(pick),
                       channel_->poll_groups[pick.group].priority, due,
                       pick.device};
@@ -624,24 +623,6 @@ void Scheduler::consider_groups(std::uint32_t device, std::int64_t now_ns,
     }
 }
 
-void Scheduler::consider_overdue_probe(std::uint32_t device,
-                                       std::int64_t now_ns, PollKey& best_key,
-                                       PollPick& best, bool& found) noexcept {
-    const DeviceRun& run = devices_[device];
-    if (probe_in_flight_ || !orders_.empty() ||
-        !channel_->devices[device].enabled || !run.probe ||
-        units_[run.unit].holder != NOBODY ||
-        allowed_from(device, false) > now_ns ||
-        now_ns < later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR)) {
-        return;
-    }
-    const std::optional<std::uint32_t> group = first_group(device);
-    if (group.has_value()) {
-        consider(PollPick{.device = device, .group = *group, .probe = true},
-                 best_key, best, found);
-    }
-}
-
 bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                             std::int64_t& wake) noexcept {
     bool found = false;
@@ -649,7 +630,6 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
     PollKey best_key{};
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
-        consider_overdue_probe(device, now_ns, best_key, best, found);
         if (!polls_allowed(device)) {
             continue;
         }
@@ -670,10 +650,6 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
     }
     if (!found) {
         return false;
-    }
-    if (best.probe) {
-        return take_probe(best.device, now_ns,
-                          devices_[best.device].probe_timeout_ns, false, out);
     }
     out = best.retry ? take_retry(best.device, now_ns)
                      : take_poll(best.device, best.group, now_ns);
@@ -754,6 +730,51 @@ std::int64_t Scheduler::next_poll_due_ns() const noexcept {
     return next;
 }
 
+bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
+                                   std::int64_t& wake) noexcept {
+    if (probe_in_flight_ || !orders_.empty()) {
+        return false;
+    }
+    // The oldest probe past its floor, of a device whose unit is free.
+    std::optional<std::uint32_t> oldest;
+    std::int64_t oldest_floor = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!channel_->devices[device].enabled || !run.probe ||
+            units_[run.unit].holder != NOBODY) {
+            continue;
+        }
+        const std::int64_t floor =
+            later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
+        const std::int64_t from = std::max(floor, allowed_from(device, false));
+        if (from > now_ns) {
+            wake = std::min(wake, std::max(from, floor_release_ns_));
+            continue;
+        }
+        if (floor < oldest_floor) {
+            oldest = device;
+            oldest_floor = floor;
+        }
+    }
+    if (!oldest.has_value()) {
+        return false;
+    }
+    // At most one probe past its floor in any PROBE_FLOOR time-outs of line
+    // time after the last one (the lead's ruling N1): floor probes cost the
+    // live devices at most one probe time-out in every PROBE_FLOOR + 1,
+    // whatever the number of dead devices and their groups.
+    if (now_ns < floor_release_ns_) {
+        wake = std::min(wake, floor_release_ns_);
+        return false;
+    }
+    const std::int64_t timeout_ns = devices_[*oldest].probe_timeout_ns;
+    if (!take_probe(*oldest, now_ns, timeout_ns, false, out)) {
+        return false;
+    }
+    floor_release_ns_ = later(now_ns, timeout_ns * (PROBE_FLOOR + 1));
+    return true;
+}
+
 bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
                              std::int64_t& wake) noexcept {
     // One probe of the channel at a time, and only in time no due request
@@ -782,7 +803,11 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
         std::int64_t wait_ns = run.probe_timeout_ns;
         bool windowed = false;
-        if (next_poll < later(now_ns, wait_ns) && now_ns < floor) {
+        if (now_ns >= floor) {
+            // Past its floor: `choose_floor_probe`'s, under its spacing.
+            continue;
+        }
+        if (next_poll < later(now_ns, wait_ns)) {
             // The window ends before the quiet time a serial line keeps
             // after a time-out, so that the poll goes out when due.
             const std::int64_t quiet = channel_->transport == TransportKind::TCP
@@ -881,8 +906,9 @@ Choice Scheduler::take(std::int64_t now_ns) noexcept {
     // 1. The next step of an exclusive order in progress; 2. orders;
     // 3. retries and due poll groups; 4. keep-alive; 5. a probe (6.2).
     if (choose_exclusive_step(now_ns, out, wake) ||
-        choose_order(now_ns, out, wake) || choose_poll(now_ns, out, wake) ||
-        choose_keepalive(now_ns, out, wake) ||
+        choose_order(now_ns, out, wake) ||
+        choose_floor_probe(now_ns, out, wake) ||
+        choose_poll(now_ns, out, wake) || choose_keepalive(now_ns, out, wake) ||
         choose_probe(now_ns, out, wake)) {
         return out;
     }

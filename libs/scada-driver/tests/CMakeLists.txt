@@ -29,7 +29,7 @@ target_compile_definitions(scada-driver-unit-test PRIVATE
   "SCADA_DRIVER_GOLDEN_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/golden/driver-vectors.txt\"")
 
 # How dead devices share a line with live ones, with the default failure
-# keys (decision D-138; review G5, G7): minutes of a simulated line.
+# keys (decision D-138; review G7, N1): minutes of a simulated line.
 scada_add_test(scada-driver-line-perf-test KIND perf
   SOURCES
     line_perf_test.cpp

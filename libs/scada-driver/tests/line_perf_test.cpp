@@ -84,6 +84,7 @@ struct Figures {
     std::int64_t start_gap_ns = 0;      // worst live gap, 10 s to 2 min
     std::int64_t death_gap_ns = 0;      // worst live gap, 2 min after a death
     std::int64_t live_gap_ns = 0;       // worst live gap after that
+    std::int64_t demoted_gap_ns = 0;    // worst live gap once all are DEMOTED
     std::int64_t bad_ns = -1;  // death to COMM_FAIL, the slowest dead unit
     std::vector<double> dead_share;  // per minute: the line held by the dead
 };
@@ -143,6 +144,9 @@ void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
         die();
     }
     const std::int64_t back_ns = times.back_ns;
+    // When the units died by the simulated clock: a step runs the exchange
+    // it started to its end, past the loop's time (review P2).
+    std::int64_t died_ns = 0;
     for (std::int64_t now = SECOND; now <= times.end_ns; now += SECOND) {
         if (now == back_ns) {
             line.bus.fault(back, Fault::NONE);
@@ -150,17 +154,18 @@ void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
         (void)run_engine(line.engine, line.clock, now);
         if (now == times.death_ns) {
             die();
+            died_ns = line.clock.monotonic_ns();
         }
         if (out.bad_ns < 0 && now > times.death_ns && all_bad(line, dead)) {
-            out.bad_ns = now - times.death_ns;
+            out.bad_ns = line.clock.monotonic_ns() - died_ns;
         }
         if (out.all_demoted_ns < 0 && now < back_ns &&
             all_demoted(line, dead)) {
-            out.all_demoted_ns = now;
+            out.all_demoted_ns = line.clock.monotonic_ns();
         }
         if (now > back_ns && out.back_running_ns < 0 &&
             line.engine.failures().state(back - 1U) == DeviceStatus::RUNNING) {
-            out.back_running_ns = now - back_ns;
+            out.back_running_ns = line.clock.monotonic_ns() - back_ns;
         }
     }
 }
@@ -195,6 +200,9 @@ void analyse(const Line& line, const std::vector<bool>& dead, std::uint8_t back,
         }
         // A gap belongs to the window its end falls in.
         const std::int64_t gap = request.time_ns - previous;
+        if (out.all_demoted_ns > 0 && previous >= out.all_demoted_ns) {
+            out.demoted_gap_ns = std::max(out.demoted_gap_ns, gap);
+        }
         const std::int64_t settled =
             std::max(2 * MINUTE, death_ns + 2 * MINUTE);
         if (death_ns > 0 && request.time_ns >= death_ns &&
@@ -228,10 +236,11 @@ void print(const char* name, const Figures& figures) {
         "{}: all dead COMM_FAIL {:.0f} s after their death, DEMOTED at "
         "{:.0f} s; the returned unit RUNNING {:.0f} s after its return; worst "
         "live gap {:.3f} s from 10 s to 2 min, {:.3f} s in the 2 min after "
-        "the death, {:.3f} s after\n",
+        "the death, {:.3f} s after, {:.3f} s once all are DEMOTED\n",
         name, seconds(figures.bad_ns), seconds(figures.all_demoted_ns),
         seconds(figures.back_running_ns), seconds(figures.start_gap_ns),
-        seconds(figures.death_gap_ns), seconds(figures.live_gap_ns));
+        seconds(figures.death_gap_ns), seconds(figures.live_gap_ns),
+        seconds(figures.demoted_gap_ns));
     for (std::size_t minute = 0; minute < figures.dead_share.size();
          minute += 5) {
         std::cout << std::format(
@@ -244,9 +253,11 @@ void print(const char* name, const Figures& figures) {
 TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
     // 250 units at 38,400 bit/s, every fifth dead; unit 5 returns at 30 min.
     // In the contract's order the dead take their turns like any due
-    // request until they are demoted: a known limit (D-138, #147). Measured:
-    // COMM_FAIL by 54 s (J2), all DEMOTED at 464 s, a worst live gap of
-    // 102.8 s, the returned unit RUNNING 267 s after its return.
+    // request until they are demoted: a known limit (D-138, #147). Measured
+    // by the simulated clock: COMM_FAIL by 55 s (J2), all DEMOTED at 467 s,
+    // a worst live gap of 102.8 s, 2.03 s once all are DEMOTED (floor probes
+    // one in 11 probe time-outs, N1), the returned unit RUNNING 111 s after
+    // its return.
     const Figures figures = measure(250, 38'400);
     print("250 units, 50 dead", figures);
     EXPECT_GT(figures.bad_ns, 0);
@@ -255,6 +266,7 @@ TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
     EXPECT_LE(figures.all_demoted_ns, 10 * MINUTE);
     EXPECT_LE(figures.start_gap_ns, 110 * SECOND);
     EXPECT_LE(figures.live_gap_ns, 110 * SECOND);
+    EXPECT_LE(figures.demoted_gap_ns, 2 * SECOND + 100 * MILLISECOND);
     EXPECT_GE(figures.back_running_ns, 0);
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
@@ -263,8 +275,9 @@ TEST(LinePerf, FiftyOfTwoHundredFiftyUnitsDieTogether) {
     // J2, J4: the same line, all 250 answering until 2 min; then every
     // fifth dies. Each dead unit is COMM_FAIL one period after its own first
     // time-out (J2); the dead hold the line until they are demoted, the
-    // known limit (measured: COMM_FAIL by 54 s after the death, all DEMOTED
-    // at 584 s, a worst live gap of 102.8 s after the death, 1.0 s before).
+    // known limit (measured: COMM_FAIL by 55 s after the death, all DEMOTED
+    // at 587 s, a worst live gap of 102.8 s after the death, 1.0 s before,
+    // 2.03 s once all are DEMOTED).
     const Figures figures = measure(250, 38'400, 2 * MINUTE);
     print("250 units, 50 die together at 2 min", figures);
     EXPECT_GT(figures.bad_ns, 0);
@@ -272,21 +285,25 @@ TEST(LinePerf, FiftyOfTwoHundredFiftyUnitsDieTogether) {
     EXPECT_LE(figures.start_gap_ns, 1 * SECOND + 100 * MILLISECOND);
     EXPECT_LE(figures.death_gap_ns, 110 * SECOND);
     EXPECT_LE(figures.live_gap_ns, 110 * SECOND);
+    EXPECT_LE(figures.demoted_gap_ns, 2 * SECOND + 100 * MILLISECOND);
 }
 
 TEST(LinePerf, FiftyDeadOfAFasterGroupAmongTwoHundredFiftyUnits) {
     // The first case with the dead units in the 200 ms group, of a higher
     // priority than the live ones' 1 s group: by priority the dead go first
-    // until they are demoted (measured: COMM_FAIL by 54 s, all DEMOTED at
-    // 460 s, a worst live gap of 52.1 s, the returned unit RUNNING 260 s
-    // after its return).
+    // until they are demoted, and after it their floor probes go one in 11
+    // probe time-outs (N1; before, they took the live units' turns as due
+    // polls of the faster group: 52.1 s). Measured: COMM_FAIL by 54 s, all
+    // DEMOTED at 463 s, a worst live gap of 2.03 s, the returned unit
+    // RUNNING 107 s after its return.
     const Figures figures = measure(250, 38'400, 0, FAST);
     print("250 units, 50 dead in the 200 ms group", figures);
     EXPECT_GT(figures.bad_ns, 0);
     EXPECT_LE(figures.bad_ns, 60 * SECOND);
     EXPECT_GT(figures.all_demoted_ns, 0);
     EXPECT_LE(figures.all_demoted_ns, 10 * MINUTE);
-    EXPECT_LE(figures.live_gap_ns, 60 * SECOND);
+    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.demoted_gap_ns, 2 * SECOND + 100 * MILLISECOND);
     EXPECT_GE(figures.back_running_ns, 0);
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
@@ -298,7 +315,7 @@ TEST(LinePerf, FiveDeadAmongTwentyFiveUnits) {
     // no answer is no failure, so each back-off ends with a floor probe of
     // the whole 1 s, which holds one poll at most (J1). Until the dead are
     // demoted they take their turns like any due request (measured: a live
-    // gap of 10.3 s at the start, 1.76 s after).
+    // gap of 10.3 s at the start, 1.90 s once all are DEMOTED).
     const Figures figures = measure(25, 19'200);
     print("25 units, 5 dead", figures);
     EXPECT_LE(figures.start_gap_ns, 12 * SECOND);
