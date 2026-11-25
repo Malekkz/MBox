@@ -1,7 +1,8 @@
-# The types of a template's configuration expressions (5.6, D-113): a
-# `when` that gives INT (CF-523), a name that no parameter or variable has
-# (CF-310), and a range over a set (CF-523). `'meter' IN options` and the
-# register `n - 1` of a `repeat` variable are valid. Invented.
-templates/io_card.yaml:11:12: CF-523
-templates/io_card.yaml:14:43: CF-310
-templates/io_card.yaml:20:16: CF-523
+# The types of a template's configuration expressions (5.6; D-113, the
+# lead's review of #144, B5 and B6): a `when` that gives INT and a range
+# over a set are CF-410 (2.4), at the offending character. `cards` is no
+# parameter of io_card's chain upward, but a child template could declare
+# it, so it is checked at an instance (#103), not here. `'meter' IN options`
+# and the register `n - 1` of a `repeat` variable are valid. Invented.
+templates/io_card.yaml:11:12: CF-410
+templates/io_card.yaml:20:16: CF-410

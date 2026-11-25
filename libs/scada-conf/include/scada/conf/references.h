@@ -31,9 +31,11 @@ struct CheckedFile {
 // - CF-301 and CF-302 for the tags that tag files and interlocks define;
 // - CF-622 for `data_bits: 7` and a loopback, multicast or broadcast host of
 //   a Modbus channel;
-// - the types of the configuration expressions of templates (CF-523), and
-//   CF-310 for a name in them that no parameter or variable of the
-//   template's chain has.
+// - CF-410 for a configuration expression of a template that fails over
+//   the names of its chain upward, and for any name in an expression of a
+//   device without template; CF-523 for a `for` value that gives no range
+//   or INT. An expression with a name its chain upward lacks is left to the
+//   expander (#103), as a child of the chain may define the name.
 // Expects files that passed stage 3: a value of the wrong shape is skipped.
 void check_references(std::span<const CheckedFile> files,
                       Diagnostics& diagnostics);

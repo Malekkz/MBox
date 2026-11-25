@@ -235,10 +235,11 @@ TEST(References, NamesOfATemplatesPoints) {
                    "  - { name: x, enum: none_such, logging: counters, "
                    "address: { table: holding, register: 4, type: uint16 } "
                    "}\n"}}),
-        (Lines{"templates/meter_a.yaml:10:22 CF-310: enumeration \"none_such\" "
-               "does not exist",
-               "templates/meter_a.yaml:10:42 CF-310: logging policy "
-               "\"counters\" does not exist"}));
+        // An enumeration that the chain upward and enums.yaml lack may be a
+        // child's (4.5, step 3.1): it waits for the instance (#103; B5 of
+        // the review of #144).
+        Lines{"templates/meter_a.yaml:10:42 CF-310: logging policy "
+              "\"counters\" does not exist"});
 }
 
 // An instance's own points, defaults and overrides name enumerations of the
@@ -416,7 +417,10 @@ TEST(References, AModbusDeviceIsNeverAtALoopbackMulticastOrBroadcastHost) {
 }
 
 // The types of a template's configuration expressions (5.6), over the
-// parameters and `repeat` variables of its chain.
+// parameters and `repeat` variables of its chain: a failure is CF-410 in the
+// form of 2.4 and 10.4. `cards` and the `n` of `k: "1..n"` resolve nowhere in
+// the chain upward, so a child could give them: they are not reported here
+// (B5, B6 of the review of #144).
 TEST(References, TypesOfConfigurationExpressions) {
     EXPECT_EQ(
         validate(
@@ -452,21 +456,224 @@ TEST(References, TypesOfConfigurationExpressions) {
               "      - { name: \"p{n}\", address: { table: holding, "
               "register: \"100 + n\", type: uint16 } }\n"}}),
         // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
-        (Lines{"templates/meter_a.yaml:8:30 CF-523: expression: the value "
-               "must be BOOL, not INT at column 8",
-               "templates/meter_a.yaml:9:60 CF-523: expression: the value "
-               "must be a number, not BOOL at column 7",
-               "templates/meter_a.yaml:10:54 CF-310: parameter or variable "
-               "\"cards\" does not exist",
-               "templates/meter_a.yaml:11:53 CF-523: expression: sum reads "
-               "tags, and a configuration expression has none at line 1, "
-               "column 1 of the expression's text",
-               "templates/meter_a.yaml:12:74 CF-523: expression: max takes 2 "
-               "or more arguments, not 1 at column 21",
-               "templates/meter_a.yaml:15:35 CF-310: parameter or variable "
-               "\"n\" does not exist",
-               "templates/meter_a.yaml:16:18 CF-523: expression: AND needs "
-               "BOOL, not SET at column 7"}));
+        (Lines{"templates/meter_a.yaml:8:30 CF-410: expression \"inputs + "
+               "1\": the value must be BOOL, not INT",
+               "templates/meter_a.yaml:9:60 CF-410: expression \"model = "
+               "'a'\": the value must be a number, not BOOL",
+               "templates/meter_a.yaml:11:53 CF-410: expression "
+               "\"sum(\\\"x.*\\\")\": sum reads tags, and a configuration "
+               "expression has none",
+               "templates/meter_a.yaml:12:74 CF-410: expression "
+               "\"round(inputs / 2) + max(inputs)\": max takes 2 or more "
+               "arguments, not 1",
+               "templates/meter_a.yaml:16:18 CF-410: expression \"n > 1 AND "
+               "options\": AND needs BOOL, not SET"}));
+}
+
+// B1 of the review of #144: without control/tasks.yaml the tasks fast,
+// normal and slow exist (9.1); a file replaces them all.
+TEST(References, TheDefaultTasks) {
+    const std::string tags =
+        "tags:\n"
+        "  - { name: a.f, type: virtual, expr: \"1\", task: fast }\n"
+        "  - { name: a.n, type: virtual, expr: \"1\", task: normal }\n"
+        "  - { name: a.s, type: virtual, expr: \"1\", task: slow }\n";
+    EXPECT_EQ(validate({{"tags/site.yaml", tags}}), Lines{});
+    EXPECT_EQ(validate({{"tags/site.yaml", tags},
+                        {"control/tasks.yaml",
+                         "tasks:\n  normal: { period: 1s, programs: [] }\n"}}),
+              (Lines{"tags/site.yaml:2:50 CF-310: task \"fast\" does not exist",
+                     "tags/site.yaml:4:50 CF-310: task \"slow\" does not "
+                     "exist"}));
+}
+
+// B2: an alarm's expressions read tags wherever the alarm stands, a point,
+// a bit of a point or a tag; they are not configuration expressions.
+TEST(References, AlarmExpressionsAreRunTimeWhereverTheAlarmStands) {
+    EXPECT_EQ(
+        validate(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\nbit_order: lsb0\n"
+              "points:\n"
+              "  - name: word\n"
+              "    tag: false\n"
+              "    address: { table: holding, register: 1, type: uint16 }\n"
+              "    alarms: [ { type: expression, name: w.hot, expr: "
+              "\"ps1.t1 > 80\", priority: high, suppress_when: "
+              "ps1.station.maint } ]\n"
+              "    bits:\n"
+              "      0:\n"
+              "        name: fault\n"
+              "        alarms: [ { type: state, alarm_on: true, priority: "
+              "high, suppress_when: ps1.station.maint } ]\n"},
+             {"tags/site.yaml",
+              "tags:\n"
+              "  - { name: a.b, type: internal, value_type: bool, alarms: "
+              "[ { type: state, alarm_on: true, priority: high, "
+              "suppress_when: ps1.station.maint } ] }\n"}}),
+        Lines{});
+}
+
+// B3: data_bits by its value, however it is written.
+TEST(References, DataBitsByTheirValue) {
+    for (const std::string_view written : {"0x7", "0x07"}) {
+        EXPECT_EQ(validate({{"drivers/modbus/line1.yaml",
+                             "channel:\n  name: line1\n  type: rtu\n"
+                             "  device: /dev/serial/by-path/platform-serial1\n"
+                             "  baud: 9600\n  data_bits: " +
+                                 std::string(written) + "\n"}}),
+                  Lines{"drivers/modbus/line1.yaml:6:14 CF-622: "
+                        "channel.data_bits: 7 data bits are Modbus ASCII, "
+                        "which is not available in this version"})
+            << written;
+    }
+}
+
+// B4: an IPv6 host by its 16 bytes, however it is written; an IPv4-mapped
+// address by its IPv4 address.
+// What CF-622 says of a Modbus TCP host, or "valid".
+std::string host_reason(std::string_view address) {
+    const Lines lines = tcp_channel_to(address);
+    if (lines.empty()) {
+        return "valid";
+    }
+    constexpr std::string_view SEPARATOR = " is ";
+    return lines.front().substr(lines.front().rfind(SEPARATOR) +
+                                SEPARATOR.size());
+}
+
+TEST(References, IpV6HostsByTheirBytes) {
+    const auto reason = host_reason;
+
+    for (const std::string_view valid :
+         {"ff::1", "ff0::1", "fff:1::1", "::ffff:192.0.2.1", "2001:db8::1"}) {
+        EXPECT_EQ(reason(valid), "valid") << valid;
+    }
+}
+
+TEST(References, IpV6LoopbacksAndMulticastByTheirBytes) {
+    const auto reason = host_reason;
+    for (const std::string_view loopback :
+         {"::1", "0::1", "0000:0000:0000:0000:0000:0000:0000:0001", "::0.0.0.1",
+          "::ffff:127.0.0.1"}) {
+        EXPECT_EQ(reason(loopback), "a loopback address") << loopback;
+    }
+    for (const std::string_view multicast :
+         {"ff02::1", "FF05::2", "::ffff:224.0.0.1"}) {
+        EXPECT_EQ(reason(multicast), "a multicast address") << multicast;
+    }
+    EXPECT_EQ(reason("::ffff:255.255.255.255"), "the broadcast address");
+}
+
+// B5: a parent template is not checked alone for names a child may give;
+// a chain of three templates, the root using what the leaf declares.
+TEST(References, AParentMayUseWhatAChildGives) {
+    EXPECT_EQ(
+        validate({{"templates/meter_base.yaml",
+                   "template: meter_base\n"
+                   "points: [ { name: v, enum: states, unit: V } ]\n"},
+                  {"templates/meter_a.yaml",
+                   "template: meter_a\nextends: meter_base\nprotocol: modbus\n"
+                   "points:\n"
+                   "  - { name: p, address: { table: holding, register: "
+                   "\"base_r + 1\", type: uint16 } }\n"},
+                  {"templates/meter_b.yaml",
+                   "template: meter_b\nextends: meter_a\nprotocol: modbus\n"
+                   "params: { base_r: { type: int, default: 100 } }\n"
+                   "enums: { states: { 0: off, 1: on } }\n"},
+                  {"drivers/modbus/line1.yaml",
+                   channel("  - { name: ps1.m1, template: meter_b, unit_id: "
+                           "1 }\n")}}),
+        Lines{});
+    // In the chain upward, the types are checked: meter_b's own `when`.
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "params: { inputs: { type: int, default: 2 } }\n"},
+                  {"templates/meter_b.yaml",
+                   "template: meter_b\nextends: meter_a\nprotocol: modbus\n"
+                   "points:\n"
+                   "  - { name: p, when: inputs, address: { table: holding, "
+                   "register: 1, type: uint16 } }\n"}}),
+        Lines{"templates/meter_b.yaml:5:22 CF-410: expression \"inputs\": the "
+              "value must be BOOL, not INT"});
+}
+
+// B5: without a template nothing can define a name, so each is CF-410; with
+// a template, the instance's expressions are left to the expander, which
+// binds its variables (#103).
+TEST(References, NamesOfAnInstancesExpressions) {
+    EXPECT_EQ(
+        validate({{"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    unit_id: 1\n"
+                           "    points:\n"
+                           "      - { name: p, address: { table: holding, "
+                           "register: \"base + 1\", type: uint16 } }\n")}}),
+        Lines{"drivers/modbus/line1.yaml:10:58 CF-410: expression \"base + "
+              "1\": \"base\" is not a parameter or a variable"});
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "points:\n"
+                   "  - { name: p, address: { table: holding, register: 1, "
+                   "type: uint16 } }\n"},
+                  {"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    template: meter_a\n"
+                           "    unit_id: 1\n"
+                           "    overrides: { p: { address: { register: "
+                           "\"'a' + n\" } } }\n")}}),
+        Lines{});
+}
+
+// S3: a chain cut by its length (or a cycle) is not known; its names and
+// types are not checked here (CF-401 comes with #103).
+TEST(References, ACutChainIsNotChecked) {
+    Files files;
+    constexpr int TEMPLATES = 7;
+    for (int level = 1; level <= TEMPLATES; ++level) {
+        const std::string name = "t" + std::to_string(level);
+        std::string text = "template: " + name + "\nprotocol: modbus\n";
+        if (level > 1) {
+            text += "extends: t" + std::to_string(level - 1) + "\n";
+        }
+        if (level == 1) {
+            text += "params: { inputs: { type: int, default: 2 } }\n";
+        }
+        if (level == TEMPLATES) {
+            text +=
+                "points: [ { name: p, when: inputs, address: { table: "
+                "holding, register: 1, type: uint16 } } ]\n";
+        }
+        files.emplace("templates/" + name + ".yaml", text);
+    }
+    EXPECT_EQ(validate(files), Lines{});
+}
+
+// S2: a user tag must not start with the segment `sys` (2.1): `sys` itself
+// too; `system.a` is another segment, and valid.
+TEST(References, TheSysSegment) {
+    EXPECT_EQ(
+        validate({{"tags/a.yaml",
+                   "tags:\n"
+                   "  - { name: sys, type: internal, value_type: int64 }\n"
+                   "  - { name: system.a, type: internal, value_type: "
+                   "int64 }\n"}}),
+        Lines{"tags/a.yaml:2:13 CF-301: tag names starting with sys. "
+              "are reserved"});
+}
+
+// Stage 5 runs only when the stages before it found no error: a tree with
+// a YAML error gives that error alone, not its wrong references too.
+TEST(References, StageFiveWaitsForTheStagesBefore) {
+    EXPECT_EQ(validate({{"tags/a.yaml",
+                         "tags:\n"
+                         "  - { name: a.b, type: manual, value_type: int64, "
+                         "area: nowhere }\n"},
+                        {"tags/b.yaml", "tags: [\n"}}),
+              Lines{"tags/b.yaml:1:7 CF-110: an unclosed flow sequence is not "
+                    "allowed in configuration files"});
 }
 
 }  // namespace

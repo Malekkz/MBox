@@ -72,8 +72,11 @@ D-113):
 - names given twice: channels, devices and interlocks (CF-303), and the tags
   of tag files and interlocks (CF-301, CF-302);
 - the Modbus channel rules of Annex A.1 (CF-622);
-- the types of a template's configuration expressions (CF-523), and a name
-  in them that no parameter or variable of the chain has (CF-310).
+- the types of a template's configuration expressions, over the names of
+  its chain upward (CF-410; CF-523 for the type of a `for` value), and a
+  name in an expression of a device without template (CF-410). A name the
+  chain upward lacks may come from a child, and is checked at the instance
+  (#103).
 
 A reference to a tag gives no error yet: point tags exist only once
 instances are expanded, so those references, and the names and types of

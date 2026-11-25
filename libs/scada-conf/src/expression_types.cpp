@@ -233,7 +233,9 @@ private:
         const ValueType lhs = child(node, 0);
         const ValueType rhs = child(node, 1);
         if (lhs == rhs || (is_number(lhs) && is_number(rhs))) {
-            if (lhs == ValueType::SET || lhs == ValueType::RANGE) {
+            // Two SETs are two values of one type (5.6); a range is not a
+            // value, only a part of `IN` and of a `for` value (D-113).
+            if (lhs == ValueType::RANGE) {
                 return pair_mismatch(node,
                                      node.op == ExprOp::EQUAL ? "=" : "<>",
                                      "two values of one type");

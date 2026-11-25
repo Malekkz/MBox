@@ -12,9 +12,11 @@
 #include "scada/conf/expression.h"
 #include "scada/conf/names.h"
 #include "scada/conf/node.h"
+#include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +38,7 @@ constexpr std::uint16_t CF_SYSTEM_TAG = 301;
 constexpr std::uint16_t CF_TAG_TWICE = 302;
 constexpr std::uint16_t CF_NAME_TWICE = 303;
 constexpr std::uint16_t CF_NO_SUCH = 310;
+constexpr std::uint16_t CF_EXPRESSION_FAILS = 410;
 constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
 constexpr std::uint16_t CF_PROTOCOL_RULE = 622;
 
@@ -49,6 +52,10 @@ constexpr std::array<std::string_view, 4> DEFAULT_PRIORITIES = {
     "critical", "high", "medium", "low"};
 constexpr std::array<std::string_view, 2> DEFAULT_CLASSES = {"process",
                                                              "system"};
+// 9.1: "Without `control/tasks.yaml`, the tasks `fast` (10 ms), `normal`
+// (100 ms) and `slow` (1 s) exist. A file replaces them all."
+constexpr std::array<std::string_view, 3> DEFAULT_TASKS = {"fast", "normal",
+                                                           "slow"};
 
 // Names of one kind, each with the place it was first given.
 class Definitions {
@@ -78,57 +85,58 @@ std::string first_at(const Location& where) {
 }
 
 // The parts of an IPv4 literal; nothing for anything else.
-std::optional<std::array<unsigned, 4>> ipv4_parts(std::string_view text) {
-    if (!is_ipv4_address(text)) {
-        return std::nullopt;
-    }
-    constexpr unsigned DECIMAL = 10;
-    std::array<unsigned, 4> parts{};
-    std::size_t part = 0;
-    for (const char chr : text) {
-        if (chr == '.') {
-            ++part;
-        } else {
-            parts.at(part) =
-                parts.at(part) * DECIMAL + static_cast<unsigned>(chr - '0');
-        }
-    }
-    return parts;
-}
-
-// Why `host` cannot be a device's address (Annex A.1), or nothing.
-std::optional<std::string> refused_host(std::string_view host) {
-    constexpr unsigned LOOPBACK = 127;
-    constexpr unsigned FIRST_MULTICAST = 224;
-    constexpr unsigned LAST_MULTICAST = 239;
-    constexpr unsigned BROADCAST = 255;
-    if (const std::optional<std::array<unsigned, 4>> parts = ipv4_parts(host)) {
-        if (parts->at(0) == LOOPBACK) {
-            return "a loopback address";
-        }
-        if (parts->at(0) >= FIRST_MULTICAST && parts->at(0) <= LAST_MULTICAST) {
-            return "a multicast address";
-        }
-        if (*parts == std::array<unsigned, 4>{BROADCAST, BROADCAST, BROADCAST,
-                                              BROADCAST}) {
-            return "the broadcast address";
-        }
-        return std::nullopt;
-    }
-    if (!is_ipv6_address(host)) {
-        return std::nullopt;
-    }
-    std::string lower;
-    for (const char chr : host) {
-        lower.push_back(chr >= 'A' && chr <= 'Z'
-                            ? static_cast<char>(chr - 'A' + 'a')
-                            : chr);
-    }
-    if (lower == "::1" || lower == "0:0:0:0:0:0:0:1") {
+// Why an IPv4 address cannot be a device's (Annex A.1), or nothing.
+std::optional<std::string> refused_ipv4(
+    const std::array<std::uint8_t, IPV4_BYTES>& bytes) {
+    constexpr std::uint8_t LOOPBACK = 127;
+    constexpr std::uint8_t FIRST_MULTICAST = 224;
+    constexpr std::uint8_t LAST_MULTICAST = 239;
+    constexpr std::uint8_t ALL = 255;
+    if (bytes[0] == LOOPBACK) {
         return "a loopback address";
     }
-    if (lower.starts_with("ff")) {
+    if (bytes[0] >= FIRST_MULTICAST && bytes[0] <= LAST_MULTICAST) {
         return "a multicast address";
+    }
+    if (bytes == std::array<std::uint8_t, IPV4_BYTES>{ALL, ALL, ALL, ALL}) {
+        return "the broadcast address";
+    }
+    return std::nullopt;
+}
+
+// Why `host` cannot be a device's address (Annex A.1), or nothing. An
+// address is classified by its bytes, however it is written; an
+// IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) by its IPv4 address.
+std::optional<std::string> refused_host(std::string_view host) {
+    if (const std::optional<std::array<std::uint8_t, IPV4_BYTES>> bytes =
+            ipv4_bytes(host)) {
+        return refused_ipv4(*bytes);
+    }
+    const std::optional<std::array<std::uint8_t, IPV6_BYTES>> bytes =
+        ipv6_bytes(host);
+    if (!bytes) {
+        return std::nullopt;
+    }
+    constexpr std::uint8_t MULTICAST = 0xFF;
+    constexpr std::size_t MAPPED_AT = 10;
+    if (bytes->front() == MULTICAST) {
+        return "a multicast address";
+    }
+    // `::ffff:a.b.c.d`: ten zero bytes, two 0xFF, then the IPv4 address.
+    const bool mapped =
+        std::all_of(bytes->begin(), bytes->begin() + MAPPED_AT,
+                    [](std::uint8_t byte) { return byte == 0; }) &&
+        bytes->at(MAPPED_AT) == MULTICAST &&
+        bytes->at(MAPPED_AT + 1) == MULTICAST;
+    if (mapped) {
+        std::array<std::uint8_t, IPV4_BYTES> ipv4{};
+        std::copy(bytes->end() - IPV4_BYTES, bytes->end(), ipv4.begin());
+        return refused_ipv4(ipv4);
+    }
+    std::array<std::uint8_t, IPV6_BYTES> loopback{};
+    loopback.back() = 1;
+    if (*bytes == loopback) {
+        return "a loopback address";
     }
     return std::nullopt;
 }
@@ -253,6 +261,7 @@ private:
                 collect_logging();
                 break;
             case FileType::TASKS:
+                tasks_given_ = true;
                 collect_keys(tasks_, "tasks");
                 break;
             case FileType::PROGRAM:
@@ -367,7 +376,8 @@ private:
             return;
         }
         const std::string_view tag = text(*name);
-        if (tag.starts_with("sys.")) {
+        // 2.1: a user tag name "must not start with the segment `sys`".
+        if (tag == "sys" || tag.starts_with("sys.")) {
             error(CF_SYSTEM_TAG, *name,
                   "tag names starting with sys. are reserved");
             return;
@@ -382,6 +392,11 @@ private:
 
     void add_defaults() {
         const Location none{};
+        if (!tasks_given_) {
+            for (const std::string_view task : DEFAULT_TASKS) {
+                tasks_.add(task, none);
+            }
+        }
         if (!tiers_given_) {
             for (const std::string_view tier : DEFAULT_TIERS) {
                 tiers_.add(tier, none);
@@ -443,17 +458,12 @@ private:
                 CF_NO_SUCH, *protocol,
                 "protocol " + quote_text(text(*protocol)) + " does not exist");
         }
-        const Scope scope = scope_of(file_);
+        const Scope& scope = scope_of(file_);
         for (const NodeId point : items(root(), "points")) {
             check_point(point, scope, {});
         }
         for (const NodeId block : items(root(), "repeat")) {
-            std::vector<std::string> variables;
-            if (const std::optional<NodeId> range = find_map(block, "for")) {
-                for (const Entry& entry : document_->entries(*range)) {
-                    variables.emplace_back(text(entry.key));
-                }
-            }
+            const Variables variables = variables_of(block);
             check_repeat(block, scope);
             for (const NodeId point : items(block, "points")) {
                 check_point(point, scope, variables);
@@ -465,6 +475,19 @@ private:
         }
     }
 
+    using Variables = std::set<std::string, std::less<>>;
+
+    // The variables of a `repeat` block's `for`.
+    [[nodiscard]] Variables variables_of(NodeId block) const {
+        Variables variables;
+        if (const std::optional<NodeId> range = find_map(block, "for")) {
+            for (const Entry& entry : document_->entries(*range)) {
+                variables.emplace(text(entry.key));
+            }
+        }
+        return variables;
+    }
+
     // What the names of a template's points and expressions resolve to:
     // the enumerations and parameters of its chain, and the variables of
     // every `repeat` block of the chain (a template's `defaults` reach the
@@ -472,24 +495,33 @@ private:
     struct Scope {
         std::set<std::string, std::less<>> enums;
         std::map<std::string, ValueType, std::less<>> parameters;
-        std::vector<std::string> variables;
+        std::set<std::string, std::less<>> variables;
         // False when the chain names a template the tree does not have:
         // its enumerations and parameters are not known, and the missing
         // template is the error.
         bool known = true;
-        // False where the expander types the expressions (an instance).
+        // False where the expander types the expressions (an instance of a
+        // template).
         bool typed = true;
+        // True for a device without template: a name in an expression is
+        // an error here, as nothing can define it.
+        bool bare = false;
     };
 
     // The scope of `file`, a template, walking `extends` up to MAX_CHAIN
-    // files. A chain that leaves the tree is not known: its names are not
-    // checked, as the missing template is its error.
-    Scope scope_of(const CheckedFile* file) const {
-        Scope scope;
+    // files, built once per template. A chain that leaves the tree, has a
+    // cycle or is longer is not known: its names are not checked, as the
+    // missing template or CF-401 (#103) is its error.
+    const Scope& scope_of(const CheckedFile* file) {
+        const auto cached = scopes_.find(file);
+        if (cached != scopes_.end()) {
+            return cached->second;
+        }
+        Scope& scope = scopes_[file];
         std::set<const CheckedFile*> seen;
-        for (std::size_t depth = 0; file != nullptr && depth < MAX_CHAIN;
-             ++depth) {
-            if (!seen.insert(file).second) {
+        for (std::size_t depth = 0; file != nullptr; ++depth) {
+            if (depth == MAX_CHAIN || !seen.insert(file).second) {
+                scope.known = false;
                 break;
             }
             const Document& document = *file->document;
@@ -554,7 +586,7 @@ private:
                     continue;
                 }
                 for (const Entry& entry : document.entries(*range)) {
-                    scope.variables.emplace_back(document.text(entry.key));
+                    scope.variables.emplace(document.text(entry.key));
                 }
             }
         }
@@ -600,9 +632,15 @@ private:
             return;
         }
         const std::optional<NodeId> kind = find_scalar(*channel, "type");
-        if (const std::optional<NodeId> bits =
-                find_scalar(*channel, "data_bits");
-            bits && kind && text(*kind) == "rtu" && text(*bits) == "7") {
+        constexpr std::uint64_t ASCII_DATA_BITS = 7;
+        // By its value, as stage 3 typed it: `7`, `0x7` and `0x07` alike.
+        const std::optional<NodeId> bits = find_scalar(*channel, "data_bits");
+        const std::optional<Integer> value =
+            bits && file_->types->of(*bits) == ScalarType::INTEGER
+                ? parse_integer(text(*bits))
+                : std::nullopt;
+        if (bits && kind && text(*kind) == "rtu" && value && !value->negative &&
+            value->magnitude == ASCII_DATA_BITS) {
             error(CF_PROTOCOL_RULE, *bits,
                   "channel.data_bits: 7 data bits are Modbus ASCII, which is "
                   "not available in this version");
@@ -628,11 +666,16 @@ private:
             } else {
                 scope.known = false;
             }
+            // An instance's points, defaults and overrides may use the
+            // variables of the template's `repeat` blocks (4.5, step 6);
+            // their expressions are typed by the expander, which binds
+            // them.
+            scope.typed = false;
+        } else {
+            // Without a template there is no parameter or variable: every
+            // name in an expression is unknown (B5 of the review of #144).
+            scope.bare = true;
         }
-        // An instance's points, defaults and overrides may use the
-        // variables of the template's `repeat` blocks (4.5, step 6); their
-        // expressions are typed by the expander, which binds them.
-        scope.typed = false;
         for (const NodeId point : items(device, "points")) {
             check_point(point, scope, {});
         }
@@ -651,12 +694,15 @@ private:
     // The names a point uses: enumeration, logging, alarms, its bits'; and
     // the types of its configuration expressions, when its scope is known.
     void check_point(NodeId point, const Scope& scope,
-                     const std::vector<std::string>& variables) {
+                     const Variables& variables) {
         if (!is_map(point)) {
             return;
         }
+        // In a template, a child of the chain may define the enumeration
+        // (4.5, step 3.1): it is checked at the instance (#103).
         if (const std::optional<NodeId> name = find_scalar(point, "enum");
-            name && scope.known && !scope.enums.contains(text(*name))) {
+            name && scope.known && !in_template() &&
+            !scope.enums.contains(text(*name))) {
             need(enums_, "enumeration", *name);
         }
         check_logging_of(point);
@@ -789,6 +835,10 @@ private:
         }
     }
 
+    [[nodiscard]] bool in_template() const noexcept {
+        return type() == FileType::TEMPLATE;
+    }
+
     // --- Configuration expressions of a template ---------------------------
 
     void check_repeat(NodeId block, const Scope& scope) {
@@ -803,14 +853,8 @@ private:
             }
         }
         if (const std::optional<NodeId> when = find_scalar(block, "when")) {
-            std::vector<std::string> variables;
-            if (const std::optional<NodeId> range = find_map(block, "for")) {
-                for (const Entry& entry : document_->entries(*range)) {
-                    variables.emplace_back(text(entry.key));
-                }
-            }
-            check_typed(*when, scope, variables, ExpressionKind::CONFIGURATION,
-                        Wanted::BOOL);
+            check_typed(*when, scope, variables_of(block),
+                        ExpressionKind::CONFIGURATION, Wanted::BOOL);
         }
     }
 
@@ -831,13 +875,22 @@ private:
 
     enum class Wanted : std::uint8_t { BOOL, NUMBER, RANGE_OR_INT };
 
+    // The one place that tells run-time expressions from configuration
+    // expressions in a point (8): an alarm's `expr`, `condition` and
+    // `suppress_when` read tags, wherever the alarm stands (a point, a bit
+    // of a point, a tag). Stage 3 types both kinds as EXPRESSION.
+    static bool holds_run_time_expressions(std::string_view key) noexcept {
+        return key == "alarms";
+    }
+
     // Every expression of a point: its `when`, and each scalar stage 3 typed
     // as an expression (addresses, scaling).
     void check_expressions(NodeId point, const Scope& scope,
-                           const std::vector<std::string>& variables) {
+                           const Variables& variables) {
         for (const Entry& entry : document_->entries(point)) {
             const std::string_view key = text(entry.key);
-            if (key == "alarms" || key == "logging" || key == "name") {
+            if (holds_run_time_expressions(key) || key == "logging" ||
+                key == "name") {
                 continue;
             }
             if (key == "when") {
@@ -853,7 +906,7 @@ private:
 
     // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
     void check_numbers_below(NodeId node, const Scope& scope,
-                             const std::vector<std::string>& variables) {
+                             const Variables& variables) {
         switch (document_->kind(node)) {
             case NodeKind::SCALAR:
                 if (file_->types->of(node) == ScalarType::EXPRESSION) {
@@ -863,7 +916,9 @@ private:
                 return;
             case NodeKind::MAP:
                 for (const Entry& entry : document_->entries(node)) {
-                    check_numbers_below(entry.value, scope, variables);
+                    if (!holds_run_time_expressions(text(entry.key))) {
+                        check_numbers_below(entry.value, scope, variables);
+                    }
                 }
                 return;
             case NodeKind::SEQUENCE:
@@ -878,9 +933,8 @@ private:
     // the chain may be used, as in a point, which merging may join to a
     // point a `repeat` made.
     void check_typed(NodeId scalar, const Scope& scope,
-                     const std::vector<std::string>& variables,
-                     ExpressionKind kind, Wanted wanted,
-                     bool chain_variables = true) {
+                     const Variables& variables, ExpressionKind kind,
+                     Wanted wanted, bool chain_variables = true) {
         ExpressionError syntax;
         const std::optional<Expression> tree =
             parse_expression(text(scalar), kind, syntax);
@@ -892,39 +946,72 @@ private:
         const NameTypes names =
             [&scope, &variables, chain_variables](
                 std::string_view name) -> std::optional<ValueType> {
-            for (const std::string& variable : variables) {
-                if (variable == name) {
-                    return ValueType::INT;
-                }
+            if (variables.contains(name)) {
+                return ValueType::INT;
             }
             if (const auto found = scope.parameters.find(name);
                 found != scope.parameters.end()) {
                 return found->second;
             }
-            if (chain_variables) {
-                for (const std::string& variable : scope.variables) {
-                    if (variable == name) {
-                        return ValueType::INT;
-                    }
-                }
+            if (chain_variables && scope.variables.contains(name)) {
+                return ValueType::INT;
             }
             return std::nullopt;
         };
+        // A name the template's chain upward does not have may come from a
+        // child of the chain (4.5): it is checked at the instance (#103).
+        // Without a template, no name can be defined, so each is CF-410.
+        for (const ExprNode& node : tree->nodes) {
+            if (node.op != ExprOp::REFERENCE || names(node.text)) {
+                continue;
+            }
+            if (scope.bare) {
+                report(scalar, node.column,
+                       quote_text(node.text) +
+                           " is not a parameter or a variable");
+            }
+            return;
+        }
         TypeError problem;
         const std::optional<ValueType> result =
             configuration_type(*tree, names, problem);
         if (!result) {
-            report(scalar, problem);
+            report(scalar, problem.column, reason_of(problem.message));
             return;
         }
-        if (!fits(*result, wanted)) {
-            report(scalar,
-                   TypeError{.code = CF_TYPE_MISMATCH,
-                             .column = tree->nodes.at(tree->root).column,
-                             .message = "expression: the value must be " +
-                                        wanted_name(wanted) + ", not " +
-                                        std::string(value_type_name(*result))});
+        if (fits(*result, wanted)) {
+            return;
         }
+        const std::uint32_t column = tree->nodes.at(tree->root).column;
+        const std::string reason = "the value must be " + wanted_name(wanted) +
+                                   ", not " +
+                                   std::string(value_type_name(*result));
+        // 5.6 names CF-523 for the type of a `for` value; any other failure
+        // of a configuration expression is CF-410 (2.4).
+        if (wanted == Wanted::RANGE_OR_INT) {
+            ExpressionSite site = expression_site(*document_, scalar, column);
+            diagnostics_->error(CF_TYPE_MISMATCH, std::move(site.location),
+                                "expression: " + reason + site.where);
+            return;
+        }
+        report(scalar, column, reason);
+    }
+
+    // The reason of a type checker's message, without its "expression: ".
+    static std::string reason_of(const std::string& message) {
+        constexpr std::string_view PREFIX = "expression: ";
+        return message.starts_with(PREFIX) ? message.substr(PREFIX.size())
+                                           : message;
+    }
+
+    // CF-410 (2.4, 10.4): `expression {expr}: {reason}`, at the offending
+    // character (D-109).
+    void report(NodeId scalar, std::uint32_t column,
+                const std::string& reason) {
+        ExpressionSite site = expression_site(*document_, scalar, column);
+        diagnostics_->error(
+            CF_EXPRESSION_FAILS, std::move(site.location),
+            "expression " + quote_text(text(scalar)) + ": " + reason);
     }
 
     static bool fits(ValueType type, Wanted wanted) noexcept {
@@ -951,23 +1038,14 @@ private:
         return "?";
     }
 
-    void report(NodeId scalar, const TypeError& problem) {
-        ExpressionSite site =
-            expression_site(*document_, scalar, problem.column);
-        std::string message = problem.message;
-        if (problem.code == CF_TYPE_MISMATCH) {
-            message += site.where;
-        }
-        diagnostics_->error(problem.code, std::move(site.location),
-                            std::move(message));
-    }
-
     std::span<const CheckedFile> files_;
     Diagnostics* diagnostics_;
     const CheckedFile* file_ = nullptr;
     const Document* document_ = nullptr;
 
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
+    // The scope of each template, built once (S4 of the review of #144).
+    std::map<const CheckedFile*, Scope> scopes_;
     Definitions template_names_;
     Definitions channels_;
     Definitions devices_;
@@ -983,6 +1061,7 @@ private:
     Definitions classes_;
     Definitions tags_;
     bool tiers_given_ = false;
+    bool tasks_given_ = false;
     bool priorities_given_ = false;
     bool classes_given_ = false;
 };

@@ -105,9 +105,9 @@ TEST(ExpressionTypes, ComparisonsAndLogic) {
     EXPECT_EQ(type_of("s = i"),
               "CF-523 at 3: expression: = needs two values of one type, not "
               "STRING and INT");
-    EXPECT_EQ(type_of("o = o"),
-              "CF-523 at 3: expression: = needs two values of one type, not "
-              "SET and SET");
+    // Two SETs are two values of one type (5.6; S1 of the review of #144).
+    EXPECT_EQ(type_of("o = o"), "BOOL");
+    EXPECT_EQ(type_of("o <> o"), "BOOL");
     EXPECT_EQ(type_of("s < 'b'"),
               "CF-523 at 3: expression: a comparison needs numbers or two "
               "TIMEs, not STRING and STRING");

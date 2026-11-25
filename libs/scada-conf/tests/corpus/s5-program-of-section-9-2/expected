@@ -1,6 +1,6 @@
-# A function block program (9.2) that passes stage 3. Its task and its
-# output are defined nowhere in the tree: CF-310 for each at stage 5
-# (D-113). The block library declares no block type before phase 6, so a
-# tree that has them is still refused, for its block type (CF-910). Invented.
-control/ps1_pump.yaml:2:7: CF-310
+# A function block program (9.2) that passes stage 3. Its task `normal` is
+# one of the default tasks, as the tree has no control/tasks.yaml (9.1);
+# its output is defined nowhere in the tree: CF-310 at stage 5 (D-113). The
+# block library declares no block type before phase 6, so a tree that has
+# it is still refused, for its block type (CF-910). Invented.
 control/ps1_pump.yaml:7:13: CF-310

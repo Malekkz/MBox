@@ -4,7 +4,10 @@
 // The name grammars of configuration schemas contract 2.1, and the other
 // text forms the schemas check (addresses, zones, times of day).
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace scada::conf {
@@ -53,6 +56,20 @@ constexpr std::size_t MAX_HOST_NAME = 253;
 // An IPv6 address in the text forms of RFC 4291 2.2 (with `::` and an IPv4
 // tail), without a zone index.
 [[nodiscard]] bool is_ipv6_address(std::string_view text) noexcept;
+
+// The bytes of an IPv4 and an IPv6 address.
+constexpr std::size_t IPV4_BYTES = 4;
+constexpr std::size_t IPV6_BYTES = 16;
+
+// The 4 bytes of an IPv4 literal, most significant first; nothing for
+// anything that `is_ipv4_address` refuses.
+[[nodiscard]] std::optional<std::array<std::uint8_t, IPV4_BYTES>> ipv4_bytes(
+    std::string_view text) noexcept;
+
+// The 16 bytes of an IPv6 literal (`::`, an IPv4 tail), most significant
+// first; nothing for anything that `is_ipv6_address` refuses.
+[[nodiscard]] std::optional<std::array<std::uint8_t, IPV6_BYTES>> ipv6_bytes(
+    std::string_view text) noexcept;
 
 // An IPv4 or IPv6 address.
 [[nodiscard]] bool is_ip_address(std::string_view text) noexcept;
