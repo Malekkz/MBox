@@ -134,6 +134,18 @@ TEST(ExpressionTypes, InAndRanges) {
               "REAL");
 }
 
+// The gaps of the review of #144: one INT is a `for` value as a range is
+// (5.6); a STRING on the left of IN with a range is refused, as IN with a
+// range compares INTs.
+TEST(ExpressionTypes, ForValuesAndInOfAString) {
+    EXPECT_EQ(type_of("i", ExpressionKind::FOR_VALUE), "INT");
+    EXPECT_EQ(type_of("3", ExpressionKind::FOR_VALUE), "INT");
+    EXPECT_EQ(type_of("s IN 1..5"),
+              "CF-523 at 3: expression: IN with a range needs INTs, not "
+              "STRING");
+    EXPECT_EQ(type_of("i IN 1..5"), "BOOL");
+}
+
 TEST(ExpressionTypes, Functions) {
     EXPECT_EQ(type_of("if(b, i, i)"), "INT");
     EXPECT_EQ(type_of("if(b, i, r)"), "REAL");
@@ -159,6 +171,10 @@ TEST(ExpressionTypes, Functions) {
               "INT and STRING");
     EXPECT_EQ(type_of("if(b, 1)"),
               "CF-523 at 1: expression: if takes 3 arguments, not 2");
+    EXPECT_EQ(type_of("limit(0, i, 10, 2)"),
+              "CF-523 at 1: expression: limit takes 3 arguments, not 4");
+    EXPECT_EQ(type_of("limit(0, i)"),
+              "CF-523 at 1: expression: limit takes 3 arguments, not 2");
     EXPECT_EQ(type_of("max(i)"),
               "CF-523 at 1: expression: max takes 2 or more arguments, not 1");
     EXPECT_EQ(type_of("sqrt(i, i)"),
@@ -179,8 +195,10 @@ TEST(ExpressionTypes, NamesAndTags) {
     EXPECT_EQ(type_of("i + k"),
               "CF-310 at 5: parameter or variable \"k\" does not exist");
     for (const std::string_view call :
-         {"sum(\"a.*\")", "avg(\"a.*\")", "min_of(\"a.*\")",
-          "count_good(\"a.*\")", "tag(\"a\")"}) {
+         {"sum(\"a.*\")", "avg(\"a.*\")", "min_of(\"a.*\")", "max_of(\"a.*\")",
+          "count_good(\"a.*\")", "moving_avg(\"a\", T#1m)", "rate(\"a\")",
+          "totalise(\"a\")", "quality(\"a\")", "age(\"a\")", "is_good(\"a\")",
+          "tag(\"a\")"}) {
         const std::string name(call.substr(0, call.find('(')));
         EXPECT_EQ(type_of(call), "CF-523 at 1: expression: " + name +
                                      " reads tags, and a configuration "

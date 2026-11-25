@@ -800,5 +800,120 @@ TEST(References, IdentityChecksAreTyped) {
                "value must be a number, not STRING"}));
 }
 
+// --- The remaining mutant gaps of the review of #144 ----------------------
+
+// 1: stage 5 does not type an instance's expressions; the expander does,
+// where they are used. A default that reaches no point is used nowhere.
+TEST(References, AnInstanceIsNotTypedAsATemplate) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "params: { model: { type: string, default: a } }\n"
+                   "points:\n"
+                   "  - { name: p, address: { table: holding, register: 1, "
+                   "type: uint16 } }\n"},
+                  {"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    template: meter_a\n"
+                           "    unit_id: 1\n"
+                           "    disable: [p]\n"
+                           "    defaults: { scale: { gain: \"model * 2\" } "
+                           "}\n")}}),
+        Lines{});
+}
+
+// 2: a block's `when` and a template's `defaults` are typed with the
+// variables: `n` is an INT, not a BOOL or an unknown name. A variable hides
+// a parameter of its name, as in the expander (D-114).
+TEST(References, VariablesOfABlockAndOfDefaults) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "defaults: { when: \"n\" }\n"
+                   "repeat:\n"
+                   "  - for: { n: \"1..2\" }\n"
+                   "    when: \"n\"\n"
+                   "    points:\n"
+                   "      - { name: \"p{n}\", address: { table: holding, "
+                   "register: \"n\", type: uint16 } }\n"}}),
+        (Lines{"templates/meter_a.yaml:3:20 CF-410: expression \"n\": the "
+               "value must be BOOL, not INT",
+               "templates/meter_a.yaml:6:12 CF-410: expression \"n\": the "
+               "value must be BOOL, not INT"}));
+    EXPECT_EQ(validate({{"templates/meter_a.yaml",
+                         "template: meter_a\nprotocol: modbus\n"
+                         "params: { n: { type: string, default: a } }\n"
+                         "defaults: { when: \"n > 1\" }\n"
+                         "repeat:\n"
+                         "  - for: { n: \"1..2\" }\n"
+                         "    when: \"n > 1\"\n"
+                         "    points:\n"
+                         "      - { name: \"p{n}\", address: { table: holding, "
+                         "register: \"n\", type: uint16 } }\n"}}),
+              Lines{});
+}
+
+// 3: an address is IPv4-mapped only with both bytes 0xFF before the IPv4
+// address; `::ff00:7f00:1` is not, so it is not the loopback 127.0.0.1.
+TEST(References, AnAddressWithOneFfByteIsNotIpv4Mapped) {
+    EXPECT_EQ(host_reason("::ff00:7f00:1"), "valid");
+    EXPECT_EQ(host_reason("::00ff:7f00:1"), "valid");
+}
+
+// 4 and 5: `replace` in the tiers of logging settings is no tier name, and
+// a bit's logging settings name their policy.
+TEST(References, TiersAndTheLoggingOfABit) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\nbit_order: lsb0\n"
+                   "points:\n"
+                   "  - name: w\n"
+                   "    tag: false\n"
+                   "    address: { table: holding, register: 1, type: uint16 "
+                   "}\n"
+                   "    logging: { tiers: { replace: true, 1m: 1y } }\n"
+                   "    bits:\n"
+                   "      0: { name: fault, logging: { policy: events } }\n"}}),
+        Lines{"templates/meter_a.yaml:10:44 CF-310: logging policy \"events\" "
+              "does not exist"});
+}
+
+// 6 and 7: a file that gives `classes` replaces the default classes, and
+// the first file that gives `priorities` defines them (a second is CF-811,
+// with slice 7 of #100).
+TEST(References, AlarmListsOfAFile) {
+    EXPECT_EQ(
+        validate({{"areas.yaml", std::string(AREAS)},
+                  {"alarms/a.yaml",
+                   "priorities: [urgent]\n"
+                   "classes: [safety]\n"
+                   "alarms:\n"
+                   "  - { tag: ps1.fm1.flow, type: high, limit: 4, priority: "
+                   "urgent, class: process, area: ps1 }\n"},
+                  {"alarms/b.yaml",
+                   "priorities: [minor]\n"
+                   "alarms:\n"
+                   "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
+                   "minor, class: safety, area: ps1 }\n"}}),
+        (Lines{"alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
+               "exist",
+               "alarms/b.yaml:3:57 CF-310: alarm priority \"minor\" does not "
+               "exist"}));
+}
+
+// 8: one INT is a `for` value (5.6), as a range is.
+TEST(References, OneIntIsAForValue) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "params: { inputs: { type: int, default: 2 } }\n"
+                   "repeat:\n"
+                   "  - for: { n: \"inputs\", k: [1, \"inputs * 2\"] }\n"
+                   "    points:\n"
+                   "      - { name: \"p{n}_{k}\", address: { table: holding, "
+                   "register: \"n + k\", type: uint16 } }\n"}}),
+        Lines{});
+}
+
 }  // namespace
 }  // namespace scada::conf
