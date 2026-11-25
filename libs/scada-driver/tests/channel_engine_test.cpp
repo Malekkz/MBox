@@ -1187,15 +1187,22 @@ TEST(ChannelEngine, BytesFoundBeforeASendRestartTheQuietTime) {
 }
 
 TEST(ChannelEngine, ALineThatIsNeverQuietIsJammedAndStillPolled) {
-    // G3: noise for 10 s on a serial line: after 256 quiet times that each
-    // found bytes the line counts as jammed, once, and requests go out.
-    Rig rig(channel_of(1, quick_failure(0, 100), TransportKind::SERIAL), 1);
+    // G3, J6: noise for 10 s on a serial line with `turnaround` 1 s: after
+    // 5 s of quiet times that each found bytes the line counts as jammed,
+    // once, and requests go out again; the rule is in time, not in rounds.
+    CompiledChannel channel =
+        channel_of(1, quick_failure(0, 100), TransportKind::SERIAL);
+    channel.line = LineTiming{.bit_rate = 300, .turnaround_ns = SECOND};
+    Rig rig(std::move(channel), 1);
     rig.run_until(FAST_PERIOD - MILLISECOND);
     rig.bus.fault(1, Fault::GARBAGE);  // a broken answer starts a quiet time
-    rig.transport.noise(FAST_PERIOD, 10 * SECOND);
-    rig.run_until(10 * SECOND);
+    rig.transport.noise(FAST_PERIOD, 20 * SECOND);
+    rig.run_until(4 * SECOND);
+    const std::size_t before = requests_of(rig.bus, 1);
+    EXPECT_EQ(rig.engine.counts().jams, 0U);
+    rig.run_until(9 * SECOND);
     EXPECT_EQ(rig.engine.counts().jams, 1U);
-    EXPECT_GT(requests_of(rig.bus, 1), 10U);
+    EXPECT_GT(requests_of(rig.bus, 1), before);
 }
 
 TEST(ChannelEngine, ADeadBlockOfALiveDeviceRestsWithItsOwnBackOff) {
@@ -1267,24 +1274,69 @@ TEST(ChannelEngine, DevicesThatDieWhileRunningAlsoWaitForTheLiveOnes) {
 }
 
 TEST(ChannelEngine, AProbeEndsWhenTheNextPollFallsDue) {
-    // G7: default time-outs (1 s), a live unit in a 1 s group and a dead
-    // one, back-off 1 s. A poll falls due within every probe's 1 s, so
-    // before G7 each probe waited the floor of 10 time-outs and then held
-    // the poll. Now the probe goes in the window before the next poll, its
-    // time-out ending when that poll falls due: probes about every
-    // back-off, and the live period kept.
+    // G7: default time-outs (1 s), a live unit in a 1 s group and a demoted
+    // one, back-off 1 s. A poll falls due within every probe's 1 s; the
+    // probe goes in the window before it, its time-out ending there, so the
+    // returned unit is found at once and the live period is kept.
     FailureRules rules = quick_failure(0, 1);
     rules.timeout_ns = SECOND;
     rules.backoff_max_ns = SECOND;
     Rig rig(channel_of(2, rules, TransportKind::SERIAL, 1), 2);
     rig.bus.fault(2, Fault::SILENT);
-    rig.run_until(3 * SECOND);
+    rig.run_until(1500 * MILLISECOND);  // demoted at 1 s, probe due at 2 s
     ASSERT_EQ(rig.state(1), DeviceStatus::DEMOTED);
-    const std::size_t before = requests_of(rig.bus, 2);
-    rig.run_until(23 * SECOND);
-    EXPECT_GE(requests_of(rig.bus, 2) - before, 8U);
+    rig.bus.fault(2, Fault::NONE);
+    const std::int64_t due = rig.engine.failures().probe_due_ns(1);
+    rig.run_until(due + SECOND);
+    EXPECT_NE(rig.state(1), DeviceStatus::DEMOTED);
     EXPECT_LE(longest_gap_after(times_of(rig.bus, 1), 3 * SECOND),
               SECOND + 5 * MILLISECOND);
+}
+
+TEST(ChannelEngine, AWindowedProbeThatTimesOutIsNoFailedProbe) {
+    // J1: a dead unit's windowed probe gets no answer: its back-off does not
+    // double and its due time stands; the floor probe, with the whole
+    // time-out, follows 10 time-outs after the due time.
+    FailureRules rules = quick_failure(0, 1);
+    rules.timeout_ns = SECOND;
+    rules.backoff_max_ns = 8 * SECOND;
+    Rig rig(channel_of(2, rules, TransportKind::SERIAL, 1), 2);
+    rig.bus.fault(2, Fault::SILENT);
+    rig.run_until(1500 * MILLISECOND);  // demoted at 1 s, probe due at 2 s
+    ASSERT_EQ(rig.state(1), DeviceStatus::DEMOTED);
+    const std::int64_t due = rig.engine.failures().probe_due_ns(1);
+    const std::size_t before = requests_of(rig.bus, 2);
+    rig.run_until(due + 5 * SECOND);
+    EXPECT_EQ(requests_of(rig.bus, 2), before + 1);  // the windowed one
+    EXPECT_EQ(rig.engine.failures().probe_due_ns(1), due);
+    rig.run_until(due + 10 * SECOND + 1100 * MILLISECOND);
+    EXPECT_EQ(requests_of(rig.bus, 2), before + 2);  // and the floor probe
+    EXPECT_GT(rig.engine.failures().probe_due_ns(1), due + 10 * SECOND);
+}
+
+// The reviewer's run of J1 on `transport`: unit 2 answers in 300 ms (its
+// time-out 1 s) on a channel with a 200 ms group; silent from 5 s to 60 s.
+DeviceStatus slow_unit_after_its_return(TransportKind transport) {
+    CompiledChannel channel = channel_of(2, FailureRules{}, transport);
+    channel.connection.lost_after_timeouts = 100;
+    Rig rig(std::move(channel), 2);
+    rig.transport.latency(2, 300 * MILLISECOND);
+    rig.run_until(5 * SECOND);
+    rig.bus.fault(2, Fault::SILENT);
+    rig.run_until(60 * SECOND);
+    EXPECT_EQ(rig.state(1), DeviceStatus::DEMOTED);
+    rig.bus.fault(2, Fault::NONE);
+    rig.run_until(400 * SECOND);
+    return rig.state(1);
+}
+
+TEST(ChannelEngine, AUnitSlowerThanTheProbeWindowIsStillRecovered) {
+    // J1, DI 7.4: no window is long enough for its 300 ms, but the floor
+    // probe waits its whole time-out and finds it.
+    EXPECT_EQ(slow_unit_after_its_return(TransportKind::SERIAL),
+              DeviceStatus::RUNNING);
+    EXPECT_EQ(slow_unit_after_its_return(TransportKind::TCP),
+              DeviceStatus::RUNNING);
 }
 
 // --- The C++ delta check: H1 to H7 ------------------------------------------
@@ -1310,9 +1362,9 @@ CompiledChannel chained_device(TransportKind transport, bool three,
 
 TEST(ChannelEngine, AChainWhoseFirstPartFailsStillWritesItsOtherParts) {
     // H1: a value at 0, its companion at 20 and the companion's own at 40
-    // (0 <- 20 <- 40). The unit stops answering register 0 only: at every
-    // cycle 0 is BAD with COMM_FAIL and 20 and 40 are written GOOD, never
-    // frozen at their last value.
+    // (0 <- 20 <- 40). The unit stops answering register 0 only: 0 is BAD
+    // with COMM_FAIL, and 20 and 40 are never GOOD and frozen: written GOOD
+    // at each read of the chain, BAD with COMM_FAIL while it rests (J5).
     CompiledChannel channel =
         make_channel({{.name = "d1",
                        .unit_id = 1,
@@ -1329,13 +1381,12 @@ TEST(ChannelEngine, AChainWhoseFirstPartFailsStillWritesItsOtherParts) {
     rig.bus.silent_from(1, 0, 0);
     rig.run_until(10 * SECOND);
     EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
-    EXPECT_EQ(rig.tags.point(0, 1).quality, tag::Quality::GOOD);
-    EXPECT_EQ(rig.tags.point(0, 2).quality, tag::Quality::GOOD);
-    // Written in the last cycle, at the 200 ms period.
-    EXPECT_GE(rig.tags.point(0, 1).time_ns,
-              SimClock::REALTIME_OFFSET_NS + 9 * SECOND);
-    EXPECT_GE(rig.tags.point(0, 2).time_ns,
-              SimClock::REALTIME_OFFSET_NS + 9 * SECOND);
+    for (std::uint32_t point = 1; point <= 2; ++point) {
+        EXPECT_TRUE(rig.tags.has_flag(0, point, Flag::COMM_FAIL) ||
+                    rig.tags.point(0, point).time_ns >=
+                        SimClock::REALTIME_OFFSET_NS + 9 * SECOND);
+    }
+    EXPECT_GE(rig.engine.counts().rests, 1U);
     EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
 }
 
@@ -1654,6 +1705,108 @@ TEST(ChannelEngine, ACycleProbeWaitsOneSecondAtMost) {
     EXPECT_GE(rig.engine.failures().probe_due_ns(0), due + 5 * SECOND);
     EXPECT_LT(rig.engine.failures().probe_due_ns(0),
               due + 5 * SECOND + 100 * MILLISECOND);
+}
+
+// When the point of each device `first` to `end` (exclusive) was first seen
+// BAD with COMM_FAIL, running `rig` in 10 ms steps to `until_ns`; 0 when
+// never. Indexed by device.
+std::vector<std::int64_t> first_comm_fail(Rig& rig, std::uint32_t first,
+                                          std::uint32_t end,
+                                          std::int64_t until_ns) {
+    std::vector<std::int64_t> bad_at(end, 0);
+    for (std::int64_t now = rig.clock.monotonic_ns(); now <= until_ns;
+         now += 10 * MILLISECOND) {
+        rig.run_until(now);
+        for (std::uint32_t device = first; device < end; ++device) {
+            if (bad_at[device] == 0 &&
+                rig.tags.has_flag(device, 0, Flag::COMM_FAIL)) {
+                bad_at[device] = now;
+            }
+        }
+    }
+    return bad_at;
+}
+
+TEST(ChannelEngine, DeadUnitsGoBadWithinTheirVerdictTimeOnABusyLine) {
+    // J2: 10 live units that take 25 ms each fill a 200 ms group; 5 others,
+    // RUNNING, die together at 1 s (time-out 100 ms, retries 2). Their
+    // retries are held back behind the live polls (G5), but each dead
+    // unit's point is COMM_FAIL at the latest one period (200 ms, here also
+    // the retries' 2 x 100 ms) after its first time-out. Without the rule
+    // they are still GOOD at 6 s.
+    Rig rig(channel_of(15, quick_failure(2, 3), TransportKind::SERIAL), 15);
+    for (std::uint8_t unit = 1; unit <= 10; ++unit) {
+        rig.transport.latency(unit, 25 * MILLISECOND);
+    }
+    rig.run_until(SECOND);
+    for (std::uint8_t unit = 11; unit <= 15; ++unit) {
+        rig.bus.fault(unit, Fault::SILENT);
+    }
+    const std::vector<std::int64_t> bad_at =
+        first_comm_fail(rig, 10, 15, 6 * SECOND);
+    // From its first request after the death: one time-out, then at most
+    // the verdict time (200 ms) and the end of the exchange on the line then
+    // (25 ms), within the 10 ms of the sampling.
+    for (std::uint32_t device = 10; device < 15; ++device) {
+        const std::vector<std::int64_t> sent =
+            times_of(rig.bus, static_cast<std::uint8_t>(device + 1));
+        const auto first =
+            std::find_if(sent.begin(), sent.end(),
+                         [](std::int64_t time) { return time >= SECOND; });
+        ASSERT_NE(first, sent.end());
+        ASSERT_GT(bad_at[device], 0);
+        EXPECT_LE(bad_at[device] - *first,
+                  100 * MILLISECOND + 200 * MILLISECOND + 25 * MILLISECOND +
+                      10 * MILLISECOND);
+    }
+    EXPECT_GT(rig.engine.counts().early_verdicts, 0U);
+}
+
+TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
+    // J3: 30 units that take 40 ms each fill a 1 s group, so a request is
+    // always due. Units 26 to 30 are dead; unit 30 returns at 300 s: its
+    // probe, past its floor, takes the turn of a held-back failing poll and
+    // finds it. Failing polls and probes share one spacing, so a live unit
+    // waits for at most one 1 s time-out of them at a time.
+    CompiledChannel channel =
+        channel_of(30, FailureRules{}, TransportKind::SERIAL, 1);
+    channel.line.bit_rate = 9'600;
+    Rig rig(std::move(channel), 30);
+    for (std::uint8_t unit = 1; unit <= 30; ++unit) {
+        rig.transport.latency(unit, 40 * MILLISECOND);
+    }
+    for (std::uint8_t unit = 26; unit <= 30; ++unit) {
+        rig.bus.fault(unit, Fault::SILENT);
+    }
+    rig.run_until(300 * SECOND);
+    ASSERT_EQ(rig.state(29), DeviceStatus::DEMOTED);
+    rig.bus.fault(30, Fault::NONE);
+    rig.run_until(700 * SECOND);
+    EXPECT_EQ(rig.state(29), DeviceStatus::RUNNING);
+    std::int64_t worst = 0;
+    for (std::uint8_t unit = 1; unit <= 25; ++unit) {
+        worst = std::max(
+            worst, longest_gap_after(times_of(rig.bus, unit), 60 * SECOND));
+    }
+    EXPECT_LE(worst, 2 * SECOND + 300 * MILLISECOND);
+}
+
+TEST(ChannelEngine, AChainWithADeadPartRestsAsAWhole) {
+    // J5: a value at 0 with its companion at 100; the block at 100 is dead,
+    // the one at 0 answers, so the device stays RUNNING. After 3 failures
+    // the whole chain rests: neither request is read until the back-off
+    // (1 s) ends, and the value is BAD through its companion.
+    Rig rig(chained_device(TransportKind::SERIAL, false, 3), 1);
+    rig.bus.silent_from(1, 100, 100);
+    rig.run_until(800 * MILLISECOND);
+    ASSERT_GE(rig.engine.counts().rests, 1U);
+    const std::size_t value_reads = reads_of(rig.bus, 0);
+    const std::size_t companion_reads = reads_of(rig.bus, 100);
+    rig.run_until(1300 * MILLISECOND);
+    EXPECT_EQ(reads_of(rig.bus, 0), value_reads);
+    EXPECT_EQ(reads_of(rig.bus, 100), companion_reads);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::BAD);
 }
 
 TEST(ChannelEngine, APeerCloseJustBeforeTheSendSendsNothing) {

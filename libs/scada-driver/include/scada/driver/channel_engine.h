@@ -67,6 +67,7 @@ struct EngineCounts {
     std::uint64_t chain_overflows = 0;  // chains too long for their buffer
     std::uint64_t jams = 0;   // serial lines never quiet before a send (G3)
     std::uint64_t rests = 0;  // dead blocks of live devices put to rest (G8)
+    std::uint64_t early_verdicts = 0;  // COMM_FAIL before the retries (J2)
 };
 
 class ChannelEngine {
@@ -75,12 +76,12 @@ public:
     // arrives.
     static constexpr std::int64_t NEVER =
         std::numeric_limits<std::int64_t>::max();
-    // Quiet times in a row that found bytes before a send, after which the
-    // line counts as jammed: one is counted in `jams`, and requests are sent
-    // again without waiting until a discard finds the line quiet (G3). At
-    // the 20 ms quiet time this is 5.12 s, longer than the longest answer
+    // How long quiet times may keep finding bytes before a send: then the
+    // line counts as jammed, one is counted in `jams`, and requests are sent
+    // again without waiting until a discard finds the line quiet (G3, J6).
+    // 5 s at any bit rate and `turnaround`: longer than the longest answer
     // at 1,200 bit/s (255 bytes: 2.3 s).
-    static constexpr std::uint32_t JAM_ROUNDS = 256;
+    static constexpr std::int64_t JAM_NS = 5'000'000'000;
 
     // Allocates every buffer, sized for `channel`, which must outlive the
     // engine, as must `protocol`, `transport`, `clock` and `tags`. Every
@@ -146,18 +147,25 @@ private:
         std::int64_t backoff_ns = 0;
     };
 
+    // Members in the order that packs them best.
     struct DeviceRun {
+        std::uint64_t answers = 0;  // its polls that answered
+        std::size_t max_frame = 0;  // `DeviceCaps::max_frame_bytes`
+        // The request whose first attempt timed out, retries pending: its
+        // points are written COMM_FAIL at `verdict_ns` if they are still
+        // pending then (review J2).
+        std::int64_t verdict_ns = 0;
         std::vector<PointRun> points;
         std::vector<RequestRest> rests;  // per planned request
-        bool any_resting = false;
-        std::uint64_t answers = 0;  // its polls that answered
-        DeviceState protocol;       // the protocol's own state (2.2)
-        std::size_t max_frame = 0;  // `DeviceCaps::max_frame_bytes`
-        DeviceStatus published = DeviceStatus::DISABLED;
-        std::uint32_t attempts = 0;  // failed attempts of the request
-        bool comm_failed = false;    // its points were written COMM_FAIL
         // Samples of a chain of companions until its last request (5.5).
         std::vector<DeliveredSample> chain;
+        std::uint32_t attempts = 0;  // failed attempts of the request
+        std::uint32_t verdict_request = 0;
+        bool any_resting = false;
+        DeviceState protocol;  // the protocol's own state (2.2)
+        DeviceStatus published = DeviceStatus::DISABLED;
+        bool verdict_pending = false;
+        bool comm_failed = false;     // its points were written COMM_FAIL
         bool chain_overflow = false;  // the chain did not fit: not published
         // A part of the chain was busy: the rest of the chain is read, and
         // nothing of it published (P9).
@@ -193,12 +201,19 @@ private:
     SCADA_RT void sync_scheduler() noexcept;
     SCADA_RT void publish_states() noexcept;
     SCADA_RT void fail_points(std::uint32_t device) noexcept;
+    // The points of `request` are written BAD with COMM_FAIL now.
+    SCADA_RT void fail_points_of(std::uint32_t device,
+                                 const Request& request) noexcept;
     // The points of the choice's request go bad with COMM_FAIL. In a chain
     // of companions they are part of the chain, so that its dependents see
     // their companion's outcome when it is processed (5.5, review G1).
     SCADA_RT void fail_request(const Choice& choice) noexcept;
     // Returns when a point next goes STALE, or NEVER.
     SCADA_RT std::int64_t check_staleness(std::int64_t now_ns) noexcept;
+    // Writes COMM_FAIL to the points of a request whose retries are still
+    // held back when its verdict falls due (J2); returns the next such
+    // time, or NEVER.
+    SCADA_RT std::int64_t check_verdicts(std::int64_t now_ns) noexcept;
     SCADA_RT Scan scan(const Request& request, const Attempt& sent,
                        std::size_t& have, std::size_t& frame_bytes) noexcept;
     SCADA_RT void deliver(const Choice& choice,
@@ -237,7 +252,11 @@ private:
     // Input is discarded by `settle` at every step until the next send
     // (7.2: bytes that arrive during a quiet time are not the next answer).
     bool discard_before_send_ = false;
-    std::uint32_t noisy_rounds_ = 0;  // quiet times in a row that found bytes
+    // Quiet times keep finding bytes since `noisy_since_ns_`; `jammed_` once
+    // that lasted JAM_NS.
+    bool noisy_ = false;
+    bool jammed_ = false;
+    std::int64_t noisy_since_ns_ = 0;
     // Bytes a stream delivered after the last complete frame, kept at the
     // start of `rx_` for the next answer (Q12).
     std::size_t carry_ = 0;

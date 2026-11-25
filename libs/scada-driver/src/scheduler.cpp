@@ -759,6 +759,7 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
         const std::int64_t floor =
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
         std::int64_t wait_ns = run.probe_timeout_ns;
+        bool windowed = false;
         if (next_poll < later(now_ns, wait_ns) && now_ns < floor) {
             // The window ends before the quiet time a serial line keeps
             // after a time-out, so that the poll goes out when due.
@@ -766,30 +767,78 @@ bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
                                            ? 0
                                            : margin_ns(channel_->line);
             const std::int64_t window = next_poll - now_ns - quiet;
+            // One windowed probe per due time (J1): a device slower than
+            // the window is still found by the floor probe.
             if (window < std::min(wait_ns, PROBE_MIN_WINDOW_NS) ||
-                !compiled.plan.probe.has_value()) {
+                !compiled.plan.probe.has_value() || run.windowed_tried) {
                 wake = std::min(wake, floor);
                 continue;
             }
             wait_ns = window;
+            windowed = true;
         }
-        if (!compiled.plan.probe.has_value()) {
-            // R8: no request may serve as a probe (all side-effect or
-            // chained): one whole normal poll cycle of the device is.
-            if (!start_probe_cycle(device, now_ns, out)) {
-                continue;
-            }
-            probe_in_flight_ = true;
+        if (take_probe(device, now_ns, wait_ns, windowed, out)) {
             return true;
         }
-        out = Choice{.kind = Choice::Kind::PROBE,
-                     .device = device,
-                     .request = *compiled.plan.probe,
-                     .timeout_ns = wait_ns};
-        save_undo(out, 0);
-        record(device, false, now_ns);
+    }
+    return false;
+}
+
+bool Scheduler::take_probe(std::uint32_t device, std::int64_t now_ns,
+                           std::int64_t wait_ns, bool windowed,
+                           Choice& out) noexcept {
+    DeviceRun& run = devices_[device];
+    const CompiledDevice& compiled = channel_->devices[device];
+    if (!compiled.plan.probe.has_value()) {
+        // R8: no request may serve as a probe (all side-effect or
+        // chained): one whole normal poll cycle of the device is.
+        if (!start_probe_cycle(device, now_ns, out)) {
+            return false;
+        }
         probe_in_flight_ = true;
         return true;
+    }
+    out = Choice{.kind = Choice::Kind::PROBE,
+                 .device = device,
+                 .request = *compiled.plan.probe,
+                 .timeout_ns = wait_ns,
+                 .windowed = windowed};
+    run.windowed_tried = run.windowed_tried || windowed;
+    save_undo(out, 0);
+    record(device, false, now_ns);
+    probe_in_flight_ = true;
+    if (!windowed) {
+        // A probe with its whole time-out holds the line as a failing poll
+        // does: the two share the spacing (G5, J3).
+        last_failing_ns_ = now_ns;
+        failing_sent_ = true;
+    }
+    return true;
+}
+
+bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
+                                     Choice& out) noexcept {
+    if (probe_in_flight_ || !orders_.empty()) {
+        return false;
+    }
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!channel_->devices[device].enabled || !run.probe ||
+            units_[run.unit].holder != NOBODY ||
+            allowed_from(device, false) > now_ns) {
+            continue;
+        }
+        const std::int64_t floor =
+            later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
+        if (now_ns < floor ||
+            (failing_sent_ &&
+             now_ns < later(last_failing_ns_,
+                            run.probe_timeout_ns * FAILING_SPACING))) {
+            continue;
+        }
+        if (take_probe(device, now_ns, run.probe_timeout_ns, false, out)) {
+            return true;
+        }
     }
     return false;
 }
@@ -831,8 +880,8 @@ Choice Scheduler::take(std::int64_t now_ns) noexcept {
     // 1. The next step of an exclusive order in progress; 2. orders;
     // 3. retries and due poll groups; 4. keep-alive; 5. a probe (6.2).
     if (choose_exclusive_step(now_ns, out, wake) ||
-        choose_order(now_ns, out, wake) || choose_poll(now_ns, out, wake) ||
-        choose_keepalive(now_ns, out, wake) ||
+        choose_order(now_ns, out, wake) || choose_overdue_probe(now_ns, out) ||
+        choose_poll(now_ns, out, wake) || choose_keepalive(now_ns, out, wake) ||
         choose_probe(now_ns, out, wake)) {
         return out;
     }
@@ -986,6 +1035,10 @@ void Scheduler::set_polled(std::uint32_t device, bool polled) noexcept {
 void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
                           std::int64_t timeout_ns) noexcept {
     if (device < devices_.size()) {
+        DeviceRun& run = devices_[device];
+        if (!run.probe || run.probe_due_ns != due_ns) {
+            run.windowed_tried = false;  // a new due time (J1)
+        }
         devices_[device].probe = true;
         devices_[device].probe_due_ns = due_ns;
         devices_[device].probe_timeout_ns =
@@ -995,9 +1048,34 @@ void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
 
 void Scheduler::rest(std::uint32_t device, std::uint32_t request,
                      bool resting) noexcept {
-    if (device < devices_.size() && request < devices_[device].resting.size() &&
-        !channel_->devices[device].plan.requests[request].chained) {
-        devices_[device].resting[request] = resting;
+    if (device >= devices_.size() ||
+        request >= devices_[device].resting.size()) {
+        return;
+    }
+    DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    const Request& planned = plan.requests[request];
+    run.resting[request] = resting;
+    if (planned.poll_group >= plan.by_group.size()) {
+        return;
+    }
+    // A chain of companions rests as a whole (J5): every request from the
+    // chain's first to its last, which is the first one not `chained`.
+    const std::vector<std::uint32_t>& list = plan.by_group[planned.poll_group];
+    const auto found = std::find(list.begin(), list.end(), request);
+    if (found == list.end()) {
+        return;
+    }
+    auto first = found;
+    while (first != list.begin() && plan.requests[*(first - 1)].chained) {
+        --first;
+    }
+    auto last = found;
+    while (last + 1 != list.end() && plan.requests[*last].chained) {
+        ++last;
+    }
+    for (auto member = first; member <= last; ++member) {
+        run.resting[*member] = resting;
     }
 }
 

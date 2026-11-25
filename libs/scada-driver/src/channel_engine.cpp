@@ -195,7 +195,8 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
 
 std::int64_t ChannelEngine::step() noexcept {
     const std::int64_t now = clock_->monotonic_ns();
-    const std::int64_t stale_due = check_staleness(now);
+    const std::int64_t stale_due =
+        std::min(check_staleness(now), check_verdicts(now));
     if (!status_.ok()) {
         return NEVER;
     }
@@ -247,14 +248,19 @@ std::int64_t ChannelEngine::step() noexcept {
 
 bool ChannelEngine::settle(std::int64_t now_ns) noexcept {
     if (!transport_->discard_input()) {
-        noisy_rounds_ = 0;
+        noisy_ = false;
+        jammed_ = false;
         return true;
     }
-    if (noisy_rounds_ >= JAM_ROUNDS) {
+    if (!noisy_) {
+        noisy_ = true;
+        noisy_since_ns_ = now_ns;
+    }
+    if (jammed_) {
         return true;  // jammed: counted once, sent all the same
     }
-    ++noisy_rounds_;
-    if (noisy_rounds_ == JAM_ROUNDS) {
+    if (now_ns - noisy_since_ns_ >= JAM_NS) {
+        jammed_ = true;
         ++counts_.jams;
         return true;
     }
@@ -299,7 +305,8 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         answered_since_connect_ = false;
         quiet_until_ns_ = 0;
         discard_before_send_ = false;
-        noisy_rounds_ = 0;
+        noisy_ = false;
+        jammed_ = false;
         carry_ = 0;
         for (DeviceRun& run : devices_) {
             drop_chain(run);  // a chain never spans a connect (P9)
@@ -336,6 +343,7 @@ void ChannelEngine::apply_loss() noexcept {
     for (DeviceRun& run : devices_) {
         drop_chain(run);
         run.attempts = 0;
+        run.verdict_pending = false;
     }
     // Every device is CONNECTING: `publish_states` writes their points BAD
     // with COMM_FAIL, all at once (conformance test 16).
@@ -358,6 +366,7 @@ void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
     for (DeviceRun& run : devices_) {
         drop_chain(run);  // a chain cut by the close publishes nothing
         run.attempts = 0;
+        run.verdict_pending = false;
     }
     if (lost) {
         // The run of time-outs found the connection lost (7.3, R-15): its
@@ -473,6 +482,29 @@ void ChannelEngine::fail_request(const Choice& choice) noexcept {
         }
     }
     deliver(choice, std::span(sink_storage_).first(sink_count_));
+}
+
+std::int64_t ChannelEngine::check_verdicts(std::int64_t now_ns) noexcept {
+    std::int64_t next = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        DeviceRun& run = devices_[device];
+        if (!run.verdict_pending) {
+            continue;
+        }
+        if (now_ns < run.verdict_ns) {
+            next = std::min(next, run.verdict_ns);
+            continue;
+        }
+        // Retries still held back: the points go bad now, and the retries
+        // go on as attempts to recover (J2). Demotion still counts the
+        // request once, when its attempts end.
+        run.verdict_pending = false;
+        fail_points_of(
+            device,
+            channel_->devices[device].plan.requests[run.verdict_request]);
+        ++counts_.early_verdicts;
+    }
+    return next;
 }
 
 std::int64_t ChannelEngine::check_staleness(std::int64_t now_ns) noexcept {
@@ -697,6 +729,7 @@ void ChannelEngine::answered(const Choice& choice,
     const Request& request = compiled.plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
     run.attempts = 0;
+    run.verdict_pending = false;
     if (choice.kind == Choice::Kind::PROBE) {
         // The device answered, busy or not: it is alive (7.4). A probe
         // neither adds to the run of time-outs nor empties it, nor resets
@@ -795,14 +828,33 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         (end == End::BROKEN && channel_->transport != TransportKind::TCP);
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
+        if (run.attempts == 0 && choice.kind == Choice::Kind::POLL) {
+            // The verdict does not wait for held-back retries (G5): one
+            // period of the group, or the retries' time-outs if longer.
+            const std::int64_t period =
+                channel_->poll_groups[request.poll_group].period_ns;
+            run.verdict_pending = true;
+            run.verdict_request = choice.request;
+            run.verdict_ns =
+                later(now, std::max(period, compiled.failure.timeout_ns *
+                                                static_cast<std::int64_t>(
+                                                    compiled.failure.retries)));
+        }
         ++run.attempts;
         ++counts_.retries;
         scheduler_.retry(device, choice.request, now);
         return;
     }
     run.attempts = 0;
+    run.verdict_pending = false;
     if (probe) {
-        failures_.probe_ended(device, false, now);
+        // A probe cut short to a window and not answered in it is no failed
+        // probe: the device may only be slower than the window. The due
+        // time stands, and the floor probe with the whole time-out follows
+        // (review J1).
+        if (!choice.windowed || end != End::TIMEOUT) {
+            failures_.probe_ended(device, false, now);
+        }
         scheduler_.probe_done();
         drop_chain(run);
         return;
@@ -855,8 +907,7 @@ void ChannelEngine::rest_if_dead_block(const Choice& choice) noexcept {
     // The device answered other requests since this one began to fail: a
     // dead block of a live device, which demotion never ends (G8).
     if (rest.failures < rules.demote_after ||
-        run.answers == rest.answers_mark || !failures_.polled(device) ||
-        channel_->devices[device].plan.requests[choice.request].chained) {
+        run.answers == rest.answers_mark || !failures_.polled(device)) {
         return;
     }
     const std::int64_t now = clock_->monotonic_ns();
@@ -871,6 +922,29 @@ void ChannelEngine::rest_if_dead_block(const Choice& choice) noexcept {
     run.any_resting = true;
     scheduler_.rest(device, choice.request, true);
     ++counts_.rests;
+    // The other requests of its chain rest with it, unread: their points
+    // are BAD with COMM_FAIL until the chain is read again, never GOOD and
+    // frozen (J5, H1).
+    const ReadPlan& plan = channel_->devices[device].plan;
+    for (std::uint32_t other = 0; other < plan.requests.size(); ++other) {
+        if (other != choice.request && scheduler_.resting(device, other) &&
+            !run.rests[other].resting) {
+            fail_points_of(device, plan.requests[other]);
+        }
+    }
+}
+
+void ChannelEngine::fail_points_of(std::uint32_t device,
+                                   const Request& request) noexcept {
+    sink_count_ = 0;
+    for (const std::uint32_t point : request.points) {
+        if (sink_count_ < sink_storage_.size()) {
+            sink_storage_[sink_count_++] = DeliveredSample{
+                .point = point,
+                .sample = RawSample{.outcome = Outcome::COMM_FAIL}};
+        }
+    }
+    process(device, std::span(sink_storage_).first(sink_count_));
 }
 
 void ChannelEngine::deliver(const Choice& choice,

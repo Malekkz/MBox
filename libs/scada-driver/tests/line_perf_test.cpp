@@ -11,6 +11,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
+#include "scada/tag/types.h"
 #include "sim_transport.h"
 #include "test_protocol.h"
 
@@ -75,8 +76,10 @@ struct Figures {
     std::int64_t all_demoted_ns = -1;   // every dead unit DEMOTED
     std::int64_t back_running_ns = -1;  // the returned unit RUNNING again
     std::int64_t start_gap_ns = 0;      // worst live gap, 10 s to 2 min
-    std::int64_t live_gap_ns = 0;       // worst live gap after 2 min
-    std::vector<double> dead_share;     // per minute: the line held by the dead
+    std::int64_t death_gap_ns = 0;      // worst live gap, 2 min after a death
+    std::int64_t live_gap_ns = 0;       // worst live gap after that
+    std::int64_t bad_ns = -1;  // death to COMM_FAIL, the slowest dead unit
+    std::vector<double> dead_share;  // per minute: the line held by the dead
 };
 
 // The units that never answer, by unit id: every fifth.
@@ -100,20 +103,51 @@ bool all_demoted(const Line& line, const std::vector<bool>& dead) {
     return true;
 }
 
-// Runs `line` to `end_ns` with the `dead` units silent; `back` answers again
-// from `back_ns`. Fills the times of `out`.
-void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
-         std::int64_t back_ns, std::int64_t end_ns, Figures& out) {
+// The dead units' points are all COMM_FAIL.
+bool all_bad(const Line& line, const std::vector<bool>& dead) {
     for (std::size_t unit = 1; unit < dead.size(); ++unit) {
-        if (dead[unit]) {
-            line.bus.fault(static_cast<std::uint8_t>(unit), Fault::SILENT);
+        if (dead[unit] &&
+            !line.tags.has_flag(static_cast<std::uint32_t>(unit - 1), 0,
+                                tag::QualityFlag::COMM_FAIL)) {
+            return false;
         }
     }
-    for (std::int64_t now = SECOND; now <= end_ns; now += SECOND) {
+    return true;
+}
+
+// When the units die, when one of them returns, when the run ends.
+struct Times {
+    std::int64_t death_ns = 0;  // 0: dead from the start
+    std::int64_t back_ns = 30 * MINUTE;
+    std::int64_t end_ns = 40 * MINUTE;
+};
+
+// Runs `line` with the `dead` units silent from `times.death_ns`; `back`
+// answers again from `times.back_ns`. Fills the times of `out`.
+void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
+         const Times& times, Figures& out) {
+    const auto die = [&] {
+        for (std::size_t unit = 1; unit < dead.size(); ++unit) {
+            if (dead[unit]) {
+                line.bus.fault(static_cast<std::uint8_t>(unit), Fault::SILENT);
+            }
+        }
+    };
+    if (times.death_ns == 0) {
+        die();
+    }
+    const std::int64_t back_ns = times.back_ns;
+    for (std::int64_t now = SECOND; now <= times.end_ns; now += SECOND) {
         if (now == back_ns) {
             line.bus.fault(back, Fault::NONE);
         }
         (void)run_engine(line.engine, line.clock, now);
+        if (now == times.death_ns) {
+            die();
+        }
+        if (out.bad_ns < 0 && now > times.death_ns && all_bad(line, dead)) {
+            out.bad_ns = now - times.death_ns;
+        }
         if (out.all_demoted_ns < 0 && now < back_ns &&
             all_demoted(line, dead)) {
             out.all_demoted_ns = now;
@@ -128,39 +162,54 @@ void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
 // The line time of the dead per minute, and the worst live gaps, from the
 // bus's log: each request holds the line until the next one is sent.
 void analyse(const Line& line, const std::vector<bool>& dead, std::uint8_t back,
-             std::int64_t back_ns, std::int64_t end_ns, Figures& out) {
+             const Times& times, Figures& out) {
+    const std::int64_t back_ns = times.back_ns;
+    const std::int64_t end_ns = times.end_ns;
+    const std::int64_t death_ns = times.death_ns;
     const std::vector<LoggedRequest>& log = line.bus.log();
     std::vector<std::int64_t> last(dead.size(), -1);
     out.dead_share.assign(static_cast<std::size_t>(end_ns / MINUTE), 0.0);
     for (std::size_t index = 0; index + 1 < log.size(); ++index) {
         const LoggedRequest& request = log[index];
         const auto minute = static_cast<std::size_t>(request.time_ns / MINUTE);
-        if (dead[request.unit_id] &&
+        if (dead[request.unit_id] && request.time_ns >= death_ns &&
             (request.unit_id != back || request.time_ns < back_ns) &&
             minute < out.dead_share.size()) {
             out.dead_share[minute] +=
                 static_cast<double>(log[index + 1].time_ns - request.time_ns) /
                 static_cast<double>(MINUTE);
         }
-        if (dead[request.unit_id]) {
+        if (dead[request.unit_id] && request.time_ns >= death_ns) {
             continue;
         }
         const std::int64_t previous = last[request.unit_id];
         last[request.unit_id] = request.time_ns;
-        std::int64_t& worst =
-            previous < 2 * MINUTE ? out.start_gap_ns : out.live_gap_ns;
-        if (previous >= 10 * SECOND) {
-            worst = std::max(worst, request.time_ns - previous);
+        if (previous < 10 * SECOND) {
+            continue;
+        }
+        // A gap belongs to the window its end falls in.
+        const std::int64_t gap = request.time_ns - previous;
+        const std::int64_t settled =
+            std::max(2 * MINUTE, death_ns + 2 * MINUTE);
+        if (death_ns > 0 && request.time_ns >= death_ns &&
+            previous < death_ns + 2 * MINUTE) {
+            out.death_gap_ns = std::max(out.death_gap_ns, gap);
+        } else if (previous < 2 * MINUTE) {
+            out.start_gap_ns = std::max(out.start_gap_ns, gap);
+        } else if (previous >= settled) {
+            out.live_gap_ns = std::max(out.live_gap_ns, gap);
         }
     }
 }
 
-Figures measure(std::uint8_t units, std::uint32_t bit_rate) {
+Figures measure(std::uint8_t units, std::uint32_t bit_rate,
+                std::int64_t death_ns = 0) {
     Line line(line_of(units, bit_rate), units);
     const std::vector<bool> dead = every_fifth(units);
+    const Times times{.death_ns = death_ns};
     Figures out;
-    run(line, dead, 5, 30 * MINUTE, 40 * MINUTE, out);
-    analyse(line, dead, 5, 30 * MINUTE, 40 * MINUTE, out);
+    run(line, dead, 5, times, out);
+    analyse(line, dead, 5, times, out);
     return out;
 }
 
@@ -170,11 +219,13 @@ double seconds(std::int64_t time_ns) {
 
 void print(const char* name, const Figures& figures) {
     std::cout << std::format(
-        "{}: all dead DEMOTED at {:.0f} s; the returned unit RUNNING {:.0f} s "
-        "after its return; worst live gap {:.3f} s from 10 s to 2 min, "
-        "{:.3f} s after\n",
-        name, seconds(figures.all_demoted_ns), seconds(figures.back_running_ns),
-        seconds(figures.start_gap_ns), seconds(figures.live_gap_ns));
+        "{}: all dead COMM_FAIL {:.0f} s after their death, DEMOTED at "
+        "{:.0f} s; the returned unit RUNNING {:.0f} s after its return; worst "
+        "live gap {:.3f} s from 10 s to 2 min, {:.3f} s in the 2 min after "
+        "the death, {:.3f} s after\n",
+        name, seconds(figures.bad_ns), seconds(figures.all_demoted_ns),
+        seconds(figures.back_running_ns), seconds(figures.start_gap_ns),
+        seconds(figures.death_gap_ns), seconds(figures.live_gap_ns));
     for (std::size_t minute = 0; minute < figures.dead_share.size();
          minute += 5) {
         std::cout << std::format(
@@ -191,6 +242,10 @@ TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
     // still being counted, and the dead take the time the live leave.
     const Figures figures = measure(250, 38'400);
     print("250 units, 50 dead", figures);
+    // The last dead unit's first attempt comes after the 49 others', each a
+    // 1 s time-out; it is COMM_FAIL 3 s after it (J2).
+    EXPECT_GT(figures.bad_ns, 0);
+    EXPECT_LE(figures.bad_ns, 90 * SECOND);
     EXPECT_GT(figures.all_demoted_ns, 0);
     EXPECT_LE(figures.all_demoted_ns, 20 * MINUTE);
     EXPECT_LE(figures.start_gap_ns, 2 * SECOND);
@@ -199,16 +254,32 @@ TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
 
+TEST(LinePerf, FiftyOfTwoHundredFiftyUnitsDieTogether) {
+    // J2, J4: the same line, all 250 answering until 2 min; then every
+    // fifth dies. Their first attempts go in their normal turn, each a
+    // 1 s time-out; each dead unit is COMM_FAIL one period after its own
+    // first time-out (J2), and the live wait while the first attempts run.
+    const Figures figures = measure(250, 38'400, 2 * MINUTE);
+    print("250 units, 50 die together at 2 min", figures);
+    EXPECT_GT(figures.bad_ns, 0);
+    EXPECT_LE(figures.bad_ns, 60 * SECOND);
+    // J4: the 50 first attempts, 1 s each, hold the live once (51.7 s).
+    EXPECT_LE(figures.death_gap_ns, 55 * SECOND);
+    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+}
+
 TEST(LinePerf, FiveDeadAmongTwentyFiveUnits) {
     // A line with idle time: 25 units at 19,200 bit/s, every fifth dead;
     // unit 5 returns at 30 min. Probes go in the windows before the next
-    // due poll, their time-out ended there (G7); the live keep their 1 s
-    // period.
+    // due poll, their time-out ended there (G7); a windowed probe that gets
+    // no answer is no failure, so each back-off ends with a floor probe of
+    // the whole 1 s, which holds one poll at most (J1).
     const Figures figures = measure(25, 19'200);
     print("25 units, 5 dead", figures);
     EXPECT_GT(figures.all_demoted_ns, 0);
     EXPECT_LE(figures.all_demoted_ns, MINUTE);
-    EXPECT_LE(figures.live_gap_ns, SECOND + 50 * MILLISECOND);
+    EXPECT_LE(figures.bad_ns, 10 * SECOND);
+    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 50 * MILLISECOND);
     EXPECT_GE(figures.back_running_ns, 0);
     EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }

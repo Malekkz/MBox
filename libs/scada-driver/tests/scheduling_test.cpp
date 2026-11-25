@@ -1201,14 +1201,14 @@ TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
                      ReadRules{.max_units = LARGE});
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_polled(0, false);
-    scheduler.set_probe(0, 5 * MILLISECOND, 0);
+    scheduler.set_probe(0, 5 * MILLISECOND, 100 * MILLISECOND);
     EXPECT_EQ(scheduler.take(0).device, 1U);  // d2's poll
     const Choice wait = scheduler.take(MILLISECOND);
     EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
     EXPECT_EQ(wait.wake_ns, 5 * MILLISECOND);
     // A due poll of d2 at the same time goes first.
     EXPECT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::POLL);
-    scheduler.set_probe(0, FAST_PERIOD, 0);
+    scheduler.set_probe(0, FAST_PERIOD, 100 * MILLISECOND);
     const Choice probe = scheduler.take(FAST_PERIOD + MILLISECOND);
     EXPECT_EQ(probe.kind, Choice::Kind::PROBE);
     EXPECT_EQ(probe.device, 0U);

@@ -87,6 +87,9 @@ struct Choice {
     // A PROBE's time-out: its device's, at most 1 s, shortened to end when
     // the next poll falls due (review G7); 0 for every other choice.
     std::int64_t timeout_ns = 0;
+    // The probe's time-out was shortened to a window: a time-out of it is no
+    // failed probe (review J1).
+    bool windowed = false;
 };
 
 class Scheduler {
@@ -226,10 +229,18 @@ public:
 
     // The planned request `request` of `device` rests (`resting`) or is
     // polled again: a resting request is left out of its group's cycles
-    // (review G8). A chained request never rests: its chain would be cut.
+    // (review G8). A request of a chain of companions rests with the whole
+    // chain, so that no part of it is read and thrown away (J5).
     // `reconnect` ends every rest.
     SCADA_RT void rest(std::uint32_t device, std::uint32_t request,
                        bool resting) noexcept;
+    // Whether `request` of `device` rests.
+    [[nodiscard]] bool resting(std::uint32_t device,
+                               std::uint32_t request) const noexcept {
+        return device < devices_.size() &&
+               request < devices_[device].resting.size() &&
+               devices_[device].resting[request];
+    }
     void probe_done() noexcept { probe_in_flight_ = false; }
 
     // Sends the poll request `request` of `device` again as its next
@@ -270,37 +281,40 @@ private:
         bool limited = false;  // the last cycle waited and ended late
     };
 
+    // Members in the order that packs them best.
     struct DeviceRun {
+        // Where in the group's cycle a chain in progress started.
+        std::size_t chain_next = 0;
+        std::size_t chain_next_split = 0;
+        // Failure handling (7.4).
+        std::int64_t probe_due_ns = 0;
+        std::int64_t retry_due_ns = 0;
+        std::int64_t failing_timeout_ns = 0;
+        std::int64_t probe_timeout_ns = 0;
         std::vector<GroupState> groups;
+        // An order whose steps have started.
+        OrderTicket order{};
         std::vector<bool> split;    // per request: replaced by its split form
         std::vector<bool> absent;   // per request: refused, not sent
         std::vector<bool> resting;  // per request: in its back-off (G8)
         std::uint32_t unit = 0;     // index into units_
-        // A chain of companion requests (5.5) in progress: its group, and
-        // where in the group's cycle it started.
-        bool chain = false;
-        std::uint32_t chain_group = 0;
-        std::size_t chain_next = 0;
-        std::size_t chain_next_split = 0;
-        // An order whose steps have started.
-        bool order_active = false;
-        OrderTicket order{};
+        std::uint32_t chain_group = 0;  // the group of a chain in progress
         std::uint32_t order_step = 0;
+        std::uint32_t retry_request = 0;
+        bool chain = false;  // a chain of companion requests (5.5) in progress
+        bool order_active = false;
         // Within one `take`: an earlier order of this device waits, so its
         // later orders wait too (arrival order per device).
         bool order_blocked = false;
-        // Failure handling (7.4).
         bool polled = true;
         bool probe = false;
-        std::int64_t probe_due_ns = 0;
         bool retry = false;
-        std::uint32_t retry_request = 0;
-        std::int64_t retry_due_ns = 0;
         // Not RUNNING with an empty failure count: not answered since the
         // connect, or failing (G5).
         bool failing = false;
-        std::int64_t failing_timeout_ns = 0;
-        std::int64_t probe_timeout_ns = 0;
+        // A windowed probe was sent for this due time: the next one waits for
+        // the floor, with its whole time-out (J1).
+        bool windowed_tried = false;
     };
 
     // One physical unit: the devices that share its key (R3).
@@ -395,6 +409,12 @@ private:
                           std::int64_t& wake) noexcept;
     [[nodiscard]] bool due_work_pending() const noexcept;
     [[nodiscard]] std::int64_t next_poll_due_ns() const noexcept;
+    // A probe past its floor takes the turn of a held-back failing poll,
+    // under the same spacing, so that a saturated line still probes (J3).
+    bool choose_overdue_probe(std::int64_t now_ns, Choice& out) noexcept;
+    // Takes the probe of `device` with time-out `wait_ns`.
+    bool take_probe(std::uint32_t device, std::int64_t now_ns,
+                    std::int64_t wait_ns, bool windowed, Choice& out) noexcept;
     bool choose_probe(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
     bool start_probe_cycle(std::uint32_t device, std::int64_t now_ns,

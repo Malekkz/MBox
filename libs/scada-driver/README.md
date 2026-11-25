@@ -79,15 +79,23 @@ the contracts left open.
   and the dead are all demoted after 983 s (D-138; `ctest --preset perf`).
 - **Probes use the windows between polls.** A probe goes when no request
   waits, its time-out ended before the next due poll if the window is at
-  least 100 ms; else it waits up to 10 time-outs and then goes with its
-  whole time-out (1 s at most), delaying one poll (D-138). With 200 live
-  units the windows are too short, and probes go at that floor.
+  least 100 ms; one such probe per due time, and its time-out is no
+  failure. Else, and after it, the probe waits up to 10 time-outs and then
+  goes with its whole time-out (1 s at most), holding one poll, also on a
+  line where a request is always due (D-138).
+- **Dead values go bad on time.** A poll's points are COMM_FAIL at the
+  latest one period (or its retries' time-outs, if longer) after its first
+  time-out, even while its retries wait behind live devices (D-140).
+- **Units that die together cost one long gap.** Each is asked once in its
+  normal turn before it is known to be dead: 50 units with a 1 s time-out
+  hold the live ones once for about 51 s (D-138).
 - **A dead block of a live device rests.** A request that keeps failing
   while its device answers others is polled once per back-off (10 s,
-  doubling to 300 s, by default); its points stay BAD (D-140).
-- **A line that is never quiet is jammed.** After 256 quiet times in a row
-  that found bytes, a serial line counts a jam (`jams`) and sends anyway
-  (D-140).
+  doubling to 300 s, by default), with its whole chain of companions if it
+  has one; its points stay BAD (D-140).
+- **A line that is never quiet is jammed.** When quiet times keep finding
+  bytes for 5 s, a serial line counts a jam (`jams`) and sends anyway: no
+  request for at most 5 s plus one quiet time (D-140).
 - **A device with no probe request is probed by a poll cycle.** When every
   read of a device has side effects or is chained, its probe is one whole
   poll cycle at each back-off instant, and its samples are published as a
