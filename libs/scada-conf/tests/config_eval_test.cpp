@@ -19,8 +19,9 @@
 namespace scada::conf {
 namespace {
 
-// `text` evaluated with i = 7, r = 2.5, b = TRUE, s = 'meter' and
-// o = {meter, battery}: the canonical text and type of its value, or
+// `text` evaluated with i = 7, r = 2.5, b = TRUE, s = 'meter',
+// o = {meter, battery}, p = {battery, meter, meter} and q = {grid}: the
+// canonical text and type of its value, or
 // "CF-<code> at <column>: <message>".
 std::string eval(std::string_view text,
                  ExpressionKind kind = ExpressionKind::CONFIGURATION) {
@@ -41,6 +42,10 @@ std::string eval(std::string_view text,
         set.type = ValueType::SET;
         set.set = {"meter", "battery"};
         values.emplace("o", set);
+        set.set = {"battery", "meter", "meter"};
+        values.emplace("p", set);
+        set.set = {"grid"};
+        values.emplace("q", set);
         return values;
     }();
     const Bindings bindings = [](std::string_view name) -> const ConfigValue* {
@@ -149,6 +154,69 @@ TEST(ConfigEval, FailuresAreCf410) {
     EXPECT_EQ(eval("n + 1"),
               "CF-410 at 1: expression: \"n\" is not a parameter and no "
               "variable bound to this point");
+}
+
+// The edges of each operator and function (T6 of the review of #146), one
+// row each: the bounds of INT, each sign of an overflowing product, the
+// ends of a range, bit and shift 63, the bounds of `limit`, the order of
+// `atan2`, every REAL function, and SETs compared as sets (C3).
+TEST(ConfigEval, Edges) {
+    const std::pair<std::string_view, std::string_view> rows[] = {
+        {"-9223372036854775807 - 1", "-9223372036854775808 INT"},
+        {"-9223372036854775807 - 1 - 1",
+         "CF-410 at 26: expression: the result does not fit INT"},
+        {"-(-9223372036854775807 - 1)",
+         "CF-410 at 1: expression: the result does not fit INT"},
+        {"(-9223372036854775807 - 1) DIV -1",
+         "CF-410 at 28: expression: the result does not fit INT"},
+        {"-4611686018427387904 * 2", "-9223372036854775808 INT"},
+        {"-4611686018427387904 * 3",
+         "CF-410 at 22: expression: the result does not fit INT"},
+        {"3 * -4611686018427387904",
+         "CF-410 at 3: expression: the result does not fit INT"},
+        {"-4611686018427387904 * -2",
+         "CF-410 at 22: expression: the result does not fit INT"},
+        {"round(9223372036854774784.0)", "9223372036854774784 INT"},
+        {"round(9223372036854775808.0)",
+         "CF-410 at 1: expression: the result does not fit INT"},
+        {"i >= 7", "true BOOL"},
+        {"i >= 8", "false BOOL"},
+        {"i < 8", "true BOOL"},
+        {"i < 7", "false BOOL"},
+        {"1 IN 1..5", "true BOOL"},
+        {"0 IN 1..5", "false BOOL"},
+        {"5 IN 1..5", "true BOOL"},
+        {"6 IN 1..5", "false BOOL"},
+        {"bit(-1, 63)", "true BOOL"},
+        {"bit(1, 63)", "false BOOL"},
+        // `shl` drops the bits it shifts out, with no error (the lead's
+        // ruling on #146).
+        {"shl(1, 63)", "-9223372036854775808 INT"},
+        {"shl(3, 63)", "-9223372036854775808 INT"},
+        {"shl(1, -1)", "CF-410 at 1: expression: a shift of -1 is not 0 to 63"},
+        {"limit(5, 1, 9)", "5 INT"},
+        {"limit(9, 1, 5)",
+         "CF-410 at 1: expression: limit needs lo at most hi"},
+        {"atan2(1, 0)", "1.5707963267948966 REAL"},
+        {"atan2(0, 1)", "0.0 REAL"},
+        {"sqrt(2)", "1.4142135623730951 REAL"},
+        {"exp(0)", "1.0 REAL"},
+        {"ln(1)", "0.0 REAL"},
+        {"log10(100)", "2.0 REAL"},
+        {"sin(0)", "0.0 REAL"},
+        {"cos(0)", "1.0 REAL"},
+        {"tan(0)", "0.0 REAL"},
+        {"asin(1)", "1.5707963267948966 REAL"},
+        {"acos(1)", "0.0 REAL"},
+        {"atan(1)", "0.7853981633974483 REAL"},
+        {"o = p", "true BOOL"},
+        {"o = q", "false BOOL"},
+        {"o <> q", "true BOOL"},
+        {"o <> p", "false BOOL"},
+    };
+    for (const auto& [text, expected] : rows) {
+        EXPECT_EQ(eval(text), expected) << text;
+    }
 }
 
 }  // namespace

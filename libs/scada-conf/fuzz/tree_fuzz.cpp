@@ -9,11 +9,15 @@
 // Properties: validation never fails on a readable tree; the count is at least
 // the list; every error has a message, and a line given with its column; the
 // expanded tree (stage 4) exists exactly when the tree is valid, and each of
-// its nodes names a file of the tree and the device it belongs to.
+// its nodes names a file of the tree and the device it belongs to. In the
+// expanded tree no key that steers expansion is left, no expression outside
+// `alarms`, every point name is valid and unique in its device, and the tree
+// is within the node limit (T7 of the review of #146).
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
+#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/validate.h"
 
@@ -24,6 +28,7 @@
 #include <fstream>
 #include <ios>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -142,10 +147,95 @@ void write_tree(std::string_view input, const std::filesystem::path& root) {
 
 }  // namespace
 
+namespace {
+
+using scada::conf::Document;
+using scada::conf::NodeId;
+using scada::conf::NodeKind;
+
+// No key that steers expansion is left below `node` (T7 of the review of
+// #146), and no expression outside `alarms`, which hold run-time ones.
+// NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
+void check_expanded_value(const scada::conf::ExpandedTree& tree, NodeId node,
+                          bool in_alarms) {
+    const Document& document = tree.document;
+    switch (document.kind(node)) {
+        case NodeKind::SCALAR: {
+            const scada::conf::ScalarType type = tree.types.of(node);
+            check(in_alarms ||
+                  (type != scada::conf::ScalarType::EXPRESSION &&
+                   type != scada::conf::ScalarType::INTEGER_EXPRESSION));
+            return;
+        }
+        case NodeKind::MAP:
+            for (const scada::conf::Entry& entry : document.entries(node)) {
+                const std::string_view key = document.text(entry.key);
+                for (const std::string_view steering :
+                     {"when", "repeat", "for", "defaults", "overrides",
+                      "disable", "only", "replace", "template", "params"}) {
+                    check(key != steering);
+                }
+                check_expanded_value(tree, entry.value,
+                                     in_alarms || key == "alarms");
+            }
+            return;
+        case NodeKind::SEQUENCE:
+            for (const NodeId item : document.items(node)) {
+                check_expanded_value(tree, item, in_alarms);
+            }
+            return;
+    }
+}
+
+// Each device's points: a valid name (2.1) with no `{...}` left, unique in
+// its device; the keys below them as `check_expanded_value`.
+void check_devices(const scada::conf::ExpandedTree& tree) {
+    const Document& document = tree.document;
+    const std::optional<NodeId> channels =
+        document.find(document.root(), "channels");
+    check(channels.has_value());
+    if (!channels) {
+        return;
+    }
+    for (const NodeId channel : document.items(*channels)) {
+        const std::optional<NodeId> devices = document.find(channel, "devices");
+        check(devices.has_value());
+        if (!devices) {
+            continue;
+        }
+        for (const NodeId device : document.items(*devices)) {
+            std::set<std::string_view> names;
+            for (const scada::conf::Entry& entry : document.entries(device)) {
+                if (document.text(entry.key) != "points") {
+                    check_expanded_value(tree, entry.value, false);
+                    continue;
+                }
+                for (const NodeId point : document.items(entry.value)) {
+                    const std::optional<NodeId> name =
+                        document.find(point, "name");
+                    check(name.has_value());
+                    if (!name) {
+                        continue;
+                    }
+                    const std::string_view text = document.text(*name);
+                    check(scada::conf::is_tag_name(text));
+                    check(names.insert(text).second);
+                    check_expanded_value(tree, point, false);
+                }
+            }
+        }
+    }
+}
+
+}  // namespace
+
 // Every node of `tree` lies in a file of the tree, has a type table entry,
-// and belongs to no device or to one the tree lists.
+// and belongs to no device or to one the tree lists; the tree is within the
+// node limit of 1.3, and its devices hold what expansion makes (T7).
 void check_expanded(const scada::conf::ExpandedTree& tree) {
+    constexpr std::size_t MAX_TREE_NODES = 4'000'000;
     const scada::conf::Document& document = tree.document;
+    check(document.size() <= MAX_TREE_NODES);
     check(tree.types.size() == document.size());
     check(tree.instance_of.size() == document.size());
     for (scada::conf::NodeId node = 0; node < document.size(); ++node) {
@@ -154,6 +244,7 @@ void check_expanded(const scada::conf::ExpandedTree& tree) {
         check(instance == scada::conf::ExpandedTree::NO_INSTANCE ||
               instance < tree.instances.size());
     }
+    check_devices(tree);
 }
 
 // NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer

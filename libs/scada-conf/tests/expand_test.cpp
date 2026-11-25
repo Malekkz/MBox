@@ -682,6 +682,180 @@ TEST(Expand, TheLimitsOfTheExpandedTree) {
                      "template templates/meter_a.yaml:65:5"}));
 }
 
+// T6 of the review of #146: what a swap of two steps, or of two loops,
+// would change, and the edges of each limit and pattern.
+namespace {
+
+// A template `meter_a` of Modbus with `body` after its header, and one
+// instance with `more`.
+Lines one_template(std::string_view body, std::string_view more = {}) {
+    return expand(
+        {{"templates/meter_a.yaml",
+          "template: meter_a\nprotocol: modbus\n" + std::string(body)},
+         {"drivers/modbus/line1.yaml", one_device(more)}});
+}
+
+constexpr std::string_view ADDRESS =
+    "address: { table: holding, register: 1, type: uint16 }";
+
+}  // namespace
+
+// Two `for` variables: the first outermost (4.4).
+TEST(Expand, TheFirstVariableIsOutermost) {
+    EXPECT_EQ(one_template("repeat:\n"
+                           "  - for: { a: \"1..2\", b: \"1..2\" }\n"
+                           "    points: [ { name: \"p{a}_{b}\", " +
+                           std::string(ADDRESS) + " } ]\n"),
+              (Lines{"ps1.m1.p1_1: {address: {table: holding, register: 1, "
+                     "type: uint16}}",
+                     "ps1.m1.p1_2: {address: {table: holding, register: 1, "
+                     "type: uint16}}",
+                     "ps1.m1.p2_1: {address: {table: holding, register: 1, "
+                     "type: uint16}}",
+                     "ps1.m1.p2_2: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+}
+
+// A level's `disable` applies after its own points are joined (3.4), and
+// an override needs a point that exists after step 4 (CF-413).
+TEST(Expand, TheOrderOfDisableAndOfOverrides) {
+    EXPECT_EQ(one_template("disable: [q]\npoints:\n  - { name: p, " +
+                           std::string(ADDRESS) + " }\n  - { name: q, " +
+                           std::string(ADDRESS) + " }\n"),
+              (Lines{"ps1.m1.p: {address: {table: holding, register: 1, type: "
+                     "uint16}}"}));
+    EXPECT_EQ(one_template("points:\n  - { name: p, when: \"false\", " +
+                               std::string(ADDRESS) + " }\n  - { name: q, " +
+                               std::string(ADDRESS) + " }\n",
+                           "    overrides: { p: { unit: V } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:18: error CF-413: point "
+                     "\"p\" does not exist in template \"meter_a\""}));
+}
+
+// 2.5: `?` is one character of a segment, never a dot; `*` stays within a
+// segment.
+TEST(Expand, PatternsStayWithinASegment) {
+    const std::string points = "points:\n  - { name: a.b, " +
+                               std::string(ADDRESS) + " }\n  - { name: ab, " +
+                               std::string(ADDRESS) + " }\n";
+    EXPECT_EQ(one_template(points, "    disable: [\"a?b\"]\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:15: error CF-413: point "
+                     "\"a?b\" does not exist in template \"meter_a\""}));
+    EXPECT_EQ(one_template(points, "    disable: [\"a*\"]\n"),
+              (Lines{"ps1.m1.a.b: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+}
+
+// The edges of the `repeat` limits (CF-113, 4.4): 65,536 values pass and
+// 65,537 do not; so for the pairs of two variables; a `for` value that is
+// no range or INT is CF-523.
+TEST(Expand, TheEdgesOfRepeat) {
+    const auto block = [](std::string_view range) {
+        return "repeat:\n  - for: " + std::string(range) + "\n    points: []\n";
+    };
+    EXPECT_EQ(one_template(block("{ n: \"1..65536\" }")), Lines{});
+    EXPECT_EQ(one_template(block("{ n: \"1..65537\" }")),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the range "
+                     "of \"n\" exceeds its limit of 65536\n  from template "
+                     "templates/meter_a.yaml:4:15"}));
+    EXPECT_EQ(one_template(block("{ a: \"1..256\", b: \"1..256\" }")), Lines{});
+    EXPECT_EQ(one_template(block("{ a: \"1..256\", b: \"1..257\" }")),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the values "
+                     "of a repeat block exceed its limit of 65536\n  from "
+                     "template templates/meter_a.yaml:4:10"}));
+    EXPECT_EQ(one_template("params: { c: { type: bool, default: true } }\n" +
+                           block("{ n: \"c\" }")),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-523: "
+                     "expression: the value must be a range or an INT, not "
+                     "BOOL\n  from template templates/meter_a.yaml:5:15"}));
+}
+
+// The edges of a parameter: its `min` itself passes; a quoted "true" is no
+// bool (1.2); a bit name given twice is CF-416; one cause is reported once.
+TEST(Expand, TheEdgesOfParametersAndBits) {
+    const std::string params =
+        "params: { k: { type: int, default: 1, min: 2 }, f: { type: bool, "
+        "default: false } }\n"
+        "points:\n  - { name: p, " +
+        std::string(ADDRESS) + " }\n";
+    EXPECT_EQ(one_template(params, "    params: { k: 2 }\n"),
+              (Lines{"ps1.m1.p: {address: {table: holding, register: 1, type: "
+                     "uint16}}"}));
+    EXPECT_EQ(one_template(params, "    params: { k: 2, f: \"true\" }\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:24: error CF-412: parameter "
+                     "\"f\": must be true or false"}));
+    EXPECT_EQ(
+        one_template("bit_order: lsb0\npoints:\n  - { name: w, tag: "
+                     "false, " +
+                     std::string(ADDRESS) + ", bits: { 0: run, 1: run } }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-416: point \"run\" is "
+               "defined twice\n  from template templates/meter_a.yaml:5:103 "
+               "(point w)"}));
+    // A default that fails under two points of one instance is one cause
+    // at one instance: one error, with no count of instances.
+    EXPECT_EQ(one_template("params: { k: { type: int, default: 0 } }\n"
+                           "defaults: { scale: { gain: \"1 DIV k\" } }\n"
+                           "points:\n  - { name: p, " +
+                           std::string(ADDRESS) + " }\n  - { name: q, " +
+                           std::string(ADDRESS) + " }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"1 DIV k\": division by zero\n  from template "
+                     "templates/meter_a.yaml:4:31 (point p; k = 0)"}));
+}
+
+// `expanded_diagnostic` (expand.h) places a diagnostic of a later stage as
+// the expander does: at the instance, with the template's line as a note.
+TEST(Expand, AnExpandedDiagnostic) {
+    std::optional<test::TempDirectory> temp =
+        test::TempDirectory::create("scada-conf-expand-");
+    ASSERT_TRUE(temp.has_value());
+    if (!temp) {
+        return;
+    }
+    Files all{{"templates/meter_a.yaml",
+               "template: meter_a\nprotocol: modbus\npoints:\n  - { name: p, " +
+                   std::string(ADDRESS) + " }\n"},
+              {"drivers/modbus/line1.yaml", one_device()},
+              {"system.yaml", std::string(SYSTEM)}};
+    for (const auto& [path, content] : all) {
+        const fs::path full = temp->path() / path;
+        fs::create_directories(full.parent_path());
+        std::ofstream(full, std::ios::binary) << content;
+    }
+    const Result<Validation> validation = validate_and_expand(temp->path());
+    ASSERT_TRUE(validation.ok());
+    if (!validation.ok() || !validation.value().expanded) {
+        FAIL() << "no expanded tree";
+        return;
+    }
+    const ExpandedTree& tree = *validation.value().expanded;
+    // The node of the point's `register` value, written in the template.
+    std::optional<NodeId> from_template;
+    std::optional<NodeId> from_instance;
+    for (NodeId node = 0; node < tree.document.size(); ++node) {
+        const Location place = tree.document.location(node);
+        if (tree.document.kind(node) == NodeKind::SCALAR &&
+            tree.document.text(node) == "1" &&
+            place.file == "templates/meter_a.yaml") {
+            from_template = node;
+        }
+        if (tree.document.kind(node) == NodeKind::SCALAR &&
+            tree.document.text(node) == "ps1.m1") {
+            from_instance = node;
+        }
+    }
+    ASSERT_TRUE(from_template && from_instance);
+    if (!from_template || !from_instance) {
+        return;
+    }
+    EXPECT_EQ(format(expanded_diagnostic(tree, 1, *from_template, "a message",
+                                         "point p")),
+              "drivers/modbus/line1.yaml:7:11: error CF-1: a message\n  from "
+              "template templates/meter_a.yaml:4:53 (point p)");
+    EXPECT_EQ(format(expanded_diagnostic(tree, 1, *from_instance, "a message")),
+              "drivers/modbus/line1.yaml:7:11: error CF-1: a message");
+}
+
 TEST(Expand, APointOfAProtocolTemplateNeedsAnAddress) {
     EXPECT_EQ(
         expand({{"templates/meter_a.yaml",
@@ -918,6 +1092,24 @@ TEST(Expand, InvalidValuesByTheRawTypeAfterTheOverrides) {
                "register: 1, type: int16}}",
                "ps1.m1.q: {invalid_values: [nan], address: {table: holding, "
                "register: 2, type: float32}}"}));
+}
+
+// B6 as the lead corrected it: keys the schema types as strings
+// (`write.values`) are compared as text, so `16` and `0x10` stay two keys.
+TEST(Expand, StringKeysMergeAsText) {
+    EXPECT_EQ(
+        expand({{"templates/base_a.yaml",
+                 "template: base_a\nprotocol: modbus\n"
+                 "points: [ { name: c, access: rw, address: { table: holding, "
+                 "register: 1, type: uint16, write: { values: { 16: 1 } } } } "
+                 "]\n"},
+                {"templates/meter_a.yaml",
+                 "template: meter_a\nextends: base_a\nprotocol: modbus\n"
+                 "points: [ { name: c, address: { write: { values: { 0x10: 2 } "
+                 "} } } ]\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        Lines{"ps1.m1.c: {access: rw, address: {table: holding, register: 1, "
+              "type: uint16, write: {values: {16: 1, 0x10: 2}}}}"});
 }
 
 // B6: map keys of the integer form merge by their value: a child's `0xF`

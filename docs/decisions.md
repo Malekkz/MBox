@@ -2218,6 +2218,12 @@ Decision:
   - Every expression of a point's keys and of `identify` is a number (2.4), as stage 5 types a template's (D-113): `the value must be a number, not {type}`. A key the schema types as an integer (`register`, `bit`, `divide_by`) takes an INT: `the value must be an INT, not REAL` (B9). Stage 3 marks such an expression `INTEGER_EXPRESSION`, and stage 5 types it the same way at the template. The range of a computed value (`register: "70000"`, `divide_by` 0) is the merged-point checks' (the second pull request of #103).
   - `identify` of the device, the template's with the instance's appended, is evaluated with the parameters and no variable (B8).
   - `AND` and `OR` evaluate both sides (the ruling O-4): `false AND 1 DIV k = 0` with k = 0 is CF-410.
+  - The evaluator (the lead's rulings on the C++ review of #146, all on #136):
+    - two SETs compare as sets: `=` holds when they hold the same strings, whatever their order or repeats (C3);
+    - `/` of two INTs, an INT with a REAL, and a TIME times or divided by a number are binary64 operations on the operands converted to binary64, so an INT above 2^53 may round;
+    - `shl` drops the bits it shifts out, with no error; a shift or a bit number outside 0 to 63 is CF-410;
+    - `limit(lo, x, hi)` with `lo` above `hi` is CF-410 (`limit needs lo at most hi`), not a silent `hi`;
+    - `round` and the other rounding functions take REAL only, as the function table says.
   - Alarms hold run-time expressions and are not evaluated here, wherever they stand: on a point or on a bit (B2 of the review of #144).
   - In a block scalar or an escaped string, which has no place in the file for a character, the message adds the place within the expression's text, as for CF-520 (D-109).
 - **`repeat`.** A `for` value is evaluated with the parameters only; a second variable's range does not see the first (the ruling O-7). Its values are counted from the bounds before any is made, each run's span refused before it is added so that the count cannot wrap (B1): CF-113, `the range of n exceeds its limit of 65536`, and for two variables `the values of a repeat block exceed ...`.

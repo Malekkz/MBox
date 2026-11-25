@@ -481,10 +481,20 @@ private:
             cause += ':' + std::to_string(site.line) + ':' +
                      std::to_string(site.column) + '|';
             cause += diagnostic.message;
-            const auto [group, added] =
-                causes_.try_emplace(std::move(cause), pending_.size(), 0);
+            const auto [group, added] = causes_.try_emplace(
+                std::move(cause), Cause{.first = pending_.size(),
+                                        .more = 0,
+                                        .last = diagnostic.location});
             if (!added) {
-                ++group->second.second;
+                // Counted once per instance: points of one instance that
+                // meet the cause are one.
+                Cause& seen = group->second;
+                const Location& at = diagnostic.location;
+                if (at.file != seen.last.file || at.line != seen.last.line ||
+                    at.column != seen.last.column) {
+                    ++seen.more;
+                    seen.last = at;
+                }
                 return;
             }
         }
@@ -494,11 +504,10 @@ private:
     // Gives the buffered diagnostics, in the order they arose.
     void flush_diagnostics() {
         for (const auto& [cause, group] : causes_) {
-            if (group.second > 0) {
+            if (group.more > 0) {
                 pending_[group.first].message +=
-                    " (and " + std::to_string(group.second) +
-                    (group.second == 1 ? " more instance)"
-                                       : " more instances)");
+                    " (and " + std::to_string(group.more) +
+                    (group.more == 1 ? " more instance)" : " more instances)");
             }
         }
         for (Diagnostic& diagnostic : pending_) {
@@ -2345,7 +2354,12 @@ private:
     // The diagnostics until the end of the run, and the first of each cause
     // with the number of other instances it arose at.
     std::vector<Diagnostic> pending_;
-    std::map<std::string, std::pair<std::size_t, std::size_t>> causes_;
+    struct Cause {
+        std::size_t first = 0;  // in `pending_`
+        std::size_t more = 0;   // other instances
+        Location last;          // the instance it was last met at
+    };
+    std::map<std::string, Cause> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
     std::set<std::string> reported_;

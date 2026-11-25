@@ -60,6 +60,11 @@ struct ExpandedTree {
                                              std::string message,
                                              std::string detail = {});
 
+// A computed value (13.3) is a scalar of style PLAIN with its canonical
+// text; its type is in `types`, so a computed STRING such as `12` or `true`
+// must be written by its type, quoted, never by its style (T5 of the
+// review of #146): the writer of the expanded files (#102) goes by `types`.
+//
 // Expands every device instance of `files`, which passed stage 3. Errors go
 // to `diagnostics`. A template's own faults (its chain, its parameters'
 // types, two written points of one name, a base template's addresses,
