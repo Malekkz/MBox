@@ -8,14 +8,19 @@
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/node.h"
+#include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
+#include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -25,6 +30,7 @@ namespace scada::conf {
 namespace {
 
 constexpr std::uint16_t CF_MISSING_KEY = 202;
+constexpr std::uint16_t CF_NO_SUCH = 310;
 constexpr std::uint16_t CF_VALUE_TYPE = 504;
 constexpr std::uint16_t CF_SCALING_RANGE = 516;
 constexpr std::uint16_t CF_INTEGER_SCALING = 517;
@@ -145,8 +151,25 @@ bool is_signed(std::string_view raw) noexcept {
 
 class Checker {
 public:
-    Checker(const ExpandedTree& tree, Diagnostics& diagnostics)
-        : tree_(&tree), document_(&tree.document), diagnostics_(&diagnostics) {}
+    Checker(const ExpandedTree& tree, std::span<const CheckedFile> files,
+            Diagnostics& diagnostics)
+        : tree_(&tree), document_(&tree.document), diagnostics_(&diagnostics) {
+        for (const CheckedFile& file : files) {
+            if (file.source->path_class.type != FileType::ENUMS) {
+                continue;
+            }
+            const Document& enums = *file.document;
+            const std::optional<NodeId> map =
+                enums.kind(enums.root()) == NodeKind::MAP
+                    ? enums.find(enums.root(), "enums")
+                    : std::nullopt;
+            if (map && enums.kind(*map) == NodeKind::MAP) {
+                for (const Entry& entry : enums.entries(*map)) {
+                    global_enums_.emplace(enums.text(entry.key));
+                }
+            }
+        }
+    }
 
     void run() {
         const NodeId channels =
@@ -217,6 +240,12 @@ private:
 
     void check_device(NodeId device) {
         const std::string name = text_of(device, "name");
+        device_enums_.clear();
+        if (const std::optional<NodeId> enums = child_map(device, "enums")) {
+            for (const Entry& entry : document_->entries(*enums)) {
+                device_enums_.emplace(document_->text(entry.key));
+            }
+        }
         if (const std::optional<NodeId> time =
                 child_map(device, "device_time")) {
             tag_ = name;
@@ -239,6 +268,7 @@ private:
 
     void check_point(NodeId point) {
         check_completeness(point);
+        check_enumeration(point);
         const std::optional<NodeId> address = child_map(point, "address");
         if (protocol_ != "modbus" || !address) {
             return;
@@ -251,6 +281,28 @@ private:
         }
         if (check_integer_scaling(point, value_type)) {
             check_scaling_range(point, *address, raw, value_type);
+        }
+    }
+
+    // An enumeration named in a template resolves over the instance's
+    // chain (merged into the device's `enums`), then `enums.yaml`.
+    void check_enumeration(NodeId point) {
+        const std::optional<NodeId> name = child(point, "enum");
+        if (!name || document_->kind(*name) != NodeKind::SCALAR) {
+            return;
+        }
+        const std::string_view text = document_->text(*name);
+        if (device_enums_.contains(text) || global_enums_.contains(text)) {
+            return;
+        }
+        const Diagnostic diagnostic = expanded_diagnostic(
+            *tree_, CF_NO_SUCH, *name,
+            "enumeration " + quote_text(text) + " does not exist",
+            "point " + point_name_);
+        // Only a name a template wrote: the instance's own names are the
+        // reference check's.
+        if (!diagnostic.notes.empty()) {
+            diagnostics_->add(diagnostic);
         }
     }
 
@@ -564,12 +616,16 @@ private:
     std::string backend_;
     std::string tag_;
     std::string point_name_;
+    std::set<std::string, std::less<>> global_enums_;
+    std::set<std::string, std::less<>> device_enums_;
 };
 
 }  // namespace
 
-void check_merged_points(const ExpandedTree& tree, Diagnostics& diagnostics) {
-    Checker(tree, diagnostics).run();
+void check_merged_points(const ExpandedTree& tree,
+                         std::span<const CheckedFile> files,
+                         Diagnostics& diagnostics) {
+    Checker(tree, files, diagnostics).run();
 }
 
 }  // namespace scada::conf

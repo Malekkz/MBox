@@ -578,7 +578,9 @@ TEST(References, AParentMayUseWhatAChildGives) {
                    "template: meter_a\nextends: meter_base\nprotocol: modbus\n"
                    "points:\n"
                    "  - { name: p, address: { table: holding, register: "
-                   "\"base_r + 1\", type: uint16 } }\n"},
+                   "\"base_r + 1\", type: uint16 } }\n"
+                   "  - { name: v, address: { table: holding, register: 9, "
+                   "type: uint16 } }\n"},
                   {"templates/meter_b.yaml",
                    "template: meter_b\nextends: meter_a\nprotocol: modbus\n"
                    "params: { base_r: { type: int, default: 100 } }\n"
@@ -612,8 +614,10 @@ TEST(References, NamesOfAnInstancesExpressions) {
                            "    points:\n"
                            "      - { name: p, address: { table: holding, "
                            "register: \"base + 1\", type: uint16 } }\n")}}),
+        // The expander (stage 4) finds it first.
         Lines{"drivers/modbus/line1.yaml:10:58 CF-410: expression \"base + "
-              "1\": \"base\" is not a parameter or a variable"});
+              "1\": \"base\" is not a parameter and no variable bound to "
+              "this point"});
     EXPECT_EQ(
         validate({{"templates/meter_a.yaml",
                    "template: meter_a\nprotocol: modbus\n"
@@ -626,7 +630,11 @@ TEST(References, NamesOfAnInstancesExpressions) {
                            "    unit_id: 1\n"
                            "    overrides: { p: { address: { register: "
                            "\"'a' + n\" } } }\n")}}),
-        Lines{});
+        // Stage 5 leaves it to the expander, which binds the variables of
+        // each point: `n` is bound to none here.
+        Lines{"drivers/modbus/line1.yaml:10:51 CF-410: expression \"'a' + "
+              "n\": \"n\" is not a parameter and no variable bound to this "
+              "point"});
 }
 
 // S3: a chain cut by its length (or a cycle) is not known; its names and

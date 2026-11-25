@@ -544,7 +544,8 @@ private:
             return false;
         }
         keep_present(instance, device.points);
-        apply_defaults(defaults, instance, device.points);
+        apply_defaults(defaults, instance,
+                       channel_->source->path_class.protocol, device.points);
         apply_overrides(instance, device_keys, device.points);
         // The template's device keys go under the instance's.
         Value keys = device_keys;
@@ -1169,7 +1170,7 @@ private:
     // Step 5: the template's `defaults` merged with the instance's, merged
     // under every point.
     static void apply_defaults(const Value& template_defaults,
-                               const Value& instance,
+                               const Value& instance, std::string_view protocol,
                                std::vector<Point>& points) {
         Value defaults = template_defaults;
         if (const Value* own = instance.find("defaults")) {
@@ -1181,22 +1182,42 @@ private:
             merged.node = point.value.node;
             merge(merged, point.value, "point");
             point.value = std::move(merged);
-            pick_invalid_values(point.value);
+            pick_invalid_values(point.value, protocol);
         }
+    }
+
+    // The raw type of a Modbus address (Annex A.2): its `type`, else `bool`
+    // for one bit, coils and discrete inputs, `uint16` otherwise. Empty for
+    // another protocol, whose raw type its address does not say.
+    static std::string raw_type_of(const Value* address,
+                                   std::string_view protocol) {
+        if (address == nullptr) {
+            return {};
+        }
+        if (const Value* raw = address->find("type")) {
+            return std::string(raw->scalar_text());
+        }
+        if (protocol != "modbus") {
+            return {};
+        }
+        const Value* table = address->find("table");
+        const std::string_view name =
+            table != nullptr ? table->scalar_text() : std::string_view();
+        const bool one_bit = address->find("bit") != nullptr ||
+                             name == "coil" || name == "discrete";
+        return one_bit ? "bool" : "uint16";
     }
 
     // `invalid_values` of `defaults` is a map from raw type to a list
     // (4.7); a point that gives no list of its own takes the one of its raw
-    // type, or none.
-    static void pick_invalid_values(Value& point) {
+    // type, written or the protocol's default, or none.
+    static void pick_invalid_values(Value& point, std::string_view protocol) {
         Value* invalid = point.find("invalid_values");
         if (invalid == nullptr || invalid->kind != NodeKind::MAP) {
             return;
         }
-        const Value* address = point.find("address");
-        const Value* raw = address != nullptr ? address->find("type") : nullptr;
-        const Value* list =
-            raw != nullptr ? invalid->find(raw->scalar_text()) : nullptr;
+        const std::string raw = raw_type_of(point.find("address"), protocol);
+        const Value* list = raw.empty() ? nullptr : invalid->find(raw);
         if (list == nullptr) {
             point.erase("invalid_values");
             return;
@@ -1420,8 +1441,9 @@ private:
             return false;
         }
         if (value->type != ValueType::BOOL) {
-            error(CF_TYPE_MISMATCH, when,
-                  "expression: the value must be BOOL, not " +
+            error(CF_EVALUATION, when,
+                  "expression " + quote_text(when.scalar_text()) +
+                      ": the value must be BOOL, not " +
                       std::string(value_type_name(value->type)));
             return false;
         }
@@ -1461,16 +1483,16 @@ private:
             // At the offending character, as for a syntax error (D-109).
             ExpressionSite site = expression_site(*value.file->document,
                                                   value.node, problem.column);
-            std::string message = problem.message;
+            // Every failure of a configuration expression, a type that
+            // does not fit included, is CF-410 in the form of 2.4 and 10.4
+            // (B6 of the review of #144).
+            std::string reason = problem.message;
             constexpr std::string_view PREFIX = "expression: ";
-            if (problem.code == CF_EVALUATION && message.starts_with(PREFIX)) {
-                message = "expression " + quote_text(text) + ": " +
-                          message.substr(PREFIX.size());
-            } else {
-                message += site.where;
+            if (reason.starts_with(PREFIX)) {
+                reason = reason.substr(PREFIX.size());
             }
-            error_in(problem.code, *value.file, std::move(site.location),
-                     std::move(message));
+            error_in(CF_EVALUATION, *value.file, std::move(site.location),
+                     "expression " + quote_text(text) + ": " + reason);
         }
         return result;
     }
