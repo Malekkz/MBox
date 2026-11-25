@@ -39,10 +39,13 @@ scada_add_library(scada-conf
   SOURCES
     src/diagnostic.cpp
     src/expression.cpp
+    src/expression_site.cpp
+    src/expression_types.cpp
     src/names.cpp
     src/node.cpp
     src/path_class.cpp
     src/read.cpp
+    src/references.cpp
     src/rules.cpp
     src/scalar.cpp
     src/schema.cpp

@@ -8,6 +8,7 @@
 
 #include "scada/conf/schema.h"
 
+#include "expression_site.h"
 #include "scada/common/panic.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -67,10 +68,6 @@ constexpr std::uint16_t CF_BAD_NAME = 212;
 constexpr std::uint16_t CF_NOT_A_SECRET = 213;
 constexpr std::uint16_t CF_SECRET = 214;
 constexpr std::uint16_t CF_EXPRESSION_SYNTAX = 520;
-
-// The continuation bytes of UTF-8, which do not start a character.
-constexpr unsigned char UTF8_CONTINUATION_MASK = 0xC0;
-constexpr unsigned char UTF8_CONTINUATION = 0x80;
 
 constexpr std::string_view INT64_MIN_TEXT = "-9223372036854775808";
 constexpr std::string_view INT64_MAX_TEXT = "9223372036854775807";
@@ -1992,7 +1989,7 @@ private:
         if (parse_expression(text, kind, problem)) {
             return ScalarType::EXPRESSION;
         }
-        out.error(expression_diagnostic(scalar, text, problem));
+        out.error(expression_diagnostic(scalar, problem));
         return std::nullopt;
     }
 
@@ -2001,33 +1998,11 @@ private:
     // at the scalar, with the line and column within the expression's text
     // in the message. Columns count characters (contract 1.1).
     [[nodiscard]] Diagnostic expression_diagnostic(
-        NodeId scalar, std::string_view text,
-        const ExpressionError& problem) const {
-        const std::size_t offset =
-            std::min<std::size_t>(problem.column - 1, text.size());
-        std::size_t line = 1;
-        std::size_t column = 1;
-        for (std::size_t i = 0; i < offset; ++i) {
-            const auto byte = static_cast<unsigned char>(text[i]);
-            if (byte == '\n') {
-                ++line;
-                column = 1;
-            } else if ((byte & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION) {
-                ++column;
-            }
-        }
-        Location location = document_->location(scalar);
-        std::string where = " at column " + std::to_string(column);
-        if (document_->verbatim(scalar)) {
-            const bool quoted =
-                document_->style(scalar) == ScalarStyle::SINGLE_QUOTED ||
-                document_->style(scalar) == ScalarStyle::DOUBLE_QUOTED;
-            location.column +=
-                static_cast<std::uint32_t>(column - 1 + (quoted ? 1 : 0));
-        } else {
-            where = " at line " + std::to_string(line) + ", column " +
-                    std::to_string(column) + " of the expression's text";
-        }
+        NodeId scalar, const ExpressionError& problem) const {
+        ExpressionSite site =
+            expression_site(*document_, scalar, problem.column);
+        Location location = std::move(site.location);
+        const std::string& where = site.where;
         std::string message = problem.message;
         if (problem.code == CF_EXPRESSION_SYNTAX) {
             message = "expression: " + problem.message + where;

@@ -1,0 +1,3 @@
+template: level_c
+extends: level_base
+protocol: modbus

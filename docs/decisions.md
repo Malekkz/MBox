@@ -2046,7 +2046,8 @@ Decision:
 - Where an error is (the lead's review of #133, S-1). The parser marks a scalar `verbatim` when its text is its source characters on one line: a plain or quoted scalar with no escape, folded break or doubled quote (`Document::verbatim`, one bit per node). For such a scalar the error is at the offending character in the file, its column counted in characters (contract 1.1). For any other scalar (a block scalar, an escaped or folded one) the file cannot give the character's place, so the error is at the scalar and the message names the line and column within the expression's text ("at line 2, column 5 of the expression's text"). CF-520's message gives the column within the expression, in characters.
 - A parameter or a `repeat` variable named like a reserved word (any case) is CF-212 at its name (5.6: "a parameter or variable with such a name is refused"); `bad` would otherwise read as the literal BAD, 2.
 - A tab is not white space (5.6: "Spaces and line ends separate tokens"): CF-520, with a message that names it.
-- Messages give the right spelling of a common mistake: `!=` (`<>`), `&&`, `||`, `%`, `!`, `==`; a `.` that follows a name (`tag("...")`); a reserved word used as a name; a pattern string where a value is meant; a range in parentheses. A character beyond ASCII is shown whole.
+- Messages give the right spelling of a common mistake: `!=` (`<>`), `&&`, `||`, `%`, `!`, `==`; a `.` that follows a name in a run-time expression (`tag("...")`; not after a number such as `1.` or `1.5.2`, and not in a configuration expression, which has no tags); a reserved word used as a name; an operator word used as a function (`mod(a, 2)`: MOD is an operator, written `a MOD b`); a pattern string where a value is meant; a range in parentheses. A character beyond ASCII is shown whole, and one that shows as a space or as nothing (a no-break space, a zero-width space, a byte-order mark) as its code point, `U+00A0` (the lead's final pass on #133).
+- A parameter or variable name that is not an identifier (`Bad`) has the schema's CF-212 only, not a second one for the reserved word.
 - The depth that CF-526 limits is the nesting of the parser: the expression counts as level 1, and a parenthesis, a call's arguments, a unary operator's operand and the right side of `**` one more each. So 31 nested parentheses, 31 nested calls (a ladder of `if(c, a, if(...))` stops at 31 levels) 15 of `-( ... )` or a chain of 31 `**` (`a ** a ** ...`, right-associative) are the most; 4,096 bytes are accepted and 4,097 refused (CF-526). A flat chain such as `a + b + c` does not deepen it, so 4,096 bytes of a flat chain are accepted, and every recursion of the parser is bounded by 32.
 - Stage 3 keeps no tree: it parses each expression for its syntax and drops the result; stage 5 parses it again to check names and types. A parse is linear in the text, at most 4,096 bytes, so parsing twice costs less than keeping a tree per expression of the whole tree in memory.
 - Each node of the tree keeps its extent in the expression's text (`begin`, `end`, byte offsets), so stage 5 can point at a whole operand, not only at its operator.
@@ -2108,6 +2109,74 @@ Limits (the lead's review of #140):
 - The robust shape, a reusable workflow called by two small ones, is a separate issue: it renames every check, so it comes before required checks are set.
 Reason: a change of base changes what the pull request merges, and a draft made ready is the point where reviewers rely on the run; both must be tested as a push is. A title edit must not re-run the pipeline, cancel a run, or turn a red pull request green.
 Consequences: a title edit shows a few skipped checks named by their templates (`${{ needs.events.outputs.prefix }}...`) on the pull request; a red pull request stays red, because its real checks keep their names (probe test 5). The probe pull request that tested this is named in its pull request for the owner to delete.
+
+## D-113: What stage 5 checks before the expander exists
+Date: 2026-11-24
+Phase / issue: 2, #100 (P2-03), slice 6
+Status: accepted, with the rulings of the lead's review of #144 (B1 to B6, S1 to S5)
+
+Context: stage 5 checks names, references and cross-file rules "of the expanded tree" (contract 1.4). The expander is #103 and comes after this slice (the lead, 2026-11-24, on #100 and #103). Point tags (`<device>.<point>`), names that `repeat` makes, and the bindings of `repeat` variables exist only once instances are expanded.
+Options: wait for the expander; check now only what expansion cannot change, and leave every tag reference unchecked.
+Decision: stage 5 runs on the files as stage 3 read them, and checks only what no expansion can change:
+- **Names that must exist** (CF-310, `{kind} {name} does not exist`):
+  - `template` of a device and `extends` of a template;
+  - a template's `protocol`, at its key (D-108);
+  - areas, logging policies (`logging`, `policy`, `default_policy`) and aggregate tiers (`tiers` keys; `1m` and `1h` when `logging.yaml` gives no `aggregate_tiers`);
+  - enumerations of a tag (in `enums.yaml`) and of an instance's points (in its template's chain, then `enums.yaml`). A template's own points are not checked: a child of the chain may define the table (4.5, step 3.1; B5);
+  - tasks (`fast`, `normal` and `slow` when there is no `control/tasks.yaml`, 9.1; a file replaces them all; B1), programs (`tasks.yaml`), interlocks (`interlocks` of an output, also `on` and `off`), outputs (`output` of a block);
+  - alarm priorities and classes, with the defaults of section 8 when no file gives the list, and the keys of `max_shelve`.
+- **Names given twice:**
+  - a channel (also in two protocols' directories), a device (across channels) and an interlock: CF-303, "first at file:line";
+  - the tags of tag files and interlocks: CF-301 for a name whose first segment is `sys` (`sys` itself too, not `system.a`; 2.1), CF-302 when given twice;
+  - a template, program, area, policy, task or enumeration cannot be given twice: file names and map keys are unique already.
+- **The Modbus channel rules of Annex A.1 (CF-622):**
+  - `data_bits` of 7 on `rtu`, by its value (`7`, `0x7`; B3);
+  - a `host` that is a loopback (127.0.0.0/8, `::1`), multicast (224.0.0.0/4, `ff00::/8`) or the broadcast address (255.255.255.255). The host is classified by its bytes, however it is written (B4); an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is classified by its IPv4 address. A subnet's broadcast address cannot be known from the address alone.
+- **The configuration expressions of a template**, by the tables of 5.6:
+  - `when` must give BOOL;
+  - an expression under an address or a scaling must give a number;
+  - a `for` value must give a range or an INT, over parameters only;
+  - the expressions of an identity check (`address`, `range`; 2.4, 4.8), of a template or of a device without template, must give a number. `equals` and `in` stay text (D-108).
+
+  Parameters are typed by the nearest declaration of the chain that gives a `type`: `int` INT, `number` REAL, `bool` BOOL, `string` and `enum` STRING, `set` SET. A `repeat` variable is INT.
+- **Names in a template's expressions (B5).** A template is checked only through its own chain upward. A name that no parameter or `repeat` variable of that chain has may come from a child of the chain (contract 4.5 resolves names over the instance's chain; 4.1 describes a base with the signals and a child per protocol). Such a name gives no error here, and its expression is not typed. The names are checked at each instance, over the instance's chain, by the expander (#103). A chain cut by a missing template, a cycle or its length (more than 5 files) is not known: its names and types are not checked here (S3), and the missing template or CF-401 is the error.
+- **Codes (B6).** Contract 2.4: "An expression that refers to an unknown name, has the wrong type, divides by zero or overflows is CF-410". So a failure of a configuration expression is CF-410, in the form of 10.4: `expression {expr}: {reason}`, at the offending character (D-109). This covers:
+  - a type that does not fit;
+  - a wrong number of arguments;
+  - a function that reads tags (aggregates, `quality`, `age`, `is_good`, the windowed functions, `tag`);
+  - a `when` that gives no BOOL;
+  - an address or scaling expression that gives no number;
+  - a name in a device without template, where nothing can define one.
+
+  CF-523 stays where 5.6 names it for a configuration expression: a `for` value whose result is not a range or an INT (`expression: the value must be a range or an INT, not ...`). An operand of the range that is not an INT (`1..options`) is a type error of the range operator, CF-410. CF-310 is not used for names in expressions. The disagreement between 2.4 and 5.6 is on #136.
+- **Run-time expressions in a point (B2).** An alarm's `expr`, `condition` and `suppress_when` read tags, wherever the alarm stands: on a point, a bit of a point or a tag. One function (`holds_run_time_expressions`) skips every `alarms` key, so these are never typed as configuration expressions.
+- **Equality (S1).** Two SETs are two values of one type (5.6), so `=` and `<>` accept them. A range is not a value, only a part of `IN` and of a `for` value, so `=` refuses it (on #136).
+- `round`, `trunc`, `floor` and `ceil` take REAL, as the function table says; `round(3)` is CF-410.
+- **Instances.** The expressions of an instance of a template (its `defaults`, `overrides` and points) are typed by the expander, which knows the variables bound to each point.
+- **Cost (S4).** The scope of each template (its chain's enumerations, parameters and variables) is built once, and its names are kept in sets. Measured in the release build: a template of 32,000 `repeat` blocks, 0.27 s; 65,536 devices of a template with 3,000 parameters, 4.6 s for the whole validation.
+What waits, and where:
+- **#103 (the expander):**
+  - the names of a template's expressions and enumerations over the instance's chain, at the instance with a "from template" note;
+  - CF-401 (a cycle, more than 4 parents);
+  - CF-415 (a parameter's type changed);
+  - the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map).
+- **Slice 7 of #100:**
+  - every reference to a tag: outputs, feedback, `local_panel.input`, alarms (`tag`, `limit`, `setpoint`), block pins, run-time expressions;
+  - CF-301 for point tags, CF-302 against point tags;
+  - point references within a device: companions (`exponent_from`, `quality_from`, `source_time_from`), health and identity points;
+  - poll group references (CF-604);
+  - output names given twice;
+  - alarm ids given twice on one tag (CF-812);
+  - `priorities`, `max_shelve` or `classes` in two files (CF-811);
+  - CF-311, CF-312, and the names and types of run-time expressions (CF-521 to CF-525, CF-527).
+- The default task of an interlock and of a virtual tag (`normal`) is a name of the defaults above; whether it exists needs nothing more.
+Reason: an error now must stay an error once the expander exists, and a name that only expansion, or a child of the chain, makes must not be refused before it can exist. Every check above reads names that neither does.
+Consequences:
+- A tree whose tag references are wrong passes stage 5 until slice 7. A unit test (`AReferenceToATagGivesNoErrorYet`) pins that, so slice 7 changes it on purpose.
+- A template that no instance uses is never checked for names: open point O1 on #136.
+- Corpus cases:
+  - `s3-unknown-protocol` is now `s5-unknown-protocol`, with its CF-310;
+  - `s3-program-of-section-9-2` is now `s5-program-of-section-9-2`, whose output is not in its tree (its task `normal` is a default task).
 
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23

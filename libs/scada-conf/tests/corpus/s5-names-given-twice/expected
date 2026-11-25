@@ -1,0 +1,10 @@
+# Names given twice (D-113): a channel name in two protocols' directories
+# and a device on two channels (CF-303), an interlock in two files, which
+# is also its tag (CF-303, CF-302), a tag in `sys` (CF-301) and a tag in two
+# tag files (CF-302). Invented.
+drivers/modbus/line1.yaml:2:9: CF-303
+drivers/modbus/line2.yaml:7:13: CF-303
+outputs/b.yaml:2:13: CF-302
+outputs/b.yaml:2:13: CF-303
+tags/a.yaml:2:13: CF-301
+tags/b.yaml:2:13: CF-302

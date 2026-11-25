@@ -1,0 +1,23 @@
+template: io_card
+protocol: modbus
+params:
+  inputs: { type: int, min: 1, max: 32, default: 16 }
+  options: { type: set, values: [meter, battery] }
+points:
+  - name: meter.power
+    when: "'meter' IN options"
+    address: { table: holding, register: 300, type: int32 }
+  - name: battery.level
+    when: "inputs"
+    address: { table: holding, register: 310, type: uint16 }
+  - name: card.count
+    address: { table: holding, register: "cards + 1", type: uint16 }
+repeat:
+  - for: { n: "1..inputs" }
+    points:
+      - name: "in{n}"
+        address: { table: discrete, register: "n - 1", type: bool }
+  - for: { n: "1..options" }
+    points:
+      - name: "out{n}"
+        address: { table: coil, register: "n - 1", type: bool }

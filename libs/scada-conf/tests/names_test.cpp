@@ -6,6 +6,14 @@
 
 #include <gtest/gtest.h>
 
+#include <string_view>
+
+#include <optional>
+
+#include <cstdint>
+
+#include <array>
+
 #include <string>
 
 namespace scada::conf {
@@ -146,6 +154,36 @@ TEST(Names, DevicePaths) {
     EXPECT_FALSE(is_device_path("/devices/a"));
     EXPECT_FALSE(is_device_path("/dev/a\tb"));
     EXPECT_FALSE(is_device_path("/dev/a\nb"));
+}
+
+// The bytes of an address, however it is written (B4 of the review of #144).
+TEST(Names, AddressBytes) {
+    using V4 = std::array<std::uint8_t, IPV4_BYTES>;
+    EXPECT_EQ(ipv4_bytes("192.0.2.1"), (V4{192, 0, 2, 1}));
+    EXPECT_EQ(ipv4_bytes("192.0.2"), std::nullopt);
+}
+
+TEST(Names, Ipv6Bytes) {
+    using V6 = std::array<std::uint8_t, IPV6_BYTES>;
+    V6 loopback{};
+    loopback.back() = 1;
+    for (const std::string_view text :
+         {"::1", "0::1", "0:0:0:0:0:0:0:1",
+          "0000:0000:0000:0000:0000:0000:0000:0001", "::0.0.0.1"}) {
+        EXPECT_EQ(ipv6_bytes(text), loopback) << text;
+    }
+}
+
+TEST(Names, Ipv6BytesOfOtherForms) {
+    using V6 = std::array<std::uint8_t, IPV6_BYTES>;
+    EXPECT_EQ(ipv6_bytes("ff02::1a"),
+              (V6{0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1A}));
+    EXPECT_EQ(ipv6_bytes("ff::1"),
+              (V6{0x00, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}));
+    EXPECT_EQ(ipv6_bytes("::FFFF:127.0.0.1"),
+              (V6{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}));
+    EXPECT_EQ(ipv6_bytes("1::2::3"), std::nullopt);
+    EXPECT_EQ(ipv6_bytes("192.0.2.1"), std::nullopt);
 }
 
 }  // namespace

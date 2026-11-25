@@ -94,6 +94,46 @@ std::string lower(std::string_view text) {
     return out;
 }
 
+// A code point as U+XXXX: upper-case hexadecimal, at least four digits.
+std::string code_point_name(std::uint32_t code_point) {
+    constexpr int HEX = 16;
+    constexpr std::size_t MIN_DIGITS = 4;
+    std::array<char, MIN_DIGITS * 2> buffer{};
+    const std::to_chars_result written = std::to_chars(
+        buffer.data(), buffer.data() + buffer.size(), code_point, HEX);
+    std::string digits(buffer.data(), written.ptr);
+    std::ranges::transform(digits, digits.begin(), [](char chr) {
+        return static_cast<char>(std::toupper(static_cast<unsigned char>(chr)));
+    });
+    if (digits.size() < MIN_DIGITS) {
+        digits.insert(0, MIN_DIGITS - digits.size(), '0');
+    }
+    return "U+" + digits;
+}
+
+// Characters beyond ASCII that show as a space or as nothing.
+bool looks_blank(std::uint32_t code_point) noexcept {
+    constexpr std::uint32_t NO_BREAK_SPACE = 0x00A0;
+    constexpr std::uint32_t SOFT_HYPHEN = 0x00AD;
+    constexpr std::uint32_t OGHAM_SPACE = 0x1680;
+    constexpr std::uint32_t FIRST_GENERAL_SPACE = 0x2000;
+    constexpr std::uint32_t LAST_FORMAT_MARK = 0x200F;
+    constexpr std::uint32_t LINE_SEPARATOR = 0x2028;
+    constexpr std::uint32_t NARROW_NO_BREAK_SPACE = 0x202F;
+    constexpr std::uint32_t MEDIUM_SPACE = 0x205F;
+    constexpr std::uint32_t WORD_JOINER = 0x2060;
+    constexpr std::uint32_t IDEOGRAPHIC_SPACE = 0x3000;
+    constexpr std::uint32_t BYTE_ORDER_MARK = 0xFEFF;
+    return code_point == NO_BREAK_SPACE || code_point == SOFT_HYPHEN ||
+           code_point == OGHAM_SPACE ||
+           (code_point >= FIRST_GENERAL_SPACE &&
+            code_point <= LAST_FORMAT_MARK) ||
+           (code_point >= LINE_SEPARATOR &&
+            code_point <= NARROW_NO_BREAK_SPACE) ||
+           code_point == MEDIUM_SPACE || code_point == WORD_JOINER ||
+           code_point == IDEOGRAPHIC_SPACE || code_point == BYTE_ORDER_MARK;
+}
+
 class Lexer {
 public:
     Lexer(std::string_view text, ExpressionKind kind)
@@ -106,6 +146,17 @@ public:
             lexeme->end = static_cast<std::uint32_t>(pos_);
         }
         return lexeme;
+    }
+
+    // True if the next character after spaces and line ends is `chr`.
+    [[nodiscard]] bool next_is(char chr) const noexcept {
+        std::size_t next = pos_;
+        while (next < text_.size() &&
+               (text_[next] == ' ' || text_[next] == '\n' ||
+                text_[next] == '\r')) {
+            ++next;
+        }
+        return next < text_.size() && text_[next] == chr;
     }
 
 private:
@@ -438,7 +489,7 @@ private:
             }
         }
         fail(error, CF_SYNTAX, pos_,
-             "unexpected character " + quote_text(character()) + hint());
+             "unexpected character " + shown_character() + hint());
         return std::nullopt;
     }
 
@@ -448,6 +499,18 @@ private:
             utf8::decode(text_, pos_);
         const std::size_t length = decoded ? decoded->first : 1;
         return std::string(text_.substr(pos_, length));
+    }
+
+    // The character at `pos_` as a message shows it: quoted, or as U+XXXX
+    // when it would look like a space or like nothing (a no-break space, a
+    // zero-width space, a byte-order mark).
+    [[nodiscard]] std::string shown_character() const {
+        const std::optional<std::pair<std::size_t, std::uint32_t>> decoded =
+            utf8::decode(text_, pos_);
+        if (decoded && looks_blank(decoded->second)) {
+            return code_point_name(decoded->second);
+        }
+        return quote_text(character());
     }
 
     // The right spelling of a character another language uses here.
@@ -463,11 +526,29 @@ private:
             case '%':
                 return "; the remainder is written MOD";
             case '.':
-                return "; a tag name with a segment that starts with a digit "
-                       "or holds - is written tag(\"...\")";
+                return follows_name() ? "; a tag name with a segment that "
+                                        "starts with a digit or holds - is "
+                                        "written tag(\"...\")"
+                                      : std::string();
             default:
                 return {};
         }
+    }
+
+    // True if the `.` at `pos_` ends a name of a run-time expression, the
+    // only place where a tag name stands: `a.1x`, not `1.`, `.5` or
+    // `1.5.2`, and never in a configuration expression, which has no tags.
+    [[nodiscard]] bool follows_name() const noexcept {
+        if (kind_ != ExpressionKind::RUN_TIME) {
+            return false;
+        }
+        std::size_t start = pos_;
+        while (start > 0 &&
+               (is_letter(text_[start - 1]) || is_digit(text_[start - 1]) ||
+                text_[start - 1] == '_' || text_[start - 1] == '.')) {
+            --start;
+        }
+        return start < pos_ && (is_letter(text_[start]) || text_[start] == '_');
     }
 
     std::string_view text_;
@@ -979,14 +1060,7 @@ private:
         if (const std::optional<std::string> word = reserved_word(current_)) {
             const std::optional<std::size_t> literal = literal_word(*word);
             if (!literal) {
-                return fail(
-                    current_.column,
-                    quote_text(current_.text) + " is a reserved word" +
-                        (kind_ == ExpressionKind::RUN_TIME
-                             ? "; a tag of this name is written tag(\"" +
-                                   current_.text + "\")"
-                             : "; a parameter or variable cannot have this "
-                               "name"));
+                return fail(current_.column, misplaced_word(*word));
             }
             if (!advance()) {
                 return std::nullopt;
@@ -1058,6 +1132,24 @@ private:
         expression_.nodes[node].end = close;
         expression_.nodes[node].text = lower(name.text);
         return node;
+    }
+
+    // The message for an operator word where a value is expected. Followed
+    // by `(` it is taken for a function; otherwise for a name.
+    [[nodiscard]] std::string misplaced_word(const std::string& word) const {
+        if (lexer_.next_is('(')) {
+            // NOT before `(` is its operand in parentheses, valid, so it
+            // never comes here.
+            const std::string usage =
+                word == "IN" ? "a IN s" : "a " + word + " b";
+            return quote_text(current_.text) + " is not a function: " + word +
+                   " is an operator, written " + usage;
+        }
+        return quote_text(current_.text) + " is a reserved word" +
+               (kind_ == ExpressionKind::RUN_TIME
+                    ? "; a tag of this name is written tag(\"" + current_.text +
+                          "\")"
+                    : "; a parameter or variable cannot have this name");
     }
 
     Lexer lexer_;

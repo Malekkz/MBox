@@ -1,0 +1,2 @@
+tags:
+  - { name: ps1.count, type: internal, value_type: int64 }

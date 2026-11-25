@@ -1,0 +1,2 @@
+interlocks:
+  - { name: ps1.permit, condition: "TRUE", message: permitted }

@@ -9,6 +9,7 @@
 
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
+#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
@@ -229,11 +230,12 @@ private:
 
     // A parameter or a `repeat` variable named like a reserved word of
     // expressions (`bad`, `in`) is CF-212 at its name (5.6): `100 + bad`
-    // would read the literal BAD, 2.
+    // would read the literal BAD, 2. A name that is not an identifier
+    // (`BAD`) already has its CF-212 from the schema, so it gets no second.
     void refuse_reserved_names(NodeId map, std::string_view kind) const {
         for (const Entry& entry : document_->entries(map)) {
             const std::string_view name = document_->text(entry.key);
-            if (is_reserved_word(name)) {
+            if (is_identifier(name) && is_reserved_word(name)) {
                 error(CF_BAD_NAME, entry.key,
                       quote_text(name) + " is not a valid " +
                           std::string(kind) +

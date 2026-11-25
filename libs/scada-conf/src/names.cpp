@@ -1,7 +1,10 @@
 #include "scada/conf/names.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace scada::conf {
@@ -210,6 +213,106 @@ bool is_ipv6_address(std::string_view text) noexcept {
     const std::string_view after = text.substr(gap + 2);
     return ipv6_groups(before, false, left) &&
            ipv6_groups(after, true, right) && left + right < IPV6_GROUPS;
+}
+
+std::optional<std::array<std::uint8_t, IPV4_BYTES>> ipv4_bytes(
+    std::string_view text) noexcept {
+    if (!is_ipv4_address(text)) {
+        return std::nullopt;
+    }
+    constexpr unsigned DECIMAL = 10;
+    std::array<std::uint8_t, IPV4_BYTES> bytes{};
+    std::size_t part = 0;
+    unsigned value = 0;
+    for (const char chr : text) {
+        if (chr == '.') {
+            bytes.at(part++) = static_cast<std::uint8_t>(value);
+            value = 0;
+        } else {
+            value = value * DECIMAL + static_cast<unsigned>(chr - '0');
+        }
+    }
+    bytes.at(part) = static_cast<std::uint8_t>(value);
+    return bytes;
+}
+
+namespace {
+
+// The 16-bit groups of one side of `::`, an IPv4 tail as two; the address
+// is already known to be valid.
+void ipv6_side(std::string_view side,
+               std::array<std::uint16_t, IPV6_GROUPS>& groups,
+               std::size_t& count) {
+    constexpr unsigned HEX = 16;
+    constexpr unsigned BYTE = 8;
+    std::size_t start = 0;
+    while (start < side.size()) {
+        const std::size_t end = side.find(':', start);
+        const std::string_view group = side.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start);
+        if (group.find('.') != std::string_view::npos) {
+            const std::optional<std::array<std::uint8_t, IPV4_BYTES>> tail =
+                ipv4_bytes(group);
+            if (tail) {
+                groups.at(count++) = static_cast<std::uint16_t>(
+                    (static_cast<unsigned>((*tail)[0]) << BYTE) | (*tail)[1]);
+                groups.at(count++) = static_cast<std::uint16_t>(
+                    (static_cast<unsigned>((*tail)[2]) << BYTE) | (*tail)[3]);
+            }
+            return;
+        }
+        constexpr unsigned FIRST_LETTER_DIGIT = 10;
+        unsigned value = 0;
+        for (const char chr : group) {
+            const unsigned digit =
+                is_digit(chr) ? static_cast<unsigned>(chr - '0')
+                              : static_cast<unsigned>((chr | ' ') - 'a') +
+                                    FIRST_LETTER_DIGIT;
+            value = value * HEX + digit;
+        }
+        groups.at(count++) = static_cast<std::uint16_t>(value);
+        if (end == std::string_view::npos) {
+            return;
+        }
+        start = end + 1;
+    }
+}
+
+}  // namespace
+
+std::optional<std::array<std::uint8_t, IPV6_BYTES>> ipv6_bytes(
+    std::string_view text) noexcept {
+    if (!is_ipv6_address(text)) {
+        return std::nullopt;
+    }
+    constexpr unsigned BYTE = 8;
+    constexpr unsigned LOW_BYTE = 0xFF;
+    std::array<std::uint16_t, IPV6_GROUPS> before{};
+    std::array<std::uint16_t, IPV6_GROUPS> after{};
+    std::size_t left = 0;
+    std::size_t right = 0;
+    const std::size_t gap = text.find("::");
+    if (gap == std::string_view::npos) {
+        ipv6_side(text, before, left);
+    } else {
+        ipv6_side(text.substr(0, gap), before, left);
+        ipv6_side(text.substr(gap + 2), after, right);
+    }
+    std::array<std::uint16_t, IPV6_GROUPS> groups{};
+    for (std::size_t i = 0; i < left; ++i) {
+        groups.at(i) = before.at(i);
+    }
+    for (std::size_t i = 0; i < right; ++i) {
+        groups.at(IPV6_GROUPS - right + i) = after.at(i);
+    }
+    std::array<std::uint8_t, IPV6_BYTES> bytes{};
+    for (std::size_t i = 0; i < IPV6_GROUPS; ++i) {
+        bytes.at(2 * i) = static_cast<std::uint8_t>(groups.at(i) >> BYTE);
+        bytes.at(2 * i + 1) =
+            static_cast<std::uint8_t>(groups.at(i) & LOW_BYTE);
+    }
+    return bytes;
 }
 
 bool is_ip_address(std::string_view text) noexcept {
