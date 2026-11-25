@@ -216,12 +216,12 @@ public:
 
     // `device` is not known to answer: it has not answered since the
     // connect, or its unit has a failure count (7.4); `timeout_ns` is what
-    // one of its requests may cost. Within a priority, the polls of devices
-    // whose last request was answered go before the polls and retries of the
-    // others, so that dead devices take the line when the live ones leave
-    // it. The hold ends for the whole channel FAILING_SPACING time-outs of
-    // the last failing poll or probe after it was sent; then the failing
-    // polls go by due time, the oldest first: dead devices take about a
+    // one of its requests may cost. The polls of devices whose last request
+    // was answered go before the polls and retries of the others, whatever
+    // their priorities, so that dead devices take the line when the live
+    // ones leave it (L1). The hold ends for the whole channel FAILING_SPACING
+    // time-outs of the last failing poll or probe after it was sent; then the
+    // failing polls go by due time, the oldest first: dead devices take about a
     // quarter of a busy line, none is starved, and their points still go
     // bad (review G5, K3; D-138).
     // `failed`: its unit has a failure count; only such a device, or one
@@ -401,17 +401,28 @@ private:
         std::uint32_t group = 0;
         bool retry = false;
     };
-    using PollKey =
-        std::tuple<bool, std::uint8_t, bool, std::int64_t, std::uint32_t>;
-    [[nodiscard]] PollKey key_of(const PollPick& pick,
-                                 std::int64_t now_ns) const noexcept;
-    void consider(const PollPick& pick, std::int64_t now_ns, PollPick& best,
-                  bool& found) const noexcept;
+    // The chain first, then priority, due time, device (live picks).
+    using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
+    // Due time, device (failing picks: the oldest first, K3).
+    using FailKey = std::pair<std::int64_t, std::uint32_t>;
+    // The best live and the best failing pick of one `take` (L1).
+    struct Candidates {
+        PollPick live;
+        PollKey live_key;
+        PollPick failing;
+        FailKey failing_key;
+        bool has_live = false;
+        bool has_failing = false;
+    };
+    // A suspect's pick that continues no chain: it waits behind the live.
+    [[nodiscard]] bool failing_pick(const PollPick& pick) const noexcept;
+    void consider(const PollPick& pick, Candidates& candidates) const noexcept;
     void consider_groups(std::uint32_t device, std::int64_t now_ns,
-                         std::int64_t& wake, PollPick& best,
-                         bool& found) noexcept;
+                         std::int64_t& wake, Candidates& candidates) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
+    bool take_failing(const PollPick& pick, std::int64_t now_ns,
+                      Choice& out) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
     [[nodiscard]] bool due_work_pending() const noexcept;
@@ -429,7 +440,8 @@ private:
     // A failing poll or a probe that may cost `timeout_ns` was sent: the
     // others wait FAILING_SPACING of it.
     void hold_failing(std::int64_t now_ns, std::int64_t timeout_ns) noexcept;
-    // When the next poll of a device known to answer falls due, or NEVER.
+    // When the next poll of a device known to answer can go (its due time
+    // or its pacing; now or past when one is due), or NEVER.
     [[nodiscard]] std::int64_t next_live_poll_due_ns() const noexcept;
     // The oldest due time of a failing device's poll or retry, or NEVER.
     [[nodiscard]] std::int64_t oldest_failing_due_ns() const noexcept;

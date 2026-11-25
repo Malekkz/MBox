@@ -572,39 +572,43 @@ Choice Scheduler::take_retry(std::uint32_t device,
     return choice;
 }
 
-// A chain in progress first, then priority, then devices whose last request
-// was answered before failing ones (G5) unless a failing one waited a whole
-// period, then due time, device order. A retry is its device's next poll
-// and takes its turn in that order, due when the failure was seen (Q1).
-Scheduler::PollKey Scheduler::key_of(const PollPick& pick,
-                                     std::int64_t now_ns) const noexcept {
-    const DeviceRun& run = devices_[pick.device];
-    const CompiledPollGroup& group = channel_->poll_groups[pick.group];
-    const std::int64_t due =
-        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
-    // The hold ends for the whole channel at once (K3): then the failing
-    // polls take their turn by due time, the oldest first.
-    // A device not yet answered since the connect is a suspect once some
-    // device of the channel has failed (G5): it may be dead too. A chain in
-    // progress, or the retry of a part of one, ends its chain first and is
-    // never held back: the chain's samples wait for it.
-    const bool chain = chain_open(pick);
-    const bool held_back = !chain && suspect(pick.device, pick.retry) &&
-                           now_ns < failing_release_ns_;
-    return PollKey{!chain, group.priority, held_back, due, pick.device};
+// Two orders (L1). A live pick, a chain in progress or the retry of a part
+// of one among them: the chain first, then priority, then due time, device
+// order. A failing pick (a device not known to answer, or a retry): the
+// oldest due first, whatever its priority, so that a dead device of a fast
+// group cannot starve a failing one of a slower group (K3). A retry is its
+// device's next poll, due when the failure was seen (Q1).
+bool Scheduler::failing_pick(const PollPick& pick) const noexcept {
+    return !chain_open(pick) && suspect(pick.device, pick.retry);
 }
 
-void Scheduler::consider(const PollPick& pick, std::int64_t now_ns,
-                         PollPick& best, bool& found) const noexcept {
-    if (!found || key_of(pick, now_ns) < key_of(best, now_ns)) {
-        best = pick;
-        found = true;
+void Scheduler::consider(const PollPick& pick,
+                         Candidates& candidates) const noexcept {
+    const DeviceRun& run = devices_[pick.device];
+    const std::int64_t due =
+        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
+    if (failing_pick(pick)) {
+        const FailKey key{due, pick.device};
+        if (!candidates.has_failing || key < candidates.failing_key) {
+            candidates.failing = pick;
+            candidates.failing_key = key;
+            candidates.has_failing = true;
+        }
+        return;
+    }
+    const PollKey key{!chain_open(pick),
+                      channel_->poll_groups[pick.group].priority, due,
+                      pick.device};
+    if (!candidates.has_live || key < candidates.live_key) {
+        candidates.live = pick;
+        candidates.live_key = key;
+        candidates.has_live = true;
     }
 }
 
 void Scheduler::consider_groups(std::uint32_t device, std::int64_t now_ns,
-                                std::int64_t& wake, PollPick& best,
-                                bool& found) noexcept {
+                                std::int64_t& wake,
+                                Candidates& candidates) noexcept {
     DeviceRun& run = devices_[device];
     for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
         GroupState& state = run.groups[group];
@@ -625,21 +629,20 @@ void Scheduler::consider_groups(std::uint32_t device, std::int64_t now_ns,
             continue;
         }
         consider(PollPick{.device = device, .group = group, .retry = false},
-                 now_ns, best, found);
+                 candidates);
     }
 }
 
 bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                             std::int64_t& wake) noexcept {
-    bool found = false;
-    PollPick best;
+    Candidates candidates;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
         if (!polls_allowed(device)) {
             continue;
         }
         if (!run.retry) {
-            consider_groups(device, now_ns, wake, best, found);
+            consider_groups(device, now_ns, wake, candidates);
             continue;
         }
         const std::int64_t from = allowed_from(device, false);
@@ -651,36 +654,51 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                                         .plan.requests[run.retry_request]
                                         .poll_group;
         consider(PollPick{.device = device, .group = group, .retry = true},
-                 now_ns, best, found);
+                 candidates);
     }
-    if (found && suspect(best.device, best.retry)) {
-        // Not yet answered, while others failed: it holds the others back,
-        // but takes any idle time (it may be alive).
-        if (!devices_[best.device].failed && !best.retry) {
-            hold_failing(now_ns, devices_[best.device].failing_timeout_ns);
+    const PollPick& live = candidates.live;
+    if (candidates.has_live && !chain_open(live) && candidates.has_failing &&
+        now_ns >= failing_release_ns_ &&
+        candidates.failing_key.first <= std::get<2>(candidates.live_key)) {
+        // The hold has ended: the oldest failing poll takes this turn if it
+        // is due no later than the live one, whatever their priorities: at
+        // most one in FAILING_SPACING of its time-outs (K3, L1).
+        return take_failing(candidates.failing, now_ns, out);
+    }
+    if (candidates.has_live) {
+        out = live.retry ? take_retry(live.device, now_ns)
+                         : take_poll(live.device, live.group, now_ns);
+        return true;
+    }
+    if (!candidates.has_failing) {
+        return false;
+    }
+    // No live poll can go now. A device not yet answered takes the idle
+    // time (it may be alive); a failed one or a retry only a gap longer than
+    // its time-out while the hold lasts (K3), as a probe does.
+    const PollPick& failing = candidates.failing;
+    const DeviceRun& run = devices_[failing.device];
+    const bool failed = run.failed || failing.retry;
+    const std::int64_t next_live = next_live_poll_due_ns();
+    if (failed && now_ns < failing_release_ns_ &&
+        next_live < later(now_ns, run.failing_timeout_ns)) {
+        // Wake at the hold's end, or when the next live poll can go if that
+        // is later than now: never "now", which would spin (L1).
+        wake = std::min(wake, failing_release_ns_);
+        if (next_live > now_ns) {
+            wake = std::min(wake, next_live);
         }
+        return false;
     }
-    if (found && (devices_[best.device].failed || best.retry)) {
-        // While the hold lasts, a failing poll uses idle time only if no
-        // live poll falls due within its time-out (K3), as a probe does. A
-        // chain in progress holds its unit and is never held back: it is
-        // read to its end (else nothing could go to that unit).
-        const std::int64_t cost_ns = devices_[best.device].failing_timeout_ns;
-        const std::int64_t live = next_live_poll_due_ns();
-        if (!chain_open(best) && now_ns < failing_release_ns_ &&
-            live < later(now_ns, cost_ns)) {
-            wake = std::min(
-                wake,
-                std::max(now_ns + 1, std::min(failing_release_ns_, live)));
-            return false;
-        }
-        hold_failing(now_ns, cost_ns);
-    }
-    if (found) {
-        out = best.retry ? take_retry(best.device, now_ns)
-                         : take_poll(best.device, best.group, now_ns);
-    }
-    return found;
+    return take_failing(failing, now_ns, out);
+}
+
+bool Scheduler::take_failing(const PollPick& pick, std::int64_t now_ns,
+                             Choice& out) noexcept {
+    hold_failing(now_ns, devices_[pick.device].failing_timeout_ns);
+    out = pick.retry ? take_retry(pick.device, now_ns)
+                     : take_poll(pick.device, pick.group, now_ns);
+    return true;
 }
 
 bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
@@ -865,9 +883,11 @@ std::int64_t Scheduler::next_live_poll_due_ns() const noexcept {
         if (!polls_allowed(device) || run.failing || run.retry) {
             continue;
         }
+        // A live poll goes at its due time, or when its pacing allows.
+        const std::int64_t from = allowed_from(device, false);
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
             if (!channel_->devices[device].plan.by_group[group].empty()) {
-                next = std::min(next, run.groups[group].due_ns);
+                next = std::min(next, std::max(run.groups[group].due_ns, from));
             }
         }
     }
@@ -907,13 +927,17 @@ bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
             allowed_from(device, false) > now_ns) {
             continue;
         }
-        // Past its floor, when the hold of failing polls ends, and unless
-        // a held-back failing poll is older: probes and failing polls take
-        // the turns by age, so that neither starves the other (J3, K3).
+        // Past its floor, when the hold of failing polls ends or in a gap
+        // of the live polls longer than its time-out, as a failing poll
+        // goes (K3), and unless a held-back failing poll is older: probes
+        // and failing polls take the turns by age, so that neither starves
+        // the other (J3, K3, L1).
         const std::int64_t floor =
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
-        if (now_ns < floor || now_ns < failing_release_ns_ ||
-            oldest_failing_due_ns() < floor) {
+        const bool held =
+            now_ns < failing_release_ns_ &&
+            next_live_poll_due_ns() < later(now_ns, run.probe_timeout_ns);
+        if (now_ns < floor || held || oldest_failing_due_ns() < floor) {
             continue;
         }
         if (take_probe(device, now_ns, run.probe_timeout_ns, false, out)) {

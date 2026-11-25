@@ -33,17 +33,21 @@ namespace {
 
 constexpr std::int64_t LATENCY = MILLISECOND;
 constexpr std::int64_t MINUTE = 60 * SECOND;
+constexpr std::uint32_t FAST = 0;    // the 200 ms group of the builder
 constexpr std::uint32_t NORMAL = 1;  // the 1 s group of the builder
 using Fault = SimBus::Fault;
 
-// `units` units of one point each in the 1 s group, on a serial line at
-// `bit_rate`, with the default failure keys.
-CompiledChannel line_of(std::uint8_t units, std::uint32_t bit_rate) {
+// `units` units of one point each in the 1 s group, every fifth in
+// `fifth_group`, on a serial line at `bit_rate`, with the default failure
+// keys.
+CompiledChannel line_of(std::uint8_t units, std::uint32_t bit_rate,
+                        std::uint32_t fifth_group) {
     std::vector<DeviceSpec> specs;
     for (std::uint8_t unit = 1; unit <= units; ++unit) {
-        specs.push_back({.name = "d" + std::to_string(unit),
-                         .unit_id = unit,
-                         .points = adjacent(0, 1, NORMAL)});
+        specs.push_back(
+            {.name = "d" + std::to_string(unit),
+             .unit_id = unit,
+             .points = adjacent(0, 1, unit % 5 == 0 ? fifth_group : NORMAL)});
     }
     CompiledChannel channel = make_channel(specs, ReadRules{.max_units = 64});
     channel.transport = TransportKind::SERIAL;
@@ -203,8 +207,8 @@ void analyse(const Line& line, const std::vector<bool>& dead, std::uint8_t back,
 }
 
 Figures measure(std::uint8_t units, std::uint32_t bit_rate,
-                std::int64_t death_ns = 0) {
-    Line line(line_of(units, bit_rate), units);
+                std::int64_t death_ns = 0, std::uint32_t dead_group = NORMAL) {
+    Line line(line_of(units, bit_rate, dead_group), units);
     const std::vector<bool> dead = every_fifth(units);
     const Times times{.death_ns = death_ns};
     Figures out;
@@ -268,6 +272,23 @@ TEST(LinePerf, FiftyOfTwoHundredFiftyUnitsDieTogether) {
     // J4: the 50 first attempts, 1 s each, hold the live once (51.7 s).
     EXPECT_LE(figures.death_gap_ns, 55 * SECOND);
     EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+}
+
+TEST(LinePerf, FiftyDeadOfAFasterGroupAmongTwoHundredFiftyUnits) {
+    // L1: the first case with the dead units in the 200 ms group, of a
+    // higher priority than the live ones' 1 s group. The failing polls wait
+    // behind the live ones whatever their priority, and the live keep about
+    // their period (before L1 they waited until the dead were DEMOTED).
+    const Figures figures = measure(250, 38'400, 0, FAST);
+    print("250 units, 50 dead in the 200 ms group", figures);
+    EXPECT_GT(figures.bad_ns, 0);
+    EXPECT_LE(figures.bad_ns, 90 * SECOND);
+    EXPECT_GT(figures.all_demoted_ns, 0);
+    EXPECT_LE(figures.all_demoted_ns, 30 * MINUTE);
+    EXPECT_LE(figures.start_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_GE(figures.back_running_ns, 0);
+    EXPECT_LE(figures.back_running_ns, 5 * MINUTE + 30 * SECOND);
 }
 
 TEST(LinePerf, FiveDeadAmongTwentyFiveUnits) {

@@ -18,8 +18,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <string>
@@ -34,6 +36,7 @@ namespace {
 constexpr std::int64_t LATENCY = MILLISECOND;
 constexpr std::uint64_t LARGE = 64;
 constexpr std::uint32_t FAST = 0;
+constexpr std::uint32_t NORMAL = 1;
 constexpr std::uint32_t SLOW = 2;
 using Fault = SimBus::Fault;
 using Flag = tag::QualityFlag;
@@ -1765,6 +1768,131 @@ TEST(ChannelEngine, DeadUnitsGoBadWithinTheirVerdictTimeOnABusyLine) {
                       20 * MILLISECOND);
     }
     EXPECT_GT(rig.engine.counts().early_verdicts, 0U);
+}
+
+// The times of the requests of `unit` that start at register `first`.
+std::vector<std::int64_t> times_at(const SimBus& bus, std::uint8_t unit,
+                                   std::uint32_t first) {
+    std::vector<std::int64_t> out;
+    for (const LoggedRequest& request : bus.log()) {
+        if (request.unit_id == unit && request.first == first) {
+            out.push_back(request.time_ns);
+        }
+    }
+    return out;
+}
+
+TEST(ChannelEngine, ADeadUnitOfAFasterGroupLeavesTheSlowerGroupsTheirTurn) {
+    // L1, the reviewer's first run: tcp, unit 1 in the 200 ms group goes
+    // silent at 5 s, units 2 and 3 answer in the 1 s group (default keys:
+    // time-out 1 s, 2 retries). The failing poll is the best by priority;
+    // the live polls go all the same. Without the fix they waited from 5 s
+    // until unit 1 was DEMOTED, about 30 s, while the worker spun.
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1, FAST)},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
+         {.name = "d3", .unit_id = 3, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), 3);
+    rig.run_until(5 * SECOND);
+    rig.bus.fault(1, Fault::SILENT);
+    std::size_t steps = 0;
+    for (std::int64_t now = 5 * SECOND; now <= 60 * SECOND;
+         now += 100 * MILLISECOND) {
+        const std::size_t taken = run_engine(rig.engine, rig.clock, now);
+        steps = std::max(steps, taken);
+    }
+    // A live poll waits its period and at most one failing request (1 s).
+    for (std::uint8_t unit = 2; unit <= 3; ++unit) {
+        EXPECT_LE(longest_gap_after(times_of(rig.bus, unit), 5 * SECOND),
+                  2 * SECOND + 100 * MILLISECOND)
+            << "unit " << int{unit};
+    }
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_LT(steps, 100U);  // no spin: a handful of steps per 100 ms
+}
+
+TEST(ChannelEngine, ADeadBlockOfAFastGroupLeavesTheDevicesSlowBlockItsTurn) {
+    // L1, the reviewer's second run: d1 reads register 0 in the 200 ms
+    // group and register 20 in the 1 s group; d2 answers in the 1 s group.
+    // Register 0 stops answering at 5 s. The slow block keeps being read:
+    // d1 answers, so it is never DEMOTED, and its good point stays GOOD.
+    // Without the fix d2 waited 30 s and d1 was DEMOTED.
+    CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = {{.first = 0, .group = FAST},
+                     {.first = 20, .group = NORMAL}}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), 2);
+    rig.run_until(5 * SECOND);
+    rig.bus.silent_from(1, 0, 0);
+    rig.run_until(60 * SECOND);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 1).quality, tag::Quality::GOOD);
+    EXPECT_FALSE(rig.tags.has_flag(0, 1, Flag::COMM_FAIL));
+    const std::int64_t slow =
+        longest_gap_after(times_at(rig.bus, 1, 20), 5 * SECOND);
+    const std::int64_t live =
+        longest_gap_after(times_of(rig.bus, 2), 5 * SECOND);
+    // The slow block waits behind the dead block's retries, its device's
+    // next poll (Q1), which wait in the hold: at most 3 attempts x 4 time-
+    // outs (12 s), until the dead block rests (G8); then every period.
+    EXPECT_LE(slow, 12 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(longest_gap_after(times_at(rig.bus, 1, 20), 50 * SECOND),
+              SECOND + 100 * MILLISECOND);
+    EXPECT_GT(rig.engine.counts().rests, 0U);
+    EXPECT_LE(live, 2 * SECOND + 100 * MILLISECOND);
+}
+
+// L2: d1 reads a chain 0 <- 20 in `chain_group` and a third point at 60 in
+// the 10 s group; d2 answers in `live_group`. Register 20 stops answering at
+// 1 s (default keys: 2 retries of 1 s). Returns the requests at 60 in 70 s
+// and d2's longest gap.
+std::pair<std::size_t, std::int64_t> chain_with_a_dead_part(
+    std::uint32_t chain_group, std::uint32_t live_group) {
+    CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = {{.first = 0, .group = chain_group, .companions = {1}},
+                     {.first = 20, .group = chain_group},
+                     {.first = 60, .group = SLOW}}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1, live_group)}},
+        ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    quality_from_companions(channel, 0, 0);
+    Rig rig(std::move(channel), 2);
+    rig.run_until(SECOND);
+    rig.bus.silent_from(1, 20, 20);
+    rig.run_until(71 * SECOND);
+    EXPECT_EQ(rig.engine.counts().rests, 0U);  // K1
+    EXPECT_TRUE(rig.tags.has_flag(0, 1, Flag::COMM_FAIL));
+    EXPECT_NE(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    const std::vector<std::int64_t> slow = times_at(rig.bus, 1, 60);
+    const auto asked = static_cast<std::size_t>(
+        std::count_if(slow.begin(), slow.end(),
+                      [](std::int64_t time) { return time >= SECOND; }));
+    return {asked, longest_gap_after(times_of(rig.bus, 2), SECOND)};
+}
+
+TEST(ChannelEngine, AChainWithADeadPartLeavesTheOthersTheirTurn) {
+    // L2: between the chain's cycles the device's slower group and the
+    // other devices take their turn. Before the fix the point at 60 was
+    // asked 0 times in 70 s (the reviewer's run).
+    for (const auto& [chain_group, live_group] :
+         std::array<std::pair<std::uint32_t, std::uint32_t>, 2>{
+             {{FAST, NORMAL}, {NORMAL, NORMAL}}}) {
+        const auto [asked, gap] =
+            chain_with_a_dead_part(chain_group, live_group);
+        EXPECT_GE(asked, 6U) << chain_group;
+        // One chain cycle read whole (K1: 1 + 2 attempts of 1 s at the
+        // dead part), then d2's period.
+        EXPECT_LE(gap, 4 * SECOND + 100 * MILLISECOND) << chain_group;
+    }
 }
 
 TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
