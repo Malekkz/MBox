@@ -2252,8 +2252,9 @@ private:
     // of #146): one per node, and for each reference to a parameter the
     // weight of the value it copies, so that a reference to a set of 65,536
     // strings is not one unit.
-    [[nodiscard]] std::size_t evaluation_cost(const Compiled& site) const {
-        std::size_t cost = std::max<std::size_t>(1, site.tree->nodes.size());
+    [[nodiscard]] std::size_t evaluation_cost(const Compiled& site,
+                                              const Expression& tree) const {
+        std::size_t cost = std::max<std::size_t>(1, tree.nodes.size());
         for (const auto& [name, count] : site.references) {
             const auto found = param_weights_.find(name);
             if (found == param_weights_.end()) {
@@ -2280,7 +2281,7 @@ private:
 
     // Types `site` for `bindings` unless the names it read keep their
     // types; a typing counts its nodes toward the work.
-    bool type_site(Compiled& site, const Value& value,
+    bool type_site(Compiled& site, const Expression& tree, const Value& value,
                    const Bindings& bindings) {
         if (site.typed && std::ranges::all_of(site.read, [&](const auto& name) {
                 const ConfigValue* bound = bindings(name.first);
@@ -2290,8 +2291,7 @@ private:
             })) {
             return true;
         }
-        if (!count_work(value,
-                        std::max<std::size_t>(1, site.tree->nodes.size()))) {
+        if (!count_work(value, std::max<std::size_t>(1, tree.nodes.size()))) {
             return false;
         }
         site.read.clear();
@@ -2305,8 +2305,8 @@ private:
             return bound;
         };
         site.types.clear();
-        site.type_ok = type_for_evaluation(*site.tree, recording, site.types,
-                                           site.type_error);
+        site.type_ok =
+            type_for_evaluation(tree, recording, site.types, site.type_error);
         site.typed = true;
         ++typings_;
         return true;
@@ -2332,7 +2332,7 @@ private:
             return std::nullopt;
         }
         const Expression& tree = *site->tree;
-        if (!count_work(value, evaluation_cost(*site))) {
+        if (!count_work(value, evaluation_cost(*site, tree))) {
             return std::nullopt;
         }
         std::map<std::string, ConfigValue, std::less<>> local;
@@ -2349,7 +2349,7 @@ private:
             }
             return nullptr;
         };
-        if (!type_site(*site, value, bindings)) {
+        if (!type_site(*site, tree, value, bindings)) {
             return std::nullopt;
         }
         EvalError problem = site->type_error;

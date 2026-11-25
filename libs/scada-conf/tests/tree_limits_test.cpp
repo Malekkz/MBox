@@ -368,9 +368,10 @@ TEST(Expand, AnEvaluationCostsItsNodes) {
     // 10 values, 10 points made, and `n > 0` (3 nodes) parsed and typed (6)
     // and evaluated 10 times (30).
     constexpr std::size_t EDGE = 65;
+    constexpr int VALUES = 10;
     const auto passes = [](const std::string& when, std::size_t work) {
         return expand_limited(
-                   {{"templates/meter_a.yaml", repeat_when(10, when)},
+                   {{"templates/meter_a.yaml", repeat_when(VALUES, when)},
                     {"drivers/modbus/line1.yaml", instances(1)}},
                    {.work = work})
                    .error_count == 0;
