@@ -4,7 +4,7 @@
 // the instance and the template line it came from.
 
 #include "scada/conf/expand.h"
-#include "expanded_text.h"
+#include "expand_cases.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
@@ -22,77 +22,9 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace scada::conf {
 namespace {
-
-namespace fs = std::filesystem;
-
-using Lines = std::vector<std::string>;
-using Files = std::map<std::string, std::string>;
-
-constexpr std::string_view SYSTEM =
-    "unit: { id: site-0042, name: Test unit }\n"
-    "time: { timezone: Etc/UTC, sync: { mode: none } }\n";
-
-// Validates and expands the tree of `files` with a system.yaml: its errors
-// in the form of contract 1.4 (with their notes), or its expanded points,
-// with each device's keys first when `with_devices`.
-Lines expand(const Files& files, bool with_devices = false) {
-    std::optional<test::TempDirectory> temp =
-        test::TempDirectory::create("scada-conf-expand-");
-    EXPECT_TRUE(temp.has_value());
-    if (!temp) {
-        return {"no temporary directory"};
-    }
-    Files all = files;
-    all.try_emplace("system.yaml", SYSTEM);
-    for (const auto& [path, content] : all) {
-        const fs::path full = temp->path() / path;
-        fs::create_directories(full.parent_path());
-        std::ofstream out(full, std::ios::binary);
-        out << content;
-        EXPECT_TRUE(out.good());
-    }
-    const Result<Validation> validation = validate_and_expand(temp->path());
-    EXPECT_TRUE(validation.ok());
-    if (!validation.ok()) {
-        return {"not validated"};
-    }
-    const Validation& result = validation.value();
-    if (!result.report.errors.empty()) {
-        Lines lines;
-        for (const Diagnostic& error : result.report.errors) {
-            lines.push_back(format(error));
-        }
-        return lines;
-    }
-    if (!result.expanded) {
-        return {"no expanded tree"};
-    }
-    return points_of(*result.expanded, with_devices);
-}
-
-// A Modbus RTU channel holding the devices given.
-std::string channel(std::string_view devices) {
-    return "channel:\n"
-           "  name: line1\n"
-           "  type: rtu\n"
-           "  device: /dev/serial/by-path/platform-serial1\n"
-           "  baud: 9600\n"
-           "devices:\n" +
-           std::string(devices);
-}
-
-// One device `ps1.m1` of template `meter_a`, with more keys after it.
-std::string one_device(std::string_view more = {}) {
-    return channel(
-        "  - name: ps1.m1\n"
-        "    template: meter_a\n"
-        "    unit_id: 1\n" +
-        std::string(more));
-}
 
 TEST(Expand, AnInstanceGetsTheTemplatesPoints) {
     EXPECT_EQ(
@@ -591,98 +523,6 @@ TEST(Expand, TagNameLengths) {
                fits.substr(0, 57) +
                "\"... is 128 bytes, the limit is 127\n"
                "  from template templates/meter_a.yaml:6:95 (point w)"}));
-}
-
-// 65,536 points are valid; one more is CF-414, found while the points are
-// made, so a `repeat` over many points never builds more than the limit.
-TEST(Expand, ThePointLimit) {
-    const auto with = [](std::string_view range) {
-        return expand(
-            {{"templates/meter_a.yaml",
-              "template: meter_a\nprotocol: modbus\n"
-              "repeat:\n"
-              "  - for: { n: \"" +
-                  std::string(range) +
-                  "\" }\n"
-                  "    points:\n"
-                  "      - { name: \"a{n}\", address: { table: holding, "
-                  "register: 1, type: uint16 } }\n"
-                  "      - { name: \"b{n}\", address: { table: holding, "
-                  "register: 2, type: uint16 } }\n"},
-             {"drivers/modbus/line1.yaml", one_device()},
-             {"system.yaml", std::string(SYSTEM) + "limits: { max_tags: "
-                                                   "1000000 }\n"}});
-    };
-    EXPECT_EQ(with("1..32768").size(), 65536U);
-    // CF-414 counts the points that exist after step 4, of the instance
-    // (C2 of the review of #146).
-    EXPECT_EQ(with("1..32769"),
-              Lines{"drivers/modbus/line1.yaml:7:11: error CF-414: template "
-                    "\"meter_a\" expands to 65538 points, the limit is "
-                    "65536"});
-}
-
-// C2 of the review of #146: the limits of 1.3 hold for the expanded tree,
-// on running totals; passing one stops the expansion.
-TEST(Expand, TheLimitsOfTheExpandedTree) {
-    const std::string meter =
-        "template: meter_a\nprotocol: modbus\n"
-        "repeat:\n"
-        "  - for: { n: \"1..4\" }\n"
-        "    points:\n"
-        "      - { name: \"a{n}\", address: { table: holding, register: 1, "
-        "type: uint16 } }\n";
-    // `limits.max_tags` (CF-1001): 3 devices of 4 tags pass 10 at the third.
-    EXPECT_EQ(
-        expand({{"templates/meter_a.yaml", meter},
-                {"system.yaml",
-                 std::string(SYSTEM) + "limits: { max_tags: 10 }\n"},
-                {"drivers/modbus/line1.yaml",
-                 channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 "
-                         "}\n"
-                         "  - { name: ps1.m2, template: meter_a, unit_id: 2 "
-                         "}\n"
-                         "  - { name: ps1.m3, template: meter_a, unit_id: 3 "
-                         "}\n"
-                         "  - { name: ps1.m4, template: meter_a, unit_id: 4 "
-                         "}\n")}}),
-        (Lines{"drivers/modbus/line1.yaml:9:13: error CF-1001: 12 tags, the "
-               "limit is 10"}));
-    // The nodes an instance makes count before step 4: 40,000 points of
-    // more than 100 nodes each pass 4,000,000.
-    std::string list = "[";
-    constexpr int VALUES = 100;
-    for (int value = 0; value < VALUES; ++value) {
-        list += (value == 0 ? "" : ", ") + std::to_string(value);
-    }
-    list += "]";
-    EXPECT_EQ(expand({{"templates/meter_a.yaml",
-                       "template: meter_a\nprotocol: modbus\n"
-                       "repeat:\n"
-                       "  - for: { n: \"1..40000\" }\n"
-                       "    points:\n"
-                       "      - { name: \"a{n}\", invalid_values: " +
-                           list +
-                           ", address: { table: holding, register: 1, type: "
-                           "uint16 } }\n"},
-                      {"drivers/modbus/line1.yaml", one_device()}}),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the "
-                     "expanded tree exceeds its limit of 4000000 nodes\n  from "
-                     "template templates/meter_a.yaml:6:17"}));
-    // Every `repeat` value evaluated counts toward the work of the tree:
-    // 62 blocks of 65,536 values pass 4,000,000.
-    std::string blocks = "template: meter_a\nprotocol: modbus\nrepeat:\n";
-    constexpr int BLOCKS = 62;
-    for (int block = 0; block < BLOCKS; ++block) {
-        blocks +=
-            "  - { for: { n: \"1..65536\" }, when: \"false\", points: "
-            "[] }\n";
-    }
-    EXPECT_EQ(expand({{"templates/meter_a.yaml", blocks},
-                      {"drivers/modbus/line1.yaml", one_device()}}),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the repeat "
-                     "values of the tree exceed their limit of 4000000\n  from "
-                     "template templates/meter_a.yaml:65:5"}));
 }
 
 // T6 of the review of #146: what a swap of two steps, or of two loops,

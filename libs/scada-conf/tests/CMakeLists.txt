@@ -24,3 +24,12 @@ target_compile_definitions(scada-conf-unit-test PRIVATE
 # expression_types.h: the type checker, not part of the public interface.
 target_include_directories(scada-conf-unit-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
+# The limits of stage 4 at their edges: millions of nodes each, so each has
+# a time limit of its own, apart from the unit tests above.
+scada_add_test(scada-conf-limits-test KIND unit
+  SOURCES limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-tree-limits-test KIND unit
+  SOURCES tree_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)

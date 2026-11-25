@@ -273,6 +273,12 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   the built-in schemas against the contract's examples.
 - `tests/expand_test.cpp`: each step of the merge order and each CF-4xx
   code, with the instance and the template line of its errors.
+- `tests/limits_test.cpp` and `tests/tree_limits_test.cpp`: the point limit
+  of an instance (CF-414) and the limits of the expanded tree (nodes, tags,
+  `repeat` work) at their edges. Each makes millions of nodes, so each is an
+  executable of its own (`scada-conf-limits-test`,
+  `scada-conf-tree-limits-test`) with its own time limit; the cases they
+  share are in `tests/expand_cases.h`.
 - `tests/config_eval_test.cpp`: the values of configuration expressions and
   the failures that are CF-410.
 - `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
