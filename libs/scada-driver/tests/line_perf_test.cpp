@@ -84,6 +84,7 @@ struct Figures {
     std::int64_t start_gap_ns = 0;      // worst live gap, 10 s to 2 min
     std::int64_t death_gap_ns = 0;      // worst live gap, 2 min after a death
     std::int64_t live_gap_ns = 0;       // worst live gap after that
+    std::int64_t demoted_gap_ns = 0;    // worst live gap once all are DEMOTED
     std::int64_t bad_ns = -1;  // death to COMM_FAIL, the slowest dead unit
     std::vector<double> dead_share;  // per minute: the line held by the dead
 };
@@ -195,6 +196,9 @@ void analyse(const Line& line, const std::vector<bool>& dead, std::uint8_t back,
         }
         // A gap belongs to the window its end falls in.
         const std::int64_t gap = request.time_ns - previous;
+        if (out.all_demoted_ns > 0 && previous >= out.all_demoted_ns) {
+            out.demoted_gap_ns = std::max(out.demoted_gap_ns, gap);
+        }
         const std::int64_t settled =
             std::max(2 * MINUTE, death_ns + 2 * MINUTE);
         if (death_ns > 0 && request.time_ns >= death_ns &&
@@ -228,10 +232,11 @@ void print(const char* name, const Figures& figures) {
         "{}: all dead COMM_FAIL {:.0f} s after their death, DEMOTED at "
         "{:.0f} s; the returned unit RUNNING {:.0f} s after its return; worst "
         "live gap {:.3f} s from 10 s to 2 min, {:.3f} s in the 2 min after "
-        "the death, {:.3f} s after\n",
+        "the death, {:.3f} s after, {:.3f} s once all are DEMOTED\n",
         name, seconds(figures.bad_ns), seconds(figures.all_demoted_ns),
         seconds(figures.back_running_ns), seconds(figures.start_gap_ns),
-        seconds(figures.death_gap_ns), seconds(figures.live_gap_ns));
+        seconds(figures.death_gap_ns), seconds(figures.live_gap_ns),
+        seconds(figures.demoted_gap_ns));
     for (std::size_t minute = 0; minute < figures.dead_share.size();
          minute += 5) {
         std::cout << std::format(

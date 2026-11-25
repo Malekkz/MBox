@@ -18,7 +18,9 @@
 //    contract's order of service (DI 6.2 step 3): its period, plus each
 //    request sent meanwhile that goes before it, an unanswered one at most
 //    its time-out and an answered one of the same or a higher priority its
-//    exchange, plus one request already on the line.
+//    exchange, plus one request already on the line. The probes of demoted
+//    units count at most one probe time-out in every PROBE_FLOOR + 1
+//    (the lead's ruling N1).
 //
 // Each seed builds its own channel (transport, line, failure keys, chains,
 // poll groups per unit, a second block in another group) and its own faults
@@ -32,6 +34,7 @@
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
+#include "scada/driver/scheduler.h"
 #include "scada/tag/types.h"
 #include "sim_transport.h"
 #include "test_protocol.h"
@@ -42,6 +45,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,6 +63,7 @@ constexpr std::uint32_t THIRD_REGISTER = 30;   // the last part of a chain of 3
 constexpr std::uint32_t SHARED_REGISTER = 60;  // a second device on unit 1
 constexpr std::size_t SPIN_STEPS = 2'000;
 constexpr std::int64_t SAMPLE = 100 * MILLISECOND;  // the run's sampling
+constexpr std::int64_t NEVER_NS = std::numeric_limits<std::int64_t>::max();
 
 // What a unit does from a time on.
 enum class Mode : std::uint8_t {
@@ -275,6 +280,9 @@ struct Harness {
     RecordingTags tags;
     TestProtocol protocol;
     ChannelEngine engine;
+    // Per unit id: the sample times at which its device became DEMOTED or
+    // stopped being so, in order (a request to it then is a probe).
+    std::vector<std::vector<std::int64_t>> demoted_flips;
 };
 // NOLINTEND(misc-non-private-member-variables-in-classes)
 
@@ -504,6 +512,19 @@ std::uint8_t unit_priority(const Harness& run, std::uint8_t unit) {
     return own;
 }
 
+// Whether the device of `unit` was DEMOTED at the sample before `time_ns`.
+bool demoted_at(const Harness& run, std::uint8_t unit, std::int64_t time_ns) {
+    const std::vector<std::int64_t>& flips = run.demoted_flips[unit];
+    const auto after = std::upper_bound(flips.begin(), flips.end(), time_ns);
+    return (after - flips.begin()) % 2 == 1;
+}
+
+// A probe's time-out: the device's, at most 1 s (7.4).
+std::int64_t probe_timeout(const Harness& run, std::uint32_t device) {
+    return std::min(run.scenario.channel.devices[device].failure.timeout_ns,
+                    SECOND);
+}
+
 // A transport fault between `from_ns` and `to_ns` (or just before) costs a
 // reconnect, or the quiet time after noise: their bounds.
 std::int64_t fault_slack(const Harness& run, std::int64_t from_ns,
@@ -527,6 +548,7 @@ std::int64_t fault_slack(const Harness& run, std::int64_t from_ns,
 std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
                       std::int64_t from_ns, std::int64_t to_ns) {
     std::int64_t ahead = 0;
+    std::int64_t probes = 0;  // line time of the probes of demoted units
     // An answered request of the same priority goes before it only when due
     // earlier: once per other unit and register in the gap.
     std::vector<std::pair<std::uint8_t, std::uint32_t>> same;
@@ -551,7 +573,10 @@ std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
             priority_of(run, request.unit_id, request.first);
         const std::pair<std::uint8_t, std::uint32_t> key{request.unit_id,
                                                          request.first};
-        if (unanswered(mode, request.first)) {
+        if (unanswered(mode, request.first) &&
+            demoted_at(run, request.unit_id, request.time_ns)) {
+            probes += probe_timeout(run, device) + EXCHANGE_SLACK;
+        } else if (unanswered(mode, request.first)) {
             ahead += run.scenario.channel.devices[device].failure.timeout_ns +
                      EXCHANGE_SLACK;
         } else if (request.unit_id == unit || priority < own ||
@@ -564,7 +589,18 @@ std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
             }
         }
     }
-    return ahead;
+    // Probes of demoted units take at most one probe time-out in every
+    // PROBE_FLOOR + 1 (the lead's ruling N1), and one already on the line.
+    std::int64_t shortest = NEVER_NS;
+    std::int64_t longest = 0;
+    for (std::uint32_t device = 0; device < run.scenario.channel.devices.size();
+         ++device) {
+        shortest = std::min(shortest, probe_timeout(run, device));
+        longest = std::max(longest, probe_timeout(run, device));
+    }
+    const std::int64_t rounds =
+        2 + (to_ns - from_ns) / ((Scheduler::PROBE_FLOOR + 1) * shortest);
+    return ahead + std::min(probes, rounds * (longest + EXCHANGE_SLACK));
 }
 
 // Invariant 6 for the gap from `from_ns` to `to_ns` between two requests
@@ -694,6 +730,7 @@ std::size_t run_checked(Harness& run, std::int64_t end_ns,
 std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     constexpr std::int64_t END = 120 * SECOND;
     Harness run(scenario_of(seed, END));
+    run.demoted_flips.resize(run.scenario.units + 1U);
     std::vector<UnitState> units(run.scenario.units + 1U);
     std::vector<std::string> violations;
     std::size_t steps = 0;
@@ -735,6 +772,14 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
                                  std::to_string(now / MILLISECOND) +
                                  " ms: " + std::to_string(taken) + " steps");
             break;
+        }
+        for (std::uint8_t unit = 1; unit <= run.scenario.units; ++unit) {
+            std::vector<std::int64_t>& flips = run.demoted_flips[unit];
+            const bool demoted =
+                run.engine.failures().state(unit - 1U) == DeviceStatus::DEMOTED;
+            if (demoted != (flips.size() % 2 == 1)) {
+                flips.push_back(now);
+            }
         }
         scan(run, units, last_value, seen, violations);
         for (std::string& violation : check(run, units, now)) {

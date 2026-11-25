@@ -206,10 +206,12 @@ public:
     // flight; `probe_done` ends the flight. When the next poll falls due
     // within `timeout_ns`, the probe goes only if that leaves at least
     // PROBE_MIN_WINDOW_NS (or `timeout_ns`, if shorter), with its time-out
-    // ending when that poll falls due (`Choice::timeout_ns`); a probe
-    // PROBE_FLOOR time-outs late goes in the next idle instant with its
-    // whole time-out (D-138, G7). A cycle probe has no window: its first
-    // request, the probe, waits its whole probe time-out.
+    // ending when that poll falls due (`Choice::timeout_ns`). A probe
+    // PROBE_FLOOR time-outs late goes ahead of due polls with its whole
+    // time-out, the oldest first, at most one such probe per channel in
+    // PROBE_FLOOR + 1 probe time-outs (D-138, G7, the lead's ruling N1). A
+    // cycle probe has no window: its first request, the probe, waits its
+    // whole probe time-out.
     void set_probe(std::uint32_t device, std::int64_t due_ns,
                    std::int64_t timeout_ns) noexcept;
     void clear_probe(std::uint32_t device) noexcept;
@@ -374,13 +376,11 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
-    // A candidate poll: the next request of a group, a retry, or a probe
-    // past its floor.
+    // A candidate poll: the next request of a group, or a retry.
     struct PollPick {
         std::uint32_t device = 0;
         std::uint32_t group = 0;
         bool retry = false;
-        bool probe = false;
     };
     // A chain in progress first, then priority, due time, device (DI 6.2
     // step 3).
@@ -390,11 +390,10 @@ private:
     void consider_groups(std::uint32_t device, std::int64_t now_ns,
                          std::int64_t& wake, PollKey& best_key, PollPick& best,
                          bool& found) noexcept;
-    // A probe past its floor is a candidate as a due poll of its device's
-    // group of the highest priority, due at its floor (J3).
-    void consider_overdue_probe(std::uint32_t device, std::int64_t now_ns,
-                                PollKey& best_key, PollPick& best,
-                                bool& found) noexcept;
+    // The oldest probe past its floor, ahead of due polls, at most one in
+    // PROBE_FLOOR + 1 probe time-outs per channel (the lead's ruling N1).
+    bool choose_floor_probe(std::int64_t now_ns, Choice& out,
+                            std::int64_t& wake) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
@@ -429,6 +428,8 @@ private:
     std::int64_t start_ns_ = 0;
     Undo undo_;
     bool probe_in_flight_ = false;
+    // Until when no further probe past its floor goes (N1).
+    std::int64_t floor_release_ns_ = 0;
 };
 
 }  // namespace scada::driver

@@ -1234,12 +1234,13 @@ TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
               (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
 }
 
-TEST(Scheduling, AnOverdueProbeTakesOneTurnInTheOrderOfService) {
-    // J3 without the hold: 20 demoted devices whose probes are past their
-    // floor, and a live device in the 200 ms group, always due. A probe past
-    // its floor goes as a due poll of its device's group, due at its floor:
-    // the probes are sent, and the live device waits at most one probe
-    // time-out past its period.
+TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
+    // J3, the lead's ruling N1: 20 demoted devices whose probes are past
+    // their floor (time-out 100 ms), and a live device whose 200 ms polls
+    // fill the line, so a request is always due and no window opens. The
+    // oldest probe past its floor goes ahead of the due polls, at most one
+    // in PROBE_FLOOR + 1 probe time-outs: about 60 s / 1.1 s = 54 probes,
+    // and the live device waits at most its period and one probe time-out.
     std::vector<DeviceSpec> specs{
         {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
         {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
@@ -1271,14 +1272,14 @@ TEST(Scheduling, AnOverdueProbeTakesOneTurnInTheOrderOfService) {
                 worst = std::max(worst, now - last_live);
                 last_live = now;
             }
-            now += choice.device == 0 ? 10 * MILLISECOND : 100 * MILLISECOND;
+            now += choice.device == 0 ? FAST_PERIOD : 100 * MILLISECOND;
         } else {
             now = std::max(now + MILLISECOND, choice.wake_ns);
         }
     }
-    // Its period and at most one probe or failing poll on the line.
-    EXPECT_LE(worst, FAST_PERIOD + 100 * MILLISECOND + 10 * MILLISECOND);
-    EXPECT_GT(probes, 50U);
+    EXPECT_LE(worst, FAST_PERIOD + 100 * MILLISECOND);
+    EXPECT_GE(probes, 50U);
+    EXPECT_LE(probes, 55U);
 }
 
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {

@@ -1924,6 +1924,49 @@ TEST(ChannelEngine, TheLastBlockOfADeadUnitGoesBadByItsDemotion) {
     EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
 }
 
+TEST(ChannelEngine, FloorProbesOfAFasterGroupLeaveTheLiveUnitsTheirPeriod) {
+    // N1, the lead's ruling: tcp, 20 units of the 200 ms group dead from
+    // the start, 5 live in the 1 s group (default keys). After the dead are
+    // demoted their floor probes, all due together and of a higher group,
+    // go one in PROBE_FLOOR + 1 probe time-outs: a live unit waits at most
+    // its period and one probe time-out (1 s) at every round, for 2,000 s.
+    // Before, the floor probes took 21 s of every 311 s.
+    std::vector<DeviceSpec> specs;
+    for (std::uint8_t unit = 1; unit <= 25; ++unit) {
+        specs.push_back({.name = "d" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, unit <= 20 ? FAST : NORMAL)});
+    }
+    CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), 25);
+    for (std::uint8_t unit = 1; unit <= 20; ++unit) {
+        rig.bus.fault(unit, Fault::SILENT);
+    }
+    std::int64_t demoted_at = 0;
+    for (std::int64_t now = SECOND; now <= 2'000 * SECOND && demoted_at == 0;
+         now += SECOND) {
+        rig.run_until(now);
+        bool all = true;
+        for (std::uint32_t device = 0; device < 20; ++device) {
+            all = all && rig.state(device) == DeviceStatus::DEMOTED;
+        }
+        demoted_at = all ? now : 0;
+    }
+    ASSERT_GT(demoted_at, 0);
+    rig.run_until(2'000 * SECOND);
+    std::int64_t worst = 0;
+    for (std::uint8_t unit = 21; unit <= 25; ++unit) {
+        worst = std::max(
+            worst, longest_gap_after(times_of(rig.bus, unit), demoted_at));
+    }
+    EXPECT_LE(worst, SECOND + SECOND + 50 * MILLISECOND);
+    // The dead are still probed: each at the latest every 20 x 11 probe
+    // time-outs beyond its back-off.
+    EXPECT_GT(times_of(rig.bus, 1).back(), 1'500 * SECOND);
+}
+
 TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
     // J3: 30 units that take 40 ms each fill a 1 s group, so a request is
     // always due. Units 26 to 30 are dead; unit 30 returns at 1,800 s: its
