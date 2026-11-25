@@ -2224,7 +2224,7 @@ Decision:
 - **CF-414** is found while points are made, not after: a level whose own points (distinct by CF-416) would pass 65,536 stops there. Memory therefore stays bounded for a `repeat` of 65,536 pairs over many points.
 - **Names made by expansion (step 8, B7)** follow 2.1: a point or bit name that does not is CF-212 `"<name>" is not a valid point name`, and where a `{...}` is left, `: {x} names no variable bound to this point`. Its length is CF-402 or CF-403.
 - **The merge (4.5).**
-  - Maps are merged key by key. Two keys of the integer form are one key by their value (`15` and `0xF` of `bits`, an inline `enum`, `states`); the child's spelling and value win (B6). No key the schema types as a name has the integer form.
+  - Maps are merged key by key. Two keys of the integer form are one key by their value, as 1.2 types the keys of `bits`, enumerations, a quality rule's `map`, `states` and `values` (`15` and `0xF`); the child's spelling and value win (B6). The merge does not know the schema, so this holds in every map: the one string-keyed map whose keys may have the integer form, `write.values`, would merge `16` and `0x10` too.
   - `replace: true` on a point's map replaces it whole, the defaults under it too, and the map stays so through later levels until the end (the ruling O-2).
   - A template's `disable` matches any point so far, also of its own level (the ruling O-8).
   - A child's `enums` table replaces the inherited table of the same name whole (4.5, step 3.1).
