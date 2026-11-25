@@ -74,6 +74,20 @@ name: an instance of 65,536 points, made by one `repeat`, and the refusal of
 one of 65,537 took 736 ms together (release build, x86-64,
 `Expand.ThePointLimit`).
 
+The expanded tree is held to the limits of a tree (contract 1.3, D-114):
+4,000,000 nodes and 256 MiB of text (CF-113), and `limits.max_tags`
+(CF-1001), each on a running total checked after every device, so before
+the next; passing one stops the expansion. Each device is written into the
+document as soon as it is finished and then dropped, and what an instance
+makes before step 4 counts toward the node limit, so memory is bounded by
+the limit, not by the tree's instances. Every `repeat` value evaluated
+counts toward a work budget of 4,000,000 values. Measured peak (release
+build, x86-64, the whole of `validate_and_expand`): 289 MB and 1.7 s for a
+valid tree of 3,604,535 expanded nodes (5 instances of a 65,536-point
+`repeat`); the same for 100 such instances, refused with CF-113 after the
+sixth; 18 MB and 5.7 s for 20,000 instances whose expressions fail, given
+as 100 errors with "and N more instances".
+
 Stage 5 runs when stage 4 found no error. It checks what needs no point
 tags (`check_references`, `include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's

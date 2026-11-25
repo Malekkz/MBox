@@ -62,6 +62,15 @@ constexpr std::size_t MAX_PARENTS = 4;
 // one instance (4.4, CF-414).
 constexpr std::size_t MAX_REPEAT_VALUES = 65536;
 constexpr std::size_t MAX_POINTS = 65536;
+// The limits of a tree (1.3), which the expanded tree is held to as well
+// (C2 of the review of #146): its nodes, its text, and the work of its
+// `repeat` blocks, one per value evaluated.
+constexpr std::size_t MAX_TREE_NODES = 4'000'000;
+constexpr std::size_t MAX_TREE_TEXT = std::size_t{256} * 1024 * 1024;
+constexpr std::size_t MAX_REPEAT_WORK = MAX_TREE_NODES;
+// `limits.max_tags` without a value (4.1 of the system file).
+constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
+constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
 // Most bytes of a tag name (2.1, #119).
 constexpr std::size_t MAX_TAG_NAME_BYTES = 127;
 
@@ -395,6 +404,8 @@ public:
             file_index_.emplace(&file, static_cast<FileIndex>(paths_.size()));
             paths_.push_back(file.source->path);
         }
+        max_tags_ = max_tags_of();
+        writer_.begin();
         // A template's own faults once, at the template, whether or not an
         // instance uses it (the ruling O-6 on #146).
         for (const CheckedFile& file : files_) {
@@ -403,7 +414,8 @@ public:
             }
         }
         for (const CheckedFile& file : files_) {
-            if (file.source->path_class.type == FileType::CHANNEL) {
+            if (file.source->path_class.type == FileType::CHANNEL &&
+                !stopped_) {
                 expand_channel(file);
             }
         }
@@ -411,7 +423,7 @@ public:
         if (failed_) {
             return std::nullopt;
         }
-        return write();
+        return writer_.finish();
     }
 
 private:
@@ -447,6 +459,13 @@ private:
                                  .location = std::move(diagnostic.location),
                                  .detail = std::move(detail)});
             diagnostic.location = *instance_;
+        }
+        // Past twice the reported limit, an error is counted, not kept: the
+        // texts that suppress repeats are bounded too (C2 of the review of
+        // #146).
+        if (pending_.size() >= 2 * Diagnostics::REPORTED_LIMIT) {
+            diagnostics_->count_unlisted_errors(1);
+            return;
         }
         const std::string key = format(diagnostic);
         if (!reported_.insert(key).second) {
@@ -496,15 +515,9 @@ private:
         std::vector<Point> points;  // in order
     };
 
-    struct Channel {
-        const CheckedFile* file = nullptr;
-        std::vector<Device> devices;
-        std::vector<Location> instances;
-    };
-
     void expand_channel(const CheckedFile& file) {
         channel_ = &file;
-        Channel channel{.file = &file, .devices = {}, .instances = {}};
+        writer_.begin_channel(file);
         const Document& document = *file.document;
         const NodeId root = document.root();
         if (const std::optional<NodeId> devices =
@@ -515,16 +528,102 @@ private:
                 if (document.kind(device) != NodeKind::MAP) {
                     continue;
                 }
+                if (stopped_) {
+                    break;
+                }
                 std::optional<Device> expanded = expand_device(file, device);
-                if (expanded && instance_) {
-                    channel.devices.push_back(std::move(*expanded));
-                    channel.instances.push_back(*instance_);
+                // A device is written as soon as it is finished and then
+                // dropped; after an error nothing more is written, as no
+                // tree is given (C2 of the review of #146).
+                if (expanded && instance_ && !failed_) {
+                    writer_.device(*expanded, *instance_);
+                    tags_ += tags_of(*expanded);
+                    check_totals(*instance_);
                 }
             }
         }
-        channels_.push_back(std::move(channel));
+        writer_.end_channel();
         channel_ = nullptr;
         instance_.reset();
+    }
+
+    // The running totals of the expanded tree after a device, so before the
+    // next is expanded: its nodes and text (CF-113) and its tags (CF-1001).
+    // Passing one stops the expansion (1.3).
+    void check_totals(const Location& instance) {
+        std::string message;
+        std::uint16_t code = CF_SIZE_LIMIT;
+        if (writer_.nodes() > MAX_TREE_NODES) {
+            message = "the expanded tree exceeds its limit of 4000000 nodes";
+        } else if (writer_.text_bytes() > MAX_TREE_TEXT) {
+            message = "the expanded tree exceeds its limit of 256 MiB of text";
+        } else if (tags_ > static_cast<std::uint64_t>(max_tags_)) {
+            code = CF_TOO_MANY_TAGS;
+            message = std::to_string(tags_) + " tags, the limit is " +
+                      std::to_string(max_tags_);
+        } else {
+            return;
+        }
+        error_in(code, *channel_, instance, std::move(message));
+        stopped_ = true;
+    }
+
+    // The tags of a device: a point's, unless `tag: false`, and each named
+    // bit's (12.5).
+    static std::uint64_t tags_of(const Device& device) {
+        std::uint64_t count = 0;
+        for (const Point& point : device.points) {
+            const Value* tag = point.value.find("tag");
+            if (tag == nullptr || tag->scalar_text() != "false") {
+                ++count;
+            }
+            if (const Value* bits = point.value.find("bits")) {
+                count += bits->members.size();
+            }
+        }
+        return count;
+    }
+
+    // `limits.max_tags` of system.yaml, or its default.
+    [[nodiscard]] std::int64_t max_tags_of() const {
+        for (const CheckedFile& file : files_) {
+            if (file.source->path_class.type != FileType::SYSTEM) {
+                continue;
+            }
+            const Document& document = *file.document;
+            const std::optional<NodeId> limits =
+                document.kind(document.root()) == NodeKind::MAP
+                    ? document.find(document.root(), "limits")
+                    : std::nullopt;
+            const std::optional<NodeId> max_tags =
+                limits && document.kind(*limits) == NodeKind::MAP
+                    ? document.find(*limits, "max_tags")
+                    : std::nullopt;
+            if (max_tags) {
+                if (const std::optional<Integer> value =
+                        parse_integer(document.text(*max_tags))) {
+                    if (const std::optional<std::int64_t> limit =
+                            as_int64(*value)) {
+                        return *limit;
+                    }
+                }
+            }
+        }
+        return DEFAULT_MAX_TAGS;
+    }
+
+    // The nodes of `value` as the builder will hold them, a key counted as
+    // one.
+    // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
+    static std::size_t node_count(const Value& value) {
+        std::size_t count = 1;
+        for (const Member& member : value.members) {
+            count += 1 + node_count(member.value.front());
+        }
+        for (const Value& item : value.items) {
+            count += node_count(item);
+        }
+        return count;
     }
 
     std::optional<Device> expand_device(const CheckedFile& file, NodeId node) {
@@ -536,6 +635,7 @@ private:
         instance_ = name->location();
         device_name_ = std::string(name->scalar_text());
         device_failed_ = false;
+        made_nodes_ = 0;
         params_.clear();
         Device device{.keys = written, .points = {}};
         // `identify` is the template's with the instance's appended (step
@@ -1181,17 +1281,18 @@ private:
         std::vector<Point> own;
         std::set<std::string, std::less<>> names;
         const auto add = [&](Point point) {
-            // The point limit bounds production too: a `repeat` of 65,536
-            // pairs over many points stops at the limit (CF-414). A level's
-            // own points have distinct names, so more of them than the
-            // limit is more points than the limit after merging.
-            if (own.size() >= MAX_POINTS) {
-                if (!device_failed_) {
-                    error(CF_TOO_MANY_POINTS, *point.value.find("name"),
-                          "template " + quote_text(template_name) +
-                              " expands to more than 65536 points, the "
-                              "limit is 65536");
-                }
+            // What an instance makes before step 4 counts toward the node
+            // limit of the tree with what is written, so that no instance
+            // holds more than the tree may (C2 of the review of #146).
+            // CF-414 counts the points that exist after step 4.
+            if (device_failed_) {
+                return;
+            }
+            made_nodes_ += node_count(point.value);
+            if (writer_.nodes() + made_nodes_ > MAX_TREE_NODES) {
+                error(CF_SIZE_LIMIT, *point.value.find("name"),
+                      "the expanded tree exceeds its limit of 4000000 nodes");
+                stopped_ = true;
                 return;
             }
             if (!names.insert(point.name).second) {
@@ -1294,17 +1395,8 @@ private:
                 return;
             }
             if (axis == axes->size()) {
-                if (points == nullptr) {
-                    return;
-                }
-                for (const Value& item : points->items) {
-                    if (std::optional<Point> point =
-                            point_of(item, variables, template_name)) {
-                        if (when != nullptr) {
-                            point->conditions.push_back(*when);
-                        }
-                        add(std::move(*point));
-                    }
+                if (count_repeat_value(block) && points != nullptr) {
+                    make_points(*points, when, variables, template_name, add);
                 }
                 return;
             }
@@ -1314,6 +1406,37 @@ private:
             }
         };
         walk(0);
+    }
+
+    // The points of one value (or pair) of a block, each with the block's
+    // `when` to decide at step 4.
+    template <typename Add>
+    static void make_points(
+        const Value& points, const Value* when,
+        const std::map<std::string, std::int64_t, std::less<>>& variables,
+        const std::string& template_name, const Add& add) {
+        for (const Value& item : points.items) {
+            if (std::optional<Point> point =
+                    point_of(item, variables, template_name)) {
+                if (when != nullptr) {
+                    point->conditions.push_back(*when);
+                }
+                add(std::move(*point));
+            }
+        }
+    }
+
+    // Each value counts toward the work of the tree, whether or not its
+    // `when` keeps the point (the lead's ruling S1 on #146); false past
+    // the budget.
+    bool count_repeat_value(const Value& block) {
+        if (++repeat_work_ <= MAX_REPEAT_WORK) {
+            return true;
+        }
+        error(CF_SIZE_LIMIT, block,
+              "the repeat values of the tree exceed their limit of 4000000");
+        stopped_ = true;
+        return false;
     }
 
     using Axes = std::vector<std::pair<std::string, std::vector<std::int64_t>>>;
@@ -1489,22 +1612,7 @@ private:
                 index_of(points);
             for (const Value& entry : list->items) {
                 const std::string_view pattern = entry.scalar_text();
-                bool any = false;
-                if (pattern.find_first_of("*?") == std::string_view::npos) {
-                    if (const auto found = by_name.find(pattern);
-                        found != by_name.end()) {
-                        matched[found->second] = true;
-                        any = true;
-                    }
-                } else {
-                    for (std::size_t i = 0; i < points.size(); ++i) {
-                        if (matches(pattern, points[i].name)) {
-                            matched[i] = true;
-                            any = true;
-                        }
-                    }
-                }
-                if (!any) {
+                if (!mark_matches(pattern, points, by_name, matched)) {
                     error(CF_NO_SUCH_POINT, entry,
                           "point " + quote_text(pattern) +
                               " does not exist in template " +
@@ -1515,6 +1623,30 @@ private:
             std::erase_if(
                 points, [&](const Point&) { return matched[index++] != keep; });
         }
+    }
+
+    // Marks the points `pattern` matches; false if none. A plain name is
+    // looked up, a pattern matched against every point.
+    static bool mark_matches(
+        std::string_view pattern, const std::vector<Point>& points,
+        const std::map<std::string, std::size_t, std::less<>>& by_name,
+        std::vector<bool>& matched) {
+        if (pattern.find_first_of("*?") == std::string_view::npos) {
+            const auto found = by_name.find(pattern);
+            if (found == by_name.end()) {
+                return false;
+            }
+            matched[found->second] = true;
+            return true;
+        }
+        bool any = false;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (matches(pattern, points[i].name)) {
+                matched[i] = true;
+                any = true;
+            }
+        }
+        return any;
     }
 
     // Step 4: a point whose `when`, or the `when` of a block that made it,
@@ -2006,27 +2138,57 @@ private:
 
     // --- The Document ------------------------------------------------------
 
-    std::optional<ExpandedTree> write() {
-        Writer writer(*this);
-        return writer.run();
-    }
-
     class Writer {
     public:
         explicit Writer(const Expander& expander) : expander_(&expander) {}
 
-        std::optional<ExpandedTree> run() {
+        // Opens the document: `channels`, written one device at a time.
+        void begin() {
             for (const std::string& path : expander_->paths_) {
-                if (!builder_.add_file(path).ok()) {
-                    return std::nullopt;
-                }
+                ok_ = ok_ && builder_.add_file(path).ok();
             }
             const SourcePosition top{};
-            ok_ = builder_.begin_map(top).ok() && key("channels", top) &&
+            ok_ = ok_ && builder_.begin_map(top).ok() && key("channels", top) &&
                   builder_.begin_sequence(top).ok();
-            for (const Channel& channel : expander_->channels_) {
-                write_channel(channel);
+        }
+
+        // The nodes and the bytes of text written so far.
+        [[nodiscard]] std::size_t nodes() const noexcept {
+            return instance_of_.size();
+        }
+        [[nodiscard]] std::size_t text_bytes() const noexcept {
+            return text_bytes_;
+        }
+
+        void begin_channel(const CheckedFile& file) {
+            const SourcePosition top = position(file, file.document->root());
+            ok_ = ok_ && builder_.begin_map(top).ok() && key("protocol", top);
+            scalar(file.source->path_class.protocol, ScalarType::STRING, top);
+            ok_ = ok_ && key("file", top);
+            scalar(file.source->path, ScalarType::STRING, top);
+            const Document& document = *file.document;
+            if (const std::optional<NodeId> written =
+                    document.find(document.root(), "channel")) {
+                ok_ = ok_ && key("channel", top);
+                write_value(copy_of(file, *written));
             }
+            ok_ =
+                ok_ && key("devices", top) && builder_.begin_sequence(top).ok();
+        }
+
+        void device(const Device& device, const Location& instance) {
+            instance_ = static_cast<std::uint32_t>(instances_.size());
+            instances_.push_back(instance);
+            write_device(device);
+            instance_ = ExpandedTree::NO_INSTANCE;
+        }
+
+        void end_channel() {
+            ok_ =
+                ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
+        }
+
+        std::optional<ExpandedTree> finish() {
             ok_ =
                 ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
             if (!ok_) {
@@ -2065,6 +2227,7 @@ private:
         }
 
         bool key(std::string_view text, SourcePosition where) {
+            text_bytes_ += text.size();
             const Result<NodeId> node =
                 builder_.key(text, ScalarStyle::PLAIN, where);
             if (node.ok()) {
@@ -2075,6 +2238,7 @@ private:
 
         void scalar(std::string_view text, ScalarType type,
                     SourcePosition where) {
+            text_bytes_ += text.size();
             const Result<NodeId> node =
                 builder_.scalar(text, ScalarStyle::PLAIN, where);
             ok_ = ok_ && node.ok();
@@ -2082,31 +2246,6 @@ private:
                 note(node.value());
                 types_.emplace_back(node.value(), type);
             }
-        }
-
-        void write_channel(const Channel& channel) {
-            const CheckedFile& file = *channel.file;
-            const SourcePosition top = position(file, file.document->root());
-            ok_ = ok_ && builder_.begin_map(top).ok() && key("protocol", top);
-            scalar(file.source->path_class.protocol, ScalarType::STRING, top);
-            ok_ = ok_ && key("file", top);
-            scalar(file.source->path, ScalarType::STRING, top);
-            const Document& document = *file.document;
-            if (const std::optional<NodeId> written =
-                    document.find(document.root(), "channel")) {
-                ok_ = ok_ && key("channel", top);
-                write_value(copy_of(file, *written));
-            }
-            ok_ =
-                ok_ && key("devices", top) && builder_.begin_sequence(top).ok();
-            for (std::size_t i = 0; i < channel.devices.size(); ++i) {
-                instance_ = static_cast<std::uint32_t>(instances_.size());
-                instances_.push_back(channel.instances[i]);
-                write_device(channel.devices[i]);
-                instance_ = ExpandedTree::NO_INSTANCE;
-            }
-            ok_ =
-                ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
         }
 
         void write_device(const Device& device) {
@@ -2146,6 +2285,7 @@ private:
                         return;
                     }
                     const Document& document = *value.file->document;
+                    text_bytes_ += document.text(value.node).size();
                     const Result<NodeId> node = builder_.scalar(
                         document.text(value.node), document.style(value.node),
                         where, document.verbatim(value.node));
@@ -2189,7 +2329,11 @@ private:
         std::vector<std::uint32_t> instance_of_;
         std::vector<Location> instances_;
         std::vector<std::pair<NodeId, ScalarType>> types_;
+        std::size_t text_bytes_ = 0;
     };
+
+    // The expanded tree, written as devices are finished.
+    Writer writer_{*this};
 
     std::span<const CheckedFile> files_;
     Diagnostics* diagnostics_;
@@ -2204,11 +2348,19 @@ private:
     std::map<std::string, std::pair<std::size_t, std::size_t>> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
-    std::vector<Channel> channels_;
     std::set<std::string> reported_;
     bool failed_ = false;
     // An error in the instance being expanded, which ends its steps.
     bool device_failed_ = false;
+    // A limit of the tree was passed: expansion stops (1.3).
+    bool stopped_ = false;
+    // The running totals the limits are checked on (C2 of the review of
+    // #146): the tags written, the nodes the instance being expanded has
+    // made, and the `repeat` values evaluated in the tree.
+    std::int64_t max_tags_ = DEFAULT_MAX_TAGS;
+    std::uint64_t tags_ = 0;
+    std::size_t made_nodes_ = 0;
+    std::size_t repeat_work_ = 0;
 
     // The instance being expanded.
     const CheckedFile* channel_ = nullptr;
