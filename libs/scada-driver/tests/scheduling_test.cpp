@@ -1267,6 +1267,49 @@ TEST(Scheduling, NoFailingDeviceIsStarvedWhateverItsTimeOut) {
     EXPECT_GT(polls[2], 100U);
 }
 
+TEST(Scheduling, AFailingFastGroupLeavesTheSlowerGroupsTheirTurn) {
+    // L1: unit 1 in the 200 ms group fails (time-out 1 s); units 2 and 3
+    // answer in the 1 s group. The failing poll is the best by priority, but
+    // while the hold lasts the live polls of the slower group go, and no
+    // wait is "now".
+    const CompiledChannel channel = make_channel(
+        {{.name = "dead", .unit_id = 1, .points = adjacent(0, 1, 0)},
+         {.name = "a", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
+         {.name = "b", .unit_id = 3, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_failing(0, true, true, SECOND);
+    std::array<std::int64_t, 3> last{};
+    std::array<std::int64_t, 3> gap{};
+    std::array<std::size_t, 3> polls{};
+    std::size_t steps = 0;
+    std::size_t near_now = 0;  // waits that end within 1 ms: a spin
+    std::int64_t now = 0;
+    // A step that sends nothing and wakes at once would spin: cap them.
+    while (now < 120 * SECOND && steps < 10'000) {
+        ++steps;
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::POLL) {
+            gap.at(choice.device) =
+                std::max(gap.at(choice.device), now - last.at(choice.device));
+            last.at(choice.device) = now;
+            ++polls.at(choice.device);
+            now += choice.device == 0 ? SECOND : 50 * MILLISECOND;
+        } else {
+            ASSERT_EQ(choice.kind, Choice::Kind::WAIT);
+            near_now += choice.wake_ns <= now + MILLISECOND ? 1U : 0U;
+            now = std::max(now + MILLISECOND, choice.wake_ns);
+        }
+    }
+    // A live poll waits at most one failing request past its period.
+    EXPECT_LE(gap[1], 2 * SECOND + 100 * MILLISECOND);
+    EXPECT_LE(gap[2], 2 * SECOND + 100 * MILLISECOND);
+    // The dead unit keeps about a quarter of the line, never starved.
+    EXPECT_GT(polls[0], 20U);
+    EXPECT_EQ(near_now, 0U);
+    EXPECT_LT(steps, 2'000U);
+}
+
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
     // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
     const CompiledChannel channel =

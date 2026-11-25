@@ -401,17 +401,28 @@ private:
         std::uint32_t group = 0;
         bool retry = false;
     };
-    using PollKey =
-        std::tuple<bool, std::uint8_t, bool, std::int64_t, std::uint32_t>;
-    [[nodiscard]] PollKey key_of(const PollPick& pick,
-                                 std::int64_t now_ns) const noexcept;
-    void consider(const PollPick& pick, std::int64_t now_ns, PollPick& best,
-                  bool& found) const noexcept;
+    // The chain first, then priority, due time, device (live picks).
+    using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
+    // Due time, device (failing picks: the oldest first, K3).
+    using FailKey = std::pair<std::int64_t, std::uint32_t>;
+    // The best live and the best failing pick of one `take` (L1).
+    struct Candidates {
+        PollPick live;
+        PollKey live_key{};
+        PollPick failing;
+        FailKey failing_key{};
+        bool has_live = false;
+        bool has_failing = false;
+    };
+    // A suspect's pick that continues no chain: it waits behind the live.
+    [[nodiscard]] bool failing_pick(const PollPick& pick) const noexcept;
+    void consider(const PollPick& pick, Candidates& candidates) const noexcept;
     void consider_groups(std::uint32_t device, std::int64_t now_ns,
-                         std::int64_t& wake, PollPick& best,
-                         bool& found) noexcept;
+                         std::int64_t& wake, Candidates& candidates) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
+    bool take_failing(const PollPick& pick, std::int64_t now_ns,
+                      Choice& out) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
     [[nodiscard]] bool due_work_pending() const noexcept;
@@ -429,8 +440,10 @@ private:
     // A failing poll or a probe that may cost `timeout_ns` was sent: the
     // others wait FAILING_SPACING of it.
     void hold_failing(std::int64_t now_ns, std::int64_t timeout_ns) noexcept;
-    // When the next poll of a device known to answer falls due, or NEVER.
-    [[nodiscard]] std::int64_t next_live_poll_due_ns() const noexcept;
+    // When the next poll of a device known to answer can go, if later than
+    // `now_ns`, else NEVER.
+    [[nodiscard]] std::int64_t next_live_poll_due_ns(
+        std::int64_t now_ns) const noexcept;
     // The oldest due time of a failing device's poll or retry, or NEVER.
     [[nodiscard]] std::int64_t oldest_failing_due_ns() const noexcept;
     // Takes the probe of `device` with time-out `wait_ns`.

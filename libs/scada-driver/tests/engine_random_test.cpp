@@ -9,10 +9,15 @@
 //    reconnect bounds.
 // 4. A value whose companion's block stopped answering is not GOOD past the
 //    same bound (DI 5.5, G1, H1, K1).
-// 5. The engine never spins: every call of the run waits at some point.
+// 5. The engine never spins: it takes at most SPIN_STEPS steps in any 100 ms
+//    of simulated time (review L1: a wait 1 ns ahead, nothing sent).
+// 6. A unit that answers has its value asked within its period plus the
+//    hold of failing polls and the reconnect bounds, whatever the groups and
+//    priorities of the dead units (L1).
 //
-// Each seed builds its own channel (transport, line, failure keys, chains)
-// and its own faults over time; the seeds are fixed, so every run is the
+// Each seed builds its own channel (transport, line, failure keys, chains,
+// poll groups per unit, a second block in another group) and its own faults
+// over time; the seeds are fixed, so every run is the
 // same and a failure names its seed.
 
 #include "channel_builder.h"
@@ -22,6 +27,7 @@
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
+#include "scada/driver/scheduler.h"
 #include "scada/tag/types.h"
 #include "sim_transport.h"
 #include "test_protocol.h"
@@ -45,15 +51,26 @@ namespace {
 using Fault = SimBus::Fault;
 constexpr std::uint32_t VALUE_REGISTER = 0;
 constexpr std::uint32_t COMPANION_REGISTER = 20;
+constexpr std::uint32_t BLOCK_REGISTER = 40;
+constexpr std::size_t SPIN_STEPS = 2'000;
 
 // What a unit does from a time on.
-enum class Mode : std::uint8_t { ANSWERS, SILENT, BUSY, COMPANION_SILENT };
+enum class Mode : std::uint8_t {
+    ANSWERS,
+    SILENT,
+    BUSY,
+    COMPANION_SILENT,
+    BLOCK_SILENT
+};
 
 // One random channel and its faults.
 struct Scenario {
     CompiledChannel channel;
     std::uint8_t units = 0;
     std::vector<bool> chained;  // per device: a value with a companion
+    // Per device: the index of a point in a second block, in another
+    // group, or 0 for none.
+    std::vector<std::uint32_t> block;
     std::vector<std::int64_t> latency_ns;
     struct Event {
         std::int64_t time_ns = 0;
@@ -73,8 +90,11 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
     Scenario out;
     out.units = static_cast<std::uint8_t>(pick(random, 2, 6));
     std::vector<DeviceSpec> specs;
-    const auto group = static_cast<std::uint32_t>(pick(random, 0, 1));
     for (std::uint8_t unit = 1; unit <= out.units; ++unit) {
+        // fast, normal or slow (default groups: 200 ms, 1 s, 10 s, by
+        // priority), mostly the first two.
+        const auto group = static_cast<std::uint32_t>(
+            std::min<std::int64_t>(pick(random, 0, 4), 2) % 3);
         const bool chain = pick(random, 0, 2) == 0;
         out.chained.push_back(chain);
         std::vector<PointSpec> points{
@@ -83,6 +103,16 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
             points[0].companions = {1};
             points.push_back({.first = COMPANION_REGISTER, .group = group});
         }
+        std::uint32_t block = 0;
+        if (pick(random, 0, 2) == 0) {
+            block = static_cast<std::uint32_t>(points.size());
+            points.push_back(
+                {.first = BLOCK_REGISTER,
+                 .group = (group + static_cast<std::uint32_t>(
+                                       pick(random, 1, 2))) %
+                          3});
+        }
+        out.block.push_back(block);
         specs.push_back({.name = "d" + std::to_string(unit),
                          .unit_id = unit,
                          .points = points});
@@ -131,6 +161,8 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
             mode = Mode::BUSY;
         } else if (roll == 6 && out.chained[unit - 1U]) {
             mode = Mode::COMPANION_SILENT;
+        } else if (roll == 7 && out.block[unit - 1U] != 0) {
+            mode = Mode::BLOCK_SILENT;
         }
         out.events.push_back({.time_ns = time, .unit = unit, .mode = mode});
     }
@@ -169,26 +201,38 @@ void apply(Harness& run, const Scenario::Event& event) {
     run.bus.fault(event.unit, fault);
     if (event.mode == Mode::COMPANION_SILENT) {
         run.bus.silent_from(event.unit, COMPANION_REGISTER, COMPANION_REGISTER);
+    } else if (event.mode == Mode::BLOCK_SILENT) {
+        run.bus.silent_from(event.unit, BLOCK_REGISTER, BLOCK_REGISTER);
     } else {
         run.bus.silent_from(event.unit, 1000, 1000);  // nothing silent
     }
 }
 
-// The verdict bound of a device: one attempt, then one period or its
-// retries' time-outs, plus one exchange of any device on the line, the
-// quiet time and slack.
-std::int64_t verdict_bound(const Harness& run, std::uint32_t device) {
-    const CompiledChannel& channel = run.scenario.channel;
-    const FailureRules& rules = channel.devices[device].failure;
+std::int64_t longest_timeout(const Harness& run) {
     std::int64_t longest = 0;
-    for (const CompiledDevice& other : channel.devices) {
+    for (const CompiledDevice& other : run.scenario.channel.devices) {
         longest = std::max(longest, other.failure.timeout_ns);
     }
-    const std::int64_t period =
-        channel
-            .poll_groups[channel.devices[device].points[0].poll_group.value_or(
-                0)]
-            .period_ns;
+    return longest;
+}
+
+std::int64_t period_of(const Harness& run, std::uint32_t device,
+                       std::uint32_t point) {
+    const CompiledChannel& channel = run.scenario.channel;
+    return channel
+        .poll_groups[channel.devices[device].points[point].poll_group.value_or(
+            0)]
+        .period_ns;
+}
+
+// The verdict bound of a point: one attempt, then one period or its
+// retries' time-outs, plus one exchange of any device on the line, the
+// quiet time and slack.
+std::int64_t verdict_bound(const Harness& run, std::uint32_t device,
+                           std::uint32_t point) {
+    const FailureRules& rules = run.scenario.channel.devices[device].failure;
+    const std::int64_t longest = longest_timeout(run);
+    const std::int64_t period = period_of(run, device, point);
     return rules.timeout_ns +
            std::max(period, rules.timeout_ns * rules.retries) + longest +
            200 * MILLISECOND;
@@ -200,8 +244,30 @@ std::int64_t verdict_bound(const Harness& run, std::uint32_t device) {
 bool good_past_bound(const Harness& run, std::uint32_t device,
                      std::uint32_t point, std::int64_t first_ns,
                      std::int64_t now_ns) {
-    return first_ns >= 0 && now_ns > first_ns + verdict_bound(run, device) &&
+    return first_ns >= 0 &&
+           now_ns > first_ns + verdict_bound(run, device, point) &&
            run.tags.point(device, point).quality == tag::Quality::GOOD;
+}
+
+// How long a unit that answers again may take to be RUNNING: its probe
+// back-off and the reconnect bounds (invariant 3).
+std::int64_t recover_bound(const Harness& run, std::uint8_t unit) {
+    const FailureRules& rules = run.scenario.channel.devices[unit - 1U].failure;
+    const ConnectionRules& connection = run.scenario.channel.connection;
+    return rules.backoff_max_ns + rules.timeout_ns * 10 +
+           connection.reconnect_max_ns + connection.connect_timeout_ns +
+           3 * SECOND;
+}
+
+// The longest time between two requests for the value of a unit that
+// answers (invariant 6): its period; the first attempts of the units that
+// stopped, one each; the hold of failing polls and probes (FAILING_SPACING
+// of the longest time-out, and that time-out); slack.
+std::int64_t live_gap_bound(const Harness& run, std::uint8_t unit) {
+    const std::int64_t longest = longest_timeout(run);
+    return period_of(run, unit - 1U, 0) +
+           (run.scenario.units + Scheduler::FAILING_SPACING + 2) * longest +
+           SECOND;
 }
 
 struct UnitState {
@@ -211,6 +277,7 @@ struct UnitState {
     // `since_ns`.
     std::int64_t first_value_ns = -1;
     std::int64_t first_companion_ns = -1;
+    std::int64_t first_block_ns = -1;
 };
 
 // Checks invariants 1, 3 and 4 at `now_ns`; returns the violations.
@@ -221,13 +288,14 @@ std::vector<std::string> check(const Harness& run,
     for (std::uint8_t unit = 1; unit <= run.scenario.units; ++unit) {
         const std::uint32_t device = unit - 1U;
         const UnitState& state = units[unit];
-        const FailureRules& rules =
-            run.scenario.channel.devices[device].failure;
         const bool chain = run.scenario.chained[device];
+        const std::uint32_t block = run.scenario.block[device];
         if (state.mode == Mode::SILENT &&
             (good_past_bound(run, device, 0, state.first_value_ns, now_ns) ||
              (chain && good_past_bound(run, device, 1, state.first_companion_ns,
-                                       now_ns)))) {
+                                       now_ns)) ||
+             (block != 0 && good_past_bound(run, device, block,
+                                            state.first_block_ns, now_ns)))) {
             out.push_back("unit " + std::to_string(unit) +
                           " silent and GOOD at " +
                           std::to_string(now_ns / MILLISECOND));
@@ -240,13 +308,15 @@ std::vector<std::string> check(const Harness& run,
                           " value GOOD with its companion silent at " +
                           std::to_string(now_ns / MILLISECOND));
         }
+        if (state.mode == Mode::BLOCK_SILENT &&
+            good_past_bound(run, device, block, state.first_block_ns,
+                            now_ns)) {
+            out.push_back("unit " + std::to_string(unit) +
+                          " block silent and GOOD at " +
+                          std::to_string(now_ns / MILLISECOND));
+        }
         if (state.mode == Mode::ANSWERS) {
-            const ConnectionRules& connection = run.scenario.channel.connection;
-            const std::int64_t recover =
-                rules.backoff_max_ns + rules.timeout_ns * 10 +
-                connection.reconnect_max_ns + connection.connect_timeout_ns +
-                3 * SECOND;
-            if (now_ns > state.since_ns + recover &&
+            if (now_ns > state.since_ns + recover_bound(run, unit) &&
                 run.engine.failures().state(device) != DeviceStatus::RUNNING) {
                 out.push_back("unit " + std::to_string(unit) +
                               " answering and not RUNNING at " +
@@ -265,7 +335,13 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
     for (std::uint8_t unit = 1; unit <= run.scenario.units; ++unit) {
         const FailureRules& rules =
             run.scenario.channel.devices[unit - 1U].failure;
-        const std::int64_t bound = rules.backoff_max_ns +
+        std::int64_t period = 0;
+        for (std::uint32_t point = 0;
+             point < run.scenario.channel.devices[unit - 1U].points.size();
+             ++point) {
+            period = std::max(period, period_of(run, unit - 1U, point));
+        }
+        const std::int64_t bound = rules.backoff_max_ns + period +
                                    rules.timeout_ns * 10 +
                                    connection.reconnect_max_ns +
                                    connection.connect_timeout_ns + 5 * SECOND;
@@ -300,6 +376,9 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     std::size_t steps = 0;
     std::size_t next_event = 0;
     std::size_t seen = 0;  // requests of the bus's log looked at
+    std::size_t busiest = 0;  // the most steps in one sample
+    // Per unit: the last request for its value (invariant 6).
+    std::vector<std::int64_t> last_value(run.scenario.units + 1U, 0);
     for (std::int64_t now = SAMPLE; now <= END; now += SAMPLE) {
         while (next_event < run.scenario.events.size() &&
                run.scenario.events[next_event].time_ns <= now) {
@@ -313,28 +392,65 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
         }
         const std::size_t taken = run_engine(run.engine, run.clock, now);
         steps += taken;
-        if (taken > 100'000) {
-            // An engine that never waits: a spin (invariant 5).
+        busiest = std::max(busiest, taken);
+        if (taken > SPIN_STEPS) {
+            // An engine that wakes without sending: a spin (invariant 5).
             violations.push_back("spin at " +
-                                 std::to_string(now / MILLISECOND) + " ms");
+                                 std::to_string(now / MILLISECOND) + " ms: " +
+                                 std::to_string(taken) + " steps");
             break;
         }
         const std::vector<LoggedRequest>& log = run.bus.log();
         for (; seen < log.size(); ++seen) {
-            UnitState& state = units[log[seen].unit_id];
-            std::int64_t& first = log[seen].first == COMPANION_REGISTER
-                                      ? state.first_companion_ns
-                                      : state.first_value_ns;
-            if (first < 0 && log[seen].time_ns >= state.since_ns) {
-                first = log[seen].time_ns;
+            const LoggedRequest& request = log[seen];
+            UnitState& state = units[request.unit_id];
+            std::int64_t* first = &state.first_value_ns;
+            if (request.first == COMPANION_REGISTER) {
+                first = &state.first_companion_ns;
+            } else if (request.first == BLOCK_REGISTER) {
+                first = &state.first_block_ns;
             }
+            if (*first < 0 && request.time_ns >= state.since_ns) {
+                *first = request.time_ns;
+            }
+            if (request.first != VALUE_REGISTER) {
+                continue;
+            }
+            std::int64_t& last = last_value[request.unit_id];
+            if (state.mode == Mode::ANSWERS &&
+                last >= state.since_ns + recover_bound(run, request.unit_id) &&
+                request.time_ns - last > live_gap_bound(run, request.unit_id)) {
+                violations.push_back(
+                    "unit " + std::to_string(request.unit_id) +
+                    " answering and its value not asked from " +
+                    std::to_string(last / MILLISECOND) + " to " +
+                    std::to_string(request.time_ns / MILLISECOND) + " ms");
+            }
+            last = request.time_ns;
         }
         for (std::string& violation : check(run, units, now)) {
             violations.push_back(std::move(violation));
         }
     }
+    if (seed == 2) {
+        const CompiledChannel& c = run.scenario.channel;
+        std::printf("DBG transport %d rate %u\n", static_cast<int>(c.transport), c.line.bit_rate);
+        for (std::size_t d = 0; d < c.devices.size(); ++d) {
+            std::printf("DBG dev %zu chain %d block %u group %u to %lld retries %u demote %u bo %lld bomax %lld lat %lld\n", d, static_cast<int>(run.scenario.chained[d]), run.scenario.block[d], c.devices[d].points[0].poll_group.value_or(9), static_cast<long long>(c.devices[d].failure.timeout_ns/1000000), c.devices[d].failure.retries, c.devices[d].failure.demote_after, static_cast<long long>(c.devices[d].failure.backoff_ns/1000000), static_cast<long long>(c.devices[d].failure.backoff_max_ns/1000000), static_cast<long long>(run.scenario.latency_ns[d]/1000000));
+        }
+        for (const auto& e : run.scenario.events) {
+            if (e.time_ns > 0 && e.time_ns < 105 * SECOND) std::printf("DBG ev %lld unit %u mode %d\n", static_cast<long long>(e.time_ns/1000000), e.unit, static_cast<int>(e.mode));
+        }
+        for (const auto& r : run.bus.log()) {
+            if (r.time_ns > 70 * SECOND && r.time_ns < 92 * SECOND) std::printf("DBG rq %lld u%u r%u\n", static_cast<long long>(r.time_ns/1000000), r.unit_id, r.first);
+        }
+    }
     for (std::string& violation : check_asked(run, END)) {
         violations.push_back(std::move(violation));
+    }
+    if (busiest > SPIN_STEPS / 2) {
+        violations.push_back("busiest sample: " + std::to_string(busiest) +
+                             " steps");
     }
     return {steps, violations};
 }

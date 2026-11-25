@@ -408,11 +408,13 @@ void ChannelEngine::sync_scheduler() noexcept {
                 run.any_resting = run.any_resting || rest.resting;
             }
         }
-        // Failed: a failure count, or an attempt that timed out and waits
-        // for its retry (the count comes only when the attempts end).
+        // Failed: a failure count, an attempt that timed out and waits for
+        // its retry (the count comes only when the attempts end), or a
+        // chain whose last cycle had a failed part (L2).
         scheduler_.set_failing(
             device, failures_.state(device) != DeviceStatus::RUNNING,
-            failures_.failures(device) > 0 || devices_[device].attempts > 0,
+            failures_.failures(device) > 0 || run.attempts > 0 ||
+                run.chain_failing,
             compiled.failure.timeout_ns);
         // One probe for every demoted device of a unit (Q5).
         if (failures_.probes_for_unit(device)) {
@@ -444,6 +446,7 @@ void ChannelEngine::cut_chain(std::uint32_t device, bool more) noexcept {
 
 void ChannelEngine::drop_chain(DeviceRun& run) noexcept {
     run.chain.clear();
+    run.chain_part_failed = false;
     run.chain_overflow = false;
     run.chain_cut = false;
 }
@@ -883,6 +886,9 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     if (request.chained) {
         fail_points_of(device, request);
     }
+    if (scheduler_.in_chain(device, choice.request)) {
+        run.chain_part_failed = true;
+    }
     fail_request(choice);
     if (end == End::BROKEN) {
         (void)failures_.request_ended(device, RequestEnd::FAILED, now);
@@ -983,6 +989,9 @@ void ChannelEngine::deliver(const Choice& choice,
         if (request.chained) {
             return;
         }
+        // The chain's end: whether it was read whole (L2).
+        run.chain_failing = run.chain_part_failed;
+        run.chain_part_failed = false;
         if (run.chain_cut) {
             cut_chain(choice.device, false);  // its end: the failures only
             return;
