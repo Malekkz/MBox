@@ -679,12 +679,15 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
     const PollPick& failing = candidates.failing;
     const DeviceRun& run = devices_[failing.device];
     const bool failed = run.failed || failing.retry;
-    const std::int64_t next_live = next_live_poll_due_ns(now_ns);
+    const std::int64_t next_live = next_live_poll_due_ns();
     if (failed && now_ns < failing_release_ns_ &&
         next_live < later(now_ns, run.failing_timeout_ns)) {
-        // Both are later than now: the hold's end, and a live poll that can
-        // go then (a past one waits for its pacing, already in `wake`).
-        wake = std::min(wake, std::min(failing_release_ns_, next_live));
+        // Wake at the hold's end, or when the next live poll can go if that
+        // is later than now: never "now", which would spin (L1).
+        wake = std::min(wake, failing_release_ns_);
+        if (next_live > now_ns) {
+            wake = std::min(wake, next_live);
+        }
         return false;
     }
     return take_failing(failing, now_ns, out);
@@ -873,8 +876,7 @@ void Scheduler::hold_failing(std::int64_t now_ns,
     failing_release_ns_ = later(now_ns, timeout_ns * FAILING_SPACING);
 }
 
-std::int64_t Scheduler::next_live_poll_due_ns(
-    std::int64_t now_ns) const noexcept {
+std::int64_t Scheduler::next_live_poll_due_ns() const noexcept {
     std::int64_t next = NEVER;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
@@ -889,8 +891,7 @@ std::int64_t Scheduler::next_live_poll_due_ns(
             }
         }
     }
-    // Never "now": a live poll that cannot go now is no reason to wake now.
-    return next > now_ns ? next : NEVER;
+    return next;
 }
 
 std::int64_t Scheduler::oldest_failing_due_ns() const noexcept {
@@ -935,7 +936,7 @@ bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
         const bool held =
             now_ns < failing_release_ns_ &&
-            next_live_poll_due_ns(now_ns) < later(now_ns, run.probe_timeout_ns);
+            next_live_poll_due_ns() < later(now_ns, run.probe_timeout_ns);
         if (now_ns < floor || held || oldest_failing_due_ns() < floor) {
             continue;
         }

@@ -440,10 +440,9 @@ private:
     // A failing poll or a probe that may cost `timeout_ns` was sent: the
     // others wait FAILING_SPACING of it.
     void hold_failing(std::int64_t now_ns, std::int64_t timeout_ns) noexcept;
-    // When the next poll of a device known to answer can go, if later than
-    // `now_ns`, else NEVER.
-    [[nodiscard]] std::int64_t next_live_poll_due_ns(
-        std::int64_t now_ns) const noexcept;
+    // When the next poll of a device known to answer can go (its due time
+    // or its pacing; now or past when one is due), or NEVER.
+    [[nodiscard]] std::int64_t next_live_poll_due_ns() const noexcept;
     // The oldest due time of a failing device's poll or retry, or NEVER.
     [[nodiscard]] std::int64_t oldest_failing_due_ns() const noexcept;
     // Takes the probe of `device` with time-out `wait_ns`.

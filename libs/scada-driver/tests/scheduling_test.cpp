@@ -1360,6 +1360,55 @@ TEST(Scheduling, AnOverdueProbeTakesAGapAsAFailingPollDoes) {
     EXPECT_GT(dead, 20U);
 }
 
+TEST(Scheduling, AnOverdueProbeNeverTakesTheTurnOfADueLivePoll) {
+    // Found by the perf test: 20 demoted devices whose probes are past
+    // their floor, a live device in the 200 ms group, a failing one. While
+    // the hold lasts and the live poll is due, the live poll goes; a probe
+    // uses only a gap longer than its time-out. Before the fix a due live
+    // poll counted as no live poll at all, and the probes, each renewing
+    // the hold, took every turn.
+    std::vector<DeviceSpec> specs{
+        {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
+        {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
+    for (std::uint8_t unit = 3; unit <= 22; ++unit) {
+        specs.push_back({.name = "p" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, SLOW)});
+    }
+    const CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_failing(1, true, true, 100 * MILLISECOND);
+    for (std::uint32_t device = 2; device < 22; ++device) {
+        scheduler.set_polled(device, false);
+        scheduler.set_probe(device, 0, 100 * MILLISECOND);
+    }
+    std::int64_t last_live = 0;
+    std::int64_t worst = 0;
+    std::size_t probes = 0;
+    std::int64_t now = 0;
+    for (std::size_t step = 0; step < 20'000 && now < 60 * SECOND; ++step) {
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::PROBE) {
+            ++probes;
+            now += 100 * MILLISECOND;  // unanswered; due again at once
+            scheduler.probe_done();
+            scheduler.set_probe(choice.device, now, 100 * MILLISECOND);
+        } else if (choice.kind == Choice::Kind::POLL) {
+            if (choice.device == 0) {
+                worst = std::max(worst, now - last_live);
+                last_live = now;
+            }
+            now += choice.device == 0 ? 10 * MILLISECOND : 100 * MILLISECOND;
+        } else {
+            now = std::max(now + MILLISECOND, choice.wake_ns);
+        }
+    }
+    // Its period and at most one probe or failing poll on the line.
+    EXPECT_LE(worst, FAST_PERIOD + 100 * MILLISECOND + 10 * MILLISECOND);
+    EXPECT_GT(probes, 50U);
+}
+
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
     // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
     const CompiledChannel channel =
