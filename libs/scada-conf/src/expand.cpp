@@ -347,6 +347,7 @@ public:
                 expand_channel(file);
             }
         }
+        flush_diagnostics();
         if (failed_) {
             return std::nullopt;
         }
@@ -388,9 +389,44 @@ private:
             diagnostic.location = *instance_;
         }
         const std::string key = format(diagnostic);
-        if (reported_.insert(key).second) {
+        if (!reported_.insert(key).second) {
+            return;
+        }
+        // One cause in a template, met by many instances, is one error at
+        // the first, with their count (the ruling O-6 on #146).
+        if (!diagnostic.notes.empty()) {
+            const Location& site = diagnostic.notes.front().location;
+            std::string cause = std::to_string(code);
+            cause += '|';
+            cause += site.file;
+            cause += ':' + std::to_string(site.line) + ':' +
+                     std::to_string(site.column) + '|';
+            cause += diagnostic.message;
+            const auto [group, added] =
+                causes_.try_emplace(std::move(cause), pending_.size(), 0);
+            if (!added) {
+                ++group->second.second;
+                return;
+            }
+        }
+        pending_.push_back(std::move(diagnostic));
+    }
+
+    // Gives the buffered diagnostics, in the order they arose.
+    void flush_diagnostics() {
+        for (const auto& [cause, group] : causes_) {
+            if (group.second > 0) {
+                pending_[group.first].message +=
+                    " (and " + std::to_string(group.second) +
+                    (group.second == 1 ? " more instance)"
+                                       : " more instances)");
+            }
+        }
+        for (Diagnostic& diagnostic : pending_) {
             diagnostics_->add(std::move(diagnostic));
         }
+        pending_.clear();
+        causes_.clear();
     }
 
     // --- Channels and devices -----------------------------------------------
@@ -1190,6 +1226,15 @@ private:
     std::optional<Axes> axes_of(const Value& range) {
         Axes axes;
         for (const Member& member : range.members) {
+            // A variable would hide the parameter, and change a parent's
+            // expression that meant it (the ruling O-3 on #146).
+            if (declarations_.contains(member.key)) {
+                error_at(CF_BAD_VALUE, *member.key_file, member.key_node,
+                         "parameter " + quote_text(member.key) +
+                             ": a repeat variable cannot have its name",
+                         "parameter " + member.key);
+                return std::nullopt;
+            }
             std::optional<std::vector<std::int64_t>> values =
                 values_of(member.value.front(), member.key);
             if (!values) {
@@ -1214,6 +1259,7 @@ private:
     std::optional<std::vector<std::int64_t>> values_of(
         const Value& range, const std::string& name) {
         std::vector<std::pair<std::int64_t, std::int64_t>> runs;
+        context_ = "variable " + name;
         const auto add_run = [&](const Value& part) {
             std::optional<ConfigValue> value =
                 evaluate(part, {}, ExpressionKind::FOR_VALUE);
@@ -1370,6 +1416,7 @@ private:
             if (position++ < first) {
                 return false;
             }
+            context_ = "point " + point.name;
             const std::map<std::string, std::int64_t, std::less<>> variables =
                 bound_to(point);
             bool present = true;
@@ -1529,6 +1576,7 @@ private:
         // The identity checks' expressions (4.8, 2.4) have the parameters
         // and no variable.
         if (Value* identify = device.keys.find("identify")) {
+            context_ = "identify";
             evaluate_below(*identify, {});
         }
         if (device.points.size() > MAX_POINTS) {
@@ -1631,6 +1679,7 @@ private:
     // --- Step 7: evaluation ------------------------------------------------
 
     void evaluate_point(Point& point) {
+        context_ = "point " + point.name;
         const std::map<std::string, std::int64_t, std::less<>> variables =
             bound_to(point);
         for (Member& member : point.value.members) {
@@ -1754,6 +1803,27 @@ private:
             }
             return nullptr;
         };
+        // The point, and each name the expression used with its value (S2
+        // of the review of #146): `point s3; n = 3`.
+        const auto detail = [this, &tree, &bindings]() {
+            std::string out = context_;
+            std::set<std::string, std::less<>> seen;
+            std::string values;
+            for (const ExprNode& node : tree->nodes) {
+                if (node.op != ExprOp::REFERENCE ||
+                    !seen.insert(node.text).second) {
+                    continue;
+                }
+                if (const ConfigValue* bound = bindings(node.text)) {
+                    values += (values.empty() ? "" : ", ") + node.text + " = " +
+                              canonical_text(*bound);
+                }
+            }
+            if (!values.empty()) {
+                out += (out.empty() ? "" : "; ") + values;
+            }
+            return out;
+        };
         EvalError problem;
         std::optional<ConfigValue> result =
             evaluate_configuration(*tree, bindings, problem);
@@ -1775,7 +1845,8 @@ private:
                 reason += site.where;
             }
             error_in(CF_EVALUATION, *value.file, std::move(site.location),
-                     "expression " + quote_text(text) + ": " + reason);
+                     "expression " + quote_text(text) + ": " + reason,
+                     detail());
         } else if ((wanted == Wanted::INT && result->type != ValueType::INT) ||
                    (wanted == Wanted::NUMBER &&
                     result->type != ValueType::INT &&
@@ -1792,7 +1863,8 @@ private:
                 reason += site.where;
             }
             error_in(CF_EVALUATION, *value.file, std::move(site.location),
-                     "expression " + quote_text(text) + ": " + reason);
+                     "expression " + quote_text(text) + ": " + reason,
+                     detail());
             return std::nullopt;
         }
         return result;
@@ -1989,6 +2061,12 @@ private:
     Diagnostics* diagnostics_;
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     std::set<const CheckedFile*> faulty_templates_;
+    // What is being evaluated, for the detail of a CF-410.
+    std::string context_;
+    // The diagnostics until the end of the run, and the first of each cause
+    // with the number of other instances it arose at.
+    std::vector<Diagnostic> pending_;
+    std::map<std::string, std::pair<std::size_t, std::size_t>> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
     std::vector<Channel> channels_;

@@ -637,7 +637,8 @@ TEST(Expand, AnExpressionThatFailsIsCf410) {
                       {"drivers/modbus/line1.yaml", one_device()}}),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
                      "\"100 DIV k\": division by zero\n"
-                     "  from template templates/meter_a.yaml:5:61"}));
+                     "  from template templates/meter_a.yaml:5:61 (point flow; "
+                     "k = 0)"}));
 }
 
 // A parameter that no level of the chain gives a type is CF-202.
@@ -876,6 +877,193 @@ TEST(Expand, IntegerKeysMergeByValue) {
                "register: 2, type: uint16}}"}));
 }
 
+// B7: a name made by expansion follows 2.1 (CF-212), and the message
+// names a `{...}` that no variable bound to the point fills.
+TEST(Expand, NamesMadeByExpansion) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { x: { type: int, default: 1 } }\n"
+                 "points:\n"
+                 "  - { name: \"s{n}\", address: { table: holding, "
+                 "register: 1, type: uint16 } }\n"
+                 "repeat:\n"
+                 "  - for: { n: \"-1..1\" }\n"
+                 "    points:\n"
+                 "      - { name: \"x.{n}\", address: { table: holding, "
+                 "register: \"10 + n\", type: uint16 } }\n"
+                 "      - { name: \"t{n}.u{x}\", address: { table: "
+                 "holding, register: \"20 + n\", type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        (Lines{
+            "drivers/modbus/line1.yaml:7:11: error CF-212: \"s{n}\" is not a "
+            "valid point name: {n} names no variable bound to this point\n  "
+            "from template templates/meter_a.yaml:5:13 (point s{n})",
+            "drivers/modbus/line1.yaml:7:11: error CF-212: \"x.-1\" is not a "
+            "valid point name\n  from template templates/meter_a.yaml:9:17 "
+            "(point x.-1)",
+            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t-1.u{x}\" is not "
+            "a valid point name: {x} names no variable bound to this point\n  "
+            "from template templates/meter_a.yaml:10:17 (point t-1.u{x})",
+            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t0.u{x}\" is not "
+            "a valid point name: {x} names no variable bound to this point\n  "
+            "from template templates/meter_a.yaml:10:17 (point t0.u{x})",
+            "drivers/modbus/line1.yaml:7:11: error CF-212: \"t1.u{x}\" is not "
+            "a valid point name: {x} names no variable bound to this point\n  "
+            "from template templates/meter_a.yaml:10:17 (point t1.u{x})"}));
+}
+
+// B8: `identify` names what exists: a name that no parameter gives is
+// CF-410 at the instance.
+TEST(Expand, TheNamesOfIdentify) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "identify:\n"
+                 "  - { address: { table: holding, register: \"100 + "
+                 "zz\", type: uint16 }, equals: 7 }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: "
+                 "1, type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        (Lines{
+            "drivers/modbus/line1.yaml:7:11: error CF-410: expression \"100 + "
+            "zz\": \"zz\" is not a parameter and no variable bound to this "
+            "point\n  from template templates/meter_a.yaml:4:51 (identify)"}));
+}
+
+// B9 and the ruling O-9: a key the schema types as an integer takes an
+// INT; a `number` parameter written as an integer is an INT.
+TEST(Expand, AnIntegerKeyTakesAnInt) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\n"
+        "params: { b: { type: number, default: 1.5 } }\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: \"b + 2\", "
+        "type: uint16 } }\n"
+        "  - { name: q, address: { table: holding, register: \"10 / 2\", "
+        "type: uint16 } }\n"
+        "  - { name: r, scale: { divide_by: \"2.5\" }, address: { table: "
+        "holding, register: 3, type: uint16 } }\n"
+        "  - { name: g, scale: { gain: \"b * 2\" }, address: { table: "
+        "holding, register: 4, type: uint16 } }\n";
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    params: { b: 40 }\n")}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"10 / 2\": the value must be an INT, not REAL\n  from "
+                     "template templates/meter_a.yaml:6:57 (point q)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"2.5\": the value must be an INT, not REAL\n  from "
+                     "template templates/meter_a.yaml:7:37 (point r)"}));
+}
+
+// B10: `when` in `defaults` or `overrides` is CF-419 (4.4), at the
+// template's or the instance's line.
+TEST(Expand, WhenInDefaultsOrOverrides) {
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "defaults: { when: \"true\" }\n"
+                       "points:\n"
+                       "  - { name: p, address: { table: holding, register: 1, "
+                       "type: uint16 } }\n"},
+                      {"templates/meter_b.yaml",
+                       "template: meter_b\nprotocol: modbus\n"
+                       "points:\n"
+                       "  - { name: p, address: { table: holding, register: 1, "
+                       "type: uint16 } }\n"},
+                      {"drivers/modbus/line1.yaml",
+                       channel("  - name: ps1.m1\n    template: meter_b\n"
+                               "    unit_id: 1\n"
+                               "    defaults: { when: \"true\" }\n"
+                               "    overrides: { p: { when: false } }\n")}}),
+              (Lines{"drivers/modbus/line1.yaml:10:23: error CF-419: when "
+                     "cannot be given in defaults",
+                     "drivers/modbus/line1.yaml:11:29: error CF-419: when "
+                     "cannot be given in overrides",
+                     "templates/meter_a.yaml:3:19: error CF-419: when cannot "
+                     "be given in defaults"}));
+}
+
+// B11: a base template has no `address`, `read` or `identify` (4.1).
+TEST(Expand, ABaseTemplateHasNoAddress) {
+    EXPECT_EQ(
+        expand({{"templates/base_a.yaml",
+                 "template: base_a\n"
+                 "read: { max_registers: 10 }\n"
+                 "identify: [ { address: { table: holding, register: 1 }, "
+                 "equals: 7 } ]\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: 1 } }\n"
+                 "repeat:\n"
+                 "  - for: { n: \"1..2\" }\n"
+                 "    points: [ { name: \"q{n}\", address: { register: 2 } } "
+                 "]\n"}}),
+        (Lines{"templates/base_a.yaml:2:7: error CF-421: template \"base_a\": "
+               "a base template has no read",
+               "templates/base_a.yaml:3:11: error CF-421: template \"base_a\": "
+               "a base template has no identify",
+               "templates/base_a.yaml:5:25: error CF-421: template \"base_a\": "
+               "a base template has no address",
+               "templates/base_a.yaml:8:40: error CF-421: template \"base_a\": "
+               "a base template has no address"}));
+}
+
+// The ruling O-3: a `repeat` variable with the name of a parameter of the
+// chain is refused at the instance (CF-412): a child's variable would
+// change a parent's expression that meant the parameter.
+TEST(Expand, AVariableWithTheNameOfAParameter) {
+    EXPECT_EQ(
+        expand({{"templates/base_a.yaml",
+                 "template: base_a\nprotocol: modbus\n"
+                 "params: { n: { type: int, default: 100 } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: \"n + "
+                 "1\", type: uint16 } }\n"},
+                {"templates/meter_a.yaml",
+                 "template: meter_a\nextends: base_a\nprotocol: modbus\n"
+                 "repeat:\n"
+                 "  - for: { n: \"1..2\" }\n"
+                 "    points: [ { name: \"x{n}\", unit: V, address: { table: "
+                 "holding, register: \"n\", type: uint16 } } ]\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-412: parameter \"n\": "
+               "a repeat variable cannot have its name\n  from template "
+               "templates/meter_a.yaml:5:12 (parameter n)"}));
+}
+
+// The ruling O-6: a template's own fault is reported once, at it, even
+// with no instance; a cause in a template met by many instances is one
+// error at the first, with their count.
+TEST(Expand, ATemplatesFaultOnceAndOneCauseOnce) {
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "params: { k: { type: int, default: 1 }, k2: { type: "
+                       "int } }\n"},
+                      {"templates/meter_b.yaml",
+                       "template: meter_b\nextends: meter_a\nprotocol: modbus\n"
+                       "params: { k: { type: number } }\n"}}),
+              (Lines{"templates/meter_b.yaml:4:22: error CF-415: parameter "
+                     "\"k\" cannot change its type"}));
+    std::string devices;
+    for (int unit = 1; unit <= 4; ++unit) {
+        devices += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   ", params: { k: 0 } }\n";
+    }
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { k: { type: int, default: 1 } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: "
+                 "\"100 DIV k\", type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml", channel(devices)}}),
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-410: expression \"100 "
+               "DIV k\": division by zero (and 3 more instances)\n  from "
+               "template templates/meter_a.yaml:5:58 (point p; k = 0)"}));
+}
+
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a
 // template's point; they are not evaluated.
 TEST(Expand, AlarmsOnABitAreNotEvaluated) {
@@ -913,10 +1101,11 @@ TEST(Expand, Cf410InABlockScalarNamesItsPlaceInTheText) {
                  "        100 +\n"
                  "        1 DIV k\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-               "\"100 +\\n1 DIV k\\n\": division by zero at line 2, column 3 "
-               "of the expression's text\n"
-               "  from template templates/meter_a.yaml:9:17"}));
+        (Lines{
+            "drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+            "\"100 +\\n1 DIV k\\n\": division by zero at line 2, column 3 "
+            "of the expression's text\n"
+            "  from template templates/meter_a.yaml:9:17 (point p; k = 0)"}));
 }
 
 }  // namespace
