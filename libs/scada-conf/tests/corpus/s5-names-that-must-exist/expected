@@ -1,13 +1,11 @@
 # Names that must exist (CF-310, D-113): an alarm priority, a program, a
 # template, an aggregate tier (logging.yaml gives no tiers, so 1m and 1h
 # exist), an area, a task, a logging policy and a parent template. The
-# enumeration of level_a's point is checked at its instance ps1.lt1, over
-# the instance's chain (B5 of the review of #144; D-115). The tags that the
-# alarm and the virtual tag read are point tags, checked with slice 7.
-# Invented.
+# enumeration of level_a's point is not checked in the template, as a child
+# could define it (B5 of the review of #144). The tags that the alarm and
+# the virtual tag read are point tags, checked with slice 7. Invented.
 alarms/ps1.yaml:2:60: CF-310
 control/tasks.yaml:2:36: CF-310
-drivers/modbus/line1.yaml:7:13: CF-310
 drivers/modbus/line1.yaml:8:32: CF-310
 logging.yaml:2:68: CF-310
 tags/ps1.yaml:2:68: CF-310

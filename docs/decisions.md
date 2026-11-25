@@ -2197,6 +2197,7 @@ Decision:
   - An instance's parameter that the chain does not declare is CF-412 (`the template has no parameter of this name`); the contract has no other code for it.
   - A `number` parameter is REAL even when its value is written as an integer.
   - A child's declaration may give `default`, `min`, `max` and `values` without `type`; giving another `type` is CF-415 at it.
+  - A declaration that no level of the chain gives a `type` is CF-202 (`parameter "<name>" needs type`).
 - **Evaluation.** An expression is evaluated with the parameters and the variables bound to the point, over the instance's whole chain (B5 of the review of #144).
   - Its types are checked first, with the type checker of stage 5 (D-113).
   - Every failure is CF-410, in the contract's form `expression {expr}: {reason}` (2.4, 10.4; B6), at the offending character (D-109). This covers a type error, a `when` that gives no BOOL, and a name that is neither a parameter nor a variable bound to this point (`... is not a parameter and no variable bound to this point`).
@@ -2218,40 +2219,6 @@ Decision:
 - **Name patterns** of `disable` and `only` follow 2.5: `*` and `?` stay within one segment.
 Reason: each choice is the reading of the contract that needs no new key or code. Errors stay where the user can act on them: at the instance, with the template's line.
 Consequences: tag references and the checks of a merged point (CF-504, CF-516, CF-517 at stage 5, CF-202 of an incomplete merged map) come in the next pull request of #103 and in slice 7 of #100, and read `ExpandedTree`. CF-1001 (`limits.max_tags`) is the tag set's (#101).
-
-## D-115: The checks of a merged point (stage 5)
-Date: 2026-11-24
-Phase / issue: 2, #103 (P2-06), second part
-Status: proposed
-
-Context: D-108 leaves to stage 5 what only a merged point can show: the keys a merged map still lacks (CF-202), an integer value type on a floating raw type (CF-504, D-134), the range of an integer scaling (CF-516) and an integer value type with a scaling that is not integer when merging brought the keys together (CF-517). The review of #132 (C5) adds two points on CF-504.
-Options: per check below; the simplest reading of contract 4.7 and Annexes A and B.
-Decision: `check_merged_points` reads each point of the expanded tree (D-114), whatever level, default or override gave each key.
-- **Where.** An error is placed by `expanded_diagnostic`:
-  - a key that a template wrote is at the instance, with a note `from template <file>:<line>:<column> (point <name>)` (1.4);
-  - a key the instance's own file wrote (an override, an instance point) is at its own line.
-
-  This replaces D-108's "at the line of `value_type` or `counter` in the file that wrote it", which is now the note. The message names the point by its tag, `"<device>.<point>"`.
-- **CF-202, the keys merging must have completed:**
-  - a Modbus address: `table` and `register`, unless the point is a double point given by its `on`, `off` and `fault` shapes (each needs `table` and `register`); `register` also unless `parts`, or a write-only point whose `write` has `on` and `off` (A.2);
-  - by the raw type: `length` for `string` and `bytes`, `count` for `mod10k`, `width` and `resolution` for `epoch`, `fields` for `datetime`;
-  - an `io` address, by its channel's backend (B.2): `line` and `direction` for `gpio`, `at_start` as well for an output (`direction: output`, or `access` `rw` or `wo`), `channel` for `iio`, `profile` with its `type` for `simulator`;
-  - `exponent_from`: `point` and `direction`;
-  - a bit given as a map: `name`;
-  - `on_invalid` given as a map: `substitute`;
-  - a `device_time` (device, point address) with `zone: local`: `tz`;
-  - a parameter that no level of its chain gives a `type` (stage 4, as the declarations are merged).
-- **The value type** is the given one, or the derived one of 4.7: `bool` for a bit or a `bool` raw type; `int64` for an enumeration or a double point; `float64` for a floating raw type, `exponent_from`, a `divide_by` above 1, or a `gain` or `offset` that is not an integer; `string` for `string` and `bytes`; otherwise `int64`, and `uint64` for a `uint64` raw type. A Modbus raw type without `type` is `bool` for coils and discrete inputs and `uint16` otherwise. The checks below read Modbus points only: the raw type of an `io` point comes from its backend, not its address.
-- **CF-504:**
-  - an `int64` or `uint64` value type given on a `float32` or `float64` raw type, unless the point is an enumeration or a double point, which read a code (D-134);
-  - a counter (`counter`, or `kind: counter`) on a floating raw type, even with an enumeration (C5: an enumeration must not skip the counter check), with the message `<name>: a counter cannot hold <raw type>`, which has no row in the contract's table (on #136);
-  - an integer value type with no scaling that cannot hold its integer raw type: `int64` on `uint64`, or `uint64` on a signed raw type.
-- **CF-516.** With an integer scaling (no `exponent_from`, an integer `gain` and `offset`, `divide_by` absent or 1), each end of the raw range, times `gain`, plus `offset`, must fit the value type. It is computed exactly in 64-bit sign and magnitude, with no wider type (no compiler extensions). The raw range is that of the raw type, of its bit `field` (sign-extended for a signed raw type), or for `mod10k` 0 to 10^(4 x count) - 1.
-- **Enumerations named in a template** (B5 of the review of #144) are checked at the instance: in the `enums` the instance's chain merged into the device, then `enums.yaml`. A name that neither has is CF-310 at the instance, with the template's line as a note. A name the instance's own file writes is stage 5's reference check (D-113), so it is reported once.
-- **CF-517** at stage 5: an integer value type, given or derived from an enumeration or a double point, with `exponent_from`, a `gain` or `offset` that is not an integer, or a `divide_by` other than 1, after expansion; so a `divide_by` written as an expression counts with its value. Where one point object holds both keys, stage 3 refused it already, and stage 5 does not run.
-- **No error twice.** Stage 5 runs only when stages 3 and 4 found none, so the cause that C5 names (`counter: false`, an `address.type` under `protocol: io`) is already refused, and CF-504 is never given beside it.
-Reason: each check reads the point as the driver will, after every merge, so a template that a base, a default or an override completes is valid, and one that none completes is refused at the instance that uses it.
-Consequences: the corpus case `s5-integer-on-floating-raw` is the one saved in the slice that moved CF-504 to stage 5, with instances added, since only expanded points are checked. The references that need point tags come with slice 7 of #100.
 
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23

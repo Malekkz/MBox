@@ -43,7 +43,6 @@ scada_add_library(scada-conf
     src/expression.cpp
     src/expression_site.cpp
     src/expression_types.cpp
-    src/merged_points.cpp
     src/names.cpp
     src/node.cpp
     src/path_class.cpp

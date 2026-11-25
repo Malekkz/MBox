@@ -1,6 +1,5 @@
 #include "scada/conf/validate.h"
 
-#include "merged_points.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
@@ -276,9 +275,6 @@ Result<Validation> validate_and_expand(const std::filesystem::path& root,
             // slice 7 of #100.
             Diagnostics stage5;
             check_references(checked, stage5);
-            if (validation.expanded) {
-                check_merged_points(*validation.expanded, checked, stage5);
-            }
             stage5.move_into(report);
         }
     }
