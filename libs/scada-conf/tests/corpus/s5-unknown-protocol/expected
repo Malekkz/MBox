@@ -1,4 +1,4 @@
 # A template of a protocol this version does not know is checked against
 # the framework keys alone: its protocol keys give no error at stage 3, and
-# the unknown protocol is one error of stage 5 (D-108). The template is
-# otherwise valid, so the tree passes stage 3.
+# the unknown protocol is one error of stage 5, at its key (D-108, D-113).
+templates/meter_x.yaml:2:11: CF-310

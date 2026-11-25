@@ -1,0 +1,4 @@
+channel:
+  name: net2
+  type: tcp
+  host: "ff02::1"

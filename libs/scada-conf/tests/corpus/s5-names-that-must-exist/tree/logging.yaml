@@ -1,0 +1,2 @@
+policies:
+  process: { mode: on_change, raw_retention: 90d, tiers: { 1m: 1y, 15m: 2y } }

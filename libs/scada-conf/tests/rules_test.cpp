@@ -538,6 +538,11 @@ TEST(Rules, ReservedWordsAreNotParameterOrVariableNames) {
                "reserved word of expressions",
                "5:12 CF-212: \"true\" is not a valid variable name: it is a "
                "reserved word of expressions"}));
+    // A capitalised reserved word is not an identifier: one CF-212, the
+    // schema's, not a second one for the reserved word.
+    EXPECT_EQ(check_template("template: t\nprotocol: modbus\n"
+                             "params: { Bad: { type: int, default: 8 } }\n"),
+              Lines{"3:11 CF-212: \"Bad\" is not a valid identifier name"});
 }
 
 // An expression error is at its character in the file, columns counted in

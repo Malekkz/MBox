@@ -1,0 +1,7 @@
+template: level_a
+protocol: modbus
+points:
+  - name: level
+    enum: level_states
+    logging: process
+    address: { table: input, register: 10, type: uint16 }

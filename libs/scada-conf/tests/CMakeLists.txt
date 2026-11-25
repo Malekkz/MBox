@@ -3,10 +3,12 @@ scada_add_test(scada-conf-unit-test KIND unit
     corpus_test.cpp
     diagnostic_test.cpp
     expression_test.cpp
+    expression_types_test.cpp
     names_test.cpp
     node_test.cpp
     path_class_test.cpp
     read_test.cpp
+    references_test.cpp
     rules_test.cpp
     scalar_test.cpp
     schema_examples_test.cpp
@@ -17,3 +19,6 @@ scada_add_test(scada-conf-unit-test KIND unit
 # The conformance corpus of contract section 14, read in place.
 target_compile_definitions(scada-conf-unit-test PRIVATE
   "SCADA_CONF_CORPUS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/corpus\"")
+# expression_types.h: the type checker, not part of the public interface.
+target_include_directories(scada-conf-unit-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")

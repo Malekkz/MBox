@@ -3,6 +3,7 @@
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/references.h"
 #include "scada/conf/rules.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/schema.h"
@@ -241,8 +242,24 @@ Result<Report> validate_tree(const std::filesystem::path& root,
     for (ParsedFile& file : parsed) {
         check_schema(file, stage3);
     }
+    const bool stage3_failed =
+        stage2.error_count() > 0 || stage3.error_count() > 0;
     stage2.move_into(report);
     stage3.move_into(report);
+    if (!stage3_failed) {
+        // Stage 4, the expansion of templates and instances, comes with
+        // #103; stage 5 checks what needs no expansion (D-113).
+        std::vector<CheckedFile> checked;
+        checked.reserve(parsed.size());
+        for (const ParsedFile& file : parsed) {
+            checked.push_back(CheckedFile{.source = file.source,
+                                          .document = &file.document,
+                                          .types = &file.types});
+        }
+        Diagnostics stage5;
+        check_references(checked, stage5);
+        stage5.move_into(report);
+    }
     if (!passed(report)) {
         // Section 1.4: warnings are reported only when no stage gave an
         // error.
