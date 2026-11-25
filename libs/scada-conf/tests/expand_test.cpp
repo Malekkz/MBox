@@ -1263,6 +1263,58 @@ TEST(Expand, AnAbsentPointCollidesWithNothing) {
               "uint16}}"});
 }
 
+// D6 of the delta review of #146: the runs of a `for` list are summed
+// (CF-113 past 65,536); an INT parameter is held to an integer bound as an
+// integer, and to a decimal bound exactly (T3, D7); a written point and
+// one a `repeat` made in one level are two of one name (CF-416).
+TEST(Expand, TheEdgesOfRangesBoundsAndLevels) {
+    const auto runs = [](std::string_view list) {
+        return one_template("repeat:\n  - for: { n: " + std::string(list) +
+                            " }\n    points: []\n");
+    };
+    EXPECT_EQ(runs("[\"1..30000\", \"1..30000\"]"), Lines{});
+    EXPECT_EQ(runs("[\"1..40000\", \"1..30000\"]"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the range "
+                     "of \"n\" exceeds its limit of 65536\n  from template "
+                     "templates/meter_a.yaml:4:15"}));
+}
+
+// T3 and D7: an INT parameter is held to an integer bound as an integer,
+// and to a decimal bound exactly.
+TEST(Expand, TheBoundsOfAnIntParameter) {
+    const auto bounded = [](std::string_view declared, std::string_view given) {
+        return one_template("params: { m: { type: int, default: 1, " +
+                                std::string(declared) + " } }\npoints:\n" +
+                                "  - { name: p, " + std::string(ADDRESS) +
+                                " }\n",
+                            "    params: { m: " + std::string(given) + " }\n");
+    };
+    EXPECT_EQ(
+        bounded("max: 9007199254740992", "9007199254740993"),
+        (Lines{"drivers/modbus/line1.yaml:10:18: error CF-412: parameter "
+               "\"m\": 9007199254740993 is above its max 9007199254740992"}));
+    EXPECT_EQ(
+        bounded("max: 9007199254740992.0", "9007199254740993"),
+        (Lines{"drivers/modbus/line1.yaml:10:18: error CF-412: parameter "
+               "\"m\": 9007199254740993 is above its max 9007199254740992.0"}));
+    EXPECT_EQ(bounded("max: 2.5", "2").size(), 1U);
+    EXPECT_EQ(bounded("max: 2.5", "3"),
+              (Lines{"drivers/modbus/line1.yaml:10:18: error CF-412: parameter "
+                     "\"m\": 3 is above its max 2.5"}));
+}
+
+// D6: a written point and one a `repeat` made in one level are two of one
+// name (CF-416).
+TEST(Expand, AWrittenAndAMadePointOfOneName) {
+    EXPECT_EQ(one_template("points:\n  - { name: p1, " + std::string(ADDRESS) +
+                           " }\nrepeat:\n  - for: { n: \"1..1\" }\n    "
+                           "points: [ { name: \"p{n}\", " +
+                           std::string(ADDRESS) + " } ]\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-416: point "
+                     "\"p1\" is defined twice\n  from template "
+                     "templates/meter_a.yaml:7:23 (point p1)"}));
+}
+
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a
 // template's point; they are not evaluated.
 TEST(Expand, AlarmsOnABitAreNotEvaluated) {

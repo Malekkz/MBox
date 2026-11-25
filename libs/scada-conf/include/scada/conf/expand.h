@@ -11,6 +11,7 @@
 #include "scada/conf/references.h"
 #include "scada/conf/types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -60,6 +61,33 @@ struct ExpandedTree {
                                              std::string message,
                                              std::string detail = {});
 
+// The limits of the expanded tree (contract 1.3; decision D-114), each on
+// a running total; passing one stops the expansion (CF-113). The defaults
+// are the contract's; a test may give smaller ones to reach them cheaply.
+// The contract's values (1.3): the nodes and text of a tree, and the
+// diagnostics kept, twice the reported 1,000.
+inline constexpr std::size_t MAX_EXPANDED_NODES = 4'000'000;
+inline constexpr std::size_t MAX_EXPANDED_TEXT = std::size_t{256} << 20U;
+inline constexpr std::size_t MAX_KEPT_ERRORS = 2 * Diagnostics::REPORTED_LIMIT;
+
+struct ExpandLimits {
+    std::size_t nodes = MAX_EXPANDED_NODES;
+    std::size_t text_bytes = MAX_EXPANDED_TEXT;
+    // Points made, written or generated, kept or not, and `repeat` values
+    // evaluated.
+    std::size_t work = MAX_EXPANDED_NODES;
+    // Diagnostics kept; past it an error is counted only.
+    std::size_t kept_errors = MAX_KEPT_ERRORS;
+};
+
+// What the expansion held to report its errors, at its end: the texts that
+// suppress a repeated diagnostic and the causes met at several instances.
+// Both are at most `ExpandLimits::kept_errors`; for tests of that bound.
+struct ExpandCounts {
+    std::size_t kept_texts = 0;
+    std::size_t causes = 0;
+};
+
 // A computed value (13.3) is a scalar of style PLAIN with its canonical
 // text; its type is in `types`, so a computed STRING such as `12` or `true`
 // must be written by its type, quoted, never by its style (T5 of the
@@ -77,7 +105,8 @@ struct ExpandedTree {
 // chain names one, is left out without an error: the missing name is CF-310
 // of stage 5. Nothing when an error was found.
 [[nodiscard]] std::optional<ExpandedTree> expand_tree(
-    std::span<const CheckedFile> files, Diagnostics& diagnostics);
+    std::span<const CheckedFile> files, Diagnostics& diagnostics,
+    const ExpandLimits& limits = {}, ExpandCounts* counts = nullptr);
 
 }  // namespace scada::conf
 

@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -62,12 +63,6 @@ constexpr std::size_t MAX_PARENTS = 4;
 // one instance (4.4, CF-414).
 constexpr std::size_t MAX_REPEAT_VALUES = 65536;
 constexpr std::size_t MAX_POINTS = 65536;
-// The limits of a tree (1.3), which the expanded tree is held to as well
-// (C2 of the review of #146): its nodes, its text, and the work of its
-// `repeat` blocks, one per value evaluated.
-constexpr std::size_t MAX_TREE_NODES = 4'000'000;
-constexpr std::size_t MAX_TREE_TEXT = std::size_t{256} * 1024 * 1024;
-constexpr std::size_t MAX_REPEAT_WORK = MAX_TREE_NODES;
 // `limits.max_tags` without a value (4.1 of the system file).
 constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
@@ -395,8 +390,12 @@ struct Point {
 
 class Expander {
 public:
-    Expander(std::span<const CheckedFile> files, Diagnostics& diagnostics)
-        : files_(files), diagnostics_(&diagnostics) {}
+    Expander(std::span<const CheckedFile> files, Diagnostics& diagnostics,
+             const ExpandLimits& limits, ExpandCounts* counts)
+        : files_(files),
+          diagnostics_(&diagnostics),
+          limits_(limits),
+          counts_(counts) {}
 
     std::optional<ExpandedTree> run() {
         for (const CheckedFile& file : files_) {
@@ -431,6 +430,14 @@ public:
 private:
     // --- Errors ----------------------------------------------------------
 
+    // A cause met at several instances (`error_in`).
+    struct Cause {
+        std::size_t first = 0;           // in `pending_`
+        std::size_t more = 0;            // other instances
+        Location last;                   // the instance it was last met at
+        std::vector<std::string> names;  // of the first other instances
+    };
+
     // An error at `site`: in the instance's own file it is there; in a
     // template it is at the instance, with the template's line as a note.
     void error(std::uint16_t code, const Value& site, std::string message,
@@ -462,54 +469,64 @@ private:
                                  .detail = std::move(detail)});
             diagnostic.location = *instance_;
         }
-        // Past twice the reported limit, an error is counted, not kept: the
-        // texts that suppress repeats are bounded too (C2 of the review of
-        // #146).
-        if (pending_.size() >= 2 * Diagnostics::REPORTED_LIMIT) {
-            diagnostics_->count_unlisted_errors(1);
-            return;
-        }
-        const std::string key = format(diagnostic);
-        if (!reported_.insert(key).second) {
-            return;
-        }
         // One cause in a template, met by many instances, is one error at
-        // the first, with their count (the ruling O-6 on #146).
+        // the first, with their count (the ruling O-6 on #146). It is
+        // looked up before any text is kept, so a cause met again keeps
+        // nothing (D2 of the delta review).
+        std::string cause;
         if (!diagnostic.notes.empty()) {
             const Location& site = diagnostic.notes.front().location;
-            std::string cause = std::to_string(code);
+            cause = std::to_string(code);
             cause += '|';
             cause += site.file;
             cause += ':' + std::to_string(site.line) + ':' +
                      std::to_string(site.column) + '|';
             cause += diagnostic.message;
-            const auto [group, added] = causes_.try_emplace(
-                std::move(cause), Cause{.first = pending_.size(),
-                                        .more = 0,
-                                        .last = diagnostic.location,
-                                        .names = {}});
-            if (!added) {
-                // Counted once per instance: points of one instance that
-                // meet the cause are one.
-                Cause& seen = group->second;
-                const Location& place = diagnostic.location;
-                if (place.file != seen.last.file ||
-                    place.line != seen.last.line ||
-                    place.column != seen.last.column) {
-                    ++seen.more;
-                    seen.last = place;
-                    if (seen.names.size() < NAMED_INSTANCES) {
-                        seen.names.push_back(device_name_);
-                    }
-                }
+            if (const auto group = causes_.find(cause);
+                group != causes_.end()) {
+                count_instance(group->second, diagnostic.location);
                 return;
             }
+        }
+        // Past the kept limit an error is counted, not kept: the texts
+        // that suppress repeats and the causes are bounded by it (C2 of the
+        // review of #146, D2 of the delta review).
+        if (pending_.size() >= limits_.kept_errors) {
+            diagnostics_->count_unlisted_errors(1);
+            return;
+        }
+        if (!reported_.insert(format(diagnostic)).second) {
+            return;
+        }
+        if (!cause.empty()) {
+            causes_.emplace(std::move(cause), Cause{.first = pending_.size(),
+                                                    .more = 0,
+                                                    .last = diagnostic.location,
+                                                    .names = {}});
         }
         pending_.push_back(std::move(diagnostic));
     }
 
+    // Counted once per instance: points of one instance that meet the
+    // cause are one.
+    void count_instance(Cause& seen, const Location& place) const {
+        if (place.file == seen.last.file && place.line == seen.last.line &&
+            place.column == seen.last.column) {
+            return;
+        }
+        ++seen.more;
+        seen.last = place;
+        if (seen.names.size() < NAMED_INSTANCES) {
+            seen.names.push_back(device_name_);
+        }
+    }
+
     // Gives the buffered diagnostics, in the order they arose.
     void flush_diagnostics() {
+        if (counts_ != nullptr) {
+            counts_->kept_texts = reported_.size();
+            counts_->causes = causes_.size();
+        }
         // The others by name, the first 10 (S7 of the delta review of
         // #146); the note's values are those of the instance the error is
         // at.
@@ -517,9 +534,9 @@ private:
             if (group.more == 0) {
                 continue;
             }
-            std::string others = " (and " + std::to_string(group.more) +
-                                 (group.more == 1 ? " more instance: "
-                                                  : " more instances: ");
+            std::string others =
+                " (and " + std::to_string(group.more) +
+                (group.more == 1 ? " more instance: " : " more instances: ");
             for (std::size_t i = 0; i < group.names.size(); ++i) {
                 others += (i == 0 ? "" : ", ") + group.names[i];
             }
@@ -578,10 +595,11 @@ private:
     void check_totals(const Location& instance) {
         std::string message;
         std::uint16_t code = CF_SIZE_LIMIT;
-        if (writer_.nodes() > MAX_TREE_NODES) {
-            message = "the expanded tree exceeds its limit of 4000000 nodes";
-        } else if (writer_.text_bytes() > MAX_TREE_TEXT) {
-            message = "the expanded tree exceeds its limit of 256 MiB of text";
+        if (writer_.nodes() > limits_.nodes) {
+            message = nodes_message();
+        } else if (writer_.text_bytes() > limits_.text_bytes) {
+            message = "the expanded tree exceeds its limit of " +
+                      bytes_text(limits_.text_bytes) + " of text";
         } else if (tags_ > static_cast<std::uint64_t>(max_tags_)) {
             code = CF_TOO_MANY_TAGS;
             message = std::to_string(tags_) + " tags, the limit is " +
@@ -704,6 +722,10 @@ private:
         }
         keep_present(written, device.points);
         apply_defaults(defaults, written, device.points);
+        // Past a limit at step 5 the device's later steps are not done.
+        if (stopped_) {
+            return device;
+        }
         apply_overrides(written, device_keys, device.points);
         if (reference != nullptr) {
             // With a template, after step 6: no default reaches them.
@@ -1188,26 +1210,63 @@ private:
                 continue;
             }
             const std::string limit_text((*bound)->scalar_text());
-            bool outside = false;
-            const std::optional<std::int64_t> integer_limit =
-                int64_of(limit_text);
-            if (value.type == ValueType::INT && integer_limit) {
-                outside = above ? value.integer > *integer_limit
-                                : value.integer < *integer_limit;
-            } else if (const std::optional<double> limit =
-                           nearest_binary64(limit_text)) {
-                const double real = value.type == ValueType::REAL
-                                        ? value.real
-                                        : static_cast<double>(value.integer);
-                outside = above ? real > *limit : real < *limit;
-            }
-            if (outside) {
+            const std::optional<int> order = order_against(value, limit_text);
+            if (order && (above ? *order > 0 : *order < 0)) {
                 return std::string(above ? " is above its max "
                                          : " is below its min ") +
                        limit_text;
             }
         }
         return std::nullopt;
+    }
+
+    // The order of `value` and the bound written as `limit_text` (-1, 0,
+    // 1), or nothing for a bound that is no number. An INT against an
+    // integer bound as integers (T3), against a decimal bound exactly, the
+    // INT not converted (D7 of the delta review of #146).
+    static std::optional<int> order_against(const ConfigValue& value,
+                                            const std::string& limit_text) {
+        const std::optional<std::int64_t> integer_limit = int64_of(limit_text);
+        if (value.type == ValueType::INT && integer_limit) {
+            if (value.integer < *integer_limit) {
+                return -1;
+            }
+            return value.integer > *integer_limit ? 1 : 0;
+        }
+        const std::optional<double> limit = nearest_binary64(limit_text);
+        if (!limit) {
+            return std::nullopt;
+        }
+        return value.type == ValueType::REAL
+                   ? compare_reals(value.real, *limit)
+                   : compare_exactly(value.integer, *limit);
+    }
+
+    static int compare_reals(double left, double right) {
+        if (left < right) {
+            return -1;
+        }
+        return left > right ? 1 : 0;
+    }
+
+    // The order of `integer` and `real` (-1, 0, 1), exact: `real` is
+    // finite, as a bound read by `nearest_binary64` is.
+    static int compare_exactly(std::int64_t integer, double real) {
+        // 2^63, exact in binary64.
+        constexpr double TWO_TO_63 = 9223372036854775808.0;
+        if (real >= TWO_TO_63) {
+            return -1;
+        }
+        if (real < -TWO_TO_63) {
+            return 1;
+        }
+        const double whole = std::floor(real);
+        // `whole` is in [-2^63, 2^63), so it converts exactly.
+        const auto floor_integer = static_cast<std::int64_t>(whole);
+        if (integer != floor_integer) {
+            return integer < floor_integer ? -1 : 1;
+        }
+        return whole == real ? 0 : -1;
     }
 
     static std::optional<std::int64_t> int64_of(const std::string& text) {
@@ -1311,11 +1370,9 @@ private:
             if (device_failed_) {
                 return;
             }
-            made_nodes_ += node_count(point.value);
-            if (writer_.nodes() + made_nodes_ > MAX_TREE_NODES) {
-                error(CF_SIZE_LIMIT, *point.value.find("name"),
-                      "the expanded tree exceeds its limit of 4000000 nodes");
-                stopped_ = true;
+            const Value& name = *point.value.find("name");
+            if (!count_work(name) ||
+                !count_made(name, node_count(point.value))) {
                 return;
             }
             if (!names.insert(point.name).second) {
@@ -1452,14 +1509,47 @@ private:
     // Each value counts toward the work of the tree, whether or not its
     // `when` keeps the point (the lead's ruling S1 on #146); false past
     // the budget.
-    bool count_repeat_value(const Value& block) {
-        if (++repeat_work_ <= MAX_REPEAT_WORK) {
+    bool count_repeat_value(const Value& block) { return count_work(block); }
+
+    // The work of the expansion: every point made, written or generated,
+    // kept or not, and every `repeat` value evaluated counts one (the
+    // ruling S1 on #146, D3 of the delta review); false past the limit.
+    bool count_work(const Value& site) {
+        if (++work_ <= limits_.work) {
             return true;
         }
-        error(CF_SIZE_LIMIT, block,
-              "the repeat values of the tree exceed their limit of 4000000");
+        error(CF_SIZE_LIMIT, site,
+              "the points and repeat values made for the tree exceed their "
+              "limit of " +
+                  std::to_string(limits_.work));
         stopped_ = true;
         return false;
+    }
+
+    // `nodes` more made for the instance being expanded, which count
+    // toward the node limit with what is written; false past it.
+    bool count_made(const Value& site, std::size_t nodes) {
+        made_nodes_ =
+            nodes > SIZE_MAX - made_nodes_ ? SIZE_MAX : made_nodes_ + nodes;
+        if (made_nodes_ <= limits_.nodes &&
+            writer_.nodes() <= limits_.nodes - made_nodes_) {
+            return true;
+        }
+        error(CF_SIZE_LIMIT, site, nodes_message());
+        stopped_ = true;
+        return false;
+    }
+
+    [[nodiscard]] std::string nodes_message() const {
+        return "the expanded tree exceeds its limit of " +
+               std::to_string(limits_.nodes) + " nodes";
+    }
+
+    // `256 MiB`, or `1000 bytes` for a limit that is no whole MiB.
+    static std::string bytes_text(std::size_t bytes) {
+        constexpr std::size_t MIB = std::size_t{1024} * 1024;
+        return bytes % MIB == 0 ? std::to_string(bytes / MIB) + " MiB"
+                                : std::to_string(bytes) + " bytes";
     }
 
     using Axes = std::vector<std::pair<std::string, std::vector<std::int64_t>>>;
@@ -1720,12 +1810,21 @@ private:
 
     // Step 5: the template's `defaults` merged with the instance's, merged
     // under every point.
-    static void apply_defaults(const Value& template_defaults,
-                               const Value& instance,
-                               std::vector<Point>& points) {
+    // The defaults are merged under every point, so their nodes times the
+    // points count toward the node limit before any merge (D1 of the delta
+    // review of #146).
+    void apply_defaults(const Value& template_defaults, const Value& instance,
+                        std::vector<Point>& points) {
         Value defaults = template_defaults;
         if (const Value* own = instance.find("defaults")) {
             merge(defaults, *own, "defaults");
+        }
+        const std::size_t each = node_count(defaults) - 1;
+        const std::size_t total = each != 0 && points.size() > SIZE_MAX / each
+                                      ? SIZE_MAX
+                                      : each * points.size();
+        if (!count_made(*instance.find("name"), total)) {
+            return;
         }
         for (Point& point : points) {
             Value merged = defaults;
@@ -1800,6 +1899,10 @@ private:
                              no_such_point(member.key, template_of(instance)));
                     continue;
                 }
+                if (!count_made(member.value.front(),
+                                node_count(member.value.front()))) {
+                    return;
+                }
                 merge(points[found->second].value, member.value.front(),
                       "point");
             }
@@ -1844,6 +1947,11 @@ private:
                 if (!present) {
                     continue;
                 }
+            }
+            if (!count_work(*point->value.find("name")) ||
+                !count_made(*point->value.find("name"),
+                            node_count(point->value))) {
+                return;
             }
             if (!index.emplace(point->name, device.points.size()).second) {
                 error(CF_POINT_TWICE, *point->value.find("name"),
@@ -2308,8 +2416,14 @@ private:
             write_members(device.keys);
             ok_ =
                 ok_ && key("points", top) && builder_.begin_sequence(top).ok();
+            // The text is checked after each point, not only after the
+            // device (D4 of the delta review of #146): past the limit the
+            // device stops here and the expansion with it.
             for (const Point& point : device.points) {
                 write_value(point.value);
+                if (text_bytes_ > expander_->limits_.text_bytes) {
+                    break;
+                }
             }
             ok_ =
                 ok_ && builder_.end_sequence().ok() && builder_.end_map().ok();
@@ -2390,6 +2504,8 @@ private:
 
     std::span<const CheckedFile> files_;
     Diagnostics* diagnostics_;
+    ExpandLimits limits_;
+    ExpandCounts* counts_;
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     std::set<const CheckedFile*> faulty_templates_;
     std::map<const CheckedFile*, Value> roots_;
@@ -2398,12 +2514,6 @@ private:
     // The diagnostics until the end of the run, and the first of each cause
     // with the number of other instances it arose at.
     std::vector<Diagnostic> pending_;
-    struct Cause {
-        std::size_t first = 0;  // in `pending_`
-        std::size_t more = 0;   // other instances
-        Location last;          // the instance it was last met at
-        std::vector<std::string> names;  // of the first other instances
-    };
     std::map<std::string, Cause> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
@@ -2419,7 +2529,7 @@ private:
     std::int64_t max_tags_ = DEFAULT_MAX_TAGS;
     std::uint64_t tags_ = 0;
     std::size_t made_nodes_ = 0;
-    std::size_t repeat_work_ = 0;
+    std::size_t work_ = 0;
 
     // The instance being expanded.
     const CheckedFile* channel_ = nullptr;
@@ -2456,8 +2566,10 @@ Diagnostic expanded_diagnostic(const ExpandedTree& tree, std::uint16_t code,
 }
 
 std::optional<ExpandedTree> expand_tree(std::span<const CheckedFile> files,
-                                        Diagnostics& diagnostics) {
-    return Expander(files, diagnostics).run();
+                                        Diagnostics& diagnostics,
+                                        const ExpandLimits& limits,
+                                        ExpandCounts* counts) {
+    return Expander(files, diagnostics, limits, counts).run();
 }
 
 }  // namespace scada::conf

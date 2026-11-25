@@ -43,12 +43,17 @@ namespace scada::conf {
 struct Validation {
     Report report;
     std::optional<ExpandedTree> expanded;
+    // What stage 4 held to report its errors (expand.h).
+    ExpandCounts expansion;
 };
 
 // As `validate_tree`, and keeps the expanded tree, which the expanded files
 // of contract 13.3 are written from (#102).
+// `expand_limits` are the limits of the expanded tree, the contract's unless
+// a test gives others.
 [[nodiscard]] Result<Validation> validate_and_expand(
-    const std::filesystem::path& root, const ScanLimits& limits = {});
+    const std::filesystem::path& root, const ScanLimits& limits = {},
+    const ExpandLimits& expand_limits = {});
 
 }  // namespace scada::conf
 

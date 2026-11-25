@@ -33,15 +33,26 @@ inline constexpr std::string_view SYSTEM =
     "unit: { id: site-0042, name: Test unit }\n"
     "time: { timezone: Etc/UTC, sync: { mode: none } }\n";
 
-// Validates and expands the tree of `files` with a system.yaml: its errors
-// in the form of contract 1.4 (with their notes), or its expanded points,
-// with each device's keys first when `with_devices`.
-inline Lines expand(const Files& files, bool with_devices = false) {
+// What `expand_limited` gives: the lines of `expand`, the count of errors,
+// and what stage 4 held to report them.
+struct Expanded {
+    Lines lines;
+    std::size_t error_count = 0;
+    ExpandCounts counts;
+};
+
+// Validates and expands the tree of `files` with a system.yaml, under
+// `limits`: its errors in the form of contract 1.4 (with their notes), or
+// its expanded points, with each device's keys first when `with_devices`.
+inline Expanded expand_limited(const Files& files, const ExpandLimits& limits,
+                               bool with_devices = false) {
     std::optional<test::TempDirectory> temp =
         test::TempDirectory::create("scada-conf-expand-");
     EXPECT_TRUE(temp.has_value());
     if (!temp) {
-        return {"no temporary directory"};
+        return {.lines = {"no temporary directory"},
+                .error_count = 0,
+                .counts = {}};
     }
     Files all = files;
     all.try_emplace("system.yaml", SYSTEM);
@@ -52,23 +63,31 @@ inline Lines expand(const Files& files, bool with_devices = false) {
         out << content;
         EXPECT_TRUE(out.good());
     }
-    const Result<Validation> validation = validate_and_expand(temp->path());
+    const Result<Validation> validation =
+        validate_and_expand(temp->path(), {}, limits);
     EXPECT_TRUE(validation.ok());
     if (!validation.ok()) {
-        return {"not validated"};
+        return {.lines = {"not validated"}, .error_count = 0, .counts = {}};
     }
     const Validation& result = validation.value();
+    Expanded expanded{.lines = {},
+                      .error_count = result.report.error_count,
+                      .counts = result.expansion};
     if (!result.report.errors.empty()) {
-        Lines lines;
         for (const Diagnostic& error : result.report.errors) {
-            lines.push_back(format(error));
+            expanded.lines.push_back(format(error));
         }
-        return lines;
+    } else if (!result.expanded) {
+        expanded.lines = {"no expanded tree"};
+    } else {
+        expanded.lines = points_of(*result.expanded, with_devices);
     }
-    if (!result.expanded) {
-        return {"no expanded tree"};
-    }
-    return points_of(*result.expanded, with_devices);
+    return expanded;
+}
+
+// As `expand_limited`, with the contract's limits: the lines only.
+inline Lines expand(const Files& files, bool with_devices = false) {
+    return expand_limited(files, {}, with_devices).lines;
 }
 
 // A Modbus RTU channel holding the devices given.

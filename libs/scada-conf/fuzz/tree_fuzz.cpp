@@ -154,11 +154,12 @@ using scada::conf::Document;
 using scada::conf::NodeId;
 using scada::conf::NodeKind;
 
-// No key that steers expansion is left below `node` (T7 of the review of
-// #146), and no expression outside `alarms`, which hold run-time ones.
+// Below a point no `replace` is left, which is reserved in every map of a
+// point; and no expression outside `alarms`, which hold run-time ones (T7
+// of the review of #146).
 // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
 void check_expanded_value(const scada::conf::ExpandedTree& tree, NodeId node,
-                          bool in_alarms) {
+                          bool in_point, bool in_alarms) {
     const Document& document = tree.document;
     switch (document.kind(node)) {
         case NodeKind::SCALAR: {
@@ -171,20 +172,30 @@ void check_expanded_value(const scada::conf::ExpandedTree& tree, NodeId node,
         case NodeKind::MAP:
             for (const scada::conf::Entry& entry : document.entries(node)) {
                 const std::string_view key = document.text(entry.key);
-                for (const std::string_view steering :
-                     {"when", "repeat", "for", "defaults", "overrides",
-                      "disable", "only", "replace", "template", "params"}) {
-                    check(key != steering);
-                }
-                check_expanded_value(tree, entry.value,
+                check(!in_point || key != "replace");
+                check_expanded_value(tree, entry.value, in_point,
                                      in_alarms || key == "alarms");
             }
             return;
         case NodeKind::SEQUENCE:
             for (const NodeId item : document.items(node)) {
-                check_expanded_value(tree, item, in_alarms);
+                check_expanded_value(tree, item, in_point, in_alarms);
             }
             return;
+    }
+}
+
+// No key that steers expansion is a key of `map`, a device or a point: only
+// their own keys, as a map below them may use these names (`enums: { only:
+// ... }`, D5 of the delta review of #146).
+void check_own_keys(const Document& document, NodeId map) {
+    for (const scada::conf::Entry& entry : document.entries(map)) {
+        const std::string_view key = document.text(entry.key);
+        for (const std::string_view steering :
+             {"when", "repeat", "for", "defaults", "overrides", "disable",
+              "only", "replace", "template", "params"}) {
+            check(key != steering);
+        }
     }
 }
 
@@ -206,9 +217,10 @@ void check_devices(const scada::conf::ExpandedTree& tree) {
         }
         for (const NodeId device : document.items(*devices)) {
             std::set<std::string_view> names;
+            check_own_keys(document, device);
             for (const scada::conf::Entry& entry : document.entries(device)) {
                 if (document.text(entry.key) != "points") {
-                    check_expanded_value(tree, entry.value, false);
+                    check_expanded_value(tree, entry.value, false, false);
                     continue;
                 }
                 for (const NodeId point : document.items(entry.value)) {
@@ -221,7 +233,8 @@ void check_devices(const scada::conf::ExpandedTree& tree) {
                     const std::string_view text = document.text(*name);
                     check(scada::conf::is_tag_name(text));
                     check(names.insert(text).second);
-                    check_expanded_value(tree, point, false);
+                    check_own_keys(document, point);
+                    check_expanded_value(tree, point, true, false);
                 }
             }
         }

@@ -76,17 +76,25 @@ one of 65,537 took 736 ms together (release build, x86-64,
 
 The expanded tree is held to the limits of a tree (contract 1.3, D-114):
 4,000,000 nodes and 256 MiB of text (CF-113), and `limits.max_tags`
-(CF-1001), each on a running total checked after every device, so before
-the next; passing one stops the expansion. Each device is written into the
-document as soon as it is finished and then dropped, and what an instance
-makes before step 4 counts toward the node limit, so memory is bounded by
-the limit, not by the tree's instances. Every `repeat` value evaluated
-counts toward a work budget of 4,000,000 values. Measured peak (release
-build, x86-64, the whole of `validate_and_expand`): 289 MB and 1.7 s for a
-valid tree of 3,604,535 expanded nodes (5 instances of a 65,536-point
-`repeat`); the same for 100 such instances, refused with CF-113 after the
-sixth; 18 MB and 5.7 s for 20,000 instances whose expressions fail, given
-as 100 errors with "and N more instances".
+(CF-1001), each on a running total; passing one stops the expansion. The
+nodes and tags are checked after every device, the text after every
+point. Each device is written into the document as soon as it is
+finished and then dropped. What an instance makes before step 4, and the
+defaults merged under its points before step 5, count toward the node
+limit, so memory is bounded by the limit, not by the tree's instances.
+Every point made, written or generated, and every `repeat` value evaluated
+count toward a work budget of 4,000,000. The diagnostics kept are at most
+2,000, past which an error is counted only.
+
+The bound, measured on the worst accepted trees (release build, x86-64,
+the whole of `validate_and_expand`): a peak of 670 MB, for 5 `repeat`
+blocks of 65,536 points whose `when` is false (made, then removed at step
+4), and 641 MB for one instance of 3,997,723 expanded nodes; the longest
+run, 10.2 s, for 61 instances of a template of 65,536 written points that
+each keep one (`only`), just under the work budget. A tree past a limit is
+refused within that: 100 instances of a 65,536-point `repeat` at the node
+limit, 20,000 instances whose expressions fail at 18 MB, as 100 errors
+that each name the other instances.
 
 Stage 5 runs when stage 4 found no error. It checks what needs no point
 tags (`check_references`, `include/scada/conf/references.h`, D-113):

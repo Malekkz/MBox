@@ -207,7 +207,8 @@ Result<Report> validate_tree(const std::filesystem::path& root,
 }
 
 Result<Validation> validate_and_expand(const std::filesystem::path& root,
-                                       const ScanLimits& limits) {
+                                       const ScanLimits& limits,
+                                       const ExpandLimits& expand_limits) {
     Validation validation;
     Report& report = validation.report;
     Diagnostics stage1;
@@ -267,7 +268,8 @@ Result<Validation> validate_and_expand(const std::filesystem::path& root,
         }
         // Stage 4: templates and instances (D-114).
         Diagnostics stage4;
-        validation.expanded = expand_tree(checked, stage4);
+        validation.expanded =
+            expand_tree(checked, stage4, expand_limits, &validation.expansion);
         const bool stage4_failed = stage4.error_count() > 0;
         stage4.move_into(report);
         if (!stage4_failed) {
