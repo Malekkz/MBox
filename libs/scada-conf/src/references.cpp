@@ -473,6 +473,7 @@ private:
                 find_map(root(), "defaults")) {
             check_point(*defaults, scope, scope.variables);
         }
+        check_identify(root(), scope);
     }
 
     using Variables = std::set<std::string, std::less<>>;
@@ -689,6 +690,7 @@ private:
                 check_point(entry.value, scope, {});
             }
         }
+        check_identify(device, scope);
     }
 
     // The names a point uses: enumeration, logging, alarms, its bits'; and
@@ -717,6 +719,17 @@ private:
         }
         if (scope.known && scope.typed) {
             check_expressions(point, scope, variables);
+        }
+    }
+
+    // The identity checks of a template or a device (4.8): the expressions
+    // of their `address` and `range` (2.4), typed as other expressions.
+    void check_identify(NodeId owner, const Scope& scope) {
+        if (!scope.known || !scope.typed) {
+            return;
+        }
+        for (const NodeId check : items(owner, "identify")) {
+            check_numbers_below(check, scope, {});
         }
     }
 

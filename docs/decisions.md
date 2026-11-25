@@ -2135,7 +2135,8 @@ Decision: stage 5 runs on the files as stage 3 read them, and checks only what n
 - **The configuration expressions of a template**, by the tables of 5.6:
   - `when` must give BOOL;
   - an expression under an address or a scaling must give a number;
-  - a `for` value must give a range or an INT, over parameters only.
+  - a `for` value must give a range or an INT, over parameters only;
+  - the expressions of an identity check (`address`, `range`; 2.4, 4.8), of a template or of a device without template, must give a number. `equals` and `in` stay text (D-108).
 
   Parameters are typed by the nearest declaration of the chain that gives a `type`: `int` INT, `number` REAL, `bool` BOOL, `string` and `enum` STRING, `set` SET. A `repeat` variable is INT.
 - **Names in a template's expressions (B5).** A template is checked only through its own chain upward. A name that no parameter or `repeat` variable of that chain has may come from a child of the chain (contract 4.5 resolves names over the instance's chain; 4.1 describes a base with the signals and a child per protocol). Such a name gives no error here, and its expression is not typed. The names are checked at each instance, over the instance's chain, by the expander (#103). A chain cut by a missing template, a cycle or its length (more than 5 files) is not known: its names and types are not checked here (S3), and the missing template or CF-401 is the error.

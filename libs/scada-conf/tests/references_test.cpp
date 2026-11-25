@@ -676,5 +676,118 @@ TEST(References, StageFiveWaitsForTheStagesBefore) {
                     "allowed in configuration files"});
 }
 
+// B2: where names are checked, a device without template, an alarm's
+// expressions are not: each would otherwise be CF-410 for a tag name. One
+// alarm on a point, one on a bit: the two places that skip `alarms`.
+TEST(References, AlarmsOfADeviceWithoutTemplateAreRunTime) {
+    EXPECT_EQ(
+        validate({{"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    unit_id: 1\n"
+                           "    points:\n"
+                           "      - name: p\n"
+                           "        address: { table: holding, register: 1, "
+                           "type: uint16 }\n"
+                           "        alarms: [ { type: expression, name: p.hot, "
+                           "expr: \"ps1.t1 > 80\", priority: high } ]\n")}}),
+        Lines{});
+    EXPECT_EQ(
+        validate({{"drivers/modbus/line1.yaml",
+                   channel("  - name: ps1.m1\n"
+                           "    unit_id: 1\n"
+                           "    points:\n"
+                           "      - name: w\n"
+                           "        tag: false\n"
+                           "        address: { table: holding, register: 1, "
+                           "type: uint16 }\n"
+                           "        bits:\n"
+                           "          0:\n"
+                           "            name: fault\n"
+                           "            alarms: [ { type: state, alarm_on: "
+                           "true, priority: high, suppress_when: "
+                           "ps1.station.maint } ]\n")}}),
+        Lines{});
+}
+
+// The one CF-523 of a configuration expression: the type of a `for` value
+// (5.6).
+TEST(References, AForValueOfTheWrongTypeIsCf523) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "params: { flag: { type: bool, default: true } }\n"
+                   "repeat:\n"
+                   "  - for: { n: \"flag\" }\n"
+                   "    points: [ { name: \"p{n}\", address: { table: holding, "
+                   "register: n, type: uint16 } } ]\n"}}),
+        Lines{"templates/meter_a.yaml:5:16 CF-523: expression: the value must "
+              "be a range or an INT, not BOOL at column 1"});
+}
+
+// A program's task must exist; a tasks.yaml replaces the default tasks.
+TEST(References, AProgramsTask) {
+    EXPECT_EQ(
+        validate({{"control/tasks.yaml",
+                   "tasks:\n  normal: { period: 1s, programs: [ps1_a] }\n"},
+                  {"control/ps1_a.yaml",
+                   "program: ps1_a\ntask: fast\nblocks: []\n"}}),
+        Lines{"control/ps1_a.yaml:2:7 CF-310: task \"fast\" does not "
+              "exist"});
+}
+
+// Types over a chain of three: the leaf uses the root's parameter.
+TEST(References, TypesOverAChainOfThree) {
+    EXPECT_EQ(validate({{"templates/t1.yaml",
+                         "template: t1\nprotocol: modbus\n"
+                         "params: { inputs: { type: int, default: 2 } }\n"},
+                        {"templates/t2.yaml",
+                         "template: t2\nprotocol: modbus\nextends: t1\n"},
+                        {"templates/t3.yaml",
+                         "template: t3\nprotocol: modbus\nextends: t2\n"
+                         "points: [ { name: p, when: inputs, address: { table: "
+                         "holding, register: 1, type: uint16 } } ]\n"}}),
+              Lines{"templates/t3.yaml:4:28 CF-410: expression \"inputs\": the "
+                    "value must be BOOL, not INT"});
+}
+
+// A chain cut by its length is not typed, even with a type error in it.
+TEST(References, ACutChainWithATypeError) {
+    Files files;
+    constexpr int TEMPLATES = 7;
+    for (int level = 1; level <= TEMPLATES; ++level) {
+        const std::string name = "t" + std::to_string(level);
+        std::string text = "template: " + name + "\nprotocol: modbus\n";
+        if (level > 1) {
+            text += "extends: t" + std::to_string(level - 1) + "\n";
+        }
+        text += "params: { p" + std::to_string(level) +
+                ": { type: int, default: 2 } }\n";
+        if (level == TEMPLATES) {
+            text +=
+                "points: [ { name: p, when: \"p7 + 1\", address: { table: "
+                "holding, register: 1, type: uint16 } } ]\n";
+        }
+        files.emplace("templates/" + name + ".yaml", text);
+    }
+    EXPECT_EQ(validate(files), Lines{});
+}
+
+// 3 of the review of #144: the expressions of `identify` (2.4, 4.8).
+TEST(References, IdentityChecksAreTyped) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "params: { inputs: { type: int, default: 2 } }\n"
+                   "identify:\n"
+                   "  - { address: { table: holding, register: \"1 > 2\", "
+                   "type: uint16 }, equals: 7 }\n"
+                   "  - { address: { table: holding, register: 2, type: "
+                   "uint16 }, range: [\"'a'\", \"inputs * 2\"] }\n"}}),
+        (Lines{"templates/meter_a.yaml:5:47 CF-410: expression \"1 > 2\": the "
+               "value must be a number, not BOOL",
+               "templates/meter_a.yaml:6:72 CF-410: expression \"'a'\": the "
+               "value must be a number, not STRING"}));
+}
+
 }  // namespace
 }  // namespace scada::conf
