@@ -507,6 +507,11 @@ private:
         // True for a device without template: a name in an expression is
         // an error here, as nothing can define it.
         bool bare = false;
+        // While the chain is walked, child first: the `number` parameters,
+        // and the nearest default of each parameter, INT if written as an
+        // integer (the ruling O-9 on #146).
+        std::set<std::string, std::less<>> numbers;
+        std::map<std::string, bool, std::less<>> integer_default;
     };
 
     // The scope of `file`, a template, walking `extends` up to MAX_CHAIN
@@ -541,7 +546,25 @@ private:
             }
             file = next->second;
         }
+        type_numbers(scope);
         return scope;
+    }
+
+    // A `number` parameter is an INT or a REAL by the written form of its
+    // default, as the expander reads its value; without a default it is
+    // not known here, and the expander checks the instance's value.
+    static void type_numbers(Scope& scope) {
+        for (const std::string& name : scope.numbers) {
+            const auto found = scope.integer_default.find(name);
+            if (found == scope.integer_default.end()) {
+                scope.parameters.erase(name);
+            } else {
+                scope.parameters[name] =
+                    found->second ? ValueType::INT : ValueType::REAL;
+            }
+        }
+        scope.numbers.clear();
+        scope.integer_default.clear();
     }
 
     // The scope of a device's own points, defaults and overrides, one per
@@ -591,15 +614,30 @@ private:
             return;
         }
         for (const Entry& entry : document.entries(*params)) {
+            if (document.kind(entry.value) != NodeKind::MAP) {
+                continue;
+            }
+            const std::string name(document.text(entry.key));
+            if (const std::optional<NodeId> written =
+                    document.find(entry.value, "default")) {
+                scope.integer_default.try_emplace(
+                    name, read_integer(document.text(*written)).form !=
+                              IntegerForm::NOT_INTEGER);
+            }
             // A child may change a default without repeating the type, and
             // never changes it (CF-415): the type is that of the nearest
             // declaration that gives one.
-            if (document.kind(entry.value) != NodeKind::MAP ||
-                !document.find(entry.value, "type")) {
+            const std::optional<NodeId> type =
+                document.find(entry.value, "type");
+            if (!type) {
                 continue;
             }
-            scope.parameters.try_emplace(std::string(document.text(entry.key)),
-                                         parameter_type(document, entry.value));
+            if (scope.parameters
+                    .try_emplace(name, parameter_type(document, entry.value))
+                    .second &&
+                document.text(*type) == "number") {
+                scope.numbers.insert(name);
+            }
         }
     }
 
@@ -906,7 +944,7 @@ private:
         }
     }
 
-    enum class Wanted : std::uint8_t { BOOL, NUMBER, RANGE_OR_INT };
+    enum class Wanted : std::uint8_t { BOOL, NUMBER, INT, RANGE_OR_INT };
 
     // The one place that tells run-time expressions from configuration
     // expressions in a point (8): an alarm's `expr`, `condition` and
@@ -942,14 +980,16 @@ private:
                              const Variables& variables) {
         switch (document_->kind(node)) {
             case NodeKind::SCALAR:
-                // An integer key's expression is typed as a number here: a
-                // `number` parameter is an INT or a REAL by what the
-                // instance writes (O-9 on #146); the expander checks INT.
+                // A key the schema types as an integer takes an INT, as in
+                // the expander (B9 of the review of #146).
                 if (const ScalarType type = file_->types->of(node);
                     type == ScalarType::EXPRESSION ||
                     type == ScalarType::INTEGER_EXPRESSION) {
                     check_typed(node, scope, variables,
-                                ExpressionKind::CONFIGURATION, Wanted::NUMBER);
+                                ExpressionKind::CONFIGURATION,
+                                type == ScalarType::INTEGER_EXPRESSION
+                                    ? Wanted::INT
+                                    : Wanted::NUMBER);
                 }
                 return;
             case NodeKind::MAP:
@@ -1063,6 +1103,8 @@ private:
                 return type == ValueType::BOOL;
             case Wanted::NUMBER:
                 return type == ValueType::INT || type == ValueType::REAL;
+            case Wanted::INT:
+                return type == ValueType::INT;
             case Wanted::RANGE_OR_INT:
                 return type == ValueType::RANGE || type == ValueType::INT;
         }
@@ -1075,6 +1117,8 @@ private:
                 return "BOOL";
             case Wanted::NUMBER:
                 return "a number";
+            case Wanted::INT:
+                return "an INT";
             case Wanted::RANGE_OR_INT:
                 return "a range or an INT";
         }

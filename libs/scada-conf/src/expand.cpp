@@ -206,15 +206,26 @@ void strip_replace(Value& value) {
     }
 }
 
-// True if two map keys are one key: the same text, or two integers of one
-// value (`15` and `0xF` of `bits`, an inline `enum` or `states`; B6 of the
-// review of #146). No key the schema types as a name has the integer form.
-bool same_key(std::string_view left, std::string_view right) {
-    if (left == right) {
+// True if `member` has an integer key, as stage 3 typed it by the schema's
+// key type (`bits`, enumerations, a quality rule's `map`, `states`, a BOOL
+// point's `values`; 1.2).
+bool integer_key(const Member& member) {
+    return member.key_file != nullptr &&
+           member.key_file->types->of(member.key_node) == ScalarType::INTEGER;
+}
+
+// True if two map keys are one key: the same text, or two integer keys of
+// one value (`15` and `0xF`; B6 of the review of #146). Keys the schema
+// types as strings (`write.values`) are compared as text.
+bool same_key(const Member& left, const Member& right) {
+    if (left.key == right.key) {
         return true;
     }
-    const std::optional<Integer> left_value = parse_integer(left);
-    const std::optional<Integer> right_value = parse_integer(right);
+    if (!integer_key(left) || !integer_key(right)) {
+        return false;
+    }
+    const std::optional<Integer> left_value = parse_integer(left.key);
+    const std::optional<Integer> right_value = parse_integer(right.key);
     if (!left_value || !right_value ||
         left_value->magnitude != right_value->magnitude) {
         return false;
@@ -223,11 +234,11 @@ bool same_key(std::string_view left, std::string_view right) {
            left_value->negative == right_value->negative;
 }
 
-// The member of `map` whose key is `key` by `same_key`.
-Member* member_of_key(Value& map, std::string_view key) {
-    for (Member& member : map.members) {
-        if (same_key(member.key, key)) {
-            return &member;
+// The member of `map` that is the key of `member` by `same_key`.
+Member* member_of_key(Value& map, const Member& member) {
+    for (Member& candidate : map.members) {
+        if (same_key(candidate, member)) {
+            return &candidate;
         }
     }
     return nullptr;
@@ -259,7 +270,7 @@ void merge(Value& into, const Value& over, std::string_view parent) {
                        !(member.key == "off" && old.key == "on");
             });
         }
-        if (Member* existing = member_of_key(into, member.key)) {
+        if (Member* existing = member_of_key(into, member)) {
             // The child's spelling of an integer key is kept with its value.
             existing->key = member.key;
             existing->key_file = member.key_file;
@@ -767,8 +778,8 @@ private:
                             ": a base template has no protocol; a device "
                             "uses a template of its channel's"
                       : "template " + quote_text(reference.scalar_text()) +
-                            " is for " + protocol + ", the channel is " +
-                            wanted);
+                            " is for " + quote_text(protocol) +
+                            ", the channel is " + quote_text(wanted));
             return false;
         }
         return true;
@@ -1318,7 +1329,8 @@ private:
         const std::optional<std::uint64_t> count = count_of(runs);
         if (!count) {
             error(CF_SIZE_LIMIT, range,
-                  "the range of " + name + " exceeds its limit of 65536");
+                  "the range of " + quote_text(name) +
+                      " exceeds its limit of 65536");
             return std::nullopt;
         }
         std::vector<std::int64_t> values;
@@ -1369,11 +1381,11 @@ private:
         const std::pair<std::int64_t, std::string>& inherited,
         std::int64_t value, const std::string& template_name) {
         std::string message = "point " + quote_text(point) + ": variable ";
-        message += variable;
+        message += quote_text(variable);
         message += " is " + std::to_string(inherited.first);
-        message += " in " + inherited.second;
+        message += " in " + quote_text(inherited.second);
         message += " and " + std::to_string(value);
-        message += " in " + template_name;
+        message += " in " + quote_text(template_name);
         return message;
     }
 
@@ -1794,7 +1806,13 @@ private:
         const std::optional<Expression> tree =
             parse_expression(text, kind, syntax);
         if (!tree) {
-            // A plain number under `number_or_expression` is no expression.
+            // Stage 3 parsed every scalar it typed as an expression, so this
+            // is a fault of the validator, never passed in silence (T5 of
+            // the review of #146).
+            error(CF_EVALUATION, value,
+                  "expression " + quote_text(text) +
+                      ": its text does not parse at expansion, which is an "
+                      "internal error of the validator");
             return std::nullopt;
         }
         std::map<std::string, ConfigValue, std::less<>> local;

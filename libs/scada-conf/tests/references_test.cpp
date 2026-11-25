@@ -461,7 +461,7 @@ TEST(References, TypesOfConfigurationExpressions) {
         (Lines{"templates/meter_a.yaml:8:30 CF-410: expression \"inputs + "
                "1\": the value must be BOOL, not INT",
                "templates/meter_a.yaml:9:60 CF-410: expression \"model = "
-               "'a'\": the value must be a number, not BOOL",
+               "'a'\": the value must be an INT, not BOOL",
                "templates/meter_a.yaml:11:53 CF-410: expression "
                "\"sum(\\\"x.*\\\")\": sum reads tags, and a configuration "
                "expression has none at line 1, column 1 of the "
@@ -807,7 +807,7 @@ TEST(References, IdentityChecksAreTyped) {
                    "  - { address: { table: holding, register: 2, type: "
                    "uint16 }, range: [\"'a'\", \"inputs * 2\"] }\n"}}),
         (Lines{"templates/meter_a.yaml:5:47 CF-410: expression \"1 > 2\": the "
-               "value must be a number, not BOOL",
+               "value must be an INT, not BOOL",
                "templates/meter_a.yaml:6:72 CF-410: expression \"'a'\": the "
                "value must be a number, not STRING"}));
 }
@@ -915,6 +915,41 @@ TEST(References, AnUnknownNameIsNoVariable) {
                    "      - { name: \"p{n}\", when: flag, address: { table: "
                    "holding, register: \"n\", type: uint16 } }\n"}}),
         Lines{});
+}
+
+// B9 and the ruling O-9 on #146 at stage 5: a `number` parameter is an INT
+// or a REAL by the written form of its nearest default; without one it is
+// left to the instance. A key the schema types as an integer takes an INT.
+TEST(References, ANumberParameterByItsDefault) {
+    const auto meter = [](std::string_view params) {
+        return "template: meter_a\nprotocol: modbus\nparams: { " +
+               std::string(params) +
+               " }\n"
+               "points:\n"
+               "  - { name: p, address: { table: holding, register: \"b + "
+               "2\", type: uint16 } }\n";
+    };
+    EXPECT_EQ(validate({{"templates/meter_a.yaml",
+                         meter("b: { type: number, default: 40 }")}}),
+              Lines{});
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml", meter("b: { type: number }")}}),
+        Lines{});
+    EXPECT_EQ(validate({{"templates/meter_a.yaml",
+                         meter("b: { type: number, default: 1.5 }")}}),
+              Lines{"templates/meter_a.yaml:5:56 CF-410: expression \"b + "
+                    "2\": the value must be an INT, not REAL"});
+    // A child's default is the nearest.
+    EXPECT_EQ(validate({{"templates/base_a.yaml",
+                         "template: base_a\nprotocol: modbus\n"
+                         "params: { b: { type: number, default: 1.5 } }\n"},
+                        {"templates/meter_a.yaml",
+                         "template: meter_a\nextends: base_a\nprotocol: "
+                         "modbus\nparams: { b: { default: 4 } }\n"
+                         "points:\n"
+                         "  - { name: p, address: { table: holding, "
+                         "register: \"b + 2\", type: uint16 } }\n"}}),
+              Lines{});
 }
 
 // 8: one INT is a `for` value (5.6), as a range is.

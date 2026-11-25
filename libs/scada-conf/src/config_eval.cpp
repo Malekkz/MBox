@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,8 +23,8 @@ namespace {
 
 constexpr std::uint16_t CF_EVALUATION = 410;
 
-constexpr std::int64_t INT_MAX = std::numeric_limits<std::int64_t>::max();
-constexpr std::int64_t INT_MIN = std::numeric_limits<std::int64_t>::min();
+constexpr std::int64_t LARGEST_INT = std::numeric_limits<std::int64_t>::max();
+constexpr std::int64_t SMALLEST_INT = std::numeric_limits<std::int64_t>::min();
 constexpr int MAX_SHIFT = 63;
 
 // Room for the shortest text of any double.
@@ -31,7 +32,8 @@ constexpr std::size_t REAL_TEXT = 32;
 
 // True and the sum in `out` unless it overflows.
 bool add(std::int64_t lhs, std::int64_t rhs, std::int64_t& out) noexcept {
-    if ((rhs > 0 && lhs > INT_MAX - rhs) || (rhs < 0 && lhs < INT_MIN - rhs)) {
+    if ((rhs > 0 && lhs > LARGEST_INT - rhs) ||
+        (rhs < 0 && lhs < SMALLEST_INT - rhs)) {
         return false;
     }
     out = lhs + rhs;
@@ -39,7 +41,8 @@ bool add(std::int64_t lhs, std::int64_t rhs, std::int64_t& out) noexcept {
 }
 
 bool subtract(std::int64_t lhs, std::int64_t rhs, std::int64_t& out) noexcept {
-    if ((rhs < 0 && lhs > INT_MAX + rhs) || (rhs > 0 && lhs < INT_MIN + rhs)) {
+    if ((rhs < 0 && lhs > LARGEST_INT + rhs) ||
+        (rhs > 0 && lhs < SMALLEST_INT + rhs)) {
         return false;
     }
     out = lhs - rhs;
@@ -51,14 +54,17 @@ bool multiply(std::int64_t lhs, std::int64_t rhs, std::int64_t& out) noexcept {
         out = 0;
         return true;
     }
-    if ((lhs == -1 && rhs == INT_MIN) || (rhs == -1 && lhs == INT_MIN)) {
+    if ((lhs == -1 && rhs == SMALLEST_INT) ||
+        (rhs == -1 && lhs == SMALLEST_INT)) {
         return false;
     }
     bool overflows = false;
     if (lhs > 0) {
-        overflows = rhs > 0 ? lhs > INT_MAX / rhs : rhs < INT_MIN / lhs;
+        overflows =
+            rhs > 0 ? lhs > LARGEST_INT / rhs : rhs < SMALLEST_INT / lhs;
     } else {
-        overflows = rhs > 0 ? lhs < INT_MIN / rhs : lhs < INT_MAX / rhs;
+        overflows =
+            rhs > 0 ? lhs < SMALLEST_INT / rhs : lhs < LARGEST_INT / rhs;
     }
     if (overflows) {
         return false;
@@ -285,7 +291,7 @@ private:
         if (value.type == ValueType::REAL) {
             return ConfigValue::of_real(-value.real);
         }
-        if (value.integer == INT_MIN) {
+        if (value.integer == SMALLEST_INT) {
             return fail(node, "the result does not fit INT");
         }
         ConfigValue result = value;
@@ -380,7 +386,7 @@ private:
         if (rhs.integer == 0) {
             return fail(node, "division by zero");
         }
-        if (lhs.integer == INT_MIN && rhs.integer == -1) {
+        if (lhs.integer == SMALLEST_INT && rhs.integer == -1) {
             return fail(node, "the result does not fit INT");
         }
         // C++ truncates toward zero, and the remainder has the sign of the
@@ -394,7 +400,16 @@ private:
                                               const ConfigValue& lhs,
                                               const ConfigValue& rhs) {
         int order = 0;
-        if (lhs.type == ValueType::STRING) {
+        if (lhs.type == ValueType::SET) {
+            // Two SETs are equal when they hold the same strings, whatever
+            // their order or repeats (C3 of the review of #146); only `=`
+            // and `<>` take a SET (5.6).
+            const std::set<std::string, std::less<>> left(lhs.set.begin(),
+                                                          lhs.set.end());
+            const std::set<std::string, std::less<>> right(rhs.set.begin(),
+                                                           rhs.set.end());
+            order = left == right ? 0 : 1;
+        } else if (lhs.type == ValueType::STRING) {
             order = lhs.text.compare(rhs.text);
         } else if (lhs.type == ValueType::REAL || rhs.type == ValueType::REAL) {
             const double left = as_real(lhs);
@@ -492,8 +507,8 @@ private:
         return negate(node, value);
     }
 
-    static std::optional<ConfigValue> extreme(
-        const ExprNode& node, const std::vector<ConfigValue>& args) {
+    std::optional<ConfigValue> extreme(const ExprNode& node,
+                                       const std::vector<ConfigValue>& args) {
         const bool real = std::ranges::any_of(args, [](const ConfigValue& arg) {
             return arg.type == ValueType::REAL;
         });
@@ -504,7 +519,11 @@ private:
         };
         ConfigValue result;
         if (node.text == "limit") {
-            // limit(lo, x, hi)
+            // limit(lo, x, hi); lo above hi is a mistake of the
+            // configuration, not a silent `hi` (the lead's ruling on #146).
+            if (less(args[2], args[0])) {
+                return fail(node, "limit needs lo at most hi");
+            }
             result = args[1];
             if (less(result, args[0])) {
                 result = args[0];

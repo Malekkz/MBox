@@ -301,7 +301,7 @@ TEST(Expand, JoinedBindings) {
                  "register: n, type: uint16 } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{"drivers/modbus/line1.yaml:7:11: error CF-422: point \"pv1\": "
-               "variable n is 1 in base_a and 2 in meter_a\n"
+               "variable \"n\" is 1 in \"base_a\" and 2 in \"meter_a\"\n"
                "  from template templates/meter_a.yaml:7:17 (point pv1)"}));
 }
 
@@ -562,7 +562,7 @@ TEST(Expand, TheChain) {
         expand({{"templates/meter_a.yaml", "template: meter_a\nprotocol: io\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{"drivers/modbus/line1.yaml:8:15: error CF-420: template "
-               "\"meter_a\" is for io, the channel is modbus"}));
+               "\"meter_a\" is for \"io\", the channel is \"modbus\""}));
 }
 
 // 8: tag names of exactly 127 bytes are valid; 128 is CF-402 at the
@@ -741,7 +741,7 @@ TEST(Expand, ARangeOverTheWholeIntSpan) {
                        "register: 1, type: uint16 } }\n"},
                       {"drivers/modbus/line1.yaml", one_device()}}),
               Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the range "
-                    "of n exceeds its limit of 65536\n"
+                    "of \"n\" exceeds its limit of 65536\n"
                     "  from template templates/meter_a.yaml:4:15"});
 }
 
