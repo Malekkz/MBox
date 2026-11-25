@@ -19,6 +19,7 @@
 #include "scada/conf/expand.h"
 #include "scada/conf/names.h"
 #include "scada/conf/node.h"
+#include "scada/conf/types.h"
 #include "scada/conf/validate.h"
 
 #include <cstddef>
