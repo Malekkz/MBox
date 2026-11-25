@@ -3,6 +3,7 @@
 
 #include "scada/conf/schema.h"
 #include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
 #include "scada/conf/types.h"
@@ -1091,6 +1092,129 @@ TEST(Schema, NestedOneOfIsBounded) {
         SchemaSet::compile(
             {SchemaSource{.name = "t.schema.json", .text = recursive}}, problem)
             .ok());
+}
+
+// --- SchemaSet::check_value: a value computed at expansion (D-115) ---------
+
+// "<code>: <message>" of each error `check_value` gives; the status's message
+// when it fails.
+Lines value_errors(const SchemaSet& set, std::string_view schema,
+                   const std::vector<std::string>& path, std::string_view text,
+                   std::string_view label) {
+    const Result<std::vector<ValueError>> errors =
+        set.check_value(schema, path, text, label);
+    if (!errors.ok()) {
+        return {std::string(errors.status().message())};
+    }
+    Lines lines;
+    for (const ValueError& error : errors.value()) {
+        lines.push_back("CF-" + std::to_string(error.code) + ": " +
+                        error.message);
+    }
+    return lines;
+}
+
+constexpr std::string_view MODBUS_DEVICE = "modbus.schema.json#/$defs/device";
+
+// The keys that an expression computes, by their paths below a device: the
+// edges pass, a value past them is the CF-204 of stage 3.
+TEST(CheckValue, TheKeysOfAComputedValue) {
+    const SchemaSet& set = SchemaSet::builtin();
+    const std::vector<std::string> reg{"points", "[]", "address", "register"};
+    EXPECT_EQ(
+        value_errors(set, MODBUS_DEVICE, reg, "65536", "address.register"),
+        Lines{});
+    EXPECT_EQ(
+        value_errors(set, MODBUS_DEVICE, reg, "70000", "address.register"),
+        Lines{"CF-204: address.register must be between 0 and 65536"});
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE, reg, "-1", "address.register"),
+              Lines{"CF-204: address.register must be between 0 and 65536"});
+    const std::vector<std::string> bit{"points", "[]", "address", "bit"};
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE, bit, "15", "address.bit"),
+              Lines{});
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE, bit, "16", "address.bit"),
+              Lines{"CF-204: address.bit must be between 0 and 15"});
+    const std::vector<std::string> divide{"points", "[]", "scale", "divide_by"};
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE, divide, "1", "scale.divide_by"),
+              Lines{});
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE, divide, "0", "scale.divide_by"),
+              Lines{"CF-204: scale.divide_by must be between 1 and any"});
+}
+
+// The integer form is a rule of the key too: a REAL where the key takes an
+// integer is CF-203. The device's own identity checks and an override are
+// paths of their own, through "unevaluatedProperties".
+TEST(CheckValue, TheFormAndOtherPaths) {
+    const SchemaSet& set = SchemaSet::builtin();
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE,
+                           {"points", "[]", "address", "register"}, "1.5",
+                           "address.register"),
+              Lines{"CF-203: address.register must be an integer or an "
+                    "expression"});
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE,
+                           {"identify", "[]", "address", "register"}, "70000",
+                           "identify[0].address.register"),
+              Lines{"CF-204: identify[0].address.register must be between 0 "
+                    "and 65536"});
+    EXPECT_EQ(
+        value_errors(set, MODBUS_DEVICE, {"overrides", "p", "address", "bit"},
+                     "16", "address.bit"),
+        Lines{"CF-204: address.bit must be between 0 and 15"});
+}
+
+// Every rule of the key applies, not only "minimum" and "maximum": "enum",
+// and "x-scada-min" and "x-scada-max" of a type with a unit.
+TEST(CheckValue, EveryRuleOfTheKey) {
+    const SchemaSet set =
+        one_schema(R"({"type": "object", "properties": {)"
+                   R"("mode": {"type": "string", "enum": ["a", "b"]},)"
+                   R"("wait": {"type": "string", "x-scada-type": "duration",)"
+                   R"( "x-scada-min": "1s", "x-scada-max": "60s"}}})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"mode"}, "a", "mode"),
+              Lines{});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"mode"}, "c", "mode"),
+              Lines{"CF-205: mode must be one of a, b"});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"wait"}, "60s", "wait"),
+              Lines{});
+    // The message of stage 3 for the value written.
+    EXPECT_EQ(check_with(set, "t.schema.json", "wait: 2m\n"),
+              Lines{"1:7 CF-204: wait must be between 1s and 60s"});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"wait"}, "2m", "wait"),
+              Lines{"CF-204: wait must be between 1s and 60s"});
+}
+
+// Where an "allOf" or a "oneOf" joins several schemas that give the key a
+// rule, the value meets each.
+TEST(CheckValue, EverySchemaJoinedAtAStep) {
+    const SchemaSet set = one_schema(
+        R"({"$defs": {)"
+        R"("low": {"properties": {"n": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "maximum": 10}}},)"
+        R"("high": {"properties": {"n": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "minimum": 5}}}},)"
+        R"("type": "object",)"
+        R"("allOf": [{"$ref": "#/$defs/low"}], "oneOf": [{"$ref": "#/$defs/high"}]})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "7", "n"), Lines{});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "11", "n"),
+              Lines{"CF-204: n must be between any and 10"});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "4", "n"),
+              Lines{"CF-204: n must be between 5 and any"});
+}
+
+// A schema or a key that gives no rule is a defect of the caller: INTERNAL,
+// never a value taken as valid.
+TEST(CheckValue, AKeyWithoutARuleIsInternal) {
+    const SchemaSet& set = SchemaSet::builtin();
+    EXPECT_EQ(value_errors(set, "none.schema.json", {"n"}, "1", "n"),
+              Lines{"check_value: the schema is not in the set"});
+    EXPECT_EQ(value_errors(set, MODBUS_DEVICE,
+                           {"points", "[]", "address", "nonsense"}, "1",
+                           "address.nonsense"),
+              Lines{"check_value: the schema gives the key no rule"});
+    const Result<std::vector<ValueError>> failed = set.check_value(
+        MODBUS_DEVICE, std::vector<std::string>{"points", "x"}, "1", "x");
+    ASSERT_FALSE(failed.ok());
+    EXPECT_EQ(failed.status().code(), StatusCode::INTERNAL);
 }
 
 }  // namespace

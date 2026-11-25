@@ -2517,7 +2517,8 @@ private:
             ExpandedTree tree{.document = std::move(document).value(),
                               .types = {},
                               .instance_of = std::move(instance_of_),
-                              .instances = std::move(instances_)};
+                              .instances = std::move(instances_),
+                              .computed = std::move(computed_)};
             tree.types = ScalarTypes(tree.document);
             for (const auto& [node, type] : types_) {
                 tree.types.set(node, type);
@@ -2552,16 +2553,18 @@ private:
             return node.ok();
         }
 
-        void scalar(std::string_view text, ScalarType type,
-                    SourcePosition where) {
+        std::optional<NodeId> scalar(std::string_view text, ScalarType type,
+                                     SourcePosition where) {
             text_bytes_ += text.size();
             const Result<NodeId> node =
                 builder_.scalar(text, ScalarStyle::PLAIN, where);
             ok_ = ok_ && node.ok();
-            if (node.ok()) {
-                note(node.value());
-                types_.emplace_back(node.value(), type);
+            if (!node.ok()) {
+                return std::nullopt;
             }
+            note(node.value());
+            types_.emplace_back(node.value(), type);
+            return node.value();
         }
 
         void write_device(const Device& device) {
@@ -2603,7 +2606,10 @@ private:
             switch (value.kind) {
                 case NodeKind::SCALAR: {
                     if (value.computed) {
-                        scalar(value.text, value.type, where);
+                        if (const std::optional<NodeId> node =
+                                scalar(value.text, value.type, where)) {
+                            computed_.push_back(*node);
+                        }
                         return;
                     }
                     const Document& document = *value.file->document;
@@ -2649,6 +2655,7 @@ private:
         bool ok_ = true;
         std::uint32_t instance_ = ExpandedTree::NO_INSTANCE;
         std::vector<std::uint32_t> instance_of_;
+        std::vector<NodeId> computed_;
         std::vector<Location> instances_;
         std::vector<std::pair<NodeId, ScalarType>> types_;
         std::size_t text_bytes_ = 0;

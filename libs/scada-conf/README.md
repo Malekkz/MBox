@@ -114,8 +114,11 @@ Stage 5 runs when stage 4 found no error. On each merged point of the
 expanded tree (`src/merged_points.cpp`, D-115) it checks the keys that
 merging had to complete (CF-202), an integer value type or a counter on a
 floating raw type (CF-504), the range of an integer scaling (CF-516) and an
-integer value type with a scaling that is not integer (CF-517). It also
-checks what needs no point tags (`check_references`,
+integer value type with a scaling that is not integer (CF-517). Each value
+computed from a configuration expression (`register: "r * 65536"`) is
+checked by `SchemaSet::check_value` against its key's rules in the
+protocol's schema, as stage 3 checks a value written there (CF-204 and the
+key's other rules). It also checks what needs no point tags (`check_references`,
 `include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's
   protocol, areas, logging policies and aggregate tiers, enumerations (of

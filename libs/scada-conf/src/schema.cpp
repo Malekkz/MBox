@@ -2264,6 +2264,115 @@ bool SchemaSet::has(std::string_view schema_file) const {
     return compiled_->names.contains(schema_file);
 }
 
+namespace {
+
+// The schemas that `start` joins for one node: itself and, transitively,
+// what its "$ref", "allOf" and "oneOf" name.
+void join_closure(const CompiledSchemas& schemas, SchemaId start,
+                  std::set<SchemaId>& out) {
+    std::vector<SchemaId> pending{start};
+    while (!pending.empty()) {
+        const SchemaId schema_id = pending.back();
+        pending.pop_back();
+        if (!out.insert(schema_id).second) {
+            continue;
+        }
+        const SchemaNode& rules = schemas.nodes.at(schema_id);
+        if (rules.ref) {
+            pending.push_back(*rules.ref);
+        }
+        pending.insert(pending.end(), rules.all_of.begin(), rules.all_of.end());
+        pending.insert(pending.end(), rules.one_of.begin(), rules.one_of.end());
+    }
+}
+
+// The schemas of the key `step` below the schemas `from`: of the items for
+// "[]"; otherwise of the property of that name, or, where none of `from`
+// names it, of "unevaluatedProperties".
+std::set<SchemaId> step_down(const CompiledSchemas& schemas,
+                             const std::set<SchemaId>& from,
+                             std::string_view step) {
+    std::set<SchemaId> joined;
+    for (const SchemaId schema_id : from) {
+        join_closure(schemas, schema_id, joined);
+    }
+    std::set<SchemaId> named;
+    std::set<SchemaId> unevaluated;
+    for (const SchemaId schema_id : joined) {
+        const SchemaNode& rules = schemas.nodes.at(schema_id);
+        if (step == "[]") {
+            if (rules.items) {
+                named.insert(*rules.items);
+            }
+            continue;
+        }
+        for (const auto& [key, child] : rules.properties) {
+            if (key == step) {
+                named.insert(child);
+            }
+        }
+        if (rules.unevaluated == Unevaluated::SCHEMA) {
+            unevaluated.insert(rules.unevaluated_schema);
+        }
+    }
+    return named.empty() ? unevaluated : named;
+}
+
+}  // namespace
+
+Result<std::vector<ValueError>> SchemaSet::check_value(
+    std::string_view schema, std::span<const std::string> path,
+    std::string_view text, std::string_view label) const {
+    const auto found = compiled_->names.find(schema);
+    if (found == compiled_->names.end()) {
+        return Status(StatusCode::INTERNAL,
+                      "check_value: the schema is not in the set");
+    }
+    std::set<SchemaId> rules{found->second};
+    for (const std::string& step : path) {
+        rules = step_down(*compiled_, rules, step);
+        if (rules.empty()) {
+            return Status(StatusCode::INTERNAL,
+                          "check_value: the schema gives the key no rule");
+        }
+    }
+    DocumentBuilder builder;
+    const Result<FileIndex> file = builder.add_file(std::string(label));
+    if (!file.ok() ||
+        !builder
+             .scalar(
+                 text, ScalarStyle::PLAIN,
+                 SourcePosition{.file = file.value(), .line = 1, .column = 1})
+             .ok()) {
+        return Status(StatusCode::INTERNAL,
+                      "check_value: the value is not kept");
+    }
+    Result<Document> document = builder.finish();
+    if (!document.ok()) {
+        return document.status();
+    }
+    std::vector<ValueError> errors;
+    for (const SchemaId schema_id : rules) {
+        ScalarTypes types(document.value());
+        Diagnostics diagnostics;
+        Validator validator(*compiled_, document.value(), types, label);
+        validator.run(schema_id, diagnostics);
+        Report report;
+        diagnostics.move_into(report);
+        for (Diagnostic& diagnostic : report.errors) {
+            ValueError error{.code = diagnostic.code,
+                             .message = std::move(diagnostic.message)};
+            if (std::ranges::none_of(errors, [&error](const ValueError& seen) {
+                    return seen.code == error.code &&
+                           seen.message == error.message;
+                })) {
+                errors.push_back(std::move(error));
+            }
+        }
+    }
+    return errors;
+}
+
 void SchemaSet::validate(const Document& document, ScalarTypes& types,
                          std::string_view schema_file,
                          std::string_view file_label,

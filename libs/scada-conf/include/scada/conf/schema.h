@@ -16,7 +16,9 @@
 #include "scada/conf/types.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -34,6 +36,12 @@ struct SchemaSource {
 [[nodiscard]] const std::vector<SchemaSource>& builtin_schema_sources();
 
 struct CompiledSchemas;
+
+// One error of a value at its key: its code and message.
+struct ValueError {
+    std::uint16_t code = 0;
+    std::string message;
+};
 
 // A compiled set of schema files. Immutable once compiled; may be shared
 // between validations.
@@ -66,6 +74,22 @@ public:
 
     // True if a schema file of this name is in the set.
     [[nodiscard]] bool has(std::string_view schema_file) const;
+
+    // Checks `text`, a value computed at expansion (contract 13.3), written
+    // as a plain scalar, against every rule that `schema` gives the key at
+    // `path` below it, as stage 3 checks a value written there: its type and
+    // form, "minimum" and "maximum", "x-scada-min" and "x-scada-max", "enum"
+    // and "const", with the same codes and messages, the key named `label`
+    // (decision D-115). `schema` names a file (`modbus.schema.json`) or a
+    // definition (`modbus.schema.json#/$defs/device`); `path` holds map
+    // keys, and "[]" for the items of a sequence. Every schema that a "$ref",
+    // "allOf" or "oneOf" joins at a step is followed; where several give the
+    // key a rule, the value must meet each. Gives the errors, none for a
+    // value that meets the rules, or INTERNAL when `schema` or `path` names
+    // no rule: a defect of the caller, not of the configuration.
+    [[nodiscard]] Result<std::vector<ValueError>> check_value(
+        std::string_view schema, std::span<const std::string> path,
+        std::string_view text, std::string_view label) const;
 
     SchemaSet(SchemaSet&&) noexcept;
     SchemaSet& operator=(SchemaSet&&) noexcept;

@@ -5,15 +5,20 @@
 
 #include "merged_points.h"
 
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
+#include "scada/conf/schema.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -24,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace scada::conf {
 
@@ -153,7 +159,11 @@ class Checker {
 public:
     Checker(const ExpandedTree& tree, std::span<const CheckedFile> files,
             Diagnostics& diagnostics)
-        : tree_(&tree), document_(&tree.document), diagnostics_(&diagnostics) {
+        : tree_(&tree),
+          document_(&tree.document),
+          diagnostics_(&diagnostics),
+          computed_(tree.computed) {
+        std::ranges::sort(computed_);
         for (const CheckedFile& file : files) {
             if (file.source->path_class.type != FileType::ENUMS) {
                 continue;
@@ -171,7 +181,9 @@ public:
         }
     }
 
-    void run() {
+    // Fails with INTERNAL when a computed value's key has no rule in its
+    // protocol's schema, a defect of this software.
+    [[nodiscard]] Status run() {
         const NodeId channels =
             child(document_->root(), "channels").value_or(0);
         for (const NodeId channel : document_->items(channels)) {
@@ -187,8 +199,12 @@ public:
             }
             for (const NodeId device : document_->items(*devices)) {
                 check_device(device);
+                if (!status_.ok()) {
+                    return status_;
+                }
             }
         }
+        return status_;
     }
 
 private:
@@ -263,6 +279,98 @@ private:
             point_name_ = text_of(point, "name");
             tag_ = name + "." + point_name_;
             check_point(point);
+        }
+        point_name_.clear();
+        check_computed(device);
+    }
+
+    // --- CF-2xx: the values computed at expansion --------------------------
+
+    // Each value computed from a configuration expression is checked
+    // against its key's rules in the protocol's schema, as stage 3 checks a
+    // value written there (D-115): `register: "base + 70000"` is the CF-204
+    // that `register: 70000` is. The key is named from its point.
+    void check_computed(NodeId device) {
+        if (computed_.empty()) {
+            return;
+        }
+        std::vector<std::string> steps;
+        const std::string schema = protocol_ + ".schema.json#/$defs/device";
+        for (const Entry& entry : document_->entries(device)) {
+            const std::string_view key = document_->text(entry.key);
+            steps.assign(1, std::string(key));
+            if (key != "points") {
+                walk_computed(schema, entry.value, steps, std::string(key));
+                continue;
+            }
+            steps.emplace_back("[]");
+            for (const NodeId point : document_->items(entry.value)) {
+                point_name_ = text_of(point, "name");
+                if (document_->kind(point) != NodeKind::MAP) {
+                    continue;
+                }
+                for (const Entry& member : document_->entries(point)) {
+                    const std::string_view name = document_->text(member.key);
+                    steps.resize(2);
+                    steps.emplace_back(name);
+                    walk_computed(schema, member.value, steps,
+                                  std::string(name));
+                }
+            }
+            point_name_.clear();
+        }
+    }
+
+    // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
+    void walk_computed(const std::string& schema, NodeId node,
+                       std::vector<std::string>& steps,
+                       const std::string& label) {
+        if (!status_.ok()) {
+            return;
+        }
+        switch (document_->kind(node)) {
+            case NodeKind::SCALAR:
+                if (std::ranges::binary_search(computed_, node)) {
+                    check_value(schema, node, steps, label);
+                }
+                return;
+            case NodeKind::MAP:
+                for (const Entry& entry : document_->entries(node)) {
+                    const std::string_view key = document_->text(entry.key);
+                    steps.emplace_back(key);
+                    walk_computed(schema, entry.value, steps,
+                                  label + "." + std::string(key));
+                    steps.pop_back();
+                }
+                return;
+            case NodeKind::SEQUENCE: {
+                std::size_t index = 0;
+                steps.emplace_back("[]");
+                for (const NodeId item : document_->items(node)) {
+                    walk_computed(schema, item, steps,
+                                  label + "[" + std::to_string(index) + "]");
+                    ++index;
+                }
+                steps.pop_back();
+                return;
+            }
+        }
+    }
+
+    void check_value(const std::string& schema, NodeId node,
+                     const std::vector<std::string>& steps,
+                     const std::string& label) {
+        Result<std::vector<ValueError>> errors =
+            SchemaSet::builtin().check_value(schema, steps,
+                                             document_->text(node), label);
+        if (!errors.ok()) {
+            status_ = errors.status();
+            return;
+        }
+        for (ValueError& found : errors.value()) {
+            diagnostics_->add(expanded_diagnostic(
+                *tree_, found.code, node, std::move(found.message),
+                point_name_.empty() ? std::string() : "point " + point_name_));
         }
     }
 
@@ -618,14 +726,16 @@ private:
     std::string point_name_;
     std::set<std::string, std::less<>> global_enums_;
     std::set<std::string, std::less<>> device_enums_;
+    std::vector<NodeId> computed_;
+    Status status_;
 };
 
 }  // namespace
 
-void check_merged_points(const ExpandedTree& tree,
-                         std::span<const CheckedFile> files,
-                         Diagnostics& diagnostics) {
-    Checker(tree, files, diagnostics).run();
+Status check_merged_points(const ExpandedTree& tree,
+                           std::span<const CheckedFile> files,
+                           Diagnostics& diagnostics) {
+    return Checker(tree, files, diagnostics).run();
 }
 
 }  // namespace scada::conf

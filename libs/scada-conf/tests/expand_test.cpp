@@ -5,10 +5,14 @@
 
 #include "scada/conf/expand.h"
 #include "expand_cases.h"
+#include "merged_points.h"
 #include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/types.h"
 #include "scada/conf/validate.h"
+#include "scada/conf/yaml.h"
 #include "scada/test/temp_directory.h"
 
 #include <gtest/gtest.h>
@@ -1509,6 +1513,85 @@ TEST(MergedPoints, AnIoAddressNeedsTheKeysOfItsBackend) {
                  "volatile, address: { line: 3, direction: output } }\n"}}),
         (Lines{"drivers/io/local.yaml:5:80: error CF-202: the address of "
                "\"ps1.io.run\" needs at_start"}));
+}
+
+// A value computed at expansion is checked as stage 3 checks the value
+// written there (D-115): CF-204 at the instance, with the template line and
+// the point, for a register, a bit and a divisor out of range, and for a
+// register of the device's identity checks.
+TEST(MergedPoints, ComputedValuesOutOfRange) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\n"
+        "params: { r: { type: int, default: 1 } }\n"
+        "identify:\n"
+        "  - { address: { table: holding, register: \"r * 70000\", type: "
+        "uint16 }, equals: 7 }\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: \"r * 65536\", "
+        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n";
+    // With r = 0 every value is in range but the divisor.
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml", meter},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    params: { r: 0 }\n")}}),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+               "scale.divide_by must be between 1 and any\n"
+               "  from template templates/meter_a.yaml:7:117 (point p)"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    params: { r: 2 }\n")}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "identify[0].address.register must be between 0 and "
+                     "65536\n"
+                     "  from template templates/meter_a.yaml:5:44",
+                     "drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.register must be between 0 and 65536\n"
+                     "  from template templates/meter_a.yaml:7:53 (point p)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.bit must be between 0 and 15\n"
+                     "  from template templates/meter_a.yaml:7:71 (point p)"}));
+}
+
+// A computed value at a key that its protocol's schema gives no rule is a
+// defect of the expander, not a valid value: INTERNAL.
+TEST(MergedPoints, AComputedValueWithoutARuleIsInternal) {
+    Diagnostics parsed;
+    std::optional<Document> document = parse_yaml(
+        "channels:\n"
+        "  - protocol: modbus\n"
+        "    devices:\n"
+        "      - name: ps1.m1\n"
+        "        points: [ { name: p, address: { nonsense: 5 } } ]\n",
+        "expanded", parsed);
+    if (!document.has_value()) {
+        ADD_FAILURE() << "not parsed";
+        return;
+    }
+    const Document& expanded = *document;
+    // The node at `key` of `map`, or `map` itself where it has none.
+    const auto member_at = [&expanded](NodeId map, std::string_view key) {
+        return expanded.find(map, key).value_or(map);
+    };
+    const NodeId device =
+        expanded
+            .items(member_at(
+                expanded.items(member_at(expanded.root(), "channels")).front(),
+                "devices"))
+            .front();
+    const NodeId point = expanded.items(member_at(device, "points")).front();
+    const NodeId value = member_at(member_at(point, "address"), "nonsense");
+    ASSERT_EQ(expanded.text(value), "5");
+    ExpandedTree tree{.document = std::move(document).value(),
+                      .types = {},
+                      .instance_of = {},
+                      .instances = {},
+                      .computed = {value}};
+    tree.types = ScalarTypes(tree.document);
+    Diagnostics diagnostics;
+    const Status status = check_merged_points(tree, {}, diagnostics);
+    EXPECT_EQ(status.code(), StatusCode::INTERNAL);
+    tree.computed.clear();
+    EXPECT_TRUE(check_merged_points(tree, {}, diagnostics).ok());
 }
 
 // B5 of the review of #144: an enumeration a template names must exist in

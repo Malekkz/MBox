@@ -48,6 +48,9 @@ struct ExpandedTree {
     std::vector<std::uint32_t> instance_of;
     // The place of each device instance: its `name` key.
     std::vector<Location> instances;
+    // The scalars computed from a configuration expression (13.3), in the
+    // order written, for the checks of their values at stage 5 (D-115).
+    std::vector<NodeId> computed;
 
     static constexpr std::uint32_t NO_INSTANCE = 0xFFFFFFFF;
 };

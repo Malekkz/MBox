@@ -2,6 +2,7 @@
 
 #include "merged_points.h"
 #include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/node.h"
@@ -279,7 +280,11 @@ Result<Validation> validate_and_expand(const std::filesystem::path& root,
             Diagnostics stage5;
             check_references(checked, stage5);
             if (validation.expanded) {
-                check_merged_points(*validation.expanded, checked, stage5);
+                const Status merged =
+                    check_merged_points(*validation.expanded, checked, stage5);
+                if (!merged.ok()) {
+                    return merged;
+                }
             }
             stage5.move_into(report);
         }

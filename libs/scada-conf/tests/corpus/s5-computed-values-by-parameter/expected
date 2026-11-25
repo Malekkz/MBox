@@ -1,0 +1,8 @@
+# The values computed from a parameter are checked as written values are
+# (contract 13.3, 1.2; D-115): CF-204 at the instance, with the template line
+# as the note. ps1.m1 gives each key its edge (register 65536, bit 15,
+# divide_by 1) and is valid; ps1.m2 gives register 70000, bit 16 and
+# divide_by 0. Invented.
+drivers/modbus/line1.yaml:8:13: CF-204
+drivers/modbus/line1.yaml:8:13: CF-204
+drivers/modbus/line1.yaml:8:13: CF-204

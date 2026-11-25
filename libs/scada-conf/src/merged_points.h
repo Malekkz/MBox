@@ -5,6 +5,7 @@
 // contract 4.5, 4.7, Annexes A and B; decisions D-108, D-134, D-115): what
 // only the whole point, after every level, default and override, can show.
 
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/references.h"
@@ -28,10 +29,17 @@ namespace scada::conf {
 // - CF-310 for an enumeration that a template's point names and neither the
 //   instance's chain nor `enums.yaml` of `files` defines (B5 of the review
 //   of #144; an enumeration the instance's own file names is stage 5's
-//   reference check).
-void check_merged_points(const ExpandedTree& tree,
-                         std::span<const CheckedFile> files,
-                         Diagnostics& diagnostics);
+//   reference check);
+// - for each value computed from a configuration expression, the errors
+//   stage 3 gives that value written at its key: CF-204 for `register`,
+//   `bit` or `divide_by` out of range, and every other rule of the key in
+//   the protocol's schema (`SchemaSet::check_value`).
+// Fails with INTERNAL, a defect of this software, when a computed value's
+// key has no rule in its protocol's schema; otherwise OK, the errors in
+// `diagnostics`.
+[[nodiscard]] Status check_merged_points(const ExpandedTree& tree,
+                                         std::span<const CheckedFile> files,
+                                         Diagnostics& diagnostics);
 
 }  // namespace scada::conf
 
