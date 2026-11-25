@@ -582,12 +582,16 @@ Scheduler::PollKey Scheduler::key_of(const PollPick& pick,
     const CompiledPollGroup& group = channel_->poll_groups[pick.group];
     const std::int64_t due =
         pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
-    (void)due;
-    const bool held_back =
-        (run.failing || pick.retry) && failing_sent_ &&
-        now_ns <
-            later(last_failing_ns_, run.failing_timeout_ns * FAILING_SPACING);
-    return PollKey{!run.chain, group.priority, held_back, due, pick.device};
+    // The hold ends for the whole channel at once (K3): then the failing
+    // polls take their turn by due time, the oldest first.
+    // A device not yet answered since the connect is a suspect once some
+    // device of the channel has failed (G5): it may be dead too. A chain in
+    // progress, or the retry of a part of one, ends its chain first and is
+    // never held back: the chain's samples wait for it.
+    const bool chain = chain_open(pick);
+    const bool held_back = !chain && suspect(pick.device, pick.retry) &&
+                           now_ns < failing_release_ns_;
+    return PollKey{!chain, group.priority, held_back, due, pick.device};
 }
 
 void Scheduler::consider(const PollPick& pick, std::int64_t now_ns,
@@ -649,11 +653,30 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
         consider(PollPick{.device = device, .group = group, .retry = true},
                  now_ns, best, found);
     }
-    if (found) {
-        if (devices_[best.device].failing || best.retry) {
-            last_failing_ns_ = now_ns;
-            failing_sent_ = true;
+    if (found && suspect(best.device, best.retry)) {
+        // Not yet answered, while others failed: it holds the others back,
+        // but takes any idle time (it may be alive).
+        if (!devices_[best.device].failed && !best.retry) {
+            hold_failing(now_ns, devices_[best.device].failing_timeout_ns);
         }
+    }
+    if (found && (devices_[best.device].failed || best.retry)) {
+        // While the hold lasts, a failing poll uses idle time only if no
+        // live poll falls due within its time-out (K3), as a probe does. A
+        // chain in progress holds its unit and is never held back: it is
+        // read to its end (else nothing could go to that unit).
+        const std::int64_t cost_ns = devices_[best.device].failing_timeout_ns;
+        const std::int64_t live = next_live_poll_due_ns();
+        if (!chain_open(best) && now_ns < failing_release_ns_ &&
+            live < later(now_ns, cost_ns)) {
+            wake = std::min(
+                wake,
+                std::max(now_ns + 1, std::min(failing_release_ns_, live)));
+            return false;
+        }
+        hold_failing(now_ns, cost_ns);
+    }
+    if (found) {
         out = best.retry ? take_retry(best.device, now_ns)
                          : take_poll(best.device, best.group, now_ns);
     }
@@ -669,7 +692,9 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
         if (!compiled.enabled || compiled.keepalive_ns <= 0 ||
             !compiled.plan.keepalive.has_value() || !run.polled || run.retry ||
             units_[run.unit].holder != NOBODY || run.order_active ||
-            !current_form(device, *compiled.plan.keepalive, form)) {
+            !current_form(device, *compiled.plan.keepalive, form) ||
+            run.resting[*compiled.plan.keepalive] || run.resting[form]) {
+            // A resting request is a dead block: no keep-alive of it (K5).
             continue;
         }
         // Idle is the unit's silence: any request to it keeps it alive.
@@ -810,10 +835,64 @@ bool Scheduler::take_probe(std::uint32_t device, std::int64_t now_ns,
     if (!windowed) {
         // A probe with its whole time-out holds the line as a failing poll
         // does: the two share the spacing (G5, J3).
-        last_failing_ns_ = now_ns;
-        failing_sent_ = true;
+        hold_failing(now_ns, run.probe_timeout_ns);
     }
     return true;
+}
+
+bool Scheduler::chain_open(const PollPick& pick) const noexcept {
+    const DeviceRun& run = devices_[pick.device];
+    return run.chain ||
+           (pick.retry && in_chain(pick.device, run.retry_request));
+}
+
+bool Scheduler::suspect(std::uint32_t device, bool retry) const noexcept {
+    const DeviceRun& run = devices_[device];
+    return retry || run.failed || (run.failing && failed_devices_ > 0);
+}
+
+void Scheduler::hold_failing(std::int64_t now_ns,
+                             std::int64_t timeout_ns) noexcept {
+    // The spacing is that of the request just sent: what it may cost the
+    // line, whichever device comes next (K3).
+    failing_release_ns_ = later(now_ns, timeout_ns * FAILING_SPACING);
+}
+
+std::int64_t Scheduler::next_live_poll_due_ns() const noexcept {
+    std::int64_t next = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!polls_allowed(device) || run.failing || run.retry) {
+            continue;
+        }
+        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+            if (!channel_->devices[device].plan.by_group[group].empty()) {
+                next = std::min(next, run.groups[group].due_ns);
+            }
+        }
+    }
+    return next;
+}
+
+std::int64_t Scheduler::oldest_failing_due_ns() const noexcept {
+    std::int64_t oldest = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!polls_allowed(device) || (!run.failed && !run.retry)) {
+            continue;
+        }
+        if (run.retry) {
+            oldest = std::min(oldest, run.retry_due_ns);
+            continue;
+        }
+        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+            std::uint32_t request = 0;
+            if (peek(device, group, request)) {
+                oldest = std::min(oldest, run.groups[group].due_ns);
+            }
+        }
+    }
+    return oldest;
 }
 
 bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
@@ -828,12 +907,13 @@ bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
             allowed_from(device, false) > now_ns) {
             continue;
         }
+        // Past its floor, when the hold of failing polls ends, and unless
+        // a held-back failing poll is older: probes and failing polls take
+        // the turns by age, so that neither starves the other (J3, K3).
         const std::int64_t floor =
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
-        if (now_ns < floor ||
-            (failing_sent_ &&
-             now_ns < later(last_failing_ns_,
-                            run.probe_timeout_ns * FAILING_SPACING))) {
+        if (now_ns < floor || now_ns < failing_release_ns_ ||
+            oldest_failing_due_ns() < floor) {
             continue;
         }
         if (take_probe(device, now_ns, run.probe_timeout_ns, false, out)) {
@@ -1046,43 +1126,52 @@ void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
     }
 }
 
-void Scheduler::rest(std::uint32_t device, std::uint32_t request,
-                     bool resting) noexcept {
-    if (device >= devices_.size() ||
-        request >= devices_[device].resting.size()) {
-        return;
+bool Scheduler::in_chain(std::uint32_t device,
+                         std::uint32_t request) const noexcept {
+    if (device >= devices_.size()) {
+        return false;
     }
-    DeviceRun& run = devices_[device];
     const ReadPlan& plan = channel_->devices[device].plan;
-    const Request& planned = plan.requests[request];
-    run.resting[request] = resting;
-    if (planned.poll_group >= plan.by_group.size()) {
-        return;
+    if (request >= plan.requests.size()) {
+        return false;
     }
-    // A chain of companions rests as a whole (J5): every request from the
-    // chain's first to its last, which is the first one not `chained`.
+    const Request& planned = plan.requests[request];
+    if (planned.chained) {
+        return true;
+    }
+    // The last request of a chain is not `chained`; the one before it is.
+    if (planned.poll_group >= plan.by_group.size()) {
+        return false;
+    }
     const std::vector<std::uint32_t>& list = plan.by_group[planned.poll_group];
     const auto found = std::find(list.begin(), list.end(), request);
-    if (found == list.end()) {
-        return;
-    }
-    auto first = found;
-    while (first != list.begin() && plan.requests[*(first - 1)].chained) {
-        --first;
-    }
-    auto last = found;
-    while (last + 1 != list.end() && plan.requests[*last].chained) {
-        ++last;
-    }
-    for (auto member = first; member <= last; ++member) {
-        run.resting[*member] = resting;
-    }
+    return found != list.end() && found != list.begin() &&
+           plan.requests[*(found - 1)].chained;
 }
 
-void Scheduler::set_failing(std::uint32_t device, bool failing,
+void Scheduler::rest(std::uint32_t device, std::uint32_t request,
+                     bool resting) noexcept {
+    // No request of a chain of companions rests, first, middle or last: a
+    // chain is read whole every period, so that nothing of it is read and
+    // thrown away or left GOOD and frozen (the lead's ruling K1).
+    if (device >= devices_.size() ||
+        request >= devices_[device].resting.size() ||
+        in_chain(device, request)) {
+        return;
+    }
+    devices_[device].resting[request] = resting;
+}
+
+void Scheduler::set_failing(std::uint32_t device, bool failing, bool failed,
                             std::int64_t timeout_ns) noexcept {
     if (device < devices_.size()) {
-        devices_[device].failing = failing;
+        DeviceRun& run = devices_[device];
+        if (run.failed != failed) {
+            failed_devices_ =
+                failed ? failed_devices_ + 1 : failed_devices_ - 1;
+        }
+        run.failing = failing || failed;
+        run.failed = failed;
         devices_[device].failing_timeout_ns = timeout_ns;
     }
 }

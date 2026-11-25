@@ -193,6 +193,10 @@ private:
     // its device answered other requests in between (G8).
     void rest_if_dead_block(const Choice& choice) noexcept;
 
+    // A busy part cut the chain of `device`: only the COMM_FAIL samples of
+    // its failed parts are kept, and written at once unless `more` parts
+    // follow, which are read but not published (P9, K4).
+    SCADA_RT void cut_chain(std::uint32_t device, bool more) noexcept;
     // Empties a device's chain: what it held is never published.
     SCADA_RT static void drop_chain(DeviceRun& run) noexcept;
     // Before a send after a quiet time: true when the line is quiet (or

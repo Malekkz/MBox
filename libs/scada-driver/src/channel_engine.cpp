@@ -408,10 +408,11 @@ void ChannelEngine::sync_scheduler() noexcept {
                 run.any_resting = run.any_resting || rest.resting;
             }
         }
+        // Failed: a failure count, or an attempt that timed out and waits
+        // for its retry (the count comes only when the attempts end).
         scheduler_.set_failing(
-            device,
-            failures_.state(device) != DeviceStatus::RUNNING ||
-                failures_.failures(device) > 0,
+            device, failures_.state(device) != DeviceStatus::RUNNING,
+            failures_.failures(device) > 0 || devices_[device].attempts > 0,
             compiled.failure.timeout_ns);
         // One probe for every demoted device of a unit (Q5).
         if (failures_.probes_for_unit(device)) {
@@ -422,6 +423,23 @@ void ChannelEngine::sync_scheduler() noexcept {
             scheduler_.clear_probe(device);
         }
     }
+}
+
+void ChannelEngine::cut_chain(std::uint32_t device, bool more) noexcept {
+    DeviceRun& run = devices_[device];
+    // Only the COMM_FAIL samples of failed parts are kept, in place and
+    // without allocation; nothing a part read is published (P9, K4).
+    const auto failed_end = std::partition(
+        run.chain.begin(), run.chain.end(), [](const DeliveredSample& sample) {
+            return sample.sample.outcome == Outcome::COMM_FAIL;
+        });
+    run.chain.erase(failed_end, run.chain.end());
+    if (more) {
+        run.chain_cut = true;  // the parts that follow are read, not published
+        return;
+    }
+    process(device, run.chain);
+    drop_chain(run);
 }
 
 void ChannelEngine::drop_chain(DeviceRun& run) noexcept {
@@ -738,8 +756,7 @@ void ChannelEngine::answered(const Choice& choice,
         scheduler_.probe_done();
         if (choice.cycle && decoded.kind == DecodeResult::Kind::BUSY) {
             // A busy part cuts its chain, as a poll's does (H4).
-            drop_chain(run);
-            run.chain_cut = request.chained;
+            cut_chain(device, request.chained);
         } else if (choice.cycle) {
             // A whole poll cycle as a probe (R8): published as a poll.
             deliver(choice, std::span(sink_storage_).first(sink_count_));
@@ -756,10 +773,10 @@ void ChannelEngine::answered(const Choice& choice,
         // the lead's ruling on D-12): the points keep their values, STALE
         // by `max_age`.
         (void)failures_.request_ended(device, RequestEnd::NOT_COUNTED, now);
-        // A busy part cuts its chain: what was held is dropped, and the
-        // parts that follow are read but not published (P9).
-        drop_chain(run);
-        run.chain_cut = request.chained;
+        // A busy part cuts its chain: nothing it read is published, and the
+        // parts that follow are read but not published (P9); its failed
+        // parts still go bad (K4).
+        cut_chain(device, request.chained);
         return;
     }
     (void)failures_.request_ended(device, RequestEnd::ANSWERED, now);
@@ -859,9 +876,13 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         drop_chain(run);
         return;
     }
-    // A failed part of a chain is part of the chain: its points go bad
-    // with it, and the points that depend on them through their companions'
-    // outcome, when the chain's last request is in (5.5, test 8; G1).
+    // A failed part of a chain is part of the chain: the points that depend
+    // on it go bad through their companions' outcome when the chain's last
+    // request is in (5.5, test 8; G1). Its own points go bad now, not at the
+    // chain's end (J2: the verdict does not wait for the other parts).
+    if (request.chained) {
+        fail_points_of(device, request);
+    }
     fail_request(choice);
     if (end == End::BROKEN) {
         (void)failures_.request_ended(device, RequestEnd::FAILED, now);
@@ -906,8 +927,11 @@ void ChannelEngine::rest_if_dead_block(const Choice& choice) noexcept {
     }
     // The device answered other requests since this one began to fail: a
     // dead block of a live device, which demotion never ends (G8).
+    // A part of a chain never rests: the chain is read whole every period,
+    // and with J2 its points go bad on time (the lead's ruling K1).
     if (rest.failures < rules.demote_after ||
-        run.answers == rest.answers_mark || !failures_.polled(device)) {
+        run.answers == rest.answers_mark || !failures_.polled(device) ||
+        scheduler_.in_chain(device, choice.request)) {
         return;
     }
     const std::int64_t now = clock_->monotonic_ns();
@@ -922,16 +946,6 @@ void ChannelEngine::rest_if_dead_block(const Choice& choice) noexcept {
     run.any_resting = true;
     scheduler_.rest(device, choice.request, true);
     ++counts_.rests;
-    // The other requests of its chain rest with it, unread: their points
-    // are BAD with COMM_FAIL until the chain is read again, never GOOD and
-    // frozen (J5, H1).
-    const ReadPlan& plan = channel_->devices[device].plan;
-    for (std::uint32_t other = 0; other < plan.requests.size(); ++other) {
-        if (other != choice.request && scheduler_.resting(device, other) &&
-            !run.rests[other].resting) {
-            fail_points_of(device, plan.requests[other]);
-        }
-    }
 }
 
 void ChannelEngine::fail_points_of(std::uint32_t device,
@@ -969,12 +983,14 @@ void ChannelEngine::deliver(const Choice& choice,
         if (request.chained) {
             return;
         }
-        if (!run.chain_cut) {
-            if (run.chain_overflow) {
-                ++counts_.chain_overflows;
-            } else {
-                process(choice.device, run.chain);
-            }
+        if (run.chain_cut) {
+            cut_chain(choice.device, false);  // its end: the failures only
+            return;
+        }
+        if (run.chain_overflow) {
+            ++counts_.chain_overflows;
+        } else {
+            process(choice.device, run.chain);
         }
         drop_chain(run);
         return;

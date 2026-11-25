@@ -10,6 +10,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     point_rules_test.cpp
     sample_processing_test.cpp
     channel_engine_test.cpp
+    engine_random_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
     test_protocol.cpp

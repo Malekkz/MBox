@@ -72,11 +72,14 @@ the contracts left open.
   sequence: 5 writes at a 10 s write interval hold the unit and the devices
   that share it for 40 s, with no poll and no keep-alive (D-136).
 - **Live devices go first; the dead get the rest.** Within a priority,
-  devices that answer are polled before failing ones and ones not yet
-  answered; a failing poll still goes once the line has run 4 of its
-  time-outs since the last one. With the default keys, 250 units at
-  38,400 bit/s with 50 dead keep a worst live gap of 2.01 s (1 s group),
-  and the dead are all demoted after 983 s (D-138; `ctest --preset perf`).
+  devices that answer are polled before failing ones and, once one has
+  failed, ones not yet answered. The hold ends for the channel 4 time-outs
+  of the last failing request after it was sent, and then the oldest
+  failing poll goes; until then a failing poll uses a gap only if it is
+  longer than its time-out. With the default keys, 250 units at
+  38,400 bit/s with 50 dead keep a worst live gap of 2.0 s (1 s group);
+  the dead are COMM_FAIL within 77 s and all demoted after 1,674 s (D-138;
+  `ctest --preset perf`).
 - **Probes use the windows between polls.** A probe goes when no request
   waits, its time-out ended before the next due poll if the window is at
   least 100 ms; one such probe per due time, and its time-out is no
@@ -91,8 +94,9 @@ the contracts left open.
   hold the live ones once for about 51 s (D-138).
 - **A dead block of a live device rests.** A request that keeps failing
   while its device answers others is polled once per back-off (10 s,
-  doubling to 300 s, by default), with its whole chain of companions if it
-  has one; its points stay BAD (D-140).
+  doubling to 300 s, by default); its points stay BAD. A request of a chain
+  of companions never rests: a dead part of a chain is attempted every
+  period (D-140).
 - **A line that is never quiet is jammed.** When quiet times keep finding
   bytes for 5 s, a serial line counts a jam (`jams`) and sends anyway: no
   request for at most 5 s plus one quiet time (D-140).

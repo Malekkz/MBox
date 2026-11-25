@@ -67,6 +67,12 @@ TEST(Timing, TheInterFrameGapIsFixedAbove19200BitPerSecond) {
     // 3.5 characters up to 19,200 bit/s, then at least 1.75 ms (G2).
     EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 9'600}), 3'645'834);
     EXPECT_EQ(inter_frame_gap_ns(LineTiming{.bit_rate = 19'200}), 1'822'917);
+    // At 19,200 bit/s itself the characters count, even short ones (7 bits:
+    // 1.28 ms, below 1.75 ms).
+    EXPECT_EQ(
+        inter_frame_gap_ns(LineTiming{
+            .bit_rate = 19'200, .bits_per_char = bits_per_char(5, false, 1)}),
+        1'276'042);
     EXPECT_EQ(
         inter_frame_gap_ns(LineTiming{
             .bit_rate = 38'400, .bits_per_char = bits_per_char(8, true, 1)}),

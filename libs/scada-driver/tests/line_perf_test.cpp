@@ -246,8 +246,10 @@ TEST(LinePerf, FiftyDeadAmongTwoHundredFiftyUnits) {
     // 1 s time-out; it is COMM_FAIL 3 s after it (J2).
     EXPECT_GT(figures.bad_ns, 0);
     EXPECT_LE(figures.bad_ns, 90 * SECOND);
+    // The dead take only gaps longer than their time-out, or one turn in 4
+    // time-outs (K3): demotion is slow, their values are bad long before.
     EXPECT_GT(figures.all_demoted_ns, 0);
-    EXPECT_LE(figures.all_demoted_ns, 20 * MINUTE);
+    EXPECT_LE(figures.all_demoted_ns, 30 * MINUTE);
     EXPECT_LE(figures.start_gap_ns, 2 * SECOND);
     EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 100 * MILLISECOND);
     EXPECT_GE(figures.back_running_ns, 0);
@@ -277,7 +279,7 @@ TEST(LinePerf, FiveDeadAmongTwentyFiveUnits) {
     const Figures figures = measure(25, 19'200);
     print("25 units, 5 dead", figures);
     EXPECT_GT(figures.all_demoted_ns, 0);
-    EXPECT_LE(figures.all_demoted_ns, MINUTE);
+    EXPECT_LE(figures.all_demoted_ns, 4 * MINUTE);
     EXPECT_LE(figures.bad_ns, 10 * SECOND);
     EXPECT_LE(figures.live_gap_ns, 2 * SECOND + 50 * MILLISECOND);
     EXPECT_GE(figures.back_running_ns, 0);

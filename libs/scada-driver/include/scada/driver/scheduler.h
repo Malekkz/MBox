@@ -219,21 +219,27 @@ public:
     // one of its requests may cost. Within a priority, the polls of devices
     // whose last request was answered go before the polls and retries of the
     // others, so that dead devices take the line when the live ones leave
-    // it. A held-back poll still goes in its turn once the line has
-    // run FAILING_SPACING of its time-outs since the last failing poll was
-    // sent: dead devices take about a quarter of a busy line, and
-    // are never starved, so their points still go bad (review G5, D-138).
-    SCADA_RT void set_failing(std::uint32_t device, bool failing,
+    // it. The hold ends for the whole channel FAILING_SPACING time-outs of
+    // the last failing poll or probe after it was sent; then the failing
+    // polls go by due time, the oldest first: dead devices take about a
+    // quarter of a busy line, none is starved, and their points still go
+    // bad (review G5, K3; D-138).
+    // `failed`: its unit has a failure count; only such a device, or one
+    // with a retry, starts a hold and waits for a window as described.
+    SCADA_RT void set_failing(std::uint32_t device, bool failing, bool failed,
                               std::int64_t timeout_ns) noexcept;
     static constexpr std::int64_t FAILING_SPACING = 4;
 
     // The planned request `request` of `device` rests (`resting`) or is
     // polled again: a resting request is left out of its group's cycles
-    // (review G8). A request of a chain of companions rests with the whole
-    // chain, so that no part of it is read and thrown away (J5).
-    // `reconnect` ends every rest.
+    // (review G8). A request of a chain of companions, first, middle or
+    // last, never rests (K1). `reconnect` ends every rest.
     SCADA_RT void rest(std::uint32_t device, std::uint32_t request,
                        bool resting) noexcept;
+    // Whether `request` of `device` is part of a chain of companions: it is
+    // `chained`, or it ends a chain.
+    [[nodiscard]] bool in_chain(std::uint32_t device,
+                                std::uint32_t request) const noexcept;
     // Whether `request` of `device` rests.
     [[nodiscard]] bool resting(std::uint32_t device,
                                std::uint32_t request) const noexcept {
@@ -312,6 +318,7 @@ private:
         // Not RUNNING with an empty failure count: not answered since the
         // connect, or failing (G5).
         bool failing = false;
+        bool failed = false;  // its unit has a failure count (K3)
         // A windowed probe was sent for this due time: the next one waits for
         // the floor, with its whole time-out (J1).
         bool windowed_tried = false;
@@ -412,6 +419,20 @@ private:
     // A probe past its floor takes the turn of a held-back failing poll,
     // under the same spacing, so that a saturated line still probes (J3).
     bool choose_overdue_probe(std::int64_t now_ns, Choice& out) noexcept;
+    // The pick continues a chain of companions: one is in progress, or it
+    // is the retry of a part of one (its last part included).
+    [[nodiscard]] bool chain_open(const PollPick& pick) const noexcept;
+    // `device` has failed, has a retry, or has not answered since the
+    // connect while some device has failed: its polls wait behind the
+    // others while a hold lasts (G5, K3).
+    [[nodiscard]] bool suspect(std::uint32_t device, bool retry) const noexcept;
+    // A failing poll or a probe that may cost `timeout_ns` was sent: the
+    // others wait FAILING_SPACING of it.
+    void hold_failing(std::int64_t now_ns, std::int64_t timeout_ns) noexcept;
+    // When the next poll of a device known to answer falls due, or NEVER.
+    [[nodiscard]] std::int64_t next_live_poll_due_ns() const noexcept;
+    // The oldest due time of a failing device's poll or retry, or NEVER.
+    [[nodiscard]] std::int64_t oldest_failing_due_ns() const noexcept;
     // Takes the probe of `device` with time-out `wait_ns`.
     bool take_probe(std::uint32_t device, std::int64_t now_ns,
                     std::int64_t wait_ns, bool windowed, Choice& out) noexcept;
@@ -434,8 +455,11 @@ private:
     std::int64_t start_ns_ = 0;
     Undo undo_;
     bool probe_in_flight_ = false;
-    std::int64_t last_failing_ns_ = 0;  // a failing device's last poll (G5)
-    bool failing_sent_ = false;
+    // Until when the polls of failing devices wait behind the others: the
+    // last failing poll or probe sent, plus FAILING_SPACING of its time-out
+    // (G5, K3).
+    std::int64_t failing_release_ns_ = 0;
+    std::uint32_t failed_devices_ = 0;  // devices with a failure count
 };
 
 }  // namespace scada::driver

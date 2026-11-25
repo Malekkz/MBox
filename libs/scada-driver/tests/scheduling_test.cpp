@@ -408,6 +408,46 @@ TEST(Scheduling, AnUnservablePeriodIsReportedAsAchievedAndLimited) {
 
 // --- Conformance test 13: keep-alive --------------------------------------
 
+TEST(Scheduling, NoRequestOfAChainRests) {
+    // K1: a chain of companions (0 with its companion at 100): neither its
+    // first nor its last request can rest.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    const ReadPlan& plan = channel.devices[0].plan;
+    for (std::uint32_t request = 0; request < plan.requests.size(); ++request) {
+        scheduler.rest(0, request, true);
+        EXPECT_TRUE(scheduler.in_chain(0, request));
+        EXPECT_FALSE(scheduler.resting(0, request));
+    }
+}
+
+TEST(Scheduling, ARestingRequestIsNoKeepAlive) {
+    // K5: the keep-alive request (the block at 50) rests as a dead block:
+    // no keep-alive is sent while it rests; after its rest they resume.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .count = 2, .group = SLOW},
+                                  {.first = 50, .group = SLOW}},
+                       .keepalive_ns = 2 * SECOND}},
+                     ReadRules{.max_units = 4});
+    SimBus bus = mapped_bus();
+    const TestProtocol protocol;
+    Loop loop(channel, protocol, bus, 0, EXCHANGE);
+    const ReadPlan& plan = channel.devices[0].plan;
+    ASSERT_TRUE(plan.keepalive.has_value());
+    const std::uint32_t keepalive = plan.keepalive.value_or(0);
+    ASSERT_EQ(plan.requests[keepalive].first, 50U);
+    loop.scheduler().rest(0, keepalive, true);
+    loop.run_until(9 * SECOND);
+    EXPECT_TRUE(keepalives_of(loop).first.empty());
+    loop.scheduler().rest(0, keepalive, false);
+    loop.run_until(13 * SECOND);  // the poll at 10 s, a keep-alive 2 s on
+    EXPECT_FALSE(keepalives_of(loop).first.empty());
+}
+
 TEST(Scheduling, AnIdleDeviceGetsAKeepAliveOutsideEverySideEffect) {
     // A slow group (10 s) and a keep-alive of 2 s: between polls the device
     // gets keep-alives, which never read the side-effect range at 0.
@@ -1191,6 +1231,40 @@ TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
     EXPECT_EQ(reads_at(scheduler, plan,
                        {2 * MILLISECOND, 3 * MILLISECOND, 4 * MILLISECOND}),
               (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
+}
+
+TEST(Scheduling, NoFailingDeviceIsStarvedWhateverItsTimeOut) {
+    // K3: a saturated 100 ms group with one answering device (90 ms each)
+    // and two failing ones, time-outs 50 ms and 3 s, for one hour. The hold
+    // of failing polls ends for the whole channel, and the oldest-due
+    // failing poll goes first: both failing devices keep being polled.
+    CompiledChannel channel =
+        make_channel({{.name = "live", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "fast", .unit_id = 2, .points = adjacent(0, 1)},
+                      {.name = "slow", .unit_id = 3, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    channel.poll_groups[0].period_ns = 100 * MILLISECOND;
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_failing(1, true, true, 50 * MILLISECOND);
+    scheduler.set_failing(2, true, true, 3 * SECOND);
+    const std::array<std::int64_t, 3> cost{90 * MILLISECOND, 50 * MILLISECOND,
+                                           3 * SECOND};
+    std::array<std::size_t, 3> polls{};
+    std::int64_t now = 0;
+    while (now < 3600 * SECOND) {
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::POLL) {
+            ++polls.at(choice.device);
+            now += cost.at(choice.device);
+        } else if (choice.kind == Choice::Kind::WAIT) {
+            now = std::max(now + 1, choice.wake_ns);
+        } else {
+            now += MILLISECOND;
+        }
+    }
+    EXPECT_GT(polls[0], 20'000U);
+    EXPECT_GT(polls[1], 100U);
+    EXPECT_GT(polls[2], 100U);
 }
 
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
