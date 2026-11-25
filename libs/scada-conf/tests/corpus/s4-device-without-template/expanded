@@ -1,0 +1,7 @@
+# B2 of the review of #146: a device without a template has empty steps 1
+# to 3, and steps 4 to 8 apply to its points: spare's `when` is false, so it
+# does not exist; the defaults reach level (poll_group, the address keys,
+# invalid_values of its raw type uint16); the override gives its unit.
+# Invented.
+ps1.d1: {unit_id: 1}
+ps1.d1.level: {poll_group: fast, address: {table: holding, type: uint16, register: 1}, invalid_values: [65535], unit: m}

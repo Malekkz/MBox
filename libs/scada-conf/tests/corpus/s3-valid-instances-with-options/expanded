@@ -1,0 +1,10 @@
+# Expanded devices and points (contract 14, test 6; S6 of the delta review
+# of #146): 2 devices and 5 points, as the reviewer's reference expander
+# gives them. Invented.
+ps1.drive1: {bit_order: lsb0, unit_id: 1}
+ps1.drive1.speed: {address: {table: holding, register: 10, type: int16}, scale: {gain: 0.11}}
+ps1.drive1.meter.power: {address: {table: holding, register: 300, type: int32}}
+ps1.drive2: {bit_order: lsb0, unit_id: 2}
+ps1.drive2.speed: {address: {table: holding, register: 10, type: int16}, scale: {divide_by: 10}, max_age: 2s}
+ps1.drive2.meter.power: {address: {table: holding, register: 300, type: int32, word_order: little}}
+ps1.drive2.brake.state: {address: {table: holding, register: 310, type: uint16}, bits: {0: {name: brake.on}, 3: brake.fault}, tag: false}

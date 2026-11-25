@@ -1,0 +1,17 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - name: ps1.d1
+    unit_id: 1
+    defaults:
+      poll_group: fast
+      address: { table: holding, type: uint16 }
+      invalid_values: { uint16: [65535], int16: [32768] }
+    overrides:
+      level: { unit: m }
+    points:
+      - { name: level, address: { register: 1 } }
+      - { name: spare, when: "false", address: { register: 2 } }

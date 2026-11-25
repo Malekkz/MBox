@@ -1,0 +1,5 @@
+# Inside step 4 (4.5), `when` is decided first, then the instance's
+# `disable`: aux is gone (has_aux false) before p1's `disable` names it, so
+# the entry matches no point (CF-413). With `disable` first the tree would
+# be valid. S6 of the delta review of #146. Invented.
+drivers/modbus/line1.yaml:7:61: CF-413

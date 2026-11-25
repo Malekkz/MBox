@@ -1,0 +1,9 @@
+# Expanded devices and points (contract 14, test 6; S6 of the delta review
+# of #146): 1 device and 5 points, as the reviewer's reference expander
+# gives them. Invented.
+ps1.meter1: {bit_order: lsb0, unit_id: 0}
+ps1.meter1.voltage: {address: {table: holding, register: 10, type: float32, word_order: little}, unit: V, range: [0, 500], invalid_values: [{raw: nan, action: keep_last}, 0x7F800000], max_age: 10s, quality_from: [{point: status, field: [0, 3], map: {0: good, 5: [bad, TEST], default: uncertain}}]}
+ps1.meter1.current: {address: {table: holding, register: 12, type: int16}, exponent_from: {point: current_exp, direction: multiply}, unit: A}
+ps1.meter1.current_exp: {address: {table: holding, register: 13, type: int16}, tag: false}
+ps1.meter1.energy: {value_type: uint64, address: {table: holding, register: 20, type: uint64}, kind: counter, counter: {limit: 0xFFFFFFFFFFFFFFFF, at_limit: wrap, on_decrease: hold}, unit: Wh}
+ps1.meter1.status: {address: {table: holding, register: 30, type: uint16}, tag: false}

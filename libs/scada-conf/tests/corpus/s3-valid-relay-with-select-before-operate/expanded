@@ -1,0 +1,7 @@
+# Expanded devices and points (contract 14, test 6; S6 of the delta review
+# of #146): 1 device and 3 points, as the reviewer's reference expander
+# gives them. Invented.
+ps1.relay1: {bit_order: lsb0, unit_id: 1, timeout: 500ms}
+ps1.relay1.cb_pos: {kind: double_point, address: {on: {table: holding, register: 60, bit: 4}, off: {table: holding, register: 60, bit: 5}, fault: {table: holding, register: 60, bit: 6}}, poll_group: fast}
+ps1.relay1.cb_ctrl: {kind: double_point, access: wo, storage: volatile, address: {table: holding, register: 500, write: {on: {table: holding, register: 501, value: 0xFF00}, off: {table: holding, register: 502, value: 0xFF00}}}}
+ps1.relay1.earth_open: {address: {table: discrete, register: 20}, poll_group: fast}

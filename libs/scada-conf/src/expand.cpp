@@ -71,6 +71,8 @@ constexpr std::size_t MAX_REPEAT_WORK = MAX_TREE_NODES;
 // `limits.max_tags` without a value (4.1 of the system file).
 constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
+// The other instances a merged error names (S7 of the delta review).
+constexpr std::size_t NAMED_INSTANCES = 10;
 // Most bytes of a tag name (2.1, #119).
 constexpr std::size_t MAX_TAG_NAME_BYTES = 127;
 
@@ -484,7 +486,8 @@ private:
             const auto [group, added] = causes_.try_emplace(
                 std::move(cause), Cause{.first = pending_.size(),
                                         .more = 0,
-                                        .last = diagnostic.location});
+                                        .last = diagnostic.location,
+                                        .names = {}});
             if (!added) {
                 // Counted once per instance: points of one instance that
                 // meet the cause are one.
@@ -495,6 +498,9 @@ private:
                     place.column != seen.last.column) {
                     ++seen.more;
                     seen.last = place;
+                    if (seen.names.size() < NAMED_INSTANCES) {
+                        seen.names.push_back(device_name_);
+                    }
                 }
                 return;
             }
@@ -504,12 +510,21 @@ private:
 
     // Gives the buffered diagnostics, in the order they arose.
     void flush_diagnostics() {
+        // The others by name, the first 10 (S7 of the delta review of
+        // #146); the note's values are those of the instance the error is
+        // at.
         for (const auto& [cause, group] : causes_) {
-            if (group.more > 0) {
-                pending_[group.first].message +=
-                    " (and " + std::to_string(group.more) +
-                    (group.more == 1 ? " more instance)" : " more instances)");
+            if (group.more == 0) {
+                continue;
             }
+            std::string others = " (and " + std::to_string(group.more) +
+                                 (group.more == 1 ? " more instance: "
+                                                  : " more instances: ");
+            for (std::size_t i = 0; i < group.names.size(); ++i) {
+                others += (i == 0 ? "" : ", ") + group.names[i];
+            }
+            others += group.more > group.names.size() ? ", ...)" : ")";
+            pending_[group.first].message += others;
         }
         for (Diagnostic& diagnostic : pending_) {
             diagnostics_->add(std::move(diagnostic));
@@ -2387,6 +2402,7 @@ private:
         std::size_t first = 0;  // in `pending_`
         std::size_t more = 0;   // other instances
         Location last;          // the instance it was last met at
+        std::vector<std::string> names;  // of the first other instances
     };
     std::map<std::string, Cause> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;

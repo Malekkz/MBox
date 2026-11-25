@@ -1166,7 +1166,29 @@ TEST(Expand, ATemplatesFaultOnceAndOneCauseOnce) {
                  "\"100 DIV k\", type: uint16 } }\n"},
                 {"drivers/modbus/line1.yaml", channel(devices)}}),
         (Lines{"drivers/modbus/line1.yaml:7:13: error CF-410: expression \"100 "
-               "DIV k\": division by zero (and 3 more instances)\n  from "
+               "DIV k\": division by zero (and 3 more instances: ps1.m2, "
+               "ps1.m3, ps1.m4)\n  from "
+               "template templates/meter_a.yaml:5:58 (point p; k = 0)"}));
+    // Past 10 others, the first 10 are named (S7 of the delta review).
+    constexpr int MANY = 12;
+    devices.clear();
+    for (int unit = 1; unit <= MANY; ++unit) {
+        devices += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   ", params: { k: 0 } }\n";
+    }
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { k: { type: int, default: 1 } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: "
+                 "\"100 DIV k\", type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml", channel(devices)}}),
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-410: expression \"100 "
+               "DIV k\": division by zero (and 11 more instances: ps1.m2, "
+               "ps1.m3, ps1.m4, ps1.m5, ps1.m6, ps1.m7, ps1.m8, ps1.m9, "
+               "ps1.m10, ps1.m11, ...)\n  from "
                "template templates/meter_a.yaml:5:58 (point p; k = 0)"}));
 }
 

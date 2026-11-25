@@ -1,0 +1,7 @@
+template: pump_a
+protocol: modbus
+params:
+  has_aux: { type: bool, default: false }
+points:
+  - { name: state, address: { table: holding, register: 10, type: uint16 } }
+  - { name: aux, when: has_aux, address: { table: holding, register: 14, type: uint16 } }

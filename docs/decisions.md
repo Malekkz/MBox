@@ -2194,7 +2194,7 @@ Decision:
 - **Where an error is (1.4).**
   - An error whose site is in the instance's own file is there.
   - One whose site is in a template is at the instance's `name` key, with a note `from template <file>:<line>:<column> (<detail>)`. The detail names the point, the parameter or `identify`; for CF-410 it adds each name the expression used with its value, as `(point s3; n = 3)` (S2 of the review of #146).
-  - The same diagnostic is reported once. One cause in a template met by several instances (one code, one template position, one message) is one error, at the first instance, with ` (and N more instances)` after its message (the ruling O-6).
+  - The same diagnostic is reported once. One cause in a template met by several instances (one code, one template position, one message) is one error, at the first instance, with ` (and N more instances: <names>)` after its message, naming the first 10 others (the ruling O-6; S7 of the delta review). The note's detail gives the values of the instance the error is at. Points of one instance that meet the cause count that instance once.
 - **A template's own faults (O-6)** are found once, at the template, before any instance and whether or not an instance uses it:
   - its chain: a cycle (CF-401 at the `extends` that closes it, for each template of the cycle), more than 4 parents (CF-401 at its own `extends`), a base and a protocol template mixed (CF-421);
   - its parameters along the chain: a changed type (CF-415), a declaration that no level types (CF-202, `parameter "<name>" needs type`);

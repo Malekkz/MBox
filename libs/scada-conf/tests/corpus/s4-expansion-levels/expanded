@@ -8,8 +8,9 @@
 # - exclusive groups of `address`: pump_b's `field` removes pump_a's `bit`,
 #   and its `parts` removes `register`;
 # - a template's `only` (3.4) removes spare at pump_a's level;
-# - inside step 4, `when` first: aux (has_aux false) is gone before p1's
-#   `disable` removes speed; p2 has has_aux true and its `only` keeps aux.
+# - `when` removes aux of p1 (has_aux false); p1's `disable` removes speed;
+#   p2 has has_aux true and its `only` keeps state and aux. (The order
+#   inside step 4 is pinned by s4-step-four-when-first.)
 ps1.p1: {enums: {states: {2: tripped}}, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 1}
 ps1.p1.state: {poll_group: fast, max_age: 30s, enum: states, address: {table: holding, register: 10, type: uint16}}
 ps1.p1.fault: {poll_group: fast, max_age: 30s, address: {table: holding, register: 12, type: uint16, field: [0, 3]}}

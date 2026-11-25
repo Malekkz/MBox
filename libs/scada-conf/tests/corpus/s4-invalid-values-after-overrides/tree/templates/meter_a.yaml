@@ -1,0 +1,8 @@
+template: meter_a
+protocol: modbus
+defaults:
+  invalid_values: { uint16: [65535], int16: [32768], float32: [nan] }
+points:
+  - { name: p, address: { table: holding, register: 1, type: uint16 } }
+  - { name: q, address: { table: holding, register: 2, type: uint16 } }
+  - { name: r, address: { table: holding, register: 4, type: uint16 } }

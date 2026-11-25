@@ -1,0 +1,7 @@
+# B5 of the review of #146: `invalid_values` of `defaults`, a map by raw
+# type, is picked after the overrides, which change p to int16 and q to
+# float32; r keeps uint16. Invented.
+ps1.m1: {unit_id: 1}
+ps1.m1.p: {invalid_values: [32768], address: {table: holding, register: 1, type: int16}}
+ps1.m1.q: {invalid_values: [nan], address: {table: holding, register: 2, type: float32}}
+ps1.m1.r: {invalid_values: [65535], address: {table: holding, register: 4, type: uint16}}

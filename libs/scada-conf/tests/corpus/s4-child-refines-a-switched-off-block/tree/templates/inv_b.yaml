@@ -1,0 +1,5 @@
+template: inv_b
+extends: inv_core
+protocol: modbus
+points:
+  - { name: pv1.voltage, address: { register: 300 } }
