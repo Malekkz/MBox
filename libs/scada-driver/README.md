@@ -84,9 +84,11 @@ the contracts left open.
   waits, its time-out ended before the next due poll if the window is at
   least 100 ms; one such probe per due time, and its time-out is no
   failure. Else, and after it, the probe waits up to 10 time-outs and then
-  goes with its whole time-out (1 s at most), holding one poll, also on a
-  line where a request is always due, where it takes one turn as a due
-  poll (D-138).
+  goes with its whole time-out (1 s at most) ahead of due polls, the oldest
+  first, at most one such probe per channel in 11 probe time-outs: a
+  returned unit is found also on a line where a request is always due, and
+  once the dead are demoted a live unit waits at most its period and one
+  probe time-out (2.03 s on the 250-unit line; D-138).
 - **Dead values go bad on time.** A poll's points are COMM_FAIL at the
   latest one period (or its retries' time-outs, if longer) after its first
   time-out, however long its retries wait for their turn (D-140).
