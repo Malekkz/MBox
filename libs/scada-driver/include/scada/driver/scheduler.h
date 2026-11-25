@@ -216,12 +216,12 @@ public:
 
     // `device` is not known to answer: it has not answered since the
     // connect, or its unit has a failure count (7.4); `timeout_ns` is what
-    // one of its requests may cost. Within a priority, the polls of devices
-    // whose last request was answered go before the polls and retries of the
-    // others, so that dead devices take the line when the live ones leave
-    // it. The hold ends for the whole channel FAILING_SPACING time-outs of
-    // the last failing poll or probe after it was sent; then the failing
-    // polls go by due time, the oldest first: dead devices take about a
+    // one of its requests may cost. The polls of devices whose last request
+    // was answered go before the polls and retries of the others, whatever
+    // their priorities, so that dead devices take the line when the live
+    // ones leave it (L1). The hold ends for the whole channel FAILING_SPACING
+    // time-outs of the last failing poll or probe after it was sent; then the
+    // failing polls go by due time, the oldest first: dead devices take about a
     // quarter of a busy line, none is starved, and their points still go
     // bad (review G5, K3; D-138).
     // `failed`: its unit has a failure count; only such a device, or one

@@ -71,15 +71,18 @@ the contracts left open.
 - **A list of writes holds its unit.** A list (8.5) is an exclusive
   sequence: 5 writes at a 10 s write interval hold the unit and the devices
   that share it for 40 s, with no poll and no keep-alive (D-136).
-- **Live devices go first; the dead get the rest.** Within a priority,
-  devices that answer are polled before failing ones and, once one has
-  failed, ones not yet answered. The hold ends for the channel 4 time-outs
+- **Live devices go first; the dead get the rest.** Whatever the poll
+  groups' priorities, devices that answer are polled before failing ones
+  and, once one has failed, ones not yet answered; the failing ones go by
+  due time, the oldest first. The hold ends for the channel 4 time-outs
   of the last failing request after it was sent, and then the oldest
   failing poll goes; until then a failing poll uses a gap only if it is
   longer than its time-out. With the default keys, 250 units at
   38,400 bit/s with 50 dead keep a worst live gap of 2.0 s (1 s group);
   the dead are COMM_FAIL within 77 s and all demoted after 1,674 s (D-138;
-  `ctest --preset perf`).
+  `ctest --preset perf`). A device's state tag can thus show RUNNING for
+  minutes after its points are COMM_FAIL: refuse a write on the points'
+  COMM_FAIL, not on DEMOTED.
 - **Probes use the windows between polls.** A probe goes when no request
   waits, its time-out ended before the next due poll if the window is at
   least 100 ms; one such probe per due time, and its time-out is no

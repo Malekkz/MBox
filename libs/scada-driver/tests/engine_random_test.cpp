@@ -106,11 +106,10 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
         std::uint32_t block = 0;
         if (pick(random, 0, 2) == 0) {
             block = static_cast<std::uint32_t>(points.size());
-            points.push_back(
-                {.first = BLOCK_REGISTER,
-                 .group = (group + static_cast<std::uint32_t>(
-                                       pick(random, 1, 2))) %
-                          3});
+            points.push_back({.first = BLOCK_REGISTER,
+                              .group = (group + static_cast<std::uint32_t>(
+                                                    pick(random, 1, 2))) %
+                                       3});
         }
         out.block.push_back(block);
         specs.push_back({.name = "d" + std::to_string(unit),
@@ -309,8 +308,7 @@ std::vector<std::string> check(const Harness& run,
                           std::to_string(now_ns / MILLISECOND));
         }
         if (state.mode == Mode::BLOCK_SILENT &&
-            good_past_bound(run, device, block, state.first_block_ns,
-                            now_ns)) {
+            good_past_bound(run, device, block, state.first_block_ns, now_ns)) {
             out.push_back("unit " + std::to_string(unit) +
                           " block silent and GOOD at " +
                           std::to_string(now_ns / MILLISECOND));
@@ -375,7 +373,7 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     std::vector<std::string> violations;
     std::size_t steps = 0;
     std::size_t next_event = 0;
-    std::size_t seen = 0;  // requests of the bus's log looked at
+    std::size_t seen = 0;     // requests of the bus's log looked at
     std::size_t busiest = 0;  // the most steps in one sample
     // Per unit: the last request for its value (invariant 6).
     std::vector<std::int64_t> last_value(run.scenario.units + 1U, 0);
@@ -396,8 +394,8 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
         if (taken > SPIN_STEPS) {
             // An engine that wakes without sending: a spin (invariant 5).
             violations.push_back("spin at " +
-                                 std::to_string(now / MILLISECOND) + " ms: " +
-                                 std::to_string(taken) + " steps");
+                                 std::to_string(now / MILLISECOND) +
+                                 " ms: " + std::to_string(taken) + " steps");
             break;
         }
         const std::vector<LoggedRequest>& log = run.bus.log();
@@ -430,19 +428,6 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
         }
         for (std::string& violation : check(run, units, now)) {
             violations.push_back(std::move(violation));
-        }
-    }
-    if (seed == 2) {
-        const CompiledChannel& c = run.scenario.channel;
-        std::printf("DBG transport %d rate %u\n", static_cast<int>(c.transport), c.line.bit_rate);
-        for (std::size_t d = 0; d < c.devices.size(); ++d) {
-            std::printf("DBG dev %zu chain %d block %u group %u to %lld retries %u demote %u bo %lld bomax %lld lat %lld\n", d, static_cast<int>(run.scenario.chained[d]), run.scenario.block[d], c.devices[d].points[0].poll_group.value_or(9), static_cast<long long>(c.devices[d].failure.timeout_ns/1000000), c.devices[d].failure.retries, c.devices[d].failure.demote_after, static_cast<long long>(c.devices[d].failure.backoff_ns/1000000), static_cast<long long>(c.devices[d].failure.backoff_max_ns/1000000), static_cast<long long>(run.scenario.latency_ns[d]/1000000));
-        }
-        for (const auto& e : run.scenario.events) {
-            if (e.time_ns > 0 && e.time_ns < 105 * SECOND) std::printf("DBG ev %lld unit %u mode %d\n", static_cast<long long>(e.time_ns/1000000), e.unit, static_cast<int>(e.mode));
-        }
-        for (const auto& r : run.bus.log()) {
-            if (r.time_ns > 70 * SECOND && r.time_ns < 92 * SECOND) std::printf("DBG rq %lld u%u r%u\n", static_cast<long long>(r.time_ns/1000000), r.unit_id, r.first);
         }
     }
     for (std::string& violation : check_asked(run, END)) {

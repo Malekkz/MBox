@@ -170,13 +170,6 @@ private:
         // A part of the chain was busy: the rest of the chain is read, and
         // nothing of it published (P9).
         bool chain_cut = false;
-        // A part of the chain in progress failed; and so did one of the
-        // last chain that ended. The device is then failing for the
-        // scheduler until a chain of it is read whole, although its other
-        // blocks answer: a chain with a dead part waits behind the others
-        // between its cycles (review L2).
-        bool chain_part_failed = false;
-        bool chain_failing = false;
     };
 
     // The exchange and the connection: not real-time, since they reach the

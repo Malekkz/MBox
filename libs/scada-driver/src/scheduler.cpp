@@ -657,8 +657,8 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                  candidates);
     }
     const PollPick& live = candidates.live;
-    if (candidates.has_live && !chain_open(live) &&
-        candidates.has_failing && now_ns >= failing_release_ns_ &&
+    if (candidates.has_live && !chain_open(live) && candidates.has_failing &&
+        now_ns >= failing_release_ns_ &&
         candidates.failing_key.first <= std::get<2>(candidates.live_key)) {
         // The hold has ended: the oldest failing poll takes this turn if it
         // is due no later than the live one, whatever their priorities: at
@@ -666,14 +666,6 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
         return take_failing(candidates.failing, now_ns, out);
     }
     if (candidates.has_live) {
-        if (live.retry || suspect(live.device, false)) {
-            // A part of a chain of a failing device, or its retry: it goes
-            // at once, the chain being read to its end, but it holds the
-            // others as any failing poll does, so that a chain with a dead
-            // part leaves the other devices and groups their turn between
-            // its cycles (L2).
-            hold_failing(now_ns, devices_[live.device].failing_timeout_ns);
-        }
         out = live.retry ? take_retry(live.device, now_ns)
                          : take_poll(live.device, live.group, now_ns);
         return true;
@@ -934,13 +926,17 @@ bool Scheduler::choose_overdue_probe(std::int64_t now_ns,
             allowed_from(device, false) > now_ns) {
             continue;
         }
-        // Past its floor, when the hold of failing polls ends, and unless
-        // a held-back failing poll is older: probes and failing polls take
-        // the turns by age, so that neither starves the other (J3, K3).
+        // Past its floor, when the hold of failing polls ends or in a gap
+        // of the live polls longer than its time-out, as a failing poll
+        // goes (K3), and unless a held-back failing poll is older: probes
+        // and failing polls take the turns by age, so that neither starves
+        // the other (J3, K3, L1).
         const std::int64_t floor =
             later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
-        if (now_ns < floor || now_ns < failing_release_ns_ ||
-            oldest_failing_due_ns() < floor) {
+        const bool held =
+            now_ns < failing_release_ns_ &&
+            next_live_poll_due_ns(now_ns) < later(now_ns, run.probe_timeout_ns);
+        if (now_ns < floor || held || oldest_failing_due_ns() < floor) {
             continue;
         }
         if (take_probe(device, now_ns, run.probe_timeout_ns, false, out)) {

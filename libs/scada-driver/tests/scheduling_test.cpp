@@ -1310,6 +1310,43 @@ TEST(Scheduling, AFailingFastGroupLeavesTheSlowerGroupsTheirTurn) {
     EXPECT_LT(steps, 2'000U);
 }
 
+TEST(Scheduling, AnOverdueProbeTakesAGapAsAFailingPollDoes) {
+    // Found by the random test: "dead" fails in the 200 ms group (time-out
+    // 300 ms, so a request of it is always due) and takes every gap of the
+    // live 1 s group, so the hold never ends; "demoted" waits for a probe (100
+    // ms). The probe, past its floor, uses a gap longer than its time-out as
+    // the failing poll does, and the two take the turns by age (J3, K3).
+    // Before, the probe waited for the hold to end, and never went.
+    const CompiledChannel channel = make_channel(
+        {{.name = "dead", .unit_id = 1, .points = adjacent(0, 1, FAST)},
+         {.name = "demoted", .unit_id = 2, .points = adjacent(0, 1, NORMAL)},
+         {.name = "live", .unit_id = 3, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_failing(0, true, true, 300 * MILLISECOND);
+    scheduler.set_polled(1, false);
+    scheduler.set_probe(1, 0, 100 * MILLISECOND);
+    std::size_t probes = 0;
+    std::size_t dead = 0;
+    std::int64_t now = 0;
+    for (std::size_t step = 0; step < 10'000 && now < 30 * SECOND; ++step) {
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::PROBE) {
+            ++probes;
+            now += 100 * MILLISECOND;  // unanswered
+            scheduler.probe_done();
+            scheduler.set_probe(1, now + SECOND, 100 * MILLISECOND);
+        } else if (choice.kind == Choice::Kind::POLL) {
+            dead += choice.device == 0 ? 1U : 0U;
+            now += choice.device == 0 ? 300 * MILLISECOND : 10 * MILLISECOND;
+        } else {
+            now = std::max(now + MILLISECOND, choice.wake_ns);
+        }
+    }
+    EXPECT_GE(probes, 10U);
+    EXPECT_GT(dead, 20U);
+}
+
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
     // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
     const CompiledChannel channel =
