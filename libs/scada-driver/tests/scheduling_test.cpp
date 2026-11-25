@@ -1234,28 +1234,10 @@ TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
               (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
 }
 
-TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
-    // J3, the lead's ruling N1: 20 demoted devices whose probes are past
-    // their floor (time-out 100 ms), and a live device whose 200 ms polls
-    // fill the line, so a request is always due and no window opens. The
-    // oldest probe past its floor goes ahead of the due polls, at most one
-    // in PROBE_FLOOR + 1 probe time-outs: about 60 s / 1.1 s = 54 probes,
-    // and the live device waits at most its period and one probe time-out.
-    std::vector<DeviceSpec> specs{
-        {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
-        {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
-    for (std::uint8_t unit = 3; unit <= 22; ++unit) {
-        specs.push_back({.name = "p" + std::to_string(unit),
-                         .unit_id = unit,
-                         .points = adjacent(0, 1, SLOW)});
-    }
-    const CompiledChannel channel =
-        make_channel(specs, ReadRules{.max_units = LARGE});
-    Scheduler scheduler(channel, 4, 0);
-    for (std::uint32_t device = 2; device < 22; ++device) {
-        scheduler.set_polled(device, false);
-        scheduler.set_probe(device, 0, 100 * MILLISECOND);
-    }
+// Runs `scheduler` for 60 s: device 0's polls take its whole 200 ms period,
+// every probe goes unanswered in 100 ms and is due again at once. Returns
+// device 0's longest gap and the probes sent.
+std::pair<std::int64_t, std::size_t> run_floor_probes(Scheduler& scheduler) {
     std::int64_t last_live = 0;
     std::int64_t worst = 0;
     std::size_t probes = 0;
@@ -1279,6 +1261,32 @@ TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
             now = std::max(now + MILLISECOND, choice.wake_ns);
         }
     }
+    return {worst, probes};
+}
+
+TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
+    // J3, the lead's ruling N1: 20 demoted devices whose probes are past
+    // their floor (time-out 100 ms), and a live device whose 200 ms polls
+    // fill the line, so a request is always due and no window opens. The
+    // oldest probe past its floor goes ahead of the due polls, at most one
+    // in PROBE_FLOOR + 1 probe time-outs: about 60 s / 1.1 s = 54 probes,
+    // and the live device waits at most its period and one probe time-out.
+    std::vector<DeviceSpec> specs{
+        {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
+        {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
+    for (std::uint8_t unit = 3; unit <= 22; ++unit) {
+        specs.push_back({.name = "p" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, SLOW)});
+    }
+    const CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    for (std::uint32_t device = 2; device < 22; ++device) {
+        scheduler.set_polled(device, false);
+        scheduler.set_probe(device, 0, 100 * MILLISECOND);
+    }
+    const auto [worst, probes] = run_floor_probes(scheduler);
     EXPECT_LE(worst, FAST_PERIOD + 100 * MILLISECOND);
     EXPECT_GE(probes, 50U);
     EXPECT_LE(probes, 55U);
