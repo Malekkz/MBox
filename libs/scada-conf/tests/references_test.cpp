@@ -901,6 +901,20 @@ TEST(References, AlarmListsOfAFile) {
                "exist"}));
 }
 
+// A name the chain upward does not have is not typed in the template, not
+// even as a variable: `flag` may be a BOOL parameter of a child (B5).
+TEST(References, AnUnknownNameIsNoVariable) {
+    EXPECT_EQ(
+        validate({{"templates/meter_a.yaml",
+                   "template: meter_a\nprotocol: modbus\n"
+                   "repeat:\n"
+                   "  - for: { n: \"1..2\" }\n"
+                   "    points:\n"
+                   "      - { name: \"p{n}\", when: flag, address: { table: "
+                   "holding, register: \"n\", type: uint16 } }\n"}}),
+        Lines{});
+}
+
 // 8: one INT is a `for` value (5.6), as a range is.
 TEST(References, OneIntIsAForValue) {
     EXPECT_EQ(

@@ -34,8 +34,9 @@ constexpr std::string_view SYSTEM =
     "time: { timezone: Etc/UTC, sync: { mode: none } }\n";
 
 // Validates and expands the tree of `files` with a system.yaml: its errors
-// in the form of contract 1.4 (with their notes), or its expanded points.
-Lines expand(const Files& files) {
+// in the form of contract 1.4 (with their notes), or its expanded points,
+// with each device's keys first when `with_devices`.
+Lines expand(const Files& files, bool with_devices = false) {
     std::optional<test::TempDirectory> temp =
         test::TempDirectory::create("scada-conf-expand-");
     EXPECT_TRUE(temp.has_value());
@@ -67,7 +68,7 @@ Lines expand(const Files& files) {
     if (!result.expanded) {
         return {"no expanded tree"};
     }
-    return points_of(*result.expanded);
+    return points_of(*result.expanded, with_devices);
 }
 
 // A Modbus RTU channel holding the devices given.
@@ -667,6 +668,65 @@ TEST(Expand, NamesAndTypesAtTheInstance) {
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
                      "\"inputs + 1\": the value must be BOOL, not INT\n"
                      "  from template templates/meter_a.yaml:5:22"}));
+}
+
+// Every expression of a point's keys is a number (2.4), at the instance
+// as stage 5 types a template's (D-113): an override or an instance's own
+// point that gives a BOOL is CF-410, not a register `true`.
+TEST(Expand, ThePointsExpressionsAreNumbers) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { base: { type: int, default: 4 } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: 1, "
+                 "type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    overrides: { p: { address: { register: "
+                            "\"base > 2\" } } }\n"
+                            "    points:\n"
+                            "      - { name: q, address: { table: holding, "
+                            "register: \"1 > 2\", type: uint16 } }\n")}}),
+        (Lines{"drivers/modbus/line1.yaml:10:50: error CF-410: expression "
+               "\"base > 2\": the value must be a number, not BOOL",
+               "drivers/modbus/line1.yaml:12:60: error CF-410: expression "
+               "\"1 > 2\": the value must be a number, not BOOL"}));
+}
+
+// The identity checks (4.8) are evaluated with the parameters, the
+// template's and the instance's appended to them, and typed as numbers.
+TEST(Expand, TheIdentityChecksAreEvaluated) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\n"
+        "params: { base: { type: int, default: 4 } }\n"
+        "identify:\n"
+        "  - { address: { table: holding, register: \"base + 1\", type: "
+        "uint16 }, equals: 7 }\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: 1, type: "
+        "uint16 } }\n";
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml", meter},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    params: { base: 10 }\n"
+                            "    identify:\n"
+                            "      - { address: { table: holding, register: "
+                            "\"base * 2\", type: uint16 }, range: [1, "
+                            "\"base\"] }\n")}},
+               true),
+        (Lines{"ps1.m1: {identify: [{address: {table: holding, register: 11, "
+               "type: uint16}, equals: 7}, {address: {table: holding, "
+               "register: 20, type: uint16}, range: [1, 10]}], unit_id: 1}",
+               "ps1.m1.p: {address: {table: holding, register: 1, type: "
+               "uint16}}"}));
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml", meter},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    identify:\n"
+                            "      - { address: { table: holding, register: "
+                            "\"1 > 2\", type: uint16 }, equals: 7 }\n")}}),
+        Lines{"drivers/modbus/line1.yaml:11:51: error CF-410: expression "
+              "\"1 > 2\": the value must be a number, not BOOL"});
 }
 
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a

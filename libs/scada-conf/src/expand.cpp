@@ -1296,6 +1296,11 @@ private:
     // Steps 7 and 8, and the checks of the expanded instance.
     void finish_points(const Value& instance, Device& device) {
         const std::string template_name = template_of(instance);
+        // The identity checks' expressions (4.8, 2.4) have the parameters
+        // and no variable.
+        if (Value* identify = device.keys.find("identify")) {
+            evaluate_below(*identify, {});
+        }
         if (device.points.size() > MAX_POINTS) {
             error(CF_TOO_MANY_POINTS, *instance.find("name"),
                   "template " + quote_text(template_name) + " expands to " +
@@ -1389,8 +1394,8 @@ private:
                     value.scalar_type() != ScalarType::EXPRESSION) {
                     return;
                 }
-                std::optional<ConfigValue> result =
-                    evaluate(value, variables, ExpressionKind::CONFIGURATION);
+                std::optional<ConfigValue> result = evaluate(
+                    value, variables, ExpressionKind::CONFIGURATION, true);
                 if (!result) {
                     return;
                 }
@@ -1454,10 +1459,13 @@ private:
         return value->integer != 0;
     }
 
+    // `wants_number`: the value must be an INT or a REAL, as every expression
+    // of a point's keys and of `identify` is a number (2.4; stage 5 types a
+    // template's the same way, D-113).
     std::optional<ConfigValue> evaluate(
         const Value& value,
         const std::map<std::string, std::int64_t, std::less<>>& variables,
-        ExpressionKind kind) {
+        ExpressionKind kind, bool wants_number = false) {
         ExpressionError syntax;
         const std::string text(value.scalar_text());
         const std::optional<Expression> tree =
@@ -1502,6 +1510,19 @@ private:
             }
             error_in(CF_EVALUATION, *value.file, std::move(site.location),
                      "expression " + quote_text(text) + ": " + reason);
+        } else if (wants_number && result->type != ValueType::INT &&
+                   result->type != ValueType::REAL) {
+            ExpressionSite site =
+                expression_site(*value.file->document, value.node,
+                                tree->nodes.at(tree->root).column);
+            std::string reason = "the value must be a number, not " +
+                                 std::string(value_type_name(result->type));
+            if (!value.file->document->verbatim(value.node)) {
+                reason += site.where;
+            }
+            error_in(CF_EVALUATION, *value.file, std::move(site.location),
+                     "expression " + quote_text(text) + ": " + reason);
+            return std::nullopt;
         }
         return result;
     }

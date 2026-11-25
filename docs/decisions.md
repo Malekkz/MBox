@@ -2202,6 +2202,8 @@ Decision:
   - Its types are checked first, with the type checker of stage 5 (D-113).
   - Every failure is CF-410, in the contract's form `expression {expr}: {reason}` (2.4, 10.4; B6), at the offending character (D-109). This covers a type error, a `when` that gives no BOOL, and a name that is neither a parameter nor a variable bound to this point (`... is not a parameter and no variable bound to this point`).
   - CF-523 stays only for a `for` value that gives no range or INT (5.6).
+  - Every expression of a point's keys and of `identify` is a number (2.4), as stage 5 types a template's (D-113). A value that is not an INT or a REAL is CF-410 `expression {expr}: the value must be a number, not {type}`, so an override never writes `register: true`.
+  - `identify` of the device, the template's with the instance's appended, is evaluated with the parameters and no variable.
   - `when` of a `repeat` block is evaluated for each value, or pair of values, with its variables.
   - A `repeat` variable hides a parameter of the same name in the expressions it reaches; the contract does not say which wins. The expander and stage 5 both look up the variables first.
   - Alarms hold run-time expressions and are not evaluated here, wherever they stand: on a point or on a bit (B2 of the review of #144).
