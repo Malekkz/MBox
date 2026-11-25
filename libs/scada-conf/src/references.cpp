@@ -942,7 +942,12 @@ private:
                              const Variables& variables) {
         switch (document_->kind(node)) {
             case NodeKind::SCALAR:
-                if (file_->types->of(node) == ScalarType::EXPRESSION) {
+                // An integer key's expression is typed as a number here: a
+                // `number` parameter is an INT or a REAL by what the
+                // instance writes (O-9 on #146); the expander checks INT.
+                if (const ScalarType type = file_->types->of(node);
+                    type == ScalarType::EXPRESSION ||
+                    type == ScalarType::INTEGER_EXPRESSION) {
                     check_typed(node, scope, variables,
                                 ExpressionKind::CONFIGURATION, Wanted::NUMBER);
                 }

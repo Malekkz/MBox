@@ -1952,8 +1952,21 @@ private:
                                                         const std::string& key,
                                                         Outcome& out) {
         const NodeView value = node(scalar);
+        const bool integer_only = !rules.scalar_kinds.empty() &&
+                                  listed_text(rules.scalar_kinds, "integer") &&
+                                  !listed_text(rules.scalar_kinds, "number");
+        // An expression of an integer key must give an INT, which the
+        // expander checks on its value.
+        const auto expression = [&]() -> std::optional<ScalarType> {
+            const std::optional<ScalarType> typed =
+                type_expression(scalar, ExpressionKind::CONFIGURATION, out);
+            if (typed && integer_only) {
+                return ScalarType::INTEGER_EXPRESSION;
+            }
+            return typed;
+        };
         if (value.style != ScalarStyle::PLAIN) {
-            return type_expression(scalar, ExpressionKind::CONFIGURATION, out);
+            return expression();
         }
         Number number;
         const NumberRead read =
@@ -1963,11 +1976,8 @@ private:
             return std::nullopt;
         }
         if (read == NumberRead::NONE) {
-            return type_expression(scalar, ExpressionKind::CONFIGURATION, out);
+            return expression();
         }
-        const bool integer_only = !rules.scalar_kinds.empty() &&
-                                  listed_text(rules.scalar_kinds, "integer") &&
-                                  !listed_text(rules.scalar_kinds, "number");
         if (integer_only && !std::holds_alternative<Integer>(number)) {
             error(out, CF_WRONG_TYPE, scalar,
                   key + " must be an integer or an expression");

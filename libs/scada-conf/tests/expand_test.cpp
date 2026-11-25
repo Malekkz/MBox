@@ -229,9 +229,8 @@ TEST(Expand, AChildChangesADefaultNotAType) {
                        "template: meter_a\nextends: base_a\nprotocol: modbus\n"
                        "params: { inputs: { type: number, default: 6 } }\n"},
                       {"drivers/modbus/line1.yaml", one_device()}}),
-              Lines{"drivers/modbus/line1.yaml:7:11: error CF-415: parameter "
-                    "\"inputs\" cannot change its type\n"
-                    "  from template templates/meter_a.yaml:4:27"});
+              Lines{"templates/meter_a.yaml:4:27: error CF-415: parameter "
+                    "\"inputs\" cannot change its type"});
 }
 
 // Step 3.2: `repeat` with one and two variables, an irregular list, an
@@ -485,9 +484,8 @@ TEST(Expand, InstancePointsAndNamesGivenTwice) {
                  "  - { name: word, tag: false, address: { table: holding, "
                  "register: 3, type: uint16 }, bits: { 0: flow } }\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-416: point \"flow\" "
-               "is defined twice\n"
-               "  from template templates/meter_a.yaml:6:13 (point flow)"}));
+        (Lines{"templates/meter_a.yaml:6:13: error CF-416: point \"flow\" "
+               "is defined twice"}));
 }
 
 // An instance without a template lists its points; `params`, `disable`
@@ -522,9 +520,11 @@ TEST(Expand, TheChain) {
                 {"templates/meter_b.yaml",
                  "template: meter_b\nextends: meter_a\nprotocol: modbus\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-401: template "
-               "\"meter_a\": extends forms a cycle through \"meter_a\"\n"
-               "  from template templates/meter_b.yaml:2:10"}));
+        // Once at each template of the cycle, at its own `extends` (O-6).
+        (Lines{"templates/meter_a.yaml:2:10: error CF-401: template "
+               "\"meter_a\": extends forms a cycle through \"meter_b\"",
+               "templates/meter_b.yaml:2:10: error CF-401: template "
+               "\"meter_b\": extends forms a cycle through \"meter_a\""}));
     Files deep{{"drivers/modbus/line1.yaml", one_device()},
                {"templates/meter_a.yaml",
                 "template: meter_a\nextends: t1\nprotocol: modbus\n"}};
@@ -539,9 +539,8 @@ TEST(Expand, TheChain) {
                               : std::string()));
     }
     EXPECT_EQ(expand(deep),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-401: template "
-                     "\"meter_a\": extends is deeper than 4 parents\n"
-                     "  from template templates/t4.yaml:3:10"}));
+              (Lines{"templates/meter_a.yaml:2:10: error CF-401: template "
+                     "\"meter_a\": extends is deeper than 4 parents"}));
     EXPECT_EQ(
         expand(
             {{"templates/base_a.yaml", "template: base_a\nextends: meter_b\n"},
@@ -550,10 +549,9 @@ TEST(Expand, TheChain) {
              {"templates/meter_a.yaml",
               "template: meter_a\nextends: base_a\nprotocol: modbus\n"},
              {"drivers/modbus/line1.yaml", one_device()}}),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-421: template "
+        (Lines{"templates/base_a.yaml:2:10: error CF-421: template "
                "\"base_a\": a base template cannot extend a protocol "
-               "template\n"
-               "  from template templates/base_a.yaml:2:10"}));
+               "template"}));
     EXPECT_EQ(
         expand({{"templates/meter_a.yaml", "template: meter_a\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
@@ -648,10 +646,8 @@ TEST(Expand, AParameterNeedsAType) {
                        "template: meter_a\nprotocol: modbus\n"
                        "params: { inputs: { default: 4 } }\n"},
                       {"drivers/modbus/line1.yaml", one_device()}}),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: parameter "
-                     "\"inputs\" needs type\n"
-                     "  from template templates/meter_a.yaml:3:11 (parameter "
-                     "inputs)"}));
+              Lines{"templates/meter_a.yaml:3:11: error CF-202: parameter "
+                    "\"inputs\" needs type"});
 }
 
 // B5 and B6 of the review of #144: at the instance, over its whole chain,
@@ -688,9 +684,9 @@ TEST(Expand, ThePointsExpressionsAreNumbers) {
                             "      - { name: q, address: { table: holding, "
                             "register: \"1 > 2\", type: uint16 } }\n")}}),
         (Lines{"drivers/modbus/line1.yaml:10:50: error CF-410: expression "
-               "\"base > 2\": the value must be a number, not BOOL",
+               "\"base > 2\": the value must be an INT, not BOOL",
                "drivers/modbus/line1.yaml:12:60: error CF-410: expression "
-               "\"1 > 2\": the value must be a number, not BOOL"}));
+               "\"1 > 2\": the value must be an INT, not BOOL"}));
 }
 
 // The identity checks (4.8) are evaluated with the parameters, the
@@ -726,7 +722,158 @@ TEST(Expand, TheIdentityChecksAreEvaluated) {
                             "      - { address: { table: holding, register: "
                             "\"1 > 2\", type: uint16 }, equals: 7 }\n")}}),
         Lines{"drivers/modbus/line1.yaml:11:51: error CF-410: expression "
-              "\"1 > 2\": the value must be a number, not BOOL"});
+              "\"1 > 2\": the value must be an INT, not BOOL"});
+}
+
+// --- The review of #146 ------------------------------------------------
+
+// B1: a range over the whole INT span is refused from its bounds; its
+// count does not wrap to 0.
+TEST(Expand, ARangeOverTheWholeIntSpan) {
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "repeat:\n"
+                       "  - for: { n: \"-9223372036854775807 - "
+                       "1..9223372036854775807\" }\n"
+                       "    points:\n"
+                       "      - { name: \"p{n}\", address: { table: holding, "
+                       "register: 1, type: uint16 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-113: the range "
+                    "of n exceeds its limit of 65536\n"
+                    "  from template templates/meter_a.yaml:4:15"});
+}
+
+// B2: without a template steps 1 to 3 are empty, and steps 4 to 8 apply to
+// the instance's points: its `when`, defaults (with `invalid_values` by raw
+// type) and overrides.
+TEST(Expand, ADeviceWithoutTemplate) {
+    EXPECT_EQ(
+        expand({{"drivers/modbus/line1.yaml",
+                 channel("  - name: d1\n"
+                         "    unit_id: 1\n"
+                         "    defaults: { poll_group: fast, address: { table: "
+                         "holding, type: uint16 }, invalid_values: { uint16: "
+                         "[65535] } }\n"
+                         "    overrides: { p: { unit: V } }\n"
+                         "    points:\n"
+                         "      - { name: p, address: { register: 1 } }\n"
+                         "      - { name: q, when: \"false\", address: { "
+                         "register: 2 } }\n")}}),
+        Lines{"d1.p: {poll_group: fast, address: {table: holding, type: "
+              "uint16, register: 1}, invalid_values: [65535], unit: V}"});
+}
+
+// B3: an instance's own point whose `when` is false does not exist, with a
+// template too; its `when` has the parameters.
+TEST(Expand, TheWhenOfAnInstancesPoint) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { o: { type: bool, default: false } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: 1, "
+                 "type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    points:\n"
+                            "      - { name: y, when: \"false\", address: { "
+                            "table: holding, register: 2, type: uint16 } }\n"
+                            "      - { name: z, when: o, address: { table: "
+                            "holding, register: 3, type: uint16 } }\n"
+                            "      - { name: w, when: \"NOT o\", address: { "
+                            "table: holding, register: 4, type: uint16 } "
+                            "}\n")}}),
+        (Lines{"ps1.m1.p: {address: {table: holding, register: 1, type: "
+               "uint16}}",
+               "ps1.m1.w: {address: {table: holding, register: 4, type: "
+               "uint16}}"}));
+}
+
+// B4 (the ruling O-1): a block's `when` is carried on each point it makes
+// and decided at step 4, so a child that refines a point of an absent
+// option does not bring it back, and its `disable` of it always matches.
+TEST(Expand, ABlocksWhenIsDecidedAtStepFour) {
+    const std::string core =
+        "template: inv_core\nprotocol: modbus\n"
+        "params: { has_dc: { type: bool, default: false } }\n"
+        "repeat:\n"
+        "  - for: { n: \"1..2\" }\n"
+        "    when: has_dc\n"
+        "    points:\n"
+        "      - { name: \"pv{n}.voltage\", unit: V, address: { table: "
+        "holding, register: \"100 + n\", type: uint16 } }\n";
+    const std::string refines =
+        "template: inv_b\nextends: inv_core\nprotocol: modbus\n"
+        "points: [ { name: pv1.voltage, address: { register: 300 } } ]\n";
+    const auto device = [](std::string_view more) {
+        return channel(
+            "  - name: ps1.i1\n    template: inv_b\n    unit_id: 1\n" +
+            std::string(more));
+    };
+    EXPECT_EQ(expand({{"templates/inv_core.yaml", core},
+                      {"templates/inv_b.yaml", refines},
+                      {"drivers/modbus/line1.yaml", device("")}}),
+              Lines{});
+    EXPECT_EQ(expand({{"templates/inv_core.yaml", core},
+                      {"templates/inv_b.yaml", refines},
+                      {"drivers/modbus/line1.yaml",
+                       device("    params: { has_dc: true }\n")}}),
+              (Lines{"ps1.i1.pv1.voltage: {unit: V, address: {table: holding, "
+                     "register: 300, type: uint16}}",
+                     "ps1.i1.pv2.voltage: {unit: V, address: {table: holding, "
+                     "register: 102, type: uint16}}"}));
+    EXPECT_EQ(expand({{"templates/inv_core.yaml", core},
+                      {"templates/inv_b.yaml",
+                       "template: inv_b\nextends: inv_core\nprotocol: "
+                       "modbus\ndisable: [\"pv1.voltage\"]\n"},
+                      {"drivers/modbus/line1.yaml", device("")}}),
+              Lines{});
+}
+
+// B5: `invalid_values` of `defaults` by raw type is picked after the
+// overrides, which may change the raw type.
+TEST(Expand, InvalidValuesByTheRawTypeAfterTheOverrides) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "defaults: { invalid_values: { uint16: [65535], int16: "
+                 "[32768], float32: [nan] } }\n"
+                 "points:\n"
+                 "  - { name: p, address: { table: holding, register: 1, "
+                 "type: uint16 } }\n"
+                 "  - { name: q, address: { table: holding, register: 2, "
+                 "type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    overrides:\n"
+                            "      p: { address: { type: int16 } }\n"
+                            "      q: { address: { type: float32 } }\n")}}),
+        (Lines{"ps1.m1.p: {invalid_values: [32768], address: {table: holding, "
+               "register: 1, type: int16}}",
+               "ps1.m1.q: {invalid_values: [nan], address: {table: holding, "
+               "register: 2, type: float32}}"}));
+}
+
+// B6: map keys of the integer form merge by their value: a child's `0xF`
+// of `bits` is the parent's 15, and its spelling and value win.
+TEST(Expand, IntegerKeysMergeByValue) {
+    EXPECT_EQ(
+        expand({{"templates/base_a.yaml",
+                 "template: base_a\n"
+                 "points: [ { name: w, tag: false, bits: { 0: run, 15: hi } "
+                 "}, { name: s, enum: { 16: a, 1: b } } ]\n"},
+                {"templates/meter_a.yaml",
+                 "template: meter_a\nextends: base_a\nprotocol: modbus\n"
+                 "bit_order: lsb0\n"
+                 "points:\n"
+                 "  - { name: w, address: { table: holding, register: 1, "
+                 "type: uint16 }, bits: { 0xF: top } }\n"
+                 "  - { name: s, enum: { 0x10: c }, address: { table: "
+                 "holding, register: 2, type: uint16 } }\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        (Lines{"ps1.m1.w: {tag: false, bits: {0: run, 0xF: top}, address: "
+               "{table: holding, register: 1, type: uint16}}",
+               "ps1.m1.s: {enum: {0x10: c, 1: b}, address: {table: holding, "
+               "register: 2, type: uint16}}"}));
 }
 
 // B2 in the expander: an alarm's expressions read tags, also on a bit of a

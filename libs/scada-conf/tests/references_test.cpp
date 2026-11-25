@@ -639,7 +639,7 @@ TEST(References, NamesOfAnInstancesExpressions) {
 }
 
 // S3: a chain cut by its length (or a cycle) is not known; its names and
-// types are not checked here (CF-401 comes with #103).
+// types are not checked at stage 5.
 TEST(References, ACutChainIsNotChecked) {
     Files files;
     constexpr int TEMPLATES = 7;
@@ -659,7 +659,13 @@ TEST(References, ACutChainIsNotChecked) {
         }
         files.emplace("templates/" + name + ".yaml", text);
     }
-    EXPECT_EQ(validate(files), Lines{});
+    // The cut is CF-401, once at each template whose chain is too deep (the
+    // ruling O-6 on #146); stage 5 does not run after it.
+    EXPECT_EQ(validate(files),
+              (Lines{"templates/t6.yaml:3:10 CF-401: template \"t6\": extends "
+                     "is deeper than 4 parents",
+                     "templates/t7.yaml:3:10 CF-401: template \"t7\": extends "
+                     "is deeper than 4 parents"}));
 }
 
 // S2: a user tag must not start with the segment `sys` (2.1): `sys` itself
@@ -780,7 +786,13 @@ TEST(References, ACutChainWithATypeError) {
         }
         files.emplace("templates/" + name + ".yaml", text);
     }
-    EXPECT_EQ(validate(files), Lines{});
+    // The cut is CF-401, once at each template whose chain is too deep (the
+    // ruling O-6 on #146); stage 5 does not run after it.
+    EXPECT_EQ(validate(files),
+              (Lines{"templates/t6.yaml:3:10 CF-401: template \"t6\": extends "
+                     "is deeper than 4 parents",
+                     "templates/t7.yaml:3:10 CF-401: template \"t7\": extends "
+                     "is deeper than 4 parents"}));
 }
 
 // 3 of the review of #144: the expressions of `identify` (2.4, 4.8).
@@ -823,34 +835,24 @@ TEST(References, AnInstanceIsNotTypedAsATemplate) {
 }
 
 // 2: a block's `when` and a template's `defaults` are typed with the
-// variables: `n` is an INT, not a BOOL or an unknown name. A variable hides
-// a parameter of its name, as in the expander (D-114).
+// variables: `n` is an INT, not a BOOL or an unknown name. (A variable with
+// the name of a parameter is refused at the instance: the ruling O-3 on
+// #146, in the expander.)
 TEST(References, VariablesOfABlockAndOfDefaults) {
     EXPECT_EQ(
         validate({{"templates/meter_a.yaml",
                    "template: meter_a\nprotocol: modbus\n"
-                   "defaults: { when: \"n\" }\n"
+                   "defaults: { scale: { gain: \"n > 1\" } }\n"
                    "repeat:\n"
                    "  - for: { n: \"1..2\" }\n"
                    "    when: \"n\"\n"
                    "    points:\n"
                    "      - { name: \"p{n}\", address: { table: holding, "
                    "register: \"n\", type: uint16 } }\n"}}),
-        (Lines{"templates/meter_a.yaml:3:20 CF-410: expression \"n\": the "
-               "value must be BOOL, not INT",
+        (Lines{"templates/meter_a.yaml:3:31 CF-410: expression \"n > 1\": "
+               "the value must be a number, not BOOL",
                "templates/meter_a.yaml:6:12 CF-410: expression \"n\": the "
                "value must be BOOL, not INT"}));
-    EXPECT_EQ(validate({{"templates/meter_a.yaml",
-                         "template: meter_a\nprotocol: modbus\n"
-                         "params: { n: { type: string, default: a } }\n"
-                         "defaults: { when: \"n > 1\" }\n"
-                         "repeat:\n"
-                         "  - for: { n: \"1..2\" }\n"
-                         "    when: \"n > 1\"\n"
-                         "    points:\n"
-                         "      - { name: \"p{n}\", address: { table: holding, "
-                         "register: \"n\", type: uint16 } }\n"}}),
-              Lines{});
 }
 
 // 3: an address is IPv4-mapped only with both bytes 0xFF before the IPv4

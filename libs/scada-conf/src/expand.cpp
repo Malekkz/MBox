@@ -10,6 +10,7 @@
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
+#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
@@ -21,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -39,6 +41,7 @@ constexpr std::uint16_t CF_MISSING_KEY = 202;
 constexpr std::uint16_t CF_EXTENDS = 401;
 constexpr std::uint16_t CF_TAG_NAME_LENGTH = 402;
 constexpr std::uint16_t CF_GENERATED_NAME_LENGTH = 403;
+constexpr std::uint16_t CF_BAD_NAME = 212;
 constexpr std::uint16_t CF_EVALUATION = 410;
 constexpr std::uint16_t CF_NO_VALUE = 411;
 constexpr std::uint16_t CF_BAD_VALUE = 412;
@@ -49,6 +52,7 @@ constexpr std::uint16_t CF_POINT_TWICE = 416;
 constexpr std::uint16_t CF_NO_ADDRESS = 417;
 constexpr std::uint16_t CF_WRONG_PROTOCOL = 420;
 constexpr std::uint16_t CF_MIXED_TEMPLATES = 421;
+constexpr std::uint16_t CF_WHEN_MERGED = 419;
 constexpr std::uint16_t CF_BINDINGS = 422;
 constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
 
@@ -202,6 +206,31 @@ void strip_replace(Value& value) {
     }
 }
 
+// True if two map keys are one key: the same text, or two integers of one
+// value (`15` and `0xF` of `bits`, an inline `enum` or `states`; B6 of the
+// review of #146). No key the schema types as a name has the integer form.
+bool same_key(std::string_view left, std::string_view right) {
+    if (left == right) {
+        return true;
+    }
+    const std::optional<Integer> a = parse_integer(left);
+    const std::optional<Integer> b = parse_integer(right);
+    if (!a || !b || a->magnitude != b->magnitude) {
+        return false;
+    }
+    return a->magnitude == 0 || a->negative == b->negative;
+}
+
+// The member of `map` whose key is `key` by `same_key`.
+Member* member_of_key(Value& map, std::string_view key) {
+    for (Member& member : map.members) {
+        if (same_key(member.key, key)) {
+            return &member;
+        }
+    }
+    return nullptr;
+}
+
 // Merges `over` into `into` (4.5, "How two values merge"): maps key by key,
 // the keys of `over` winning; a map with `replace: true`, and any other
 // value, replaces what was there whole. `parent` is the key of the maps.
@@ -228,8 +257,12 @@ void merge(Value& into, const Value& over, std::string_view parent) {
                        !(member.key == "off" && old.key == "on");
             });
         }
-        if (Value* existing = into.find(member.key)) {
-            merge(*existing, member.value.front(), member.key);
+        if (Member* existing = member_of_key(into, member.key)) {
+            // The child's spelling of an integer key is kept with its value.
+            existing->key = member.key;
+            existing->key_file = member.key_file;
+            existing->key_node = member.key_node;
+            merge(existing->value.front(), member.value.front(), member.key);
         } else {
             into.members.push_back(member);
         }
@@ -284,6 +317,9 @@ struct Point {
     Value value;
     std::map<std::string, std::pair<std::int64_t, std::string>, std::less<>>
         bindings;
+    // The `when` of each `repeat` block that made the point, decided at
+    // step 4 with the point's own (the ruling O-1 on #146).
+    std::vector<Value> conditions;
 };
 
 class Expander {
@@ -298,6 +334,13 @@ public:
             }
             file_index_.emplace(&file, static_cast<FileIndex>(paths_.size()));
             paths_.push_back(file.source->path);
+        }
+        // A template's own faults once, at the template, whether or not an
+        // instance uses it (the ruling O-6 on #146).
+        for (const CheckedFile& file : files_) {
+            if (file.source->path_class.type == FileType::TEMPLATE) {
+                check_template(file);
+            }
         }
         for (const CheckedFile& file : files_) {
             if (file.source->path_class.type == FileType::CHANNEL) {
@@ -399,29 +442,183 @@ private:
         device_failed_ = false;
         params_.clear();
         Device device{.keys = written, .points = {}};
+        // `identify` is the template's with the instance's appended (step
+        // 6), written with the device keys.
         for (const std::string_view key :
              {"template", "params", "defaults", "overrides", "disable", "only",
-              "points"}) {
+              "points", "identify"}) {
             device.keys.erase(key);
         }
-        // With a template, the instance's `identify` is appended to the
-        // template's (step 6), not merged over it.
-        if (written.find("template") != nullptr) {
-            device.keys.erase("identify");
-        }
-        if (const Value* reference = written.find("template")) {
-            std::optional<std::vector<const CheckedFile*>> chain =
-                chain_of(*reference);
-            if (!chain) {
+        // Both take the instance's position: the device keys are written
+        // at the device, and the defaults are under every point.
+        Value device_keys = Value::map_at(written.file, written.node);
+        Value defaults = Value::map_at(written.file, written.node);
+        refuse_when(written.find("defaults"), "defaults");
+        refuse_when(written.find("overrides"), "overrides");
+        const Value* reference = written.find("template");
+        if (reference != nullptr) {
+            // A template with a fault of its own is reported at it; its
+            // instances are not expanded.
+            if (const auto found = templates_.find(reference->scalar_text());
+                found != templates_.end() &&
+                faulty_templates_.contains(found->second)) {
                 return std::nullopt;
             }
-            if (!expand_templates(*chain, written, device)) {
+            std::optional<std::vector<const CheckedFile*>> chain =
+                chain_of(*reference);
+            if (!chain ||
+                std::ranges::any_of(*chain, [this](const auto* level) {
+                    return faulty_templates_.contains(level);
+                })) {
+                return std::nullopt;
+            }
+            if (!expand_templates(*chain, written, device_keys, defaults,
+                                  device.points)) {
                 return device;
             }
+        } else {
+            // Without a template, steps 1 to 3 are empty (4.5): the
+            // instance's points enter step 4 (B2 of the review of #146).
+            add_instance_points(written, device);
         }
-        add_instance_points(written, device);
+        keep_present(written, device.points);
+        apply_defaults(defaults, written, device.points);
+        apply_overrides(written, device_keys, device.points);
+        if (reference != nullptr) {
+            // With a template, after step 6: no default reaches them.
+            const std::size_t first = device.points.size();
+            add_instance_points(written, device);
+            keep_present_from(first, device.points);
+        }
+        // After step 6, which may change a raw type (B5 of the review of
+        // #146).
+        for (Point& point : device.points) {
+            pick_invalid_values(point.value,
+                                channel_->source->path_class.protocol);
+        }
+        // The template's device keys go under the instance's.
+        Value keys = device_keys;
+        merge(keys, device.keys, "");
+        device.keys = std::move(keys);
+        if (device_failed_) {
+            return device;
+        }
         finish_points(written, device);
         return device;
+    }
+
+    // --- The templates alone ----------------------------------------------
+
+    // What a template gets wrong whatever its instance: its chain (CF-401,
+    // CF-421), its parameters along it (CF-415, CF-202), two written points
+    // of one name in it (CF-416), a base template's `address`, `read` or
+    // `identify` (CF-421, 4.1) and `when` in its `defaults` (CF-419).
+    void check_template(const CheckedFile& file) {
+        channel_ = nullptr;
+        instance_.reset();
+        device_failed_ = false;
+        const Document& document = *file.document;
+        if (document.kind(document.root()) != NodeKind::MAP) {
+            return;
+        }
+        const Value root = copy_of(file, document.root());
+        const std::string& name = file.source->path_class.stem;
+        Value reference;
+        reference.kind = NodeKind::SCALAR;
+        reference.file = &file;
+        reference.node = document.root();
+        reference.computed = true;
+        reference.text = name;
+        reference.type = ScalarType::STRING;
+        if (std::optional<std::vector<const CheckedFile*>> chain =
+                chain_of(reference)) {
+            collect_parameters(*chain);
+        }
+        std::set<std::string, std::less<>> written;
+        const auto written_points = [&](const Value* list) {
+            if (list == nullptr) {
+                return;
+            }
+            for (const Value& item : list->items) {
+                const Value* point_name = item.find("name");
+                if (point_name == nullptr) {
+                    continue;
+                }
+                const std::string text(point_name->scalar_text());
+                if (text.find('{') == std::string::npos &&
+                    !written.insert(text).second) {
+                    error(CF_POINT_TWICE, *point_name,
+                          "point " + quote_text(text) + " is defined twice");
+                }
+            }
+        };
+        written_points(root.find("points"));
+        if (protocol_of(file).empty()) {
+            check_base_template(root, name);
+        }
+        refuse_when(root.find("defaults"), "defaults");
+        if (device_failed_) {
+            faulty_templates_.insert(&file);
+        }
+    }
+
+    // 4.1: a base template has common parts only.
+    void check_base_template(const Value& root, const std::string& name) {
+        for (const std::string_view key : {"read", "identify"}) {
+            if (const Value* own = root.find(key)) {
+                error(CF_MIXED_TEMPLATES, *own,
+                      "template " + quote_text(name) +
+                          ": a base template has "
+                          "no " +
+                          std::string(key));
+            }
+        }
+        const auto addresses = [&](const Value* list) {
+            if (list == nullptr) {
+                return;
+            }
+            for (const Value& item : list->items) {
+                if (const Value* address = item.find("address")) {
+                    error(CF_MIXED_TEMPLATES, *address,
+                          "template " + quote_text(name) +
+                              ": a base template has no address");
+                }
+            }
+        };
+        addresses(root.find("points"));
+        if (const Value* blocks = root.find("repeat")) {
+            for (const Value& block : blocks->items) {
+                addresses(block.find("points"));
+            }
+        }
+        if (const Value* defaults = root.find("defaults")) {
+            if (const Value* address = defaults->find("address")) {
+                error(CF_MIXED_TEMPLATES, *address,
+                      "template " + quote_text(name) +
+                          ": a base template has no address");
+            }
+        }
+    }
+
+    // CF-419: presence is decided before `defaults` and `overrides` are
+    // merged (4.4). `owner` is a `defaults` map, or with `key` "overrides"
+    // the map of a point's overrides.
+    void refuse_when(const Value* owner, std::string_view key) {
+        if (owner == nullptr || owner->kind != NodeKind::MAP) {
+            return;
+        }
+        if (key == "overrides") {
+            for (const Member& member : owner->members) {
+                refuse_when(&member.value.front(), "point overrides");
+            }
+            return;
+        }
+        if (const Value* when = owner->find("when")) {
+            error(
+                CF_WHEN_MERGED, *when,
+                "when cannot be given in " +
+                    std::string(key == "point overrides" ? "overrides" : key));
+        }
     }
 
     // --- Step 1: the chain -------------------------------------------------
@@ -433,21 +630,29 @@ private:
         std::vector<const CheckedFile*> chain;
         std::string name(reference.scalar_text());
         Value named_by = reference;
+        Value first_extends = reference;
         while (true) {
             const auto found = templates_.find(name);
             if (found == templates_.end()) {
                 return std::nullopt;
             }
             const CheckedFile* file = found->second;
-            if (std::ranges::find(chain, file) != chain.end() ||
-                chain.size() > MAX_PARENTS) {
+            // A cycle at the `extends` that closes it, of the template
+            // whose line it is; a chain too deep at the first template's
+            // `extends` (once, at the template: the ruling O-6 on #146).
+            if (std::ranges::find(chain, file) != chain.end()) {
                 error(CF_EXTENDS, named_by,
                       "template " +
+                          quote_text(chain.back()->source->path_class.stem) +
+                          ": extends forms a cycle through " +
+                          quote_text(name));
+                return std::nullopt;
+            }
+            if (chain.size() > MAX_PARENTS) {
+                error(CF_EXTENDS, first_extends,
+                      "template " +
                           quote_text(chain.front()->source->path_class.stem) +
-                          ": extends " +
-                          (chain.size() > MAX_PARENTS
-                               ? std::string("is deeper than 4 parents")
-                               : "forms a cycle through " + quote_text(name)));
+                          ": extends is deeper than 4 parents");
                 return std::nullopt;
             }
             chain.push_back(file);
@@ -460,6 +665,9 @@ private:
                 break;
             }
             named_by = copy_of(*file, *parent);
+            if (chain.size() == 1) {
+                first_extends = named_by;
+            }
             name = std::string(document.text(*parent));
         }
         std::ranges::reverse(chain);
@@ -507,6 +715,9 @@ private:
         if (!protocol.empty() && !is_known_protocol(protocol)) {
             return false;
         }
+        if (channel_ == nullptr) {
+            return true;
+        }
         const std::string& wanted = channel_->source->path_class.protocol;
         if (protocol != wanted) {
             error(protocol.empty() ? CF_MIXED_TEMPLATES : CF_WRONG_PROTOCOL,
@@ -525,32 +736,20 @@ private:
 
     // --- Steps 2 to 6 --------------------------------------------------------
 
+    // Steps 2 and 3: the parameters, then the levels of the chain merged
+    // into `points`, with their device keys and defaults.
     bool expand_templates(const std::vector<const CheckedFile*>& chain,
-                          const Value& instance, Device& device) {
+                          const Value& instance, Value& device_keys,
+                          Value& defaults, std::vector<Point>& points) {
         collect_parameters(chain);
         if (!bind_parameters(instance)) {
             return false;
         }
-        // Both take the instance's position: the device keys are written
-        // at the device, and the defaults are under every point.
-        Value device_keys = Value::map_at(instance.file, instance.node);
-        Value defaults = Value::map_at(instance.file, instance.node);
         for (const CheckedFile* level : chain) {
             const Value root = copy_of(*level, level->document->root());
             merge_level_keys(root, device_keys, defaults);
-            expand_level(*level, root, device.points);
+            expand_level(*level, root, points);
         }
-        if (device_failed_) {
-            return false;
-        }
-        keep_present(instance, device.points);
-        apply_defaults(defaults, instance,
-                       channel_->source->path_class.protocol, device.points);
-        apply_overrides(instance, device_keys, device.points);
-        // The template's device keys go under the instance's.
-        Value keys = device_keys;
-        merge(keys, device.keys, "");
-        device.keys = std::move(keys);
         return !device_failed_;
     }
 
@@ -736,9 +935,9 @@ private:
                 outside_bounds(declared, as_real)) {
             return refuse(text + *outside);
         }
-        if (type == "number" && number->type == ValueType::INT) {
-            return ConfigValue::of_real(as_real);
-        }
+        // A `number` keeps its written form, as everywhere in the
+        // validator: written as an integer it is an INT (the ruling O-9 on
+        // #146).
         return number;
     }
 
@@ -903,7 +1102,8 @@ private:
         }
         Point point{.name = std::string(name->scalar_text()),
                     .value = item,
-                    .bindings = {}};
+                    .bindings = {},
+                    .conditions = {}};
         for (const auto& [variable, value] : variables) {
             point.bindings.emplace(variable, std::pair{value, template_name});
         }
@@ -961,15 +1161,15 @@ private:
                 return;
             }
             if (axis == axes->size()) {
-                if (when != nullptr && !holds(*when, variables)) {
-                    return;
-                }
                 if (points == nullptr) {
                     return;
                 }
                 for (const Value& item : points->items) {
                     if (std::optional<Point> point =
                             point_of(item, variables, template_name)) {
+                        if (when != nullptr) {
+                            point->conditions.push_back(*when);
+                        }
                         add(std::move(*point));
                     }
                 }
@@ -1041,14 +1241,28 @@ private:
         } else if (!add_run(range)) {
             return std::nullopt;
         }
+        // Each run's span is at most 2^64 - 1 in uint64, so it is refused
+        // before it is added: `high - low + 1` of the whole INT span wraps
+        // to 0 (B1 of the review of #146).
         std::uint64_t count = 0;
+        bool too_many = false;
         for (const auto& [low, high] : runs) {
-            if (high >= low) {
-                count += static_cast<std::uint64_t>(high) -
-                         static_cast<std::uint64_t>(low) + 1;
+            if (high < low) {
+                continue;
+            }
+            const std::uint64_t span = static_cast<std::uint64_t>(high) -
+                                       static_cast<std::uint64_t>(low);
+            if (span >= MAX_REPEAT_VALUES) {
+                too_many = true;
+                break;
+            }
+            count += span + 1;
+            if (count > MAX_REPEAT_VALUES) {
+                too_many = true;
+                break;
             }
         }
-        if (count > MAX_REPEAT_VALUES) {
+        if (too_many) {
             error(CF_SIZE_LIMIT, range,
                   "the range of " + name + " exceeds its limit of 65536");
             return std::nullopt;
@@ -1091,6 +1305,9 @@ private:
             }
         }
         merge(found->value, point.value, "point");
+        for (Value& condition : point.conditions) {
+            found->conditions.push_back(std::move(condition));
+        }
     }
 
     static std::string bindings_message(
@@ -1139,17 +1356,32 @@ private:
         }
     }
 
-    // Step 4: a point whose `when` is false does not exist; then the
-    // instance's `disable` or `only`.
+    // Step 4: a point whose `when`, or the `when` of a block that made it,
+    // is false does not exist; then the instance's `disable` or `only`.
     void keep_present(const Value& instance, std::vector<Point>& points) {
-        std::erase_if(points, [this](Point& point) {
+        keep_present_from(0, points);
+        select(instance, template_of(instance), points);
+    }
+
+    // The `when` part of step 4 for the points from `first` on.
+    void keep_present_from(std::size_t first, std::vector<Point>& points) {
+        std::size_t position = 0;
+        std::erase_if(points, [this, first, &position](Point& point) {
+            if (position++ < first) {
+                return false;
+            }
+            const std::map<std::string, std::int64_t, std::less<>> variables =
+                bound_to(point);
+            bool present = true;
+            for (const Value& condition : point.conditions) {
+                present = present && holds(condition, variables);
+            }
             const Value* when = point.value.find("when");
-            const bool present =
-                when == nullptr || holds(*when, bound_to(point));
+            present = present && (when == nullptr || holds(*when, variables));
             point.value.erase("when");
+            point.conditions.clear();
             return !present;
         });
-        select(instance, template_of(instance), points);
     }
 
     static std::string template_of(const Value& instance) {
@@ -1170,7 +1402,7 @@ private:
     // Step 5: the template's `defaults` merged with the instance's, merged
     // under every point.
     static void apply_defaults(const Value& template_defaults,
-                               const Value& instance, std::string_view protocol,
+                               const Value& instance,
                                std::vector<Point>& points) {
         Value defaults = template_defaults;
         if (const Value* own = instance.find("defaults")) {
@@ -1182,7 +1414,6 @@ private:
             merged.node = point.value.node;
             merge(merged, point.value, "point");
             point.value = std::move(merged);
-            pick_invalid_values(point.value, protocol);
         }
     }
 
@@ -1288,7 +1519,6 @@ private:
                       "point " + quote_text(point->name) + " is defined twice");
                 continue;
             }
-            point->value.erase("when");
             device.points.push_back(std::move(*point));
         }
     }
@@ -1324,7 +1554,10 @@ private:
                       "point " + quote_text(point.name) + " has no address",
                       "point " + point.name);
             }
-            check_tag_name(CF_TAG_NAME_LENGTH, point.name, name, point.name);
+            if (check_name_grammar(point.name, name, point.name)) {
+                check_tag_name(CF_TAG_NAME_LENGTH, point.name, name,
+                               point.name);
+            }
             check_bits(point, names);
         }
     }
@@ -1365,8 +1598,34 @@ private:
                       "point " + point.name);
                 continue;
             }
-            check_tag_name(CF_GENERATED_NAME_LENGTH, text, *name, point.name);
+            if (check_name_grammar(text, *name, point.name)) {
+                check_tag_name(CF_GENERATED_NAME_LENGTH, text, *name,
+                               point.name);
+            }
         }
+    }
+
+    // Step 8: a point or bit name made by expansion follows 2.1 (CF-212;
+    // 1.4, stage 4): `s{n}` outside a block, `x.{n}` with n = -1. Its
+    // length is CF-402 or CF-403. A `{...}` left in the name names no
+    // variable bound to the point, which the message says (B7 of the
+    // review of #146).
+    bool check_name_grammar(const std::string& name, const Value& site,
+                            const std::string& point) {
+        if (is_tag_name(name, std::numeric_limits<std::size_t>::max())) {
+            return true;
+        }
+        std::string message = quote_text(name) + " is not a valid point name";
+        const std::size_t open = name.find('{');
+        const std::size_t close = open == std::string::npos
+                                      ? std::string::npos
+                                      : name.find('}', open);
+        if (close != std::string::npos) {
+            message += ": " + name.substr(open, close - open + 1) +
+                       " names no variable bound to this point";
+        }
+        error(CF_BAD_NAME, site, message, "point " + point);
+        return false;
     }
 
     // --- Step 7: evaluation ------------------------------------------------
@@ -1390,12 +1649,16 @@ private:
         const std::map<std::string, std::int64_t, std::less<>>& variables) {
         switch (value.kind) {
             case NodeKind::SCALAR: {
+                const ScalarType type = value.scalar_type();
                 if (value.computed ||
-                    value.scalar_type() != ScalarType::EXPRESSION) {
+                    (type != ScalarType::EXPRESSION &&
+                     type != ScalarType::INTEGER_EXPRESSION)) {
                     return;
                 }
                 std::optional<ConfigValue> result = evaluate(
-                    value, variables, ExpressionKind::CONFIGURATION, true);
+                    value, variables, ExpressionKind::CONFIGURATION,
+                    type == ScalarType::INTEGER_EXPRESSION ? Wanted::INT
+                                                           : Wanted::NUMBER);
                 if (!result) {
                     return;
                 }
@@ -1459,13 +1722,16 @@ private:
         return value->integer != 0;
     }
 
-    // `wants_number`: the value must be an INT or a REAL, as every expression
-    // of a point's keys and of `identify` is a number (2.4; stage 5 types a
-    // template's the same way, D-113).
+    // What a value must be: anything (a `when` is checked by `holds`), a
+    // number, as every expression of a point's keys and of `identify` is
+    // (2.4; stage 5 types a template's the same way, D-113), or an INT, for
+    // a key the schema types as an integer (B9 of the review of #146).
+    enum class Wanted : std::uint8_t { ANY, NUMBER, INT };
+
     std::optional<ConfigValue> evaluate(
         const Value& value,
         const std::map<std::string, std::int64_t, std::less<>>& variables,
-        ExpressionKind kind, bool wants_number = false) {
+        ExpressionKind kind, Wanted wanted = Wanted::ANY) {
         ExpressionError syntax;
         const std::string text(value.scalar_text());
         const std::optional<Expression> tree =
@@ -1510,13 +1776,18 @@ private:
             }
             error_in(CF_EVALUATION, *value.file, std::move(site.location),
                      "expression " + quote_text(text) + ": " + reason);
-        } else if (wants_number && result->type != ValueType::INT &&
-                   result->type != ValueType::REAL) {
+        } else if ((wanted == Wanted::INT && result->type != ValueType::INT) ||
+                   (wanted == Wanted::NUMBER &&
+                    result->type != ValueType::INT &&
+                    result->type != ValueType::REAL)) {
             ExpressionSite site =
                 expression_site(*value.file->document, value.node,
                                 tree->nodes.at(tree->root).column);
-            std::string reason = "the value must be a number, not " +
-                                 std::string(value_type_name(result->type));
+            std::string reason =
+                std::string(wanted == Wanted::INT
+                                ? "the value must be an INT, not "
+                                : "the value must be a number, not ") +
+                std::string(value_type_name(result->type));
             if (!value.file->document->verbatim(value.node)) {
                 reason += site.where;
             }
@@ -1717,6 +1988,7 @@ private:
     std::span<const CheckedFile> files_;
     Diagnostics* diagnostics_;
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
+    std::set<const CheckedFile*> faulty_templates_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
     std::vector<Channel> channels_;
