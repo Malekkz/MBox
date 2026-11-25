@@ -42,7 +42,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +55,8 @@ using Fault = SimBus::Fault;
 constexpr std::uint32_t VALUE_REGISTER = 0;
 constexpr std::uint32_t COMPANION_REGISTER = 20;
 constexpr std::uint32_t BLOCK_REGISTER = 40;
+constexpr std::uint32_t THIRD_REGISTER = 30;   // the last part of a chain of 3
+constexpr std::uint32_t SHARED_REGISTER = 60;  // a second device on unit 1
 constexpr std::size_t SPIN_STEPS = 2'000;
 constexpr std::int64_t SAMPLE = 100 * MILLISECOND;  // the run's sampling
 
@@ -73,6 +74,12 @@ struct Scenario {
     CompiledChannel channel;
     std::uint8_t units = 0;
     std::vector<bool> chained;  // per device: a value with a companion
+    // Per device: the chain has a third part (0 <- 20 <- 30), point 2.
+    std::vector<bool> third;
+    // A second device on unit 1 (the last device), reading register 60; with
+    // a failure count of its own when `own_unit` (H5).
+    bool shared = false;
+    bool own_unit = false;
     // Per device: the index of a point in a second block, in another
     // group, or 0 for none.
     std::vector<std::uint32_t> block;
@@ -83,15 +90,31 @@ struct Scenario {
         Mode mode = Mode::ANSWERS;
     };
     std::vector<Event> events;
+    // When the peer closes a stream, or noise arrives on a serial line.
+    std::vector<std::int64_t> transport_faults;
 };
 
-std::int64_t pick(std::mt19937_64& random, std::int64_t low,
-                  std::int64_t high) {
-    return std::uniform_int_distribution<std::int64_t>(low, high)(random);
+// SplitMix64 with our own arithmetic: the standard distributions differ
+// between standard libraries, so the same seed would build other channels
+// on other builds (review M3).
+struct Random {
+    std::uint64_t state = 0;
+    std::uint64_t next() noexcept {
+        state += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t value = state;
+        value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+        value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+        return value ^ (value >> 31U);
+    }
+};
+
+std::int64_t pick(Random& random, std::int64_t low, std::int64_t high) {
+    const auto span = static_cast<std::uint64_t>(high - low) + 1U;
+    return low + static_cast<std::int64_t>(random.next() % span);
 }
 
 Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
-    std::mt19937_64 random(seed);
+    Random random{seed};
     Scenario out;
     out.units = static_cast<std::uint8_t>(pick(random, 2, 6));
     std::vector<DeviceSpec> specs;
@@ -101,12 +124,18 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
         const auto group = static_cast<std::uint32_t>(
             std::min<std::int64_t>(pick(random, 0, 4), 2) % 3);
         const bool chain = pick(random, 0, 2) == 0;
+        const bool third = chain && pick(random, 0, 1) == 0;
         out.chained.push_back(chain);
+        out.third.push_back(third);
         std::vector<PointSpec> points{
             {.first = VALUE_REGISTER, .group = group}};
         if (chain) {
             points[0].companions = {1};
             points.push_back({.first = COMPANION_REGISTER, .group = group});
+        }
+        if (third) {
+            points[1].companions = {2};
+            points.push_back({.first = THIRD_REGISTER, .group = group});
         }
         std::uint32_t block = 0;
         if (pick(random, 0, 2) == 0) {
@@ -117,12 +146,30 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
                                        3});
         }
         out.block.push_back(block);
-        specs.push_back({.name = "d" + std::to_string(unit),
-                         .unit_id = unit,
-                         .points = points});
+        DeviceSpec spec{.name = "d" + std::to_string(unit),
+                        .unit_id = unit,
+                        .points = points};
+        if (pick(random, 0, 2) == 0) {
+            spec.keepalive_ns = pick(random, 2, 20) * 100 * MILLISECOND;
+        }
+        if (pick(random, 0, 3) == 0) {
+            spec.pacing.min_request_interval_ns =
+                pick(random, 1, 10) * 10 * MILLISECOND;
+        }
+        specs.push_back(spec);
         out.latency_ns.push_back(pick(random, 1, 40) * MILLISECOND);
     }
+    out.shared = pick(random, 0, 3) == 0;
+    if (out.shared) {
+        specs.push_back({.name = "shared",
+                         .unit_id = 1,
+                         .points = {{.first = SHARED_REGISTER, .group = 1}}});
+    }
     out.channel = make_channel(specs, ReadRules{.max_units = 4});
+    if (out.shared && pick(random, 0, 1) == 0) {
+        out.own_unit = true;
+        out.channel.devices.back().unit = CompiledDevice::OWN_UNIT;
+    }
     constexpr std::array<TransportKind, 3> KINDS{
         TransportKind::SERIAL, TransportKind::TCP, TransportKind::RTU_OVER_TCP};
     out.channel.transport =
@@ -145,7 +192,15 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
         rules.demote_after = static_cast<std::uint8_t>(pick(random, 1, 3));
         rules.backoff_ns = pick(random, 2, 10) * 100 * MILLISECOND;
         rules.backoff_max_ns = pick(random, 2, 4) * SECOND;
-        if (out.chained[device]) {
+        if (device < out.units && out.third[device]) {
+            // The companion's quality comes from the third part (D-131).
+            PointRules& middle = out.channel.devices[device].points[1].rules;
+            middle.quality_rules.push_back(
+                QualityRule{.companion = 0,
+                            .entries = {},
+                            .otherwise = {.quality = tag::Quality::GOOD}});
+        }
+        if (device < out.units && out.chained[device]) {
             // The value's quality comes from its companion (D-131).
             PointRules& value = out.channel.devices[device].points[0].rules;
             value.quality_rules.push_back(
@@ -169,6 +224,11 @@ Scenario scenario_of(std::uint64_t seed, std::int64_t end_ns) {
             mode = Mode::BLOCK_SILENT;
         }
         out.events.push_back({.time_ns = time, .unit = unit, .mode = mode});
+    }
+    // Now and then the peer closes a stream, or noise hits a serial line.
+    for (std::int64_t time = pick(random, 5, 30) * SECOND; time < end_ns;
+         time += pick(random, 20, 60) * SECOND) {
+        out.transport_faults.push_back(time);
     }
     return out;
 }
@@ -271,7 +331,15 @@ struct UnitState {
     std::int64_t first_value_ns = -1;
     std::int64_t first_companion_ns = -1;
     std::int64_t first_block_ns = -1;
+    std::int64_t first_third_ns = -1;
+    std::int64_t first_shared_ns = -1;
 };
+
+std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
+                      std::int64_t from_ns, std::int64_t to_ns);
+std::int64_t fault_slack(const Harness& run, std::int64_t from_ns,
+                         std::int64_t to_ns);
+std::uint8_t unit_priority(const Harness& run, std::uint8_t unit);
 
 // Checks invariants 1, 3 and 4 at `now_ns`; returns the violations.
 std::vector<std::string> check(const Harness& run,
@@ -288,7 +356,12 @@ std::vector<std::string> check(const Harness& run,
              (chain && good_past_bound(run, device, 1, state.first_companion_ns,
                                        now_ns)) ||
              (block != 0 && good_past_bound(run, device, block,
-                                            state.first_block_ns, now_ns)))) {
+                                            state.first_block_ns, now_ns)) ||
+             (run.scenario.third[device] &&
+              good_past_bound(run, device, 2, state.first_third_ns, now_ns)) ||
+             (unit == 1 && run.scenario.shared &&
+              good_past_bound(run, run.scenario.units, 0, state.first_shared_ns,
+                              now_ns)))) {
             out.push_back("unit " + std::to_string(unit) +
                           " silent and GOOD at " +
                           std::to_string(now_ns / MILLISECOND));
@@ -315,8 +388,22 @@ std::vector<std::string> check(const Harness& run,
                           std::to_string(now_ns / MILLISECOND));
         }
         if (state.mode == Mode::ANSWERS) {
-            if (now_ns > state.since_ns + recover_bound(run, unit) &&
-                run.engine.failures().state(device) != DeviceStatus::RUNNING) {
+            // From its return, or from the last transport fault, after
+            // which every device reconnects (7.3).
+            std::int64_t since = state.since_ns;
+            for (const std::int64_t fault : run.scenario.transport_faults) {
+                if (fault <= now_ns) {
+                    since = std::max(since, fault);
+                }
+            }
+            // Plus the requests ahead of it meanwhile (DI 6.2 step 3).
+            // The cheap tests first: the sum is over the log.
+            if (run.engine.failures().state(device) != DeviceStatus::RUNNING &&
+                now_ns > since + recover_bound(run, unit) &&
+                now_ns > since + recover_bound(run, unit) +
+                             ahead_ns(run, unit, unit_priority(run, unit),
+                                      since, now_ns) +
+                             fault_slack(run, since, now_ns)) {
                 out.push_back("unit " + std::to_string(unit) +
                               " answering and not RUNNING at " +
                               std::to_string(now_ns / MILLISECOND));
@@ -349,12 +436,16 @@ bool unanswered(Mode mode, std::uint32_t first) {
 // The priority of the group that reads register `first` of `unit`.
 std::uint8_t priority_of(const Harness& run, std::uint8_t unit,
                          std::uint32_t first) {
-    const std::uint32_t device = unit - 1U;
+    std::uint32_t device = unit - 1U;
     std::uint32_t point = 0;
     if (first == COMPANION_REGISTER) {
         point = 1;
+    } else if (first == THIRD_REGISTER) {
+        point = 2;
     } else if (first == BLOCK_REGISTER) {
         point = run.scenario.block[device];
+    } else if (first == SHARED_REGISTER) {
+        device = run.scenario.units;
     }
     const CompiledChannel& channel = run.scenario.channel;
     return channel
@@ -367,6 +458,37 @@ std::uint8_t priority_of(const Harness& run, std::uint8_t unit,
 // the frames and the quiet time at the slowest rate.
 constexpr std::int64_t EXCHANGE_SLACK = 50 * MILLISECOND;
 
+// The priority of the unit's group of the highest priority: the requests
+// ahead of that one count (the contract's order, DI 6.2 step 3).
+std::uint8_t unit_priority(const Harness& run, std::uint8_t unit) {
+    std::uint8_t own = UINT8_MAX;
+    for (const std::uint32_t first :
+         {VALUE_REGISTER, COMPANION_REGISTER, THIRD_REGISTER, BLOCK_REGISTER}) {
+        const std::uint32_t device = unit - 1U;
+        if ((first != COMPANION_REGISTER || run.scenario.chained[device]) &&
+            (first != THIRD_REGISTER || run.scenario.third[device]) &&
+            (first != BLOCK_REGISTER || run.scenario.block[device] != 0)) {
+            own = std::min(own, priority_of(run, unit, first));
+        }
+    }
+    return own;
+}
+
+// A transport fault between `from_ns` and `to_ns` (or just before) costs a
+// reconnect, or the quiet time after noise: their bounds.
+std::int64_t fault_slack(const Harness& run, std::int64_t from_ns,
+                         std::int64_t to_ns) {
+    const ConnectionRules& connection = run.scenario.channel.connection;
+    std::int64_t slack = 0;
+    for (const std::int64_t time : run.scenario.transport_faults) {
+        if (time >= from_ns - SECOND && time <= to_ns) {
+            slack += connection.reconnect_max_ns +
+                     connection.connect_timeout_ns + SECOND;
+        }
+    }
+    return slack;
+}
+
 // The line time that the requests sent between `from_ns` and `to_ns` may
 // take before a request of `unit` at priority `own` in the contract's order
 // of service (DI 6.2 step 3): an unanswered request at most its time-out,
@@ -378,11 +500,21 @@ std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
     // An answered request of the same priority goes before it only when due
     // earlier: once per other unit and register in the gap.
     std::vector<std::pair<std::uint8_t, std::uint32_t>> same;
-    for (const LoggedRequest& request : run.bus.log()) {
+    // The log is in time order: start at the window.
+    const std::vector<LoggedRequest>& log = run.bus.log();
+    const auto begin =
+        std::upper_bound(log.begin(), log.end(), from_ns,
+                         [](std::int64_t time, const LoggedRequest& request) {
+                             return time < request.time_ns;
+                         });
+    for (auto it = begin; it != log.end() && it->time_ns < to_ns; ++it) {
+        const LoggedRequest& request = *it;
         if (request.time_ns <= from_ns || request.time_ns >= to_ns) {
             continue;
         }
-        const std::uint32_t device = request.unit_id - 1U;
+        const std::uint32_t device = request.first == SHARED_REGISTER
+                                         ? run.scenario.units
+                                         : request.unit_id - 1U;
         const Mode mode =
             mode_at(run.scenario, request.unit_id, request.time_ns, SAMPLE);
         const std::uint8_t priority =
@@ -395,7 +527,8 @@ std::int64_t ahead_ns(const Harness& run, std::uint8_t unit, std::uint8_t own,
         } else if (request.unit_id == unit || priority < own ||
                    (priority == own &&
                     std::find(same.begin(), same.end(), key) == same.end())) {
-            ahead += run.scenario.latency_ns[device] + EXCHANGE_SLACK;
+            ahead +=
+                run.scenario.latency_ns[request.unit_id - 1U] + EXCHANGE_SLACK;
             if (priority == own) {
                 same.push_back(key);
             }
@@ -412,7 +545,8 @@ std::int64_t live_gap_bound(const Harness& run, std::uint8_t unit,
     return period_of(run, unit - 1U, 0) + longest_timeout(run) +
            EXCHANGE_SLACK + SECOND +
            ahead_ns(run, unit, priority_of(run, unit, VALUE_REGISTER), from_ns,
-                    to_ns);
+                    to_ns) +
+           fault_slack(run, from_ns, to_ns);
 }
 
 // Invariant 2 over the whole run: the longest silence of the bus towards
@@ -434,25 +568,15 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
                                    rules.timeout_ns * 10 +
                                    connection.reconnect_max_ns +
                                    connection.connect_timeout_ns + 5 * SECOND;
-        // The unit's group of the highest priority: the requests ahead of
-        // that one count (the contract's order, DI 6.2 step 3).
-        std::uint8_t own = UINT8_MAX;
-        for (const std::uint32_t first :
-             {VALUE_REGISTER, COMPANION_REGISTER, BLOCK_REGISTER}) {
-            if ((first != COMPANION_REGISTER ||
-                 run.scenario.chained[unit - 1U]) &&
-                (first != BLOCK_REGISTER ||
-                 run.scenario.block[unit - 1U] != 0)) {
-                own = std::min(own, priority_of(run, unit, first));
-            }
-        }
+        const std::uint8_t own = unit_priority(run, unit);
         std::int64_t last = 0;
         for (const LoggedRequest& request : run.bus.log()) {
             if (request.unit_id != unit) {
                 continue;
             }
             if (request.time_ns - last >
-                bound + ahead_ns(run, unit, own, last, request.time_ns)) {
+                bound + ahead_ns(run, unit, own, last, request.time_ns) +
+                    fault_slack(run, last, request.time_ns)) {
                 out.push_back("unit " + std::to_string(unit) +
                               " not asked from " +
                               std::to_string(last / MILLISECOND) + " to " +
@@ -460,7 +584,8 @@ std::vector<std::string> check_asked(const Harness& run, std::int64_t end_ns) {
             }
             last = request.time_ns;
         }
-        if (end_ns - last > bound + ahead_ns(run, unit, own, last, end_ns)) {
+        if (end_ns - last > bound + ahead_ns(run, unit, own, last, end_ns) +
+                                fault_slack(run, last, end_ns)) {
             out.push_back("unit " + std::to_string(unit) + " not asked after " +
                           std::to_string(last / MILLISECOND));
         }
@@ -483,6 +608,10 @@ void scan(const Harness& run, std::vector<UnitState>& units,
             first = &state.first_companion_ns;
         } else if (request.first == BLOCK_REGISTER) {
             first = &state.first_block_ns;
+        } else if (request.first == THIRD_REGISTER) {
+            first = &state.first_third_ns;
+        } else if (request.first == SHARED_REGISTER) {
+            first = &state.first_shared_ns;
         }
         if (*first < 0 && request.time_ns >= state.since_ns) {
             *first = request.time_ns;
@@ -539,6 +668,7 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
     std::vector<std::string> violations;
     std::size_t steps = 0;
     std::size_t next_event = 0;
+    std::size_t next_fault = 0;
     std::size_t seen = 0;     // requests of the bus's log looked at
     std::size_t busiest = 0;  // the most steps in one sample
     // Per unit: the last request for its value (invariant 6).
@@ -551,8 +681,20 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
             units[event.unit] = {.mode = event.mode,
                                  .since_ns = event.time_ns,
                                  .first_value_ns = -1,
-                                 .first_companion_ns = -1};
+                                 .first_companion_ns = -1,
+                                 .first_block_ns = -1,
+                                 .first_third_ns = -1,
+                                 .first_shared_ns = -1};
             ++next_event;
+        }
+        while (next_fault < run.scenario.transport_faults.size() &&
+               run.scenario.transport_faults[next_fault] <= now) {
+            if (run.scenario.channel.transport == TransportKind::SERIAL) {
+                run.transport.noise(now, now + 50 * MILLISECOND);
+            } else {
+                run.transport.close_by_peer();
+            }
+            ++next_fault;
         }
         const std::size_t taken = run_checked(run, now, violations);
         steps += taken;

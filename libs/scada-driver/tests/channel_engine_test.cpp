@@ -899,6 +899,46 @@ TEST(ChannelEngine, AChainIsPublishedWholeAndItsDependentsFollowAFailure) {
     EXPECT_EQ(rig.tags.point(0, 1).quality, tag::Quality::BAD);
 }
 
+TEST(ChannelEngine, AFailedMiddlePartIsWrittenBeforeItsChainEnds) {
+    // M2, J2: chain 0 <- 20 <- 40 on a device paced at one request every
+    // 2 s, so the chain's last part goes 2 s after its middle one. The middle
+    // part (at 20) is unanswered from 1 s (time-out 100 ms, no retry): its
+    // point is COMM_FAIL at its own failure, not at the chain's end.
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .companions = {1}},
+                                  {.first = 20, .companions = {2}},
+                                  {.first = 40}},
+                       .pacing = {.min_request_interval_ns = 2 * SECOND}}},
+                     ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 100);
+    Rig rig(std::move(channel), 1);
+    rig.run_until(SECOND);
+    rig.bus.silent_from(1, 20, 20);
+    std::int64_t middle = 0;
+    for (std::int64_t now = rig.clock.monotonic_ns(); now <= 40 * SECOND;
+         now += 10 * MILLISECOND) {
+        rig.run_until(now);
+        if (rig.tags.has_flag(0, 1, Flag::COMM_FAIL)) {
+            middle = now;
+            break;
+        }
+    }
+    ASSERT_GT(middle, 0);
+    std::int64_t sent = 0;
+    for (const LoggedRequest& request : rig.bus.log()) {
+        if (request.first == 20 && request.time_ns >= SECOND) {
+            sent = request.time_ns;
+            break;
+        }
+    }
+    ASSERT_GT(sent, 0);
+    // One time-out and the sampling; the chain's end is 2 s later.
+    EXPECT_LE(middle - sent, 100 * MILLISECOND + 20 * MILLISECOND);
+}
+
 TEST(ChannelEngine, AChainWhoseMiddlePartFailsWritesAllItsPoints) {
     // A value at 0 with companions at 100 and 150, one request each. The
     // request at 100 times out: when the chain's last request is in, the
@@ -1787,6 +1827,102 @@ TEST(ChannelEngine, AKeepAliveTimeOutArmsTheVerdictToo) {
                   200 * MILLISECOND + SECOND + 130 * MILLISECOND)
             << "silent at " << (3 * SECOND + offset) / MILLISECOND << " ms";
     }
+}
+
+// M4: d1 reads two blocks (registers 0 and 20) in the 1 s group, with
+// `demote_after` 1; `dead` of them stops answering at 2 s, the other keeps
+// answering. Returns whether d1 was RUNNING again after its first demotion
+// (sampled every 100 ms to 60 s).
+bool returns_with_dead_block(std::uint32_t dead) {
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .group = NORMAL},
+                                  {.first = 20, .group = NORMAL}}}},
+                     ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 1);
+    Rig rig(std::move(channel), 1);
+    rig.run_until(2 * SECOND);
+    rig.bus.silent_from(1, dead, dead);
+    bool demoted = false;
+    for (std::int64_t now = 2 * SECOND; now <= 60 * SECOND;
+         now += 100 * MILLISECOND) {
+        rig.run_until(now);
+        demoted = demoted || rig.state(0) == DeviceStatus::DEMOTED;
+        if (demoted && rig.state(0) == DeviceStatus::RUNNING) {
+            return true;
+        }
+    }
+    EXPECT_TRUE(demoted);
+    return false;
+}
+
+// The register the probe request of d1 above reads.
+std::uint32_t probe_register() {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .group = NORMAL},
+                                  {.first = 20, .group = NORMAL}}}},
+                     ReadRules{.max_units = 4});
+    const ReadPlan& plan = channel.devices[0].plan;
+    EXPECT_TRUE(plan.probe.has_value());
+    const std::uint32_t point =
+        plan.requests[plan.probe.value_or(0)].points.front();
+    return point == 0 ? 0 : 20;
+}
+
+TEST(ChannelEngine, TheProbeRequestDecidesWhetherADemotedDeviceReturns) {
+    // M4, D-138: with `demote_after` 1 any dead block demotes its device.
+    // When the dead block is the probe request, the probe never answers and
+    // the device stays DEMOTED, its points BAD with COMM_FAIL, although its
+    // other block would answer: the probe request is the device's verdict.
+    // When the other block is dead, the probe answers and the device is
+    // polled again, and demoted again by the dead block (it flaps, G6).
+    const std::uint32_t probe = probe_register();
+    EXPECT_FALSE(returns_with_dead_block(probe));
+    EXPECT_TRUE(returns_with_dead_block(probe == 0 ? 20 : 0));
+}
+
+// M6: a unit of five blocks (registers 0, 20, 40, 60, 80) in the 1 s group
+// dies at 2 s beside a live unit (default keys: time-out 1 s, retries 2,
+// `demote_after` 3). Each block's J2 bound runs from its own first
+// time-out, and the blocks are asked one after the other, each with its
+// retries (Q1); the third failed request demotes the unit, which writes
+// every point COMM_FAIL.
+TEST(ChannelEngine, TheLastBlockOfADeadUnitGoesBadByItsDemotion) {
+    std::vector<PointSpec> points;
+    for (std::uint32_t block = 0; block < 5; ++block) {
+        points.push_back({.first = block * 20, .group = NORMAL});
+    }
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = points},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = 4});
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), 2);
+    rig.run_until(2 * SECOND);
+    rig.bus.fault(1, Fault::SILENT);
+    std::array<std::int64_t, 5> bad_at{};
+    for (std::int64_t now = 2 * SECOND; now <= 40 * SECOND;
+         now += 10 * MILLISECOND) {
+        rig.run_until(now);
+        for (std::uint32_t point = 0; point < 5; ++point) {
+            if (bad_at.at(point) == 0 &&
+                rig.tags.has_flag(0, point, Flag::COMM_FAIL)) {
+                bad_at.at(point) = now;
+            }
+        }
+    }
+    const std::int64_t last = *std::max_element(bad_at.begin(), bad_at.end());
+    // Measured 8.01 s: at most `demote_after` x (1 + `retries`) time-outs
+    // after the death, 9 s, plus the exchanges.
+    EXPECT_LE(last - 2 * SECOND, 9 * SECOND + 500 * MILLISECOND);
+    for (const std::int64_t time : bad_at) {
+        EXPECT_GT(time, 0);
+    }
+    EXPECT_EQ(rig.state(0), DeviceStatus::DEMOTED);
 }
 
 TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
