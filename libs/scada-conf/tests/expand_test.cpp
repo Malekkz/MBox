@@ -1523,5 +1523,42 @@ TEST(MergedPoints, AnIoAddressNeedsTheKeysOfItsBackend) {
                "\"ps1.io.run\" needs at_start"}));
 }
 
+// B5 and B6 of the review of #144: at the instance, over its whole chain,
+// a configuration expression that fails is CF-410, a type included, in the
+// form of 2.4; and an enumeration a template names must exist in the
+// instance's chain or enums.yaml.
+TEST(Expand, NamesAndTypesAtTheInstance) {
+    EXPECT_EQ(expand({{"templates/meter_a.yaml",
+                       "template: meter_a\nprotocol: modbus\n"
+                       "params: { inputs: { type: int, default: 2 } }\n"
+                       "points:\n"
+                       "  - { name: p, when: \"inputs + 1\", address: { table: "
+                       "holding, register: 1, type: uint16 } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+                     "\"inputs + 1\": the value must be BOOL, not INT\n"
+                     "  from template templates/meter_a.yaml:5:22"}));
+    const std::string base =
+        "template: meter_base\n"
+        "points: [ { name: s, enum: states } ]\n";
+    const std::string meter =
+        "template: meter_a\nextends: meter_base\nprotocol: modbus\n"
+        "points: [ { name: s, address: { table: holding, register: 1, type: "
+        "uint16 } } ]\n";
+    EXPECT_EQ(expand({{"templates/meter_base.yaml", base},
+                      {"templates/meter_a.yaml",
+                       meter + "enums: { states: { 0: off, 1: on } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              Lines{"ps1.m1.s: {enum: states, address: {table: holding, "
+                    "register: 1, type: uint16}}"});
+    EXPECT_EQ(expand({{"templates/meter_base.yaml", base},
+                      {"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-310: "
+                     "enumeration \"states\" does not exist\n"
+                     "  from template templates/meter_base.yaml:2:28 (point "
+                     "s)"}));
+}
+
 }  // namespace
 }  // namespace scada::conf

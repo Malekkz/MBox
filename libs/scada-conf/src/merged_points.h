@@ -7,6 +7,9 @@
 
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
+#include "scada/conf/references.h"
+
+#include <span>
 
 namespace scada::conf {
 
@@ -21,8 +24,14 @@ namespace scada::conf {
 // - CF-516 for an integer scaling that can pass its value type over the raw
 //   type's whole range;
 // - CF-517 for an integer value type with a scaling that is not integer,
-//   where merging brought the keys together or the type is derived.
-void check_merged_points(const ExpandedTree& tree, Diagnostics& diagnostics);
+//   where merging brought the keys together or the type is derived;
+// - CF-310 for an enumeration that a template's point names and neither the
+//   instance's chain nor `enums.yaml` of `files` defines (B5 of the review
+//   of #144; an enumeration the instance's own file names is stage 5's
+//   reference check).
+void check_merged_points(const ExpandedTree& tree,
+                         std::span<const CheckedFile> files,
+                         Diagnostics& diagnostics);
 
 }  // namespace scada::conf
 
