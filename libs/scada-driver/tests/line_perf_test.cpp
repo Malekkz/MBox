@@ -144,6 +144,9 @@ void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
         die();
     }
     const std::int64_t back_ns = times.back_ns;
+    // When the units died by the simulated clock: a step runs the exchange
+    // it started to its end, past the loop's time (review P2).
+    std::int64_t died_ns = 0;
     for (std::int64_t now = SECOND; now <= times.end_ns; now += SECOND) {
         if (now == back_ns) {
             line.bus.fault(back, Fault::NONE);
@@ -151,17 +154,18 @@ void run(Line& line, const std::vector<bool>& dead, std::uint8_t back,
         (void)run_engine(line.engine, line.clock, now);
         if (now == times.death_ns) {
             die();
+            died_ns = line.clock.monotonic_ns();
         }
         if (out.bad_ns < 0 && now > times.death_ns && all_bad(line, dead)) {
-            out.bad_ns = now - times.death_ns;
+            out.bad_ns = line.clock.monotonic_ns() - died_ns;
         }
         if (out.all_demoted_ns < 0 && now < back_ns &&
             all_demoted(line, dead)) {
-            out.all_demoted_ns = now;
+            out.all_demoted_ns = line.clock.monotonic_ns();
         }
         if (now > back_ns && out.back_running_ns < 0 &&
             line.engine.failures().state(back - 1U) == DeviceStatus::RUNNING) {
-            out.back_running_ns = now - back_ns;
+            out.back_running_ns = line.clock.monotonic_ns() - back_ns;
         }
     }
 }

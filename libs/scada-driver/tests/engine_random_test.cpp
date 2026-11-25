@@ -745,13 +745,15 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
                run.scenario.events[next_event].time_ns <= now) {
             const Scenario::Event& event = run.scenario.events[next_event];
             apply(run, event);
-            units[event.unit] = {.mode = event.mode,
-                                 .since_ns = event.time_ns,
-                                 .first_value_ns = -1,
-                                 .first_companion_ns = -1,
-                                 .first_block_ns = -1,
-                                 .first_third_ns = -1,
-                                 .first_shared_ns = -1};
+            // From when it applies by the simulated clock (review P2).
+            units[event.unit] = {
+                .mode = event.mode,
+                .since_ns = std::max(event.time_ns, run.clock.monotonic_ns()),
+                .first_value_ns = -1,
+                .first_companion_ns = -1,
+                .first_block_ns = -1,
+                .first_third_ns = -1,
+                .first_shared_ns = -1};
             ++next_event;
         }
         while (next_fault < run.scenario.transport_faults.size() &&
@@ -773,16 +775,19 @@ std::pair<std::size_t, std::vector<std::string>> run_seed(std::uint64_t seed) {
                                  " ms: " + std::to_string(taken) + " steps");
             break;
         }
+        // Checked at the simulated clock, which a step leaves at the end of
+        // the exchange it ran, past the loop's time (review P2).
+        const std::int64_t at = run.clock.monotonic_ns();
         for (std::uint8_t unit = 1; unit <= run.scenario.units; ++unit) {
             std::vector<std::int64_t>& flips = run.demoted_flips[unit];
             const bool demoted =
                 run.engine.failures().state(unit - 1U) == DeviceStatus::DEMOTED;
             if (demoted != (flips.size() % 2 == 1)) {
-                flips.push_back(now);
+                flips.push_back(at);
             }
         }
         scan(run, units, last_value, seen, violations);
-        for (std::string& violation : check(run, units, now)) {
+        for (std::string& violation : check(run, units, at)) {
             violations.push_back(std::move(violation));
         }
     }

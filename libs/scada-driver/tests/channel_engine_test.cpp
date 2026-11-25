@@ -1717,8 +1717,9 @@ TEST(ChannelEngine, ACycleProbeWaitsOneSecondAtMost) {
 }
 
 // When the point of each device `first` to `end` (exclusive) was first seen
-// BAD with COMM_FAIL, running `rig` in 10 ms steps to `until_ns`; 0 when
-// never. Indexed by device.
+// BAD with COMM_FAIL, running `rig` in 10 ms steps to `until_ns`, by the
+// simulated clock (a step runs the exchange it started to its end, past
+// the loop's time; review P2); 0 when never. Indexed by device.
 std::vector<std::int64_t> first_comm_fail(Rig& rig, std::uint32_t first,
                                           std::uint32_t end,
                                           std::int64_t until_ns) {
@@ -1729,7 +1730,7 @@ std::vector<std::int64_t> first_comm_fail(Rig& rig, std::uint32_t first,
         for (std::uint32_t device = first; device < end; ++device) {
             if (bad_at[device] == 0 &&
                 rig.tags.has_flag(device, 0, Flag::COMM_FAIL)) {
-                bad_at[device] = now;
+                bad_at[device] = rig.clock.monotonic_ns();
             }
         }
     }
@@ -1910,14 +1911,15 @@ TEST(ChannelEngine, TheLastBlockOfADeadUnitGoesBadByItsDemotion) {
         for (std::uint32_t point = 0; point < 5; ++point) {
             if (bad_at.at(point) == 0 &&
                 rig.tags.has_flag(0, point, Flag::COMM_FAIL)) {
-                bad_at.at(point) = now;
+                bad_at.at(point) = rig.clock.monotonic_ns();
             }
         }
     }
     const std::int64_t last = *std::max_element(bad_at.begin(), bad_at.end());
-    // Measured 8.01 s: at most `demote_after` x (1 + `retries`) time-outs
-    // after the death, 9 s, plus the exchanges.
-    EXPECT_LE(last - 2 * SECOND, 9 * SECOND + 500 * MILLISECOND);
+    // Measured by the simulated clock: 9.0 s. The bound (review P2): one
+    // period, then `demote_after` x (1 + `retries`) x (time-out + quiet
+    // time), 1 s + 9 x 1 s on tcp.
+    EXPECT_LE(last - 2 * SECOND, SECOND + 9 * SECOND + 100 * MILLISECOND);
     for (const std::int64_t time : bad_at) {
         EXPECT_GT(time, 0);
     }
