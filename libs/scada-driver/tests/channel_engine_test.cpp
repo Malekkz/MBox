@@ -1967,6 +1967,114 @@ TEST(ChannelEngine, FloorProbesOfAFasterGroupLeaveTheLiveUnitsTheirPeriod) {
     EXPECT_GT(times_of(rig.bus, 1).back(), 1'500 * SECOND);
 }
 
+TEST(ChannelEngine, AReturnedDeviceIsPolledOncePerPeriod) {
+    // P1, DI 6.6: tcp, blocks at 0 and 40 in the 10 s group, 40 a side-
+    // effect read; the unit is silent from 25 s to 31 s and is demoted.
+    // Once probed back, its groups are due at once and then a period after
+    // that cycle started: one side-effect read, not two in 2 ms (before,
+    // `complete_cycle` made the next cycle due at once again).
+    ReadRules rules{.max_units = 4};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 40,
+                              .last = 40}};
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {{.first = 0, .group = SLOW},
+                                  {.first = 40, .group = SLOW}}}},
+                     rules);
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure = quick_failure(0, 1);
+    Rig rig(std::move(channel), 1);
+    rig.bus.side_effect(1, 0, 40, 40);
+    rig.run_until(25 * SECOND);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(31 * SECOND);
+    rig.bus.fault(1, Fault::NONE);
+    rig.run_until(60 * SECOND);
+    std::vector<std::int64_t> reads;
+    for (const LoggedRequest& request : rig.bus.log()) {
+        if (request.first == 40 && request.time_ns > 31 * SECOND) {
+            reads.push_back(request.time_ns);
+        }
+    }
+    ASSERT_GE(reads.size(), 2U);
+    for (std::size_t index = 1; index < reads.size(); ++index) {
+        EXPECT_GE(reads[index] - reads[index - 1], 9 * SECOND)
+            << "read " << index << " at " << reads[index] / MILLISECOND
+            << " ms";
+    }
+}
+
+TEST(ChannelEngine, AnAnsweredRetryCancelsTheVerdict) {
+    // P3, J2: d1 polls one point every 1 s (time-out 200 ms, retries 2:
+    // verdict 1 s after the first time-out). Its unit is silent only around
+    // its poll at 3 s; the retry, 200 ms later, is answered. The verdict is
+    // cancelled: the point never shows COMM_FAIL, also past the verdict's
+    // time.
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1, NORMAL)}},
+        ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::TCP;
+    channel.devices[0].failure =
+        FailureRules{.timeout_ns = 200 * MILLISECOND,
+                     .write_timeout_ns = 200 * MILLISECOND,
+                     .retries = 2,
+                     .demote_after = 3};
+    Rig rig(std::move(channel), 1);
+    rig.run_until(2'950 * MILLISECOND);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(3'150 * MILLISECOND);
+    rig.bus.fault(1, Fault::NONE);
+    bool comm_fail = false;
+    for (std::int64_t now = 3'150 * MILLISECOND; now <= 6 * SECOND;
+         now += 10 * MILLISECOND) {
+        rig.run_until(now);
+        comm_fail = comm_fail || rig.tags.has_flag(0, 0, Flag::COMM_FAIL);
+    }
+    EXPECT_EQ(rig.engine.counts().timeouts, 1U);
+    EXPECT_EQ(rig.engine.counts().retries, 1U);
+    EXPECT_FALSE(comm_fail);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+TEST(ChannelEngine, ADemotedUnitOfASlowerGroupIsFoundOnASaturatedLine) {
+    // P4, N1: tcp, four live units fill the 200 ms group (60 ms each, so a
+    // request of it is always due); unit 5, of the 10 s group, is demoted
+    // and returns at 600 s. Its probe past its floor goes ahead of
+    // the due polls whatever its group's priority, so it is found within
+    // its back-off (300 s at most), the floor (10 s) and the spacing (11 s).
+    std::vector<DeviceSpec> specs;
+    for (std::uint8_t unit = 1; unit <= 5; ++unit) {
+        specs.push_back({.name = "d" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, unit <= 4 ? FAST : SLOW)});
+    }
+    CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), 5);
+    // Demoted first, on a line with room (in the contract's order a 10 s
+    // group gets no turn while a 200 ms group is always due); then the
+    // 200 ms group fills the line.
+    rig.bus.fault(5, Fault::SILENT);
+    rig.run_until(120 * SECOND);
+    ASSERT_EQ(rig.state(4), DeviceStatus::DEMOTED);
+    for (std::uint8_t unit = 1; unit <= 4; ++unit) {
+        rig.transport.latency(unit, 60 * MILLISECOND);
+    }
+    rig.run_until(600 * SECOND);
+    ASSERT_EQ(rig.state(4), DeviceStatus::DEMOTED);
+    rig.bus.fault(5, Fault::NONE);
+    rig.run_until(600 * SECOND + 325 * SECOND);
+    // Found: its probe answered and it is polled again. Its 10 s poll then
+    // waits behind the always-due 200 ms group, the contract's order (a
+    // known limit, D-138): it is INITIALISING, its point not yet GOOD.
+    EXPECT_NE(rig.state(4), DeviceStatus::DEMOTED);
+    EXPECT_NE(rig.tags.point(4, 0).quality, tag::Quality::GOOD);
+}
+
 TEST(ChannelEngine, ADemotedUnitIsFoundAgainOnASaturatedLine) {
     // J3: 30 units that take 40 ms each fill a 1 s group, so a request is
     // always due. Units 26 to 30 are dead; unit 30 returns at 1,800 s: its

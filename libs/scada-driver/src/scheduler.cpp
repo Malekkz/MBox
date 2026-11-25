@@ -398,7 +398,13 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
     // time missed its period because of pacing (11.1).
     // E4: the cycle ended when its last request was handed out, not at the
     // `take` that finds it complete.
-    const std::int64_t next_due = later(state.due_ns, period_ns);
+    // A cycle due at EARLIEST (a device polled again, `set_polled`) is
+    // followed a period after it started, not at once: else a returned
+    // device is polled twice in a row, side-effect reads included (6.6;
+    // review P1).
+    const std::int64_t base =
+        state.due_ns == EARLIEST ? state.cycle_start_ns : state.due_ns;
+    const std::int64_t next_due = later(base, period_ns);
     state.limited = state.waited && state.last_sent_ns > next_due;
     state.in_cycle = false;
     state.due_ns = std::max(next_due, now_ns);
