@@ -160,7 +160,6 @@ public:
     std::optional<ConfigValue> run() { return value_of(tree_->root); }
 
 private:
-
     // NOLINTNEXTLINE(misc-no-recursion): bounded by the parser's depth, 32
     std::optional<ConfigValue> value_of(std::size_t index) {
         const ExprNode& node = tree_->nodes.at(index);
@@ -430,8 +429,8 @@ private:
                 return std::nullopt;
             }
             // INT and REAL branches give REAL (5.6): the type of the call.
-            if (chosen->type == ValueType::INT &&
-                index < types_.size() && types_[index] == ValueType::REAL) {
+            if (chosen->type == ValueType::INT && index < types_.size() &&
+                types_[index] == ValueType::REAL) {
                 return ConfigValue::of_real(
                     static_cast<double>(chosen->integer));
             }

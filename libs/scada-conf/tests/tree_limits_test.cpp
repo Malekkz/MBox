@@ -156,7 +156,6 @@ std::string instances(int count, std::string_view more = {}) {
     return channel(devices);
 }
 
-
 // A template of one `repeat` over `values` values whose block `when` is
 // `when`, making one point per value.
 std::string repeat_when(int values, const std::string& when) {
@@ -173,6 +172,21 @@ std::string false_terms(int terms) {
         text += " OR n < 0";
     }
     return text;
+}
+
+// meter_a with a SET parameter `s` of `items` values, all given by default,
+// and a `repeat` of 10 values whose `when` is `when`.
+std::string with_set(int items, const std::string& when) {
+    std::string values;
+    for (int item = 0; item < items; ++item) {
+        values += (item == 0 ? "v" : ", v") + std::to_string(item);
+    }
+    return "template: meter_a\nprotocol: modbus\nparams: { s: { type: set, "
+           "values: [" +
+           values + "], default: [" + values +
+           "] } }\nrepeat:\n  - for: { n: \"1..10\" }\n    when: \"" + when +
+           "\"\n    points:\n      - { name: \"p{n}\", address: { table: "
+           "holding, register: 1, type: uint16 } }\n";
 }
 
 }  // namespace
@@ -337,10 +351,11 @@ TEST(Expand, AnExpressionIsParsedOncePerSite) {
         {{"templates/meter_a.yaml", repeat_when(65536, false_terms(400))},
          {"drivers/modbus/line1.yaml", instances(30)}},
         {});
-    EXPECT_EQ(full.lines,
-              (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the points "
-                     "and repeat values made for the tree exceed their limit "
-                     "of 4000000\n  from template templates/meter_a.yaml:5:11"}));
+    EXPECT_EQ(
+        full.lines,
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the points "
+               "and repeat values made for the tree exceed their limit "
+               "of 4000000\n  from template templates/meter_a.yaml:5:11"}));
     EXPECT_EQ(full.counts.parses, 2U);
 }
 
@@ -354,9 +369,10 @@ TEST(Expand, AnEvaluationCostsItsNodes) {
     // and evaluated 10 times (30).
     constexpr std::size_t EDGE = 65;
     const auto passes = [](const std::string& when, std::size_t work) {
-        return expand_limited({{"templates/meter_a.yaml", repeat_when(10, when)},
-                               {"drivers/modbus/line1.yaml", instances(1)}},
-                              {.work = work})
+        return expand_limited(
+                   {{"templates/meter_a.yaml", repeat_when(10, when)},
+                    {"drivers/modbus/line1.yaml", instances(1)}},
+                   {.work = work})
                    .error_count == 0;
     };
     // `n > 0` has 3 nodes, `n + 0 > 0` 5, `n + 0 + 0 > 0` 7.
@@ -385,6 +401,42 @@ TEST(Expand, WhatIsMadeCountsWithWhatIsWritten) {
               (Lines{"drivers/modbus/line1.yaml:8:13: error CF-113: the "
                      "expanded tree exceeds its limit of 1700 nodes\n"
                      "  from template templates/meter_a.yaml:56:13"}));
+}
+
+// A reference to a parameter costs the value it copies (E1 of the review
+// of #146): `'v0' IN s` over 10 values passes at 165 with a set of 10
+// items, 65 as for `n > 0` and 10 x 10 for the set, and at 265 with 20.
+TEST(Expand, AReferenceCostsItsValue) {
+    const auto passes = [](int items, std::size_t work) {
+        return expand_limited(
+                   {{"templates/meter_a.yaml", with_set(items, "'v0' IN s")},
+                    {"drivers/modbus/line1.yaml", instances(1)}},
+                   {.work = work})
+                   .error_count == 0;
+    };
+    EXPECT_TRUE(passes(10, 165));
+    EXPECT_FALSE(passes(10, 164));
+    EXPECT_TRUE(passes(20, 265));
+    EXPECT_FALSE(passes(20, 264));
+}
+
+// Past the work budget nothing more is counted: one stop is one error,
+// not one for each expression evaluated after it.
+TEST(Expand, OneStopIsOneError) {
+    std::string text =
+        "template: meter_a\nprotocol: modbus\nparams: { k: { type: int, "
+        "default: 1 } }\npoints:\n";
+    constexpr int POINTS = 20;
+    for (int point = 0; point < POINTS; ++point) {
+        text += "  - { name: p" + std::to_string(point) +
+                ", address: { table: holding, register: \"k + " +
+                std::to_string(point) + "\", type: uint16 } }\n";
+    }
+    const Expanded expanded =
+        expand_limited({{"templates/meter_a.yaml", text},
+                        {"drivers/modbus/line1.yaml", instances(1)}},
+                       {.work = 40});
+    EXPECT_EQ(expanded.error_count, 1U);
 }
 
 }  // namespace scada::conf

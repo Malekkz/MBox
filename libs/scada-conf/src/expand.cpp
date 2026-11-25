@@ -2259,9 +2259,9 @@ private:
             if (found == param_weights_.end()) {
                 continue;
             }
-            const std::size_t weight =
-                found->second > SIZE_MAX / count ? SIZE_MAX
-                                                 : found->second * count;
+            const std::size_t weight = found->second > SIZE_MAX / count
+                                           ? SIZE_MAX
+                                           : found->second * count;
             cost = weight > SIZE_MAX - cost ? SIZE_MAX : cost + weight;
         }
         return cost;
@@ -2284,21 +2284,22 @@ private:
                    const Bindings& bindings) {
         if (site.typed && std::ranges::all_of(site.read, [&](const auto& name) {
                 const ConfigValue* bound = bindings(name.first);
-                return (bound == nullptr ? std::nullopt
-                                         : std::optional(bound->type)) ==
-                       name.second;
+                return (bound == nullptr
+                            ? std::nullopt
+                            : std::optional(bound->type)) == name.second;
             })) {
             return true;
         }
-        if (!count_work(value, std::max<std::size_t>(1, site.tree->nodes.size()))) {
+        if (!count_work(value,
+                        std::max<std::size_t>(1, site.tree->nodes.size()))) {
             return false;
         }
         site.read.clear();
         const Bindings recording =
             [&site, &bindings](std::string_view name) -> const ConfigValue* {
             const ConfigValue* bound = bindings(name);
-            site.read.emplace_back(
-                std::string(name), bound == nullptr
+            site.read.emplace_back(std::string(name),
+                                   bound == nullptr
                                        ? std::nullopt
                                        : std::optional<ValueType>(bound->type));
             return bound;
