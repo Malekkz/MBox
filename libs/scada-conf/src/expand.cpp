@@ -1401,7 +1401,11 @@ private:
             }
             case NodeKind::MAP:
                 for (Member& member : value.members) {
-                    evaluate_below(member.value.front(), variables);
+                    // An alarm's expressions read tags, also on a bit (B2 of
+                    // the review of #144).
+                    if (member.key != "alarms") {
+                        evaluate_below(member.value.front(), variables);
+                    }
                 }
                 return;
             case NodeKind::SEQUENCE:
@@ -1490,6 +1494,11 @@ private:
             constexpr std::string_view PREFIX = "expression: ";
             if (reason.starts_with(PREFIX)) {
                 reason = reason.substr(PREFIX.size());
+            }
+            // In a block scalar or an escaped string, the place is given
+            // within the text, as for CF-520 (D-109).
+            if (!value.file->document->verbatim(value.node)) {
+                reason += site.where;
             }
             error_in(CF_EVALUATION, *value.file, std::move(site.location),
                      "expression " + quote_text(text) + ": " + reason);

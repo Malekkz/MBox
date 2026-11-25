@@ -464,7 +464,8 @@ TEST(References, TypesOfConfigurationExpressions) {
                "'a'\": the value must be a number, not BOOL",
                "templates/meter_a.yaml:11:53 CF-410: expression "
                "\"sum(\\\"x.*\\\")\": sum reads tags, and a configuration "
-               "expression has none",
+               "expression has none at line 1, column 1 of the "
+               "expression's text",
                "templates/meter_a.yaml:12:74 CF-410: expression "
                "\"round(inputs / 2) + max(inputs)\": max takes 2 or more "
                "arguments, not 1",

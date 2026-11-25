@@ -544,6 +544,45 @@ private:
         return scope;
     }
 
+    // The scope of a device's own points, defaults and overrides, one per
+    // template, not per device (the lead's note on #144).
+    // - With a template, the template's chain: its enumerations. Their
+    //   expressions may use the variables of the template's `repeat` blocks
+    //   (4.5, step 6), so the expander types them, which binds them.
+    // - With a template the tree does not have: nothing is known.
+    // - Without a template there is no parameter or variable: every name
+    //   in an expression is unknown (B5 of the review of #144).
+    const Scope& instance_scope(NodeId device) {
+        const std::optional<NodeId> name = find_scalar(device, "template");
+        if (!name) {
+            static const Scope BARE = [] {
+                Scope bare;
+                bare.bare = true;
+                return bare;
+            }();
+            return BARE;
+        }
+        need(template_names_, "template", *name);
+        const auto found = templates_.find(text(*name));
+        if (found == templates_.end()) {
+            static const Scope UNKNOWN = [] {
+                Scope unknown;
+                unknown.known = false;
+                unknown.typed = false;
+                return unknown;
+            }();
+            return UNKNOWN;
+        }
+        const auto cached = instance_scopes_.find(found->second);
+        if (cached != instance_scopes_.end()) {
+            return cached->second;
+        }
+        Scope scope = scope_of(found->second);
+        scope.typed = false;
+        return instance_scopes_.emplace(found->second, std::move(scope))
+            .first->second;
+    }
+
     // The parameters a level declares with their type.
     static void add_parameters(const Document& document, NodeId root,
                                Scope& scope) {
@@ -657,26 +696,7 @@ private:
     }
 
     void check_device(NodeId device) {
-        Scope scope;
-        if (const std::optional<NodeId> name =
-                find_scalar(device, "template")) {
-            need(template_names_, "template", *name);
-            if (const auto found = templates_.find(text(*name));
-                found != templates_.end()) {
-                scope = scope_of(found->second);
-            } else {
-                scope.known = false;
-            }
-            // An instance's points, defaults and overrides may use the
-            // variables of the template's `repeat` blocks (4.5, step 6);
-            // their expressions are typed by the expander, which binds
-            // them.
-            scope.typed = false;
-        } else {
-            // Without a template there is no parameter or variable: every
-            // name in an expression is unknown (B5 of the review of #144).
-            scope.bare = true;
-        }
+        const Scope& scope = instance_scope(device);
         for (const NodeId point : items(device, "points")) {
             check_point(point, scope, {});
         }
@@ -1022,9 +1042,14 @@ private:
     void report(NodeId scalar, std::uint32_t column,
                 const std::string& reason) {
         ExpressionSite site = expression_site(*document_, scalar, column);
+        // Where the scalar is not its source on one line (a block scalar,
+        // an escaped string), the place is given within the text, as for
+        // CF-520 (D-109).
+        const std::string within =
+            document_->verbatim(scalar) ? std::string() : site.where;
         diagnostics_->error(
             CF_EXPRESSION_FAILS, std::move(site.location),
-            "expression " + quote_text(text(scalar)) + ": " + reason);
+            "expression " + quote_text(text(scalar)) + ": " + reason + within);
     }
 
     static bool fits(ValueType type, Wanted wanted) noexcept {
@@ -1059,6 +1084,7 @@ private:
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     // The scope of each template, built once (S4 of the review of #144).
     std::map<const CheckedFile*, Scope> scopes_;
+    std::map<const CheckedFile*, Scope> instance_scopes_;
     Definitions template_names_;
     Definitions channels_;
     Definitions devices_;

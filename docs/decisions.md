@@ -2202,7 +2202,8 @@ Decision:
   - Every failure is CF-410, in the contract's form `expression {expr}: {reason}` (2.4, 10.4; B6), at the offending character (D-109). This covers a type error, a `when` that gives no BOOL, and a name that is neither a parameter nor a variable bound to this point (`... is not a parameter and no variable bound to this point`).
   - CF-523 stays only for a `for` value that gives no range or INT (5.6).
   - `when` of a `repeat` block is evaluated for each value, or pair of values, with its variables.
-  - Alarms hold run-time expressions and are not evaluated here.
+  - Alarms hold run-time expressions and are not evaluated here, wherever they stand: on a point or on a bit (B2 of the review of #144).
+  - In a block scalar or an escaped string, which has no place in the file for a character, the message adds the place within the expression's text, as for CF-520 (D-109).
 - **`repeat`.** A `for` value is evaluated with the parameters only. Its values are counted from the bounds before any is made (CF-113, `the range of n exceeds its limit of 65536`, and for two variables `the values of a repeat block exceed ...`).
 - **CF-414** is found while points are made, not after: a level whose own points (distinct by CF-416) would pass 65,536 stops there. Memory therefore stays bounded for a `repeat` of 65,536 pairs over many points.
 - **Exclusive groups (4.5)** are keyed by the map they are in:

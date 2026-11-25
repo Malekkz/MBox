@@ -842,5 +842,48 @@ TEST(Expand, NamesAndTypesAtTheInstance) {
                      "s)"}));
 }
 
+// B2 in the expander: an alarm's expressions read tags, also on a bit of a
+// template's point; they are not evaluated.
+TEST(Expand, AlarmsOnABitAreNotEvaluated) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\nbit_order: lsb0\n"
+                 "points:\n"
+                 "  - name: w\n"
+                 "    tag: false\n"
+                 "    address: { table: holding, register: 1, type: uint16 }\n"
+                 "    bits:\n"
+                 "      0: { name: fault, alarms: [ { type: state, alarm_on: "
+                 "true, priority: high, suppress_when: ps1.station.maint } ] "
+                 "}\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        Lines{"ps1.m1.w: {tag: false, address: {table: holding, register: 1, "
+              "type: uint16}, bits: {0: {name: fault, alarms: [{type: state, "
+              "alarm_on: true, priority: high, suppress_when: "
+              "ps1.station.maint}]}}}"});
+}
+
+// A CF-410 in a block scalar is at the scalar, with its place within the
+// text, as for CF-520 (D-109; the lead's note on #144).
+TEST(Expand, Cf410InABlockScalarNamesItsPlaceInTheText) {
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml",
+                 "template: meter_a\nprotocol: modbus\n"
+                 "params: { k: { type: int, default: 0 } }\n"
+                 "points:\n"
+                 "  - name: p\n"
+                 "    address:\n"
+                 "      table: holding\n"
+                 "      type: uint16\n"
+                 "      register: |\n"
+                 "        100 +\n"
+                 "        1 DIV k\n"},
+                {"drivers/modbus/line1.yaml", one_device()}}),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
+               "\"100 +\\n1 DIV k\\n\": division by zero at line 2, column 3 "
+               "of the expression's text\n"
+               "  from template templates/meter_a.yaml:9:17"}));
+}
+
 }  // namespace
 }  // namespace scada::conf
