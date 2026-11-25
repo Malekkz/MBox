@@ -489,11 +489,12 @@ private:
                 // Counted once per instance: points of one instance that
                 // meet the cause are one.
                 Cause& seen = group->second;
-                const Location& at = diagnostic.location;
-                if (at.file != seen.last.file || at.line != seen.last.line ||
-                    at.column != seen.last.column) {
+                const Location& place = diagnostic.location;
+                if (place.file != seen.last.file ||
+                    place.line != seen.last.line ||
+                    place.column != seen.last.column) {
                     ++seen.more;
-                    seen.last = at;
+                    seen.last = place;
                 }
                 return;
             }

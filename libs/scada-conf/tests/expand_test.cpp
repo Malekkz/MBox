@@ -3,9 +3,11 @@
 // order would give another result, and each CF-4xx code, with its place in
 // the instance and the template line it came from.
 
+#include "scada/conf/expand.h"
 #include "expanded_text.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/node.h"
 #include "scada/conf/validate.h"
 #include "scada/test/temp_directory.h"
 
@@ -19,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scada::conf {
@@ -803,57 +806,69 @@ TEST(Expand, TheEdgesOfParametersAndBits) {
                      "templates/meter_a.yaml:4:31 (point p; k = 0)"}));
 }
 
-// `expanded_diagnostic` (expand.h) places a diagnostic of a later stage as
-// the expander does: at the instance, with the template's line as a note.
-TEST(Expand, AnExpandedDiagnostic) {
+// The expanded tree of `files` with a system.yaml, or nothing.
+std::optional<ExpandedTree> expanded_tree_of(const Files& files) {
     std::optional<test::TempDirectory> temp =
         test::TempDirectory::create("scada-conf-expand-");
-    ASSERT_TRUE(temp.has_value());
     if (!temp) {
-        return;
+        return std::nullopt;
     }
-    Files all{{"templates/meter_a.yaml",
-               "template: meter_a\nprotocol: modbus\npoints:\n  - { name: p, " +
-                   std::string(ADDRESS) + " }\n"},
-              {"drivers/modbus/line1.yaml", one_device()},
-              {"system.yaml", std::string(SYSTEM)}};
+    Files all = files;
+    all.try_emplace("system.yaml", SYSTEM);
     for (const auto& [path, content] : all) {
         const fs::path full = temp->path() / path;
         fs::create_directories(full.parent_path());
         std::ofstream(full, std::ios::binary) << content;
     }
-    const Result<Validation> validation = validate_and_expand(temp->path());
-    ASSERT_TRUE(validation.ok());
-    if (!validation.ok() || !validation.value().expanded) {
-        FAIL() << "no expanded tree";
+    Result<Validation> validation = validate_and_expand(temp->path());
+    if (!validation.ok()) {
+        return std::nullopt;
+    }
+    return std::move(validation).value().expanded;
+}
+
+// The first scalar of `tree` with `text`, written in `file`.
+std::optional<NodeId> scalar_in(const ExpandedTree& tree, std::string_view text,
+                                std::string_view file) {
+    for (NodeId node = 0; node < tree.document.size(); ++node) {
+        if (tree.document.kind(node) == NodeKind::SCALAR &&
+            tree.document.text(node) == text &&
+            tree.document.location(node).file == file) {
+            return node;
+        }
+    }
+    return std::nullopt;
+}
+
+// `expanded_diagnostic` (expand.h) places a diagnostic of a later stage as
+// the expander does: at the instance, with the template's line as a note.
+TEST(Expand, AnExpandedDiagnostic) {
+    const std::optional<ExpandedTree> tree = expanded_tree_of(
+        {{"templates/meter_a.yaml",
+          "template: meter_a\nprotocol: modbus\npoints:\n  - { name: p, " +
+              std::string(ADDRESS) + " }\n"},
+         {"drivers/modbus/line1.yaml", one_device()}});
+    ASSERT_TRUE(tree.has_value());
+    if (!tree) {
         return;
     }
-    const ExpandedTree& tree = *validation.value().expanded;
-    // The node of the point's `register` value, written in the template.
-    std::optional<NodeId> from_template;
-    std::optional<NodeId> from_instance;
-    for (NodeId node = 0; node < tree.document.size(); ++node) {
-        const Location place = tree.document.location(node);
-        if (tree.document.kind(node) == NodeKind::SCALAR &&
-            tree.document.text(node) == "1" &&
-            place.file == "templates/meter_a.yaml") {
-            from_template = node;
-        }
-        if (tree.document.kind(node) == NodeKind::SCALAR &&
-            tree.document.text(node) == "ps1.m1") {
-            from_instance = node;
-        }
-    }
-    ASSERT_TRUE(from_template && from_instance);
+    // The point's `register` value, written in the template, and the
+    // instance's name.
+    const std::optional<NodeId> from_template =
+        scalar_in(*tree, "1", "templates/meter_a.yaml");
+    const std::optional<NodeId> from_instance =
+        scalar_in(*tree, "ps1.m1", "drivers/modbus/line1.yaml");
+    ASSERT_TRUE(from_template.has_value() && from_instance.has_value());
     if (!from_template || !from_instance) {
         return;
     }
-    EXPECT_EQ(format(expanded_diagnostic(tree, 1, *from_template, "a message",
+    EXPECT_EQ(format(expanded_diagnostic(*tree, 1, *from_template, "a message",
                                          "point p")),
               "drivers/modbus/line1.yaml:7:11: error CF-1: a message\n  from "
               "template templates/meter_a.yaml:4:53 (point p)");
-    EXPECT_EQ(format(expanded_diagnostic(tree, 1, *from_instance, "a message")),
-              "drivers/modbus/line1.yaml:7:11: error CF-1: a message");
+    EXPECT_EQ(
+        format(expanded_diagnostic(*tree, 1, *from_instance, "a message")),
+        "drivers/modbus/line1.yaml:7:11: error CF-1: a message");
 }
 
 TEST(Expand, APointOfAProtocolTemplateNeedsAnAddress) {

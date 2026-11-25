@@ -15,6 +15,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace scada::conf {
 namespace {
@@ -161,7 +163,7 @@ TEST(ConfigEval, FailuresAreCf410) {
 // ends of a range, bit and shift 63, the bounds of `limit`, the order of
 // `atan2`, every REAL function, and SETs compared as sets (C3).
 TEST(ConfigEval, Edges) {
-    const std::pair<std::string_view, std::string_view> rows[] = {
+    const std::vector<std::pair<std::string_view, std::string_view>> rows = {
         {"-9223372036854775807 - 1", "-9223372036854775808 INT"},
         {"-9223372036854775807 - 1 - 1",
          "CF-410 at 26: expression: the result does not fit INT"},
