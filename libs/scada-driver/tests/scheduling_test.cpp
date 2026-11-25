@@ -1292,6 +1292,117 @@ TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
     EXPECT_LE(probes, 55U);
 }
 
+TEST(Scheduling, NoFloorProbeGoesBetweenThePartsOfAChain) {
+    // Q1, DI 6.2 step 3: d1 reads a chain (0 with its companion at 100);
+    // d2 is demoted, its probe past its floor. Once the chain's first part
+    // is out, its second goes next, not the other unit's floor probe.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(1, false);
+    scheduler.set_probe(1, 0, 100 * MILLISECOND);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_EQ(first.device, 0U);
+    const Choice second = scheduler.take(1'500 * MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::POLL);
+    EXPECT_EQ(second.device, 0U);
+    // Then the floor probe.
+    EXPECT_EQ(scheduler.take(1'501 * MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
+// Two demoted devices of units 1 and 2 (probe time-out 10 ms): d1's floor at
+// 600 ms, d2's at 100 ms.
+CompiledChannel two_demoted() {
+    return make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = LARGE});
+}
+
+void demote_both(Scheduler& scheduler) {
+    for (std::uint32_t device = 0; device < 2; ++device) {
+        scheduler.set_polled(device, false);
+    }
+    scheduler.set_probe(0, 500 * MILLISECOND, 10 * MILLISECOND);
+    scheduler.set_probe(1, 0, 10 * MILLISECOND);
+}
+
+TEST(Scheduling, TheOldestFloorProbeGoesFirst) {
+    // Q2, N1: both are past their floor at 1 s; d2's is the older.
+    const CompiledChannel channel = two_demoted();
+    Scheduler scheduler(channel, 4, 0);
+    demote_both(scheduler);
+    const Choice probe = scheduler.take(SECOND);
+    ASSERT_EQ(probe.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(probe.device, 1U);
+}
+
+TEST(Scheduling, FloorProbesAreSpacedFromTheEndOfTheLast) {
+    // Q2, N1: a floor probe at 1 s (10 ms) holds the next one until 1 s +
+    // 11 x 10 ms: PROBE_FLOOR time-outs after its end, not after its start;
+    // the wait wakes exactly then.
+    const CompiledChannel channel = two_demoted();
+    Scheduler scheduler(channel, 4, 0);
+    demote_both(scheduler);
+    ASSERT_EQ(scheduler.take(SECOND).kind, Choice::Kind::PROBE);
+    scheduler.probe_done();
+    const Choice wait = scheduler.take(SECOND + 105 * MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, SECOND + 110 * MILLISECOND);
+    const Choice next = scheduler.take(SECOND + 110 * MILLISECOND);
+    EXPECT_EQ(next.kind, Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, NoFloorProbeWhileItsUnitIsHeldByAnOrder) {
+    // Q2: a and b share unit 7, whose write interval is 2 s; a's list of two
+    // writes holds the unit between them (8.5). b is demoted, its probe past
+    // its floor at 1 s and free of pacing (a read): it waits for the
+    // list's end.
+    const CompiledChannel channel =
+        make_channel({{.name = "a",
+                       .unit_id = 7,
+                       .points = adjacent(0, 1),
+                       .pacing = {.min_write_interval_ns = 2 * SECOND}},
+                      {.name = "b", .unit_id = 7, .points = adjacent(50, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);  // only the order and the probe
+    scheduler.set_polled(1, false);
+    scheduler.set_probe(1, 0, 10 * MILLISECOND);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 3, .device = 0, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::WAIT);
+    const Choice second = scheduler.take(2 * SECOND);
+    ASSERT_EQ(second.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(second.step, 1U);
+    EXPECT_EQ(scheduler.take(2 * SECOND + MILLISECOND).kind,
+              Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, AFloorProbeKeepsItsUnitsPacing) {
+    // Q2: d1 is paced at 500 ms; polled at 0, then demoted with its probe
+    // due at 0 (floor 100 ms). At 200 ms the probe waits for the pacing.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = adjacent(0, 1),
+          .pacing = {.min_request_interval_ns = 500 * MILLISECOND}}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0, 10 * MILLISECOND);
+    const Choice wait = scheduler.take(200 * MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 500 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(500 * MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
 TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
     // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
     const CompiledChannel channel =

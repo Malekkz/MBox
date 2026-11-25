@@ -735,6 +735,14 @@ bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
     if (probe_in_flight_ || !orders_.empty()) {
         return false;
     }
+    // A chain of companions in progress anywhere on the channel goes first
+    // (DI 6.2 step 3): a floor probe between its parts would read the value
+    // and its companion a probe time-out apart (review Q1).
+    for (const DeviceRun& run : devices_) {
+        if (run.chain) {
+            return false;
+        }
+    }
     // The oldest probe past its floor, of a device whose unit is free.
     std::optional<std::uint32_t> oldest;
     std::int64_t oldest_floor = NEVER;
