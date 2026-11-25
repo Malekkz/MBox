@@ -379,15 +379,12 @@ bool recovered(const Harness& run, std::uint8_t unit, const UnitState& state,
     }
     // Plus the requests ahead of it meanwhile (DI 6.2 step 3).
     // The cheap tests first: the sum is over the log.
-    if (run.engine.failures().state(device) != DeviceStatus::RUNNING &&
-        now_ns > since + recover_bound(run, unit) &&
-        now_ns >
-            since + recover_bound(run, unit) +
-                ahead_ns(run, unit, unit_priority(run, unit), since, now_ns) +
-                fault_slack(run, since, now_ns)) {
-        return false;
-    }
-    return true;
+    return run.engine.failures().state(device) == DeviceStatus::RUNNING ||
+           now_ns <= since + recover_bound(run, unit) ||
+           now_ns <= since + recover_bound(run, unit) +
+                         ahead_ns(run, unit, unit_priority(run, unit), since,
+                                  now_ns) +
+                         fault_slack(run, since, now_ns);
 }
 
 // Checks invariants 1, 3 and 4 at `now_ns`; returns the violations.
