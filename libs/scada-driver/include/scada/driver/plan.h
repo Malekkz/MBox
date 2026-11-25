@@ -122,7 +122,9 @@ struct ReadPlan {
     // outside every chain; else a request of its own (not in `by_group`)
     // that reads the shortest part of a chain whose clusters are whole and
     // that reads no side effect; else none, which the compile step reports
-    // when a keep-alive is configured.
+    // when a keep-alive is configured. A demoted device with no probe
+    // request is probed by one whole poll cycle at each back-off instant
+    // (D-138, R8); the compile step reports such a device too.
     std::optional<std::uint32_t> keepalive;
     std::optional<std::uint32_t> probe;
 };

@@ -18,11 +18,14 @@ The library is built in slices. These are the first two:
 | The run-time objects of an exchange: connection state, attempt, sample sink | `scada/driver/exchange.h` | 2.2, 3.1 |
 | The compiled channel, device, point and poll group | `scada/driver/compiled.h` | 3.1, 6.1, 6.4, 6.5 |
 | Block planning of reads | `scada/driver/plan.h` | 6.3, 6.5, 6.6, 5.5 |
-| The order of service, pacing, keep-alive | `scada/driver/scheduler.h` | 6.2 to 6.6 |
+| The order of service, pacing, keep-alive, retries, probes | `scada/driver/scheduler.h` | 6.2 to 6.6, 7.1, 7.4 |
+| The deadlines of an exchange | `scada/driver/timing.h` | 7.1, 7.2 |
+| Device states, demotion, probes' back-off, the run of time-outs | `scada/driver/failure.h` | 3.5, 7.3, 7.4 |
+| What the engine needs of a connection and of time | `scada/driver/transport.h` | 7.1 to 7.3 |
+| The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 
-Not yet here: failure handling (timeouts, retries, demotion, probes),
-transports, the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-137 record the choices
+Not yet here: the real TCP and serial transports (slice 4), the driver process with its threads, commands, the generation
+change and reload. `docs/decisions.md` D-130 to D-140 record the choices
 the contracts left open.
 
 ## What it does
@@ -68,6 +71,43 @@ the contracts left open.
 - **A list of writes holds its unit.** A list (8.5) is an exclusive
   sequence: 5 writes at a 10 s write interval hold the unit and the devices
   that share it for 40 s, with no poll and no keep-alive (D-136).
+- **The contract's order of service; dead devices are a known limit.**
+  Orders first, then a chain in progress, then priority, then due time; a
+  retry takes its turn in that order (DI 6.2). Until a dead device is
+  demoted, its attempts, each up to its time-out, take their turns like any
+  due request and delay the live devices of its priority and below; a dead
+  device of a faster group keeps the slower groups waiting. The figures are
+  in D-138 (`ctest --preset perf`); serving answering devices first is
+  #147. A device's state tag can show RUNNING for minutes after its points
+  are COMM_FAIL: refuse a write on the points' COMM_FAIL, not on DEMOTED.
+- **Probes use the windows between polls.** A probe goes when no request
+  waits, its time-out ended before the next due poll if the window is at
+  least 100 ms; one such probe per due time, and its time-out is no
+  failure. Else, and after it, the probe waits up to 10 time-outs and then
+  goes with its whole time-out (1 s at most) ahead of due polls, the oldest
+  first, at most one such probe per channel in 11 probe time-outs: a
+  returned unit is found also on a line where a request is always due, and
+  once the dead are demoted a live unit waits at most its period and one
+  probe time-out (2.03 s on the 250-unit line; D-138).
+- **Dead values go bad on time.** A poll's points are COMM_FAIL at the
+  latest one period (or its retries' time-outs, if longer) after its first
+  time-out, however long its retries wait for their turn (D-140).
+- **A dead block of a live device rests.** A request that keeps failing
+  while its device answers others is polled once per back-off (10 s,
+  doubling to 300 s, by default); its points stay BAD. A request of a chain
+  of companions never rests: a dead part of a chain is attempted every
+  period (D-140).
+- **A line that is never quiet is jammed.** When quiet times keep finding
+  bytes for 5 s, a serial line counts a jam (`jams`) and sends anyway: no
+  request for at most 5 s plus one quiet time (D-140).
+- **A device with no probe request is probed by a poll cycle.** When every
+  read of a device has side effects or is chained, its probe is one whole
+  poll cycle at each back-off instant, and its samples are published as a
+  poll's: a side-effect read is made once per back-off (D-138).
+- **The connect blocks the worker.** `step` waits in the transport's
+  connect up to `connect_timeout` (3 s by default); orders that arrive
+  meanwhile wait as long. The command slices make the connect polled
+  (D-140).
 - **Orders can starve a chain.** On a busy unit, orders may keep dropping a
   chain of companions, which then never completes; there is no cap, and the
   poll group's achieved period shows it (D-136, R7).
@@ -145,4 +185,12 @@ ctest --preset integration -R scada-driver-zones
   every request with its time, and a loop that drives the scheduler on an
   injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
   time. `plan_test.cpp` checks the planner against plans worked out by
-  hand.
+  hand, and `plan_property_test.cpp` checks every rule on 10,000 random
+  plans from a fixed seed.
+- The conformance tests of failure handling (15, 16, 17, the dead-device
+  part of 12 and the gateway and busy parts of 19) run the channel engine
+  over a simulated transport (`tests/sim_transport.h`) on the same bus:
+  answers arrive after a fixed latency on an injected clock, and a unit can
+  be silent, busy, unreachable behind its gateway or answer garbage;
+  connects can be refused and the peer can close. `failure_test.cpp` and
+  `timing_test.cpp` check the accounting and the deadlines alone.

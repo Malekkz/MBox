@@ -4,6 +4,7 @@
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/plan.h"
+#include "scada/driver/timing.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -13,7 +14,6 @@
 #include <numeric>
 #include <optional>
 #include <span>
-#include <tuple>
 #include <vector>
 
 namespace scada::driver {
@@ -51,6 +51,36 @@ bool valid_pacing(const Pacing& pacing) noexcept {
            pacing.min_write_interval_ns >= 0;
 }
 
+// True when `request` follows a chained request in some poll group: the
+// last request of a chain.
+bool ends_a_chain(const ReadPlan& plan, std::uint32_t request) noexcept {
+    for (const std::vector<std::uint32_t>& group : plan.by_group) {
+        for (std::size_t index = 1; index < group.size(); ++index) {
+            if (group[index] == request &&
+                plan.requests[group[index - 1]].chained) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A protocol's own plan must keep 6.5 and 6.6 too: a keep-alive or probe
+// never reads a side effect, nor one request of a chain (a value without
+// its companion).
+Status check_extras(const ReadPlan& plan) noexcept {
+    for (const std::optional<std::uint32_t>& extra :
+         {plan.keepalive, plan.probe}) {
+        if (extra.has_value() &&
+            (plan.requests[*extra].side_effect ||
+             plan.requests[*extra].chained || ends_a_chain(plan, *extra))) {
+            return invalid(
+                "keep-alive or probe reads a side effect or part of a chain");
+        }
+    }
+    return {};
+}
+
 Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
     const std::size_t size = plan.requests.size();
     if (plan.by_group.size() != groups) {
@@ -81,7 +111,7 @@ Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
         (plan.probe.has_value() && *plan.probe >= size)) {
         return invalid("keep-alive or probe the plan does not hold");
     }
-    return {};
+    return check_extras(plan);
 }
 
 // Where the next request of a group's cycle is: a position in the group's
@@ -94,11 +124,11 @@ struct Position {
 };
 
 // The next request of a cycle from `group`'s current position, skipping
-// requests refused for good and expanding split forms.
+// requests refused for good or resting (G8) and expanding split forms.
 bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
                const std::vector<bool>& split, const std::vector<bool>& absent,
-               std::size_t next, std::size_t next_split,
-               Position& out) noexcept {
+               const std::vector<bool>& resting, std::size_t next,
+               std::size_t next_split, Position& out) noexcept {
     for (std::size_t index = next; index < list.size(); ++index) {
         const std::uint32_t request = list[index];
         if (split[request]) {
@@ -106,7 +136,8 @@ bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
                 plan.requests[request].split;
             const std::size_t from = index == next ? next_split : 0;
             for (std::size_t part = from; part < parts.size(); ++part) {
-                if (!absent[parts[part]]) {
+                if (!absent[parts[part]] && !resting[request] &&
+                    !resting[parts[part]]) {
                     out = Position{.index = index,
                                    .part = part,
                                    .in_split = true,
@@ -116,7 +147,7 @@ bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
             }
             continue;
         }
-        if (!absent[request]) {
+        if (!absent[request] && !resting[request]) {
             out = Position{.index = index, .request = request};
             return true;
         }
@@ -171,6 +202,7 @@ Scheduler::Scheduler(const CompiledChannel& channel,
         }
         run.split.assign(device.plan.requests.size(), false);
         run.absent.assign(device.plan.requests.size(), false);
+        run.resting.assign(device.plan.requests.size(), false);
         // OWN_UNIT is never shared: each such device is a unit of its own.
         const auto found =
             device.unit == CompiledDevice::OWN_UNIT
@@ -243,20 +275,23 @@ void Scheduler::record(std::uint32_t device, bool write,
 
 void Scheduler::save_undo(const Choice& choice, std::uint32_t group) noexcept {
     const DeviceRun& run = devices_[choice.device];
-    undo_ = Undo{.valid = true,
+    undo_ = Undo{.last_request_ns = last_request_ns_,
+                 .last_write_ns = last_write_ns_,
+                 .chain_next = run.chain_next,
+                 .chain_next_split = run.chain_next_split,
                  .choice = choice,
                  .unit = units_[run.unit],
-                 .has_request = has_request_,
-                 .last_request_ns = last_request_ns_,
-                 .has_write = has_write_,
-                 .last_write_ns = last_write_ns_,
-                 .group = group,
                  .group_state = group < run.groups.size() ? run.groups[group]
                                                           : GroupState{},
-                 .chain = run.chain,
+                 .group = group,
                  .chain_group = run.chain_group,
-                 .chain_next = run.chain_next,
-                 .chain_next_split = run.chain_next_split};
+                 .retry_request = run.retry_request,
+                 .valid = true,
+                 .has_request = has_request_,
+                 .has_write = has_write_,
+                 .chain = run.chain,
+                 .retry = run.retry,
+                 .probe_in_flight = probe_in_flight_};
 }
 
 bool Scheduler::peek(std::uint32_t device, std::uint32_t group,
@@ -267,7 +302,7 @@ bool Scheduler::peek(std::uint32_t device, std::uint32_t group,
     Position position;
     if (!state.in_cycle ||
         !find_next(plan.by_group[group], plan, run.split, run.absent,
-                   state.next, state.next_split, position)) {
+                   run.resting, state.next, state.next_split, position)) {
         return false;
     }
     request = position.request;
@@ -280,7 +315,7 @@ void Scheduler::advance(std::uint32_t device, std::uint32_t group) noexcept {
     const ReadPlan& plan = channel_->devices[device].plan;
     Position position;
     if (!find_next(plan.by_group[group], plan, run.split, run.absent,
-                   state.next, state.next_split, position)) {
+                   run.resting, state.next, state.next_split, position)) {
         return;
     }
     if (position.in_split) {
@@ -345,6 +380,7 @@ void Scheduler::drop_chain(std::uint32_t device) noexcept {
     state.next = run.chain_next;
     state.next_split = run.chain_next_split;
     run.chain = false;
+    run.retry = false;  // the chain is read again whole
     update_holder(units_[run.unit].holder, device,
                   run.order_active && run.order.exclusive);
 }
@@ -362,7 +398,13 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
     // time missed its period because of pacing (11.1).
     // E4: the cycle ended when its last request was handed out, not at the
     // `take` that finds it complete.
-    const std::int64_t next_due = later(state.due_ns, period_ns);
+    // A cycle due at EARLIEST (a device polled again, `set_polled`) is
+    // followed a period after it started, not at once: else a returned
+    // device is polled twice in a row, side-effect reads included (6.6;
+    // review P1).
+    const std::int64_t base =
+        state.due_ns == EARLIEST ? state.cycle_start_ns : state.due_ns;
+    const std::int64_t next_due = later(base, period_ns);
     state.limited = state.waited && state.last_sent_ns > next_due;
     state.in_cycle = false;
     state.due_ns = std::max(next_due, now_ns);
@@ -371,10 +413,10 @@ void Scheduler::complete_cycle(GroupState& state, std::int64_t period_ns,
 void Scheduler::start_due(std::int64_t now_ns) noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const CompiledDevice& compiled = channel_->devices[device];
-        if (!compiled.enabled) {
+        DeviceRun& run = devices_[device];
+        if (!compiled.enabled || !run.polled) {
             continue;
         }
-        DeviceRun& run = devices_[device];
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
             GroupState& state = run.groups[group];
             std::uint32_t request = 0;
@@ -517,55 +559,101 @@ bool Scheduler::choose_order(std::int64_t now_ns, Choice& out,
 }
 
 bool Scheduler::polls_allowed(std::uint32_t device) const noexcept {
-    return channel_->devices[device].enabled && !unit_exclusive(device) &&
-           !unit_held_by_other(device);
+    return channel_->devices[device].enabled && devices_[device].polled &&
+           !unit_exclusive(device) && !unit_held_by_other(device);
+}
+
+Choice Scheduler::take_retry(std::uint32_t device,
+                             std::int64_t now_ns) noexcept {
+    DeviceRun& run = devices_[device];
+    const std::uint32_t group =
+        channel_->devices[device].plan.requests[run.retry_request].poll_group;
+    const Choice choice{.kind = Choice::Kind::POLL,
+                        .device = device,
+                        .request = run.retry_request};
+    save_undo(choice, group);
+    record(device, false, now_ns);
+    run.groups[group].last_sent_ns = now_ns;
+    run.retry = false;
+    return choice;
+}
+
+// One order (DI 6.2 step 3): a chain in progress first, then priority, then
+// due time, device order. A retry is its device's next poll, due when the
+// failure was seen (Q1).
+void Scheduler::consider(const PollPick& pick, PollKey& best_key,
+                         PollPick& best, bool& found) const noexcept {
+    const DeviceRun& run = devices_[pick.device];
+    const std::int64_t due =
+        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
+    const PollKey key{!chain_open(pick),
+                      channel_->poll_groups[pick.group].priority, due,
+                      pick.device};
+    if (!found || key < best_key) {
+        best = pick;
+        best_key = key;
+        found = true;
+    }
+}
+
+void Scheduler::consider_groups(std::uint32_t device, std::int64_t now_ns,
+                                std::int64_t& wake, PollKey& best_key,
+                                PollPick& best, bool& found) noexcept {
+    DeviceRun& run = devices_[device];
+    for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+        GroupState& state = run.groups[group];
+        std::uint32_t request = 0;
+        // Nothing else to the unit inside a chain.
+        if ((run.chain && group != run.chain_group) ||
+            !peek(device, group, request)) {
+            if (!state.in_cycle &&
+                !channel_->devices[device].plan.by_group[group].empty()) {
+                wake = std::min(wake, state.due_ns);
+            }
+            continue;
+        }
+        const std::int64_t from = allowed_from(device, false);
+        if (from > now_ns) {
+            state.waited = true;
+            wake = std::min(wake, from);
+            continue;
+        }
+        consider(PollPick{.device = device, .group = group}, best_key, best,
+                 found);
+    }
 }
 
 bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
                             std::int64_t& wake) noexcept {
     bool found = false;
-    std::uint32_t best_device = 0;
-    std::uint32_t best_group = 0;
-    // A chain in progress first, then priority, due time, device order.
-    auto key = [&](std::uint32_t device, std::uint32_t group) {
-        return std::tuple(!devices_[device].chain,
-                          channel_->poll_groups[group].priority,
-                          devices_[device].groups[group].due_ns, device);
-    };
+    PollPick best;
+    PollKey best_key{};
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
-        DeviceRun& run = devices_[device];
+        const DeviceRun& run = devices_[device];
         if (!polls_allowed(device)) {
             continue;
         }
-        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
-            GroupState& state = run.groups[group];
-            std::uint32_t request = 0;
-            // Nothing else to the unit inside a chain.
-            if ((run.chain && group != run.chain_group) ||
-                !peek(device, group, request)) {
-                if (!state.in_cycle &&
-                    !channel_->devices[device].plan.by_group[group].empty()) {
-                    wake = std::min(wake, state.due_ns);
-                }
-                continue;
-            }
-            const std::int64_t from = allowed_from(device, false);
-            if (from > now_ns) {
-                state.waited = true;
-                wake = std::min(wake, from);
-                continue;
-            }
-            if (!found || key(device, group) < key(best_device, best_group)) {
-                found = true;
-                best_device = device;
-                best_group = group;
-            }
+        if (!run.retry) {
+            consider_groups(device, now_ns, wake, best_key, best, found);
+            continue;
         }
+        const std::int64_t from = allowed_from(device, false);
+        if (from > now_ns) {
+            wake = std::min(wake, from);
+            continue;
+        }
+        const std::uint32_t group = channel_->devices[device]
+                                        .plan.requests[run.retry_request]
+                                        .poll_group;
+        consider(PollPick{.device = device, .group = group, .retry = true},
+                 best_key, best, found);
     }
-    if (found) {
-        out = take_poll(best_device, best_group, now_ns);
+    if (!found) {
+        return false;
     }
-    return found;
+    out = best.retry ? take_retry(best.device, now_ns)
+                     : take_poll(best.device, best.group, now_ns);
+    return true;
 }
 
 bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
@@ -575,9 +663,11 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
         const DeviceRun& run = devices_[device];
         std::uint32_t form = 0;
         if (!compiled.enabled || compiled.keepalive_ns <= 0 ||
-            !compiled.plan.keepalive.has_value() ||
+            !compiled.plan.keepalive.has_value() || !run.polled || run.retry ||
             units_[run.unit].holder != NOBODY || run.order_active ||
-            !current_form(device, *compiled.plan.keepalive, form)) {
+            !current_form(device, *compiled.plan.keepalive, form) ||
+            run.resting[*compiled.plan.keepalive] || run.resting[form]) {
+            // A resting request is a dead block: no keep-alive of it (K5).
             continue;
         }
         // Idle is the unit's silence: any request to it keeps it alive.
@@ -599,16 +689,237 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
     return false;
 }
 
+bool Scheduler::due_work_pending() const noexcept {
+    if (!orders_.empty()) {
+        return true;
+    }
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (run.order_active) {
+            return true;
+        }
+        if (!run.polled || !channel_->devices[device].enabled) {
+            continue;
+        }
+        if (run.retry || run.chain) {
+            return true;
+        }
+        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+            std::uint32_t request = 0;
+            if (peek(device, group, request)) {
+                return true;  // even one waiting for its spacing (D-138)
+            }
+        }
+    }
+    return false;
+}
+
+std::int64_t Scheduler::next_poll_due_ns() const noexcept {
+    std::int64_t next = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!run.polled || !channel_->devices[device].enabled) {
+            continue;
+        }
+        for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
+            if (!channel_->devices[device].plan.by_group[group].empty()) {
+                next = std::min(next, run.groups[group].due_ns);
+            }
+        }
+    }
+    return next;
+}
+
+bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
+                                   std::int64_t& wake) noexcept {
+    if (probe_in_flight_ || !orders_.empty()) {
+        return false;
+    }
+    // A chain of companions in progress anywhere on the channel goes first
+    // (DI 6.2 step 3): a floor probe between its parts would read the value
+    // and its companion a probe time-out apart (review Q1).
+    for (const DeviceRun& run : devices_) {
+        if (run.chain) {
+            return false;
+        }
+    }
+    // The oldest probe past its floor, of a device whose unit is free.
+    bool found = false;
+    std::uint32_t chosen = 0;
+    std::int64_t oldest_floor = NEVER;
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const DeviceRun& run = devices_[device];
+        if (!channel_->devices[device].enabled || !run.probe ||
+            units_[run.unit].holder != NOBODY) {
+            continue;
+        }
+        const std::int64_t floor =
+            later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
+        const std::int64_t from = std::max(floor, allowed_from(device, false));
+        if (from > now_ns) {
+            wake = std::min(wake, std::max(from, floor_release_ns_));
+            continue;
+        }
+        if (floor < oldest_floor) {
+            found = true;
+            chosen = device;
+            oldest_floor = floor;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    // At most one probe past its floor in any PROBE_FLOOR time-outs of line
+    // time after the last one (the lead's ruling N1): floor probes cost the
+    // live devices at most one probe time-out in every PROBE_FLOOR + 1,
+    // whatever the number of dead devices and their groups.
+    if (now_ns < floor_release_ns_) {
+        wake = std::min(wake, floor_release_ns_);
+        return false;
+    }
+    const std::int64_t timeout_ns = devices_[chosen].probe_timeout_ns;
+    if (!take_probe(chosen, now_ns, timeout_ns, false, out)) {
+        return false;
+    }
+    floor_release_ns_ = later(now_ns, timeout_ns * (PROBE_FLOOR + 1));
+    return true;
+}
+
+bool Scheduler::choose_probe(std::int64_t now_ns, Choice& out,
+                             std::int64_t& wake) noexcept {
+    // One probe of the channel at a time, and only in time no due request
+    // needs (7.4), so that dead devices never starve the live ones.
+    if (probe_in_flight_ || due_work_pending()) {
+        return false;
+    }
+    const std::int64_t next_poll = next_poll_due_ns();
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        const CompiledDevice& compiled = channel_->devices[device];
+        const DeviceRun& run = devices_[device];
+        if (!compiled.enabled || !run.probe ||
+            units_[run.unit].holder != NOBODY) {
+            continue;
+        }
+        const std::int64_t from =
+            std::max(run.probe_due_ns, allowed_from(device, false));
+        if (from > now_ns) {
+            wake = std::min(wake, from);
+            continue;
+        }
+        // Q4, G7: a poll that falls due within the probe's time-out ends
+        // the probe's wait then, if the window is worth a probe; unless the
+        // probe has waited PROBE_FLOOR time-outs past its due time.
+        const std::int64_t floor =
+            later(run.probe_due_ns, run.probe_timeout_ns * PROBE_FLOOR);
+        std::int64_t wait_ns = run.probe_timeout_ns;
+        bool windowed = false;
+        if (now_ns >= floor) {
+            // Past its floor: `choose_floor_probe`'s, under its spacing.
+            continue;
+        }
+        if (next_poll < later(now_ns, wait_ns)) {
+            // The window ends before the quiet time a serial line keeps
+            // after a time-out, so that the poll goes out when due.
+            const std::int64_t quiet = channel_->transport == TransportKind::TCP
+                                           ? 0
+                                           : margin_ns(channel_->line);
+            const std::int64_t window = next_poll - now_ns - quiet;
+            // One windowed probe per due time (J1): a device slower than
+            // the window is still found by the floor probe.
+            if (window < std::min(wait_ns, PROBE_MIN_WINDOW_NS) ||
+                !compiled.plan.probe.has_value() || run.windowed_tried) {
+                wake = std::min(wake, floor);
+                continue;
+            }
+            wait_ns = window;
+            windowed = true;
+        }
+        if (take_probe(device, now_ns, wait_ns, windowed, out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Scheduler::take_probe(std::uint32_t device, std::int64_t now_ns,
+                           std::int64_t wait_ns, bool windowed,
+                           Choice& out) noexcept {
+    DeviceRun& run = devices_[device];
+    const CompiledDevice& compiled = channel_->devices[device];
+    if (!compiled.plan.probe.has_value()) {
+        // R8: no request may serve as a probe (all side-effect or
+        // chained): one whole normal poll cycle of the device is.
+        if (!start_probe_cycle(device, now_ns, out)) {
+            return false;
+        }
+        probe_in_flight_ = true;
+        return true;
+    }
+    out = Choice{.kind = Choice::Kind::PROBE,
+                 .device = device,
+                 .request = *compiled.plan.probe,
+                 .timeout_ns = wait_ns,
+                 .windowed = windowed};
+    run.windowed_tried = run.windowed_tried || windowed;
+    save_undo(out, 0);
+    record(device, false, now_ns);
+    probe_in_flight_ = true;
+    return true;
+}
+
+bool Scheduler::chain_open(const PollPick& pick) const noexcept {
+    const DeviceRun& run = devices_[pick.device];
+    return run.chain ||
+           (pick.retry && in_chain(pick.device, run.retry_request));
+}
+
+std::optional<std::uint32_t> Scheduler::first_group(
+    std::uint32_t device) const noexcept {
+    const ReadPlan& plan = channel_->devices[device].plan;
+    std::optional<std::uint32_t> first;
+    for (std::uint32_t group = 0; group < plan.by_group.size(); ++group) {
+        if (!plan.by_group[group].empty() &&
+            (!first.has_value() ||
+             channel_->poll_groups[group].priority <
+                 channel_->poll_groups[*first].priority)) {
+            first = group;
+        }
+    }
+    return first;
+}
+
+bool Scheduler::start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
+                                  Choice& out) noexcept {
+    DeviceRun& run = devices_[device];
+    // The group of the highest priority that has requests opens the cycle;
+    // every group of the device is due at once, as when it is polled again.
+    const std::optional<std::uint32_t> first = first_group(device);
+    if (!first.has_value()) {
+        return false;
+    }
+    run.polled = true;
+    for (GroupState& state : run.groups) {
+        state = GroupState{.due_ns = now_ns};
+    }
+    start_due(now_ns);
+    out = take_poll(device, *first, now_ns);
+    out.kind = Choice::Kind::PROBE;
+    out.cycle = true;
+    return true;
+}
+
 Choice Scheduler::take(std::int64_t now_ns) noexcept {
     undo_.valid = false;
     start_due(now_ns);
     std::int64_t wake = NEVER;
     Choice out;
     // 1. The next step of an exclusive order in progress; 2. orders;
-    // 3. due poll groups; 4. keep-alive (6.2).
+    // 3. retries and due poll groups; 4. keep-alive; 5. a probe (6.2).
     if (choose_exclusive_step(now_ns, out, wake) ||
-        choose_order(now_ns, out, wake) || choose_poll(now_ns, out, wake) ||
-        choose_keepalive(now_ns, out, wake)) {
+        choose_order(now_ns, out, wake) ||
+        choose_floor_probe(now_ns, out, wake) ||
+        choose_poll(now_ns, out, wake) || choose_keepalive(now_ns, out, wake) ||
+        choose_probe(now_ns, out, wake)) {
         return out;
     }
     if (wake == NEVER) {
@@ -637,7 +948,10 @@ std::optional<std::uint64_t> Scheduler::not_sent() noexcept {
         end_order(choice.device);
         return choice.order;
     }
+    probe_in_flight_ = undo_.probe_in_flight;
     if (choice.kind == Choice::Kind::POLL) {
+        run.retry = undo_.retry;
+        run.retry_request = undo_.retry_request;
         run.groups[undo_.group] = undo_.group_state;
         run.chain = undo_.chain;
         run.chain_group = undo_.chain_group;
@@ -721,6 +1035,7 @@ std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
         DeviceRun& run = devices_[device];
         std::fill(run.split.begin(), run.split.end(), false);
         std::fill(run.absent.begin(), run.absent.end(), false);
+        std::fill(run.resting.begin(), run.resting.end(), false);
         drop_chain(device);
         if (run.order_active) {
             if (count < ended.size()) {
@@ -729,12 +1044,97 @@ std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
             ++count;
             end_order(device);
         }
+        run.retry = false;
         for (GroupState& state : run.groups) {
             state.next_split = 0;
         }
     }
+    probe_in_flight_ = false;
     undo_.valid = false;
     return count;
+}
+
+void Scheduler::set_polled(std::uint32_t device, bool polled) noexcept {
+    if (device >= devices_.size() || devices_[device].polled == polled) {
+        return;
+    }
+    DeviceRun& run = devices_[device];
+    drop_chain(device);
+    run.polled = polled;
+    run.retry = false;
+    for (GroupState& state : run.groups) {
+        // Polled again: every group is due at once, and the outage is not
+        // published as an achieved period.
+        state = GroupState{.due_ns = EARLIEST};
+    }
+}
+
+void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
+                          std::int64_t timeout_ns) noexcept {
+    if (device < devices_.size()) {
+        DeviceRun& run = devices_[device];
+        if (!run.probe || run.probe_due_ns != due_ns) {
+            run.windowed_tried = false;  // a new due time (J1)
+        }
+        devices_[device].probe = true;
+        devices_[device].probe_due_ns = due_ns;
+        devices_[device].probe_timeout_ns =
+            std::max<std::int64_t>(timeout_ns, 0);
+    }
+}
+
+bool Scheduler::in_chain(std::uint32_t device,
+                         std::uint32_t request) const noexcept {
+    if (device >= devices_.size()) {
+        return false;
+    }
+    const ReadPlan& plan = channel_->devices[device].plan;
+    if (request >= plan.requests.size()) {
+        return false;
+    }
+    const Request& planned = plan.requests[request];
+    if (planned.chained) {
+        return true;
+    }
+    // The last request of a chain is not `chained`; the one before it is.
+    if (planned.poll_group >= plan.by_group.size()) {
+        return false;
+    }
+    const std::vector<std::uint32_t>& list = plan.by_group[planned.poll_group];
+    const auto found = std::find(list.begin(), list.end(), request);
+    return found != list.end() && found != list.begin() &&
+           plan.requests[*(found - 1)].chained;
+}
+
+void Scheduler::rest(std::uint32_t device, std::uint32_t request,
+                     bool resting) noexcept {
+    // No request of a chain of companions rests, first, middle or last: a
+    // chain is read whole every period, so that nothing of it is read and
+    // thrown away or left GOOD and frozen (the lead's ruling K1).
+    if (device >= devices_.size() ||
+        request >= devices_[device].resting.size() ||
+        in_chain(device, request)) {
+        return;
+    }
+    devices_[device].resting[request] = resting;
+}
+
+void Scheduler::clear_probe(std::uint32_t device) noexcept {
+    if (device < devices_.size()) {
+        devices_[device].probe = false;
+    }
+}
+
+void Scheduler::retry(std::uint32_t device, std::uint32_t request,
+                      std::int64_t now_ns) noexcept {
+    if (device >= devices_.size() || !devices_[device].polled ||
+        request >= channel_->devices[device].plan.requests.size() ||
+        channel_->devices[device].plan.requests[request].side_effect) {
+        return;  // a side-effect read is never sent twice (6.6)
+    }
+    devices_[device].retry = true;
+    devices_[device].retry_request = request;
+    devices_[device].retry_due_ns = now_ns;
 }
 
 std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,
@@ -774,8 +1174,14 @@ bool Scheduler::pacing_limited(std::uint32_t device,
         const GroupState& state = devices_[device].groups[group];
         const std::int64_t next_due =
             later(state.due_ns, channel_->poll_groups[group].period_ns);
+        // A running cycle with no request left ended at its last send (the
+        // `take` that closes it comes later); one with requests left is
+        // still running at `now_ns`.
+        std::uint32_t request = 0;
+        const std::int64_t end =
+            peek(device, group, request) ? now_ns : state.last_sent_ns;
         if (state.limited ||
-            (state.in_cycle && state.waited && now_ns > next_due)) {
+            (state.in_cycle && state.waited && end > next_due)) {
             return true;
         }
     }

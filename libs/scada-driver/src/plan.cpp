@@ -254,10 +254,23 @@ void absorb(Segment& into, const Segment& from) {
     into.last = std::max(into.last, from.last);
     into.members.insert(into.members.end(), from.members.begin(),
                         from.members.end());
-    add_distinct(into.clusters, from.clusters);
+    // Appended as they come: a large segment absorbs many small ones, and
+    // a search per insert would make that quadratic. `normalise` removes
+    // the repeats where a stage needs them distinct.
+    into.clusters.insert(into.clusters.end(), from.clusters.begin(),
+                         from.clusters.end());
     add_distinct(into.tags, from.tags);
     into.side_effect = into.side_effect || from.side_effect;
     into.exclusive = into.exclusive || from.exclusive;
+}
+
+void normalise(std::vector<Segment>& segments) {
+    for (Segment& segment : segments) {
+        std::sort(segment.clusters.begin(), segment.clusters.end());
+        segment.clusters.erase(
+            std::unique(segment.clusters.begin(), segment.clusters.end()),
+            segment.clusters.end());
+    }
 }
 
 void sort_segments(std::vector<Segment>& segments) {
@@ -297,6 +310,7 @@ std::vector<Segment> segments_of(const std::vector<PlanPoint>& points,
         }
         segments = std::move(out);
     }
+    normalise(segments);
     return segments;
 }
 
@@ -324,18 +338,17 @@ bool fits(const Place& place, std::uint64_t first, std::uint64_t last,
            (rules.max_values == 0 || values <= rules.max_values);
 }
 
-// True when the live segments [from, last_index] of one place can be one
-// request.
-bool one_request(const std::vector<Segment>& segments,
-                 const std::vector<bool>& live, std::size_t from,
-                 std::size_t last_index, const ReadRules& rules) {
+// True when segment `from`, which has absorbed every segment up to
+// `covered`, and the segments after it up to `last_index` can be one
+// request. The walk stops at the first segment that does not fit, so a
+// failed try costs at most one request's worth of segments.
+bool one_request(const std::vector<Segment>& segments, std::size_t from,
+                 std::size_t covered, std::size_t last_index,
+                 const ReadRules& rules) {
     const Segment& start = segments[from];
     std::uint64_t last = start.last;
     std::size_t values = start.members.size();
-    for (std::size_t index = from + 1; index <= last_index; ++index) {
-        if (!live[index]) {
-            continue;
-        }
+    for (std::size_t index = covered + 1; index <= last_index; ++index) {
         const Segment& next = segments[index];
         if (next.place != start.place || next.exclusive || start.exclusive ||
             !bridgeable(next.place, last, next.first, rules)) {
@@ -368,20 +381,24 @@ void fuse_clusters(std::vector<Segment>& segments, const ReadRules& rules) {
         if (!live[from]) {
             continue;
         }
-        // Clusters are appended as segments join, so iterate by position.
+        // Every segment up to `covered` is absorbed into `from`: a join is
+        // always of the run that follows, so the absorbed ones are never
+        // walked again. Clusters are appended as segments join, so iterate
+        // by position.
+        std::size_t covered = from;
         for (std::size_t at = 0; at < segments[from].clusters.size(); ++at) {
             const std::size_t last_index =
                 last_of_cluster[segments[from].clusters[at]];
-            if (last_index <= from ||
-                !one_request(segments, live, from, last_index, rules)) {
+            if (last_index <= covered ||
+                !one_request(segments, from, covered, last_index, rules)) {
                 continue;
             }
-            for (std::size_t index = from + 1; index <= last_index; ++index) {
-                if (live[index]) {
-                    absorb(segments[from], segments[index]);
-                    live[index] = false;
-                }
+            for (std::size_t index = covered + 1; index <= last_index;
+                 ++index) {
+                absorb(segments[from], segments[index]);
+                live[index] = false;
             }
+            covered = last_index;
         }
     }
     std::vector<Segment> out;
@@ -392,6 +409,7 @@ void fuse_clusters(std::vector<Segment>& segments, const ReadRules& rules) {
         }
     }
     segments = std::move(out);
+    normalise(segments);
 }
 
 // A run of segments read in one request; `parts` are its segments.
@@ -495,28 +513,32 @@ Request request_of(const Segment& segment,
 // first to the last that share a cluster joined, so that a value and its
 // companion stay in one request.
 std::vector<Segment> split_parts(const Block& block) {
-    std::vector<Segment> parts = block.parts;
-    bool joined = true;
-    while (joined) {
-        joined = false;
-        for (std::size_t from = 0; from < parts.size() && !joined; ++from) {
-            for (std::size_t last_part = parts.size() - 1; last_part > from;
-                 --last_part) {
-                if (!share(parts[from].clusters, parts[last_part].clusters)) {
-                    continue;
-                }
-                for (std::size_t index = from + 1; index <= last_part;
-                     ++index) {
-                    absorb(parts[from], parts[index]);
-                }
-                parts.erase(
-                    parts.begin() + static_cast<std::ptrdiff_t>(from + 1),
-                    parts.begin() + static_cast<std::ptrdiff_t>(last_part + 1));
-                joined = true;
-                break;
-            }
+    // The last part that holds each cluster; then one sweep joins each
+    // part with every part up to the furthest last part of the clusters
+    // it has met.
+    std::map<std::uint32_t, std::size_t> last_part;
+    for (std::size_t index = 0; index < block.parts.size(); ++index) {
+        for (const std::uint32_t cluster : block.parts[index].clusters) {
+            last_part[cluster] = index;
         }
     }
+    std::vector<Segment> parts;
+    std::size_t index = 0;
+    while (index < block.parts.size()) {
+        Segment part = block.parts[index];
+        std::size_t reach = index;
+        for (const std::uint32_t cluster : part.clusters) {
+            reach = std::max(reach, last_part[cluster]);
+        }
+        for (++index; index <= reach; ++index) {
+            absorb(part, block.parts[index]);
+            for (const std::uint32_t cluster : block.parts[index].clusters) {
+                reach = std::max(reach, last_part[cluster]);
+            }
+        }
+        parts.push_back(std::move(part));
+    }
+    normalise(parts);
     return parts;
 }
 

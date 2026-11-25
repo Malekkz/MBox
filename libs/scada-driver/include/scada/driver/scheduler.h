@@ -7,9 +7,10 @@
 // channel. Pure logic over an injected clock: the caller passes the
 // monotonic time, so the same inputs always give the same choices.
 //
-// Probes of demoted devices (6.2, step 5) join with failure handling
-// (7.4), and the orders' content with the command slices; here an order is
-// a ticket with a kind and a number of steps.
+// Failure handling (7.4) sets which devices are polled, asks for retries
+// and for probes of demoted devices (6.2, step 5); the orders' content
+// comes with the command slices: here an order is a ticket with a kind and
+// a number of steps.
 //
 // Threads (2.4): only the channel worker calls a scheduler. The command
 // thread hands orders to the worker through the channel's order queue; the
@@ -28,6 +29,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <vector>
 
 namespace scada::driver {
@@ -63,6 +65,7 @@ struct Choice {
         ORDER,      // step `step` of order `order` on `device`
         POLL,       // request `request` of `device`'s plan
         KEEPALIVE,  // the keep-alive request `request` of `device`
+        PROBE,      // the probe request `request` of demoted `device` (7.4)
     };
     Kind kind = Kind::IDLE;
     std::uint32_t device = 0;
@@ -76,6 +79,17 @@ struct Choice {
     // (rulings R2, D2).
     bool chain_dropped = false;
     std::uint32_t chain_device = 0;
+    // A PROBE that opens one whole normal poll cycle of its device, for a
+    // device whose plan has no probe request (the lead's ruling R8): its
+    // samples are published as a poll's; the cycle goes on only if the
+    // device recovers.
+    bool cycle = false;
+    // A PROBE's time-out: its device's, at most 1 s, shortened to end when
+    // the next poll falls due (review G7); 0 for every other choice.
+    std::int64_t timeout_ns = 0;
+    // The probe's time-out was shortened to a window: a time-out of it is no
+    // failed probe (review J1).
+    bool windowed = false;
 };
 
 class Scheduler {
@@ -169,6 +183,70 @@ public:
     [[nodiscard]] bool pacing_limited(std::uint32_t device,
                                       std::int64_t now_ns) const noexcept;
 
+    // Whether `device` is polled (INITIALISING or RUNNING, 3.5). A device
+    // that is not gets no poll, keep-alive or retry, and its chain and retry
+    // are dropped; when it is polled again, every group of it is due at once
+    // and the outage is not an achieved period.
+    void set_polled(std::uint32_t device, bool polled) noexcept;
+
+    // A probe waits for a poll that falls due within its time-out at most
+    // this many time-outs past its own due time (D-138, Q4).
+    static constexpr std::int64_t PROBE_FLOOR = 10;
+    // The shortest window before the next due poll that a probe is sent in,
+    // its time-out shortened to the window (G7); a probe whose time-out is
+    // shorter needs its whole time-out.
+    static constexpr std::int64_t PROBE_MIN_WINDOW_NS = 100'000'000;
+
+    // A demoted `device` is due for a probe at `due_ns` (7.4); a device
+    // whose plan has no probe request is probed by one whole poll cycle
+    // (Choice::cycle, R8). The probe waits at most `timeout_ns` for its
+    // answer. A probe is chosen only when no order is queued or in progress
+    // and no polled device has a retry, a chain or a request of a started
+    // cycle left (6.2 step 5), and when no other probe of the channel is in
+    // flight; `probe_done` ends the flight. When the next poll falls due
+    // within `timeout_ns`, the probe goes only if that leaves at least
+    // PROBE_MIN_WINDOW_NS (or `timeout_ns`, if shorter), with its time-out
+    // ending when that poll falls due (`Choice::timeout_ns`). A probe
+    // PROBE_FLOOR time-outs late goes ahead of due polls with its whole
+    // time-out, the oldest first, at most one such probe per channel in
+    // PROBE_FLOOR + 1 probe time-outs (D-138, G7, the lead's ruling N1). A
+    // cycle probe has no window: its first request, the probe, waits its
+    // whole probe time-out.
+    void set_probe(std::uint32_t device, std::int64_t due_ns,
+                   std::int64_t timeout_ns) noexcept;
+    void clear_probe(std::uint32_t device) noexcept;
+
+    // The planned request `request` of `device` rests (`resting`) or is
+    // polled again: a resting request is left out of its group's cycles
+    // (review G8). A request of a chain of companions, first, middle or
+    // last, never rests (K1). `reconnect` ends every rest.
+    SCADA_RT void rest(std::uint32_t device, std::uint32_t request,
+                       bool resting) noexcept;
+    // Whether `request` of `device` is part of a chain of companions: it is
+    // `chained`, or it ends a chain.
+    [[nodiscard]] bool in_chain(std::uint32_t device,
+                                std::uint32_t request) const noexcept;
+    // Whether `request` of `device` rests.
+    [[nodiscard]] bool resting(std::uint32_t device,
+                               std::uint32_t request) const noexcept {
+        return device < devices_.size() &&
+               request < devices_[device].resting.size() &&
+               devices_[device].resting[request];
+    }
+    void probe_done() noexcept { probe_in_flight_ = false; }
+
+    // Sends the poll request `request` of `device` again as its next
+    // request, before its other polls and within the pacing (7.1: a read is
+    // retried within its poll group's turn). It takes its turn among the
+    // other devices' polls by its group's priority, due at `now_ns`, the
+    // time of the failure (3.4: one device's failure delays the others by
+    // one request at most). Ignored for a side-effect request (6.6), an
+    // unknown one, or a device that is not polled. An order step that drops
+    // the device's chain drops the retry too: the chain is read again
+    // whole. Never allocates.
+    SCADA_RT void retry(std::uint32_t device, std::uint32_t request,
+                        std::int64_t now_ns) noexcept;
+
     // Orders queued and not yet started.
     [[nodiscard]] std::size_t pending_orders() const noexcept {
         return orders_.size();
@@ -195,24 +273,36 @@ private:
         bool limited = false;  // the last cycle waited and ended late
     };
 
+    // Members in the order that packs them best.
     struct DeviceRun {
-        std::vector<GroupState> groups;
-        std::vector<bool> split;   // per request: replaced by its split form
-        std::vector<bool> absent;  // per request: refused, not sent
-        std::uint32_t unit = 0;    // index into units_
-        // A chain of companion requests (5.5) in progress: its group, and
-        // where in the group's cycle it started.
-        bool chain = false;
-        std::uint32_t chain_group = 0;
+        // Where in the group's cycle a chain in progress started.
         std::size_t chain_next = 0;
         std::size_t chain_next_split = 0;
+        // Failure handling (7.4).
+        std::int64_t probe_due_ns = 0;
+        std::int64_t retry_due_ns = 0;
+        std::int64_t probe_timeout_ns = 0;
+        std::vector<GroupState> groups;
         // An order whose steps have started.
-        bool order_active = false;
         OrderTicket order{};
+        std::vector<bool> split;    // per request: replaced by its split form
+        std::vector<bool> absent;   // per request: refused, not sent
+        std::vector<bool> resting;  // per request: in its back-off (G8)
+        std::uint32_t unit = 0;     // index into units_
+        std::uint32_t chain_group = 0;  // the group of a chain in progress
         std::uint32_t order_step = 0;
+        std::uint32_t retry_request = 0;
+        bool chain = false;  // a chain of companion requests (5.5) in progress
+        bool order_active = false;
         // Within one `take`: an earlier order of this device waits, so its
         // later orders wait too (arrival order per device).
         bool order_blocked = false;
+        bool polled = true;
+        bool probe = false;
+        bool retry = false;
+        // A windowed probe was sent for this due time: the next one waits for
+        // the floor, with its whole time-out (J1).
+        bool windowed_tried = false;
     };
 
     // One physical unit: the devices that share its key (R3).
@@ -228,19 +318,23 @@ private:
 
     // What `not_sent` restores.
     struct Undo {
-        bool valid = false;
-        Choice choice;
-        UnitRun unit;
-        bool has_request = false;
+        // Ordered by size, which the padding check asks for.
         std::int64_t last_request_ns = 0;
-        bool has_write = false;
         std::int64_t last_write_ns = 0;
-        std::uint32_t group = 0;
-        GroupState group_state;
-        bool chain = false;
-        std::uint32_t chain_group = 0;
         std::size_t chain_next = 0;
         std::size_t chain_next_split = 0;
+        Choice choice;
+        UnitRun unit;
+        GroupState group_state;
+        std::uint32_t group = 0;
+        std::uint32_t chain_group = 0;
+        std::uint32_t retry_request = 0;
+        bool valid = false;
+        bool has_request = false;
+        bool has_write = false;
+        bool chain = false;
+        bool retry = false;
+        bool probe_in_flight = false;
     };
 
     // The time from which a request (or a write) to `device` is allowed.
@@ -282,10 +376,44 @@ private:
                                std::int64_t& wake) noexcept;
     bool choose_order(std::int64_t now_ns, Choice& out,
                       std::int64_t& wake) noexcept;
+    // A candidate poll: the next request of a group, or a retry.
+    struct PollPick {
+        std::uint32_t device = 0;
+        std::uint32_t group = 0;
+        bool retry = false;
+    };
+    // A chain in progress first, then priority, due time, device (DI 6.2
+    // step 3).
+    using PollKey = std::tuple<bool, std::uint8_t, std::int64_t, std::uint32_t>;
+    void consider(const PollPick& pick, PollKey& best_key, PollPick& best,
+                  bool& found) const noexcept;
+    void consider_groups(std::uint32_t device, std::int64_t now_ns,
+                         std::int64_t& wake, PollKey& best_key, PollPick& best,
+                         bool& found) noexcept;
+    // The oldest probe past its floor, ahead of due polls, at most one in
+    // PROBE_FLOOR + 1 probe time-outs per channel (the lead's ruling N1).
+    bool choose_floor_probe(std::int64_t now_ns, Choice& out,
+                            std::int64_t& wake) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,
                           std::int64_t& wake) noexcept;
+    [[nodiscard]] bool due_work_pending() const noexcept;
+    [[nodiscard]] std::int64_t next_poll_due_ns() const noexcept;
+    // The pick continues a chain of companions: one is in progress, or it
+    // is the retry of a part of one (its last part included).
+    [[nodiscard]] bool chain_open(const PollPick& pick) const noexcept;
+    // Takes the probe of `device` with time-out `wait_ns`.
+    bool take_probe(std::uint32_t device, std::int64_t now_ns,
+                    std::int64_t wait_ns, bool windowed, Choice& out) noexcept;
+    bool choose_probe(std::int64_t now_ns, Choice& out,
+                      std::int64_t& wake) noexcept;
+    bool start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
+                           Choice& out) noexcept;
+    // The device's group of the highest priority that has requests.
+    [[nodiscard]] std::optional<std::uint32_t> first_group(
+        std::uint32_t device) const noexcept;
+    Choice take_retry(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     const CompiledChannel* channel_;
     Status status_;
@@ -299,6 +427,9 @@ private:
     std::int64_t last_write_ns_ = 0;
     std::int64_t start_ns_ = 0;
     Undo undo_;
+    bool probe_in_flight_ = false;
+    // Until when no further probe past its floor goes (N1).
+    std::int64_t floor_release_ns_ = 0;
 };
 
 }  // namespace scada::driver

@@ -288,6 +288,28 @@ Broken check_extras(const ReadPlan& plan) {
     return {};
 }
 
+// The keep-alive, a planned request or one of its own (E1), reads every
+// cluster it touches whole, in its poll group: never a value without its
+// companion.
+Broken check_keepalive(const Case& tried, const ReadPlan& plan) {
+    if (!plan.keepalive.has_value()) {
+        return {};
+    }
+    const Request& keepalive = plan.requests[*plan.keepalive];
+    for (const std::uint32_t point : keepalive.points) {
+        const PlanPoint& mine = tried.points[point];
+        for (const PlanPoint& other : tried.points) {
+            if (other.cluster == mine.cluster &&
+                other.poll_group == mine.poll_group &&
+                std::find(keepalive.points.begin(), keepalive.points.end(),
+                          other.point) == keepalive.points.end()) {
+                return "the keep-alive reads a cluster in part";
+            }
+        }
+    }
+    return {};
+}
+
 // The units of `request` that something accounts for: its points, and the
 // parts of ranges read as one (atomic, side-effect, exclusive) inside it.
 // Between them, a request may bridge at most `max_gap` units (E6).
@@ -555,6 +577,9 @@ Broken check_plan(const Case& tried, const ReadPlan& plan) {
     if (Broken broken = check_chains(tried, plan); !broken.empty()) {
         return broken;
     }
+    if (Broken broken = check_keepalive(tried, plan); !broken.empty()) {
+        return broken;
+    }
     if (Broken broken = check_side_effect(tried, of_point); !broken.empty()) {
         return broken;
     }
@@ -634,6 +659,16 @@ TEST(PlanProperty, ManyPointsArePlannedQuickly) {
     EXPECT_TRUE(
         plan_blocks(far, ReadRules{.max_units = 125, .max_gap = 1}, 1, plan)
             .ok());
+    // One request can hold everything (the PR 135 final pass): 50,000
+    // points in pairs, 75,000 units per request.
+    std::vector<PlanPoint> wide;
+    for (std::uint32_t index = 0; index < 50'000; ++index) {
+        wide.push_back(PlanPoint{
+            .point = index, .cluster = index / 2, .first = index, .count = 1});
+    }
+    EXPECT_TRUE(
+        plan_blocks(wide, ReadRules{.max_units = 75'000}, 1, plan).ok());
+    EXPECT_EQ(plan.by_group[0].size(), 1U);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

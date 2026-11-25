@@ -461,6 +461,25 @@ TEST(Plan, ADeviceWhoseRequestsAreAllChainedStillHasAKeepAlive) {
     EXPECT_EQ(plan.probe, plan.keepalive);
 }
 
+TEST(Plan, AClusterOfExactlyMaxUnitsIsOneRequest) {
+    // A value at 0 and its companion at 3, 4 units per request: the
+    // cluster spans exactly 4 units and is fused, not chained (the PR 135
+    // final pass).
+    PlanPoint companion = at(1, 3);
+    companion.cluster = 0;
+    const ReadPlan plan =
+        planned({at(0, 0), companion}, ReadRules{.max_units = 4, .max_gap = 2});
+    EXPECT_EQ(spans(plan), (std::vector<Span>{{0, 4}}));
+    EXPECT_FALSE(plan.requests[plan.by_group[0][0]].chained);
+    // One unit more is a chain.
+    PlanPoint further = at(1, 4);
+    further.cluster = 0;
+    const ReadPlan chain =
+        planned({at(0, 0), further}, ReadRules{.max_units = 4, .max_gap = 3});
+    EXPECT_EQ(spans(chain), (std::vector<Span>{{0, 1}, {4, 1}}));
+    EXPECT_TRUE(chain.requests[chain.by_group[0][0]].chained);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

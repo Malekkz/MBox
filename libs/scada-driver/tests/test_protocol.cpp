@@ -150,17 +150,24 @@ FrameState TestProtocol::frame_state(
     const std::uint64_t status = get(received, STATUS_AT, 1);
     const std::uint64_t count = get(received, ANSWER_COUNT_AT, 2);
     const bool answered = status == static_cast<std::uint8_t>(AnswerStatus::OK);
-    if ((answered && count != request.count) || (!answered && count != 0) ||
-        get(received, UNIT_AT, 1) != request.unit_id) {
+    if (count > MAX_UNITS) {
         return FrameState{.kind = FrameState::Kind::BROKEN};
     }
     const std::size_t length = ANSWER_HEADER_BYTES + (2 * count);
+    // Another unit's frame, or an earlier request's: stale, dropped, and the
+    // request waits on (the lead's ruling on D-12).
+    const bool other =
+        get(received, UNIT_AT, 1) != request.unit_id ||
+        get(received, TID_AT, 2) != (attempt.transaction_id & TID_MASK);
+    if (!other &&
+        ((answered && count != request.count) || (!answered && count != 0))) {
+        return FrameState{.kind = FrameState::Kind::BROKEN};
+    }
     if (received.size() < length) {
         return FrameState{.kind = FrameState::Kind::NEED_MORE,
                           .need = length - received.size()};
     }
-    const std::uint64_t tid = get(received, TID_AT, 2);
-    if (tid != (attempt.transaction_id & TID_MASK)) {
+    if (other) {
         return FrameState{.kind = FrameState::Kind::STALE, .length = length};
     }
     return FrameState{.kind = FrameState::Kind::COMPLETE, .length = length};

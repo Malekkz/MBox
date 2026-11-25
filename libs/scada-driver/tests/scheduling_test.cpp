@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -408,6 +409,46 @@ TEST(Scheduling, AnUnservablePeriodIsReportedAsAchievedAndLimited) {
 
 // --- Conformance test 13: keep-alive --------------------------------------
 
+TEST(Scheduling, NoRequestOfAChainRests) {
+    // K1: a chain of companions (0 with its companion at 100): neither its
+    // first nor its last request can rest.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    const ReadPlan& plan = channel.devices[0].plan;
+    for (std::uint32_t request = 0; request < plan.requests.size(); ++request) {
+        scheduler.rest(0, request, true);
+        EXPECT_TRUE(scheduler.in_chain(0, request));
+        EXPECT_FALSE(scheduler.resting(0, request));
+    }
+}
+
+TEST(Scheduling, ARestingRequestIsNoKeepAlive) {
+    // K5: the keep-alive request (the block at 50) rests as a dead block:
+    // no keep-alive is sent while it rests; after its rest they resume.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .count = 2, .group = SLOW},
+                                  {.first = 50, .group = SLOW}},
+                       .keepalive_ns = 2 * SECOND}},
+                     ReadRules{.max_units = 4});
+    SimBus bus = mapped_bus();
+    const TestProtocol protocol;
+    Loop loop(channel, protocol, bus, 0, EXCHANGE);
+    const ReadPlan& plan = channel.devices[0].plan;
+    ASSERT_TRUE(plan.keepalive.has_value());
+    const std::uint32_t keepalive = plan.keepalive.value_or(0);
+    ASSERT_EQ(plan.requests[keepalive].first, 50U);
+    loop.scheduler().rest(0, keepalive, true);
+    loop.run_until(9 * SECOND);
+    EXPECT_TRUE(keepalives_of(loop).first.empty());
+    loop.scheduler().rest(0, keepalive, false);
+    loop.run_until(13 * SECOND);  // the poll at 10 s, a keep-alive 2 s on
+    EXPECT_FALSE(keepalives_of(loop).first.empty());
+}
+
 TEST(Scheduling, AnIdleDeviceGetsAKeepAliveOutsideEverySideEffect) {
     // A slow group (10 s) and a keep-alive of 2 s: between polls the device
     // gets keep-alives, which never read the side-effect range at 0.
@@ -721,6 +762,11 @@ TEST(Scheduling, PacingLimitedCountsFromTheLastRequestHandedOut) {
     EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
     EXPECT_EQ(scheduler.take(MILLISECOND).wake_ns, 10 * MILLISECOND);
     EXPECT_EQ(scheduler.take(10 * MILLISECOND).kind, Choice::Kind::POLL);
+    // Between the last send and the `take` after the slow answer, too (the
+    // PR 135 final pass): false at 100, 101 and 149 ms.
+    EXPECT_FALSE(scheduler.pacing_limited(0, 100 * MILLISECOND));
+    EXPECT_FALSE(scheduler.pacing_limited(0, 101 * MILLISECOND));
+    EXPECT_FALSE(scheduler.pacing_limited(0, 149 * MILLISECOND));
     (void)scheduler.take(150 * MILLISECOND);  // after the slow answer
     EXPECT_FALSE(scheduler.pacing_limited(0, 150 * MILLISECOND));
 }
@@ -1046,6 +1092,26 @@ TEST(Scheduling, AChannelTheSchedulerCannotRunIsRefusedOnce) {
     plan.requests[0].split = {1, 2};
     plan.requests[1].split = {2};
     EXPECT_FALSE(Scheduler::check(nested).ok());
+    // A protocol's own plan whose keep-alive is a side-effect read or a
+    // request of a chain (the PR 135 final pass).
+    ReadRules side{.max_units = 4};
+    side.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                             .unit_id = 1,
+                             .first = 0,
+                             .last = 0}};
+    CompiledChannel latch =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}}, side);
+    latch.devices[0].plan.keepalive = latch.devices[0].plan.by_group[0][0];
+    EXPECT_FALSE(Scheduler::check(latch).ok());
+    CompiledChannel chained = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    ReadPlan& chain_plan = chained.devices[0].plan;
+    chain_plan.keepalive = chain_plan.by_group[0][0];
+    EXPECT_FALSE(Scheduler::check(chained).ok());
+    chain_plan.keepalive = chain_plan.by_group[0][1];  // the chain's end
+    EXPECT_FALSE(Scheduler::check(chained).ok());
     const CompiledChannel good = make_channel(
         {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
     Scheduler scheduler(good, 4, 0);
@@ -1082,6 +1148,337 @@ TEST(Scheduling, AWriteReachesEncodeAsARequestOfKindWrite) {
     std::array<std::byte, sizeof echo> out_bytes{};
     std::copy_n(copy.protocol.begin(), out_bytes.size(), out_bytes.begin());
     EXPECT_EQ(std::bit_cast<std::uint32_t>(out_bytes), echo);
+}
+
+// --- Failure handling: not polled, retries, probes (6.2, 7.1, 7.4) -------
+
+TEST(Scheduling, ADeviceThatIsNotPolledGetsNoPollAndNoKeepAlive) {
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1), .keepalive_ns = SECOND}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::IDLE);
+    EXPECT_EQ(scheduler.take(5 * SECOND).kind, Choice::Kind::IDLE);
+    // Polled again: its groups are due at once.
+    scheduler.set_polled(0, true);
+    const Choice choice = scheduler.take(6 * SECOND);
+    EXPECT_EQ(choice.kind, Choice::Kind::POLL);
+    EXPECT_EQ(choice.request, channel.devices[0].plan.by_group[FAST].front());
+    // The outage is not an achieved period.
+    EXPECT_LT(scheduler.achieved_period_ns(FAST, 6 * SECOND + MILLISECOND),
+              FAST_PERIOD);
+}
+
+TEST(Scheduling, ARetryIsTheDevicesNextRequestWithinItsSpacing) {
+    // Two devices, 10 ms request spacing on d1: d1's failed request is sent
+    // again before anything else of d1, 10 ms after the first attempt, and
+    // d2 is served in between.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = adjacent(0, 1),
+          .pacing = Pacing{.min_request_interval_ns = 10 * MILLISECOND}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_EQ(first.device, 0U);
+    scheduler.retry(0, first.request, 0);
+    const Choice other = scheduler.take(MILLISECOND);
+    EXPECT_EQ(other.kind, Choice::Kind::POLL);
+    EXPECT_EQ(other.device, 1U);
+    const Choice wait = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 10 * MILLISECOND);
+    const Choice again = scheduler.take(10 * MILLISECOND);
+    EXPECT_EQ(again.kind, Choice::Kind::POLL);
+    EXPECT_EQ(again.device, 0U);
+    EXPECT_EQ(again.request, first.request);
+    // Once only: the cycle is complete, the next poll is a period later.
+    EXPECT_EQ(scheduler.take(11 * MILLISECOND).wake_ns, FAST_PERIOD);
+}
+
+TEST(Scheduling, ASideEffectReadIsNeverRetried) {
+    ReadRules rules{.max_units = LARGE};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 0,
+                              .last = 0}};
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .points = adjacent(0, 1)}}, rules);
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_TRUE(channel.devices[0].plan.requests[first.request].side_effect);
+    scheduler.retry(0, first.request, 0);
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::WAIT);
+}
+
+TEST(Scheduling, AnOrderThatDropsAChainDropsItsRetryToo) {
+    // A chain's first request failed and is to be retried; an order goes
+    // first (R2, D2) and drops the chain: it is read again whole, once.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}}},
+        ReadRules{.max_units = 4});
+    const ReadPlan& plan = channel.devices[0].plan;
+    Scheduler scheduler(channel, 4, 0);
+    const Choice first = scheduler.take(0);
+    scheduler.retry(0, first.request, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 0}));
+    EXPECT_TRUE(scheduler.take(MILLISECOND).chain_dropped);
+    EXPECT_EQ(reads_at(scheduler, plan,
+                       {2 * MILLISECOND, 3 * MILLISECOND, 4 * MILLISECOND}),
+              (std::vector<std::uint64_t>{0, 100, NOT_A_READ}));
+}
+
+// Runs `scheduler` for 60 s: device 0's polls take its whole 200 ms period,
+// every probe goes unanswered in 100 ms and is due again at once. Returns
+// device 0's longest gap and the probes sent.
+std::pair<std::int64_t, std::size_t> run_floor_probes(Scheduler& scheduler) {
+    std::int64_t last_live = 0;
+    std::int64_t worst = 0;
+    std::size_t probes = 0;
+    std::int64_t now = 0;
+    for (std::size_t step = 0; step < 20'000 && now < 60 * SECOND; ++step) {
+        const Choice choice = scheduler.take(now);
+        const bool live =
+            choice.kind == Choice::Kind::POLL && choice.device == 0;
+        if (live) {
+            worst = std::max(worst, now - last_live);
+            last_live = now;
+        }
+        if (choice.kind == Choice::Kind::PROBE) {
+            ++probes;
+            now += 100 * MILLISECOND;  // unanswered; due again at once
+            scheduler.probe_done();
+            scheduler.set_probe(choice.device, now, 100 * MILLISECOND);
+        } else if (choice.kind == Choice::Kind::POLL) {
+            now += live ? FAST_PERIOD : 100 * MILLISECOND;
+        } else {
+            now = std::max(now + MILLISECOND, choice.wake_ns);
+        }
+    }
+    return {worst, probes};
+}
+
+TEST(Scheduling, FloorProbesGoOneInElevenProbeTimeOuts) {
+    // J3, the lead's ruling N1: 20 demoted devices whose probes are past
+    // their floor (time-out 100 ms), and a live device whose 200 ms polls
+    // fill the line, so a request is always due and no window opens. The
+    // oldest probe past its floor goes ahead of the due polls, at most one
+    // in PROBE_FLOOR + 1 probe time-outs: about 60 s / 1.1 s = 54 probes,
+    // and the live device waits at most its period and one probe time-out.
+    std::vector<DeviceSpec> specs{
+        {.name = "live", .unit_id = 1, .points = adjacent(0, 1, FAST)},
+        {.name = "failing", .unit_id = 2, .points = adjacent(0, 1, SLOW)}};
+    for (std::uint8_t unit = 3; unit <= 22; ++unit) {
+        specs.push_back({.name = "p" + std::to_string(unit),
+                         .unit_id = unit,
+                         .points = adjacent(0, 1, SLOW)});
+    }
+    const CompiledChannel channel =
+        make_channel(specs, ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    for (std::uint32_t device = 2; device < 22; ++device) {
+        scheduler.set_polled(device, false);
+        scheduler.set_probe(device, 0, 100 * MILLISECOND);
+    }
+    const auto [worst, probes] = run_floor_probes(scheduler);
+    EXPECT_LE(worst, FAST_PERIOD + 100 * MILLISECOND);
+    EXPECT_GE(probes, 50U);
+    EXPECT_LE(probes, 55U);
+}
+
+TEST(Scheduling, NoFloorProbeGoesBetweenThePartsOfAChain) {
+    // Q1, DI 6.2 step 3: d1 reads a chain (0 with its companion at 100);
+    // d2 is demoted, its probe past its floor. Once the chain's first part
+    // is out, its second goes next, not the other unit's floor probe.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .unit_id = 1,
+          .points = {{.first = 0, .companions = {1}}, {.first = 100}}},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(1, false);
+    scheduler.set_probe(1, 0, 100 * MILLISECOND);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::POLL);
+    ASSERT_EQ(first.device, 0U);
+    const Choice second = scheduler.take(1'500 * MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::POLL);
+    EXPECT_EQ(second.device, 0U);
+    // Then the floor probe.
+    EXPECT_EQ(scheduler.take(1'501 * MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
+// Two demoted devices of units 1 and 2 (probe time-out 10 ms): d1's floor at
+// 600 ms, d2's at 100 ms.
+CompiledChannel two_demoted() {
+    return make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+         {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+        ReadRules{.max_units = LARGE});
+}
+
+void demote_both(Scheduler& scheduler) {
+    for (std::uint32_t device = 0; device < 2; ++device) {
+        scheduler.set_polled(device, false);
+    }
+    scheduler.set_probe(0, 500 * MILLISECOND, 10 * MILLISECOND);
+    scheduler.set_probe(1, 0, 10 * MILLISECOND);
+}
+
+TEST(Scheduling, TheOldestFloorProbeGoesFirst) {
+    // Q2, N1: both are past their floor at 1 s; d2's is the older.
+    const CompiledChannel channel = two_demoted();
+    Scheduler scheduler(channel, 4, 0);
+    demote_both(scheduler);
+    const Choice probe = scheduler.take(SECOND);
+    ASSERT_EQ(probe.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(probe.device, 1U);
+}
+
+TEST(Scheduling, FloorProbesAreSpacedFromTheEndOfTheLast) {
+    // Q2, N1: a floor probe at 1 s (10 ms) holds the next one until 1 s +
+    // 11 x 10 ms: PROBE_FLOOR time-outs after its end, not after its start;
+    // the wait wakes exactly then.
+    const CompiledChannel channel = two_demoted();
+    Scheduler scheduler(channel, 4, 0);
+    demote_both(scheduler);
+    ASSERT_EQ(scheduler.take(SECOND).kind, Choice::Kind::PROBE);
+    scheduler.probe_done();
+    const Choice wait = scheduler.take(SECOND + 105 * MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, SECOND + 110 * MILLISECOND);
+    const Choice next = scheduler.take(SECOND + 110 * MILLISECOND);
+    EXPECT_EQ(next.kind, Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, NoFloorProbeWhileItsUnitIsHeldByAnOrder) {
+    // Q2: a and b share unit 7, whose write interval is 2 s; a's list of two
+    // writes holds the unit between them (8.5). b is demoted, its probe past
+    // its floor at 1 s and free of pacing (a read): it waits for the
+    // list's end.
+    const CompiledChannel channel =
+        make_channel({{.name = "a",
+                       .unit_id = 7,
+                       .points = adjacent(0, 1),
+                       .pacing = {.min_write_interval_ns = 2 * SECOND}},
+                      {.name = "b", .unit_id = 7, .points = adjacent(50, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);  // only the order and the probe
+    scheduler.set_polled(1, false);
+    scheduler.set_probe(1, 0, 10 * MILLISECOND);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 3, .device = 0, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::WAIT);
+    const Choice second = scheduler.take(2 * SECOND);
+    ASSERT_EQ(second.kind, Choice::Kind::ORDER);
+    EXPECT_EQ(second.step, 1U);
+    EXPECT_EQ(scheduler.take(2 * SECOND + MILLISECOND).kind,
+              Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, AFloorProbeKeepsItsUnitsPacing) {
+    // Q2: d1 is paced at 500 ms; polled at 0, then demoted with its probe
+    // due at 0 (floor 100 ms). At 200 ms the probe waits for the pacing.
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = adjacent(0, 1),
+          .pacing = {.min_request_interval_ns = 500 * MILLISECOND}}},
+        ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::POLL);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0, 10 * MILLISECOND);
+    const Choice wait = scheduler.take(200 * MILLISECOND);
+    ASSERT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 500 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(500 * MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, AProbeWaitsForItsDueTimeAndForTheLiveDevices) {
+    // d1 is demoted, its probe due at 5 ms; d2 is live in the fast group.
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 5 * MILLISECOND, 100 * MILLISECOND);
+    EXPECT_EQ(scheduler.take(0).device, 1U);  // d2's poll
+    const Choice wait = scheduler.take(MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 5 * MILLISECOND);
+    // A due poll of d2 at the same time goes first.
+    EXPECT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::POLL);
+    scheduler.set_probe(0, FAST_PERIOD, 100 * MILLISECOND);
+    const Choice probe = scheduler.take(FAST_PERIOD + MILLISECOND);
+    EXPECT_EQ(probe.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(probe.device, 0U);
+    EXPECT_EQ(probe.request, channel.devices[0].plan.probe.value_or(~0U));
+}
+
+TEST(Scheduling, AtMostOneProbeIsInFlightPerChannel) {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2", .unit_id = 2, .points = adjacent(0, 1)}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    for (std::uint32_t device = 0; device < 2; ++device) {
+        scheduler.set_polled(device, false);
+        scheduler.set_probe(device, 0, 0);
+    }
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(first.device, 0U);
+    scheduler.clear_probe(0);
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::IDLE);
+    scheduler.probe_done();
+    const Choice second = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(second.device, 1U);
+}
+
+TEST(Scheduling, AProbeNotSentLeavesNoProbeInFlight) {
+    const CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = adjacent(0, 1)}}, ReadRules{.max_units = 4});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0, 0);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
+    EXPECT_EQ(scheduler.not_sent(), std::nullopt);
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::PROBE);
+}
+
+TEST(Scheduling, NoProbeWhileAnOrderWaits) {
+    const CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = adjacent(0, 1)},
+                      {.name = "d2",
+                       .unit_id = 2,
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = Pacing{.min_write_interval_ns = SECOND}}},
+                     ReadRules{.max_units = LARGE});
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(0, false);
+    scheduler.set_probe(0, 0, 0);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 1, .device = 1}));
+    EXPECT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{.id = 2, .device = 1}));
+    // d2's poll, then the second order waits for d2's write spacing: no
+    // probe in that time.
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::POLL);
+    const Choice wait = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, SECOND);
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(SECOND + MILLISECOND).kind, Choice::Kind::PROBE);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

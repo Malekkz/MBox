@@ -1,5 +1,6 @@
 scada_add_test(scada-driver-unit-test KIND unit
   SOURCES
+    failure_test.cpp
     golden_samples_test.cpp
     golden_vectors_test.cpp
     golden_write_test.cpp
@@ -8,8 +9,12 @@ scada_add_test(scada-driver-unit-test KIND unit
     plan_test.cpp
     point_rules_test.cpp
     sample_processing_test.cpp
+    channel_engine_test.cpp
+    engine_random_test.cpp
     scheduling_test.cpp
+    sim_transport.cpp
     test_protocol.cpp
+    timing_test.cpp
     tzif_test.cpp
     zone_file_test.cpp
     zone_table_test.cpp
@@ -22,6 +27,16 @@ scada_add_test(scada-driver-unit-test KIND unit
 target_compile_options(scada-driver-unit-test PRIVATE -ffp-contract=off)
 target_compile_definitions(scada-driver-unit-test PRIVATE
   "SCADA_DRIVER_GOLDEN_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/golden/driver-vectors.txt\"")
+
+# How dead devices share a line with live ones, with the default failure
+# keys (decision D-138; review G7, N1): minutes of a simulated line.
+scada_add_test(scada-driver-line-perf-test KIND perf
+  SOURCES
+    line_perf_test.cpp
+    loopback.cpp
+    sim_transport.cpp
+    test_protocol.cpp
+  DEPENDS scada::driver)
 
 # Every zone of the build machine's database against the C library
 # (decision D-130). Integration: it reads hundreds of files and takes

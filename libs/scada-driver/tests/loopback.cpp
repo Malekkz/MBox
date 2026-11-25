@@ -19,6 +19,8 @@ namespace scada::driver::test {
 
 namespace {
 
+constexpr std::uint8_t GARBAGE_STATUS = 0xEE;
+
 constexpr unsigned BYTE_BITS = 8;
 constexpr std::uint64_t BYTE_MASK = 0xFFU;
 constexpr std::size_t TX_BYTES = 256;
@@ -80,8 +82,39 @@ std::vector<std::byte> SimBus::answer(std::span<const std::byte> request,
                                  .first = first,
                                  .count = count});
     std::vector<std::byte> out;
+    const auto fault = faults_.find(unit_id);
+    Fault now_fault = fault == faults_.end() ? Fault::NONE : fault->second;
+    const auto busy = busy_at_.find(unit_id);
+    if (busy != busy_at_.end() && busy->second == first) {
+        now_fault = Fault::BUSY;
+    }
+    const auto silent = silent_from_.find(unit_id);
+    if (now_fault == Fault::SILENT ||
+        (silent != silent_from_.end() && first >= silent->second.first &&
+         first <= silent->second.second)) {
+        return out;
+    }
     append(out, tid, 2);
     append(out, unit_id, 1);
+    if (now_fault == Fault::GARBAGE) {
+        // A status no answer has, with data: frame_state says BROKEN.
+        append(out, GARBAGE_STATUS, 1);
+        append(out, 1, 2);
+        append(out, 0, 2);
+        return out;
+    }
+    if (now_fault == Fault::BUSY || now_fault == Fault::UNREACHABLE ||
+        now_fault == Fault::ABSENT) {
+        AnswerStatus status = AnswerStatus::ABSENT;
+        if (now_fault == Fault::BUSY) {
+            status = AnswerStatus::BUSY;
+        } else if (now_fault == Fault::UNREACHABLE) {
+            status = AnswerStatus::UNREACHABLE;
+        }
+        append(out, static_cast<std::uint8_t>(status), 1);
+        append(out, 0, 2);
+        return out;
+    }
     bool mapped = true;
     bool clears = false;
     for (std::uint32_t address = first; address < first + count; ++address) {
