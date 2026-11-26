@@ -92,6 +92,21 @@ public:
     // error and which never connects.
     ChannelEngine(const CompiledChannel& channel, const FrameProtocol& protocol,
                   Transport& transport, Clock& clock, TagSink& tags);
+    // The same with every device's caps given, one per device of
+    // `channel`, in order: `FrameProtocol::device_caps` runs on the main
+    // thread (DI 2.3), and the worker builds its engine with what the main
+    // thread asked. Fewer caps than devices gives an engine whose `status`
+    // is INVALID_ARGUMENT.
+    ChannelEngine(const CompiledChannel& channel, const FrameProtocol& protocol,
+                  Transport& transport, Clock& clock, TagSink& tags,
+                  std::span<const DeviceCaps> caps);
+
+    // Takes `stored`, the value point `point` of device `device` holds in
+    // the tag database after the writes of 9.1, as its last value
+    // (seed_point_state, review M4). Out of range is ignored. Called once,
+    // before the first step.
+    void seed_point(std::uint32_t device, std::uint32_t point,
+                    const TagValue& stored) noexcept;
 
     [[nodiscard]] Status status() const noexcept { return status_; }
 
@@ -126,6 +141,7 @@ private:
         PARTIAL,      // the frame was not taken whole
         NOT_SENT,     // encode refused the request
         UNREACHABLE,  // a gateway's answer that its unit did not respond
+        ABANDONED,    // the wait was given up for a stop (DI 10, R-14)
     };
 
     // What the bytes received so far are.

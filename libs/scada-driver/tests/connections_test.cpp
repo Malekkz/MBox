@@ -157,6 +157,14 @@ struct Script {
 
 // NOLINTEND(misc-non-private-member-variables-in-classes)
 
+TEST(Connections, AWokenWaitIsAbandonedWithoutARead) {
+    // DI 10: the stop's wake ends the wait; nothing is read after it.
+    const FixedClock clock(100);
+    Script script{.waits = {detail::Readiness::WOKEN}, .reads = {IoStatus::OK}};
+    EXPECT_EQ(script.run(1'000, clock), IoStatus::ABANDONED);
+    EXPECT_EQ(script.read, 0U);
+}
+
 TEST(Connections, AWakeWithNothingToReadWaitsAgainUntilTheDeadline) {
     // Review M3: input seen, then nothing readable, is no time-out while
     // the deadline has not passed.

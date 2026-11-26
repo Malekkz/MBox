@@ -11,6 +11,7 @@
 #include "scada/driver/raw_value.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/scheduler.h"
+#include "scada/driver/tag_value.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
 
@@ -138,9 +139,30 @@ Status check_keys(const CompiledChannel& channel) noexcept {
 
 }  // namespace
 
+namespace {
+
+std::vector<DeviceCaps> caps_of(const CompiledChannel& channel,
+                                const FrameProtocol& protocol) {
+    std::vector<DeviceCaps> caps;
+    caps.reserve(channel.devices.size());
+    for (const CompiledDevice& device : channel.devices) {
+        caps.push_back(protocol.device_caps(device));
+    }
+    return caps;
+}
+
+}  // namespace
+
 ChannelEngine::ChannelEngine(const CompiledChannel& channel,
                              const FrameProtocol& protocol,
                              Transport& transport, Clock& clock, TagSink& tags)
+    : ChannelEngine(channel, protocol, transport, clock, tags,
+                    caps_of(channel, protocol)) {}
+
+ChannelEngine::ChannelEngine(const CompiledChannel& channel,
+                             const FrameProtocol& protocol,
+                             Transport& transport, Clock& clock, TagSink& tags,
+                             std::span<const DeviceCaps> caps)
     : channel_(&channel),
       protocol_(&protocol),
       transport_(&transport),
@@ -154,6 +176,9 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
     if (status_.ok()) {
         status_ = check_keys(channel);
     }
+    if (status_.ok() && caps.size() < channel.devices.size()) {
+        status_ = invalid("fewer device caps than devices");
+    }
     const std::int64_t now = clock.monotonic_ns();
     std::size_t frame = 0;
     std::size_t request_points = 0;
@@ -162,7 +187,7 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
     for (std::size_t index = 0; index < channel.devices.size(); ++index) {
         const CompiledDevice& device = channel.devices[index];
         DeviceRun& run = devices_[index];
-        run.max_frame = protocol.device_caps(device).max_frame_bytes;
+        run.max_frame = index < caps.size() ? caps[index].max_frame_bytes : 0;
         if (device.enabled && run.max_frame == 0 && status_.ok()) {
             status_ = invalid("a device's protocol gives no frame size");
         }
@@ -191,6 +216,13 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
     sink_storage_.resize(std::max(request_points, device_points));
     batch_.reserve(device_points);
     companions_.reserve(companions);
+}
+
+void ChannelEngine::seed_point(std::uint32_t device, std::uint32_t point,
+                               const TagValue& stored) noexcept {
+    if (device < devices_.size() && point < devices_[device].points.size()) {
+        seed_point_state(devices_[device].points[point].state, stored);
+    }
 }
 
 std::int64_t ChannelEngine::step() noexcept {
@@ -285,6 +317,10 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     const IoStatus status =
         transport_->connect(later(now_ns, rules.connect_timeout_ns));
     const std::int64_t now = clock_->monotonic_ns();
+    if (status == IoStatus::ABANDONED) {
+        // A stop gave up the connect: no failure, no back-off (DI 10).
+        return now;
+    }
     if (status == IoStatus::OK) {
         if (own_close_ &&
             now <= later(own_close_ns_, rules.connect_timeout_ns)) {
@@ -654,6 +690,9 @@ ChannelEngine::End ChannelEngine::wait_answer(
         std::size_t got = 0;
         const IoStatus status =
             transport_->receive(std::span(rx_).subspan(have), deadline, got);
+        if (status == IoStatus::ABANDONED) {
+            return End::ABANDONED;
+        }
         if (status == IoStatus::TIMEOUT) {
             return started ? End::BROKEN : End::TIMEOUT;
         }
@@ -714,6 +753,11 @@ void ChannelEngine::exchange(const Choice& choice) noexcept {
         case End::CLOSED:
             // Every device of the channel at once, no retries (7.3).
             lose(now);
+            return;
+        case End::ABANDONED:
+            // A stop gave up the read in flight: nothing is counted and
+            // nothing written, its points keep their values (DI 9.2, 10,
+            // R-14). The worker stops at this boundary.
             return;
         case End::PARTIAL:
             if (channel_->transport == TransportKind::SERIAL) {

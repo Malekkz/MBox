@@ -6,6 +6,7 @@
 #include "scada/driver/driver.h"
 #include "../src/tag_writer.h"
 #include "channel_builder.h"
+#include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/sample_processing.h"
@@ -13,14 +14,23 @@
 #include "scada/driver/timing.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/types.h"
+#include "sim_transport.h"
 #include "test_protocol.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
 
 namespace scada::driver::test {
 namespace {
@@ -111,6 +121,114 @@ TEST(Driver, AProcessedValueIsWrittenWithItsBitsQualityAndTime) {
     EXPECT_EQ(to_scada_value(TagWrite{.value = bool_value(true)}).value, 1U);
     EXPECT_EQ(to_scada_value(TagWrite{.value = bool_value(false)}).value, 0U);
     EXPECT_EQ(to_scada_value(TagWrite{}).quality, SCADA_QUALITY_BAD);
+}
+
+// True when `value` comes back as itself through the library's form.
+bool round_trips(const TagValue& value) {
+    const TagValue back = detail::from_scada_value(
+        detail::to_scada_value(TagWrite{.value = value}), {});
+    return back.type == value.type && back.i == value.i && back.u == value.u &&
+           back.b == value.b &&
+           std::bit_cast<std::uint64_t>(back.f) ==
+               std::bit_cast<std::uint64_t>(value.f);
+}
+
+TEST(Driver, AStoredValueReadsBackAsTheTagValueItWasWrittenFrom) {
+    using detail::from_scada_value;
+    EXPECT_TRUE(round_trips(int64_value(-7)));
+    EXPECT_TRUE(round_trips(uint64_value(9)));
+    EXPECT_TRUE(round_trips(bool_value(true)));
+    EXPECT_TRUE(round_trips(TagValue{.type = tag::TagType::FLOAT64, .f = 2.5}));
+    const std::array<char, 3> text{'a', 'b', 'c'};
+    scada_value stored{};
+    stored.type = SCADA_TYPE_STRING;
+    const TagValue string = from_scada_value(stored, text);
+    EXPECT_EQ(string.type, tag::TagType::STRING);
+    EXPECT_EQ(string.text, "abc");
+}
+
+TEST(Driver, ASeededStringKeepsItsTextAndAnotherTypeIsIgnored) {
+    PointState state;
+    init_point_state(state, tag::TagType::STRING);
+    reset_point_state(state, tag::TagType::STRING, 0);
+    seed_point_state(state,
+                     TagValue{.type = tag::TagType::STRING, .text = "kept"});
+    EXPECT_EQ(std::string_view(state.text.data(), state.text.size()), "kept");
+    seed_point_state(state, int64_value(3));  // another type: ignored
+    EXPECT_EQ(state.value.type, tag::TagType::STRING);
+    EXPECT_EQ(state.quality, tag::Quality::BAD);  // the reset's quality stays
+}
+
+TEST(Driver, EachEndHasItsExitStatus) {
+    EXPECT_EQ(exit_status(RunEnd::STOPPED), EXIT_OK);
+    EXPECT_EQ(exit_status(RunEnd::FAILED), EXIT_ERROR);
+    EXPECT_EQ(exit_status(RunEnd::STALLED), EXIT_STALL);
+}
+
+TEST(Driver, OnlyTheStopSignalsAreBlocked) {
+    // Review M8: SIGABRT and the fault signals keep their default.
+    sigset_t before{};
+    ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, nullptr, &before), 0);
+    ASSERT_TRUE(block_stop_signals().ok());
+    sigset_t now{};
+    ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, nullptr, &now), 0);
+    const auto all_blocked = [&](std::initializer_list<int> signals) {
+        return std::all_of(signals.begin(), signals.end(), [&](int number) {
+            return ::sigismember(&now, number) == 1;
+        });
+    };
+    const auto unchanged = [&](std::initializer_list<int> signals) {
+        return std::all_of(signals.begin(), signals.end(), [&](int number) {
+            return ::sigismember(&now, number) ==
+                   ::sigismember(&before, number);
+        });
+    };
+    EXPECT_TRUE(all_blocked({SIGTERM, SIGINT, SIGHUP}));
+    EXPECT_TRUE(unchanged({SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGILL}));
+    ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, &before, nullptr), 0);
+}
+
+// A Driver that never reaches the tag library: no channel, and settings
+// that fail before the attach.
+RunEnd run_with(DriverSettings settings, Status& failure) {
+    const CompiledConfig config;
+    const TestProtocol protocol;
+    SimClock clock;
+    Driver driver(config, protocol, {}, clock, std::move(settings), nullptr);
+    const RunEnd end = driver.run();
+    failure = driver.failure();
+    EXPECT_TRUE(driver.joined());
+    return end;
+}
+
+DriverSettings settings(std::string process, std::int64_t period_ns) {
+    DriverSettings out;
+    out.process = std::move(process);
+    out.heartbeat_period_ns = period_ns;
+    return out;
+}
+
+TEST(Driver, SettingsOutOfRangeFailTheRunAtOnce) {
+    Status failure;
+    EXPECT_EQ(run_with(settings("drv-test", 0), failure), RunEnd::FAILED);
+    EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(
+        run_with(settings("drv-test", MAX_HEARTBEAT_PERIOD_NS + 1), failure),
+        RunEnd::FAILED);
+    EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(run_with(settings("", DEFAULT_HEARTBEAT_PERIOD_NS), failure),
+              RunEnd::FAILED);
+    EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(Driver, ASecondRunIsRefused) {
+    const CompiledConfig config;
+    const TestProtocol protocol;
+    SimClock clock;
+    Driver driver(config, protocol, {}, clock, settings("", 1), nullptr);
+    EXPECT_EQ(driver.run(), RunEnd::FAILED);
+    EXPECT_EQ(driver.run(), RunEnd::FAILED);
+    EXPECT_EQ(driver.failure().code(), StatusCode::FAILED_PRECONDITION);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

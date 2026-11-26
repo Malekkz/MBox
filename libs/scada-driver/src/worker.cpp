@@ -7,19 +7,21 @@
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
+#include "scada/tag/types.h"
 #include "tag_writer.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
+#include <vector>
 
 #include <poll.h>
 #include <pthread.h>
@@ -42,27 +44,45 @@ timespec to_timespec(std::int64_t duration_ns) noexcept {
                     .tv_nsec = static_cast<long>(clamped % NS_PER_S)};
 }
 
+// Makes `descriptor`, an eventfd, readable. A full counter (EAGAIN) is
+// readable already; nothing else can fail for an eventfd we own.
+void raise(const Fd& descriptor) noexcept {
+    if (!descriptor.valid()) {
+        return;
+    }
+    const std::uint64_t one = 1;
+    if (::write(descriptor.get(), &one, sizeof(one)) < 0) {
+        return;  // EAGAIN: already readable; the flags are read anyway
+    }
+}
+
 }  // namespace
 
 Worker::Worker(const CompiledChannel& channel, const FrameProtocol& protocol,
                std::unique_ptr<Transport> transport, Clock& clock,
-               scada_ctx* ctx, PointHandles handles,
+               scada_ctx* ctx, std::optional<std::uint16_t> owner,
+               std::vector<DeviceCaps> caps,
                std::int64_t stall_limit_ns) noexcept
     : channel_(&channel),
       protocol_(&protocol),
       transport_(std::move(transport)),
       clock_(&clock),
-      writer_(ctx, std::move(handles)),
+      ctx_(ctx),
+      owner_(owner),
+      caps_(std::move(caps)),
       stall_limit_ns_(stall_limit_ns) {}
 
 Worker::~Worker() {
     request_stop();
-    join();
+    // Never a join without a bound: a thread that has not returned is left
+    // to the Driver, which then ends the process (driver.h).
+    (void)join_if_returned();
 }
 
 Status Worker::start() noexcept {
     stop_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
-    if (!stop_fd_.valid()) {
+    begin_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
+    if (!stop_fd_.valid() || !begin_fd_.valid()) {
         return {StatusCode::UNAVAILABLE, "no eventfd for a worker"};
     }
     pthread_attr_t attributes{};
@@ -79,6 +99,7 @@ Status Worker::start() noexcept {
                                     },
                                     this)
                               : -1;
+    // Destroying attributes that were initialised cannot fail.
     (void)::pthread_attr_destroy(&attributes);
     if (created != 0) {
         return {StatusCode::UNAVAILABLE, "cannot start the worker thread"};
@@ -87,26 +108,37 @@ Status Worker::start() noexcept {
     return {};
 }
 
+void Worker::begin(PointHandles handles) noexcept {
+    handles_ = std::move(handles);
+    begun_.store(true, std::memory_order_release);
+    raise(begin_fd_);
+}
+
 void Worker::request_stop() noexcept {
     stop_.store(true, std::memory_order_release);
-    if (stop_fd_.valid()) {
-        const std::uint64_t one = 1;
-        // A full counter (EAGAIN) already wakes the thread, and the flag
-        // above is read at every boundary: a failed write loses nothing.
-        if (::write(stop_fd_.get(), &one, sizeof(one)) < 0) {
-            return;
-        }
-    }
+    raise(stop_fd_);
 }
 
-void Worker::join() noexcept {
-    if (started_) {
-        (void)::pthread_join(thread_, nullptr);
-        started_ = false;
+bool Worker::join_if_returned() noexcept {
+    if (!started_) {
+        return true;
     }
+    if (!returned()) {
+        return false;
+    }
+    // The thread has stored its last phase and returns at once: the join
+    // is bounded. A thread joined once is not joined again.
+    (void)::pthread_join(thread_, nullptr);
+    started_ = false;
+    return true;
 }
 
-void Worker::wait_until(std::int64_t next_ns) noexcept {
+void Worker::fail(Status status) noexcept {
+    failure_ = status;
+    phase_.store(Phase::FAILED, std::memory_order_release);
+}
+
+void Worker::wait_until(std::int64_t next_ns, int extra) noexcept {
     const std::int64_t now = clock_->monotonic_ns();
     // Every wait at most a third of the stall limit (2.6), so that an idle
     // channel moves its counter too.
@@ -115,12 +147,13 @@ void Worker::wait_until(std::int64_t next_ns) noexcept {
     if (until <= now) {
         return;
     }
-    std::array<pollfd, 2> entries{
+    std::array<pollfd, 3> entries{
         pollfd{.fd = stop_fd_.get(), .events = POLLIN, .revents = 0},
+        pollfd{.fd = extra, .events = POLLIN, .revents = 0},
         pollfd{.fd = -1, .events = 0, .revents = 0}};
     // On a stream only, POLLRDHUP alone: never POLLIN (transport.h).
-    if (channel_->transport != TransportKind::SERIAL) {
-        entries[1] = pollfd{
+    if (transport_ != nullptr && channel_->transport != TransportKind::SERIAL) {
+        entries[2] = pollfd{
             .fd = transport_->poll_fd(), .events = POLLRDHUP, .revents = 0};
     }
     const timespec left = to_timespec(until - now);
@@ -129,33 +162,88 @@ void Worker::wait_until(std::int64_t next_ns) noexcept {
     (void)::ppoll(entries.data(), entries.size(), &left, nullptr);
 }
 
-void Worker::run() noexcept {
-    // Built on this thread: every tag write, the first included, is this
-    // thread's (TD 13.2: the first thread that writes an owner's tags owns
-    // them), and so is the engine's allocation.
+bool Worker::await_begin() noexcept {
+    for (;;) {
+        if (stopping()) {
+            return false;
+        }
+        if (begun_.load(std::memory_order_acquire)) {
+            return true;
+        }
+        wait_until(NEVER, begin_fd_.get());
+        moved();
+    }
+}
+
+void Worker::serve(TagWriter& writer) noexcept {
+    // Built on this thread: the engine's allocation is this thread's, and
+    // so is every tag write (TD 13.2).
     std::optional<ChannelEngine> engine;
-    engine.emplace(*channel_, *protocol_, *transport_, *clock_, writer_);
+    engine.emplace(*channel_, *protocol_, *transport_, *clock_, writer,
+                   std::span<const DeviceCaps>(caps_));
     if (!engine->status().ok()) {
-        failure_ = engine->status();
-        phase_.store(Phase::FAILED, std::memory_order_release);
+        fail(engine->status());
         return;
     }
-    // 9.1: every tag of the owner before the first request.
-    writer_.write_not_initialised();
+    writer.seed(*engine, *channel_);
+    // A stop gives up a read in flight and a connect (DI 10, R-14).
+    transport_->set_wake(stop_fd_.get());
     phase_.store(Phase::RUNNING, std::memory_order_release);
-    while (!stop_.load(std::memory_order_acquire)) {
+    while (!stopping()) {
         const std::int64_t next = engine->step();
-        progress_.fetch_add(1, std::memory_order_relaxed);
-        writer_.notify();
-        if (stop_.load(std::memory_order_acquire)) {
+        moved();
+        writer.notify();
+        refused_.store(writer.refused(), std::memory_order_relaxed);
+        if (stopping()) {
             break;
         }
-        wait_until(next);
-        progress_.fetch_add(1, std::memory_order_relaxed);
+        wait_until(next, -1);
+        moved();
     }
     // Stopped at a boundary: nothing is in flight. An orderly close.
     transport_->close(false);
-    phase_.store(Phase::DONE, std::memory_order_release);
+    transport_->set_wake(-1);
+}
+
+void Worker::run() noexcept {
+    // 9.1 first, by owner slot: before this worker waits for anything, so
+    // that the tags of the previous life read GOOD for as short a time as
+    // the thread's start allows (review M6).
+    if (owner_.has_value()) {
+        const Status written = write_owner_not_initialised(ctx_, *owner_);
+        if (!written.ok()) {
+            fail(written);
+            return;
+        }
+    }
+    phase_.store(Phase::WRITTEN, std::memory_order_release);
+    if (!await_begin()) {
+        phase_.store(Phase::DONE, std::memory_order_release);
+        return;
+    }
+    std::size_t strings = 0;
+    for (const CompiledDevice& device : channel_->devices) {
+        strings += static_cast<std::size_t>(std::count_if(
+            device.points.begin(), device.points.end(), [](const auto& point) {
+                return point.rules.tag_type == tag::TagType::STRING;
+            }));
+    }
+    TagWriter writer(ctx_, std::move(handles_), strings);
+    if (!channel_->enabled || transport_ == nullptr) {
+        // A disabled channel: its tags are this thread's and written (9.1);
+        // it is never connected (CS 4.6) and waits for the stop.
+        phase_.store(Phase::RUNNING, std::memory_order_release);
+        while (!stopping()) {
+            wait_until(NEVER, -1);
+            moved();
+        }
+        phase_.store(Phase::DONE, std::memory_order_release);
+        return;
+    }
+    serve(writer);
+    if (phase() != Phase::FAILED) {
+        phase_.store(Phase::DONE, std::memory_order_release);
+    }
 }
 
 }  // namespace scada::driver::detail

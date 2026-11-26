@@ -54,6 +54,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
+#include <sys/eventfd.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -395,6 +396,34 @@ TEST(TcpTransport, AnAnswerThatDoesNotComeIsATimeOutAtItsDeadline) {
               IoStatus::TIMEOUT);
     EXPECT_EQ(got, 0U);
     EXPECT_GE(clock.monotonic_ns() - started, 100 * MILLISECOND);
+}
+
+TEST(TcpTransport, AReadInFlightIsAbandonedWhenItsWakeIsReadable) {
+    // DI 10, R-14: the stop eventfd ends the wait for an answer at once,
+    // long before its deadline, and nothing is read.
+    auto sim = start_sim(
+        {"--tcp", "--map", "1", "0", "0", "3", "--silent", "1"}, "tcp");
+    if (!sim.has_value()) {
+        FAIL() << "the simulator did not start";
+    }
+    const SystemClock clock;
+    TcpTransport transport(loopback(port_of(*sim)), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    const Fd wake(::eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK));  // readable
+    ASSERT_TRUE(wake.valid());
+    transport.set_wake(wake.get());
+    ASSERT_EQ(transport.send(read_request(1, 0, 1)), IoStatus::OK);
+    std::array<std::byte, 64> into{};
+    std::size_t got = 1;
+    const std::int64_t started = clock.monotonic_ns();
+    const IoStatus status = transport.receive(into, started + 10 * SECOND, got);
+    EXPECT_TRUE(status == IoStatus::ABANDONED && got == 0);
+    EXPECT_LT(clock.monotonic_ns() - started, 100 * MILLISECOND);
+    // Without the wake the same transport waits for its deadline again.
+    transport.set_wake(-1);
+    EXPECT_EQ(
+        transport.receive(into, clock.monotonic_ns() + 50 * MILLISECOND, got),
+        IoStatus::TIMEOUT);
 }
 
 // --- TCP, against a peer the test holds ------------------------------------
@@ -843,6 +872,19 @@ TEST(TcpTransport, AConnectThatGetsNoAnswerTimesOutAtItsDeadline) {
     EXPECT_EQ(transport.last_error(), ConnectError::TIMEOUT);
     EXPECT_EQ(transport.last_errno(), 0);  // no system call failed (S1)
     EXPECT_EQ(transport.poll_fd(), -1);
+}
+
+TEST(TcpTransport, AConnectIsAbandonedWhenItsWakeIsReadable) {
+    const FullListener full;
+    const SystemClock clock;
+    TcpTransport transport(loopback(full.listener.port), clock);
+    const Fd wake(::eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK));
+    ASSERT_TRUE(wake.valid());
+    transport.set_wake(wake.get());
+    const std::int64_t started = clock.monotonic_ns();
+    EXPECT_EQ(transport.connect(started + 10 * SECOND), IoStatus::ABANDONED);
+    EXPECT_LT(clock.monotonic_ns() - started, 100 * MILLISECOND);
+    EXPECT_EQ(transport.poll_fd(), -1);  // left closed
 }
 
 // True when nothing uses 127.0.0.1:`port`: a socket can be bound to it.

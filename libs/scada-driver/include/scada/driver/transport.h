@@ -23,6 +23,10 @@ enum class IoStatus : std::uint8_t {
     REFUSED,  // connect: the peer refused (a diagnostic of its own, 7.3)
     FAILED,   // connect or send: failed with nothing sent
     PARTIAL,  // send: the frame was not taken whole (7.2, 7.3)
+    // connect or receive: the wake descriptor became readable first; the
+    // wait was given up, nothing more was read (a stop abandons a read in
+    // flight, DI 10, R-14). A connect given up leaves the transport closed.
+    ABANDONED,
 };
 
 // One connection of a channel: a TCP socket or a serial port, opened
@@ -48,9 +52,15 @@ public:
     Transport& operator=(Transport&&) = delete;
     virtual ~Transport() = default;
 
+    // The descriptor whose readability ends every wait of `connect` and
+    // `receive` with ABANDONED: the worker's stop eventfd (DI 10). -1, the
+    // default, for none. It is borrowed and must stay open while set.
+    void set_wake(int descriptor) noexcept { wake_ = descriptor; }
+    [[nodiscard]] int wake() const noexcept { return wake_; }
+
     // Opens the connection, giving up at `deadline_ns` (the channel's
-    // `connect_timeout`): OK, TIMEOUT, REFUSED or FAILED. A connect that
-    // does not return OK leaves the transport closed.
+    // `connect_timeout`): OK, TIMEOUT, REFUSED, FAILED or ABANDONED. A
+    // connect that does not return OK leaves the transport closed.
     virtual IoStatus connect(std::int64_t deadline_ns) noexcept = 0;
 
     // Closes the connection. `abortive`: unsent and unacknowledged bytes
@@ -78,8 +88,9 @@ public:
     // reads once without blocking: at most `into.size()` bytes into `into`,
     // setting `received`. OK with `received` > 0; TIMEOUT only when nothing
     // is readable after the wait (a worker stalled past its deadline still
-    // reads what arrived); CLOSED. An empty `into` is FAILED, a caller's
-    // fault: the engine never passes one (S5).
+    // reads what arrived); CLOSED; ABANDONED when the wake descriptor is
+    // readable, before anything is read. An empty `into` is FAILED, a
+    // caller's fault: the engine never passes one (S5).
     virtual IoStatus receive(std::span<std::byte> into,
                              std::int64_t deadline_ns,
                              std::size_t& received) noexcept = 0;
@@ -89,6 +100,9 @@ public:
     // another quiet time before it sends (review G3). Bytes that arrive
     // later are not affected.
     virtual bool discard_input() noexcept = 0;
+
+private:
+    int wake_ = -1;
 };
 
 // The two clocks of the worker: CLOCK_MONOTONIC for deadlines and

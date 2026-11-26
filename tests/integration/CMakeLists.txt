@@ -254,7 +254,7 @@ scada_test_command(tagd_command scada-tagd)
 scada_test_command(drv_test_command scada-drv-test)
 scada_test_command(driver_sim_command scada-driver-test-sim)
 scada_add_test(scada-driver-process-integration-test KIND integration
-  SOURCES driver_integration_test.cpp
+  SOURCES driver_integration_test.cpp driver_stop_integration_test.cpp
   DEPENDS scada::tagd scada::tag scada::service scada::test-support
   ENVIRONMENT
     "SCADA_TAGD_COMMAND=${tagd_command}"

@@ -834,6 +834,17 @@ void reset_point_state(PointState& state, TagType type,
     state.text.clear();
 }
 
+void seed_point_state(PointState& state, const TagValue& stored) noexcept {
+    if (stored.type != state.value.type) {
+        return;
+    }
+    if (stored.type == TagType::STRING) {
+        store_text(state, std::as_bytes(std::span(stored.text)));
+        return;
+    }
+    state.value = stored;
+}
+
 void process_sample(const PointRules& rules, PointState& state,
                     const RawSample& sample,
                     std::span<const CompanionInput> companions,

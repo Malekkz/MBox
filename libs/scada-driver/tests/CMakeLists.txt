@@ -12,6 +12,8 @@ scada_add_test(scada-driver-unit-test KIND unit
     channel_engine_test.cpp
     connections_test.cpp
     driver_test.cpp
+    drv_test_support.cpp
+    drv_test_support_test.cpp
     engine_random_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
@@ -75,6 +77,12 @@ add_dependencies(scada-driver-transport-test scada-driver-test-sim)
 
 # A driver process of the test protocol, for the integration tests of the
 # driver process in tests/integration (decision D-142). Not installed.
-add_executable(scada-drv-test drv_test_main.cpp test_protocol.cpp)
-target_link_libraries(scada-drv-test PRIVATE scada::driver)
+# Its logic is a library of its own, so that the unit tests reach it.
+add_library(scada-drv-test-support STATIC drv_test_support.cpp test_protocol.cpp)
+target_link_libraries(scada-drv-test-support PUBLIC scada::driver)
+target_include_directories(scada-drv-test-support PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR})
+scada_target_defaults(scada-drv-test-support)
+add_executable(scada-drv-test drv_test_main.cpp)
+target_link_libraries(scada-drv-test PRIVATE scada-drv-test-support)
 scada_target_defaults(scada-drv-test)
