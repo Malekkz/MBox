@@ -456,7 +456,11 @@ Status Driver::Impl::make_workers() noexcept {
         return every;
     }
     seen_.assign(workers_.size(), 0);
-    moved_ns_.assign(workers_.size(), scada::monotonic_ns());
+    // The watchdog's clock starts here for the workers and for its own
+    // checks alike, so that a pause before the first check is credited as
+    // any other (delta, Linux review).
+    last_check_ns_ = scada::monotonic_ns();
+    moved_ns_.assign(workers_.size(), last_check_ns_);
     logged_refused_.assign(workers_.size(), 0);
     for (const std::unique_ptr<Worker>& worker : workers_) {
         const Status started = worker->start();
