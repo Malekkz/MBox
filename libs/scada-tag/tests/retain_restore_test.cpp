@@ -166,6 +166,60 @@ TEST_F(Restore, ANewTagsRegionGetsTheRetainedValuesOfItsRetainTags) {
     EXPECT_EQ(count.value, 0U);
 }
 
+// Contract 1.1, section 2 (#151): the plain owner `io` beside the owner
+// `io.scan` of the same process, a tag set that 1.0 refused. Each owner has
+// its own region and retain file, and the plain owner keeps the file it had
+// when its process had no other owner.
+TEST_F(Restore, APlainOwnerBesideAWriterOwnerRestoresFromItsOwnFile) {
+    constexpr std::uint64_t FLOW_ON_FILE = 17;
+    constexpr std::uint64_t FLOW_WRITTEN = 18;
+    TagSet set = retained_set();
+    set.owners.push_back({.name = "io.scan",
+                          .process = "io",
+                          .change_ring_capacity = MIN_CHANGE_RING_CAPACITY});
+    set.tags.push_back({.name = "plant.flow",
+                        .owner = "io.scan",
+                        .type = TagType::UINT64,
+                        .retain = true});
+    write_file("io", values_file());
+    RetainFile scan_file;
+    scan_file.values = {
+        {"plant.flow", TagType::UINT64, FLOW_ON_FILE, SOURCE_TIME}};
+    write_file("io.scan", scan_file);
+    start_host(set);
+
+    const Attached feeder = attached("io");
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().values_restored, 3U);
+    EXPECT_TRUE(std::filesystem::exists(generation_dir() / "tags.io"));
+    EXPECT_TRUE(std::filesystem::exists(generation_dir() / "tags.io.scan"));
+    const scada_value level = read(*feeder, "plant.level");
+    EXPECT_EQ(level.value, LEVEL_BITS);
+    EXPECT_EQ(level.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(info_of(*feeder, "plant.level").origin,
+              SCADA_RETAIN_OWN_PERIODIC);
+    const scada_value flow = read(*feeder, "plant.flow");
+    EXPECT_EQ(flow.value, FLOW_ON_FILE);
+    EXPECT_EQ(flow.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(info_of(*feeder, "plant.flow").origin, SCADA_RETAIN_OWN_PERIODIC);
+
+    // Each owner writes its own tag (one thread per owner, contract 13.2;
+    // here both are the test's thread).
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(feeder->resolve("plant.flow", handle), SCADA_OK);
+    scada_value value{};
+    value.type = SCADA_TYPE_UINT64;
+    value.quality = SCADA_QUALITY_GOOD;
+    value.value = FLOW_WRITTEN;
+    EXPECT_EQ(feeder->write(handle, value), SCADA_OK);
+    EXPECT_EQ(read(*feeder, "plant.flow").value, FLOW_WRITTEN);
+    ASSERT_EQ(feeder->resolve("plant.mode", handle), SCADA_OK);
+    value.type = SCADA_TYPE_INT64;
+    value.value = 4;
+    EXPECT_EQ(feeder->write(handle, value), SCADA_OK);
+    EXPECT_EQ(read(*feeder, "plant.mode").quality, SCADA_QUALITY_GOOD);
+}
+
 TEST_F(Restore, AWriteOfTheOwnerClearsRestored) {
     write_file("io", values_file());
     start_host(retained_set());

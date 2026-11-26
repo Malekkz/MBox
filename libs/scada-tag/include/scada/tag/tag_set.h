@@ -65,9 +65,10 @@ struct ProcessDefinition {
     bool realtime = false;
 };
 
-// One writing thread of a process. A process with one writing thread has
-// one owner, named like the process; otherwise its owners are named
-// `<process>.<writer>`.
+// One writing thread of a process. Its name is `<process>`, the name of its
+// process, or `<process>.<writer>` with a writer part that is not empty; the
+// number of owners of the process has no effect on their names (contract
+// 1.1, section 2).
 struct OwnerDefinition {
     std::string name;
     std::string process;  // name of a process in the same tag set

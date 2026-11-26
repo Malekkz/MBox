@@ -181,14 +181,13 @@ Status resolve_processes(const TagSet& tag_set, ResolvedTagSet& resolved,
     return {};
 }
 
-// The rule of contract section 2: the only owner of a process is named like
-// the process; several owners are named `<process>.<writer>`.
+// The rule of contract section 2 (1.1): an owner is named `<process>` or
+// `<process>.<writer>` with a writer part that is not empty. It does not
+// depend on how many owners the process has, so that an owner keeps its name,
+// and with it its ring and retain file, when its process gains or loses
+// other owners.
 Status check_owner_names(const TagSet& tag_set, const ResolvedTagSet& resolved,
                          std::string& detail) {
-    std::vector<std::size_t> owners_of_process(resolved.processes.size(), 0);
-    for (const ResolvedOwner& owner : resolved.owners) {
-        ++owners_of_process.at(owner.process_index);
-    }
     for (const ResolvedOwner& owner : resolved.owners) {
         const OwnerDefinition& definition = tag_set.owners.at(owner.definition);
         const std::string_view name = definition.name;
@@ -200,23 +199,15 @@ Status check_owner_names(const TagSet& tag_set, const ResolvedTagSet& resolved,
             detail = about(OWNER, name, "an owner name cannot start with '.'");
             return INVALID_NAME;
         }
-        if (owners_of_process.at(owner.process_index) == 1) {
-            if (name != process) {
-                detail = about(OWNER, name,
-                               "the only owner of process " + quoted(process) +
-                                   " must have the name of the process");
-                return INVALID_NAME;
-            }
-            continue;
-        }
         const bool has_writer_part = name.size() > process.size() + 1 &&
                                      name.starts_with(process) &&
                                      name.at(process.size()) == '.';
-        if (!has_writer_part) {
+        if (name != process && !has_writer_part) {
             detail = about(OWNER, name,
-                           "process " + quoted(process) +
-                               " has several owners, so each must be named "
-                               "<process>.<writer>");
+                           "an owner of process " + quoted(process) +
+                               " must be named " + quoted(process) +
+                               " or <process>.<writer> with a writer that "
+                               "is not empty");
             return INVALID_NAME;
         }
     }
