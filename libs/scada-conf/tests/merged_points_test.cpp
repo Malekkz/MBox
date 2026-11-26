@@ -1,13 +1,22 @@
 // Stage 5 on merged points (decision D-115): the cases of the review of
 // #149, one test per finding.
 
+#include "merged_points.h"
 #include "expand_cases.h"
 #include "grouped_errors.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
+#include "scada/conf/node.h"
+#include "scada/conf/schema.h"
+#include "scada/conf/types.h"
+#include "scada/conf/yaml.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -184,13 +193,13 @@ TEST(MergedPoints, AnInstancesOwnOverrideIsItsOwnError) {
                    ", overrides: { q: { scale: { gain: 4294967297 } } } }\n";
     }
     EXPECT_EQ(
-        errors(expand(
-            {{"templates/meter_a.yaml",
-              "template: meter_a\nprotocol: modbus\n"
-              "params: { k: { type: int, default: 1 } }\npoints:\n"
-              "  - { name: q, scale: { gain: \"k\" }, address: { table: "
-              "input, register: 1, type: int32 } }\n"},
-             {"drivers/modbus/line1.yaml", channel(devices)}})),
+        errors(
+            expand({{"templates/meter_a.yaml",
+                     "template: meter_a\nprotocol: modbus\n"
+                     "params: { k: { type: int, default: 1 } }\npoints:\n"
+                     "  - { name: q, scale: { gain: \"k\" }, address: { table: "
+                     "input, register: 1, type: int32 } }\n"},
+                    {"drivers/modbus/line1.yaml", channel(devices)}})),
         (Lines{"drivers/modbus/line1.yaml:7:13: error CF-516: \"ps1.m1.q\": "
                "raw x gain + offset can exceed int64 (and 2 more instances: "
                "ps1.m2, ps1.m3)\n  from template templates/meter_a.yaml:5:31 "
@@ -564,6 +573,66 @@ TEST(MergedPoints, TheKeysOfAnIoBackend) {
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the profile of "
                     "\"ps1.s1.level\" needs type\n  from template "
                     "templates/sensor_a.yaml:4:40 (point level)"});
+}
+
+// Item 2 of the delta review: the result of a value kept for its key is
+// the protocol's. One path with other rules in two protocols, through a
+// test set of schemas: `divide_by` 50 is out of `pa`'s range only.
+TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
+    const auto schema = [](std::string_view name, int maximum) {
+        return SchemaSource{
+            .name = std::string(name),
+            .text = R"({"$defs": {"device": {"type": "object", "properties":)"
+                    R"( {"points": {"type": "array", "items": {"type":)"
+                    R"( "object", "properties": {"scale": {"type": "object",)"
+                    R"( "properties": {"divide_by": {"type": "integer",)"
+                    R"( "x-scada-type": "integer", "maximum": )" +
+                    std::to_string(maximum) + "}}}}}}}}}}"};
+    };
+    std::string problem;
+    Result<SchemaSet> schemas = SchemaSet::compile(
+        {schema("pa.schema.json", 10), schema("pb.schema.json", 100)}, problem);
+    ASSERT_TRUE(schemas.ok()) << problem;
+    Diagnostics parsed;
+    std::optional<Document> document = parse_yaml(
+        "channels:\n"
+        "  - protocol: pa\n"
+        "    devices: [ { name: d1, points: [ { name: p, scale: { divide_by: "
+        "50 } } ] } ]\n"
+        "  - protocol: pb\n"
+        "    devices: [ { name: d2, points: [ { name: p, scale: { divide_by: "
+        "50 } } ] } ]\n",
+        "expanded", parsed);
+    if (!document) {
+        ADD_FAILURE() << "not parsed";
+        return;
+    }
+    ExpandedTree tree{.document = std::move(*document),
+                      .types = {},
+                      .instance_of = {},
+                      .instances = {},
+                      .computed = {}};
+    tree.types = ScalarTypes(tree.document);
+    for (NodeId node = 0; node < tree.document.size(); ++node) {
+        if (tree.document.kind(node) == NodeKind::SCALAR &&
+            tree.document.text(node) == "50") {
+            tree.types.set(node, ScalarType::INTEGER);
+            tree.computed.push_back(node);
+        }
+    }
+    ASSERT_EQ(tree.computed.size(), 2U);
+    // `pa` is checked first; `pb` must not take its result.
+    Diagnostics diagnostics;
+    ASSERT_TRUE(
+        check_merged_points(tree, {}, diagnostics, schemas.value()).ok());
+    Report report;
+    diagnostics.move_into(report);
+    Lines found;
+    for (const Diagnostic& error : report.errors) {
+        found.push_back(format(error));
+    }
+    EXPECT_EQ(found, Lines{"expanded:3:69: error CF-204: scale.divide_by must "
+                           "be between any and 10"});
 }
 
 // S5: an enumeration a template names may be in enums.yaml.

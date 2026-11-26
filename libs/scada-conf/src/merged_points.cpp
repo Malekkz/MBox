@@ -170,8 +170,9 @@ bool is_signed(std::string_view raw) noexcept {
 class Checker {
 public:
     Checker(const ExpandedTree& tree, std::span<const CheckedFile> files,
-            Diagnostics& diagnostics)
-        : tree_(&tree),
+            Diagnostics& diagnostics, const SchemaSet& schemas)
+        : schemas_(&schemas),
+          tree_(&tree),
           document_(&tree.document),
           diagnostics_(&diagnostics),
           computed_(tree.computed),
@@ -264,17 +265,16 @@ private:
                                            ? tree_->instance_of[node]
                                            : ExpandedTree::NO_INSTANCE;
         if (instance < tree_->instances.size() &&
-            document_->location(node).file ==
-                tree_->instances[instance].file) {
+            document_->location(node).file == tree_->instances[instance].file) {
             return true;
         }
         switch (document_->kind(node)) {
             case NodeKind::MAP:
-                return std::ranges::any_of(
-                    document_->entries(node), [this](const Entry& entry) {
-                        return has_own_part(entry.key) ||
-                               has_own_part(entry.value);
-                    });
+                return std::ranges::any_of(document_->entries(node),
+                                           [this](const Entry& entry) {
+                                               return has_own_part(entry.key) ||
+                                                      has_own_part(entry.value);
+                                           });
             case NodeKind::SEQUENCE:
                 return std::ranges::any_of(
                     document_->items(node),
@@ -472,7 +472,7 @@ private:
             found != key_rules_.end()) {
             return &found->second;
         }
-        const SchemaSet& schemas = SchemaSet::builtin();
+        const SchemaSet& schemas = *schemas_;
         Result<KeyRules> rules =
             schemas.key_rules(protocol_ + ".schema.json#/$defs/device", steps);
         if (!rules.ok()) {
@@ -496,7 +496,10 @@ private:
         // A value met again at the same key is not checked again (the same
         // register at every instance); the results kept are bounded.
         const std::string_view text = document_->text(node);
-        std::string seen;
+        // The key starts with the protocol: one path may have other rules
+        // in another protocol's schema (item 2 of the delta review of #149).
+        std::string seen = protocol_;
+        seen += '\0';
         for (const std::string& step : steps) {
             seen += step;
             seen += '/';
@@ -508,7 +511,7 @@ private:
         auto result = checked_.find(seen);
         if (result == checked_.end()) {
             Result<std::vector<ValueError>> errors =
-                SchemaSet::builtin().check_value(*rules, text, label);
+                schemas_->check_value(*rules, text, label);
             if (!errors.ok()) {
                 status_ = errors.status();
                 return;
@@ -953,6 +956,7 @@ private:
         }
     }
 
+    const SchemaSet* schemas_;
     const ExpandedTree* tree_;
     const Document* document_;
     Diagnostics* diagnostics_;
@@ -978,8 +982,8 @@ private:
 
 Status check_merged_points(const ExpandedTree& tree,
                            std::span<const CheckedFile> files,
-                           Diagnostics& diagnostics) {
-    return Checker(tree, files, diagnostics).run();
+                           Diagnostics& diagnostics, const SchemaSet& schemas) {
+    return Checker(tree, files, diagnostics, schemas).run();
 }
 
 }  // namespace scada::conf

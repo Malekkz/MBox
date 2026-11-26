@@ -9,6 +9,7 @@
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/references.h"
+#include "scada/conf/schema.h"
 
 #include <span>
 
@@ -34,12 +35,14 @@ namespace scada::conf {
 //   stage 3 gives that value written at its key: CF-204 for `register`,
 //   `bit` or `divide_by` out of range, and every other rule of the key in
 //   the protocol's schema (`SchemaSet::check_value`).
+// The rules of a computed value are found in `schemas`, the built-in set
+// unless a test gives another.
 // Fails with INTERNAL, a defect of this software, when a computed value's
 // key has no rule in its protocol's schema; otherwise OK, the errors in
 // `diagnostics`.
-[[nodiscard]] Status check_merged_points(const ExpandedTree& tree,
-                                         std::span<const CheckedFile> files,
-                                         Diagnostics& diagnostics);
+[[nodiscard]] Status check_merged_points(
+    const ExpandedTree& tree, std::span<const CheckedFile> files,
+    Diagnostics& diagnostics, const SchemaSet& schemas = SchemaSet::builtin());
 
 }  // namespace scada::conf
 
