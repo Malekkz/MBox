@@ -247,8 +247,6 @@ public:
         read_tasks();
         collect_virtuals();
         type_virtuals();
-        // Every tag has its type now: patterns and results may be kept.
-        settled_ = true;
         for (const CheckedFile& file : files_) {
             check_file(file);
         }
@@ -308,25 +306,37 @@ private:
         return context;
     }
 
+    // How each tag `pattern` matches is read. The tags a pattern matches do
+    // not change, only the types of virtual tags as they are typed: the
+    // tags are kept, at most 65,536 patterns, and read at each use.
     std::vector<TagRead> matching(std::string_view pattern) {
-        if (settled_) {
-            if (const auto kept = matches_.find(pattern);
-                kept != matches_.end()) {
-                return kept->second;
+        auto kept = matches_.find(pattern);
+        if (kept == matches_.end()) {
+            std::vector<const TagInfo*> found;
+            tags_->each_with_prefix(
+                pattern_prefix(pattern),
+                [&found, pattern](std::string_view name, const TagInfo& info) {
+                    if (matches_name_pattern(pattern, name)) {
+                        found.push_back(&info);
+                    }
+                });
+            if (matches_.size() >= MAX_KEPT_RESULTS) {
+                return reads_of(found);
             }
+            kept =
+                matches_.emplace(std::string(pattern), std::move(found)).first;
         }
-        std::vector<TagRead> found;
-        tags_->each_with_prefix(
-            pattern_prefix(pattern),
-            [&found, pattern](std::string_view name, const TagInfo& info) {
-                if (matches_name_pattern(pattern, name)) {
-                    found.push_back(read_of(info.value_type));
-                }
-            });
-        if (settled_ && matches_.size() < MAX_KEPT_RESULTS) {
-            matches_.emplace(std::string(pattern), found);
+        return reads_of(kept->second);
+    }
+
+    static std::vector<TagRead> reads_of(
+        const std::vector<const TagInfo*>& tags) {
+        std::vector<TagRead> reads;
+        reads.reserve(tags.size());
+        for (const TagInfo* tag : tags) {
+            reads.push_back(read_of(tag->value_type));
         }
-        return found;
+        return reads;
     }
 
     // --- Virtual tags --------------------------------------------------------
@@ -672,8 +682,8 @@ private:
     std::map<std::string, std::int64_t, std::less<>> periods_;
     std::vector<Virtual> virtuals_;
     std::map<std::string, std::size_t, std::less<>> by_name_;
-    bool settled_ = false;
-    std::map<std::string, std::vector<TagRead>, std::less<>> matches_;
+    // The tags of each pattern; a tag stays where it is in TagNames.
+    std::map<std::string, std::vector<const TagInfo*>, std::less<>> matches_;
     std::map<std::string, std::optional<TypeError>, std::less<>> results_;
 };
 

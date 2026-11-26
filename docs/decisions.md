@@ -2391,7 +2391,15 @@ Decision: `check_run_time_expressions` (`src/runtime_expressions.cpp`) runs afte
   - The components of that graph are found with Tarjan's walk, iteratively, and each is complete before any that reads it. A component of more than one tag, or a tag that reads itself, is CF-525 `virtual tags form a cycle: {names}`, once, at the name of its first tag in the order written, the names in that order. Its tags stay of unknown type.
   - Every other virtual tag is typed after its inputs: BOOL gives `bool`, INT `int64`, REAL `float64`, TIME `int64` (milliseconds, 5.6). A given `value_type` that is not the derived one is CF-527 `{name}: the expression gives {value type}`, at the given `value_type`, named as `value_type` is written. The given type stays the tag's, as its readers expect it.
   - An expression that reads a tag of unknown type (in a cycle, or whose own expression is refused) is not checked further and gives no error of its own: the cause is reported where it stands.
-- **Cost:** a pattern's tags are found from its prefix before the first wildcard, in the ordered tag names. Once every virtual tag is typed, the result of a pattern and of an expression text (with its task) is kept for the next site that has the same, at most 65,536 of each, so one template line at every instance is checked once.
+- **Cost:**
+  - A pattern's tags are found from its prefix before the first wildcard, in the ordered tag names. The tags a pattern matches are kept (at most 65,536 patterns) and their types read at each use, since a virtual tag's type changes only as it is typed.
+  - Once every virtual tag is typed, the result of an expression text (with its task) is kept for the next site that has the same (at most 65,536), so one template line at every instance is checked once.
+  - Measured (release build, x86-64, the whole of `validate_and_expand`):
+    - 2 instances of a 65,536-point `repeat` whose points each have an alarm with a `suppress_when` over a pattern: 2.30 s, against 2.21 s without the check;
+    - 10,000 virtual tags in one chain, written in reverse order: 0.07 s;
+    - 2,000 virtual tags that each sum one pattern over 60,000 tags: 1.35 s, against 0.28 s without the check;
+    - 2,000 virtual tags of 2,000 different patterns with no literal prefix over 60,000 tags: 2.73 s.
+  - The work of resolving patterns grows with the number of distinct patterns times the tags they are compared with, and no limit of 1.3 bounds that product. A work limit for it would refuse a tree that the contract accepts, so none is added here; the question is with the lead and on #136.
 Reason: this is 5.6 as written. Where it does not decide (the windows of an alarm, a given `value_type` that differs from the derived one only in width), the narrower reading is taken and asked on #136, so that nothing is accepted that a ruling might refuse later, except the alarm's window, which is not checked rather than guessed.
 Consequences: tests whose run-time expressions named tags that do not exist now list their CF-310, or define the tags where the test is about something else; the corpus case `s3-valid-expressions` defines the tags it reads. Corpus case `s5-run-time-expressions`. The README's code table names the source of each code.
 
