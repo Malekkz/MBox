@@ -7,6 +7,8 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace scada::conf {
 namespace {
@@ -198,6 +200,206 @@ TEST(MergedPoints, ADevicesOwnKeyNamesNoPoint) {
               Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: device_time "
                     "of \"ps1.m1\" needs tz\n  from template "
                     "templates/meter_a.yaml:4:14"});
+}
+
+// A point of `keys` (inside its braces after the name) in meter_a.
+Lines point(std::string_view keys, std::string_view params = {}) {
+    return meter("  - { name: p, " + std::string(keys) + " }\n", {}, params);
+}
+
+// S1: CF-504 where 4.7 decides that a value type cannot hold the raw type,
+// and the pairs it holds.
+TEST(MergedPoints, WhatAValueTypeCanHold) {
+    const std::vector<std::pair<std::string_view, std::string_view>> rows = {
+        {"value_type: int64, address: { table: input, register: 1, type: "
+         "string, length: 4 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type int64 cannot hold string\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"enum: { 0: a, 1: b }, address: { table: input, register: 1, type: "
+         "bytes, length: 4 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type int64 (derived from the enumeration) cannot hold bytes\n  "
+         "from template templates/meter_a.yaml:5:47 (point p)"},
+        {"value_type: bool, address: { table: input, register: 1, type: uint16 "
+         "}",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type bool cannot hold uint16\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"value_type: string, address: { table: input, register: 1, type: "
+         "uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type string cannot hold uint16\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"value_type: float64, address: { table: input, register: 1, type: "
+         "string, length: 4 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type float64 cannot hold string\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"value_type: string, address: { table: discrete, register: 1 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type string cannot hold bool\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"value_type: string, address: { table: coil, register: 1 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type string cannot hold bool\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"value_type: bool, address: { table: holding, register: 1, bit: 3, "
+         "type: uint16 }",
+         ""},
+        {"value_type: float64, address: { table: input, register: 1, type: "
+         "int16 }",
+         ""},
+        {"value_type: string, address: { table: input, register: 1, type: "
+         "string, length: 4 }",
+         ""},
+        {"kind: counter, counter: { limit: 100, at_limit: wrap }, address: { "
+         "table: input, register: 1, type: float32 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": a "
+         "counter cannot hold float32\n  from template "
+         "templates/meter_a.yaml:5:40 (point p)"},
+    };
+    for (const auto& [keys, error] : rows) {
+        EXPECT_EQ(point(keys),
+                  error.empty() ? Lines{} : Lines{std::string(error)})
+            << keys;
+    }
+}
+
+// S5: the cache of checked values keys on the path and on the label; two
+// instances may give one key different values.
+TEST(MergedPoints, TheCacheOfCheckedValues) {
+    const std::string params = "params: { k: { type: int, default: 16 } }\n";
+    EXPECT_EQ(point("address: { table: holding, register: \"k\", bit: \"k\", "
+                    "type: uint16 }",
+                    params),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+                    "address.bit must be between 0 and 15\n  from template "
+                    "templates/meter_a.yaml:6:63 (point p)"});
+    EXPECT_EQ(point("address: { table: input, register: 1, type: int64, "
+                    "field: [\"k * 4\", \"k * 4\"] }",
+                    params),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.field[0] must be between 0 and 63\n  from "
+                     "template templates/meter_a.yaml:6:75 (point p)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.field[1] must be between 0 and 63\n  from "
+                     "template templates/meter_a.yaml:6:84 (point p)"}));
+    EXPECT_EQ(errors(expand(
+                  {{"templates/meter_a.yaml",
+                    "template: meter_a\nprotocol: modbus\n" + params +
+                        "points:\n  - { name: p, address: { table: holding, "
+                        "register: \"k\", type: uint16 } }\n"},
+                   {"drivers/modbus/line1.yaml",
+                    channel("  - { name: ps1.m1, template: meter_a, unit_id: "
+                            "1 }\n  - { name: ps1.m2, template: meter_a, "
+                            "unit_id: 2, params: { k: 70000 } }\n")}})),
+              Lines{"drivers/modbus/line1.yaml:8:13: error CF-204: "
+                    "address.register must be between 0 and 65536\n  from "
+                    "template templates/meter_a.yaml:5:53 (point p)"});
+}
+
+// S5: the edges of CF-516: the sign of gain and offset, the int64 ends,
+// the overflow of the product, a field of 64 bits (the widest a bit field
+// can be: bits 0 to 63), the top of mod10k.
+TEST(MergedPoints, TheEdgesOfAnIntegerScaling) {
+    const std::vector<std::pair<std::string_view, std::string_view>> rows = {
+        {"scale: { gain: -4294967296 }, address: { table: input, register: 1, "
+         "type: int32 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
+         "gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        {"scale: { offset: -1 }, address: { table: input, register: 1, type: "
+         "int64 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
+         "gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        {"value_type: uint64, scale: { gain: -1 }, address: { table: input, "
+         "register: 1, type: uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
+         "gain + offset can exceed uint64\n  from template "
+         "templates/meter_a.yaml:5:43 (point p)"},
+        {"scale: { gain: 2 }, address: { table: input, register: 1, type: "
+         "int64, field: [0, 63] }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
+         "gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        {"scale: { gain: 1000 }, address: { table: input, register: 1, type: "
+         "mod10k, count: 4 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
+         "gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        {"scale: { gain: 100 }, address: { table: input, register: 1, type: "
+         "mod10k, count: 4 }",
+         ""},
+        {"scale: { gain: 4294967296 }, address: { table: input, register: 1, "
+         "type: int32, field: [0, 30] }",
+         ""},
+    };
+    for (const auto& [keys, error] : rows) {
+        EXPECT_EQ(point(keys),
+                  error.empty() ? Lines{} : Lines{std::string(error)})
+            << keys;
+    }
+}
+
+// S5: each key that a merged map must have (CF-202). The two keys of an
+// epoch are in `MergedPoints.IncompleteMergedMaps`.
+TEST(MergedPoints, EveryKeyAMergedMapNeeds) {
+    const std::vector<std::pair<std::string_view, std::string_view>> rows = {
+        {"exponent_from: { point: q }, address: { table: input, register: 1, "
+         "type: int16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: exponent_from of "
+         "\"ps1.m1.p\" needs direction\n  from template "
+         "templates/meter_a.yaml:5:31 (point p)"},
+        {"address: { table: input, register: 1, type: uint16 }, bits: { 0: { "
+         "invert: true } }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: bit 0 of \"ps1.m1.p\" "
+         "needs name\n  from template templates/meter_a.yaml:5:81 (point p)"},
+        {"on_invalid: { replace: true }, address: { table: input, register: 1, "
+         "type: uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: on_invalid of "
+         "\"ps1.m1.p\" needs substitute\n  from template "
+         "templates/meter_a.yaml:5:28 (point p)"},
+        {"address: { table: input, register: 1, type: string }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: the address of "
+         "\"ps1.m1.p\" needs length\n  from template "
+         "templates/meter_a.yaml:5:25 (point p)"},
+        {"address: { table: input, register: 1, type: mod10k }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: the address of "
+         "\"ps1.m1.p\" needs count\n  from template "
+         "templates/meter_a.yaml:5:25 (point p)"},
+        {"address: { table: input, register: 1, type: datetime }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: the address of "
+         "\"ps1.m1.p\" needs fields\n  from template "
+         "templates/meter_a.yaml:5:25 (point p)"},
+        {"address: { table: input, type: uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: the address of "
+         "\"ps1.m1.p\" needs register\n  from template "
+         "templates/meter_a.yaml:5:25 (point p)"},
+        {"address: { register: 1, type: uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-202: the address of "
+         "\"ps1.m1.p\" needs table\n  from template "
+         "templates/meter_a.yaml:5:25 (point p)"},
+    };
+    for (const auto& [keys, error] : rows) {
+        EXPECT_EQ(point(keys),
+                  error.empty() ? Lines{} : Lines{std::string(error)})
+            << keys;
+    }
+}
+
+// S5: an enumeration a template names may be in enums.yaml.
+TEST(MergedPoints, AnEnumerationOfEnumsYaml) {
+    EXPECT_EQ(errors(expand({{"templates/meter_a.yaml",
+                              "template: meter_a\nprotocol: modbus\npoints:\n"
+                              "  - { name: p, enum: states, address: { table: "
+                              "input, register: 1, type: uint16 } }\n"},
+                             {"enums.yaml",
+                              "enums: { states: { 0: off, 1: on "
+                              "} }\n"},
+                             {"drivers/modbus/line1.yaml", one_device()}})),
+              Lines{});
 }
 
 }  // namespace
