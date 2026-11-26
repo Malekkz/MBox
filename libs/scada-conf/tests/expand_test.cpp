@@ -1458,6 +1458,14 @@ TEST(MergedPoints, IntegerScalingRanges) {
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
                      "\"ps1.m1.p\": value_type int64 cannot hold uint64\n"
                      "  from template templates/meter_a.yaml:4:28 (point p)"}));
+    // An enumeration's int64 is derived, and the message says so (S2 of the
+    // review of #149).
+    EXPECT_EQ(merged("  - { name: p, enum: { 0: off, 1: on }, address: { "
+                     "table: input, register: 10, type: uint64 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type int64 (derived from the "
+                     "enumeration) cannot hold uint64\n"
+                     "  from template templates/meter_a.yaml:4:50 (point p)"}));
     EXPECT_EQ(merged("  - { name: p, value_type: uint64, address: { table: "
                      "input, register: 10, type: int16 } }\n"),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "

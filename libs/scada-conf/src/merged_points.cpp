@@ -905,6 +905,7 @@ private:
                     child(point, "value_type");
                 std::string message = quoted_tag();
                 message += ": value_type " + type;
+                message += derived_from(point, raw);
                 message += " cannot hold " + raw;
                 error(CF_VALUE_TYPE, written.value_or(address),
                       std::move(message));
