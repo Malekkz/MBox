@@ -261,27 +261,31 @@ private:
     // there is that instance's own, never one cause with a template's (item
     // 1 of the delta review of #149).
     [[nodiscard]] bool has_own_part(NodeId node) const {
-        const std::uint32_t instance = node < tree_->instance_of.size()
-                                           ? tree_->instance_of[node]
-                                           : ExpandedTree::NO_INSTANCE;
-        if (instance < tree_->instances.size() &&
-            document_->location(node).file == tree_->instances[instance].file) {
-            return true;
+        // A work list rather than recursion: the depth of a tree is the
+        // parser's to bound, not this check's.
+        std::vector<NodeId> pending{node};
+        while (!pending.empty()) {
+            const NodeId next = pending.back();
+            pending.pop_back();
+            const std::uint32_t instance = next < tree_->instance_of.size()
+                                               ? tree_->instance_of[next]
+                                               : ExpandedTree::NO_INSTANCE;
+            if (instance < tree_->instances.size() &&
+                document_->location(next).file ==
+                    tree_->instances[instance].file) {
+                return true;
+            }
+            if (document_->kind(next) == NodeKind::MAP) {
+                for (const Entry& entry : document_->entries(next)) {
+                    pending.push_back(entry.key);
+                    pending.push_back(entry.value);
+                }
+            } else if (document_->kind(next) == NodeKind::SEQUENCE) {
+                const auto items = document_->items(next);
+                pending.insert(pending.end(), items.begin(), items.end());
+            }
         }
-        switch (document_->kind(node)) {
-            case NodeKind::MAP:
-                return std::ranges::any_of(document_->entries(node),
-                                           [this](const Entry& entry) {
-                                               return has_own_part(entry.key) ||
-                                                      has_own_part(entry.value);
-                                           });
-            case NodeKind::SEQUENCE:
-                return std::ranges::any_of(
-                    document_->items(node),
-                    [this](NodeId item) { return has_own_part(item); });
-            default:
-                return false;
-        }
+        return false;
     }
 
     // The note's detail: the point, or the device's own key (S2 of the

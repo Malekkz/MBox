@@ -187,9 +187,9 @@ TEST(MergedPoints, AnInstancesOwnOverrideIsItsOwnError) {
                    ", template: meter_a, unit_id: " + std::to_string(unit) +
                    ", params: { k: 4294967297 } }\n";
     }
-    for (int unit = 5; unit <= 6; ++unit) {
-        devices += "  - { name: ps1.m" + std::to_string(unit) +
-                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+    for (const std::string_view unit : {"5", "6"}) {
+        devices += "  - { name: ps1.m" + std::string(unit) +
+                   ", template: meter_a, unit_id: " + std::string(unit) +
                    ", overrides: { q: { scale: { gain: 4294967297 } } } }\n";
     }
     EXPECT_EQ(
@@ -530,74 +530,84 @@ TEST(MergedPoints, TheKeptLimitOfTheGrouping) {
 // template's file, line and column and the key; met again at another
 // instance, which is another place: another column of one line, or the
 // same line of another file. A note that is not a template's is no cause.
+// A diagnostic for `GroupedErrors`: its code, place, first note and the
+// instance it is met at.
+struct Made {
+    std::uint16_t code;
+    Location at;
+    std::string note_kind;
+    Location note;
+    std::string instance;
+};
+
+// The errors `GroupedErrors` gives for `made`, as "<place> CF-<code> <text>".
+Lines grouped_errors(const std::vector<Made>& made) {
+    Diagnostics diagnostics;
+    GroupedErrors grouped(MAX_KEPT_ERRORS);
+    for (const Made& one : made) {
+        Diagnostic diagnostic;
+        diagnostic.code = one.code;
+        diagnostic.location = one.at;
+        diagnostic.message = "m";
+        diagnostic.notes.push_back(Diagnostic::Note{
+            .kind = one.note_kind, .location = one.note, .detail = {}});
+        grouped.add(std::move(diagnostic), "m", one.instance, diagnostics);
+    }
+    grouped.flush(diagnostics);
+    Report report;
+    diagnostics.move_into(report);
+    Lines found;
+    for (const Diagnostic& error : report.errors) {
+        found.push_back(error.location.file + ":" +
+                        std::to_string(error.location.line) + ":" +
+                        std::to_string(error.location.column) + " CF-" +
+                        std::to_string(error.code) + " " + error.message);
+    }
+    return found;
+}
+
+Location place(std::string file, std::uint32_t line, std::uint32_t column) {
+    return Location{.file = std::move(file), .line = line, .column = column};
+}
+
 TEST(MergedPoints, WhatMakesOneCause) {
-    struct Made {
-        std::uint16_t code;
-        Location at;
-        std::string note_kind;
-        Location note;
-        std::string instance;
-    };
-    const auto run = [](const std::vector<Made>& made) {
-        Diagnostics diagnostics;
-        GroupedErrors grouped(MAX_KEPT_ERRORS);
-        for (const Made& one : made) {
-            Diagnostic diagnostic;
-            diagnostic.code = one.code;
-            diagnostic.location = one.at;
-            diagnostic.message = "m";
-            diagnostic.notes.push_back(Diagnostic::Note{
-                .kind = one.note_kind, .location = one.note, .detail = {}});
-            grouped.add(std::move(diagnostic), "m", one.instance, diagnostics);
-        }
-        grouped.flush(diagnostics);
-        Report report;
-        diagnostics.move_into(report);
-        Lines found;
-        for (const Diagnostic& error : report.errors) {
-            found.push_back(error.location.file + ":" +
-                            std::to_string(error.location.line) + ":" +
-                            std::to_string(error.location.column) + " CF-" +
-                            std::to_string(error.code) + " " + error.message);
-        }
-        return found;
-    };
-    const auto at = [](std::string file, std::uint32_t line,
-                       std::uint32_t column) {
-        return Location{
-            .file = std::move(file), .line = line, .column = column};
-    };
     constexpr std::uint16_t CODE = 516;
     constexpr std::uint16_t OTHER_CODE = 517;
-    const Location site = at("templates/t.yaml", 5, 31);
+    const Location site = place("templates/t.yaml", 5, 31);
     // One cause at three instances on one line, and one in another file
     // at the same line and column.
-    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
-                   {CODE, at("a.yaml", 7, 30), "template", site, "d2"},
-                   {CODE, at("a.yaml", 7, 57), "template", site, "d3"},
-                   {CODE, at("b.yaml", 7, 3), "template", site, "d4"}}),
-              Lines{"a.yaml:7:3 CF-516 m (and 3 more instances: d2, d3, d4)"});
+    EXPECT_EQ(
+        grouped_errors({{CODE, place("a.yaml", 7, 3), "template", site, "d1"},
+                        {CODE, place("a.yaml", 7, 30), "template", site, "d2"},
+                        {CODE, place("a.yaml", 7, 57), "template", site, "d3"},
+                        {CODE, place("b.yaml", 7, 3), "template", site, "d4"}}),
+        Lines{"a.yaml:7:3 CF-516 m (and 3 more instances: d2, d3, d4)"});
     // Points of one instance that meet the cause count once.
-    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
-                   {CODE, at("a.yaml", 7, 3), "template", site, "d1"},
-                   {CODE, at("a.yaml", 8, 3), "template", site, "d2"}}),
-              Lines{"a.yaml:7:3 CF-516 m (and 1 more instance: d2)"});
+    EXPECT_EQ(
+        grouped_errors({{CODE, place("a.yaml", 7, 3), "template", site, "d1"},
+                        {CODE, place("a.yaml", 7, 3), "template", site, "d1"},
+                        {CODE, place("a.yaml", 8, 3), "template", site, "d2"}}),
+        Lines{"a.yaml:7:3 CF-516 m (and 1 more instance: d2)"});
     // Another template line, column, file or code is another cause.
     for (const Location& other :
-         {at("templates/t.yaml", 6, 31), at("templates/t.yaml", 5, 40),
-          at("templates/u.yaml", 5, 31)}) {
-        EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
-                       {CODE, at("a.yaml", 8, 3), "template", other, "d2"}}),
+         {place("templates/t.yaml", 6, 31), place("templates/t.yaml", 5, 40),
+          place("templates/u.yaml", 5, 31)}) {
+        EXPECT_EQ(grouped_errors(
+                      {{CODE, place("a.yaml", 7, 3), "template", site, "d1"},
+                       {CODE, place("a.yaml", 8, 3), "template", other, "d2"}}),
                   (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-516 m"}))
             << other.file << ":" << other.line << ":" << other.column;
     }
-    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
-                   {OTHER_CODE, at("a.yaml", 8, 3), "template", site, "d2"}}),
-              (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-517 m"}));
+    EXPECT_EQ(
+        grouped_errors(
+            {{CODE, place("a.yaml", 7, 3), "template", site, "d1"},
+             {OTHER_CODE, place("a.yaml", 8, 3), "template", site, "d2"}}),
+        (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-517 m"}));
     // A note of another kind is no cause.
-    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "include", site, "d1"},
-                   {CODE, at("a.yaml", 8, 3), "include", site, "d2"}}),
-              (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-516 m"}));
+    EXPECT_EQ(
+        grouped_errors({{CODE, place("a.yaml", 7, 3), "include", site, "d1"},
+                        {CODE, place("a.yaml", 8, 3), "include", site, "d2"}}),
+        (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-516 m"}));
 }
 
 // Item 4 of the delta review, through a whole tree: two channel files, and
@@ -727,6 +737,8 @@ TEST(MergedPoints, TheKeysOfAnIoBackend) {
 // the protocol's. One path with other rules in two protocols, through a
 // test set of schemas: `divide_by` 50 is out of `pa`'s range only.
 TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
+    constexpr int PA_MAXIMUM = 10;
+    constexpr int PB_MAXIMUM = 100;
     const auto schema = [](std::string_view name, int maximum) {
         return SchemaSource{
             .name = std::string(name),
@@ -738,8 +750,10 @@ TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
                     std::to_string(maximum) + "}}}}}}}}}}"};
     };
     std::string problem;
-    Result<SchemaSet> schemas = SchemaSet::compile(
-        {schema("pa.schema.json", 10), schema("pb.schema.json", 100)}, problem);
+    Result<SchemaSet> schemas =
+        SchemaSet::compile({schema("pa.schema.json", PA_MAXIMUM),
+                            schema("pb.schema.json", PB_MAXIMUM)},
+                           problem);
     ASSERT_TRUE(schemas.ok()) << problem;
     Diagnostics parsed;
     std::optional<Document> document = parse_yaml(
