@@ -189,20 +189,29 @@ private:
     // A tag that a user wrote, at `name` of the expanded tree (a point or
     // a bit, placed at its instance by `expanded_diagnostic`).
     void add_expanded(const std::string& tag, NodeId name, TagInfo info,
-                      const std::string& point) {
-        // The tag is the instance's: "first at" names the instance, not
-        // the template line it came from.
-        info.where = expanded_diagnostic(*tree_, 0, name, {}).location;
+                      std::string_view point) {
         if (is_system(tag)) {
-            diagnostics_->add(expanded_diagnostic(
-                *tree_, CF_SYSTEM_TAG, name,
-                "tag names starting with sys. are reserved", point));
+            diagnostics_->add(
+                expanded_diagnostic(*tree_, CF_SYSTEM_TAG, name,
+                                    "tag names starting with sys. are reserved",
+                                    "point " + std::string(point)));
             return;
         }
+        info.name = name;
         if (const TagInfo* first = tags_.add(tag, std::move(info))) {
             diagnostics_->add(expanded_diagnostic(
-                *tree_, CF_TAG_TWICE, name, twice(tag, first->where), point));
+                *tree_, CF_TAG_TWICE, name, twice(tag, where_of(*first)),
+                "point " + std::string(point)));
         }
+    }
+
+    // Where `info` was defined. A point or bit tag is the instance's:
+    // "first at" names the instance, not the template line it came from.
+    [[nodiscard]] Location where_of(const TagInfo& info) const {
+        if (info.name != 0) {
+            return expanded_diagnostic(*tree_, 0, info.name, {}).location;
+        }
+        return info.where;
     }
 
     // A tag that a user wrote in `file`, at its node `name`.
@@ -216,7 +225,7 @@ private:
             return;
         }
         if (const TagInfo* first = tags_.add(tag, std::move(info))) {
-            error(document, CF_TAG_TWICE, name, twice(tag, first->where));
+            error(document, CF_TAG_TWICE, name, twice(tag, where_of(*first)));
         }
     }
 
@@ -228,13 +237,15 @@ private:
                      .origin = TagOrigin::GENERATED,
                      .where = where,
                      .point = 0,
+                     .name = 0,
                      .protocol = {}};
         // Two generated tags of one name come from a cause reported
         // elsewhere (a device or an output given twice, CF-303; two alarms
         // of one id on a tag, CF-812): only a user's tag is CF-302 here.
         if (const TagInfo* first = tags_.add(tag, std::move(info));
             first != nullptr && first->origin != TagOrigin::GENERATED) {
-            diagnostics_->error(CF_TAG_TWICE, where, twice(tag, first->where));
+            diagnostics_->error(CF_TAG_TWICE, where,
+                                twice(tag, where_of(*first)));
         }
     }
 
@@ -344,10 +355,13 @@ private:
                         .origin = TagOrigin::POINT,
                         .where = {},
                         .point = point,
+                        .name = 0,
                         .protocol = protocol},
-                "point " + point_name);
-            collect_alarms(expanded_, point, tag,
-                           expanded_.document().location(*name));
+                point_name);
+            if (!expanded_.items(point, "alarms").empty()) {
+                collect_alarms(expanded_, point, tag,
+                               expanded_.document().location(*name));
+            }
         }
         const std::optional<NodeId> bits = expanded_.child(point, "bits");
         if (!bits || expanded_.document().kind(*bits) != NodeKind::MAP) {
@@ -373,8 +387,9 @@ private:
                              .origin = TagOrigin::BIT,
                              .where = {},
                              .point = point,
+                             .name = 0,
                              .protocol = protocol},
-                     "point " + bit_name);
+                     bit_name);
         if (expanded_.document().kind(bit) == NodeKind::MAP) {
             collect_alarms(expanded_, bit, tag,
                            expanded_.document().location(name));
@@ -449,6 +464,7 @@ private:
                                             .origin = TagOrigin::INTERLOCK,
                                             .where = {},
                                             .point = 0,
+                                            .name = 0,
                                             .protocol = {}});
                     }
                 }
@@ -479,6 +495,7 @@ private:
                             .origin = TagOrigin::TAG_FILE,
                             .where = {},
                             .point = 0,
+                            .name = 0,
                             .protocol = {}});
         collect_alarms(reader, tag, std::string(file.document->text(*name)),
                        file.document->location(*name));

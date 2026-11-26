@@ -41,6 +41,11 @@ struct TagInfo {
     Location where;
     // A point or bit tag: its point in the expanded tree. Zero otherwise.
     NodeId point = 0;
+    // A point or bit tag: the node of its name in the expanded tree, from
+    // which its place is found when it is reported (`where` is then
+    // empty: most tags are never reported, and a place copies its file's
+    // name). Zero otherwise.
+    NodeId name = 0;
     // A point or bit tag: the protocol of its channel.
     std::string protocol;
 };
