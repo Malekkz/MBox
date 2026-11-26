@@ -1,0 +1,6 @@
+template: base
+protocol: modbus
+points:
+  - { name: breaker, kind: double_point, address: { on: { table: holding, register: 60, bit: 4 } } }
+  - { name: label, address: { type: string } }
+  - { name: amps, exponent_from: { point: amps_exp } }

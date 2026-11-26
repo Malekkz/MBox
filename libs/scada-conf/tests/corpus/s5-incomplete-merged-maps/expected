@@ -1,0 +1,14 @@
+# CF-202 on the merged point (contract 14, test 2; D-115): a map that the
+# schema leaves incomplete in one template, because another may complete
+# it, must be complete once merged. breaker's address has on and no off;
+# label is a string with no length; amps' exponent_from has no direction;
+# the write-only reset gives write.on and write.off without table and
+# register. label's table and register, and amps' address, come from the
+# child and complete those keys. Invented.
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202
+drivers/modbus/line1.yaml:7:13: CF-202

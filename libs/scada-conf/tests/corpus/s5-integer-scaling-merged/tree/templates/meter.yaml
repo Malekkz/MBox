@@ -1,0 +1,7 @@
+template: meter
+extends: base
+protocol: modbus
+points:
+  - { name: flow, address: { table: input, register: 10, type: uint16 }, scale: { divide_by: 10 } }
+  - { name: level, address: { table: input, register: 11, type: uint16 }, scale: { gain: 0.5 } }
+  - { name: rate, value_type: int64, address: { table: input, register: 12, type: uint16 }, scale: { divide_by: 0x1 } }
