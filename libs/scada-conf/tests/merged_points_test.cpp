@@ -419,6 +419,32 @@ TEST(MergedPoints, TheEdgesOfAnIntegerScaling) {
         {"scale: { gain: 4294967296 }, address: { table: input, register: 1, "
          "type: int32, field: [0, 30] }",
          ""},
+        // The top of mod10k, and both ends of a signed bit field, each
+        // at its edge (item 5 of the delta review).
+        {"scale: { offset: 9223372036754775808 }, address: { table: input, r"
+         "egister: 1, type: mod10k, count: 2 }",
+         ""},
+        {"scale: { offset: 9223372036754775809 }, address: { table: input, r"
+         "egister: 1, type: mod10k, count: 2 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x ga"
+         "in + offset can exceed int64\n  from template templates/meter_a.yam"
+         "l:5:33 (point p)"},
+        {"scale: { offset: 9223372036854775800 }, address: { table: input, r"
+         "egister: 1, type: int16, field: [0, 3] }",
+         ""},
+        {"scale: { offset: 9223372036854775801 }, address: { table: input, r"
+         "egister: 1, type: int16, field: [0, 3] }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x ga"
+         "in + offset can exceed int64\n  from template templates/meter_a.yam"
+         "l:5:33 (point p)"},
+        {"scale: { offset: -9223372036854775800 }, address: { table: input, "
+         "register: 1, type: int16, field: [0, 3] }",
+         ""},
+        {"scale: { offset: -9223372036854775801 }, address: { table: input, "
+         "register: 1, type: int16, field: [0, 3] }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x ga"
+         "in + offset can exceed int64\n  from template templates/meter_a.yam"
+         "l:5:33 (point p)"},
     };
     for (const auto& [keys, error] : rows) {
         EXPECT_EQ(point(keys),
@@ -754,6 +780,53 @@ TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
     }
     EXPECT_EQ(found, Lines{"expanded:3:69: error CF-204: scale.divide_by must "
                            "be between any and 10"});
+}
+
+// Item 5 of the delta review: the CF-202 rows and the CF-517 that no test
+// held.
+TEST(MergedPoints, TheRestOfTheKeysAndScalings) {
+    const auto gpio = [](std::string_view keys) {
+        return errors(expand(
+            {{"templates/sensor_a.yaml",
+              "template: sensor_a\nprotocol: io\npoints:\n"
+              "  - { name: level, " +
+                  std::string(keys) + " }\n"},
+             {"drivers/io/local.yaml",
+              "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
+              "devices:\n  - { name: ps1.s1, template: sensor_a }\n"}}));
+    };
+    EXPECT_EQ(gpio("address: { line: 1, direction: input }"), Lines{});
+    EXPECT_EQ(gpio("address: { line: 1, direction: output }"),
+              Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
+                    "\"ps1.s1.level\" needs at_start\n  from template "
+                    "templates/sensor_a.yaml:4:29 (point level)"});
+    EXPECT_EQ(gpio("access: wo, address: { line: 1, direction: input }"),
+              Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
+                    "\"ps1.s1.level\" needs at_start\n  from template "
+                    "templates/sensor_a.yaml:4:41 (point level)"});
+    EXPECT_EQ(point("address: { table: input, register: 1, type: epoch, "
+                    "width: 32 }"),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: the address "
+                    "of \"ps1.m1.p\" needs resolution\n  from template "
+                    "templates/meter_a.yaml:5:25 (point p)"});
+    EXPECT_EQ(point("kind: double_point, address: { on: { bit: 1 }, off: { "
+                    "table: input, register: 1, bit: 2 } }"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: address.on "
+                     "of \"ps1.m1.p\" needs table\n  from template "
+                     "templates/meter_a.yaml:5:51 (point p)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-202: address.on "
+                     "of \"ps1.m1.p\" needs register\n  from template "
+                     "templates/meter_a.yaml:5:51 (point p)"}));
+    // `exponent_from` from an override, on an integer value type.
+    EXPECT_EQ(meter("  - { name: p, value_type: int64, address: { table: "
+                    "input, register: 1, type: int16 } }\n"
+                    "  - { name: e, address: { table: input, register: 2, "
+                    "type: int16 } }\n",
+                    "    overrides: { p: { exponent_from: { point: e, "
+                    "direction: multiply } } }\n"),
+              Lines{"drivers/modbus/line1.yaml:10:38: error CF-517: "
+                    "\"ps1.m1.p\": value_type int64 needs an integer scaling; "
+                    "use float64"});
 }
 
 // S5: an enumeration a template names may be in enums.yaml.

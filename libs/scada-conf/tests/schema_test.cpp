@@ -1268,6 +1268,37 @@ TEST(CheckValue, JoinedSchemasGiveEachErrorOnce) {
                      "CF-204: n must be between any and 5"}));
 }
 
+// `unevaluatedProperties` gives its rule to a key no schema names, and only
+// to such a key (item 5 of the delta review of #149).
+TEST(CheckValue, UnevaluatedPropertiesOnlyForAKeyNoSchemaNames) {
+    const SchemaSet set = one_schema(
+        R"({"type": "object", "properties": {"n": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "maximum": 10}},)"
+        R"( "unevaluatedProperties": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "maximum": 5}})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "7", "n"), Lines{});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "12", "n"),
+              Lines{"CF-204: n must be between any and 10"});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"m"}, "7", "m"),
+              Lines{"CF-204: m must be between any and 5"});
+}
+
+// Two branches of a `oneOf` that name a key through one definition give
+// it the same rules, though one of them also has `unevaluatedProperties`:
+// that names no rule of the key, and is no split.
+TEST(CheckValue, AOneOfOfOneDefinitionIsNoSplit) {
+    const SchemaSet set =
+        one_schema(R"({"$defs": {"d": {"properties": {"n": {"type": "integer",)"
+                   R"( "x-scada-type": "integer", "maximum": 10}}}},)"
+                   R"( "type": "object", "oneOf": [)"
+                   R"({"$ref": "#/$defs/d", "unevaluatedProperties": {"type":)"
+                   R"( "integer", "x-scada-type": "integer", "maximum": 5}},)"
+                   R"( {"$ref": "#/$defs/d"}]})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "7", "n"), Lines{});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "12", "n"),
+              Lines{"CF-204: n must be between any and 10"});
+}
+
 // A schema or a key that gives no rule is a defect of the caller: INTERNAL,
 // never a value taken as valid.
 TEST(CheckValue, AKeyWithoutARuleIsInternal) {

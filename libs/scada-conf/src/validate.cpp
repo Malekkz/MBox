@@ -13,6 +13,7 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "validate_internal.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -211,6 +212,14 @@ Result<Report> validate_tree(const std::filesystem::path& root,
 Result<Validation> validate_and_expand(const std::filesystem::path& root,
                                        const ScanLimits& limits,
                                        const ExpandLimits& expand_limits) {
+    return validate_and_expand_with(root, limits, expand_limits,
+                                    SchemaSet::builtin());
+}
+
+Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
+                                            const ScanLimits& limits,
+                                            const ExpandLimits& expand_limits,
+                                            const SchemaSet& stage5_schemas) {
     Validation validation;
     Report& report = validation.report;
     Diagnostics stage1;
@@ -280,8 +289,8 @@ Result<Validation> validate_and_expand(const std::filesystem::path& root,
             Diagnostics stage5;
             check_references(checked, stage5);
             if (validation.expanded) {
-                const Status merged =
-                    check_merged_points(*validation.expanded, checked, stage5);
+                const Status merged = check_merged_points(
+                    *validation.expanded, checked, stage5, stage5_schemas);
                 if (!merged.ok()) {
                     return merged;
                 }

@@ -10,10 +10,12 @@
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/schema.h"
 #include "scada/conf/types.h"
 #include "scada/conf/validate.h"
 #include "scada/conf/yaml.h"
 #include "scada/test/temp_directory.h"
+#include "validate_internal.h"
 
 #include <gtest/gtest.h>
 
@@ -682,6 +684,44 @@ std::optional<NodeId> scalar_in(const ExpandedTree& tree, std::string_view text,
         }
     }
     return std::nullopt;
+}
+
+// Item 5 of the delta review of #149: an INTERNAL failure of stage 5 is
+// the failure of `validate_and_expand`, not a report. The built-in schemas
+// never give it, so stage 5 reads a set whose `modbus` names no key.
+TEST(MergedPoints, AnInternalFailureOfStageFiveFailsTheValidation) {
+    std::optional<test::TempDirectory> temp =
+        test::TempDirectory::create("scada-conf-expand-");
+    ASSERT_TRUE(temp.has_value());
+    if (!temp) {
+        return;
+    }
+    const Files files = {
+        {"system.yaml", std::string(SYSTEM)},
+        {"templates/meter_a.yaml",
+         "template: meter_a\nprotocol: modbus\n"
+         "params: { r: { type: int, default: 1 } }\npoints:\n"
+         "  - { name: p, address: { table: holding, register: \"r\", type: "
+         "uint16 } }\n"},
+        {"drivers/modbus/line1.yaml", one_device()}};
+    for (const auto& [path, content] : files) {
+        const fs::path full = temp->path() / path;
+        fs::create_directories(full.parent_path());
+        std::ofstream(full, std::ios::binary) << content;
+    }
+    std::string problem;
+    Result<SchemaSet> bare = SchemaSet::compile(
+        {SchemaSource{.name = "modbus.schema.json",
+                      .text = R"({"$defs": {"device": {"type": "object"},)"
+                              R"( "template": {"type": "object"}}})"}},
+        problem);
+    ASSERT_TRUE(bare.ok()) << problem;
+    const Result<Validation> failed =
+        validate_and_expand_with(temp->path(), {}, {}, bare.value());
+    EXPECT_EQ(failed.status().code(), StatusCode::INTERNAL);
+    const Result<Validation> passed = validate_and_expand(temp->path());
+    ASSERT_TRUE(passed.ok());
+    EXPECT_EQ(passed.value().report.error_count, 0U);
 }
 
 // `expanded_diagnostic` (expand.h) places a diagnostic of a later stage as
