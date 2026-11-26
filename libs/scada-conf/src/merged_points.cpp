@@ -293,11 +293,15 @@ private:
     // One cause met at many instances is one error (M6 of the review of
     // #149, D-114): its key is the message without the instance's name.
     void report(Diagnostic diagnostic, NodeId placed) {
+        // The instance is named as `"<device>.<point>"`, or as `"<device>"`
+        // for its own keys (item 3 of the delta review of #149).
         std::string key = diagnostic.message;
-        const std::string own = "\"" + device_name_ + ".";
-        for (std::size_t at = key.find(own); at != std::string::npos;
-             at = key.find(own, at + 1)) {
-            key.replace(at, own.size(), "\"");
+        for (const std::string& own :
+             {"\"" + device_name_ + ".", "\"" + device_name_ + "\""}) {
+            for (std::size_t at = key.find(own); at != std::string::npos;
+                 at = key.find(own, at + 1)) {
+                key.replace(at, own.size(), "\"");
+            }
         }
         grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_,
                      !has_own_part(placed));
@@ -333,7 +337,11 @@ private:
         tag_ = device_name_;
         if (const std::optional<NodeId> time =
                 child_map(device, "device_time")) {
+            // The note names the device's key (item 3 of the delta review
+            // of #149).
+            device_key_ = "device_time";
             check_device_time(*time);
+            device_key_.clear();
         }
         check_device_computed(device);
         const std::optional<NodeId> points = child(device, "points");

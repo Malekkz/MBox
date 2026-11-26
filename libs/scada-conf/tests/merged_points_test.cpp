@@ -265,7 +265,25 @@ TEST(MergedPoints, ADevicesOwnKeyNamesNoPoint) {
                     {}, "device_time: { zone: local }\n"),
               Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: device_time "
                     "of \"ps1.m1\" needs tz\n  from template "
-                    "templates/meter_a.yaml:4:14"});
+                    "templates/meter_a.yaml:4:14 (device_time)"});
+    // One template line at three instances is one error (item 3 of the
+    // delta review).
+    std::string devices;
+    for (int unit = 1; unit <= 3; ++unit) {
+        devices += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   " }\n";
+    }
+    EXPECT_EQ(
+        errors(expand({{"templates/meter_a.yaml",
+                        "template: meter_a\nprotocol: modbus\n"
+                        "device_time: { zone: local }\npoints:\n"
+                        "  - { name: p, address: { table: holding, register: "
+                        "1, type: uint16 } }\n"},
+                       {"drivers/modbus/line1.yaml", channel(devices)}})),
+        Lines{"drivers/modbus/line1.yaml:7:13: error CF-202: device_time of "
+              "\"ps1.m1\" needs tz (and 2 more instances: ps1.m2, ps1.m3)\n"
+              "  from template templates/meter_a.yaml:3:14 (device_time)"});
 }
 
 // A point of `keys` (inside its braces after the name) in meter_a.
