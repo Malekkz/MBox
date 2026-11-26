@@ -178,7 +178,9 @@ private:
     // a bit, placed at its instance by `expanded_diagnostic`).
     void add_expanded(const std::string& tag, NodeId name, TagInfo info,
                       const std::string& point) {
-        info.where = expanded_.document().location(name);
+        // The tag is the instance's: "first at" names the instance, not
+        // the template line it came from.
+        info.where = expanded_diagnostic(*tree_, 0, name, {}).location;
         if (is_system(tag)) {
             diagnostics_->add(expanded_diagnostic(
                 *tree_, CF_SYSTEM_TAG, name,
@@ -801,8 +803,11 @@ private:
                 expanded_.child(point, "exponent_from")) {
             need_point(points, expanded_.scalar(*exponent, "point"));
         }
+        // A quality rule may read the point itself (4.7: `self`).
         for (const NodeId rule : expanded_.items(point, "quality_from")) {
-            need_point(points, expanded_.scalar(rule, "point"));
+            if (expanded_.text_of(rule, "point") != "self") {
+                need_point(points, expanded_.scalar(rule, "point"));
+            }
         }
         need_point(points, expanded_.scalar(point, "source_time_from"));
         if (const std::optional<NodeId> group =

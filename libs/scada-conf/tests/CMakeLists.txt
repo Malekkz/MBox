@@ -14,6 +14,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     references_test.cpp
     rules_test.cpp
     scalar_test.cpp
+    tag_names_test.cpp
     schema_examples_test.cpp
     schema_test.cpp
     tree_scan_test.cpp
