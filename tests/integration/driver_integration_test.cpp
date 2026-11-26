@@ -14,8 +14,10 @@
 
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
 
+#include <bit>
 #include <chrono>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <utility>
@@ -393,6 +395,218 @@ TEST_F(DriverProcess, ARefusedConnectionIsCommFail) {
     observe();
     EXPECT_TRUE(eventually(handle("d1.v"), comm_fail));
     EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+// --- 11.1: the system tags --------------------------------------------------
+
+bool good(const scada_value& value) {
+    return value.quality == SCADA_QUALITY_GOOD;
+}
+std::int64_t as_i64(const scada_value& value) {
+    return std::bit_cast<std::int64_t>(value.value);
+}
+double as_f64(const scada_value& value) {
+    return std::bit_cast<double>(value.value);
+}
+
+// Reads the system tags by name: each check one assertion.
+class SystemTags : public DriverProcess {
+protected:
+    // GOOD, with the value bits `bits`.
+    ::testing::AssertionResult is(const std::string& name, std::uint64_t bits) {
+        const scada_value value = read(handle(name));
+        if (good(value) && value.value == bits) {
+            return ::testing::AssertionSuccess();
+        }
+        return ::testing::AssertionFailure()
+               << name << ": quality " << int{value.quality} << ", value "
+               << value.value;
+    }
+    ::testing::AssertionResult is_i64(const std::string& name,
+                                      std::int64_t number) {
+        return is(name, std::bit_cast<std::uint64_t>(number));
+    }
+    // GOOD, a FLOAT64 above `low`.
+    ::testing::AssertionResult above(const std::string& name, double low) {
+        const scada_value value = read(handle(name));
+        if (good(value) && as_f64(value) > low) {
+            return ::testing::AssertionSuccess();
+        }
+        return ::testing::AssertionFailure()
+               << name << ": quality " << int{value.quality} << ", value "
+               << as_f64(value);
+    }
+    // GOOD, a FLOAT64 of at least `low`.
+    ::testing::AssertionResult at_least(const std::string& name, double low) {
+        const scada_value value = read(handle(name));
+        if (good(value) && as_f64(value) >= low) {
+            return ::testing::AssertionSuccess();
+        }
+        return ::testing::AssertionFailure()
+               << name << ": quality " << int{value.quality} << ", value "
+               << as_f64(value);
+    }
+    // GOOD, an INT64 above 0.
+    ::testing::AssertionResult positive(const std::string& name) {
+        const scada_value value = read(handle(name));
+        if (good(value) && as_i64(value) > 0) {
+            return ::testing::AssertionSuccess();
+        }
+        return ::testing::AssertionFailure()
+               << name << ": quality " << int{value.quality} << ", value "
+               << as_i64(value);
+    }
+    // The first of `results` that failed, else success.
+    static ::testing::AssertionResult all(
+        std::initializer_list<::testing::AssertionResult> results) {
+        for (const ::testing::AssertionResult& result : results) {
+            if (!result) {
+                return result;
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+    // Each of `names` GOOD and 0.
+    ::testing::AssertionResult zero(std::initializer_list<const char*> names) {
+        for (const char* name : names) {
+            const ::testing::AssertionResult held = is(name, 0);
+            if (!held) {
+                return held;
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+};
+
+TEST_F(SystemTags, ShowTheChannelAndItsDevices) {
+    // A device read in the fast group and a disabled one: the counters of
+    // 11.1 move for the first, and the second shows DISABLED (3.5).
+    start_tagd({{.name = "line1", .tags = {"d1.v", "d2.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    std::vector<std::string> disabled = device("d2", 2, "0");
+    disabled.emplace_back("--disabled");
+    auto driver = start_driver(joined(tcp_channel("line1", port_of(*sim)),
+                                      device("d1", 1, "0"), disabled));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    // Counters are written at most once a second: three requests counted
+    // means at least one write after the first reads.
+    ASSERT_TRUE(eventually(
+        handle("sys.dev.d1.requests"),
+        [](const auto& value) { return good(value) && value.value >= 3; }))
+        << driver->err();
+    // The channel: connected (2) once, never refused.
+    EXPECT_TRUE(
+        all({is_i64("sys.drv.line1.state", 2), is("sys.drv.line1.connects", 1),
+             zero({"sys.drv.line1.refused_connects", "sys.drv.line1.secured"}),
+             above("sys.drv.line1.requests_per_s", 0.0),
+             above("sys.drv.line1.period.fast", 0.0)}));
+    // d1 RUNNING (3) and answering; d2 DISABLED (0), never asked.
+    EXPECT_TRUE(
+        all({is_i64("sys.dev.d1.state", 3), positive("sys.dev.d1.last_ok_time"),
+             at_least("sys.dev.d1.response_ms", 0.0),
+             is("sys.dev.d1.requests_per_scan", 1),
+             zero({"sys.dev.d1.errors", "sys.dev.d1.timeouts",
+                   "sys.dev.d1.exceptions", "sys.dev.d1.refusals",
+                   "sys.dev.d1.points_absent", "sys.dev.d1.pacing_limited",
+                   "sys.dev.d2.requests"}),
+             is_i64("sys.dev.d2.state", 0)}));
+    ASSERT_TRUE(stops_cleanly(*driver));
+    // The stop closed the connection, and the state says so before the
+    // process ended; the read adds OWNER_DOWN only.
+    EXPECT_EQ(as_i64(read(handle("sys.drv.line1.state"))), 0);
+}
+
+TEST_F(DriverProcess, ARefusedConnectIsCountedOnTheChannel) {
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    const LocalPort refusing(false);
+    auto driver = start_driver(
+        joined(tcp_channel("line1", refusing.port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    EXPECT_TRUE(eventually(
+        handle("sys.drv.line1.refused_connects"),
+        [](const auto& value) { return good(value) && value.value >= 1; }));
+    EXPECT_EQ(read(handle("sys.drv.line1.connects")).value, 0U);
+    EXPECT_NE(as_i64(read(handle("sys.drv.line1.state"))), 2);
+    EXPECT_EQ(as_i64(read(handle("sys.dev.d1.state"))), 1);  // CONNECTING
+    EXPECT_EQ(read(handle("sys.dev.d1.requests")).value, 0U);
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(SystemTags, OfADisabledChannelShowItWasNeverConnected) {
+    // A disabled channel has no engine: its system tags are written once
+    // at its start (9.1, D-144), the channel disconnected, its device
+    // DISABLED, every count 0 but what a scan of the plan would send.
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    std::vector<std::string> off =
+        tcp_channel("line1", LocalPort(false).port());
+    off.emplace_back("--disabled");
+    auto driver = start_driver(joined(off, device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    observe();
+    EXPECT_TRUE(is_i64("sys.drv.line1.state", 0));  // disconnected
+    EXPECT_TRUE(is_i64("sys.dev.d1.state", 0));     // DISABLED
+    EXPECT_TRUE(is("sys.dev.d1.requests_per_scan", 1));
+    EXPECT_TRUE(
+        zero({"sys.drv.line1.connects", "sys.drv.line1.refused_connects",
+              "sys.drv.line1.secured", "sys.drv.line1.requests_per_s",
+              "sys.drv.line1.period.fast", "sys.dev.d1.requests",
+              "sys.dev.d1.last_ok_time", "sys.dev.d1.pacing_limited"}));
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(DriverProcess, AChannelWithoutDevicesIsOwnedByItsSystemTags) {
+    // No point tag to learn the owner from: the channel's state tag gives
+    // it (D-144).
+    start_tagd({{.name = "line1", .tags = {}}});
+    auto driver = start_driver(tcp_channel("line1", LocalPort(false).port()));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    observe();
+    EXPECT_TRUE(good(read(handle("sys.drv.line1.state"))));
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
+    // CS 12.5: a tag set lists the system tags; one that lacks one, or
+    // gives one another type, does not run the driver (D-144).
+    const std::vector<std::string> args = joined(
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0"));
+    start_tagd({{.name = "line1", .tags = {"d1.v"}, .system_tags = false}});
+    auto missing = start_driver(args);
+    if (!missing.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(
+        fails_start(*missing, "the tag set has no tag sys.drv.line1.state"));
+    // Every channel system tag, all INT64: `connects` is UINT64.
+    std::vector<std::string> all_int64;
+    all_int64.reserve(CHANNEL_SYSTEM_TAGS.size());
+    for (const SystemTag& tag : CHANNEL_SYSTEM_TAGS) {
+        all_int64.push_back("sys.drv.line1." + std::string(tag.signal));
+    }
+    const std::vector<ChannelTags> mistyped{
+        {.name = "line1", .tags = {"d1.v"}, .system_tags = false}};
+    restart_tagd(&mistyped, all_int64);
+    auto wrong = start_driver(args);
+    if (!wrong.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(
+        *wrong, "tag sys.drv.line1.connects is not of its type (11.1)"));
 }
 
 TEST_F(DriverProcess, StaleAfterMaxAgeAndClearedByTheNextRead) {

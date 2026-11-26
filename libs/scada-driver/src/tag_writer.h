@@ -3,15 +3,18 @@
 
 // The TagSink of a channel worker over the tag library (driver.h, D-142):
 // each point's resolved handle, written on the worker's own thread, which
-// owns the channel's tags (DI 2.4, CS 12.3), and the writes of 9.1.
+// owns the channel's tags (DI 2.4, CS 12.3), the writes of 9.1, and the
+// system tags of the channel and its devices (11.1, D-144).
 
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/tag_value.h"
 #include "scada/tag/scada_tag.h"
+#include "system_tags.h"
 
 #include <array>
 #include <cstddef>
@@ -43,8 +46,9 @@ public:
     // `ctx` is borrowed and outlives the writer; it must only ever be used
     // for these tags from the thread that calls the writer. `strings` is the
     // number of STRING points of the channel: room for one pending write of
-    // each is allocated here.
-    TagWriter(scada_ctx* ctx, PointHandles handles, std::size_t strings);
+    // each is allocated here. `system` holds the channel's system tags.
+    TagWriter(scada_ctx* ctx, PointHandles handles, std::size_t strings,
+              SystemTagHandles system);
 
     // Writes the point's own tag (bits: their tags come with the compile
     // step, slice 8). A STRING value is copied into its pending write,
@@ -54,9 +58,28 @@ public:
     SCADA_RT void write_point(std::uint32_t device, std::uint32_t point,
                               const ProcessedSample& sample) noexcept override;
 
-    // `sys.dev.<device>.state` comes with the system tags (slice 5b-1).
+    // `sys.dev.<device>.state` is written by `publish_system` after the
+    // step that changed it (D-144).
     SCADA_RT void device_state(std::uint32_t /*device*/,
                                DeviceStatus /*state*/) noexcept override {}
+
+    // `sys.drv.<channel>.state` at once; CONNECTING also wakes the readers
+    // at once, since the connect that follows blocks the worker up to its
+    // `connect_timeout` (D-144). Not real-time: the notify is a system call.
+    void channel_link(ChannelLink link) noexcept override;
+
+    // The system tags of the channel and its devices (SystemTags::publish).
+    void publish_system(ChannelEngine& engine, const CompiledChannel& channel,
+                        std::int64_t now_ns, bool all) noexcept;
+
+    // The system tags of a channel that has no engine, a disabled one
+    // (SystemTags::publish_idle).
+    void publish_idle(const CompiledChannel& channel) noexcept;
+
+    // When `publish_system` next writes the counters.
+    [[nodiscard]] std::int64_t system_due_ns() const noexcept {
+        return system_.next_due_ns();
+    }
 
     // Gives `engine` the value each point's tag holds now, after 9.1, as
     // its last value (review M4). Not real-time.
@@ -68,8 +91,11 @@ public:
     // with the refused writes. Not real-time.
     void notify() noexcept;
 
-    // Writes and notifies the library refused since the writer was made.
-    [[nodiscard]] std::uint64_t refused() const noexcept { return refused_; }
+    // Writes and notifies the library refused since the writer was made,
+    // the system tags' included.
+    [[nodiscard]] std::uint64_t refused() const noexcept {
+        return refused_ + system_.refused();
+    }
 
 private:
     [[nodiscard]] std::uint32_t handle(std::uint32_t device,
@@ -88,6 +114,7 @@ private:
     scada_ctx* ctx_;
     PointHandles handles_;
     std::vector<PendingText> pending_;  // capacity: the STRING points
+    SystemTags system_;
     bool written_ = false;
     std::uint64_t refused_ = 0;
 };

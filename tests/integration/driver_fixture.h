@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -78,7 +79,82 @@ struct ChannelTags {
     // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
     std::string owner{};
     bool retain = false;
+    // The system tags of the channel and its devices (11.1) are listed.
+    bool system_tags = true;
 };
+
+// One system tag of driver interface contract 11.1: its signal and type.
+struct SystemTag {
+    std::string_view signal;
+    std::string_view type;
+};
+
+// The system tags of 11.1 that slice 5b-1 writes, as CS 12.5 names them:
+// written out here, not taken from the library, so that a wrong name or
+// type in the driver fails the start (D-144).
+inline constexpr std::array<SystemTag, 5> CHANNEL_SYSTEM_TAGS{{
+    {.signal = "state", .type = "int64"},
+    {.signal = "connects", .type = "uint64"},
+    {.signal = "refused_connects", .type = "uint64"},
+    {.signal = "secured", .type = "bool"},
+    {.signal = "requests_per_s", .type = "float64"},
+}};
+// scada-drv-test's poll groups.
+inline constexpr std::array<std::string_view, 3> POLL_GROUPS{"fast", "normal",
+                                                             "slow"};
+inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
+    {.signal = "state", .type = "int64"},
+    {.signal = "last_ok_time", .type = "int64"},
+    {.signal = "requests", .type = "uint64"},
+    {.signal = "errors", .type = "uint64"},
+    {.signal = "timeouts", .type = "uint64"},
+    {.signal = "response_ms", .type = "float64"},
+    {.signal = "requests_per_scan", .type = "uint64"},
+    {.signal = "pacing_limited", .type = "bool"},
+    {.signal = "last_status", .type = "int64"},
+    {.signal = "exceptions", .type = "uint64"},
+    {.signal = "refusals", .type = "uint64"},
+    {.signal = "sentinels", .type = "uint64"},
+    {.signal = "invalid", .type = "uint64"},
+    {.signal = "points_absent", .type = "uint64"},
+}};
+
+// The devices of a channel's point tags, in order of first appearance.
+inline std::vector<std::string> devices_of(const ChannelTags& channel) {
+    std::vector<std::string> devices;
+    for (const std::string& tag : channel.tags) {
+        std::string device = tag.substr(0, tag.find('.'));
+        if (std::find(devices.begin(), devices.end(), device) ==
+            devices.end()) {
+            devices.push_back(std::move(device));
+        }
+    }
+    return devices;
+}
+
+// The system tags of `channel` and of each device of its point tags
+// (CS 12.5), with their types.
+inline std::vector<std::pair<std::string, std::string_view>> system_tags_of(
+    const ChannelTags& channel) {
+    std::vector<std::pair<std::string, std::string_view>> out;
+    const std::vector<std::string> devices = devices_of(channel);
+    out.reserve(CHANNEL_SYSTEM_TAGS.size() + POLL_GROUPS.size() +
+                (devices.size() * DEVICE_SYSTEM_TAGS.size()));
+    const std::string drv = "sys.drv." + channel.name + ".";
+    for (const SystemTag& tag : CHANNEL_SYSTEM_TAGS) {
+        out.emplace_back(drv + std::string(tag.signal), tag.type);
+    }
+    for (const std::string_view group : POLL_GROUPS) {
+        out.emplace_back(drv + "period." + std::string(group), "float64");
+    }
+    for (const std::string& device : devices) {
+        for (const SystemTag& tag : DEVICE_SYSTEM_TAGS) {
+            out.emplace_back(
+                "sys.dev." + device + "." + std::string(tag.signal), tag.type);
+        }
+    }
+    return out;
+}
 
 // The port of the simulator's first line, `tcp <port>`; 0 if none.
 inline std::uint16_t port_of(const ChildProcess& sim) {
@@ -609,14 +685,20 @@ private:
         std::string owners;
         std::string tags;
         owners_.clear();
-        const auto add_tag = [&](const std::string& name,
-                                 const std::string& owner, bool retain) {
+        const auto add_typed = [&](const std::string& name,
+                                   const std::string& owner,
+                                   std::string_view type, bool retain) {
             tags += tags.empty() ? R"({"name": ")" : R"(, {"name": ")";
             tags += name;
             tags += R"(", "owner": ")";
             tags += owner;
-            tags += retain ? R"(", "type": "int64", "retain": true})"
-                           : R"(", "type": "int64"})";
+            tags += R"(", "type": ")";
+            tags += type;
+            tags += retain ? R"(", "retain": true})" : R"("})";
+        };
+        const auto add_tag = [&](const std::string& name,
+                                 const std::string& owner, bool retain) {
+            add_typed(name, owner, "int64", retain);
         };
         for (const ChannelTags& channel : channels) {
             std::string owner = channel.owner;
@@ -637,6 +719,12 @@ private:
             }
             for (const std::string& tag : channel.tags) {
                 add_tag(tag, owner, channel.retain);
+            }
+            // With the channel's owner (CS 12.5).
+            if (channel.system_tags) {
+                for (const auto& [name, type] : system_tags_of(channel)) {
+                    add_typed(name, owner, type, false);
+                }
             }
         }
         for (const std::string& tag : extra_tags) {

@@ -18,9 +18,10 @@
 // watchdog, 2.6). A worker runs its ChannelEngine, waiting between steps on
 // its connection (POLLRDHUP, a stream only) and on its stop eventfd, each
 // wait at most a third of the channel's stall limit; the stop eventfd also
-// ends the transport's own waits (DI 10). The command thread comes with
-// the command slices (6, 7), the system tags and the workers' log queues
-// with slice 5b.
+// ends the transport's own waits (DI 10). Each worker also writes the
+// system tags of its channel and devices (11.1, D-144). The command thread
+// comes with the command slices (6, 7), the workers' log queues with slice
+// 5b-3.
 
 #include "scada/common/log.h"
 #include "scada/common/status.h"

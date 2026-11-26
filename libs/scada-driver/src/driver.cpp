@@ -12,6 +12,7 @@
 #include "scada/service/notify.h"
 #include "scada/tag/scada_tag.h"
 #include "stall_watch.h"
+#include "system_tags.h"
 #include "tag_writer.h"
 #include "worker.h"
 
@@ -40,7 +41,11 @@
 namespace scada::driver {
 namespace {
 
+using detail::ChannelSignal;
+using detail::DeviceSignal;
 using detail::PointHandles;
+using detail::SystemSlot;
+using detail::SystemTagHandles;
 using detail::Worker;
 
 constexpr std::int64_t NS_PER_S = 1'000'000'000;
@@ -242,6 +247,16 @@ private:
     [[nodiscard]] Status resolve(const CompiledChannel& channel,
                                  std::optional<std::uint16_t> owner,
                                  PointHandles& out) noexcept;
+    // The system tags of the channel and its devices (11.1, D-144), with
+    // the same checks as the point tags.
+    [[nodiscard]] Status resolve_system(const CompiledChannel& channel,
+                                        std::optional<std::uint16_t> owner,
+                                        SystemTagHandles& out) noexcept;
+    // One tag of the channel's owner, of `type`.
+    [[nodiscard]] Status resolve_one(const CompiledChannel& channel,
+                                     std::optional<std::uint16_t> owner,
+                                     const std::string& name, std::uint8_t type,
+                                     std::uint32_t& handle) noexcept;
     [[nodiscard]] Status begin_workers() noexcept;
     [[nodiscard]] Status await_running() noexcept;
     // One heartbeat and watchdog notification.
@@ -348,30 +363,34 @@ Status Driver::Impl::attach() noexcept {
 Status Driver::Impl::owner_of(const CompiledChannel& channel,
                               std::optional<std::uint16_t>& owner) noexcept {
     owner.reset();
+    // The first point tag, or, for a channel without one, its own state tag
+    // (11.1, D-144): every channel has system tags.
+    std::string name = detail::channel_tag_name(
+        channel.name, detail::channel_signal(ChannelSignal::STATE).name);
     for (const CompiledDevice& device : channel.devices) {
-        for (const CompiledPoint& point : device.points) {
-            if (!point.rules.has_tag) {
-                continue;
-            }
-            const std::string name = point_tag_name(device, point);
-            std::uint32_t handle = SCADA_INVALID_HANDLE;
-            scada_tag_info_t info{};
-            if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
-                scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
-                return fail_start({StatusCode::NOT_FOUND, "a point has no tag"},
-                                  "the tag set has no tag " + name);
-            }
-            if (info.owned == 0) {
-                return fail_start({StatusCode::FAILED_PRECONDITION,
-                                   "a point's tag is not this process's"},
-                                  "tag " + name + " is owned by " +
-                                      text_of(info.owner) +
-                                      ", not a thread of " + settings_.process);
-            }
-            owner = info.owner_index;
-            return {};
+        const auto tagged = std::find_if(
+            device.points.begin(), device.points.end(),
+            [](const CompiledPoint& point) { return point.rules.has_tag; });
+        if (tagged != device.points.end()) {
+            name = point_tag_name(device, *tagged);
+            break;
         }
     }
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    scada_tag_info_t info{};
+    if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
+        scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
+        return fail_start({StatusCode::NOT_FOUND, "a channel's tag is missing"},
+                          "the tag set has no tag " + name);
+    }
+    if (info.owned == 0) {
+        return fail_start({StatusCode::FAILED_PRECONDITION,
+                           "a channel's tag is not this process's"},
+                          "tag " + name + " is owned by " +
+                              text_of(info.owner) + ", not a thread of " +
+                              settings_.process);
+    }
+    owner = info.owner_index;
     return {};
 }
 
@@ -514,6 +533,79 @@ Status Driver::Impl::resolve(const CompiledChannel& channel,
     return {};
 }
 
+Status Driver::Impl::resolve_one(const CompiledChannel& channel,
+                                 std::optional<std::uint16_t> owner,
+                                 const std::string& name, std::uint8_t type,
+                                 std::uint32_t& handle) noexcept {
+    scada_tag_info_t info{};
+    if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
+        scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
+        return fail_start({StatusCode::NOT_FOUND, "a system tag is missing"},
+                          "the tag set has no tag " + name);
+    }
+    if (info.type != type) {
+        return fail_start({StatusCode::FAILED_PRECONDITION,
+                           "a system tag is not of its type"},
+                          "tag " + name + " is not of its type (11.1)");
+    }
+    // The channel's worker writes them: the channel's owner (CS 12.5).
+    if (!owner.has_value() || info.owner_index != *owner) {
+        return fail_start({StatusCode::FAILED_PRECONDITION,
+                           "a channel's tags have two owners"},
+                          "tag " + name + " of channel " + channel.name +
+                              " is owned by " + text_of(info.owner) +
+                              ", not by the channel's owner");
+    }
+    return {};
+}
+
+Status Driver::Impl::resolve_system(const CompiledChannel& channel,
+                                    std::optional<std::uint16_t> owner,
+                                    SystemTagHandles& out) noexcept {
+    out.groups = channel.poll_groups.size();
+    out.devices = channel.devices.size();
+    const auto add = [&](const std::string& name, std::uint8_t type) {
+        SystemSlot slot{.type = type};
+        Status status = resolve_one(channel, owner, name, type, slot.handle);
+        out.slots.push_back(slot);
+        if (out.slots.size() % HEARTBEAT_EVERY_TAGS == 0) {
+            (void)beat();  // a retiring generation is seen by the loop
+        }
+        return status;
+    };
+    for (std::size_t signal = 0; signal < detail::CHANNEL_SIGNALS; ++signal) {
+        const detail::SignalSpec& spec =
+            detail::channel_signal(static_cast<ChannelSignal>(signal));
+        Status status =
+            add(detail::channel_tag_name(channel.name, spec.name), spec.type);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    for (const CompiledPollGroup& group : channel.poll_groups) {
+        Status status =
+            add(detail::channel_tag_name(channel.name, "period." + group.name),
+                SCADA_TYPE_FLOAT64);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    // Every device, disabled ones too: CS 12.5 gives each its set.
+    for (const CompiledDevice& device : channel.devices) {
+        for (std::size_t signal = 0; signal < detail::DEVICE_SIGNALS;
+             ++signal) {
+            const detail::SignalSpec& spec =
+                detail::device_signal(static_cast<DeviceSignal>(signal));
+            Status status =
+                add(detail::device_tag_name(device.name, spec.name), spec.type);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+    }
+    return {};
+}
+
 Status Driver::Impl::begin_workers() noexcept {
     for (std::size_t index = 0; index < workers_.size(); ++index) {
         Worker& worker = *workers_[index];
@@ -522,7 +614,12 @@ Status Driver::Impl::begin_workers() noexcept {
         if (!resolved.ok()) {
             return resolved;
         }
-        worker.begin(std::move(handles));
+        SystemTagHandles system;
+        resolved = resolve_system(worker.channel(), owners_[index], system);
+        if (!resolved.ok()) {
+            return resolved;
+        }
+        worker.begin(std::move(handles), std::move(system));
     }
     return {};
 }

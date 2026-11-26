@@ -7,6 +7,7 @@
 #include "channel_builder.h"
 #include "loopback.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
@@ -2388,6 +2389,105 @@ TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
         protocol.device_caps(channel.devices[0])};
     const ChannelEngine engine(channel, protocol, transport, clock, tags, caps);
     EXPECT_FALSE(engine.status().ok());
+}
+
+// --- 11.1: the counts behind the system tags (D-144) -----------------------
+
+TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.run_until(10 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_EQ(counts.requests, requests_of(rig.bus, 1));
+    EXPECT_EQ(rig.engine.device_counts(1).requests, requests_of(rig.bus, 2));
+    EXPECT_GE(counts.requests, 10U);
+    EXPECT_EQ(counts.errors, 0U);
+    EXPECT_EQ(counts.timeouts, 0U);
+    EXPECT_GT(counts.last_ok_time_ns, 0);
+    // The loopback answers each request whole after LATENCY.
+    EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 1.0);
+    // Both devices' requests of the last 10 s, over 10 s.
+    const double expected =
+        static_cast<double>(rig.engine.counts().requests) / 10.0;
+    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(rig.clock.monotonic_ns()),
+                     expected);
+    EXPECT_EQ(rig.engine.points_absent(0), 0U);
+}
+
+TEST(ChannelEngine, ASilentDeviceCountsEveryAttemptAsATimeOut) {
+    Rig rig(channel_of(2, quick_failure(2, 100), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(2 * SECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.requests, 3U);
+    EXPECT_EQ(counts.timeouts, counts.requests);  // retries included
+    EXPECT_EQ(counts.errors, 0U);
+    EXPECT_EQ(counts.last_ok_time_ns, 0);
+    EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 0.0);  // nothing answered
+    EXPECT_EQ(rig.engine.device_counts(1).timeouts, 0U);
+}
+
+// True when every one of at least 5 requests was refused: an error and a
+// refusal, never an exception or a time-out.
+::testing::AssertionResult only_refused(const DeviceCounts& counts) {
+    if (counts.refusals >= 5 && counts.errors == counts.refusals &&
+        counts.errors == counts.requests && counts.exceptions == 0 &&
+        counts.timeouts == 0) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "requests " << counts.requests << ", errors " << counts.errors
+           << ", refusals " << counts.refusals << ", exceptions "
+           << counts.exceptions << ", time-outs " << counts.timeouts;
+}
+
+TEST(ChannelEngine, BusyAndGatewayAnswersAreRefusalsAndErrors) {
+    Rig rig(channel_of(2, quick_failure(0, 100), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::BUSY);
+    rig.bus.fault(2, Fault::UNREACHABLE);
+    rig.run_until(5 * FAST_PERIOD - MILLISECOND);
+    EXPECT_TRUE(only_refused(rig.engine.device_counts(0)));  // busy
+    EXPECT_TRUE(only_refused(rig.engine.device_counts(1)));  // gateway
+}
+
+TEST(ChannelEngine, AnAbsentAnswerIsAnExceptionAndItsPointsAreAbsent) {
+    Rig rig(channel_of(1, quick_failure(0, 100), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::ABSENT);
+    rig.run_until(3 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.exceptions, 1U);
+    EXPECT_EQ(counts.errors, counts.exceptions);
+    EXPECT_EQ(counts.refusals, 0U);
+    EXPECT_EQ(rig.engine.points_absent(0), 1U);
+}
+
+TEST(ChannelEngine, ABrokenAnswerIsAnError) {
+    // A serial line: a broken frame is retried, not a close (7.3).
+    Rig rig(channel_of(1, quick_failure(0, 100), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.run_until(3 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.errors, 3U);
+    EXPECT_EQ(counts.errors, rig.engine.counts().broken);
+    EXPECT_EQ(counts.exceptions + counts.refusals + counts.timeouts, 0U);
+}
+
+TEST(ChannelEngine, TheLinkIsToldBeforeAConnectAndAfterALoss) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    EXPECT_EQ(rig.tags.links(),
+              (std::vector<ChannelLink>{ChannelLink::CONNECTING,
+                                        ChannelLink::DISCONNECTED}));
+    EXPECT_EQ(rig.engine.link(), ChannelLink::DISCONNECTED);
+    rig.run_until(2 * SECOND);
+    EXPECT_EQ(rig.engine.link(), ChannelLink::CONNECTED);
+    rig.transport.close_by_peer();
+    rig.run_until(2 * SECOND + 100 * MILLISECOND);
+    EXPECT_EQ(rig.tags.links(),
+              (std::vector<ChannelLink>{
+                  ChannelLink::CONNECTING, ChannelLink::DISCONNECTED,
+                  ChannelLink::CONNECTING, ChannelLink::CONNECTED,
+                  ChannelLink::DISCONNECTED}));
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

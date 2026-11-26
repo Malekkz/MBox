@@ -205,6 +205,12 @@ public:
     states() const noexcept {
         return states_;
     }
+    void channel_link(ChannelLink link) noexcept override {
+        links_.push_back(link);
+    }
+    [[nodiscard]] const std::vector<ChannelLink>& links() const noexcept {
+        return links_;
+    }
     // Every point write, in order: (device, point).
     [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>&
     order() const noexcept {
@@ -214,6 +220,7 @@ public:
 private:
     std::map<std::pair<std::uint32_t, std::uint32_t>, Written> points_;
     std::vector<std::pair<std::uint32_t, DeviceStatus>> states_;
+    std::vector<ChannelLink> links_;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> order_;
 };
 

@@ -2569,7 +2569,7 @@ Decision:
 
 Reason: the smallest process that meets 2.3, 2.4, 2.6, 9.1 and 10 with the engine of slice 3 and the transports of slice 4, with every end bounded.
 
-Consequences: `TagSink::device_state` writes nothing until the system tags of 11.1 (slice 5b-1); identity checks and restarts (7.6) come with 5b-2; the command thread and the orders with slices 6 and 7; the compile step, bit tags, reload and the generation change with slice 8.
+Consequences: `TagSink::device_state` writes nothing: the system tags of 11.1 are written by the worker after each step (slice 5b-1, D-144); identity checks and restarts (7.6) come with 5b-2; the command thread and the orders with slices 6 and 7; the compile step, bit tags, reload and the generation change with slice 8.
 
 Tests:
 - `scada-driver-process-integration-test` runs scada-tagd, `scada-driver-test-sim` and `scada-drv-test` as processes, with a listener standing in for the service manager, and observes the tags, the exit and the log:
@@ -2620,3 +2620,48 @@ Consequences:
 - Slice 5b of #104 (the `sys.proc` tags of a driver's main thread) and the tag-set generator of #101 can build on the 1.1 rule.
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
+
+## D-144: The system tags of a channel and its devices
+Date: 2026-11-26; rebased on the reviewed slice 5a (D-142) on 2026-11-27
+Phase / issue: 2, #104 (P2-07), slice 5b-1
+Status: accepted; the cut of slice 5b into 5b-1 (system tags), 5b-2 (identity and restart) and 5b-3 (log queues) is the lead's (2026-11-26). Review by a person: it adds writes after every attach (9.1) and at the stop.
+
+Context: driver interface contract 11.1 lists the system tags and their types, and says states are written when they change and counters, times and averages at most once a second. CS 12.5 names them and gives them to the channel's owner. Neither says what counts as an error answer, when `response_ms` starts and ends, how `requests_per_s` is windowed, when the channel's `state` is "connecting", or what a worker does with a system tag the tag set lacks.
+
+Decision:
+- This slice writes, per channel: `state`, `connects`, `refused_connects`, `secured` (always false in phase 2, reference 13.3), `period.<group>` for every poll group of the channel, and `requests_per_s`. Per device, disabled devices included: `state`, `last_ok_time`, `requests`, `errors`, `timeouts`, `response_ms`, `requests_per_scan`, `pacing_limited`, `last_status`, `exceptions`, `refusals`, `sentinels`, `invalid` and `points_absent`.
+  - `identity`, `identity_ok` and `restarts` come with 5b-2.
+  - `selections_lost` and `last_command_stage` come with the command slices.
+  - `refresh_failures` comes with phase 5.
+  - The `sys.proc.<process>.*` tags, written by the main thread as the owner `<process>` (tag database contract 1.1, D-143), come with a later part of 5b.
+- The main thread resolves every tag of this list after the point tags of the channel, with the same checks (D-142): a tag the tag set lacks, or one of another type or of another owner than the channel's, fails the start (`RunEnd::FAILED`, exit status 1, "the tag set has no tag t", "tag t is not of its type (11.1)"): the tag set was not built for this configuration (CS 12.5). The handles reach the worker with its point handles (`Worker::begin`).
+- A channel's owner is that of its first point tag, as in D-142, or, for a channel without one, that of its `sys.drv.<channel>.state` tag.
+- Values are written GOOD, with no flags and source time 0 (the library stores its own update time with LOCAL_TIME, TD 13). The walk of 9.1 by owner slot (D-142) writes them NOT_INIT with the other tags of the owner; once the worker has its engine, every one is written with its current value, then one notify, all before READY=1 (9.1: "Diagnostic tags are written with their current values").
+- A disabled channel has no engine (CS 4.6): its worker writes its system tags once, at its start, as a channel never connected: `state` 0, every device DISABLED (0), `secured` false, every count, time and average 0, and `requests_per_scan` that of the device's plan.
+- States are checked after every step and written when they change: the channel's and every device's `state`, `secured` and `pacing_limited`. Everything else is written at most once a second, and only when it changed. A worker's wait ends at the next such second, so an idle channel's counters move too.
+- The channel's `state`: 1 (connecting) is written and the readers woken just before a connect begins, since the connect blocks the worker up to `connect_timeout`. It is 2 once connected, and 0 otherwise: after a refused or failed connect, during the back-off, after a loss or a close of the driver's own, and at the stop once the connection is closed.
+- Device counts, kept by the engine for every device:
+  - `requests` counts every frame sent to it, retries and probes included.
+  - `timeouts` counts the attempts that got no byte of an answer by the first deadline (7.1); a partial send on a serial line counts as one (7.2).
+  - `errors` counts the answers that are errors: `exceptions` plus `refusals` plus broken answers.
+  - `exceptions` counts the answers SPLIT, ABSENT, DEVICE_INVALID and REFUSED: error answers with a protocol code.
+  - `refusals` counts BUSY and UNREACHABLE answers (busy and gateway).
+  - `last_status` is the `raw` code of the last answer that `exceptions` or `refusals` counted. The contract fills `raw` only for a REFUSED write, so for reads it stays 0 until the protocols report a code there too (a point for #136).
+  - `last_ok_time` is the CLOCK_REALTIME of the last SAMPLES or WRITE_OK answer, 0 before the first.
+  - `response_ms` is the average, over the device's last 100 complete answers, of the time from the send to the first byte of the answer. Bytes left from before the send count as 0 ms, and bytes of frames dropped as stale do not start the time.
+  - `sentinels` and `invalid` come from the sample processing of contract 5 (`SampleCounts`).
+  - `points_absent` is the number of its points that are ABSENT now.
+  - `requests_per_scan` is that of the plan (6.3).
+- `requests_per_s` is the number of frames the channel sent in the last 10 whole seconds of the monotonic clock, the running second included, divided by 10.
+- `period.<group>` is the scheduler's achieved period in ms (6.3), and `pacing_limited` is the scheduler's verdict (6.4).
+
+Reason: the counters the engine and the scheduler already have, published by the thread that owns the tags, with the fewest writes that meet the rate rule of 11.1.
+
+Consequences:
+- The engine counts per device (`ChannelEngine::device_counts`, `response_ms`, `points_absent`, `requests_per_s`) and tells its sink of the link (`TagSink::channel_link`). The worker publishes through `SystemTags`.
+- A tag set without these tags no longer starts a driver. `scada-conf` does not yet generate them (CS 12.5); the integration tests' tag sets list them.
+- Tests:
+  - `channel_engine_test.cpp` covers the counts for an answering device, a silent one, busy and gateway answers, an absent answer and a broken one, and the link callbacks.
+  - `diagnostics_test.cpp` covers the two windows.
+  - `scada-driver-process-integration-test` reads the tags of a running driver: a connected channel with one live and one disabled device, a refused connect, and the state after the stop; a disabled channel's values; a channel without devices, owned through its state tag; a tag set without the system tags, and one with a system tag of another type, refused at the start. The fixture's tag sets list every system tag (`driver_fixture.h`).
+- Not tested, and why: a system tag of another owner than the channel's is refused by the same check as a point tag's, which D-142's test covers.

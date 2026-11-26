@@ -4,10 +4,12 @@
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/types.h"
+#include "system_tags.h"
 #include "tag_writer.h"
 
 #include <algorithm>
@@ -108,8 +110,9 @@ Status Worker::start() noexcept {
     return {};
 }
 
-void Worker::begin(PointHandles handles) noexcept {
+void Worker::begin(PointHandles handles, SystemTagHandles system) noexcept {
     handles_ = std::move(handles);
+    system_ = std::move(system);
     begun_.store(true, std::memory_order_release);
     raise(begin_fd_);
 }
@@ -186,17 +189,23 @@ void Worker::serve(TagWriter& writer) noexcept {
         return;
     }
     writer.seed(*engine, *channel_);
+    // 9.1: "Diagnostic tags are written with their current values", after
+    // the walk of the owner wrote them NOT_INIT (D-144).
+    writer.publish_system(*engine, *channel_, clock_->monotonic_ns(), true);
+    writer.notify();
     // A stop gives up a read in flight and a connect (DI 10, R-14).
     transport_->set_wake(stop_fd_.get());
     phase_.store(Phase::RUNNING, std::memory_order_release);
     while (!stopping()) {
         const std::int64_t next = engine->step();
         moved();
+        writer.publish_system(*engine, *channel_, clock_->monotonic_ns(),
+                              false);
         writer.notify();
         refused_.store(writer.refused(), std::memory_order_relaxed);
         // After a stop the stop eventfd is readable: this wait returns at
         // once, and the loop ends at its check.
-        wait_until(next, -1);
+        wait_until(std::min(next, writer.system_due_ns()), -1);
         moved();
     }
     // Stopped at a boundary: nothing more is read. The close is orderly (a
@@ -204,6 +213,9 @@ void Worker::serve(TagWriter& writer) noexcept {
     // the kernel sends a reset instead.
     transport_->close(false);
     transport_->set_wake(-1);
+    // The channel's state says so (11.1).
+    writer.channel_link(ChannelLink::DISCONNECTED);
+    writer.notify();
 }
 
 void Worker::run() noexcept {
@@ -229,10 +241,13 @@ void Worker::run() noexcept {
                 return point.rules.tag_type == tag::TagType::STRING;
             }));
     }
-    TagWriter writer(ctx_, std::move(handles_), strings);
+    TagWriter writer(ctx_, std::move(handles_), strings, std::move(system_));
     if (!channel_->enabled || transport_ == nullptr) {
         // A disabled channel: its tags are this thread's and written (9.1);
-        // it is never connected (CS 4.6) and waits for the stop.
+        // it is never connected (CS 4.6), says so in its system tags, and
+        // waits for the stop.
+        writer.publish_idle(*channel_);
+        writer.notify();
         phase_.store(Phase::RUNNING, std::memory_order_release);
         while (!stopping()) {
             wait_until(NEVER, -1);

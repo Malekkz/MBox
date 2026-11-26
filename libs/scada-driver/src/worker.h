@@ -8,6 +8,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
+#include "system_tags.h"
 #include "tag_writer.h"
 
 #include <atomic>
@@ -57,10 +58,11 @@ public:
     // (DI 2.4). UNAVAILABLE if the thread or an eventfd cannot be had.
     [[nodiscard]] Status start() noexcept;
 
-    // Hands the worker its point handles once it is WRITTEN: it then
-    // builds its engine and runs, or, for a disabled channel, idles until
-    // the stop. Main thread only, once.
-    void begin(PointHandles handles) noexcept;
+    // Hands the worker its point handles and its system tags (D-144) once
+    // it is WRITTEN: it then builds its engine and runs, or, for a disabled
+    // channel, writes its system tags and idles until the stop. Main thread
+    // only, once.
+    void begin(PointHandles handles, SystemTagHandles system) noexcept;
 
     // Asks the thread to stop at its next transaction boundary; a read in
     // flight and a connect are given up (DI 10). Safe from any thread, any
@@ -127,7 +129,9 @@ private:
     // Written by `begin` before `begun_` is stored with release; read by
     // the worker after it loads `begun_` with acquire.
     PointHandles handles_;
-    // Release by `begin`, acquire by the worker: publishes `handles_`.
+    SystemTagHandles system_;
+    // Release by `begin`, acquire by the worker: publishes `handles_` and
+    // `system_`.
     std::atomic<bool> begun_{false};
     // Release by `request_stop`, acquire by the worker at every boundary.
     std::atomic<bool> stop_{false};
