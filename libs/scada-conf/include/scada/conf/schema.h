@@ -40,12 +40,13 @@ class SchemaSet;
 
 // The rules a schema gives one key, found once for many values
 // (`SchemaSet::key_rules`).
+// Only `SchemaSet::key_rules` makes one, never empty, and only the set that
+// made it uses it (S4 of the review of #149).
 class KeyRules {
-public:
-    KeyRules() = default;
-
 private:
     friend class SchemaSet;
+    KeyRules() = default;
+    const CompiledSchemas* owner_ = nullptr;
     std::vector<std::size_t> schemas_;
 };
 
@@ -105,12 +106,21 @@ public:
 
     // The rules `schema` gives the key at `path`, as `check_value` finds
     // them, to check many values with the overload below; INTERNAL when
-    // they name no rule.
+    // they name no rule, or when the branches of a `oneOf` on the path give
+    // the key different rules: stage 3 checks a value against one branch
+    // only, which a computed value alone cannot choose (M8 of the review of
+    // #149).
     [[nodiscard]] Result<KeyRules> key_rules(
         std::string_view schema, std::span<const std::string> path) const;
 
-    // `check_value` against rules found by `key_rules` of this set.
-    [[nodiscard]] std::vector<ValueError> check_value(
+    // Each key that the branches of a `oneOf` give different rules, as
+    // `<file>: <key>`: the keys `key_rules` refuses. None in the built-in
+    // set, which a test checks.
+    [[nodiscard]] std::vector<std::string> keys_split_by_one_of() const;
+
+    // `check_value` against rules found by `key_rules` of this set; INTERNAL
+    // for rules of another set.
+    [[nodiscard]] Result<std::vector<ValueError>> check_value(
         const KeyRules& rules, std::string_view text,
         std::string_view label) const;
 

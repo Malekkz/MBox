@@ -1424,8 +1424,8 @@ TEST(MergedPoints, IntegerScalingWhereMergingBringsTheKeys) {
                      "0.5 }, address: { table: input, register: 10, type: "
                      "uint16 } }\n"),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-517: "
-                     "\"ps1.m1.p\": value_type int64 needs an integer "
-                     "scaling; use float64\n"
+                     "\"ps1.m1.p\": value_type int64 (derived from the "
+                     "enumeration) needs an integer scaling; use float64\n"
                      "  from template templates/meter_a.yaml:4:53 (point p)"}));
     // An integer raw type with a decimal gain derives float64: valid.
     EXPECT_EQ(merged("  - { name: p, scale: { gain: 0.5 }, address: { table: "

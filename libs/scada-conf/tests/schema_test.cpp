@@ -1208,13 +1208,46 @@ TEST(CheckValue, TheRulesOfAKeyFoundOnce) {
     const std::vector<std::string> bit{"points", "[]", "address", "bit"};
     const Result<KeyRules> rules = set.key_rules(MODBUS_DEVICE, bit);
     ASSERT_TRUE(rules.ok());
-    EXPECT_TRUE(set.check_value(rules.value(), "15", "address.bit").empty());
-    const std::vector<ValueError> errors =
+    const Result<std::vector<ValueError>> good =
+        set.check_value(rules.value(), "15", "address.bit");
+    ASSERT_TRUE(good.ok());
+    EXPECT_TRUE(good.value().empty());
+    const Result<std::vector<ValueError>> errors =
         set.check_value(rules.value(), "16", "address.bit");
-    ASSERT_EQ(errors.size(), 1U);
-    EXPECT_EQ(errors.front().message, "address.bit must be between 0 and 15");
+    ASSERT_TRUE(errors.ok());
+    ASSERT_EQ(errors.value().size(), 1U);
+    EXPECT_EQ(errors.value().front().message,
+              "address.bit must be between 0 and 15");
     const std::vector<std::string> nonsense{"points", "nonsense"};
     EXPECT_FALSE(set.key_rules(MODBUS_DEVICE, nonsense).ok());
+    // Rules of another set are refused, not followed (S4 of the review of
+    // #149).
+    const SchemaSet other = one_schema(
+        R"({"type": "object", "properties": {"n": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "maximum": 1}}})");
+    const Result<std::vector<ValueError>> foreign =
+        other.check_value(rules.value(), "1", "n");
+    ASSERT_FALSE(foreign.ok());
+    EXPECT_EQ(foreign.status().code(), StatusCode::INTERNAL);
+}
+
+// The branches of a `oneOf` that give one key different rules: a computed
+// value alone cannot choose its branch, so `key_rules` refuses the key (M8
+// of the review of #149); no built-in schema has that shape.
+TEST(CheckValue, AKeySplitByAOneOf) {
+    const SchemaSet set = one_schema(
+        R"({"type": "object", "oneOf": [)"
+        R"({"properties": {"t": {"const": "coil"}, "n": {"type": "integer",)"
+        R"( "x-scada-type": "integer", "maximum": 10}}},)"
+        R"({"properties": {"t": {"const": "holding"}, "n": {"type":)"
+        R"( "integer", "x-scada-type": "integer", "minimum": 20}}}]})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "25", "n"),
+              Lines{"check_value: a oneOf gives the key different rules"});
+    EXPECT_EQ(
+        set.keys_split_by_one_of(),
+        (std::vector<std::string>{"t.schema.json: n", "t.schema.json: t"}));
+    EXPECT_EQ(SchemaSet::builtin().keys_split_by_one_of(),
+              std::vector<std::string>{});
 }
 
 // A schema or a key that gives no rule is a defect of the caller: INTERNAL,

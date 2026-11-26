@@ -5,12 +5,15 @@
 
 #include "merged_points.h"
 
+#include "grouped_errors.h"
+
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
+#include "scada/conf/rules.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/schema.h"
 #include "scada/conf/tree.h"
@@ -37,6 +40,7 @@ namespace scada::conf {
 namespace {
 
 constexpr std::uint16_t CF_MISSING_KEY = 202;
+constexpr std::uint16_t CF_OUT_OF_RANGE = 204;
 constexpr std::uint16_t CF_NO_SUCH = 310;
 constexpr std::uint16_t CF_VALUE_TYPE = 504;
 constexpr std::uint16_t CF_SCALING_RANGE = 516;
@@ -144,8 +148,12 @@ std::optional<std::pair<Wide, Wide>> raw_range(std::string_view raw,
         }
     }
     if (raw == "mod10k") {
+        // `count` is 2 to 4 (A.2, stage 3); bounded here too, so that the
+        // loop never runs past 10^16 (S6 of the review of #149).
+        constexpr std::uint64_t MAX_MOD10K_COUNT = 4;
         std::uint64_t high = 1;
-        for (std::uint64_t i = 0; i < mod10k_count; ++i) {
+        for (std::uint64_t i = 0; i < std::min(mod10k_count, MAX_MOD10K_COUNT);
+             ++i) {
             high *= MOD10K_BASE;
         }
         return std::pair{
@@ -153,6 +161,11 @@ std::optional<std::pair<Wide, Wide>> raw_range(std::string_view raw,
             Wide{.negative = false, .magnitude = high - 1, .overflow = false}};
     }
     return std::nullopt;
+}
+
+// True for a raw type of integers: `bool`, the integer types, `mod10k`.
+bool is_integer_raw(std::string_view raw) {
+    return raw_range(raw, 1).has_value();
 }
 
 bool is_signed(std::string_view raw) noexcept {
@@ -166,7 +179,8 @@ public:
         : tree_(&tree),
           document_(&tree.document),
           diagnostics_(&diagnostics),
-          computed_(tree.computed) {
+          computed_(tree.computed),
+          grouped_(MAX_KEPT_ERRORS) {
         std::ranges::sort(computed_);
         for (const CheckedFile& file : files) {
             if (file.source->path_class.type != FileType::ENUMS) {
@@ -208,6 +222,7 @@ public:
                 }
             }
         }
+        grouped_.flush(*diagnostics_);
         return status_;
     }
 
@@ -240,9 +255,30 @@ private:
     }
 
     void error(std::uint16_t code, NodeId node, std::string message) {
-        diagnostics_->add(expanded_diagnostic(
-            *tree_, code, node, std::move(message), "point " + point_name_));
+        report(expanded_diagnostic(*tree_, code, node, std::move(message),
+                                   detail()));
     }
+
+    // The note's detail: the point, or nothing for a device's own key.
+    [[nodiscard]] std::string detail() const {
+        return point_name_.empty() ? std::string() : "point " + point_name_;
+    }
+
+    // One cause met at many instances is one error (M6 of the review of
+    // #149, D-114): its key is the message without the instance's name.
+    void report(Diagnostic diagnostic) {
+        std::string key = diagnostic.message;
+        const std::string own = "\"" + device_name_ + ".";
+        for (std::size_t at = key.find(own); at != std::string::npos;
+             at = key.find(own, at + 1)) {
+            key.replace(at, own.size(), "\"");
+        }
+        grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_);
+    }
+
+    // The tag in a message, whole (S2 of the review of #149): a tag is at
+    // most 127 bytes of the name grammar.
+    [[nodiscard]] std::string quoted_tag() const { return "\"" + tag_ + "\""; }
 
     // CF-202 for each of `keys` that `map` lacks.
     void need(NodeId map, std::string_view object,
@@ -250,8 +286,8 @@ private:
         for (const std::string_view key : keys) {
             if (!child(map, key)) {
                 error(CF_MISSING_KEY, map,
-                      std::string(object) + " of " + quote_text(tag_) +
-                          " needs " + std::string(key));
+                      std::string(object) + " of " + quoted_tag() + " needs " +
+                          std::string(key));
             }
         }
     }
@@ -259,19 +295,20 @@ private:
     // --- A device and its points -------------------------------------------
 
     void check_device(NodeId device) {
-        const std::string name = text_of(device, "name");
+        device_name_ = text_of(device, "name");
         device_enums_.clear();
         if (const std::optional<NodeId> enums = child_map(device, "enums")) {
             for (const Entry& entry : document_->entries(*enums)) {
                 device_enums_.emplace(document_->text(entry.key));
             }
         }
+        point_name_.clear();
+        tag_ = device_name_;
         if (const std::optional<NodeId> time =
                 child_map(device, "device_time")) {
-            tag_ = name;
-            point_name_.clear();
             check_device_time(*time);
         }
+        check_device_computed(device);
         const std::optional<NodeId> points = child(device, "points");
         if (!points) {
             return;
@@ -281,11 +318,17 @@ private:
                 continue;
             }
             point_name_ = text_of(point, "name");
-            tag_ = name + "." + point_name_;
-            check_point(point);
+            tag_ = device_name_ + "." + point_name_;
+            // A point whose computed value is wrong gets no further check,
+            // which would read the wrong value (M5 of the review of #149).
+            if (check_point_computed(point)) {
+                check_point(point);
+            }
+            if (!status_.ok()) {
+                return;
+            }
         }
         point_name_.clear();
-        check_computed(device);
     }
 
     // --- CF-2xx: the values computed at expansion --------------------------
@@ -293,41 +336,45 @@ private:
     // Each value computed from a configuration expression is checked
     // against its key's rules in the protocol's schema, as stage 3 checks a
     // value written there (D-115): `register: "base + 70000"` is the CF-204
-    // that `register: 70000` is. The key is named from its point.
-    void check_computed(NodeId device) {
+    // that `register: 70000` is. The key is named from its point, or from
+    // the device for its own keys.
+    void check_device_computed(NodeId device) {
         if (computed_.empty()) {
             return;
         }
         std::vector<std::string> steps;
-        const std::string schema = protocol_ + ".schema.json#/$defs/device";
         for (const Entry& entry : document_->entries(device)) {
             const std::string_view key = document_->text(entry.key);
-            steps.assign(1, std::string(key));
-            if (key != "points") {
-                walk_computed(schema, entry.value, steps, std::string(key));
+            if (key == "points" || key == "name") {
                 continue;
             }
-            steps.emplace_back("[]");
-            for (const NodeId point : document_->items(entry.value)) {
-                point_name_ = text_of(point, "name");
-                if (document_->kind(point) != NodeKind::MAP) {
-                    continue;
-                }
-                for (const Entry& member : document_->entries(point)) {
-                    const std::string_view name = document_->text(member.key);
-                    steps.resize(2);
-                    steps.emplace_back(name);
-                    walk_computed(schema, member.value, steps,
-                                  std::string(name));
-                }
-            }
-            point_name_.clear();
+            steps.assign(1, std::string(key));
+            walk_computed(entry.value, steps, std::string(key));
         }
     }
 
+    // The computed values of a point; false if one is wrong. A point's
+    // name was checked as stage 4 made it (CF-212, S3 of the review of
+    // #149).
+    bool check_point_computed(NodeId point) {
+        if (computed_.empty()) {
+            return true;
+        }
+        computed_failed_ = false;
+        std::vector<std::string> steps;
+        for (const Entry& member : document_->entries(point)) {
+            const std::string_view name = document_->text(member.key);
+            if (name == "name") {
+                continue;
+            }
+            steps.assign({"points", "[]", std::string(name)});
+            walk_computed(member.value, steps, std::string(name));
+        }
+        return !computed_failed_;
+    }
+
     // NOLINTNEXTLINE(misc-no-recursion): bounded by the nesting limit of 32
-    void walk_computed(const std::string& schema, NodeId node,
-                       std::vector<std::string>& steps,
+    void walk_computed(NodeId node, std::vector<std::string>& steps,
                        const std::string& label) {
         if (!status_.ok()) {
             return;
@@ -335,14 +382,14 @@ private:
         switch (document_->kind(node)) {
             case NodeKind::SCALAR:
                 if (std::ranges::binary_search(computed_, node)) {
-                    check_value(schema, node, steps, label);
+                    check_value(node, steps, label);
                 }
                 return;
             case NodeKind::MAP:
                 for (const Entry& entry : document_->entries(node)) {
                     const std::string_view key = document_->text(entry.key);
                     steps.emplace_back(key);
-                    walk_computed(schema, entry.value, steps,
+                    walk_computed(entry.value, steps,
                                   label + "." + std::string(key));
                     steps.pop_back();
                 }
@@ -350,75 +397,127 @@ private:
             case NodeKind::SEQUENCE: {
                 std::size_t index = 0;
                 steps.emplace_back("[]");
+                const bool failed_before = computed_failed_;
+                computed_failed_ = false;
+                bool computed = false;
                 for (const NodeId item : document_->items(node)) {
-                    walk_computed(schema, item, steps,
+                    computed =
+                        computed || std::ranges::binary_search(computed_, item);
+                    walk_computed(item, steps,
                                   label + "[" + std::to_string(index) + "]");
                     ++index;
                 }
                 steps.pop_back();
+                // A computed item is checked with the rule of the whole
+                // value, the order of a bit field's ends (M3 of the review
+                // of #149).
+                if (computed && !computed_failed_ && steps.back() == "field") {
+                    check_field_order(node, label);
+                }
+                computed_failed_ = computed_failed_ || failed_before;
                 return;
             }
         }
     }
 
-    void check_value(const std::string& schema, NodeId node,
-                     const std::vector<std::string>& steps,
-                     const std::string& label) {
-        // The rules of a key are found once per protocol and path.
-        std::string key = schema;
+    void check_field_order(NodeId field, const std::string& label) {
+        if (std::optional<std::string> message =
+                bit_field_order_error(*document_, tree_->types, field, label)) {
+            computed_failed_ = true;
+            report(expanded_diagnostic(*tree_, CF_OUT_OF_RANGE,
+                                       document_->items(field)[0],
+                                       std::move(*message), detail()));
+        }
+    }
+
+    // The rules of a key, found once per protocol and path: a device's own
+    // key in its protocol's `device`, a template key of it (`health`, M7 of
+    // the review of #149) in its protocol's `template`.
+    const KeyRules* rules_for(const std::vector<std::string>& steps) {
+        std::string key = protocol_;
         for (const std::string& step : steps) {
             key += '/' + step;
         }
-        auto found = key_rules_.find(key);
-        if (found == key_rules_.end()) {
-            Result<KeyRules> rules =
-                SchemaSet::builtin().key_rules(schema, steps);
-            if (!rules.ok()) {
-                status_ = rules.status();
-                return;
-            }
-            found = key_rules_.emplace(key, std::move(rules).value()).first;
+        if (const auto found = key_rules_.find(key);
+            found != key_rules_.end()) {
+            return &found->second;
+        }
+        const SchemaSet& schemas = SchemaSet::builtin();
+        Result<KeyRules> rules =
+            schemas.key_rules(protocol_ + ".schema.json#/$defs/device", steps);
+        if (!rules.ok()) {
+            rules = schemas.key_rules(
+                protocol_ + ".schema.json#/$defs/template", steps);
+        }
+        if (!rules.ok()) {
+            status_ = rules.status();
+            return nullptr;
+        }
+        return &key_rules_.emplace(std::move(key), std::move(rules).value())
+                    .first->second;
+    }
+
+    void check_value(NodeId node, const std::vector<std::string>& steps,
+                     const std::string& label) {
+        const KeyRules* rules = rules_for(steps);
+        if (rules == nullptr) {
+            return;
         }
         // A value met again at the same key is not checked again (the same
         // register at every instance); the results kept are bounded.
         const std::string_view text = document_->text(node);
-        std::string seen = key;
+        std::string seen;
+        for (const std::string& step : steps) {
+            seen += step;
+            seen += '/';
+        }
         seen += '\0';
         seen += text;
         seen += '\0';
         seen += label;
         auto result = checked_.find(seen);
         if (result == checked_.end()) {
+            Result<std::vector<ValueError>> errors =
+                SchemaSet::builtin().check_value(*rules, text, label);
+            if (!errors.ok()) {
+                status_ = errors.status();
+                return;
+            }
             if (checked_.size() >= MAX_CHECKED_VALUES) {
                 checked_.clear();
             }
             result =
-                checked_
-                    .emplace(std::move(seen), SchemaSet::builtin().check_value(
-                                                  found->second, text, label))
+                checked_.emplace(std::move(seen), std::move(errors).value())
                     .first;
         }
         for (const ValueError& error : result->second) {
-            diagnostics_->add(expanded_diagnostic(
-                *tree_, error.code, node, error.message,
-                point_name_.empty() ? std::string() : "point " + point_name_));
+            computed_failed_ = true;
+            report(expanded_diagnostic(*tree_, error.code, node, error.message,
+                                       detail()));
         }
     }
 
+    // The scale and value-type checks hold for every protocol's point (M2
+    // of the review of #149: 4.7 has no protocol condition); those that need
+    // the raw type are a Modbus point's, the one protocol whose address
+    // names a raw type.
     void check_point(NodeId point) {
         check_completeness(point);
         check_enumeration(point);
         const std::optional<NodeId> address = child_map(point, "address");
-        if (protocol_ != "modbus" || !address) {
-            return;
+        std::string raw;
+        std::string value_type = text_of(point, "value_type");
+        if (protocol_ == "modbus" && address) {
+            raw = raw_type_of(*address);
+            value_type = value_type_of(point, raw);
+            if (!check_value_type(point, raw, value_type)) {
+                return;
+            }
         }
-        const std::string raw = raw_type_of(*address);
-        const std::string value_type = value_type_of(point, raw);
-        check_value_type(point, raw);
         if (value_type != "int64" && value_type != "uint64") {
             return;
         }
-        if (check_integer_scaling(point, value_type)) {
+        if (check_integer_scaling(point, value_type, raw) && !raw.empty()) {
             check_scaling_range(point, *address, raw, value_type);
         }
     }
@@ -441,7 +540,7 @@ private:
         // Only a name a template wrote: the instance's own names are the
         // reference check's.
         if (!diagnostic.notes.empty()) {
-            diagnostics_->add(diagnostic);
+            report(diagnostic);
         }
     }
 
@@ -455,7 +554,9 @@ private:
         if (const std::optional<NodeId> bits = child_map(point, "bits")) {
             for (const Entry& entry : document_->entries(*bits)) {
                 if (document_->kind(entry.value) == NodeKind::MAP) {
-                    need(entry.value, "a bit", {"name"});
+                    need(entry.value,
+                         "bit " + std::string(document_->text(entry.key)),
+                         {"name"});
                 }
             }
         }
@@ -495,14 +596,27 @@ private:
     void check_modbus_address(NodeId point, NodeId address) {
         const bool shapes = child(address, "on") || child(address, "off") ||
                             child(address, "fault");
-        if (!shapes) {
+        if (shapes) {
+            // A double point by shapes reads two bits, on and off, and may
+            // read a fault bit (A.2): any one shape alone is not complete
+            // (M4 of the review of #149).
+            need(address, "the address", {"on", "off"});
+        } else {
             need(address, "the address", {"table"});
         }
         const bool write_only = text_of(point, "access") == "wo";
         const std::optional<NodeId> write = child_map(address, "write");
-        const bool switched =
-            write && child(*write, "on") && child(*write, "off");
-        if (!shapes && !child(address, "parts") && !(write_only && switched)) {
+        const std::optional<NodeId> on =
+            write ? child_map(*write, "on") : std::nullopt;
+        const std::optional<NodeId> off =
+            write ? child_map(*write, "off") : std::nullopt;
+        // A write-only point that writes `on` and `off` needs no register of
+        // its own when each names its own (A.2, A.5: `{ table, register,
+        // value }`).
+        if (write_only && on && off) {
+            need(*on, "write.on", {"table", "register"});
+            need(*off, "write.off", {"table", "register"});
+        } else if (!shapes && !child(address, "parts")) {
             need(address, "the address", {"register"});
         }
         const std::string raw = text_of(address, "type");
@@ -517,7 +631,8 @@ private:
         }
         for (const std::string_view shape : {"on", "off", "fault"}) {
             if (const std::optional<NodeId> part = child_map(address, shape)) {
-                need(*part, "the address", {"table", "register"});
+                need(*part, "address." + std::string(shape),
+                     {"table", "register"});
             }
         }
     }
@@ -600,43 +715,90 @@ private:
         return raw == "uint64" ? "uint64" : "int64";
     }
 
+    // `divide_by: 1` in any written form (`0x1`) is an integer scaling, as
+    // stage 3 reads it (M1 of the review of #149).
     [[nodiscard]] bool is_one(NodeId scale, std::string_view key) const {
         const std::optional<NodeId> node = child(scale, key);
-        return node && is_integer(*node) && document_->text(*node) == "1";
+        return node && is_integer_one(*document_, tree_->types, *node);
     }
 
-    // CF-504 (D-134): an integer value type, or a counter, on a floating
-    // raw type. An enumeration or a double point reads a code and may have
-    // an integer type; a counter may not, enumeration or not.
-    void check_value_type(NodeId point, const std::string& raw) {
-        if (raw != "float32" && raw != "float64") {
-            return;
+    // How the value type was got, for a message (S2 of the review of #149):
+    // empty when `value_type` is written.
+    [[nodiscard]] std::string derived_from(NodeId point,
+                                           const std::string& raw) const {
+        if (child(point, "value_type")) {
+            return {};
         }
-        const std::string given = text_of(point, "value_type");
-        const std::optional<NodeId> given_at = child(point, "value_type");
-        if (given_at && (given == "int64" || given == "uint64") &&
+        if (child(point, "enum")) {
+            return " (derived from the enumeration)";
+        }
+        if (text_of(point, "kind") == "double_point") {
+            return " (derived from kind double_point)";
+        }
+        if (!raw.empty() && is_integer_raw(raw) &&
+            (child(point, "exponent_from") || child(point, "scale"))) {
+            return " (derived from the raw type " + raw + " and the scaling)";
+        }
+        return raw.empty() ? " (derived)"
+                           : " (derived from the raw type " + raw + ")";
+    }
+
+    // CF-504 (4.7, D-134): "A value_type that cannot hold the raw type". It
+    // is given where 4.7 decides it (S1 of the review of #149, D-115):
+    // - a string raw type (`string`, `bytes`) is held by `string` only, and
+    //   `string` holds nothing else;
+    // - `bool` holds a `bool` raw type only (a bit, a coil);
+    // - an integer value type does not hold a floating raw type, unless the
+    //   point reads a code (an enumeration, a double point); a counter never
+    //   does;
+    // - `int64` does not hold `uint64`, nor `uint64` a signed raw type,
+    //   without a scaling (`check_scaling_range`).
+    // Other pairs (`epoch`, `datetime`, `mod10k`; `float64` on a 64-bit
+    // integer) are not refused here; they are on #136. False after a CF-504.
+    bool check_value_type(NodeId point, const std::string& raw,
+                          const std::string& type) {
+        const std::optional<NodeId> address = child_map(point, "address");
+        const NodeId at =
+            child(point, "value_type").value_or(address.value_or(point));
+        const auto refuse = [&]() {
+            error(CF_VALUE_TYPE, at,
+                  quoted_tag() + ": value_type " + type +
+                      derived_from(point, raw) + " cannot hold " + raw);
+            return false;
+        };
+        const bool text_raw = raw == "string" || raw == "bytes";
+        if (text_raw != (type == "string")) {
+            return refuse();
+        }
+        if (type == "bool" && raw != "bool") {
+            return refuse();
+        }
+        const bool floating = raw == "float32" || raw == "float64";
+        if (floating && (type == "int64" || type == "uint64") &&
             !is_code(point)) {
-            error(CF_VALUE_TYPE, *given_at,
-                  quote_text(tag_) + ": value_type " + given + " cannot hold " +
-                      raw);
+            return refuse();
         }
         std::optional<NodeId> counter = child_map(point, "counter");
         if (!counter && text_of(point, "kind") == "counter") {
             counter = child(point, "kind");
         }
-        if (counter) {
+        if (floating && counter) {
             error(CF_VALUE_TYPE, *counter,
-                  quote_text(tag_) + ": a counter cannot hold " + raw);
+                  quoted_tag() + ": a counter cannot hold " + raw);
+            return false;
         }
+        return true;
     }
 
     // CF-517 (4.7): an integer value type takes no `exponent_from`, no
     // decimal `gain` or `offset`, no `divide_by` above 1. True if the
     // scaling is integer.
-    bool check_integer_scaling(NodeId point, const std::string& type) {
+    bool check_integer_scaling(NodeId point, const std::string& type,
+                               const std::string& raw) {
+        const std::string derived = derived_from(point, raw);
         const auto refuse = [&](NodeId where) {
             error(CF_INTEGER_SCALING, where,
-                  quote_text(tag_) + ": value_type " + type +
+                  quoted_tag() + ": value_type " + type + derived +
                       " needs an integer scaling; use float64");
         };
         bool integer = true;
@@ -732,13 +894,13 @@ private:
                 continue;
             }
             if (scale) {
-                error(CF_SCALING_RANGE, *scale,
-                      quote_text(tag_) + ": raw x gain + offset can exceed " +
-                          type);
+                error(
+                    CF_SCALING_RANGE, *scale,
+                    quoted_tag() + ": raw x gain + offset can exceed " + type);
             } else {
                 const std::optional<NodeId> written =
                     child(point, "value_type");
-                std::string message = quote_text(tag_);
+                std::string message = quoted_tag();
                 message += ": value_type " + type;
                 message += " cannot hold " + raw;
                 error(CF_VALUE_TYPE, written.value_or(address),
@@ -760,6 +922,10 @@ private:
     std::vector<NodeId> computed_;
     std::map<std::string, KeyRules, std::less<>> key_rules_;
     std::map<std::string, std::vector<ValueError>, std::less<>> checked_;
+    std::string device_name_;
+    // A computed value of the point being checked was wrong (M5).
+    bool computed_failed_ = false;
+    GroupedErrors grouped_;
     Status status_;
 };
 
