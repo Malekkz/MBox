@@ -238,10 +238,12 @@ TEST(TagSetValidate, AppliesTheOwnerNamingRule) {
         expect_valid(tag_set);
     }
     {
-        // A foreign prefix, an empty writer and a name that only starts
-        // like the process stay refused, beside other owners and alone.
+        // A foreign prefix (also that of another process, `q.b`), an empty
+        // writer and a name that only starts like the process stay refused,
+        // beside other owners and alone.
         for (const bool alone : {false, true}) {
-            for (const std::string_view name : {"px.b", "p.", "px", "q"}) {
+            for (const std::string_view name :
+                 {"px.b", "q.b", "p.", "px", "q"}) {
                 TagSet tag_set = samples::one_owner();
                 tag_set.processes.push_back(
                     {.name = "q", .uid = samples::UID_OTHER});
