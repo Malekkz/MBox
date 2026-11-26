@@ -292,14 +292,19 @@ protected:
     std::optional<ChildEnding> pause_repeatedly() {
         const auto started = SteadyClock::now();
         std::optional<ChildEnding> ending;
-        while (!ending.has_value() && since(started) < milliseconds{8000} &&
+        while (since(started) < milliseconds{8000} &&
                driver_->send_signal(SIGSTOP)) {
-            // Stopped, the driver cannot end: this only paces the stop.
-            (void)driver_->wait_for_ending(milliseconds{150});
-            if (!driver_->send_signal(SIGCONT)) {
+            // A stopped driver does not run, but one that was already
+            // exiting may still end here: keep that end, or the next signal
+            // fails and the end is lost.
+            ending = driver_->wait_for_ending(milliseconds{150});
+            if (ending.has_value() || !driver_->send_signal(SIGCONT)) {
                 break;
             }
             ending = driver_->wait_for_ending(milliseconds{350});
+            if (ending.has_value()) {
+                break;
+            }
         }
         return ending;
     }
