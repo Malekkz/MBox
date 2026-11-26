@@ -172,7 +172,7 @@ slice of #100.
 | CF-201 | `src/rules.cpp`, `src/schema.cpp` |
 | CF-202 | `src/expand.cpp`, `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp`, `src/validate.cpp` |
 | CF-203 | `src/rules.cpp`, `src/schema.cpp` |
-| CF-204 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-204 | `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp` |
 | CF-205 | `src/rules.cpp`, `src/schema.cpp` |
 | CF-206 | `src/schema.cpp` |
 | CF-207 | `src/schema.cpp` |
