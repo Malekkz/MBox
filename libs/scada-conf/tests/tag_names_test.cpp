@@ -218,5 +218,42 @@ TEST(TagNames, TheTagsOfAProgram) {
                "does not exist"}));
 }
 
+// An expression alarm's state tag is `<name>.alarm.<id>`; two alarms of
+// one id on a tag are CF-812's (slice 7c), not CF-302; a string tag is no
+// number for a setpoint; a feedback given as `{ tag, within, settle }`
+// names a tag.
+TEST(TagNames, AlarmStatesAndFeedbackForms) {
+    EXPECT_EQ(with_alarms("alarms:\n"
+                          "  - { type: expression, name: site.hot, expr: "
+                          "\"ps1.m1.flow > 3\", priority: high, area: ps1 }\n"
+                          "  - { tag: site.hot.alarm.expression, type: state, "
+                          "alarm_on: 1, priority: high, area: ps1 }\n"
+                          "  - { tag: ps1.m1.flow, type: high, limit: 4, "
+                          "priority: high, area: ps1 }\n"
+                          "  - { tag: ps1.m1.flow, type: high, limit: 5, "
+                          "priority: high, area: ps1 }\n"),
+              Lines{});
+    EXPECT_EQ(
+        errors(expand({{"areas.yaml", std::string(AREAS)},
+                       {"templates/meter_a.yaml", std::string(METER)},
+                       {"drivers/modbus/line1.yaml", one_device()},
+                       {"tags/site.yaml",
+                        "tags:\n  - { name: site.label, type: manual, "
+                        "value_type: string, area: ps1 }\n"},
+                       {"alarms/site.yaml",
+                        "alarms:\n  - { tag: ps1.m1.flow, type: deviation, "
+                        "limit: 2, setpoint: site.label, priority: high, area: "
+                        "ps1 }\n"},
+                       {"outputs/ps1.yaml",
+                        "outputs:\n  - { name: ps1.out, area: ps1, kind: "
+                        "setpoint, target: ps1.m1.flow, feedback: { tag: "
+                        "ps1.m1.gone, within: 1, settle: 1s }, interlocks: [], "
+                        "safe_state: hold }\n"}})),
+        (Lines{"alarms/site.yaml:2:62: error CF-312: \"site.label\" "
+               "must be a number tag",
+               "outputs/ps1.yaml:2:87: error CF-310: tag \"ps1.m1.gone\" "
+               "does not exist"}));
+}
+
 }  // namespace
 }  // namespace scada::conf
