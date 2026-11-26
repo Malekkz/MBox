@@ -17,12 +17,12 @@
 #include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
-#include "scada/conf/types.h"
 #include "tag_names.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -147,6 +147,90 @@ struct Virtual {
     std::optional<Expression> tree;
     // The virtual tags it reads, by index.
     std::vector<std::size_t> inputs;
+};
+
+// Tarjan's strongly connected components, iteratively (no recursion: a
+// tree may hold many virtual tags). Each component is complete before any
+// that reads it, so the virtual tags are typed in the order their inputs
+// need.
+class Components {
+public:
+    explicit Components(std::span<const std::vector<std::size_t>* const> inputs)
+        : inputs_(inputs),
+          index_(inputs.size(), UNSEEN),
+          low_(inputs.size(), 0),
+          on_stack_(inputs.size(), false) {}
+
+    std::vector<std::vector<std::size_t>> run() {
+        for (std::size_t start = 0; start < inputs_.size(); ++start) {
+            if (index_[start] == UNSEEN) {
+                walk_from(start);
+            }
+        }
+        return std::move(out_);
+    }
+
+private:
+    static constexpr std::size_t UNSEEN =
+        std::numeric_limits<std::size_t>::max();
+
+    void walk_from(std::size_t start) {
+        walk_.emplace_back(start, 0);
+        while (!walk_.empty()) {
+            auto& [node, edge] = walk_.back();
+            if (edge == 0 && index_[node] == UNSEEN) {
+                open(node);
+            }
+            const std::vector<std::size_t>& inputs = *inputs_[node];
+            if (edge < inputs.size()) {
+                const std::size_t input = inputs[edge++];
+                if (index_[input] == UNSEEN) {
+                    walk_.emplace_back(input, 0);
+                } else if (on_stack_[input]) {
+                    low_[node] = std::min(low_[node], index_[input]);
+                }
+                continue;
+            }
+            close(node);
+        }
+    }
+
+    void open(std::size_t node) {
+        index_[node] = low_[node] = next_++;
+        stack_.push_back(node);
+        on_stack_[node] = true;
+    }
+
+    void close(std::size_t done) {
+        walk_.pop_back();
+        if (!walk_.empty()) {
+            const std::size_t parent = walk_.back().first;
+            low_[parent] = std::min(low_[parent], low_[done]);
+        }
+        if (low_[done] != index_[done]) {
+            return;
+        }
+        std::vector<std::size_t> component;
+        std::size_t member = UNSEEN;
+        while (member != done) {
+            member = stack_.back();
+            stack_.pop_back();
+            on_stack_[member] = false;
+            component.push_back(member);
+        }
+        std::ranges::sort(component);
+        out_.push_back(std::move(component));
+    }
+
+    std::span<const std::vector<std::size_t>* const> inputs_;
+    std::vector<std::size_t> index_;
+    std::vector<std::size_t> low_;
+    std::vector<bool> on_stack_;
+    std::vector<std::size_t> stack_;
+    // The walk: a node and the next of its inputs to visit.
+    std::vector<std::pair<std::size_t, std::size_t>> walk_;
+    std::vector<std::vector<std::size_t>> out_;
+    std::size_t next_ = 0;
 };
 
 class Checker {
@@ -339,63 +423,15 @@ private:
         return inputs;
     }
 
-    // Tarjan's components, iteratively: each is complete before any that
-    // reads it, so the virtual tags are typed in the order their inputs
-    // need (a cycle is one component).
+    // Each component of the graph of virtual tags, complete before any
+    // that reads it (a cycle is one component).
     [[nodiscard]] std::vector<std::vector<std::size_t>> components() const {
-        constexpr std::size_t UNSEEN = std::numeric_limits<std::size_t>::max();
-        const std::size_t count = virtuals_.size();
-        std::vector<std::size_t> index(count, UNSEEN);
-        std::vector<std::size_t> low(count, 0);
-        std::vector<bool> on_stack(count, false);
-        std::vector<std::size_t> stack;
-        std::vector<std::vector<std::size_t>> out;
-        std::size_t next = 0;
-        // The walk: a node and the next of its inputs to visit.
-        std::vector<std::pair<std::size_t, std::size_t>> walk;
-        for (std::size_t start = 0; start < count; ++start) {
-            if (index[start] != UNSEEN) {
-                continue;
-            }
-            walk.emplace_back(start, 0);
-            while (!walk.empty()) {
-                auto& [node, edge] = walk.back();
-                if (edge == 0 && index[node] == UNSEEN) {
-                    index[node] = low[node] = next++;
-                    stack.push_back(node);
-                    on_stack[node] = true;
-                }
-                const std::vector<std::size_t>& inputs = virtuals_[node].inputs;
-                if (edge < inputs.size()) {
-                    const std::size_t input = inputs[edge++];
-                    if (index[input] == UNSEEN) {
-                        walk.emplace_back(input, 0);
-                    } else if (on_stack[input]) {
-                        low[node] = std::min(low[node], index[input]);
-                    }
-                    continue;
-                }
-                const std::size_t done = node;
-                walk.pop_back();
-                if (!walk.empty()) {
-                    const std::size_t parent = walk.back().first;
-                    low[parent] = std::min(low[parent], low[done]);
-                }
-                if (low[done] == index[done]) {
-                    std::vector<std::size_t> component;
-                    std::size_t member = UNSEEN;
-                    while (member != done) {
-                        member = stack.back();
-                        stack.pop_back();
-                        on_stack[member] = false;
-                        component.push_back(member);
-                    }
-                    std::ranges::sort(component);
-                    out.push_back(std::move(component));
-                }
-            }
+        std::vector<const std::vector<std::size_t>*> inputs;
+        inputs.reserve(virtuals_.size());
+        for (const Virtual& tag : virtuals_) {
+            inputs.push_back(&tag.inputs);
         }
-        return out;
+        return Components(inputs).run();
     }
 
     void type_virtuals() {
@@ -554,8 +590,9 @@ private:
         // text, and every tag has its type: the result is kept.
         const std::string key = site.task + '\0' + std::string(text);
         if (const auto kept = results_.find(key); kept != results_.end()) {
-            if (kept->second) {
-                report(site, *kept->second);
+            const std::optional<TypeError>& kept_error = kept->second;
+            if (kept_error.has_value()) {
+                report(site, kept_error.value());
             }
             return;
         }

@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -292,8 +293,9 @@ std::string run_time_of(std::string_view text) {
         }
         return found;
     };
+    constexpr std::int64_t NORMAL_PERIOD_MS = 100;
     context.task = "normal";
-    context.period_ms = 100;
+    context.period_ms = NORMAL_PERIOD_MS;
     TypeError error;
     const std::optional<ValueType> type = run_time_type(*tree, context, error);
     if (!type) {
