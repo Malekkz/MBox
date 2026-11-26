@@ -415,10 +415,11 @@ TEST(Expand, ExpressionsHaveABudgetOfTheirOwn) {
         "\"1..1000\" }\n    points:\n      - { name: \"p{n}\", address: { "
         "table: holding, register: \"if(n <= 24, 1000 + 2 * (n - 1), 1400 + "
         "2 * (n - 25))\", type: uint16 } }\n";
+    constexpr int DEVICES = 30;
     const auto expanded = [&meter](std::size_t work) {
         return expand_limited(
             {{"templates/meter_a.yaml", meter},
-             {"drivers/modbus/line1.yaml", instances(30)},
+             {"drivers/modbus/line1.yaml", instances(DEVICES)},
              {"system.yaml",
               std::string(SYSTEM) + "limits: { max_tags: 1000000 }\n"}},
             {.work = work});
