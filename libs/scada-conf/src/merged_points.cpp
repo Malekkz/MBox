@@ -520,7 +520,8 @@ private:
         if (value_type != "int64" && value_type != "uint64") {
             return;
         }
-        if (check_integer_scaling(point, value_type, raw) && !raw.empty()) {
+        if (check_integer_scaling(point, value_type, raw) && !raw.empty() &&
+            address) {
             check_scaling_range(point, *address, raw, value_type);
         }
     }
@@ -601,24 +602,24 @@ private:
                             child(address, "fault");
         const bool write_only = text_of(point, "access") == "wo";
         const std::optional<NodeId> write = child_map(address, "write");
-        const std::optional<NodeId> on =
+        const std::optional<NodeId> write_on =
             write ? child_map(*write, "on") : std::nullopt;
-        const std::optional<NodeId> off =
+        const std::optional<NodeId> write_off =
             write ? child_map(*write, "off") : std::nullopt;
         if (shapes) {
             // A double point by shapes reads two bits, on and off, and may
             // read a fault bit (A.2): any one shape alone is not complete
             // (M4 of the review of #149).
             need(address, "the address", {"on", "off"});
-        } else if (!(write_only && on && off)) {
+        } else if (!(write_only && write_on && write_off)) {
             need(address, "the address", {"table"});
         }
         // A write-only point that writes `on` and `off` needs no register of
         // its own when each names its own (A.2, A.5: `{ table, register,
         // value }`).
-        if (write_only && on && off) {
-            need(*on, "write.on", {"table", "register"});
-            need(*off, "write.off", {"table", "register"});
+        if (write_only && write_on && write_off) {
+            need(*write_on, "write.on", {"table", "register"});
+            need(*write_off, "write.off", {"table", "register"});
         } else if (!shapes && !child(address, "parts")) {
             need(address, "the address", {"register"});
         }
@@ -761,10 +762,10 @@ private:
     bool check_value_type(NodeId point, const std::string& raw,
                           const std::string& type) {
         const std::optional<NodeId> address = child_map(point, "address");
-        const NodeId at =
+        const NodeId place =
             child(point, "value_type").value_or(address.value_or(point));
         const auto refuse = [&]() {
-            error(CF_VALUE_TYPE, at,
+            error(CF_VALUE_TYPE, place,
                   quoted_tag() + ": value_type " + type +
                       derived_from(point, raw) + " cannot hold " + raw);
             return false;
