@@ -1250,6 +1250,24 @@ TEST(CheckValue, AKeySplitByAOneOf) {
               std::vector<std::string>{});
 }
 
+// Two joined schemas that give a value the same error give it once; two
+// different errors are both given (S5 of the review of #149).
+TEST(CheckValue, JoinedSchemasGiveEachErrorOnce) {
+    const SchemaSet set = one_schema(
+        R"({"type": "object", "allOf": [)"
+        R"({"properties": {"n": {"type": "integer", "x-scada-type": "integer",)"
+        R"( "maximum": 10}}},)"
+        R"({"properties": {"n": {"type": "integer", "x-scada-type": "integer",)"
+        R"( "maximum": 10}}},)"
+        R"({"properties": {"n": {"type": "integer", "x-scada-type": "integer",)"
+        R"( "maximum": 5}}}]})");
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "7", "n"),
+              Lines{"CF-204: n must be between any and 5"});
+    EXPECT_EQ(value_errors(set, "t.schema.json", {"n"}, "12", "n"),
+              (Lines{"CF-204: n must be between any and 10",
+                     "CF-204: n must be between any and 5"}));
+}
+
 // A schema or a key that gives no rule is a defect of the caller: INTERNAL,
 // never a value taken as valid.
 TEST(CheckValue, AKeyWithoutARuleIsInternal) {

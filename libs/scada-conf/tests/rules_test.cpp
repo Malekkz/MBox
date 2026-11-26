@@ -521,6 +521,40 @@ TEST(Rules, IntegerScalingAtItsEdge) {
                     "scaling; use float64"});
 }
 
+// `is_integer_one` reads a scalar as stage 3 types it: an integer 1 in any
+// form is one; a decimal, a quoted text, another integer is not (M1 and S5
+// of the review of #149).
+TEST(Rules, AnIntegerOneInAnyForm) {
+    struct Row {
+        std::string_view text;
+        ScalarType type;
+        bool one;
+    };
+    const std::vector<Row> rows = {
+        {"1", ScalarType::INTEGER, true},
+        {"0x1", ScalarType::INTEGER, true},
+        {"0x01", ScalarType::INTEGER, true},
+        {"-1", ScalarType::INTEGER, false},
+        {"2", ScalarType::INTEGER, false},
+        {"0", ScalarType::INTEGER, false},
+        {"1.0", ScalarType::DECIMAL, false},
+        {"'1'", ScalarType::STRING, false},
+        {"\"d\"", ScalarType::EXPRESSION, false},
+    };
+    for (const Row& row : rows) {
+        Diagnostics diagnostics;
+        const std::optional<Document> document = parse_yaml(
+            "n: " + std::string(row.text) + "\n", "f.yaml", diagnostics);
+        ASSERT_TRUE(document) << row.text;
+        const std::optional<NodeId> node =
+            document->find(document->root(), "n");
+        ASSERT_TRUE(node) << row.text;
+        ScalarTypes types(*document);
+        types.set(*node, row.type);
+        EXPECT_EQ(is_integer_one(*document, types, *node), row.one) << row.text;
+    }
+}
+
 // A parameter or `repeat` variable named like a reserved word of
 // expressions is CF-212 at its declaration (5.6): `100 + bad` would read
 // the literal BAD.

@@ -2,6 +2,8 @@
 // #149, one test per finding.
 
 #include "expand_cases.h"
+#include "grouped_errors.h"
+#include "scada/conf/diagnostic.h"
 
 #include <gtest/gtest.h>
 
@@ -387,6 +389,124 @@ TEST(MergedPoints, EveryKeyAMergedMapNeeds) {
                   error.empty() ? Lines{} : Lines{std::string(error)})
             << keys;
     }
+}
+
+// The kept limit of the grouping: the diagnostic at the limit is counted,
+// not kept, and a repeated text is dropped (S5 of the review of #149).
+TEST(MergedPoints, TheKeptLimitOfTheGrouping) {
+    const auto diagnostic = [](std::uint16_t code, std::string message) {
+        Diagnostic made;
+        made.code = code;
+        made.location = Location{.file = "f.yaml", .line = 1, .column = 1};
+        made.message = std::move(message);
+        return made;
+    };
+    Diagnostics diagnostics;
+    GroupedErrors grouped(2);
+    grouped.add(diagnostic(204, "a"), {}, "d1", diagnostics);
+    grouped.add(diagnostic(204, "a"), {}, "d1", diagnostics);
+    grouped.add(diagnostic(204, "b"), {}, "d1", diagnostics);
+    grouped.add(diagnostic(204, "c"), {}, "d1", diagnostics);
+    grouped.flush(diagnostics);
+    Report report;
+    diagnostics.move_into(report);
+    ASSERT_EQ(report.errors.size(), 2U);
+    EXPECT_EQ(report.errors[0].message, "a");
+    EXPECT_EQ(report.errors[1].message, "b");
+    EXPECT_EQ(report.error_count, 3U);
+}
+
+// S5: the range of a bit field (one bit, a few, all 64), a product past 64
+// bits, a point refused once, and the derived type of a double point.
+TEST(MergedPoints, BitFieldRangesAndOneErrorAPoint) {
+    const std::vector<std::pair<std::string_view, std::string_view>> rows = {
+        // A 64-bit field of uint64 is uint64's range: never a shift by 64.
+        {"scale: { offset: 1 }, address: { table: input, register: 1, type: "
+         "uint64, field: [0, 63] }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
+         "raw x gain + offset can exceed uint64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        // The product overflows 64 bits.
+        {"scale: { gain: 2 }, address: { table: input, register: 1, type: "
+         "uint64 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
+         "raw x gain + offset can exceed uint64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        // A field's range, not its raw type's: 15 x 2^59 fits int64.
+        {"scale: { gain: 576460752303423488 }, address: { table: input, "
+         "register: 1, type: uint16, field: [0, 3] }",
+         ""},
+        {"scale: { gain: 576460752303423488 }, address: { table: input, "
+         "register: 1, type: uint16 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
+         "raw x gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        // A field of one bit: 0 to 1.
+        {"scale: { offset: 9223372036854775807 }, address: { table: input, "
+         "register: 1, type: uint16, field: [5, 5] }",
+         "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
+         "raw x gain + offset can exceed int64\n  from template "
+         "templates/meter_a.yaml:5:23 (point p)"},
+        {"scale: { offset: 9223372036854775806 }, address: { table: input, "
+         "register: 1, type: uint16, field: [5, 5] }",
+         ""},
+        // One error for a point refused: no CF-517 after its CF-504.
+        {"kind: counter, enum: { 0: a, 1: b }, scale: { gain: 0.5 }, "
+         "address: { table: input, register: 1, type: float32 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "a counter cannot hold float32\n  from template "
+         "templates/meter_a.yaml:5:22 (point p)"},
+        {"kind: double_point, states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { "
+         "table: input, register: 1, type: string, length: 4 }",
+         "drivers/modbus/line1.yaml:7:11: error CF-504: \"ps1.m1.p\": "
+         "value_type int64 (derived from kind double_point) cannot hold "
+         "string\n  from template templates/meter_a.yaml:5:81 (point p)"},
+    };
+    for (const auto& [keys, error] : rows) {
+        EXPECT_EQ(point(keys),
+                  error.empty() ? Lines{} : Lines{std::string(error)})
+            << keys;
+    }
+}
+
+// A point refused by CF-504 gets no CF-517 too, when merging brought the
+// scaling (S5 of the review of #149).
+TEST(MergedPoints, OneErrorForARefusedPoint) {
+    EXPECT_EQ(meter("  - { name: p, value_type: int64, address: { table: "
+                    "input, register: 1, type: float32 } }\n",
+                    "    overrides: { p: { scale: { gain: 0.5 } } }\n"),
+              Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                    "\"ps1.m1.p\": value_type int64 cannot hold float32\n"
+                    "  from template templates/meter_a.yaml:5:28 (point p)"});
+}
+
+// The keys of an io address by its channel's backend (B.2, B.3).
+TEST(MergedPoints, TheKeysOfAnIoBackend) {
+    const auto io = [](std::string_view backend, std::string_view address) {
+        return errors(expand(
+            {{"templates/sensor_a.yaml",
+              "template: sensor_a\nprotocol: io\npoints:\n"
+              "  - { name: level, address: " +
+                  std::string(address) + " }\n"},
+             {"drivers/io/local.yaml",
+              "channel: { name: local, backend: " + std::string(backend) +
+                  ", device: adc0 }\n"
+                  "devices:\n  - { name: ps1.s1, template: sensor_a }\n"}}));
+    };
+    EXPECT_EQ(io("iio", "{ channel: in_voltage0 }"), Lines{});
+    EXPECT_EQ(io("iio", "{ filter: 1s }"),
+              Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
+                    "\"ps1.s1.level\" needs channel\n  from template "
+                    "templates/sensor_a.yaml:4:29 (point level)"});
+    EXPECT_EQ(io("simulator", "{ profile: { type: ramp } }"), Lines{});
+    EXPECT_EQ(io("simulator", "{ filter: 1s }"),
+              Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
+                    "\"ps1.s1.level\" needs profile\n  from template "
+                    "templates/sensor_a.yaml:4:29 (point level)"});
+    EXPECT_EQ(io("simulator", "{ profile: { period: 10 } }"),
+              Lines{"drivers/io/local.yaml:3:13: error CF-202: the profile of "
+                    "\"ps1.s1.level\" needs type\n  from template "
+                    "templates/sensor_a.yaml:4:40 (point level)"});
 }
 
 // S5: an enumeration a template names may be in enums.yaml.

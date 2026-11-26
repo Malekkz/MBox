@@ -163,11 +163,6 @@ std::optional<std::pair<Wide, Wide>> raw_range(std::string_view raw,
     return std::nullopt;
 }
 
-// True for a raw type of integers: `bool`, the integer types, `mod10k`.
-bool is_integer_raw(std::string_view raw) {
-    return raw_range(raw, 1).has_value();
-}
-
 bool is_signed(std::string_view raw) noexcept {
     return raw.starts_with("int");
 }
@@ -738,10 +733,6 @@ private:
         }
         if (text_of(point, "kind") == "double_point") {
             return " (derived from kind double_point)";
-        }
-        if (!raw.empty() && is_integer_raw(raw) &&
-            (child(point, "exponent_from") || child(point, "scale"))) {
-            return " (derived from the raw type " + raw + " and the scaling)";
         }
         return raw.empty() ? " (derived)"
                            : " (derived from the raw type " + raw + ")";
