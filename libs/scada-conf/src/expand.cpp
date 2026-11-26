@@ -6,7 +6,6 @@
 
 #include "config_eval.h"
 #include "expression_site.h"
-#include "name_pattern.h"
 #include "expression_types.h"
 #include "grouped_errors.h"
 #include "name_pattern.h"

@@ -262,11 +262,11 @@ std::string run_time_of(std::string_view text) {
         return "syntax: " + syntax.message;
     }
     const std::vector<std::pair<std::string_view, TagRead>> tags = {
-        {"a.b", TagRead::BOOL},        {"a.i", TagRead::INT},
-        {"a.r", TagRead::REAL},        {"a.s", TagRead::STRING},
-        {"v.x", TagRead::UNKNOWN},     {"q", TagRead::INT},
-        {"q.quality", TagRead::INT},   {"inv1.power", TagRead::REAL},
-        {"inv2.power", TagRead::INT},  {"f1", TagRead::BOOL},
+        {"a.b", TagRead::BOOL},       {"a.i", TagRead::INT},
+        {"a.r", TagRead::REAL},       {"a.s", TagRead::STRING},
+        {"v.x", TagRead::UNKNOWN},    {"q", TagRead::INT},
+        {"q.quality", TagRead::INT},  {"inv1.power", TagRead::REAL},
+        {"inv2.power", TagRead::INT}, {"f1", TagRead::BOOL},
         {"f2", TagRead::BOOL}};
     RunTimeContext context;
     context.tag = [&tags](std::string_view name) -> std::optional<TagRead> {

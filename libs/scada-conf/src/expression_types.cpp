@@ -31,12 +31,12 @@ constexpr std::uint16_t CF_WINDOW = 524;
 constexpr std::int64_t MAX_WINDOW_CYCLES = 10'000;
 
 // The aggregates of 5.6: one pattern, or two or more tag references.
-constexpr std::array<std::string_view, 5> AGGREGATES = {
-    "sum", "avg", "min_of", "max_of", "count_good"};
+constexpr std::array<std::string_view, 5> AGGREGATES = {"sum", "avg", "min_of",
+                                                        "max_of", "count_good"};
 
 // The time functions of 5.6: a tag reference and a TIME literal.
-constexpr std::array<std::string_view, 3> TIME_FUNCTIONS = {
-    "moving_avg", "rate", "totalise"};
+constexpr std::array<std::string_view, 3> TIME_FUNCTIONS = {"moving_avg",
+                                                            "rate", "totalise"};
 
 bool is_number(ValueType type) noexcept {
     return type == ValueType::INT || type == ValueType::REAL;
@@ -331,8 +331,8 @@ private:
               std::pair{std::string_view(".age"), ValueType::TIME}}) {
             if (name.size() > suffix.size() && name.ends_with(suffix)) {
                 attribute = type;
-                base = std::string_view(name).substr(0, name.size() -
-                                                            suffix.size());
+                base = std::string_view(name).substr(
+                    0, name.size() - suffix.size());
             }
         }
         const std::optional<TagRead> read = run_time_->tag(name);
@@ -397,8 +397,8 @@ private:
         }
         const std::string& name = tree_->nodes.at(node.children[0]).text;
         if (is_name_pattern(name)) {
-            return mismatch(node, "tag names one tag, not the pattern " +
-                                      quote_text(name));
+            return mismatch(
+                node, "tag names one tag, not the pattern " + quote_text(name));
         }
         const std::optional<TagRead> read = run_time_->tag(name);
         if (!read) {
@@ -434,8 +434,8 @@ private:
         }
         const ExprNode& window = tree_->nodes.at(node.children[1]);
         if (window.op != ExprOp::TIME) {
-            return mismatch(node, node.text +
-                                      " needs a TIME literal as argument 2");
+            return mismatch(node,
+                            node.text + " needs a TIME literal as argument 2");
         }
         const std::int64_t period = run_time_->period_ms;
         if (!run_time_->task.empty() && period > 0 &&
@@ -444,8 +444,9 @@ private:
              (window.integer / MAX_WINDOW_CYCLES == period &&
               window.integer % MAX_WINDOW_CYCLES != 0))) {
             return fail(CF_WINDOW, window,
-                        node.text + ": the window must be 1 to 10000 cycles "
-                                    "of task " +
+                        node.text +
+                            ": the window must be 1 to 10000 cycles "
+                            "of task " +
                             quote_text(run_time_->task));
         }
         return ValueType::REAL;
@@ -461,9 +462,9 @@ private:
             const std::vector<TagRead> reads =
                 run_time_->matching(pattern.text);
             if (reads.empty()) {
-                return fail(CF_NO_MATCH, pattern,
-                            "pattern " + quote_text(pattern.text) +
-                                " matches no tag");
+                return fail(
+                    CF_NO_MATCH, pattern,
+                    "pattern " + quote_text(pattern.text) + " matches no tag");
             }
             for (const TagRead read : reads) {
                 if (read == TagRead::STRING) {

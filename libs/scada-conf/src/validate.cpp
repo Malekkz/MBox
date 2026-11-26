@@ -1,6 +1,7 @@
 #include "scada/conf/validate.h"
 
 #include "merged_points.h"
+#include "runtime_expressions.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
@@ -13,7 +14,6 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
-#include "runtime_expressions.h"
 #include "tag_names.h"
 #include "validate_internal.h"
 

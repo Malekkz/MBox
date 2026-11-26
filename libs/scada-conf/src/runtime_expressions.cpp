@@ -86,8 +86,8 @@ std::string derived_value_type(ValueType type) {
 // The part of a name pattern before its first wildcard: every name it
 // matches starts with it.
 std::string_view pattern_prefix(std::string_view pattern) {
-    return pattern.substr(0, std::min(pattern.find_first_of("*?"),
-                                      pattern.size()));
+    return pattern.substr(
+        0, std::min(pattern.find_first_of("*?"), pattern.size()));
 }
 
 // The scalar at `key` of `map` in `document`, or nothing.
@@ -176,8 +176,8 @@ private:
     // --- Tasks --------------------------------------------------------------
 
     void read_tasks() {
-        periods_ = {{"fast", FAST_MS}, {"normal", NORMAL_MS},
-                    {"slow", SLOW_MS}};
+        periods_ = {
+            {"fast", FAST_MS}, {"normal", NORMAL_MS}, {"slow", SLOW_MS}};
         for (const CheckedFile& file : files_) {
             if (file.source->path_class.type != FileType::TASKS) {
                 continue;
@@ -253,7 +253,8 @@ private:
                 continue;
             }
             const Document& document = *file.document;
-            for (const NodeId tag : items_at(document, document.root(), "tags")) {
+            for (const NodeId tag :
+                 items_at(document, document.root(), "tags")) {
                 const std::optional<NodeId> name =
                     scalar_at(document, tag, "name");
                 const std::optional<NodeId> expr =
@@ -268,14 +269,15 @@ private:
                     .file = &file,
                     .name_node = *name,
                     .value_type = scalar_at(document, tag, "value_type"),
-                    .site = Site{.document = &document,
-                                 .scalar = *expr,
-                                 .task = task.empty() ? std::string(DEFAULT_TASK)
-                                                      : std::move(task),
-                                 .needs_bool = false,
-                                 .expanded = false,
-                                 .device = {},
-                                 .detail = {}},
+                    .site =
+                        Site{.document = &document,
+                             .scalar = *expr,
+                             .task = task.empty() ? std::string(DEFAULT_TASK)
+                                                  : std::move(task),
+                             .needs_bool = false,
+                             .expanded = false,
+                             .device = {},
+                             .detail = {}},
                     .tree = parse(document, *expr),
                     .inputs = {}};
                 // Two tags of one name are CF-302 (D-116): the first counts.
@@ -315,9 +317,8 @@ private:
                 add_named(node.text);
                 for (const std::string_view suffix : {".quality", ".age"}) {
                     if (node.text.ends_with(suffix)) {
-                        add_named(std::string_view(node.text)
-                                      .substr(0, node.text.size() -
-                                                     suffix.size()));
+                        add_named(std::string_view(node.text).substr(
+                            0, node.text.size() - suffix.size()));
                     }
                 }
             } else if (node.op == ExprOp::PATTERN) {
@@ -458,7 +459,8 @@ private:
         switch (file.source->path_class.type) {
             case FileType::TAGS:
                 for (const NodeId tag : items_at(document, root, "tags")) {
-                    for (const NodeId alarm : items_at(document, tag, "alarms")) {
+                    for (const NodeId alarm :
+                         items_at(document, tag, "alarms")) {
                         check_alarm(document, alarm, {}, {});
                     }
                 }
@@ -502,14 +504,14 @@ private:
             if (!scalar) {
                 continue;
             }
-            check(Site{.document = &document,
-                       .scalar = *scalar,
-                       .task = {},
-                       .needs_bool = true,
-                       .expanded = &document == &tree_->document,
-                       .device = device,
-                       .detail = point.empty() ? std::string()
-                                               : "point " + point});
+            check(Site{
+                .document = &document,
+                .scalar = *scalar,
+                .task = {},
+                .needs_bool = true,
+                .expanded = &document == &tree_->document,
+                .device = device,
+                .detail = point.empty() ? std::string() : "point " + point});
         }
     }
 
@@ -521,14 +523,16 @@ private:
             for (const NodeId device : items_at(document, channel, "devices")) {
                 const std::string device_name =
                     text_at(document, device, "name");
-                for (const NodeId point : items_at(document, device, "points")) {
+                for (const NodeId point :
+                     items_at(document, device, "points")) {
                     const std::string point_name =
                         text_at(document, point, "name");
                     for (const NodeId alarm :
                          items_at(document, point, "alarms")) {
                         check_alarm(document, alarm, device_name, point_name);
                     }
-                    const std::optional<NodeId> bits = document.find(point, "bits");
+                    const std::optional<NodeId> bits =
+                        document.find(point, "bits");
                     if (!bits || document.kind(*bits) != NodeKind::MAP) {
                         continue;
                     }
