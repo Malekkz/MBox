@@ -29,8 +29,12 @@ public:
     // instance, the place the diagnostic is at, it is counted with
     // `instance`, the name of that instance, and the first names the others
     // when flushed. A diagnostic of the same text as one kept is dropped.
+    // With `groupable` false it is never a cause: an error that the
+    // instance's own file contributes to is its own (item 1 of the delta
+    // review of #149).
     void add(Diagnostic diagnostic, std::string_view key,
-             std::string_view instance, Diagnostics& diagnostics);
+             std::string_view instance, Diagnostics& diagnostics,
+             bool groupable = true);
 
     // Gives the kept diagnostics to `diagnostics` in the order they came,
     // the first of a cause with "(and N more instances: <the first 10>)",

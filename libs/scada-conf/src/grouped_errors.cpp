@@ -20,11 +20,12 @@ constexpr std::size_t NAMED_INSTANCES = 10;
 }  // namespace
 
 void GroupedErrors::add(Diagnostic diagnostic, std::string_view key,
-                        std::string_view instance, Diagnostics& diagnostics) {
+                        std::string_view instance, Diagnostics& diagnostics,
+                        bool groupable) {
     // A cause is looked up before any text is kept, so that one met again
     // keeps nothing (D2 of the delta review of #146).
     std::string cause;
-    if (!diagnostic.notes.empty() &&
+    if (groupable && !diagnostic.notes.empty() &&
         diagnostic.notes.front().kind == "template") {
         const Location& site = diagnostic.notes.front().location;
         cause = std::to_string(diagnostic.code);

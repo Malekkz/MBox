@@ -49,7 +49,7 @@ TEST(MergedPoints, ADivisorOfOneInAnyForm) {
                     "}\n"),
               Lines{"drivers/modbus/line1.yaml:7:11: error CF-516: "
                     "\"ps1.m1.p\": raw x gain + offset can exceed int64\n"
-                    "  from template templates/meter_a.yaml:5:23 (point p)"});
+                    "  from template templates/meter_a.yaml:5:49 (point p)"});
     EXPECT_EQ(meter("  - { name: p, value_type: int64, scale: { divide_by: "
                     "1 }, address: { table: input, register: 10, type: "
                     "int32 } }\n"),
@@ -165,6 +165,60 @@ TEST(MergedPoints, OneCauseOneError) {
                     "params: { k: { type: int, default: 1 } }\n"),
               Lines{"drivers/modbus/line1.yaml:11:37: error CF-204: "
                     "scale.divide_by must be between 1 and any"});
+}
+
+// Item 1 of the delta review: an instance that fails through its own
+// override is its own error, at its line, not one more instance of a
+// template's cause; one whose map holds a key the instance gave is not
+// grouped either.
+TEST(MergedPoints, AnInstancesOwnOverrideIsItsOwnError) {
+    std::string devices;
+    for (int unit = 1; unit <= 3; ++unit) {
+        devices += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   ", params: { k: 4294967297 } }\n";
+    }
+    for (int unit = 5; unit <= 6; ++unit) {
+        devices += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   ", overrides: { q: { scale: { gain: 4294967297 } } } }\n";
+    }
+    EXPECT_EQ(
+        errors(expand(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\n"
+              "params: { k: { type: int, default: 1 } }\npoints:\n"
+              "  - { name: q, scale: { gain: \"k\" }, address: { table: "
+              "input, register: 1, type: int32 } }\n"},
+             {"drivers/modbus/line1.yaml", channel(devices)}})),
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-516: \"ps1.m1.q\": "
+               "raw x gain + offset can exceed int64 (and 2 more instances: "
+               "ps1.m2, ps1.m3)\n  from template templates/meter_a.yaml:5:31 "
+               "(point q)",
+               "drivers/modbus/line1.yaml:10:85: error CF-516: \"ps1.m5.q\": "
+               "raw x gain + offset can exceed int64",
+               "drivers/modbus/line1.yaml:11:85: error CF-516: \"ps1.m6.q\": "
+               "raw x gain + offset can exceed int64"}));
+    // The template's address lacks `length` only because each instance
+    // made it a string: two errors, one each.
+    std::string strings;
+    for (int unit = 1; unit <= 2; ++unit) {
+        strings += "  - { name: ps1.m" + std::to_string(unit) +
+                   ", template: meter_a, unit_id: " + std::to_string(unit) +
+                   ", overrides: { q: { address: { type: string } } } }\n";
+    }
+    EXPECT_EQ(
+        errors(expand(
+            {{"templates/meter_a.yaml",
+              "template: meter_a\nprotocol: modbus\npoints:\n"
+              "  - { name: q, address: { table: input, register: 1 } }\n"},
+             {"drivers/modbus/line1.yaml", channel(strings)}})),
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-202: the address of "
+               "\"ps1.m1.q\" needs length\n  from template "
+               "templates/meter_a.yaml:4:25 (point q)",
+               "drivers/modbus/line1.yaml:8:13: error CF-202: the address of "
+               "\"ps1.m2.q\" needs length\n  from template "
+               "templates/meter_a.yaml:4:25 (point q)"}));
 }
 
 // M7: the read ranges' ends and a health rule's bit field are evaluated
@@ -311,27 +365,27 @@ TEST(MergedPoints, TheEdgesOfAnIntegerScaling) {
          "type: int32 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
          "gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:31 (point p)"},
         {"scale: { offset: -1 }, address: { table: input, register: 1, type: "
          "int64 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
          "gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:33 (point p)"},
         {"value_type: uint64, scale: { gain: -1 }, address: { table: input, "
          "register: 1, type: uint16 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
          "gain + offset can exceed uint64\n  from template "
-         "templates/meter_a.yaml:5:43 (point p)"},
+         "templates/meter_a.yaml:5:51 (point p)"},
         {"scale: { gain: 2 }, address: { table: input, register: 1, type: "
          "int64, field: [0, 63] }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
          "gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:31 (point p)"},
         {"scale: { gain: 1000 }, address: { table: input, register: 1, type: "
          "mod10k, count: 4 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": raw x "
          "gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:31 (point p)"},
         {"scale: { gain: 100 }, address: { table: input, register: 1, type: "
          "mod10k, count: 4 }",
          ""},
@@ -427,13 +481,13 @@ TEST(MergedPoints, BitFieldRangesAndOneErrorAPoint) {
          "uint64, field: [0, 63] }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
          "raw x gain + offset can exceed uint64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:33 (point p)"},
         // The product overflows 64 bits.
         {"scale: { gain: 2 }, address: { table: input, register: 1, type: "
          "uint64 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
          "raw x gain + offset can exceed uint64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:31 (point p)"},
         // A field's range, not its raw type's: 15 x 2^59 fits int64.
         {"scale: { gain: 576460752303423488 }, address: { table: input, "
          "register: 1, type: uint16, field: [0, 3] }",
@@ -442,13 +496,13 @@ TEST(MergedPoints, BitFieldRangesAndOneErrorAPoint) {
          "register: 1, type: uint16 }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
          "raw x gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:31 (point p)"},
         // A field of one bit: 0 to 1.
         {"scale: { offset: 9223372036854775807 }, address: { table: input, "
          "register: 1, type: uint16, field: [5, 5] }",
          "drivers/modbus/line1.yaml:7:11: error CF-516: \"ps1.m1.p\": "
          "raw x gain + offset can exceed int64\n  from template "
-         "templates/meter_a.yaml:5:23 (point p)"},
+         "templates/meter_a.yaml:5:33 (point p)"},
         {"scale: { offset: 9223372036854775806 }, address: { table: input, "
          "register: 1, type: uint16, field: [5, 5] }",
          ""},

@@ -1447,12 +1447,12 @@ TEST(MergedPoints, IntegerScalingRanges) {
                      "table: input, register: 10, type: int32 } }\n"),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-516: "
                      "\"ps1.m1.p\": raw x gain + offset can exceed int64\n"
-                     "  from template templates/meter_a.yaml:4:23 (point p)"}));
+                     "  from template templates/meter_a.yaml:4:31 (point p)"}));
     EXPECT_EQ(merged("  - { name: p, scale: { offset: 1 }, address: { table: "
                      "input, register: 10, type: uint64 } }\n"),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-516: "
                      "\"ps1.m1.p\": raw x gain + offset can exceed uint64\n"
-                     "  from template templates/meter_a.yaml:4:23 (point p)"}));
+                     "  from template templates/meter_a.yaml:4:33 (point p)"}));
     EXPECT_EQ(merged("  - { name: p, value_type: int64, address: { table: "
                      "input, register: 10, type: uint64 } }\n"),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "

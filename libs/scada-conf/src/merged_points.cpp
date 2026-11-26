@@ -251,7 +251,37 @@ private:
 
     void error(std::uint16_t code, NodeId node, std::string message) {
         report(expanded_diagnostic(*tree_, code, node, std::move(message),
-                                   detail()));
+                                   detail()),
+               node);
+    }
+
+    // True if `node`, or a key or value below it, was written in its
+    // instance's own file (an override, an instance point): an error placed
+    // there is that instance's own, never one cause with a template's (item
+    // 1 of the delta review of #149).
+    [[nodiscard]] bool has_own_part(NodeId node) const {
+        const std::uint32_t instance = node < tree_->instance_of.size()
+                                           ? tree_->instance_of[node]
+                                           : ExpandedTree::NO_INSTANCE;
+        if (instance < tree_->instances.size() &&
+            document_->location(node).file ==
+                tree_->instances[instance].file) {
+            return true;
+        }
+        switch (document_->kind(node)) {
+            case NodeKind::MAP:
+                return std::ranges::any_of(
+                    document_->entries(node), [this](const Entry& entry) {
+                        return has_own_part(entry.key) ||
+                               has_own_part(entry.value);
+                    });
+            case NodeKind::SEQUENCE:
+                return std::ranges::any_of(
+                    document_->items(node),
+                    [this](NodeId item) { return has_own_part(item); });
+            default:
+                return false;
+        }
     }
 
     // The note's detail: the point, or the device's own key (S2 of the
@@ -262,14 +292,15 @@ private:
 
     // One cause met at many instances is one error (M6 of the review of
     // #149, D-114): its key is the message without the instance's name.
-    void report(Diagnostic diagnostic) {
+    void report(Diagnostic diagnostic, NodeId placed) {
         std::string key = diagnostic.message;
         const std::string own = "\"" + device_name_ + ".";
         for (std::size_t at = key.find(own); at != std::string::npos;
              at = key.find(own, at + 1)) {
             key.replace(at, own.size(), "\"");
         }
-        grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_);
+        grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_,
+                     !has_own_part(placed));
     }
 
     // The tag in a message, whole (S2 of the review of #149): a tag is at
@@ -424,7 +455,8 @@ private:
             computed_failed_ = true;
             report(expanded_diagnostic(*tree_, CF_OUT_OF_RANGE,
                                        document_->items(field)[0],
-                                       std::move(*message), detail()));
+                                       std::move(*message), detail()),
+                   field);
         }
     }
 
@@ -491,7 +523,8 @@ private:
         for (const ValueError& error : result->second) {
             computed_failed_ = true;
             report(expanded_diagnostic(*tree_, error.code, node, error.message,
-                                       detail()));
+                                       detail()),
+                   node);
         }
     }
 
@@ -539,7 +572,7 @@ private:
         // Only a name a template wrote: the instance's own names are the
         // reference check's.
         if (!diagnostic.notes.empty()) {
-            report(diagnostic);
+            report(diagnostic, *name);
         }
     }
 
@@ -871,6 +904,20 @@ private:
                     .overflow = false};
     }
 
+    // Where CF-516 is placed: at the factor that makes the range, `gain` or
+    // `offset`, the one the instance wrote first, so that an instance's own
+    // override is shown at its line (item 1 of the delta review of #149).
+    [[nodiscard]] NodeId factor_at(NodeId scale) const {
+        const std::optional<NodeId> gain = child(scale, "gain");
+        const std::optional<NodeId> offset = child(scale, "offset");
+        for (const std::optional<NodeId>& factor : {gain, offset}) {
+            if (factor && has_own_part(*factor)) {
+                return *factor;
+            }
+        }
+        return gain.value_or(offset.value_or(scale));
+    }
+
     // CF-504 or CF-516 (4.7): every raw value, times `gain`, plus `offset`,
     // must fit the integer value type. Without a scaling, a raw type the
     // value type cannot hold is CF-504.
@@ -890,7 +937,7 @@ private:
             }
             if (scale) {
                 error(
-                    CF_SCALING_RANGE, *scale,
+                    CF_SCALING_RANGE, factor_at(*scale),
                     quoted_tag() + ": raw x gain + offset can exceed " + type);
             } else {
                 const std::optional<NodeId> written =
