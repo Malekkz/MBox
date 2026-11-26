@@ -2620,3 +2620,20 @@ Consequences:
 - Slice 5b of #104 (the `sys.proc` tags of a driver's main thread) and the tag-set generator of #101 can build on the 1.1 rule.
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
+
+## D-145: Drivers set SUBSTITUTED (tag database contract 1.1)
+Date: 2026-11-26
+Phase / issue: 2, #154 (P2-15); follows #151 (D-143)
+Status: for review by a person (contract change: driver interface contract 0.7).
+
+Context: tag database contract 1.1, section 6, gives SUBSTITUTED the meaning that ruling R-6 of the driver interface contract asked for: a value substituted by configuration, and a value the device reports as forced, besides one entered by a person. The driver interface contract 0.6 and `libscada-driver` held the flag back "until tag database 1.1" (decision D-131: device flags masked to OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST).
+
+Decision:
+- `on_invalid: substitute` writes the configured value UNCERTAIN with SUBSTITUTED (`SUBSTITUTED_MARK` in `sample_processing.cpp`).
+- `DEVICE_FLAGS_MASK` takes SUBSTITUTED, so that a protocol's mapping of a NO_VALUE or DEVICE_INVALID answer keeps it on a value the device reports as forced. The configuration cannot give it: the point schema allows only OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST in a marker's flags and a `quality_from` map (CS 4.7), so the wider mask changes nothing for them. This replaces the last point of D-131 on the mask; the rest of D-131 stands. `keep_last` stays without SUBSTITUTED (contract 5.2).
+- The driver interface contract goes to 0.7: it cites tag database 1.1, 5.2 states the rule without "until 1.1", R-6 says it is in effect, and 2.5 no longer names TD 1.1 for the wake-only form of #116, which 1.1 does not have.
+- The golden vector of `substitute` (`tests/golden/driver-vectors.txt`, shared with #105 and #106) expects SUBSTITUTED,LOCAL_TIME.
+
+Reason: the code and the contracts follow tag database 1.1; nothing read the flag from a driver before.
+
+Consequences: on `main` no code of `libscada-driver` writes a `TagWrite` into the tag database yet; the writer of the driver process is in PR 150 (`tag_writer.*`). The acceptance of #154 "through real tags" therefore needs that writer and its process tests, which this change does not touch; the tests here stop at the `TagWrite` that the framework hands to the writer.

@@ -33,6 +33,9 @@ constexpr std::uint16_t flag(QualityFlag value) noexcept {
 
 constexpr QualityMark GOOD_MARK{};
 constexpr QualityMark UNCERTAIN_MARK{.quality = Quality::UNCERTAIN};
+constexpr QualityMark SUBSTITUTED_MARK{
+    .quality = Quality::UNCERTAIN,
+    .flags = tag::to_raw(QualityFlag::SUBSTITUTED)};
 
 // The worse of two marks: the higher quality value, the union of flags
 // (CS 4.7: "The worst result of all rules ... is the tag's quality").
@@ -644,12 +647,13 @@ bool apply_markers(Work& work) noexcept {
                 hold_last(work, GOOD_MARK);
                 break;
             case InvalidAction::SUBSTITUTE:
-                // UNCERTAIN; SUBSTITUTED only from tag database 1.1
-                // (contract 5.2, R-6 depends on #89).
+                // UNCERTAIN with SUBSTITUTED: a value substituted by
+                // configuration (contract 5.2, R-6; tag database contract
+                // 1.1, section 6).
                 work.new_value = true;
                 work.from_device = true;
                 work.value = marker.substitute;
-                work.mark = UNCERTAIN_MARK;
+                work.mark = SUBSTITUTED_MARK;
                 break;
         }
         return true;

@@ -36,16 +36,18 @@ struct QualityMark {
 // The flags a device may give a value, through a protocol's mapping of a
 // NO_VALUE or DEVICE_INVALID answer, an invalid marker or a `quality_from`
 // map (driver interface contract 5.2, table of outcomes; CS 4.7). Every
-// incoming mark is masked to these. SUBSTITUTED joins them with tag
-// database 1.1 (contract 5.2, R-6 depends on #89); STALE, COMM_FAIL,
-// NOT_INIT, LOCAL_TIME and TIME_UNCERTAIN are set by the framework itself,
+// incoming mark is masked to these. SUBSTITUTED is a value the device
+// reports as forced (contract 5.2, R-6; tag database contract 1.1, section
+// 6); STALE, COMM_FAIL, NOT_INIT, LOCAL_TIME and TIME_UNCERTAIN are set by
+// the framework itself,
 // OWNER_DOWN is never stored and RESTORED is the library's (tag database
 // contract 6, 6.2, 6.3).
 inline constexpr std::uint16_t DEVICE_FLAGS_MASK =
     tag::to_raw(tag::QualityFlag::OUT_OF_RANGE) |
     tag::to_raw(tag::QualityFlag::OVERFLOW) |
     tag::to_raw(tag::QualityFlag::BLOCKED) |
-    tag::to_raw(tag::QualityFlag::TEST);
+    tag::to_raw(tag::QualityFlag::TEST) |
+    tag::to_raw(tag::QualityFlag::SUBSTITUTED);
 
 // What a matching invalid marker, or `on_invalid`, does (CS 4.7).
 enum class InvalidAction : std::uint8_t {

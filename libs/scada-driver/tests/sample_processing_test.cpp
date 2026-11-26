@@ -225,11 +225,11 @@ TEST(SampleProcessing, DeviceInvalidMappedBadIsBadWithoutStale) {
 }
 
 TEST(SampleProcessing, IncomingFlagsAreMaskedToWhatADeviceMayGive) {
-    // SUBSTITUTED waits for tag database 1.1; OWNER_DOWN is never stored and
-    // RESTORED is the library's (decision D-131).
-    const std::uint16_t forbidden = flags(
-        {QualityFlag::SUBSTITUTED, QualityFlag::OWNER_DOWN,
-         QualityFlag::RESTORED, QualityFlag::STALE, QualityFlag::NOT_INIT});
+    // OWNER_DOWN is never stored and RESTORED is the library's (decision
+    // D-131); STALE and NOT_INIT are the framework's.
+    const std::uint16_t forbidden =
+        flags({QualityFlag::OWNER_DOWN, QualityFlag::RESTORED,
+               QualityFlag::STALE, QualityFlag::NOT_INIT});
     PointRules rules = int_rules();
     rules.max_age_ns = MAX_AGE_S * SECOND;
     rules.quality_rules.push_back(QualityRule{
@@ -257,9 +257,38 @@ TEST(SampleProcessing, IncomingFlagsAreMaskedToWhatADeviceMayGive) {
                                      .flags = forbidden}},
                   3 * SECOND)
             .tag;
-    EXPECT_FALSE(has(invalid.flags, QualityFlag::SUBSTITUTED));
     EXPECT_FALSE(has(invalid.flags, QualityFlag::OWNER_DOWN));
     EXPECT_FALSE(has(invalid.flags, QualityFlag::RESTORED));
+}
+
+// Contract 5.2, R-6, with tag database contract 1.1, section 6 (#154): a
+// value the device reports as forced keeps SUBSTITUTED from the protocol's
+// mapping of the answer.
+TEST(SampleProcessing, AValueForcedAtTheDeviceIsSubstituted) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    Point point(rules);
+    (void)point.value(1, SECOND);
+    const auto forced_mark = [](Quality quality) {
+        return QualityMark{.quality = quality,
+                           .flags = flags({QualityFlag::SUBSTITUTED})};
+    };
+    const TagWrite invalid =
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = forced_mark(Quality::UNCERTAIN)},
+                  2 * SECOND)
+            .tag;
+    EXPECT_EQ(invalid.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(invalid.flags, QualityFlag::SUBSTITUTED));
+    const TagWrite no_value =
+        point
+            .feed(RawSample{.outcome = Outcome::NO_VALUE,
+                            .mark = forced_mark(Quality::BAD)},
+                  3 * SECOND)
+            .tag;
+    EXPECT_EQ(no_value.quality, Quality::BAD);
+    EXPECT_TRUE(has(no_value.flags, QualityFlag::SUBSTITUTED));
 }
 
 TEST(SampleProcessing, CommFailIsBadCommFailAndKeepsTheValue) {

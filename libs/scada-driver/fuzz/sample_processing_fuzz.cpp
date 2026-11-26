@@ -5,7 +5,7 @@
 // behaviour either. Each input is a header, a sequence of samples and a
 // string. Invariants that abort, so the fuzzer reports them:
 // - every write has a quality and flags of the tag database (tag database
-//   contract 6), never OWNER_DOWN, RESTORED or SUBSTITUTED (contract 5.2);
+//   contract 6), never OWNER_DOWN or RESTORED (contract 5.2);
 // - a STRING value is at most 250 bytes of well-formed UTF-8;
 // - a GOOD or UNCERTAIN FLOAT64 value is finite;
 // - a write conversion that succeeds gives a pattern within its width, and
@@ -213,8 +213,7 @@ RawValue raw_from(std::span<const std::uint8_t> bytes,
 void check(const TagWrite& write) {
     constexpr std::uint16_t NEVER =
         scada::tag::to_raw(QualityFlag::OWNER_DOWN) |
-        scada::tag::to_raw(QualityFlag::RESTORED) |
-        scada::tag::to_raw(QualityFlag::SUBSTITUTED);
+        scada::tag::to_raw(QualityFlag::RESTORED);
     if (!scada::tag::quality_from_raw(scada::tag::to_raw(write.quality))
              .has_value() ||
         !scada::tag::quality_flags_valid(write.flags) ||

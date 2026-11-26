@@ -2,9 +2,9 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.6 |
+| Contract version | 0.7 |
 | Status | Accepted for phase 2 implementation; becomes 1.0 when phase 2 passes its acceptance tests. Ruled by the product owner on 2026-11-23 (section 18; issue #99, P2-02) |
-| Implements | Reference architecture 1.2, sections 6, 8.1 and 14.4; tag database contract 1.0, sections 6.3, 9 and 9.5 |
+| Implements | Reference architecture 1.2, sections 6, 8.1 and 14.4; tag database contract 1.1, sections 6, 6.3, 9 and 9.5 |
 | Owners of this contract | `libscada-driver`; every `scada-drv-<protocol>` and `scada-io` |
 | Meets | Configuration schemas contract (`config-schemas.md`, #98), at the points of section 17 |
 
@@ -40,7 +40,7 @@ Its findings are described here generically; every example is invented.
   code (CF-, CW-), in its table of shared keys (CS 4.10) and its section 10.
   This contract cites keys by name and defines behaviour only. Where this contract names a default, it is CS's default restated,
   and CS wins if the two differ.
-- **TD** is the tag database contract (`tag-database.md`), version 1.0. Its
+- **TD** is the tag database contract (`tag-database.md`), version 1.1. Its
   layout version 1 is frozen (TD 14.1): nothing here changes a shared
   structure, a stored enumeration, a quality flag or a limit that readers
   validate. Where the survey asked for one, this contract gives the
@@ -360,7 +360,7 @@ What enforces the rules, honestly stated:
 - `scada_tag_notify` makes system calls once a second and once a minute on
   the calling thread (#116, point 3). On a real-time thread it is **open:
   depends on #116 point 3**: until a wake-only form exists (an interface
-  addition, TD 1.1), the real-time thread of `scada-io` calls
+  addition, a later minor version of TD), the real-time thread of `scada-io` calls
   `scada_tag_notify` once per cycle after its writes, and the trace lists
   its calls as allowed, so the test cannot tell them from a stray call.
 
@@ -656,21 +656,18 @@ architectures. The vectors are shared by #104, #105 and the simulators.
 - An `ABSENT` point is counted in `sys.dev.<device>.points_absent`, logged
   once per connection in a summary (11.3), and requested again only at
   `backoff`.
-- SUBSTITUTED: TD 6 defines it as "value entered by a person in place of
-  the source". This contract also sets it for a value forced at the device
-  and for a substitute from configuration (`on_invalid: substitute`). That
-  widens a frozen flag's meaning, as the product owner ruled on 2026-11-23
-  (R-6). A consumer can no longer tell an operator's entry from the other
-  two by the flag; it tells them by the journal record of the entry. HMI
-  text says "substituted", never "entered by an operator". It holds for
-  `substitute` and forced values.
-- **R-6 depends on tag database 1.1 (with #89).** The comment of
-  SUBSTITUTED in TD 6 ("value entered by a person in place of the source")
-  is not changed here: its wider meaning is an addition to tag database
-  contract 1.0, a minor version with a migration note (D-66 f), made with
-  #89 and reviewed by a person. Until 1.1, a driver writes a forced value
-  and a configured substitute without SUBSTITUTED, with the rest of their
-  quality and flags as above.
+- SUBSTITUTED (TD 1.1, section 6) marks a value not from the source: one
+  entered by a person, one substituted by configuration, or one the device
+  reports as forced. A driver sets it on a substitute from configuration
+  (`on_invalid: substitute`, UNCERTAIN with SUBSTITUTED) and keeps it on a
+  value the device reports as forced (the protocol's mapping of a
+  `NO_VALUE` or `DEVICE_INVALID` answer, row 4 above), as the product owner
+  ruled on 2026-11-23 (R-6). The configuration gives it nowhere: the flags
+  of an invalid marker and of a `quality_from` map are OUT_OF_RANGE,
+  OVERFLOW, BLOCKED and TEST (CS 4.7).
+  A consumer tells an operator's entry from the other two by the journal
+  record of the entry, not by the flag. HMI text says "substituted", never
+  "entered by an operator".
 - `on_invalid: keep_last` (CS 4.7) is not SUBSTITUTED: the last value is
   kept with UNCERTAIN and STALE, and after the point's `max_age` (required
   with `keep_last`, CF-640) the tag goes BAD, so that a regulator does not run on a frozen measurement for as
@@ -2474,7 +2471,7 @@ CS; this list cites them. The last column keeps the options not taken.
 | R-1 | 5.8 | Marking of a driver-stamped event time | LOCAL_TIME | The time is the unit's, not the device's | TIME_UNCERTAIN; both; none |
 | R-2 | 5.6 | Change latches | The latch as its own tag in a side-effect range | No event is invented | Synthesised events |
 | R-4 | 8.8 | `WriteResult.protocol_error` packing | `(reason << 16) \| raw`, computed in unsigned arithmetic, the reason table append-only | Within TD's "driver-specific"; no layout change | Raw code only; the reason in a tag |
-| R-6 | 5.2 | SUBSTITUTED for a configured substitute and a value forced at the device | Accepted; not for `keep_last`; HMI text "substituted"; in effect with tag database 1.1 (#89), which changes the comment of the flag | The value is not measured; the journal tells an operator's entry apart | A companion tag |
+| R-6 | 5.2 | SUBSTITUTED for a configured substitute and a value forced at the device | Accepted; not for `keep_last`; HMI text "substituted"; in effect since tag database 1.1 (#151), which widened the meaning of the flag; drivers set it since 0.7 (#154) | The value is not measured; the journal tells an operator's entry apart | A companion tag |
 | R-7 | 5.1 | Bit-identical scaling on both architectures | Floating-point contraction off for scaling and conversion code (D-98) | Equal values on both architectures | A tolerance in the tests |
 | R-11 | 8.13.4 | Fail-safe writes not confirmed | Repeated with back-off while the condition holds, never to an unusable device; counted against write limits; FAILED after `failsafe_max_refusals` or a spent budget | A safe state sent once may be lost; repeats stay bounded | Sent once (0.2); repeated without end (0.3) |
 | R-12 | 8.2, 8.14 | Commands to a demoted or refusing device | Refused (`DEVICE_UNAVAILABLE`); a `READ_NOW` on a demoted device is an immediate probe | A dead device answers at once instead of after a timeout | Attempted once with the device's timeout (0.1) |
@@ -2552,6 +2549,7 @@ match, so these are no longer differences from the reference in force.
 | 0.1 | 2026-11-22 | First draft (issue #99, P2-02), from the outline in `docs/contracts/README.md`, reference sections 6, 8.1 and 14.4, TD 1.0, issue #84, and the device survey of 2026-11-22 (not in the repository). Decisions D-81 to D-92 |
 | 0.5 | 2026-11-23 | Rulings of the product owner (section 18, D-103): every open point as drafted, with three changes. A refused new request no longer ends a running refresh; a request with an unknown outcome does, and `<output>.refresh` 3 shows a refresh on an older value (8.12, X-5). Remote `single` and `double` outputs with a `safe_state` of `off` or `on` default to `safe` after 30 s on control loss, and every remote output to `hold` at an orderly stop (8.13.1, O-12). `<output>.failsafe` 3 for FAILED (8.13.3). Tests 37, 44 and 45. Markers of open rulings removed; status accepted for phase 2 implementation; reference 1.2. Migration: none (no implementation yet). |
 | 0.6 | 2026-11-23 | With configuration schemas 0.6 (#100): an integer target takes no `divide_by` above 1, no decimal `gain` or `offset`, and no `exponent_from` (CS 4.7, CF-517; `divide_by: 1` is integer), so the integer path of 8.4 covers no `scale` and integer `gain` and `offset` only. Migration: none (no implementation yet). |
+| 0.7 | 2026-11-26 | Issue #154 (P2-15, D-145), with tag database contract 1.1 (#151): the header and TD cite 1.1; 5.2 and R-6 no longer wait for 1.1: a driver writes a configured substitute UNCERTAIN with SUBSTITUTED and keeps SUBSTITUTED on a value the device reports as forced; 2.5 no longer names TD 1.1 for the wake-only form of #116. Migration: a consumer that took SUBSTITUTED from a driver as "entered by a person" uses the journal record (TD 1.1 migration note); nothing read the flag from a driver before. |
 | 0.4 | 2026-11-23 | Third pass of the committee on 0.3. The fail-safe state machine (8.13.1 to 8.13.5): the definition of control lost with its grace (`control_attach_grace`), what ends a condition (a mode change, an accepted request, control back), states and `<output>.failsafe`, a writer restart, which checks of 8.2 a fail-safe write passes, repeats with back-off, refusals and budgets (`failsafe_max_refusals`), the journal; removed outputs and slow writers at a generation change (O-18); tests 37 and 38 row by row. The run of consecutive timeouts as one determinate rule (7.3); a reconnect within `connect_timeout`; `TCP_USER_TIMEOUT` from the loss rule; a broken frame on `tcp` closes; a wrong unit id on `rtu_over_tcp` is dropped. `DecodeResult` with read-side kinds; the transaction id in a per-attempt record; run-time objects in the object table. Check 8 refuses a device before its identity check. Inverse scaling cites CS 7.2. Rulings R-18, O-18 to O-20; consequences of R-11, R-16, R-17. Tests 40 to 43. Migration: none |
 | 0.3 | 2026-11-23 | Delta check of 0.2 by the committee. Consecutive timeouts close a connection only when they span every live unit; a close the driver makes itself keeps tags and states; `rtu_over_tcp` read timeouts do not close; a side-effect read timeout closes (7.3, R-15). Two-stage timeout with a margin of 3.5 characters or 20 ms (7.1). Transaction ids per connection; `EncodeResult`, `FrameState`, `DecodeResult` defined; IEC 104 and DNP3 stated as room (2.2). Outcome-queue admission rule (2.4). Stall rule: waits capped, connect counted (2.6). Run-time state kept across a reload (3.2, 12). Non-finite values BAD with OUT_OF_RANGE; `keep_last` UNCERTAIN and STALE then BAD; health point as CS (5). Command kinds with target types and safe actions; master-timed pulses refused (8.3, O-16). Exact integer conversion (8.4). Local-panel input for `local_blocks_auto` (8.2, R-16). Fail-safe actions repeated until confirmed, `<output>.failsafe`; warning for remote switching outputs left at `hold` (8.13, R-11, O-12). `READ_NOW` as a probe on a demoted device (8.14, R-12). Apply as CS 13; a driver without a channel idles (10). A logger thread writes the journal (11.3). Local I/O: helper channels by bus, AO reserved, `hold` keeps direction, the stop step's scope and what it promises (13). Tests 35 to 39; the #108 composition is CS's. One ruling id across both contracts (18). Migration: none; no code depends on 0.2 |
 | 0.2 | 2026-11-22 | Committee review of 0.1 (C++, SCADA and Linux reviewers). The protocol interface is one request per call, the framework owns the exchange (2.2, D-93). Keys, defaults and codes are CS's; this contract cites them. Real-time tier in phase 2 is `scada-io` only; the `SCADA_RT` check stated as it is; allocation and system-call tests (2.5). Request queues per process and source, as reference 5.1. Watchdog ends the process (2.6). Reload builds aside and swaps (3.2). Raw pattern after byte and word order; non-finite values; exponent and integer arithmetic; counters (5). Side effects on register ranges (6.6). Timeout defined, frame time, serial lines, TCP rules: abortive close on a write timeout, consecutive timeouts, idle close, back-off, literal addresses (7). Command kinds, value conversion, selection on mode change, DIRECT on a selected output, `local_blocks_auto`, demoted devices refused, results retried, rate count at the first byte, refresh setpoint only and visible, one fail-safe table, fail-safe without waiting for audit (8). Process start and stop (10). Logging (11.3). Local I/O (13). Simulators and conformance tests extended; a composition for #108 (14, 15). Replayed events deferred (5.9). Decisions D-82 to D-99. Migration: none; no code depends on 0.1 |
