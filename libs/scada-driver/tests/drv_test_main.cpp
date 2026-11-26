@@ -83,7 +83,10 @@ constexpr std::int64_t SLOW_MS = 10'000;
 [[noreturn]] void thread_check_failed(std::string_view call) noexcept {
     // Not through the logger: the check stops the process at once.
     const std::string line = "thread check failed: " + std::string(call) + "\n";
-    (void)::write(STDERR_FILENO, line.data(), line.size());
+    // The status says it if the line cannot be written.
+    if (::write(STDERR_FILENO, line.data(), line.size()) < 0) {
+        std::_Exit(EXIT_THREAD_CHECK);
+    }
     std::_Exit(EXIT_THREAD_CHECK);
 }
 

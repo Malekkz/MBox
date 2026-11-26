@@ -91,8 +91,11 @@ void Worker::request_stop() noexcept {
     stop_.store(true, std::memory_order_release);
     if (stop_fd_.valid()) {
         const std::uint64_t one = 1;
-        // A full counter already wakes the thread; nothing else can fail.
-        (void)::write(stop_fd_.get(), &one, sizeof(one));
+        // A full counter (EAGAIN) already wakes the thread, and the flag
+        // above is read at every boundary: a failed write loses nothing.
+        if (::write(stop_fd_.get(), &one, sizeof(one)) < 0) {
+            return;
+        }
     }
 }
 
