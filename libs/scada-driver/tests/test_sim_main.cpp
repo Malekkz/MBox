@@ -18,12 +18,17 @@
 // answer was written; `closed` when it closed a connection after
 // `--close-after` answers (it then accepts the next one); `peer closed`
 // or `peer reset` when the driver ended a TCP connection with a FIN or a
-// reset (the stop's orderly close, DI 10).
+// reset (the stop's orderly close, DI 10). A connection the driver resets
+// while an answer is being written ends as any other (`peer reset` or `peer
+// closed`): SIGPIPE is blocked, so the write fails instead of ending the
+// simulator.
 
 #include "loopback.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "test_protocol.h"
+
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): pthread_sigmask is declared here, not in <csignal>
 
 #include <array>
 #include <cerrno>
@@ -297,6 +302,15 @@ int run_pty(SimBus& bus) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // A driver that gives up a read resets the connection, at any time
+    // (DI 10): the write of an answer then fails with EPIPE, and the
+    // simulator goes on to the next connection. Blocked, as the driver
+    // blocks it (D-142): the simulator has one thread.
+    sigset_t pipe{};
+    if (::sigemptyset(&pipe) != 0 || ::sigaddset(&pipe, SIGPIPE) != 0 ||
+        ::pthread_sigmask(SIG_BLOCK, &pipe, nullptr) != 0) {
+        return 1;
+    }
     SimBus bus;
     Options options;
     const std::span<char*> args(argv, static_cast<std::size_t>(argc));

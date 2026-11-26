@@ -18,6 +18,7 @@ scada_add_library(scada-driver
     src/sample_processing.cpp
     src/scheduler.cpp
     src/serial_transport.cpp
+    src/stall_watch.cpp
     src/system_clock.cpp
     src/tag_writer.cpp
     src/tcp_transport.cpp

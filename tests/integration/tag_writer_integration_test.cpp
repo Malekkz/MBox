@@ -114,13 +114,14 @@ protected:
     }
 
     // The writer of device 0's points: d1.v, a point without a tag, d1.s
-    // and a tag of another process.
-    TagWriter writer() {
+    // and a tag of another process, with room for `strings` STRING writes
+    // a step.
+    TagWriter writer(std::size_t strings = 1) {
         return TagWriter(ctx_,
                          PointHandles{.handles = {number_, SCADA_INVALID_HANDLE,
                                                   text_, theirs_},
                                       .first = {0}},
-                         1);
+                         strings);
     }
 
     [[nodiscard]] std::string text() const {
@@ -180,6 +181,18 @@ TEST_F(TagWriterTest, AWriteTheLibraryRefusesIsCounted) {
     TagWriter tags = writer();
     tags.write_point(0, 3, good(scada::driver::int64_value(5)));  // not ours
     EXPECT_EQ(tags.refused(), 1U);
+}
+
+TEST_F(TagWriterTest, AStringPastTheReservedRoomIsRefused) {
+    // The room is reserved at construction, so that a write never
+    // allocates: a STRING write past it is refused and counted, and the
+    // tag keeps what it had.
+    TagWriter tags = writer(0);
+    tags.write_point(
+        0, 2, good(TagValue{.type = tag::TagType::STRING, .text = "lost"}));
+    tags.notify();
+    EXPECT_EQ(tags.refused(), 1U);
+    EXPECT_NE(text(), "lost");
 }
 
 TEST_F(TagWriterTest, NineOneByOwnerSlotKeepsEveryValueAsStored) {

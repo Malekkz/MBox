@@ -108,12 +108,45 @@ TEST_F(DriverProcess, TheServiceManagerHearsReadyTheWatchdogAndStopping) {
     if (!driver.has_value()) {
         FAIL() << "no driver";
     }
-    // READY (the watchdog may be fed before it), then the watchdog at
+    // READY (the watchdog is never fed before it), then the watchdog at
     // half its interval.
-    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    ASSERT_EQ(listener().receive(WAIT_LIMIT), "READY=1") << driver->err();
     for (int fed = 0; fed < 3; ++fed) {
         EXPECT_EQ(listener().receive(WAIT_LIMIT), "WATCHDOG=1");
     }
+    EXPECT_TRUE(stops_on(*driver, listener(), SIGTERM, EXIT_OK));
+}
+
+TEST_F(DriverProcess, TheWatchdogIsNotFedBeforeReady) {
+    // The service manager's watchdog runs from READY=1 on (D-142). The
+    // resolve of 256 tags beats once before READY, and with a watchdog of
+    // 1 ms that beat would feed it; READY=1 still comes first.
+    std::vector<std::string> tags;
+    std::vector<std::string> args =
+        tcp_channel("line1", LocalPort(false).port());
+    args.emplace_back("--disabled");
+    for (const std::string& part : device("d1", 1, "0")) {
+        if (part == "--point") {
+            break;
+        }
+        args.push_back(part);
+    }
+    for (int point = 0; point < 256; ++point) {
+        tags.push_back("d1.p" + std::to_string(point));
+        for (std::string part :
+             {std::string("--point"), "p" + std::to_string(point),
+              std::to_string(point), std::string("0")}) {
+            args.push_back(std::move(part));
+        }
+    }
+    start_tagd({{.name = "line1", .tags = tags}});
+    auto driver =
+        start_driver(args, {.watchdog = std::chrono::microseconds{1000}});
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_EQ(listener().receive(WAIT_LIMIT), "READY=1") << driver->err();
+    EXPECT_EQ(listener().receive(WAIT_LIMIT), "WATCHDOG=1");
     EXPECT_TRUE(stops_on(*driver, listener(), SIGTERM, EXIT_OK));
 }
 
@@ -464,18 +497,55 @@ TEST_F(DriverProcess, APauseOfTheWholeProcessIsNotAStall) {
     if (!driver.has_value()) {
         FAIL() << "no driver";
     }
-    // READY first: the main loop then checks the workers, so a pause is
-    // seen by a check that comes late (a SIGSTOP before the first check
-    // gives no record).
+    // READY first, so that the pause comes after the start; under load it
+    // can still come before the first check, which is credited too (the
+    // start-time hole, seen by this test under asan-ubsan).
     ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
     observe();
     const std::uint32_t tag = handle("d1.v");
     ASSERT_TRUE(eventually(
         tag, [](const scada_value& value) { return good_with(value, 6); }));
     ASSERT_TRUE(pause_until_down(*driver, tag));  // 1.5 s heartbeat timeout
-    ASSERT_TRUE(eventually(tag, [](const scada_value& value) {
+    const bool back = eventually(tag, [](const scada_value& value) {
         return !owner_down(value) && good_with(value, 6);
-    }));
+    });
+    const scada_value last = read(tag);
+    ASSERT_TRUE(back) << "quality " << int{last.quality} << " flags "
+                      << last.quality_flags << " ended "
+                      << driver->wait_for_ending(milliseconds{0}).has_value()
+                      << "\ndriver:\n"
+                      << driver->err() << "\nsimulator:\n"
+                      << sim->out();
+    EXPECT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-paused")") &&
+                stops_cleanly(*driver) && !has(driver->err(), "stalled"))
+        << driver->err();
+}
+
+TEST_F(DriverProcess, APauseWithOnlyADisabledChannelIsNotAStall) {
+    // A disabled channel's worker waits for the stop, waking every third of
+    // its 1 s stall limit to move its counter (2.6). The process is stopped
+    // from its 9.1 write until the library sees it down, past that limit,
+    // and continued: the pause is logged and nothing stalls. (Whether the
+    // stop comes before the first check, the start-time hole of D-142,
+    // cannot be chosen from outside the process; the unit test
+    // StallWatch.APauseBeforeTheFirstCheckIsCredited pins that case.)
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    observe();
+    const std::uint32_t tag = handle("d1.v");
+    std::vector<std::string> off =
+        tcp_channel("line1", LocalPort(false).port(), "300");
+    off.emplace_back("--disabled");
+    auto driver = start_driver(joined(off, device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    // The written flags, whether or not the owner reads as up yet.
+    constexpr std::uint16_t WRITTEN =
+        SCADA_FLAG_NOT_INIT | SCADA_FLAG_LOCAL_TIME;
+    ASSERT_TRUE(eventually(tag, [](const scada_value& value) {
+        return (value.quality_flags & WRITTEN) == WRITTEN;
+    })) << driver->err();
+    ASSERT_TRUE(pause_until_down(*driver, tag));
     EXPECT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-paused")") &&
                 stops_cleanly(*driver) && !has(driver->err(), "stalled"))
         << driver->err();

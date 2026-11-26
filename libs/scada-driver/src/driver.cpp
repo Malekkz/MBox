@@ -11,6 +11,7 @@
 #include "scada/driver/transport.h"
 #include "scada/service/notify.h"
 #include "scada/tag/scada_tag.h"
+#include "stall_watch.h"
 #include "tag_writer.h"
 #include "worker.h"
 
@@ -56,11 +57,6 @@ constexpr std::int64_t STOP_GRACE_NS = NS_PER_S;
 // A change of a channel's refused tag writes is logged at the heartbeat
 // step, at most this often per channel (review M9; 5b-3 replaces it).
 constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
-// A check of the workers that comes later than this many heartbeat
-// periods after the one before means the whole process was not running
-// (stopped, frozen, a paused machine): the workers are not judged by that
-// time (review M7).
-constexpr std::int64_t PAUSE_PERIODS = 2;
 // "process paused" is logged at most this often, with the pauses since.
 constexpr std::int64_t PAUSE_LOG_PERIOD_NS = 10 * NS_PER_S;
 constexpr std::chrono::milliseconds LOG_FLUSH_LIMIT{1000};
@@ -282,10 +278,12 @@ private:
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::optional<std::uint16_t>> owners_;  // per worker
     // Per worker: the progress last seen and when it last moved.
-    std::vector<std::uint64_t> seen_;
-    std::vector<std::int64_t> moved_ns_;
-    std::int64_t last_check_ns_ = 0;
-    std::uint64_t pauses_ = 0;  // pauses not yet logged
+    // After the settings, whose period it takes once they are valid.
+    detail::StallWatch watch_{settings_status_.ok()
+                                  ? settings_.heartbeat_period_ns
+                                  : DEFAULT_HEARTBEAT_PERIOD_NS};
+    std::vector<detail::Watched> watched_;  // the workers at a check
+    std::uint64_t pauses_ = 0;              // pauses not yet logged
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
@@ -455,12 +453,11 @@ Status Driver::Impl::make_workers() noexcept {
     if (!every.ok()) {
         return every;
     }
-    seen_.assign(workers_.size(), 0);
     // The watchdog's clock starts here for the workers and for its own
     // checks alike, so that a pause before the first check is credited as
     // any other (delta, Linux review).
-    last_check_ns_ = scada::monotonic_ns();
-    moved_ns_.assign(workers_.size(), last_check_ns_);
+    watch_.start(workers_.size(), scada::monotonic_ns());
+    watched_.reserve(workers_.size());
     logged_refused_.assign(workers_.size(), 0);
     for (const std::unique_ptr<Worker>& worker : workers_) {
         const Status started = worker->start();
@@ -605,43 +602,26 @@ Driver::Impl::Beat Driver::Impl::beat() noexcept {
 }
 
 Worker* Driver::Impl::stalled(std::int64_t now) noexcept {
-    const std::int64_t period = settings_.heartbeat_period_ns;
-    const std::int64_t gap = last_check_ns_ == 0 ? 0 : now - last_check_ns_;
-    last_check_ns_ = now;
-    if (gap > period * PAUSE_PERIODS) {
-        // The main thread itself did not run for that time: the process
-        // was paused (or this thread was not scheduled). Only the time it
-        // lost is credited to every worker, its history kept, so that
-        // repeated short pauses never hide a worker that is stuck (review
-        // M7, delta 1).
-        const std::int64_t lost = gap - period;
-        for (std::int64_t& moved : moved_ns_) {
-            moved = add(moved, lost);
-        }
+    watched_.clear();  // keeps its capacity: one entry per worker
+    for (const std::unique_ptr<Worker>& worker : workers_) {
+        watched_.push_back(detail::Watched{.progress = worker->progress(),
+                                           .limit_ns = worker->stall_limit_ns(),
+                                           .returned = worker->returned()});
+    }
+    const std::optional<std::size_t> stuck = watch_.check(now, watched_);
+    if (watch_.last_pause_ns() > 0) {
         ++pauses_;
         if (now >= next_pause_log_ns_) {
             next_pause_log_ns_ = add(now, PAUSE_LOG_PERIOD_NS);
             log(LogLevel::NOTICE, "process paused",
                 {{"MESSAGE_ID", "driver-paused"},
-                 {"PAUSE_MS", std::to_string(gap / NS_PER_MS)},
+                 {"PAUSE_MS",
+                  std::to_string(watch_.last_pause_ns() / NS_PER_MS)},
                  {"PAUSES", std::to_string(pauses_)}});
             pauses_ = 0;
         }
     }
-    for (std::size_t index = 0; index < workers_.size(); ++index) {
-        Worker& worker = *workers_[index];
-        if (worker.returned()) {
-            continue;
-        }
-        const std::uint64_t progress = worker.progress();
-        if (progress != seen_[index]) {
-            seen_[index] = progress;
-            moved_ns_[index] = now;
-        } else if (now - moved_ns_[index] >= worker.stall_limit_ns()) {
-            return &worker;
-        }
-    }
-    return nullptr;
+    return stuck.has_value() ? workers_[*stuck].get() : nullptr;
 }
 
 RunEnd Driver::Impl::after_stall(Worker& stalled) noexcept {
