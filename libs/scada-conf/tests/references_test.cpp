@@ -165,6 +165,7 @@ TEST(References, AlarmPrioritiesClassesAndAreas) {
                    "high, area: ps1 }\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "normal, class: safety, area: ps9 }\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"alarms/site.yaml:2:27 CF-310: alarm priority \"high\" does "
                "not exist",
                "alarms/site.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
@@ -386,6 +387,7 @@ TEST(References, AReferenceToATagNamesATag) {
               "    feedback: ps1.nothing.either\n"
               "    interlocks: []\n"
               "    safe_state: off\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"alarms/site.yaml:2:12 CF-310: tag \"ps1.fm9.flow\" does not "
                "exist",
                "alarms/site.yaml:2:63 CF-310: tag \"ps1.sp9\" does not exist",
@@ -898,7 +900,7 @@ TEST(References, TiersAndTheLoggingOfABit) {
 
 // 6 and 7: a file that gives `classes` replaces the default classes, and
 // the first file that gives `priorities` defines them (a second is CF-811,
-// with slice 7 of #100).
+// with slice 7c of #100).
 TEST(References, AlarmListsOfAFile) {
     EXPECT_EQ(
         validate({{"areas.yaml", std::string(AREAS)},

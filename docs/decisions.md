@@ -2308,6 +2308,40 @@ Decision: `check_merged_points` reads each point of the expanded tree (D-114), w
 Reason: each check reads the point as the driver will, after every merge, so a template that a base, a default or an override completes is valid, and one that none completes is refused at the instance that uses it.
 Consequences: the corpus case `s5-integer-on-floating-raw` is the one saved in the slice that moved CF-504 to stage 5, with instances added, since only expanded points are checked. The cases `s5-computed-values-by-parameter` and `s5-computed-values-by-repeat` give `register` 70000, `bit` 16 and `divide_by` 0 through a parameter and through a `repeat` variable, beside each key's edge, which passes. `s5-integer-scaling-range` (CF-516), `s5-integer-scaling-merged` (CF-517) and `s5-incomplete-merged-maps` (CF-202) are conformance test 2 at stage 5. The references that need point tags come with slice 7 of #100.
 
+
+## D-116: The tag names of the expanded tree and the references to them (stage 5)
+Date: 2026-11-26
+Phase / issue: 2, #100 (P2-03), slice 7a
+Status: proposed
+
+Context: contract 2.6 resolves a tag reference against "every tag of the expanded tree, generated tags included (section 12.5)", and 12.4 and 12.5 list those tags. The tag set itself, with owners, queues and the hash, is #101, and owner names wait on a decision of the owner (#136). Slice 7a needs only names and types.
+Options: build the tag set of #101 first; build names and types only for stage 5.
+Decision: stage 5 builds the tags by name with their value types (`src/tag_names.cpp`), with no owner, queue or flag, so #101 may reuse it without taking a naming rule from it.
+- **The tags.**
+  - A point's tag `<device>.<point>`, unless `tag: false`; its type is the given `value_type`, else derived as in 4.7 (shared with the merged-point checks, `src/point_types.cpp`). An `io` point without `value_type` is `bool` on a `gpio` channel and `float64` on another backend (B.2: a line is digital, an IIO channel analog).
+  - A bit's tag `<device>.<bit>`, BOOL (5.4).
+  - The tags of tag files, with their `value_type`; a virtual tag's type is not known until its expression is typed (slice 7b), and no check reads it before then.
+  - An interlock's name, BOOL.
+  - The generated tags of 12.5:
+    - of an output: `.mode`, `.status`; `.req_manual` and `.req_auto` of its target's type, for a target that is a tag; `.refresh` with `refresh`; `.failsafe` when a fail-safe key, given or by its default (7.2, 7.4), is `safe` or `release`; `.device_selected` never in phase 2 (no protocol declares a native select);
+    - `sys.area.<area>.authority` for each area;
+    - `<tag>.alarm.<id>` and its `.shelved_until` for each alarm; `<tag>` is the `name` of an expression alarm, and `id` defaults to the `type`;
+    - `sys.proc.<process>.config_id` and `.config_state` for the processes of 12.2 always in the tag set, and every driver signal of the driver interface contract (11.1) for `io` and `drv-<protocol>` when the tree has a channel of it. These are process names of 12.2, not owner names;
+    - `sys.drv.<channel>.<signal>`, with `period.<group>` for each poll group of the channel, and `sys.dev.<device>.<signal>`, with `identity` and `identity_ok` only for a device with `identify`.
+  - Not built: `ctl.<program>.<block>.<param>`. The block library declares no block type in phase 2, so no tunable parameter exists.
+- **CF-301 and CF-302** are given here, for every tag a user writes (a point, a bit, a tag file's tag, an interlock), and against generated names. They move from the references of stage 5 (D-113). Two generated tags of one name come from a cause another rule reports (a device or an output given twice, CF-303; two alarms of one id on a tag, CF-812, slice 7c), so they are not CF-302. "first at" names the instance for a point or bit tag that a template wrote, since the tag is the instance's.
+- **References** (CF-310 `tag {name} does not exist`):
+  - an output's `target` and `feedback` (a tag, `on` and `off`, or `tag`);
+  - an area's `authority.local_panel.input`;
+  - an alarm's `tag` (in `alarms/*.yaml`), its `limit` when written as a tag, and its `setpoint`;
+  - a program block's source tag (`in`) and the tags its `out` writes.
+  - The kind a reference needs is checked with the rule that names it: the output's target and feedback (CF-702, CF-715) and the local panel's input (CF-718) in slice 7e.
+- **CF-312** for a `limit` or `setpoint` tag that is not a number: a limit and a setpoint are compared with a value (8), and the contract names no other type for them. A virtual tag, typed in 7b, is not checked here.
+- **Within a device** (2.6: "The points of the same template after expansion"): `exponent_from.point`, `quality_from[].point` other than `self`, `source_time_from`, a health rule's, a restart indication's and an identity check's `point` name a point of the device, or CF-310 `point {name} does not exist`, at the instance with the template note. A point's `poll_group` is one of its channel's (`fast`, `normal`, `slow` by default), or CF-604.
+- **Not here:** names in run-time expressions, aggregate patterns (CF-311) and expression types: slice 7b.
+Reason: a reference error now stays an error once #101 builds the tag set, since both read the same names; nothing here depends on how owners are named.
+Consequences: `References.AReferenceToATagGivesNoErrorYet` is replaced, on purpose, by `References.AReferenceToATagNamesATag`, and three tests of other rules now list the CF-310 of their dangling tags. Corpus case `s5-tag-references`. The README holds the table of every code of section 10 with where it is given or which issue holds it. Measured (release build, x86-64): the tag names add at most 37 MB (300,000 point tags) and 0.5 s to the trees of D-114 and D-115; the peak of 858 MB is unchanged.
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)

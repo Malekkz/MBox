@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 
 namespace scada::conf {
 namespace {
@@ -158,23 +159,25 @@ TEST(TagNames, PointsWithinADevice) {
         "bad } } ] }\n"
         "health: [ { point: heartbeat, good_when: 1, applies_to: all } ]\n"
         "identify: [ { point: model, equals: 7 } ]\n";
-    EXPECT_EQ(errors(expand({{"templates/meter_a.yaml", meter},
-                             {"drivers/modbus/line1.yaml", one_device()}})),
-              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-310: point "
-                     "\"heartbeat\" does not exist\n  from template "
-                     "templates/meter_a.yaml:13:20",
-                     "drivers/modbus/line1.yaml:7:11: error CF-310: point "
-                     "\"model\" does not exist\n  from template "
-                     "templates/meter_a.yaml:14:22",
-                     "drivers/modbus/line1.yaml:7:11: error CF-310: point "
-                     "\"amps_exp\" does not exist\n  from template "
-                     "templates/meter_a.yaml:11:98 (point amps)",
-                     "drivers/modbus/line1.yaml:7:11: error CF-310: point "
-                     "\"state\" does not exist\n  from template "
-                     "templates/meter_a.yaml:11:156 (point amps)",
-                     "drivers/modbus/line1.yaml:7:11: error CF-310: point "
-                     "\"clock\" does not exist\n  from template "
-                     "templates/meter_a.yaml:11:219 (point amps)"}));
+    EXPECT_EQ(
+        errors(expand({{"templates/meter_a.yaml", meter},
+                       {"drivers/modbus/line1.yaml", one_device()}})),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-310: point "
+               "\"heartbeat\" does not exist\n  from template "
+               "templates/meter_a.yaml:13:20",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: point "
+               "\"model\" does not exist\n  from template "
+               "templates/meter_a.yaml:14:22",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: point "
+               "\"amps_exp\" does not exist\n  from template "
+               "templates/meter_a.yaml:11:98 (point amps)",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: point "
+               "\"state\" does not exist\n  from template "
+               "templates/meter_a.yaml:11:156 (point amps)",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: point "
+               "\"clock\" does not exist\n  from template "
+               "templates/meter_a.yaml:11:219 (point amps)"}));
 }
 
 // A point's poll group is one of its channel's (CF-604): the defaults

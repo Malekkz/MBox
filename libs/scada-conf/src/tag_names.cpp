@@ -6,7 +6,6 @@
 #include "point_types.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
-#include "scada/conf/names.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
 #include "scada/conf/tree.h"
@@ -15,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <set>
@@ -89,6 +89,18 @@ constexpr std::array<Signal, 2> IDENTITY_SIGNALS = {{
 // 4.6: the poll groups of a channel that gives none.
 constexpr std::array<std::string_view, 3> DEFAULT_POLL_GROUPS = {
     "fast", "normal", "slow"};
+
+// The segments of a tag name joined with dots.
+std::string dotted(std::initializer_list<std::string_view> segments) {
+    std::string name;
+    for (const std::string_view segment : segments) {
+        if (!name.empty()) {
+            name += '.';
+        }
+        name += segment;
+    }
+    return name;
+}
 
 // The value types that are numbers (4.7).
 bool is_number_type(std::string_view type) {
@@ -210,7 +222,7 @@ private:
 
     // A generated tag (12.5), made for what is at `where`. A user tag of
     // the same name is CF-302 at the definition that came second.
-    void add_generated(std::string tag, std::string_view type,
+    void add_generated(const std::string& tag, std::string_view type,
                        const Location& where) {
         TagInfo info{.value_type = std::string(type),
                      .origin = TagOrigin::GENERATED,
@@ -262,13 +274,13 @@ private:
         protocols_.insert(protocol);
         if (!channel_name.empty()) {
             for (const Signal& signal : CHANNEL_SIGNALS) {
-                add_generated(
-                    "sys.drv." + channel_name + "." + std::string(signal.name),
-                    signal.type, channel_at);
+                add_generated(dotted({"sys.drv", channel_name, signal.name}),
+                              signal.type, channel_at);
             }
             for (const std::string& group : groups) {
-                add_generated("sys.drv." + channel_name + ".period." + group,
-                              "float64", channel_at);
+                add_generated(
+                    dotted({"sys.drv", channel_name, "period", group}),
+                    "float64", channel_at);
             }
         }
         for (const NodeId device : expanded_.items(channel, "devices")) {
@@ -305,15 +317,13 @@ private:
             collect_point(device_name, point, protocol, backend);
         }
         for (const Signal& signal : DEVICE_SIGNALS) {
-            add_generated(
-                "sys.dev." + device_name + "." + std::string(signal.name),
-                signal.type, device_at);
+            add_generated(dotted({"sys.dev", device_name, signal.name}),
+                          signal.type, device_at);
         }
         if (!expanded_.items(device, "identify").empty()) {
             for (const Signal& signal : IDENTITY_SIGNALS) {
-                add_generated(
-                    "sys.dev." + device_name + "." + std::string(signal.name),
-                    signal.type, device_at);
+                add_generated(dotted({"sys.dev", device_name, signal.name}),
+                              signal.type, device_at);
             }
         }
     }
@@ -409,11 +419,11 @@ private:
         if (base.empty()) {
             return;
         }
-        std::string id = reader.text_of(alarm, "id");
-        if (id.empty()) {
-            id = type;
+        std::string alarm_id = reader.text_of(alarm, "id");
+        if (alarm_id.empty()) {
+            alarm_id = type;
         }
-        const std::string state = base + ".alarm." + id;
+        const std::string state = dotted({base, "alarm", alarm_id});
         add_generated(state, "int64", where);
         add_generated(state + ".shelved_until", "int64", where);
     }
@@ -480,9 +490,8 @@ private:
             return;
         }
         for (const Entry& entry : reader.document().entries(*areas)) {
-            add_generated("sys.area." +
-                              std::string(reader.document().text(entry.key)) +
-                              ".authority",
+            add_generated(dotted({"sys.area", reader.document().text(entry.key),
+                                  "authority"}),
                           "int64", reader.document().location(entry.key));
         }
     }
@@ -557,17 +566,17 @@ private:
     void collect_processes() {
         const Location where{};
         for (const std::string_view service : SERVICES) {
-            const std::string base = "sys.proc." + std::string(service) + ".";
-            add_generated(base + "config_id", "uint64", where);
-            add_generated(base + "config_state", "int64", where);
+            add_generated(dotted({"sys.proc", service, "config_id"}), "uint64",
+                          where);
+            add_generated(dotted({"sys.proc", service, "config_state"}),
+                          "int64", where);
         }
         for (const std::string& protocol : protocols_) {
             const std::string process =
                 protocol == "io" ? std::string("io") : "drv-" + protocol;
             for (const Signal& signal : PROCESS_SIGNALS) {
-                add_generated(
-                    "sys.proc." + process + "." + std::string(signal.name),
-                    signal.type, where);
+                add_generated(dotted({"sys.proc", process, signal.name}),
+                              signal.type, where);
             }
         }
     }
@@ -663,6 +672,9 @@ private:
 
     // A tag reference that must name a number (D-116): CF-312 otherwise.
     void need_number(const Reader& reader, std::optional<NodeId> node) {
+        if (!node) {
+            return;
+        }
         const TagInfo* tag = need_tag(reader, node);
         if (tag != nullptr && !tag->value_type.empty() &&
             !is_number_type(tag->value_type)) {

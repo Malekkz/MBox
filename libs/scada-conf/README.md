@@ -138,13 +138,168 @@ error that names the others, as in stage 4. About 2 µs a computed value:
   chain upward lacks may come from a child, and is checked at the instance
   (#103).
 
-A reference to a tag gives no error yet: point tags exist only once
-instances are expanded, so those references, and the names and types of
-run-time expressions, are checked in slice 7 of #100, after #103.
+Stage 5 also builds the tags of the expanded tree by name, with their value
+types (`src/tag_names.cpp`, D-116): point and bit tags, the tags of tag files,
+interlocks, and the generated tags of section 12.5. It gives CF-301 for a
+user's tag in `sys` and CF-302 for a name given twice, and checks every
+reference to a tag outside an expression (outputs, the local panel, alarms,
+programs: CF-310, and CF-312 for a `limit` or `setpoint` that is not a
+number), every point a device's rules name (CF-310) and each point's poll
+group (CF-604). Owner names are #101's and are not used. The names and types
+of run-time expressions follow in slice 7b of #100.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
+
+## The codes of contract section 10
+
+Where each error code of section 10 is given, or which issue holds it (the
+ruling on #100: #100 closes without the codes of stages 6 and 7, of the
+protocols' own refusals and of what is not in phase 2). Kept current by each
+slice of #100.
+
+| Code | Where |
+| --- | --- |
+| CF-101 | `src/tree_scan.cpp` |
+| CF-102 | `src/validate.cpp` |
+| CF-103 | `src/tree_scan.cpp` |
+| CF-110 | `src/yaml_parser.cpp` |
+| CF-111 | `src/schema.cpp`, `src/yaml_parser.cpp` |
+| CF-112 | `src/yaml_parser.cpp` |
+| CF-113 | `src/expand.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
+| CF-114 | `src/yaml_parser.cpp` |
+| CF-201 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-202 | `src/expand.cpp`, `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp`, `src/validate.cpp` |
+| CF-203 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-204 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-205 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-206 | `src/schema.cpp` |
+| CF-207 | `src/schema.cpp` |
+| CF-208 | `src/schema.cpp` |
+| CF-210 | `src/schema.cpp` |
+| CF-211 | `src/validate.cpp` |
+| CF-212 | `src/expand.cpp`, `src/rules.cpp`, `src/schema.cpp` |
+| CF-213 | `src/schema.cpp` |
+| CF-214 | `src/schema.cpp` |
+| CF-301 | `src/tag_names.cpp` |
+| CF-302 | `src/tag_names.cpp` |
+| CF-303 | `src/references.cpp` |
+| CF-310 | `src/expression_types.cpp`, `src/merged_points.cpp`, `src/references.cpp`, `src/tag_names.cpp` |
+| CF-311 | slice 7b of #100 |
+| CF-312 | `src/tag_names.cpp` |
+| CF-401 | `src/expand.cpp` |
+| CF-402 | `src/expand.cpp` |
+| CF-403 | `src/expand.cpp` |
+| CF-410 | `src/config_eval.cpp`, `src/expand.cpp`, `src/references.cpp` |
+| CF-411 | `src/expand.cpp` |
+| CF-412 | `src/expand.cpp` |
+| CF-413 | `src/expand.cpp` |
+| CF-414 | `src/expand.cpp` |
+| CF-415 | `src/expand.cpp` |
+| CF-416 | `src/expand.cpp` |
+| CF-417 | `src/expand.cpp` |
+| CF-419 | `src/expand.cpp` |
+| CF-420 | `src/expand.cpp` |
+| CF-421 | `src/expand.cpp` |
+| CF-422 | `src/expand.cpp` |
+| CF-504 | `src/merged_points.cpp` |
+| CF-505 | slice 7c of #100 |
+| CF-506 | slice 7c of #100 |
+| CF-507 | slice 7c of #100 |
+| CF-508 | slice 7c of #100 |
+| CF-509 | slice 7c of #100 |
+| CF-520 | `src/expression.cpp`, `src/schema.cpp` |
+| CF-521 | slice 7b of #100 |
+| CF-522 | slice 7b of #100 |
+| CF-523 | `src/config_eval.cpp`, `src/expand.cpp`, `src/expression_types.cpp`, `src/references.cpp` |
+| CF-524 | slice 7b of #100 |
+| CF-525 | slice 7b of #100 |
+| CF-526 | `src/expression.cpp` |
+| CF-527 | slice 7b of #100 |
+| CF-528 | `src/expression.cpp` |
+| CF-529 | `src/expression.cpp` |
+| CF-516 | `src/merged_points.cpp` |
+| CF-517 | `src/merged_points.cpp`, `src/rules.cpp` |
+| CF-601 | slice 7d of #100 |
+| CF-602 | slice 7d of #100 |
+| CF-603 | slice 7d of #100 |
+| CF-604 | `src/tag_names.cpp` |
+| CF-605 | slice 7d of #100 |
+| CF-610 | slice 7d of #100 |
+| CF-611 | slice 7d of #100 |
+| CF-612 | slice 7d of #100 |
+| CF-613 | slice 7d of #100 |
+| CF-614 | slice 7d of #100 |
+| CF-615 | slice 7d of #100 |
+| CF-616 | slice 7d of #100 |
+| CF-618 | slice 7d of #100 |
+| CF-619 | slice 7d of #100 |
+| CF-620 | slice 7d of #100 |
+| CF-622 | `src/references.cpp` |
+| CF-640 | slice 7d of #100 |
+| CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
+| CF-702 | slice 7e of #100 |
+| CF-703 | slice 7e of #100 |
+| CF-704 | slice 7e of #100 |
+| CF-705 | slice 7e of #100 |
+| CF-706 | slice 7e of #100 |
+| CF-707 | slice 7e of #100 |
+| CF-708 | slice 7e of #100 |
+| CF-709 | slice 7e of #100 |
+| CF-710 | slice 7e of #100 |
+| CF-711 | slice 7e of #100 |
+| CF-713 | slice 7e of #100 |
+| CF-714 | slice 7e of #100 |
+| CF-715 | slice 7e of #100 |
+| CF-716 | slice 7e of #100 |
+| CF-717 | slice 7e of #100 |
+| CF-718 | slice 7e of #100 |
+| CF-719 | slice 7e of #100 |
+| CF-720 | slice 7e of #100 |
+| CF-723 | slice 7e of #100 |
+| CF-722 | slice 7e of #100 |
+| CF-801 | slice 7c of #100 |
+| CF-802 | slice 7c of #100 |
+| CF-803 | slice 7c of #100 |
+| CF-811 | slice 7c of #100 |
+| CF-812 | slice 7c of #100 |
+| CF-813 | slice 7c of #100 |
+| CF-814 | slice 7c of #100 |
+| CF-815 | slice 7c of #100 |
+| CF-901 | slice 7e of #100 |
+| CF-902 | slice 7e of #100 |
+| CF-904 | slice 7e of #100 |
+| CF-905 | slice 7e of #100 |
+| CF-906 | slice 7e of #100 |
+| CF-910 | not in phase 2 (block library and structured text) |
+| CF-911 | not in phase 2 (block library and structured text) |
+| CF-912 | not in phase 2 (block library and structured text) |
+| CF-913 | not in phase 2 (block library and structured text) |
+| CF-914 | not in phase 2 (block library and structured text) |
+| CF-915 | not in phase 2 (block library and structured text) |
+| CF-916 | not in phase 2 (block library and structured text) |
+| CF-920 | `src/validate.cpp` |
+| CF-921 | not in phase 2 (block library and structured text) |
+| CF-922 | not in phase 2 (block library and structured text) |
+| CF-1001 | `src/expand.cpp` |
+| CF-1002 | #101 and #102 (stages 6 and 7) |
+| CF-1003 | #101 and #102 (stages 6 and 7) |
+| CF-1004 | #101 and #102 (stages 6 and 7) |
+| CF-1006 | #101 and #102 (stages 6 and 7) |
+| CF-1007 | #101 and #102 (stages 6 and 7) |
+| CF-1008 | #101 and #102 (stages 6 and 7) |
+| CF-1009 | #101 and #102 (stages 6 and 7) |
+| CF-1005 | #101 and #102 (stages 6 and 7) |
+| CF-1010 | #101 and #102 (stages 6 and 7) |
+| CF-1011 | #101 and #102 (stages 6 and 7) |
+| CF-1012 | #104 and #102 (protocol refusals of section 13.1) |
+| CF-1016 | #101 and #102 (stages 6 and 7) |
+| CF-1014 | #101 and #102 (stages 6 and 7) |
+| CF-651 | slice 7d of #100 |
+| CF-652 | slice 7d of #100 |
+| CF-653 | slice 7d of #100 |
+| CF-662 | slice 7d of #100 |
 
 ## The YAML subset parser
 
@@ -320,7 +475,9 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   they share are in `tests/expand_cases.h`.
 - `tests/config_eval_test.cpp`: the values of configuration expressions and
   the failures that are CF-410.
-- `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
-  that a reference to a tag gives no error before slice 7 of #100.
+- `tests/references_test.cpp`: each check of stage 5 on a whole tree.
+- `tests/tag_names_test.cpp`: the tags of the expanded tree (point, bit and
+  generated tags, CF-301, CF-302) and the references to them outside
+  expressions (CF-310, CF-312, CF-604).
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

@@ -285,8 +285,9 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
         const bool stage4_failed = stage4.error_count() > 0;
         stage4.move_into(report);
         if (!stage4_failed) {
-            // Stage 5: what needs no point tags (D-113); the rest comes with
-            // slice 7 of #100.
+            // Stage 5: what needs no point tags (D-113), the merged points
+            // (D-115) and the tag references (D-116); the rest comes with
+            // slices 7b to 7e of #100.
             Diagnostics stage5;
             check_references(checked, stage5);
             if (validation.expanded) {
