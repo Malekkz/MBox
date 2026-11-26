@@ -240,8 +240,9 @@ TEST(MergedPoints, ReadRangesAndHealthFields) {
                     "read: { ranges: [ { kind: no_read, table: holding, "
                     "first: \"nosuchname + 1\", last: 10 } ] }\n"),
               Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-                    "\"nosuchname + 1\": \"nosuchname\" is not a parameter and "
-                    "no variable bound to this point\n  from template "
+                    "\"nosuchname + 1\": \"nosuchname\" is not a parameter of "
+                    "this device"
+                    "\n  from template "
                     "templates/meter_a.yaml:4:60 (read)"});
     EXPECT_EQ(meter(points, {},
                     "params: { b: { type: int, default: 1 } }\n"

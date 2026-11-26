@@ -2315,6 +2315,16 @@ private:
             if (reason.starts_with(PREFIX)) {
                 reason = reason.substr(PREFIX.size());
             }
+            // A device's own key (`identify`, `read`, `health`) has the
+            // parameters only: the name is not one of the device's (item 7
+            // of the delta review of #149).
+            constexpr std::string_view UNBOUND =
+                " is not a parameter and no variable bound to this point";
+            if (local.empty() && !context_.starts_with("point ") &&
+                reason.ends_with(UNBOUND)) {
+                reason.replace(reason.size() - UNBOUND.size(), UNBOUND.size(),
+                               " is not a parameter of this device");
+            }
             report_evaluation(value, problem.column, reason,
                               detail_of(tree, bindings));
             return result;

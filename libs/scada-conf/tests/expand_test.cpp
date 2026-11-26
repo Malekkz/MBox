@@ -1078,8 +1078,8 @@ TEST(Expand, TheNamesOfIdentify) {
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{
             "drivers/modbus/line1.yaml:7:11: error CF-410: expression \"100 + "
-            "zz\": \"zz\" is not a parameter and no variable bound to this "
-            "point\n  from template templates/meter_a.yaml:4:51 (identify)"}));
+            "zz\": \"zz\" is not a parameter of this device"
+            "\n  from template templates/meter_a.yaml:4:51 (identify)"}));
 }
 
 // B9 and the ruling O-9: a key the schema types as an integer takes an
@@ -1259,8 +1259,8 @@ TEST(Expand, BothSidesOfAndAndTheSecondRange) {
                        "holding, register: \"n + k\", type: uint16 } }\n"},
                       {"drivers/modbus/line1.yaml", one_device()}}),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-                     "\"1..n\": \"n\" is not a parameter and no variable bound "
-                     "to this point\n  from template "
+                     "\"1..n\": \"n\" is not a parameter of this device"
+                     "\n  from template "
                      "templates/meter_a.yaml:4:30 (variable k)"}));
 }
 
