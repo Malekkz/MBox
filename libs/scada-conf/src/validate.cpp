@@ -13,6 +13,7 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "runtime_expressions.h"
 #include "tag_names.h"
 #include "validate_internal.h"
 
@@ -298,8 +299,12 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 }
                 // The tags of the expanded tree and the references to them
                 // (D-116, slice 7a of #100).
-                const TagNames tags =
+                TagNames tags =
                     collect_tags(*validation.expanded, checked, stage5);
+                // Virtual tags get their types from their expressions before
+                // any reference reads them (D-117, slice 7b of #100).
+                check_run_time_expressions(tags, *validation.expanded, checked,
+                                           stage5);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);
             }

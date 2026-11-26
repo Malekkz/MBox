@@ -91,6 +91,17 @@ public:
     // name, 0 for none: a device given twice is checked once (CF-303).
     [[nodiscard]] NodeId device_at(std::string_view device) const;
 
+    // Gives tag `name` its value type: a virtual tag's, from its expression
+    // (D-117). Nothing for a name that is no tag.
+    void set_value_type(std::string_view name, std::string value_type);
+
+    // Calls `visit(name, info)` for each tag whose name starts with
+    // `prefix`, in the order of names.
+    void each_with_prefix(
+        std::string_view prefix,
+        const std::function<void(std::string_view, const TagInfo&)>& visit)
+        const;
+
 private:
     friend class TagCollector;
 

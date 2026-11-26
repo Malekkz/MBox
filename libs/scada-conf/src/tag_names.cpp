@@ -1504,6 +1504,21 @@ NodeId TagNames::device_at(std::string_view device) const {
     return found == devices_.end() ? 0 : found->second.name;
 }
 
+void TagNames::set_value_type(std::string_view name, std::string value_type) {
+    if (const auto found = tags_.find(name); found != tags_.end()) {
+        found->second.value_type = std::move(value_type);
+    }
+}
+
+void TagNames::each_with_prefix(
+    std::string_view prefix,
+    const std::function<void(std::string_view, const TagInfo&)>& visit) const {
+    for (auto entry = tags_.lower_bound(prefix);
+         entry != tags_.end() && entry->first.starts_with(prefix); ++entry) {
+        visit(entry->first, entry->second);
+    }
+}
+
 TagNames collect_tags(const ExpandedTree& tree,
                       std::span<const CheckedFile> files,
                       Diagnostics& diagnostics) {
