@@ -2314,7 +2314,7 @@ Date: 2026-11-26
 Phase / issue: 2, #100 (P2-03), slice 7a
 Status: proposed
 
-Context: contract 2.6 resolves a tag reference against "every tag of the expanded tree, generated tags included (section 12.5)", and 12.4 and 12.5 list those tags. The tag set itself, with owners, queues and the hash, is #101, and owner names wait on a decision of the owner (#136). Slice 7a needs only names and types.
+Context: contract 2.6 resolves a tag reference against "every tag of the expanded tree, generated tags included (section 12.5)", and 12.4 and 12.5 list those tags. The tag set itself, with owners, queues and the hash, is #101; the owner has since approved the owner-name rule (#151), which #101 builds on and slice 7a does not use. Slice 7a needs only names and types.
 Options: build the tag set of #101 first; build names and types only for stage 5.
 Decision: stage 5 builds the tags by name with their value types (`src/tag_names.cpp`), with no owner, queue or flag, so #101 may reuse it without taking a naming rule from it.
 - **The tags.**

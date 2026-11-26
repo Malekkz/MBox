@@ -4,17 +4,18 @@
 // The tags of the expanded tree by name, with their value types
 // (configuration schemas contract 12.4, 12.5; decision D-116), for the
 // reference checks of stage 5. Names and types only: the tag set with its
-// owners, queues and hash is #101, and owner names wait on a decision of the
-// owner (#136), so nothing here names an owner.
+// owners, queues and hash is #101, after the owner-name rule of #151, so
+// nothing here names an owner.
 
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
+#include "scada/conf/node.h"
 #include "scada/conf/references.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
