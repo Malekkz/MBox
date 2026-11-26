@@ -55,17 +55,19 @@ TEST(Expand, AnExpressionIsParsedOncePerSite) {
     EXPECT_EQ(small.error_count, 0U);
     EXPECT_EQ(small.counts.parses, 2U);
     EXPECT_EQ(small.counts.typings, 2U);
-    // At its full size the evaluations pass the work budget at the first
-    // instance: refused at once, with still two parses.
+    // At its full size it passes the expression budget, refused with the
+    // budget's own message (G1). The default budget takes seconds in a
+    // release build (D-114); here a budget of 4,000,000 nodes reaches it at
+    // the first instance.
     const Expanded full = expand_limited(
         {{"templates/meter_a.yaml", repeat_when(65536, false_terms(400))},
          {"drivers/modbus/line1.yaml", instances(30)}},
-        {});
-    EXPECT_EQ(
-        full.lines,
-        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the points "
-               "and repeat values made for the tree exceed their limit "
-               "of 4000000\n  from template templates/meter_a.yaml:5:11"}));
+        {.expression_work = 4'000'000});
+    EXPECT_EQ(full.lines,
+              (Lines{"drivers/modbus/line1.yaml:7:13: error CF-113: the "
+                     "expression nodes evaluated for the tree exceed their "
+                     "limit of 4000000\n  from template "
+                     "templates/meter_a.yaml:5:11"}));
     EXPECT_EQ(full.counts.parses, 2U);
 }
 

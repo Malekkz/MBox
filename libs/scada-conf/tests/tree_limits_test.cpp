@@ -322,21 +322,21 @@ TEST(Expand, WhatIsKeptPastTheLimit) {
 }
 
 }  // namespace
-// The weight of an evaluation in the work budget is its expression's nodes
-// (E1 of the review of #146). With 10 values, each node more in `when` costs
-// 12: one in each of the 10 evaluations, one in its parse and one in its
-// typing. So the budget at which the tree passes moves by 12 per node.
+// The expression budget counts each evaluation's nodes (E1 and G1 of the
+// review of #146). With 10 values, each node more in `when` costs 12: one in
+// each of the 10 evaluations, one in its parse and one in its typing. So the
+// budget at which the tree passes moves by 12 per node.
 TEST(Expand, AnEvaluationCostsItsNodes) {
-    // 65 = the `for` value "1..10" (3 nodes: parsed, typed, evaluated: 9),
-    // 10 values, 10 points made, and `n > 0` (3 nodes) parsed and typed (6)
-    // and evaluated 10 times (30).
-    constexpr std::size_t EDGE = 65;
+    // 45 = the `for` value "1..10" (3 nodes: parsed, typed, evaluated: 9),
+    // and `n > 0` (3 nodes) parsed and typed (6) and evaluated 10 times
+    // (30). The values and the points are the other budget's.
+    constexpr std::size_t EDGE = 45;
     constexpr int VALUES = 10;
     const auto passes = [](const std::string& when, std::size_t work) {
         return expand_limited(
                    {{"templates/meter_a.yaml", repeat_when(VALUES, when)},
                     {"drivers/modbus/line1.yaml", instances(1)}},
-                   {.work = work})
+                   {.expression_work = work})
                    .error_count == 0;
     };
     // `n > 0` has 3 nodes, `n + 0 > 0` 5, `n + 0 + 0 > 0` 7.
@@ -368,20 +368,20 @@ TEST(Expand, WhatIsMadeCountsWithWhatIsWritten) {
 }
 
 // A reference to a parameter costs the value it copies (E1 of the review
-// of #146): `'v0' IN s` over 10 values passes at 165 with a set of 10
-// items, 65 as for `n > 0` and 10 x 10 for the set, and at 265 with 20.
+// of #146): `'v0' IN s` over 10 values passes at 145 with a set of 10
+// items, 45 as for `n > 0` and 10 x 10 for the set, and at 245 with 20.
 TEST(Expand, AReferenceCostsItsValue) {
     const auto passes = [](int items, std::size_t work) {
         return expand_limited(
                    {{"templates/meter_a.yaml", with_set(items, "'v0' IN s")},
                     {"drivers/modbus/line1.yaml", instances(1)}},
-                   {.work = work})
+                   {.expression_work = work})
                    .error_count == 0;
     };
-    EXPECT_TRUE(passes(10, 165));
-    EXPECT_FALSE(passes(10, 164));
-    EXPECT_TRUE(passes(20, 265));
-    EXPECT_FALSE(passes(20, 264));
+    EXPECT_TRUE(passes(10, 145));
+    EXPECT_FALSE(passes(10, 144));
+    EXPECT_TRUE(passes(20, 245));
+    EXPECT_FALSE(passes(20, 244));
 }
 
 // Past the work budget nothing more is counted: one stop is one error,
@@ -399,8 +399,37 @@ TEST(Expand, OneStopIsOneError) {
     const Expanded expanded =
         expand_limited({{"templates/meter_a.yaml", text},
                         {"drivers/modbus/line1.yaml", instances(1)}},
-                       {.work = 40});
+                       {.expression_work = 40});
     EXPECT_EQ(expanded.error_count, 1U);
+}
+
+// G1 of the review of #146: expressions do not count against the points
+// and values. The lead's tree, 300 devices of a `repeat` of 1,000 points
+// with the contract's computed register, was refused at the 200th device
+// when each expression node counted as a point. A tenth of it, 30 devices,
+// takes exactly 60,000 of the points budget, 1,000 values and 1,000 points
+// each, whatever its expressions cost.
+TEST(Expand, ExpressionsHaveABudgetOfTheirOwn) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\nrepeat:\n  - for: { n: "
+        "\"1..1000\" }\n    points:\n      - { name: \"p{n}\", address: { "
+        "table: holding, register: \"if(n <= 24, 1000 + 2 * (n - 1), 1400 + "
+        "2 * (n - 25))\", type: uint16 } }\n";
+    const auto expanded = [&meter](std::size_t work) {
+        return expand_limited(
+            {{"templates/meter_a.yaml", meter},
+             {"drivers/modbus/line1.yaml", instances(30)},
+             {"system.yaml",
+              std::string(SYSTEM) + "limits: { max_tags: 1000000 }\n"}},
+            {.work = work});
+    };
+    constexpr std::size_t POINTS_AND_VALUES = 60'000;
+    EXPECT_EQ(expanded(POINTS_AND_VALUES).error_count, 0U);
+    const Expanded refused = expanded(POINTS_AND_VALUES - 1);
+    ASSERT_EQ(refused.lines.size(), 1U);
+    EXPECT_NE(refused.lines.front().find("CF-113: the points and repeat "
+                                         "values made for the tree exceed"),
+              std::string::npos);
 }
 
 }  // namespace scada::conf

@@ -1523,20 +1523,38 @@ private:
     // The work of the expansion: every point made, written or generated,
     // kept or not, and every `repeat` value evaluated counts one (the
     // ruling S1 on #146, D3 of the delta review); false past the limit.
-    // `units` above one weight an expression by its nodes (E1 of the
-    // review of #146), so that the budget bounds the real work.
-    bool count_work(const Value& site, std::size_t units = 1) {
+    bool count_work(const Value& site) {
         if (stopped_) {
             return false;
         }
-        work_ = units > SIZE_MAX - work_ ? SIZE_MAX : work_ + units;
-        if (work_ <= limits_.work) {
+        if (++work_ <= limits_.work) {
             return true;
         }
         error(CF_SIZE_LIMIT, site,
               "the points and repeat values made for the tree exceed their "
               "limit of " +
                   std::to_string(limits_.work));
+        stopped_ = true;
+        return false;
+    }
+
+    // The work of the expressions, a budget of its own (G1, the lead's
+    // ruling on #146): the nodes of every evaluation, parse and typing;
+    // false past the limit.
+    bool count_expression_work(const Value& site, std::size_t nodes) {
+        if (stopped_) {
+            return false;
+        }
+        expression_work_ = nodes > SIZE_MAX - expression_work_
+                               ? SIZE_MAX
+                               : expression_work_ + nodes;
+        if (expression_work_ <= limits_.expression_work) {
+            return true;
+        }
+        error(CF_SIZE_LIMIT, site,
+              "the expression nodes evaluated for the tree exceed their "
+              "limit of " +
+                  std::to_string(limits_.expression_work));
         stopped_ = true;
         return false;
     }
@@ -2237,7 +2255,7 @@ private:
                 }
             }
         }
-        if (!count_work(value, std::max<std::size_t>(1, nodes))) {
+        if (!count_expression_work(value, std::max<std::size_t>(1, nodes))) {
             return nullptr;
         }
         if (compiled_nodes_ + nodes > MAX_COMPILED_NODES) {
@@ -2291,7 +2309,8 @@ private:
             })) {
             return true;
         }
-        if (!count_work(value, std::max<std::size_t>(1, tree.nodes.size()))) {
+        if (!count_expression_work(
+                value, std::max<std::size_t>(1, tree.nodes.size()))) {
             return false;
         }
         site.read.clear();
@@ -2332,7 +2351,7 @@ private:
             return std::nullopt;
         }
         const Expression& tree = *site->tree;
-        if (!count_work(value, evaluation_cost(*site, tree))) {
+        if (!count_expression_work(value, evaluation_cost(*site, tree))) {
             return std::nullopt;
         }
         std::map<std::string, ConfigValue, std::less<>> local;
@@ -2666,6 +2685,7 @@ private:
     std::uint64_t tags_ = 0;
     std::size_t made_nodes_ = 0;
     std::size_t work_ = 0;
+    std::size_t expression_work_ = 0;
     // The expressions parsed, at most MAX_COMPILED_NODES nodes of them, and
     // the parses and typings done (for tests of E1 of the review of #146).
     std::map<SiteKey, Compiled> compiled_;
