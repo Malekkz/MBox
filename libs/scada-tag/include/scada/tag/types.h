@@ -38,7 +38,9 @@ enum class QualityFlag : std::uint16_t {
     STALE = 1U << 0U,
     COMM_FAIL = 1U << 1U,
     OUT_OF_RANGE = 1U << 2U,
-    SUBSTITUTED = 1U << 3U,  // entered by a person in place of the source
+    // Not from the source: entered by a person, substituted by
+    // configuration, or reported by the device as forced (contract 1.1).
+    SUBSTITUTED = 1U << 3U,
     NOT_INIT = 1U << 4U,
     OWNER_DOWN = 1U << 5U,
     TIME_UNCERTAIN = 1U << 6U,

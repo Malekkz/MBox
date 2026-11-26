@@ -54,7 +54,8 @@ and write with the sequence lock; change rings; and reliable queues.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 1.0, layout version 1.
+- Contract: `docs/contracts/tag-database.md`, version 1.1, layout version 1.
+  The retain age bound of 1.1 (section 12) is not implemented yet (#89).
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -103,7 +104,7 @@ and a sentence that names the entry, when:
 | A tag names an owner, or an owner or queue names a process, that the tag set does not have | `NOT_FOUND` |
 | More than 1,024 processes, 1,023 owners, 4,096 queues or 1,000,000 tags | `OUT_OF_RANGE` |
 | A change ring capacity is not a power of two from 1,024 to 1,048,576, or is less than twice the owner's tag count | `OUT_OF_RANGE` |
-| The only owner of a process is not named like the process, or one of several is not named `<process>.<writer>` | `INVALID_ARGUMENT` |
+| An owner is named neither `<process>`, the name of its process, nor `<process>.<writer>` with a writer that is not empty. How many owners the process has does not matter (contract 1.1) | `INVALID_ARGUMENT` |
 | A queue name does not start with `events.`, `cmd.` or `result.`, or its capacity is not a power of two | `INVALID_ARGUMENT` |
 | A queue has one process as producer and consumer | `INVALID_ARGUMENT` |
 | A `cmd.<x>` queue has no `result.<x>` queue, or that queue does not go from the consumer of `cmd.<x>` to its producer (D-52) | `INVALID_ARGUMENT` |

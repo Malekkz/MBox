@@ -2,11 +2,11 @@
 
 | | |
 | --- | --- |
-| Contract version | 0.6 |
+| Contract version | 0.7 |
 | Tree format | 1 (section 11) |
 | Status | Accepted for phase 2 implementation; becomes 1.0 when phase 2 passes its acceptance tests (issue #98, P2-01). Its rulings were made by the product owner on 2026-11-23 (section 15). |
 | Implements | Reference architecture 1.2, sections 12, 7.3, 7.4, 7.6, 8, 9.1, 10.1, and the configuration lines of 4.3, 6, 14.4 and 17.7 |
-| Agrees with | Tag database contract 1.0 (sections 3, 5, 8, 12, 13.2, 14 and 14.1); driver interface contract 0.6 (`driver-interface.md`, #99) |
+| Agrees with | Tag database contract 1.1 (sections 2, 3, 5, 8, 12, 13.2, 14 and 14.1); driver interface contract 0.6 (`driver-interface.md`, #99) |
 | Owners of this contract | `scada-conf`, `libscada-conf` |
 
 This contract fixes the configuration tree that people write by hand. It has
@@ -870,9 +870,9 @@ matches no invalid marker is written BAD with OUT_OF_RANGE, and counted.
   BAD with STALE. `keep_last` needs `max_age` on the point (CF-640).
   `substitute` writes the value with UNCERTAIN and SUBSTITUTED. SUBSTITUTED
   here means "substituted by configuration"; the HMI must not show it as
-  "entered by an operator" (tag database contract 6 defines the flag for a
-  person's entry; this widens it, section 16, ruling R-6 of the driver
-  interface contract). A consumer tells an operator's entry from the other
+  "entered by an operator" (tag database contract 1.1, section 6, which
+  gives the flag this wider meaning; ruling R-6 of the driver interface
+  contract). A consumer tells an operator's entry from the other
   meanings by its journal record, not by the flag. There is no `uncertain`
   action (C-29 of the survey): a marker means the device has no value;
   `substitute` gives a stand-in with UNCERTAIN where one is known.
@@ -1065,7 +1065,10 @@ Keys of one kind only:
   (tag database contract 12: another boot without a synchronised clock),
   is restored as BAD with RESTORED, the value kept, so that a reader sees
   it and does not act on it. Within the bound the restore is as today,
-  UNCERTAIN with RESTORED.
+  UNCERTAIN with RESTORED. The age is that of the owner's retain file
+  stamp, not of the value (tag database contract 1.1, section 12, "What
+  this age measures", with its consequences); whether a quiet owner's file
+  is stamped again is to be decided by the owner in #89.
 - The bound is refused (CF-508) on the tags whose restore must never be lost
   to a clock: output mode tags, area authority tags, alarm state and
   shelving tags (all generated, section 12.5), and any tag of
@@ -1075,11 +1078,12 @@ Keys of one kind only:
   before the region is set `ready`, so that no reader sees the old value as
   UNCERTAIN first. A change of the bound alone needs no generation change; it
   applies at the next restore.
-- **Depends on tag database 1.1 (#89).** The attach option that carries the
-  bounds and the restore rule are an addition to tag database contract 1.0,
-  a minor version with a migration note (D-66 f), made by #89 and reviewed by
-  a person (restart behaviour). Until 1.1, `retain_max_age` is validated but
-  has no effect, and `scada-conf` warns (CW-510).
+- **Depends on the library part of the bound (#89).** Tag database contract
+  1.1 (#151) specifies the attach function that carries the bounds
+  (`scada_tag_attach_retain`) and the restore rule; the library part is
+  made by #89 and reviewed by a person (restart behaviour). Until the
+  library part of the bound (#89) is merged, `retain_max_age` is validated
+  but has no effect, and `scada-conf` warns (CW-510).
 
 ### 5.3 Counters and double points
 
@@ -1972,7 +1976,7 @@ runtime diagnostics only.
 | CF-507 | A STRING tag retained | `string tags cannot be retained` |
 | CF-508 | `retain_max_age` on a mode, authority, alarm state or counter tag (#89) | `retain_max_age is not allowed on {kind} tags` |
 | CF-509 | `retain_now` on a point tag or virtual tag | `retain_now is allowed on internal and manual tags only` |
-| CW-510 | `retain_max_age` before tag database 1.1 | `retain_max_age has no effect until the tag database supports it (#89)` |
+| CW-510 | `retain_max_age` before the library part of the bound (#89) is merged | `retain_max_age has no effect until the tag database supports it (#89)` |
 | CF-520 | Expression syntax | `expression: {reason} at column {col}` |
 | CF-521 | An ambiguous `.quality` or `.age` | `{ref} is both a tag and an attribute; use quality() or age()` |
 | CF-522 | A STRING tag in an expression | `string tag {name} cannot be used in an expression` |
@@ -2240,7 +2244,10 @@ T(task)    = S("task", task, 12)
 **Owners.** One owner is one writing thread (tag database contract 2, 13.2).
 Every attached process has an owner named like the process, for the thread
 that writes its process-level tags `sys.proc.<process>.*` (among them the
-apply report of section 13.5); more owners follow its threads:
+apply report of section 13.5); more owners follow its threads. The names
+follow tag database contract 1.1, section 2: `<process>` or
+`<process>.<writer>`, whatever the number of owners of the process. An
+owner keeps its name when its process gains or loses other owners:
 
 | Owner | Process | Thread | Writes |
 | --- | --- | --- | --- |
@@ -2342,7 +2349,7 @@ Decision D-79. Every generated tag name is checked against the 127-byte limit
 - Adding or removing an alarm, an output or a tunable parameter adds or
   removes generated tags, and so restarts the data plane (section 12.7).
 
-### 12.6 Agreement with tag database contract 1.0
+### 12.6 Agreement with tag database contract 1.1
 
 - Names: tag names of at most 127 bytes of `[a-z0-9_.-]`, owner, process and
   queue names of at most 31 bytes, no owner name starting with `.`
@@ -2352,6 +2359,9 @@ Decision D-79. Every generated tag name is checked against the 127-byte limit
   capacities are powers of two up to 2,147,483,648 (contract 5).
 - Owners: every owner is one writing thread (contract 2, 13.2); no thread
   writes the tags of two owners and no owner is written by two threads.
+  An owner is named `<process>` or `<process>.<writer>` with a writer that
+  is not empty (contract 1.1, section 2), and keeps its name when its
+  process gains or loses other owners.
 - Flags: `retain_now` only with `retain`; no STRING tag RETAIN or
   WRITABLE_BY_COMMAND (contract 5, 9.4, 12).
 - `heartbeat_check_ms` at most 400 with a RETAIN_NOW tag (contract 12, D-62).
@@ -3059,8 +3069,9 @@ the reference finds it.
     O-1).
 15. Output status value 6, ACCEPTED_UNVERIFIED (reference 8.1 lists 0 to 5).
 16. SUBSTITUTED is also set for a value substituted by configuration and
-    for a value the device reports as forced (tag database contract 6:
-    "entered by a person"; R-6 of the driver interface contract).
+    for a value the device reports as forced (R-6 of the driver interface
+    contract). Resolved against the tag database contract: 1.1, section 6,
+    defines the flag so (#151); kept as the record, the number is cited.
 17. Only `control` and `io` are real-time in phase 2 (reference 4.3 includes
     "any driver assigned to a fast poll group"; O-4).
 18. The expression grammar departs from IEC 61131-3 in `**` and repeated
@@ -3091,6 +3102,7 @@ the reference finds it.
 | 0.4 | 2026-11-23 | Third pass on 0.3 (C++, SCADA, Linux) and the lead's directions, agreed with the driver interface draft: the fail-safe state machine is the driver interface contract's (8.13) and 7.4 cites it; new keys `control_attach_grace`, `failsafe_max_refusals`, and `failsafe_retry` as the first interval of a back-off; owner and meaning of `<output>.failsafe`; removed outputs and slow writers at a generation change (13.5, O-18); the `scada-tagd` hang (O-19); stages 6 and 7 swapped so that the check reads the bytes the driver reads; `apply.json` against the link after a power cut; the kind of apply against the running generation; reports paired with their `config_id`, state 3, `incomplete` after 30 s; check mode enforcement, re-check after a driver update, expanded-file limits, format version, computed values, JSON subset, load thread; CW-661 removed (validation opens no hardware); idle drivers keep the watchdog; exact integer inverse scaling with no `scale`; CW-721 only when both keys are absent; CF-722, CF-723, CF-1016; lexical rules (abutting tokens, case); corpus cases; `lost_after_timeouts` quotes the driver interface rule word for word; `apply.json` by rename, the switch back after a refused G2, a power cut before it, the first start, retention (`conf.keep_versions`); check-mode enforcement without privilege; re-check in the update's health check; the stop step's version, form and bound; `auto` by ancestor bus; A.3 and A.5 on shared command registers; rulings O-18 to O-20, X-5 dissent, consequences of O-13, R-11, R-16, R-17. Migration: none (draft). |
 | 0.5 | 2026-11-23 | Rulings of the product owner of 2026-11-23 (section 15): every ruling as drafted on the committee's recommendation, with three changes: X-5 (a refused newer request does not end the refresh, an unknown outcome ends it; `<output>.refresh` value 3), O-12 (remote switching outputs default to `safe` on control loss after 30 s and to `hold` at an orderly stop; CW-721 now warns on an explicit hold on control loss), `<output>.failsafe` value 3 for an action given up. Every "open" marker replaced by its ruling; status accepted for phase 2 implementation; reference architecture 1.2; differences 23 and 24; test 23. Migration: none |
 | 0.6 | 2026-11-23 | Corrections found while P2-03 (#100) implements the contract, agreed with the lead: CF-102 arises in stage 3 at the line of the name key, not in stage 1 (a file name can only be compared with its name key once parsed); CF-111 for keys equal only once typed arises in stage 3, which types them; a `value_type` of `int64` or `uint64` needs an integer scaling (CF-517, 4.7, 10.5), so the exact-integer write of 7.2 covers no `scale` and integer `gain` and `offset` only, and read and write of an integer point are exact inverses (the gap was found by #104); `divide_by: 1` and an absent `divide_by` are integer scalings (4.7); the keywords of the schema files, the project keywords `x-scada-*` and their types, with the types of the protocol, template and point files and the two expression forms (Annex C), and the expression syntax codes in stage 3; the YAML subset in detail (1.1, D-106): one stage 2 error per file, columns in characters, `Null` and `NULL`, the `\0` and surrogate escapes, `[a: b]`, tabs, U+FFFE and U+FFFF, and a flow collection's closing bracket; structured text is not available in this version, and every `.st` file is CF-920 at 1:1 (9.3); the corpus cases of these (test 3); `libscada-conf` for `libscada-config` (13.3). Migration: none (no tree of format 1 is deployed yet) |
+| 0.7 | 2026-11-26 | Tag database contract 1.1 (#151, D-143): the header, 12.3 and 12.6 cite 1.1, whose owner-name rule does not depend on the number of owners of a process; an owner keeps its name when its process gains or loses other owners (12.3, 12.6); 4.7 and difference 16 of section 16 cite the wider SUBSTITUTED of 1.1, section 6; 5.2 and CW-510 tie the effect of `retain_max_age` to the library part of the bound (#89), not to the version, and 5.2 says what age the bound is judged on. Migration: none. No owner, queue or tag name of this contract changes, and so no `config_hash`; the owner names of 12.3, `<process>` beside `<process>.<writer>` owners, were refused by tag database contract 1.0 and are accepted by 1.1, so `scada-conf` and `scada-tagd` are built to 1.1 before a tag set uses them. |
 ## Annex A. The Modbus protocol schema
 
 The protocol keys of `drivers/modbus/*.yaml` and of templates with
