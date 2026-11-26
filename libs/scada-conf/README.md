@@ -85,10 +85,11 @@ limit, so memory is bounded by the limit, not by the tree's instances.
 Every point made, written or generated, and every `repeat` value evaluated
 count toward a work budget of 4,000,000, so instances times template
 points is at most 4,000,000, whatever `only`, `disable` or `when` keep.
-An expression is parsed once for all its evaluations, typed again only
-when a name it reads changes type, and an evaluation costs its nodes in
-the budget (a reference to a parameter also the size of its value), so
-the budget bounds the work of evaluation too. The diagnostics kept are at
+An expression is parsed once for all its evaluations and typed again only
+when a name it reads changes type. Expressions have a budget of their
+own, 128,000,000 nodes (32 times the node limit): every evaluation counts
+its nodes, a reference to a parameter also the size of its value, and
+every parse and typing its nodes. The diagnostics kept are at
 most 2,000, past which an error is counted only.
 
 The bound, measured on the worst accepted trees (release build, x86-64,
@@ -98,12 +99,13 @@ the whole of `validate_and_expand`):
   MiB of text, 3,844,027 nodes); 670 MB for 5 `repeat` blocks of 65,536
   points whose `when` is false; 641 MB for one instance of 3,997,723
   nodes;
-- time: 10.7 s for 61 instances of a template of 65,536 written points
-  that each keep one (`only`), just under the work budget; with
-  expressions of 4,096 bytes, 0.4 s (900 evaluations of one `when`).
+- time: about 12.8 s for the worst tree of expressions within their
+  budget (additions and uncached parses take about 96 ns a node), 10.7 s
+  for 61 instances of a template of 65,536 written points that each keep
+  one (`only`), just under the work budget.
 
 A tree past a limit is refused within that: a `when` of 400 terms over
-65,536 values in 30 instances in 0.4 s (it took 729 s when every
+65,536 values in 30 instances in 5.2 s (it took 729 s when every
 evaluation parsed its text again), 100 instances of a 65,536-point
 `repeat` at the node limit, 20,000 instances whose expressions fail at
 18 MB, as 100 errors that each name the other instances.
