@@ -30,9 +30,9 @@ enum class IoStatus : std::uint8_t {
 // calls is real-time: each may block up to its deadline and makes system
 // calls (DI 2.5); the engine calls them outside every SCADA_RT function.
 //
-// Waiting: the engine does not wait while idle. The worker's loop (slice 5)
-// waits, in one `poll`, on the time `ChannelEngine::step` returned, on the
-// order eventfd of the command thread (slices 6 and 7) and, for a stream
+// Waiting: the engine does not wait while idle. The worker's loop
+// (driver.h) waits, in one `poll`, on the time `ChannelEngine::step` returned,
+// on the order eventfd of the command thread (slices 6 and 7) and, for a stream
 // only, on `poll_fd()` for POLLRDHUP alone; then it calls `step` again.
 // Never POLLIN: bytes that arrive on an idle connection are read by nobody
 // until the next exchange, so POLLIN would wake the loop at once in every

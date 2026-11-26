@@ -24,10 +24,11 @@ The library is built in slices. These are the first two:
 | What the engine needs of a connection and of time | `scada/driver/transport.h` | 7.1 to 7.3 |
 | The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 | The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
+| The driver process: main thread, a worker per channel, the writes after attach, the channel watchdog, the stop | `scada/driver/driver.h` | 2.4, 2.6, 9.1, 10 (decision D-142) |
 
-Not yet here: the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-141 record the choices
-the contracts left open.
+Not yet here: the system tags and the workers' log queues (slice 5b),
+commands, the generation change and reload. `docs/decisions.md` D-130 to
+D-142 record the choices the contracts left open.
 
 ## What it does
 
@@ -155,10 +156,25 @@ carry them there. They are read when a configuration is compiled.
 
 ```
 cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test \
-  scada-driver-transport-test scada-driver-test-sim
+  scada-driver-transport-test scada-driver-test-sim scada-drv-test \
+  scada-driver-process-integration-test scada-tagd
 ctest --preset unit -R 'scada-driver|sample_processing|tzif'
-ctest --preset integration -R 'scada-driver-(zones|transport)'
+ctest --preset integration -R 'scada-driver-(zones|transport|process)'
 ```
+
+To run a driver of the test protocol by hand against the simulator and a
+running scada-tagd (its tag set must have the process `drv-test` and the
+tags `<device>.<point>` of type INT64):
+
+```
+scada-driver-test-sim --tcp --map 1 0 0 3 --set 1 0 0 1234   # prints "tcp <port>"
+scada-drv-test --base-dir <dir> --tagd-uid <uid> \
+  --channel line1 tcp 127.0.0.1 <port> --device d1 1 --point v 0 1
+```
+
+`scada-drv-test` stops on SIGTERM or SIGINT with status 0, ends with 4 on a
+stall (2.6), 1 when it cannot start (the reason on standard error), 2 on a
+bad command line.
 
 - The golden vectors are in `tests/golden/driver-vectors.txt`, a data file
   that the protocols and their simulators share (its header gives the
@@ -211,3 +227,10 @@ ctest --preset integration -R 'scada-driver-(zones|transport)'
   loop and the discard limit are unit tests (`connections_test.cpp`). A pseudo-terminal has no bit rate or
   parity (7.2): line timing is tested on the target board (#41). Every wait
   is on a condition with a time-out; nothing sleeps.
+- `scada-driver-process-integration-test` (in `tests/integration`) runs
+  scada-tagd, the simulator and `scada-drv-test` as processes and reads the
+  tags through the C interface: the writes after attach (9.1), every
+  protocol call on its thread (test 1; `scada-drv-test` checks it), a stall
+  that ends the process and an idle or connecting worker that does not
+  (test 2), a lost and a refused connection (test 16), STALE (test 17). It
+  takes about 25 s; the idle case alone runs 12 s.

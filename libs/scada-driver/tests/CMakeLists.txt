@@ -11,6 +11,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     sample_processing_test.cpp
     channel_engine_test.cpp
     connections_test.cpp
+    driver_test.cpp
     engine_random_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
@@ -71,3 +72,9 @@ scada_add_test(scada-driver-transport-test KIND integration
   DEPENDS scada::driver scada::test-support
   ENVIRONMENT "SCADA_DRIVER_TEST_SIM_COMMAND=${sim_command}")
 add_dependencies(scada-driver-transport-test scada-driver-test-sim)
+
+# A driver process of the test protocol, for the integration tests of the
+# driver process in tests/integration (decision D-142). Not installed.
+add_executable(scada-drv-test drv_test_main.cpp test_protocol.cpp)
+target_link_libraries(scada-drv-test PRIVATE scada::driver)
+scada_target_defaults(scada-drv-test)

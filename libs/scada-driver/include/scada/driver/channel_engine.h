@@ -12,7 +12,7 @@
 //
 // Orders (writes, select and operate, READ_NOW) come with the command
 // slices; this engine sends none yet. Identity checks and device restarts
-// (7.6) come with slice 5.
+// (7.6) come with slice 5b.
 
 #include "scada/common/realtime.h"
 #include "scada/common/status.h"
