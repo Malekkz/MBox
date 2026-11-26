@@ -48,6 +48,7 @@ scada_add_library(scada-conf
     src/names.cpp
     src/node.cpp
     src/point_types.cpp
+    src/name_pattern.cpp
     src/path_class.cpp
     src/read.cpp
     src/references.cpp

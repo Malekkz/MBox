@@ -17,6 +17,11 @@
 
 namespace scada::conf {
 
+// The key of a cause (D-114): `message` with the instance taken out, where
+// it names the instance `device` as `"<device>.<point>"` or `"<device>"`.
+[[nodiscard]] std::string instance_free_key(std::string_view message,
+                                            std::string_view device);
+
 class GroupedErrors {
 public:
     // Keeps at most `kept_limit` diagnostics; past it an error is counted
