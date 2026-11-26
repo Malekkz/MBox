@@ -406,16 +406,16 @@ TEST(Expand, OneStopIsOneError) {
 // G1 of the review of #146: expressions do not count against the points
 // and values. The lead's tree, 300 devices of a `repeat` of 1,000 points
 // with the contract's computed register, was refused at the 200th device
-// when each expression node counted as a point. A tenth of it, 30 devices,
-// takes exactly 60,000 of the points budget, 1,000 values and 1,000 points
-// each, whatever its expressions cost.
+// when each expression node counted as a point. Ten of its devices take
+// exactly 20,000 of the points budget, 1,000 values and 1,000 points each,
+// whatever their expressions cost (about 190,000 when they counted).
 TEST(Expand, ExpressionsHaveABudgetOfTheirOwn) {
     const std::string meter =
         "template: meter_a\nprotocol: modbus\nrepeat:\n  - for: { n: "
         "\"1..1000\" }\n    points:\n      - { name: \"p{n}\", address: { "
         "table: holding, register: \"if(n <= 24, 1000 + 2 * (n - 1), 1400 + "
         "2 * (n - 25))\", type: uint16 } }\n";
-    constexpr int DEVICES = 30;
+    constexpr int DEVICES = 10;
     const auto expanded = [&meter](std::size_t work) {
         return expand_limited(
             {{"templates/meter_a.yaml", meter},
@@ -424,7 +424,7 @@ TEST(Expand, ExpressionsHaveABudgetOfTheirOwn) {
               std::string(SYSTEM) + "limits: { max_tags: 1000000 }\n"}},
             {.work = work});
     };
-    constexpr std::size_t POINTS_AND_VALUES = 60'000;
+    constexpr std::size_t POINTS_AND_VALUES = 20'000;
     EXPECT_EQ(expanded(POINTS_AND_VALUES).error_count, 0U);
     const Expanded refused = expanded(POINTS_AND_VALUES - 1);
     ASSERT_EQ(refused.lines.size(), 1U);
