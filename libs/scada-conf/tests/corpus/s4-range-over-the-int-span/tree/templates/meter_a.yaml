@@ -1,0 +1,6 @@
+template: meter_a
+protocol: modbus
+repeat:
+  - for: { n: "-9223372036854775807 - 1..9223372036854775807" }
+    points:
+      - { name: "p{n}", address: { table: holding, register: 1, type: uint16 } }

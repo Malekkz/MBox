@@ -1,0 +1,6 @@
+# Expanded devices and points (contract 14, test 6; S6 of the delta review
+# of #146): 1 device and 2 points, as the reviewer's reference expander
+# gives them. Invented.
+ps1.pump1: {}
+ps1.pump1.run_cmd: {value_type: bool, access: rw, storage: volatile, address: {line: pump1-run, direction: output, at_start: safe}}
+ps1.pump1.running: {address: {line: 7, direction: input, bias: pull_up, debounce: 20ms, active_low: true}}

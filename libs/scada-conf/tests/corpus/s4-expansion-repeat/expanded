@@ -1,0 +1,20 @@
+# Expanded points (contract 14, test 6): `repeat` with one variable and an
+# irregular address (`if`), two variables over an irregular list, the first
+# outermost, with a `when`; an empty range (25..inputs). The base template's
+# in{n} and the protocol template's are one point each, their bindings
+# joined (step 3.2). Invented.
+ps1.io1: {unit_id: 1}
+ps1.io1.in1: {description: Input, address: {table: discrete, register: 0, type: bool}}
+ps1.io1.in2: {description: Input, address: {table: discrete, register: 1, type: bool}}
+ps1.io1.in3: {description: Input, address: {table: discrete, register: 13, type: bool}}
+ps1.io1.card1.ch1: {address: {table: input, register: 101, type: uint16}}
+ps1.io1.card1.ch3: {address: {table: input, register: 103, type: uint16}}
+ps1.io1.card1.ch4: {address: {table: input, register: 104, type: uint16}}
+ps1.io1.card2.ch4: {address: {table: input, register: 204, type: uint16}}
+ps1.io2: {unit_id: 2}
+ps1.io2.in1: {description: Input, address: {table: discrete, register: 0, type: bool}}
+ps1.io2.in2: {description: Input, address: {table: discrete, register: 1, type: bool}}
+ps1.io2.card1.ch1: {address: {table: input, register: 101, type: uint16}}
+ps1.io2.card1.ch3: {address: {table: input, register: 103, type: uint16}}
+ps1.io2.card1.ch4: {address: {table: input, register: 104, type: uint16}}
+ps1.io2.card2.ch4: {address: {table: input, register: 204, type: uint16}}

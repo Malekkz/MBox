@@ -37,7 +37,9 @@ configure_file(src/builtin_schemas.cpp.in
 
 scada_add_library(scada-conf
   SOURCES
+    src/config_eval.cpp
     src/diagnostic.cpp
+    src/expand.cpp
     src/expression.cpp
     src/expression_site.cpp
     src/expression_types.cpp

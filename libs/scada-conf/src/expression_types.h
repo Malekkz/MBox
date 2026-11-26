@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace scada::conf {
 
@@ -45,8 +46,10 @@ using NameTypes = std::function<std::optional<ValueType>(std::string_view)>;
 // The type of `tree`, a configuration expression that parsed, or nothing
 // with the first error in `error`. Functions that read tags (aggregates,
 // `quality`, `tag`) are CF-523: a configuration expression has no tags.
+// With `node_types`, the type of every node, by index, once it succeeds.
 [[nodiscard]] std::optional<ValueType> configuration_type(
-    const Expression& tree, const NameTypes& names, TypeError& error);
+    const Expression& tree, const NameTypes& names, TypeError& error,
+    std::vector<ValueType>* node_types = nullptr);
 
 }  // namespace scada::conf
 

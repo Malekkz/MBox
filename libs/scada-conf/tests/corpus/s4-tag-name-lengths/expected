@@ -1,0 +1,5 @@
+# Name lengths (contract 14, test 8): ps1.m1 with a point name of 120 bytes
+# gives a tag of exactly 127 bytes, valid; ps1.m22 makes it 128, CF-402 at
+# the instance, and the same for a bit's generated tag, CF-403. Invented.
+drivers/modbus/line1.yaml:8:13: CF-402
+drivers/modbus/line1.yaml:8:13: CF-403

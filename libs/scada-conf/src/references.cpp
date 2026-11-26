@@ -507,6 +507,9 @@ private:
         // True for a device without template: a name in an expression is
         // an error here, as nothing can define it.
         bool bare = false;
+        // While the chain is walked: the `number` parameters, which are
+        // not typed here (`type_numbers`).
+        std::set<std::string, std::less<>> numbers;
     };
 
     // The scope of `file`, a template, walking `extends` up to MAX_CHAIN
@@ -541,7 +544,57 @@ private:
             }
             file = next->second;
         }
+        type_numbers(scope);
         return scope;
+    }
+
+    // A `number` parameter is an INT or a REAL by what each instance
+    // writes (the ruling O-9 on #146), so it is not typed at the template:
+    // the expander checks each instance's value (B12 of the delta review).
+    static void type_numbers(Scope& scope) {
+        for (const std::string& name : scope.numbers) {
+            scope.parameters.erase(name);
+        }
+        scope.numbers.clear();
+    }
+
+    // The scope of a device's own points, defaults and overrides, one per
+    // template, not per device (the lead's note on #144).
+    // - With a template, the template's chain: its enumerations. Their
+    //   expressions may use the variables of the template's `repeat` blocks
+    //   (4.5, step 6), so the expander types them, which binds them.
+    // - With a template the tree does not have: nothing is known.
+    // - Without a template there is no parameter or variable: every name
+    //   in an expression is unknown (B5 of the review of #144).
+    const Scope& instance_scope(NodeId device) {
+        const std::optional<NodeId> name = find_scalar(device, "template");
+        if (!name) {
+            static const Scope BARE = [] {
+                Scope bare;
+                bare.bare = true;
+                return bare;
+            }();
+            return BARE;
+        }
+        need(template_names_, "template", *name);
+        const auto found = templates_.find(text(*name));
+        if (found == templates_.end()) {
+            static const Scope UNKNOWN = [] {
+                Scope unknown;
+                unknown.known = false;
+                unknown.typed = false;
+                return unknown;
+            }();
+            return UNKNOWN;
+        }
+        const auto cached = instance_scopes_.find(found->second);
+        if (cached != instance_scopes_.end()) {
+            return cached->second;
+        }
+        Scope scope = scope_of(found->second);
+        scope.typed = false;
+        return instance_scopes_.emplace(found->second, std::move(scope))
+            .first->second;
     }
 
     // The parameters a level declares with their type.
@@ -552,15 +605,24 @@ private:
             return;
         }
         for (const Entry& entry : document.entries(*params)) {
+            if (document.kind(entry.value) != NodeKind::MAP) {
+                continue;
+            }
+            const std::string name(document.text(entry.key));
             // A child may change a default without repeating the type, and
             // never changes it (CF-415): the type is that of the nearest
             // declaration that gives one.
-            if (document.kind(entry.value) != NodeKind::MAP ||
-                !document.find(entry.value, "type")) {
+            const std::optional<NodeId> type =
+                document.find(entry.value, "type");
+            if (!type) {
                 continue;
             }
-            scope.parameters.try_emplace(std::string(document.text(entry.key)),
-                                         parameter_type(document, entry.value));
+            if (scope.parameters
+                    .try_emplace(name, parameter_type(document, entry.value))
+                    .second &&
+                document.text(*type) == "number") {
+                scope.numbers.insert(name);
+            }
         }
     }
 
@@ -657,26 +719,7 @@ private:
     }
 
     void check_device(NodeId device) {
-        Scope scope;
-        if (const std::optional<NodeId> name =
-                find_scalar(device, "template")) {
-            need(template_names_, "template", *name);
-            if (const auto found = templates_.find(text(*name));
-                found != templates_.end()) {
-                scope = scope_of(found->second);
-            } else {
-                scope.known = false;
-            }
-            // An instance's points, defaults and overrides may use the
-            // variables of the template's `repeat` blocks (4.5, step 6);
-            // their expressions are typed by the expander, which binds
-            // them.
-            scope.typed = false;
-        } else {
-            // Without a template there is no parameter or variable: every
-            // name in an expression is unknown (B5 of the review of #144).
-            scope.bare = true;
-        }
+        const Scope& scope = instance_scope(device);
         for (const NodeId point : items(device, "points")) {
             check_point(point, scope, {});
         }
@@ -886,7 +929,7 @@ private:
         }
     }
 
-    enum class Wanted : std::uint8_t { BOOL, NUMBER, RANGE_OR_INT };
+    enum class Wanted : std::uint8_t { BOOL, NUMBER, INT, RANGE_OR_INT };
 
     // The one place that tells run-time expressions from configuration
     // expressions in a point (8): an alarm's `expr`, `condition` and
@@ -922,9 +965,16 @@ private:
                              const Variables& variables) {
         switch (document_->kind(node)) {
             case NodeKind::SCALAR:
-                if (file_->types->of(node) == ScalarType::EXPRESSION) {
+                // A key the schema types as an integer takes an INT, as in
+                // the expander (B9 of the review of #146).
+                if (const ScalarType type = file_->types->of(node);
+                    type == ScalarType::EXPRESSION ||
+                    type == ScalarType::INTEGER_EXPRESSION) {
                     check_typed(node, scope, variables,
-                                ExpressionKind::CONFIGURATION, Wanted::NUMBER);
+                                ExpressionKind::CONFIGURATION,
+                                type == ScalarType::INTEGER_EXPRESSION
+                                    ? Wanted::INT
+                                    : Wanted::NUMBER);
                 }
                 return;
             case NodeKind::MAP:
@@ -1022,9 +1072,14 @@ private:
     void report(NodeId scalar, std::uint32_t column,
                 const std::string& reason) {
         ExpressionSite site = expression_site(*document_, scalar, column);
+        // Where the scalar is not its source on one line (a block scalar,
+        // an escaped string), the place is given within the text, as for
+        // CF-520 (D-109).
+        const std::string within =
+            document_->verbatim(scalar) ? std::string() : site.where;
         diagnostics_->error(
             CF_EXPRESSION_FAILS, std::move(site.location),
-            "expression " + quote_text(text(scalar)) + ": " + reason);
+            "expression " + quote_text(text(scalar)) + ": " + reason + within);
     }
 
     static bool fits(ValueType type, Wanted wanted) noexcept {
@@ -1033,6 +1088,8 @@ private:
                 return type == ValueType::BOOL;
             case Wanted::NUMBER:
                 return type == ValueType::INT || type == ValueType::REAL;
+            case Wanted::INT:
+                return type == ValueType::INT;
             case Wanted::RANGE_OR_INT:
                 return type == ValueType::RANGE || type == ValueType::INT;
         }
@@ -1045,6 +1102,8 @@ private:
                 return "BOOL";
             case Wanted::NUMBER:
                 return "a number";
+            case Wanted::INT:
+                return "an INT";
             case Wanted::RANGE_OR_INT:
                 return "a range or an INT";
         }
@@ -1059,6 +1118,7 @@ private:
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     // The scope of each template, built once (S4 of the review of #144).
     std::map<const CheckedFile*, Scope> scopes_;
+    std::map<const CheckedFile*, Scope> instance_scopes_;
     Definitions template_names_;
     Definitions channels_;
     Definitions devices_;

@@ -1,0 +1,8 @@
+template: pump_b
+extends: pump_a
+protocol: modbus
+identify:
+  - { address: { table: holding, register: 2, type: uint16 }, equals: 9 }
+points:
+  - { name: fault, address: { field: [0, 3] } }
+  - { name: energy, address: { parts: [ { register: 20 }, { register: 30 } ] } }

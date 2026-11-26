@@ -1,0 +1,6 @@
+template: meter_base
+points:
+  - { name: v1, unit: V }
+  - { name: v2, unit: V }
+  - { name: v3, unit: V }
+  - { name: dc.v, unit: V }

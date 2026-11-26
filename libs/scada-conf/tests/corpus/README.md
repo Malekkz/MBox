@@ -7,6 +7,7 @@ directory is one case:
 | --- | --- |
 | `<case>/tree/` | The configuration tree, as it would be committed. |
 | `<case>/expected` | The diagnostics the tree must give, one per line, in the order of contract section 1.4: `<file>:<line>:<column>: <code>`. Lines that start with `#` are comments. A case whose list is empty is a valid tree with no warning. |
+| `<case>/expanded` | Optional, for a valid tree: its expanded devices and points (contract 14, test 6), one per line in the order of expansion: `<device>: {<keys>}`, then `<device>.<point>: {<keys>}`, values in flow style as their text. |
 
 Errors are listed when the tree has any; otherwise its warnings. Messages are
 not pinned here; the unit tests check them.

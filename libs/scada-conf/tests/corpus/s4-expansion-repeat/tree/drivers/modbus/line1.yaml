@@ -1,0 +1,8 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.io1, template: io_card, unit_id: 1 }
+  - { name: ps1.io2, template: io_card, unit_id: 2, params: { inputs: 2 } }

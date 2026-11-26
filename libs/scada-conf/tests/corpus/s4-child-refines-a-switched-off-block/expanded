@@ -1,0 +1,11 @@
+# The ruling O-1 on #146 (B4): a block's `when` is carried on each point it
+# makes and decided at step 4. inv_b refines pv1.voltage of a block whose
+# `when` is has_dc: i1 (has_dc false) has no pv point, not a pv1.voltage of
+# half an address; i2 (has_dc true) has both, pv1 at inv_b's register 300.
+# Invented.
+ps1.i1: {unit_id: 1}
+ps1.i1.power: {unit: kW, address: {table: holding, register: 10, type: uint16}}
+ps1.i2: {unit_id: 2}
+ps1.i2.power: {unit: kW, address: {table: holding, register: 10, type: uint16}}
+ps1.i2.pv1.voltage: {unit: V, address: {table: holding, register: 300, type: uint16}}
+ps1.i2.pv2.voltage: {unit: V, address: {table: holding, register: 102, type: uint16}}

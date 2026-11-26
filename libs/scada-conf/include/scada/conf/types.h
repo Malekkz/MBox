@@ -24,6 +24,10 @@ enum class ScalarType : std::uint8_t {
     SIZE,        // `2GiB` (2.2)
     PERCENTAGE,  // `0.5%` (2.2)
     EXPRESSION,  // text of an expression (2.4, 5.6), checked later
+    // An expression of a key that takes an integer only (`register`,
+    // `bit`, `divide_by`): its value must be an INT (B9 of the review of
+    // #146).
+    INTEGER_EXPRESSION,
 };
 
 // The types of the scalars of one Document, NONE until set.

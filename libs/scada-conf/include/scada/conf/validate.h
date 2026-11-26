@@ -6,9 +6,11 @@
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
 #include "scada/conf/tree.h"
 
 #include <filesystem>
+#include <optional>
 
 namespace scada::conf {
 
@@ -24,16 +26,34 @@ namespace scada::conf {
 //   their protocol's (Annexes A and B); CF-102, CF-111 once typed, CF-211,
 //   `time.sync.servers`, the keys an object requires or refuses by the
 //   value of another (rules.h) and CF-517 within one point object;
-// - stage 5, when stages 1 to 3 found no error: the names, duplicates,
-//   channel rules and expression types that need no expansion
-//   (references.h).
-// Stage 4, the expansion, comes with #103; the rest of stage 5 with slice 7
-// of #100.
+// - stage 4, when stages 1 to 3 found no error: the expansion of templates
+//   and instances (expand.h);
+// - stage 5, when stage 4 found no error: the names, duplicates, channel
+//   rules and expression types that need no point tags (references.h).
+// The checks of each merged point come with the second pull request of
+// #103, the rest of stage 5 with slice 7 of #100.
 //
 // Fails only when the tree cannot be read (see `scan_tree`); a tree that is
 // wrong is a report with errors, not a failure.
 [[nodiscard]] Result<Report> validate_tree(const std::filesystem::path& root,
                                            const ScanLimits& limits = {});
+
+// What `validate_and_expand` gives: the report, and the expanded tree of
+// stage 4 when the report has no error.
+struct Validation {
+    Report report;
+    std::optional<ExpandedTree> expanded;
+    // What stage 4 held to report its errors (expand.h).
+    ExpandCounts expansion;
+};
+
+// As `validate_tree`, and keeps the expanded tree, which the expanded files
+// of contract 13.3 are written from (#102).
+// `expand_limits` are the limits of the expanded tree, the contract's unless
+// a test gives others.
+[[nodiscard]] Result<Validation> validate_and_expand(
+    const std::filesystem::path& root, const ScanLimits& limits = {},
+    const ExpandLimits& expand_limits = {});
 
 }  // namespace scada::conf
 

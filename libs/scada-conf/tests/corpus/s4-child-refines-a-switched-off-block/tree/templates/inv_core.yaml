@@ -1,0 +1,11 @@
+template: inv_core
+protocol: modbus
+params:
+  has_dc: { type: bool, default: false }
+repeat:
+  - for: { n: "1..2" }
+    when: has_dc
+    points:
+      - { name: "pv{n}.voltage", unit: V, address: { table: holding, register: "100 + n", type: uint16 } }
+points:
+  - { name: power, unit: kW, address: { table: holding, register: 10, type: uint16 } }

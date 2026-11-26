@@ -1,0 +1,8 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.i1, template: inv_b, unit_id: 1 }
+  - { name: ps1.i2, template: inv_b, unit_id: 2, params: { has_dc: true } }

@@ -2,6 +2,7 @@
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
 #include "scada/conf/node.h"
 #include "scada/conf/references.h"
 #include "scada/conf/rules.h"
@@ -198,7 +199,18 @@ void check_schema(ParsedFile& file, Diagnostics& diagnostics) {
 
 Result<Report> validate_tree(const std::filesystem::path& root,
                              const ScanLimits& limits) {
-    Report report;
+    Result<Validation> validation = validate_and_expand(root, limits);
+    if (!validation.ok()) {
+        return validation.status();
+    }
+    return std::move(validation).value().report;
+}
+
+Result<Validation> validate_and_expand(const std::filesystem::path& root,
+                                       const ScanLimits& limits,
+                                       const ExpandLimits& expand_limits) {
+    Validation validation;
+    Report& report = validation.report;
     Diagnostics stage1;
     Result<Tree> tree = scan_tree(root, stage1, limits);
     if (!tree.ok()) {
@@ -207,7 +219,7 @@ Result<Report> validate_tree(const std::filesystem::path& root,
     const bool stage1_failed = stage1.error_count() > 0;
     stage1.move_into(report);
     if (stage1_failed) {
-        return report;
+        return validation;
     }
 
     // Stage 2: every YAML file. Structured text is not available in this
@@ -247,8 +259,6 @@ Result<Report> validate_tree(const std::filesystem::path& root,
     stage2.move_into(report);
     stage3.move_into(report);
     if (!stage3_failed) {
-        // Stage 4, the expansion of templates and instances, comes with
-        // #103; stage 5 checks what needs no expansion (D-113).
         std::vector<CheckedFile> checked;
         checked.reserve(parsed.size());
         for (const ParsedFile& file : parsed) {
@@ -256,17 +266,28 @@ Result<Report> validate_tree(const std::filesystem::path& root,
                                           .document = &file.document,
                                           .types = &file.types});
         }
-        Diagnostics stage5;
-        check_references(checked, stage5);
-        stage5.move_into(report);
+        // Stage 4: templates and instances (D-114).
+        Diagnostics stage4;
+        validation.expanded =
+            expand_tree(checked, stage4, expand_limits, &validation.expansion);
+        const bool stage4_failed = stage4.error_count() > 0;
+        stage4.move_into(report);
+        if (!stage4_failed) {
+            // Stage 5: what needs no point tags (D-113); the rest comes with
+            // slice 7 of #100.
+            Diagnostics stage5;
+            check_references(checked, stage5);
+            stage5.move_into(report);
+        }
     }
     if (!passed(report)) {
         // Section 1.4: warnings are reported only when no stage gave an
         // error.
         report.warnings.clear();
         report.warning_count = 0;
+        validation.expanded.reset();
     }
-    return report;
+    return validation;
 }
 
 }  // namespace scada::conf

@@ -1,0 +1,20 @@
+# Expanded devices and points (contract 14, test 6), each with a rule that
+# another reading would change (S4 of the review of #146):
+# - defaults of two levels: pump_a's poll_group fast over pump_base's slow,
+#   pump_base's max_age 30s kept (4.5, 3.1);
+# - enums by name: pump_a's `states` replaces pump_base's whole (3.1), so
+#   the device has {2: tripped} only;
+# - identify of a level replaces the one above: pump_b's, not pump_a's;
+# - exclusive groups of `address`: pump_b's `field` removes pump_a's `bit`,
+#   and its `parts` removes `register`;
+# - a template's `only` (3.4) removes spare at pump_a's level;
+# - `when` removes aux of p1 (has_aux false); p1's `disable` removes speed;
+#   p2 has has_aux true and its `only` keeps state and aux. (The order
+#   inside step 4 is pinned by s4-step-four-when-first.)
+ps1.p1: {enums: {states: {2: tripped}}, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 1}
+ps1.p1.state: {poll_group: fast, max_age: 30s, enum: states, address: {table: holding, register: 10, type: uint16}}
+ps1.p1.fault: {poll_group: fast, max_age: 30s, address: {table: holding, register: 12, type: uint16, field: [0, 3]}}
+ps1.p1.energy: {poll_group: fast, max_age: 30s, address: {table: holding, type: uint32, parts: [{register: 20}, {register: 30}]}}
+ps1.p2: {enums: {states: {2: tripped}}, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 2}
+ps1.p2.state: {poll_group: fast, max_age: 30s, enum: states, address: {table: holding, register: 10, type: uint16}}
+ps1.p2.aux: {poll_group: fast, max_age: 30s, address: {table: holding, register: 14, type: uint16}}

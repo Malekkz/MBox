@@ -1,0 +1,35 @@
+# Expanded devices and points (contract 14, test 6; S6 of the delta review
+# of #146): 4 devices and 28 points, as the reviewer's reference expander
+# gives them. Invented.
+ps1.inv1: {read: {max_registers: 60, gap_policy: reads_zero, max_gap: 4}, unit_id: 1, timeout: 800ms}
+ps1.inv1.power: {address: {word_order: big, table: input, register: 100, type: int32}, invalid_values: [0x80000000], scale: {gain: 0.1}, unit: kW, max_age: 15s}
+ps1.inv1.energy: {address: {word_order: big, table: input, register: 102, type: uint32}, kind: counter, counter: {limit: 0xFFFFFFFF, at_limit: wrap}, unit: kWh, logging: counters}
+ps1.inv1.pv1.voltage: {address: {word_order: big, table: input, register: 200, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv2.voltage: {address: {word_order: big, table: input, register: 202, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv3.voltage: {address: {word_order: big, table: input, register: 204, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv4.voltage: {address: {word_order: big, table: input, register: 206, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv5.voltage: {address: {word_order: big, table: input, register: 208, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv6.voltage: {address: {word_order: big, table: input, register: 210, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv7.voltage: {address: {word_order: big, table: input, register: 212, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv8.voltage: {address: {word_order: big, table: input, register: 214, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv9.voltage: {address: {word_order: big, table: input, register: 216, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv10.voltage: {address: {word_order: big, table: input, register: 218, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv11.voltage: {address: {word_order: big, table: input, register: 220, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv1.pv12.voltage: {address: {word_order: big, table: input, register: 222, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2: {read: {max_registers: 60, gap_policy: reads_zero, max_gap: 4}, unit_id: 2, timeout: 800ms}
+ps1.inv2.power: {address: {word_order: big, table: input, register: 100, type: int32}, invalid_values: [0x80000000], scale: {gain: 0.1}, unit: kW, max_age: 15s}
+ps1.inv2.energy: {address: {word_order: big, table: input, register: 102, type: uint32}, kind: counter, counter: {limit: 0xFFFFFFFF, at_limit: wrap}, unit: kWh, logging: counters}
+ps1.inv2.pv1.voltage: {address: {word_order: big, table: input, register: 200, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv2.voltage: {address: {word_order: big, table: input, register: 202, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv3.voltage: {address: {word_order: big, table: input, register: 204, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv4.voltage: {address: {word_order: big, table: input, register: 206, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv5.voltage: {address: {word_order: big, table: input, register: 208, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv6.voltage: {address: {word_order: big, table: input, register: 210, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv7.voltage: {address: {word_order: big, table: input, register: 212, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv2.pv8.voltage: {address: {word_order: big, table: input, register: 214, type: int16}, scale: {divide_by: 10}, unit: V}
+ps1.inv3: {read: {max_registers: 60, gap_policy: reads_zero, max_gap: 4}, unit_id: 3, timeout: 800ms}
+ps1.inv3.power: {address: {word_order: big, table: input, register: 100, type: int32}, invalid_values: [0x80000000], scale: {gain: 0.1}, unit: kW, max_age: 15s}
+ps1.inv3.energy: {address: {word_order: big, table: input, register: 102, type: uint32}, kind: counter, counter: {limit: 0xFFFFFFFF, at_limit: wrap}, unit: kWh, logging: counters}
+ps1.gateway: {unit_id: 255}
+ps1.gateway.link_ok: {address: {table: holding, register: 1, type: uint16}}
+ps1.gateway.serial_errors: {address: {table: input, register: 9, type: uint16, unit_id: 254}}

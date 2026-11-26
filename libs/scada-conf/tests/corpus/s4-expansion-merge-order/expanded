@@ -1,0 +1,21 @@
+# Expanded points (contract 14, test 6), each with a step that another
+# order would change:
+# - dc.v is removed by the template's disable (3.4), and the instance's
+#   only keeps v1 to v3, i1 and i2 (4);
+# - the instance's defaults win over the template's (poll_group fast), and
+#   a point's own keys over both (5); an override wins over defaults (6),
+#   so v2 has max_age 5s, not 30s;
+# - divide_by removes the inherited gain (exclusive group) and keeps offset;
+#   the override's alarms replace the list whole; replace: true replaces
+#   v3's address, word_order included;
+# - i2's override is evaluated with i2's variable (7): 500 + 2;
+# - the instance's identify is appended to the template's (6);
+# - extra, an instance point, is added after step 6, so no default reaches
+#   it. Invented.
+ps1.m1: {identify: [{address: {table: holding, register: 1, type: uint16}, equals: 7}, {address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 1}
+ps1.m1.v1: {poll_group: fast, max_age: 30s, address: {table: holding, type: uint16, word_order: little, register: 10}, unit: V, scale: {offset: 1, divide_by: 10}}
+ps1.m1.v2: {poll_group: fast, max_age: 5s, address: {table: holding, type: uint16, word_order: little, register: 11}, unit: V, alarms: [{type: high, limit: 240, priority: high}]}
+ps1.m1.v3: {poll_group: fast, max_age: 30s, address: {table: input, register: 3, type: int16}, unit: V}
+ps1.m1.i1: {poll_group: fast, max_age: 30s, address: {table: holding, type: uint16, word_order: little, register: 21}, unit: A}
+ps1.m1.i2: {poll_group: fast, max_age: 30s, address: {table: holding, type: uint16, word_order: little, register: 502}, unit: A}
+ps1.m1.extra: {address: {table: holding, register: 90, type: uint16}}

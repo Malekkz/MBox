@@ -1,0 +1,16 @@
+template: inv_core
+extends: inv_base
+protocol: modbus
+params:
+  strings: { type: int, min: 1, max: 4, default: 2 }
+  gain: { type: number, default: 0.1 }
+  has_temp: { type: bool, default: true }
+  model: { type: string, default: x1 }
+  phase: { type: enum, values: [single, three], default: three }
+  options: { type: set, values: [meter, battery], default: [] }
+points:
+  - { name: power, scale: { gain: "gain * 10" }, address: { table: holding, register: 100, type: int32 } }
+  - { name: energy, address: { table: holding, register: 102, type: uint32 } }
+  - { name: temp, when: has_temp, address: { table: input, register: 1, type: int16 } }
+  - { name: phases, when: "phase = 'three'", address: { table: input, register: 2, type: uint16 } }
+  - { name: meter.power, when: "'meter' IN options", address: { table: holding, register: 300, type: int32 } }

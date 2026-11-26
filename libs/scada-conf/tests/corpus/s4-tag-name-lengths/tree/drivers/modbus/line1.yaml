@@ -1,0 +1,8 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.m1, template: long_a, unit_id: 1 }
+  - { name: ps1.m22, template: long_a, unit_id: 2 }

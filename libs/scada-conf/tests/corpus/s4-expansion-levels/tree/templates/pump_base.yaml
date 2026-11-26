@@ -1,0 +1,7 @@
+template: pump_base
+enums:
+  states: { 0: stopped, 1: running }
+defaults: { poll_group: slow, max_age: 30s }
+points:
+  - { name: state, enum: states }
+  - { name: speed, unit: rpm }

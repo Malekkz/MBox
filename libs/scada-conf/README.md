@@ -61,10 +61,57 @@ Expressions (contract 5.6) are parsed at stage 3 by `parse_expression`
 (`when`, addresses and scaling, `repeat` ranges), each with its own syntax
 codes (CF-520, CF-526, CF-528, CF-529).
 
-Stage 5 runs when stages 1 to 3 found no error. Stage 4, the expansion of
-templates and instances, comes with #103, so stage 5 checks for now what
-needs no expansion (`check_references`, `include/scada/conf/references.h`,
-D-113):
+Stage 4 runs when stages 1 to 3 found no error: `expand_tree`
+(`include/scada/conf/expand.h`, D-114) expands every device instance in the
+merge order of contract 4.5 into one `Document` of the expanded channels,
+devices and points, each value with the file and line it came from. An
+error that a template's line causes is at the instance, with a note
+`from template <file>:<line>:<column>`; a template's own faults are at the
+template, once, whether or not an instance uses it. `validate_and_expand` gives the
+report and the expanded tree, which the expanded files of contract 13.3 are
+written from (#102). Expansion is linear in the points but for a lookup by
+name: an instance of 65,536 points, made by one `repeat`, and the refusal of
+one of 65,537 took 736 ms together (release build, x86-64,
+`Expand.ThePointLimit`).
+
+The expanded tree is held to the limits of a tree (contract 1.3, D-114):
+4,000,000 nodes and 256 MiB of text (CF-113), and `limits.max_tags`
+(CF-1001), each on a running total; passing one stops the expansion. The
+nodes and tags are checked after every device, the text after every
+point. Each device is written into the document as soon as it is
+finished and then dropped. What an instance makes before step 4, and the
+defaults merged under its points before step 5, count toward the node
+limit, so memory is bounded by the limit, not by the tree's instances.
+Every point made, written or generated, and every `repeat` value evaluated
+count toward a work budget of 4,000,000, so instances times template
+points is at most 4,000,000, whatever `only`, `disable` or `when` keep.
+An expression is parsed once for all its evaluations and typed again only
+when a name it reads changes type. Expressions have a budget of their
+own, 128,000,000 nodes (32 times the node limit): every evaluation counts
+its nodes, a reference to a parameter also the size of its value, and
+every parse and typing its nodes. The diagnostics kept are at
+most 2,000, past which an error is counted only.
+
+The bound, measured on the worst accepted trees (release build, x86-64,
+the whole of `validate_and_expand`):
+- memory: a peak of 858 MB (838 MiB) for one instance of 62,000 points,
+  each with an alarm `expr` of 4,056 bytes and 36 `invalid_values` (252
+  MiB of text, 3,844,027 nodes); 670 MB for 5 `repeat` blocks of 65,536
+  points whose `when` is false; 641 MB for one instance of 3,997,723
+  nodes;
+- time: about 12.8 s for the worst tree of expressions within their
+  budget (additions and uncached parses take about 96 ns a node), 10.7 s
+  for 61 instances of a template of 65,536 written points that each keep
+  one (`only`), just under the work budget.
+
+A tree past a limit is refused within that: a `when` of 400 terms over
+65,536 values in 30 instances in 5.2 s (it took 729 s when every
+evaluation parsed its text again), 100 instances of a 65,536-point
+`repeat` at the node limit, 20,000 instances whose expressions fail at
+18 MB, as 100 errors that each name the other instances.
+
+Stage 5 runs when stage 4 found no error. It checks what needs no point
+tags (`check_references`, `include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's
   protocol, areas, logging policies and aggregate tiers, enumerations (of
   the template's chain or `enums.yaml`), tasks, programs, interlocks,
@@ -178,8 +225,9 @@ anything, and there are no lazy caches.
   grammar (contract 5.6), giving a tree or one located error.
 - `include/scada/conf/schema.h`: `SchemaSet`, the compiled schema files and
   the validator of stage 3.
+- `include/scada/conf/expand.h`: `expand_tree` and `ExpandedTree`, stage 4.
 - `include/scada/conf/references.h`: `check_references`, the part of stage 5
-  that needs no expansion.
+  that needs no point tags.
 - `include/scada/conf/types.h`: `ScalarType` and `ScalarTypes`, the types
   stage 3 gives the scalars of a Document.
 - `include/scada/conf/read.h`: typed reads of a scalar node (`to_int64`,
@@ -245,7 +293,20 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   same tree.
 - `tests/schema_test.cpp`: each keyword of the validator with its code, and
   the built-in schemas against the contract's examples.
+- `tests/expand_test.cpp`: each step of the merge order and each CF-4xx
+  code, with the instance and the template line of its errors.
+- `tests/limits_test.cpp`, `tests/tree_limits_test.cpp` and
+  `tests/expression_limits_test.cpp`: the point limit of an instance
+  (CF-414), the limits of the expanded tree (nodes, tags, the work budget
+  and its weighting of expressions) at their edges, and the parse of each
+  expression once for all its evaluations. Each makes millions of nodes or
+  units of work, so each is an executable of its own
+  (`scada-conf-limits-test`, `scada-conf-tree-limits-test`,
+  `scada-conf-expression-limits-test`) with its own time limit; the cases
+  they share are in `tests/expand_cases.h`.
+- `tests/config_eval_test.cpp`: the values of configuration expressions and
+  the failures that are CF-410.
 - `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
-  that a reference to a tag gives no error before the expander exists.
+  that a reference to a tag gives no error before slice 7 of #100.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.
