@@ -1543,7 +1543,7 @@ TEST(MergedPoints, ComputedValuesOutOfRange) {
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
                      "identify[0].address.register must be between 0 and "
                      "65536\n"
-                     "  from template templates/meter_a.yaml:5:44",
+                     "  from template templates/meter_a.yaml:5:44 (identify)",
                      "drivers/modbus/line1.yaml:7:11: error CF-204: "
                      "address.register must be between 0 and 65536\n"
                      "  from template templates/meter_a.yaml:7:53 (point p)",

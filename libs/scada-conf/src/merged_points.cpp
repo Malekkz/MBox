@@ -259,9 +259,10 @@ private:
                                    detail()));
     }
 
-    // The note's detail: the point, or nothing for a device's own key.
+    // The note's detail: the point, or the device's own key (S2 of the
+    // review of #149).
     [[nodiscard]] std::string detail() const {
-        return point_name_.empty() ? std::string() : "point " + point_name_;
+        return point_name_.empty() ? device_key_ : "point " + point_name_;
     }
 
     // One cause met at many instances is one error (M6 of the review of
@@ -349,8 +350,10 @@ private:
                 continue;
             }
             steps.assign(1, std::string(key));
+            device_key_ = std::string(key);
             walk_computed(entry.value, steps, std::string(key));
         }
+        device_key_.clear();
     }
 
     // The computed values of a point; false if one is wrong. A point's
@@ -596,20 +599,20 @@ private:
     void check_modbus_address(NodeId point, NodeId address) {
         const bool shapes = child(address, "on") || child(address, "off") ||
                             child(address, "fault");
-        if (shapes) {
-            // A double point by shapes reads two bits, on and off, and may
-            // read a fault bit (A.2): any one shape alone is not complete
-            // (M4 of the review of #149).
-            need(address, "the address", {"on", "off"});
-        } else {
-            need(address, "the address", {"table"});
-        }
         const bool write_only = text_of(point, "access") == "wo";
         const std::optional<NodeId> write = child_map(address, "write");
         const std::optional<NodeId> on =
             write ? child_map(*write, "on") : std::nullopt;
         const std::optional<NodeId> off =
             write ? child_map(*write, "off") : std::nullopt;
+        if (shapes) {
+            // A double point by shapes reads two bits, on and off, and may
+            // read a fault bit (A.2): any one shape alone is not complete
+            // (M4 of the review of #149).
+            need(address, "the address", {"on", "off"});
+        } else if (!(write_only && on && off)) {
+            need(address, "the address", {"table"});
+        }
         // A write-only point that writes `on` and `off` needs no register of
         // its own when each names its own (A.2, A.5: `{ table, register,
         // value }`).
@@ -923,6 +926,8 @@ private:
     std::map<std::string, KeyRules, std::less<>> key_rules_;
     std::map<std::string, std::vector<ValueError>, std::less<>> checked_;
     std::string device_name_;
+    // The device's own key being checked, for the note (`read`, `health`).
+    std::string device_key_;
     // A computed value of the point being checked was wrong (M5).
     bool computed_failed_ = false;
     GroupedErrors grouped_;

@@ -1926,11 +1926,14 @@ private:
     // Steps 7 and 8, and the checks of the expanded instance.
     void finish_points(const Value& instance, Device& device) {
         const std::string template_name = template_of(instance);
-        // The identity checks' expressions (4.8, 2.4) have the parameters
-        // and no variable.
-        if (Value* identify = device.keys.find("identify")) {
-            context_ = "identify";
-            evaluate_below(*identify, {});
+        // The device's own expressions (2.4) have the parameters and no
+        // variable: the identity checks (4.8), the read ranges' ends (A.4)
+        // and a health rule's bit field (4.9; M7 of the review of #149).
+        for (const std::string_view key : {"identify", "read", "health"}) {
+            if (Value* own = device.keys.find(key)) {
+                context_ = std::string(key);
+                evaluate_below(*own, {});
+            }
         }
         if (device.points.size() > MAX_POINTS) {
             error(CF_TOO_MANY_POINTS, *instance.find("name"),
