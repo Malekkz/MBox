@@ -2,9 +2,9 @@
 
 | | |
 | --- | --- |
-| Contract version | 1.0 |
+| Contract version | 1.1 |
 | Layout version | 1 |
-| Status | Accepted as 1.0 at the close of phase 1 (issue #21, P1-13, D-66). Layout version 1 is frozen. |
+| Status | Accepted as 1.0 at the close of phase 1 (issue #21, P1-13, D-66). 1.1 approved by the product owner on 2026-11-26 (issue #151, D-143); its retain part (sections 12 and 13: the age bound, `scada_tag_attach_retain`, `bounds_unused` and the kept record) is implemented by the pull request of #89, and until then no owner passes bounds. Layout version 1 is frozen. |
 | Implements | Reference architecture 1.1, section 5 |
 | Owners of this contract | `scada-tagd`, `libscada-tag` |
 
@@ -12,7 +12,7 @@ This contract defines the shared-memory data plane exactly enough that two
 independent implementations would interoperate. All access goes through
 `libscada-tag`; no other code may depend on the binary layout.
 
-This is version 1.0, and layout version 1 is frozen. A later change is one
+This is version 1.1, and layout version 1 is frozen. A later change is one
 of three levels (product owner, 2026-11-22, D-66):
 
 1. Layout version (now 1). `libscada-tag` refuses to attach to a region
@@ -91,9 +91,11 @@ its own format version (now 2, section 12).
 | Change ring | Lossy broadcast buffer of tag changes, one per owner |
 | Reliable queue | Lossless queue with one producing thread and one consuming thread |
 
-Owners and queues are declared in the tag-set definition. A process with one
-writing thread has one owner, named like the process. Otherwise owners are
-named `<process>.<writer>`.
+Owners and queues are declared in the tag-set definition. An owner is named
+`<process>`, the name of its process, or `<process>.<writer>` with a
+`<writer>` that is not empty. The number of owners of a process has no
+effect on their names. By convention the plain name belongs to the thread
+that writes the tags of the process itself.
 
 ## 3. Directory and files
 
@@ -446,7 +448,8 @@ enum Quality : uint8_t { GOOD = 0, UNCERTAIN = 1, BAD = 2 };
 
 enum QualityFlags : uint16_t {
   STALE = 1 << 0, COMM_FAIL = 1 << 1, OUT_OF_RANGE = 1 << 2,
-  SUBSTITUTED = 1 << 3,     // value entered by a person in place of the source
+  SUBSTITUTED = 1 << 3,     // value not from the source: entered by a person,
+                            // substituted by configuration, or reported by the device as forced
   NOT_INIT = 1 << 4,
   OWNER_DOWN = 1 << 5,      // added by a read (section 6.2), never stored
   TIME_UNCERTAIN = 1 << 6,
@@ -478,6 +481,12 @@ NOT_INIT, all times 0.
 the owner sets it equal to `update_time_ns` and sets LOCAL_TIME. STALE is set
 by the owner (for a driver, by the driver framework). `scada-tagd` never writes
 a tag record of another owner; its only marking is the `down` flag of section 10.1.
+
+SUBSTITUTED marks a value that does not come from the source: one entered
+by a person, one substituted by configuration (the `substitute` action for
+invalid values), or one the device reports as forced. A consumer tells an
+entry by a person from the other cases by its journal record, not by the
+flag. An HMI must not show SUBSTITUTED as "entered by an operator".
 
 ### 6.1 Write protocol (owner thread only)
 
@@ -1506,7 +1515,8 @@ know they are there, and any number may run.
   `seq`, the same before and after) with quality BAD and without NOT_INIT
   removes the tag from the file at the next write: the owner wrote the tag
   and marked it bad, and a restart must not bring an older value back. A
-  record with NOT_INIT (the owner has not written the tag since its region
+  record that a restore under an age bound wrote (BAD with RESTORED, below)
+  is not such a record. A record with NOT_INIT (the owner has not written the tag since its region
   was created, for example because its restore failed) says nothing about
   the value and keeps it on file, as does a record that cannot be read
   consistently (mid-write at every attempt).
@@ -1618,17 +1628,33 @@ know they are there, and any number may run.
   link, are not, so a link that comes and goes writes nothing. A change of
   quality or of those flags alone is a change and is written (a change of
   SUBSTITUTED, for example). A record that is exactly what the restore of
-  the value on file wrote (UNCERTAIN, RESTORED plus the carried flags of
-  the file, the value and source time on file) is no change: the file
-  keeps the quality the owner stored. A record with RESTORED and the value
-  and source time on file but another quality or flags is the owner's
-  write. A record with RESTORED and another value or source time is taken
+  the value on file wrote is no change: quality UNCERTAIN, or BAD (a
+  restore under an age bound, below), with RESTORED plus the carried flags
+  of the file, the value and source time on file. The file then keeps the
+  value and the quality the owner stored until the owner writes the tag;
+  for a BAD record, so that a later restore can judge the value again, for
+  example in a boot whose clock is synchronised. `scada-tagd` judges the
+  record by its shape alone, so this holds for every owner, with or
+  without bounds: an owner that writes a restored value back BAD with the
+  flags it read, or `scada-drv-link` passing a slave's BAD + RESTORED value
+  through (reference 17), leaves the value on file. Under 1.0 such a record
+  removed it (D-45); under 1.1 it is kept, and the next restart restores it
+  UNCERTAIN unless a bound applies to it. A record with RESTORED and the
+  value and source time on file but any other quality or flags is the
+  owner's write; a BAD one leaves the file (D-45). A record with RESTORED and another value or source time is taken
   as a restore from another file: `scada-tagd` looks up its source in the
   files and records it ADOPTED, with SOURCE_NOT_FINAL and an unknown age if
   none holds it. That is the safe side also for an owner that writes
   RESTORED itself, for example `scada-drv-link` on a master, which passes the
   quality and flags of a slave's tag through unchanged (reference 17), so
-  that a restored value of the slave arrives with RESTORED.
+  that a restored value of the slave arrives with RESTORED. A BAD record
+  with RESTORED and another value or source time is looked up in the same
+  way; when a file holds it, it is recorded as the UNCERTAIN record would
+  be, with the quality on that file. When the look is complete and no file
+  holds it, it leaves the file as a record the owner marked BAD does
+  (D-45). When the look is incomplete (a file that cannot be read, a
+  damaged file, more than 1,023 files needed), the file keeps the value
+  and the look is made again at the next check.
 - A file written again holds the stamp of its oldest value the owner has
   not written since it was loaded or restored: in one boot the earliest
   times of their source files; across boots no `boot_id`, the earliest
@@ -1662,8 +1688,10 @@ know they are there, and any number may run.
   newest such generation, or that generation's directory is gone. When the
   wait runs out, attach takes the files as they are and counts it.
 - A restored value has quality UNCERTAIN and flag RESTORED until the owner
-  writes the tag, never GOOD; there is no time limit, so RESTORED lasts as
-  long as the owner does not write. It keeps the stored flags that describe
+  writes the tag, never GOOD; it is BAD instead only when its tag has an
+  age bound and the value's age, as defined below, is greater than the
+  bound or unknown (the age bound, below). There is no time limit, so
+  RESTORED lasts as long as the owner does not write. It keeps the stored flags that describe
   the value itself: SUBSTITUTED, BLOCKED, TEST, OUT_OF_RANGE, OVERFLOW,
   LOCAL_TIME and TIME_UNCERTAIN. STALE and COMM_FAIL describe the live link
   and are not carried. The stored quality is kept for diagnosis only
@@ -1680,8 +1708,43 @@ know they are there, and any number may run.
   is not negative; otherwise the age is unknown. No clock measures age
   reliably across a reboot without time synchronisation. Attach never
   refuses a value on its age: refusing would lose the last decision on
-  modes and authority. A bound on the age is a later policy of the
-  configuration schema (phase 2).
+  modes and authority. An owner may bound the age (the next item).
+- What this age measures. The times are those of the file's stamp, not of
+  the value: the stamp of the file's oldest value the owner has not
+  written since it was loaded or restored, or the time of the write when
+  the owner has written them all (above; D-59, B2). With a bound this age
+  decides the quality, so: a file is written only on a change, and an
+  owner whose values do not change restores BAD after a short power cut
+  once its file is older than the bound; one restored tag the owner never
+  writes pins the stamp of its file, and every value of that file then
+  has the age of that tag; a value that has not changed for a long time,
+  in a file rewritten for another tag, reads as fresh. **To be decided by
+  the owner in #89:** whether a file of a quiet owner is stamped again
+  while the owner lives, or at a clean stop. Until that is decided the
+  age is the one defined here.
+- The age bound (1.1, #89). The process passes the bounds of its owners'
+  tags to its library at attach (`scada_tag_attach_retain`, section 13):
+  at most one bound for a RETAIN tag, a duration above 0. The bounds come
+  from the configuration (`retain_max_age`, configuration schemas contract
+  5.2); they are not in the tag set, not in `config_hash` and not in shared
+  memory (D-74). The configuration refuses a bound on output mode, area
+  authority, counter and alarm state and shelving tags (configuration
+  schemas contract 5.2, CF-508); the library does not check which tags
+  have a bound. The library applies them while it restores into a new
+  `tags` region, before it sets the region `ready`, so that no reader sees
+  such a value as UNCERTAIN first. A value whose age is known and greater
+  than its bound, or whose age is unknown, is restored with quality BAD and
+  flag RESTORED, and otherwise as every restore: the carried flags, the
+  value and the source time on file. A value whose age is at most its
+  bound, and every value of a tag without a bound, is restored UNCERTAIN.
+  `scada_tag_retain_info` reports it as every restore. A reused region
+  restores nothing, so a changed bound applies at the next restore. The
+  record such a restore writes keeps the value in the file (above).
+  **Implementation:** the retain part of 1.1 (the bound in the library,
+  with `scada_tag_attach_retain` and `bounds_unused` of section 13, and
+  the kept record in `scada-tagd`) is implemented by the pull request that
+  closes #89. Until it is merged, no owner passes bounds, and `scada-tagd`
+  and every owner come from one build of the install tree.
 - Attach records for every RETAIN tag of a `tags` region it creates where
   the value came from (none, the owner's own FINAL file, its own periodic
   file, another owner's file), the `written_time_ns` of that file, the age
@@ -1779,9 +1842,16 @@ typedef struct {
   int64_t     tagd_uid;          /* -1: look up the user scada-tagd */
 } scada_attach_opts;
 
+typedef struct {                 /* section 12, the age bound; 1.1 */
+  const char *tag_name;          /* NUL-terminated */
+  int64_t     max_age_ns;        /* above 0 */
+} scada_retain_bound;            /* 16 bytes */
+
 /* Attach and status */
 int  scada_tag_attach(const char *process_name, scada_ctx **out);
 int  scada_tag_attach_opts(const char *process_name, const scada_attach_opts *opts, scada_ctx **out);
+int  scada_tag_attach_retain(const char *process_name, const scada_attach_opts *opts,
+                             const scada_retain_bound *bounds, size_t n, scada_ctx **out); /* section 12; 1.1 */
 int  scada_tag_observe(scada_ctx **out);                                                 /* section 11.4 */
 int  scada_tag_observe_opts(const scada_attach_opts *opts, scada_ctx **out);            /* retain_dir unused */
 void scada_tag_detach(scada_ctx *ctx);
@@ -1833,6 +1903,34 @@ int  scada_waitset_fd(scada_waitset *ws, int *fd);     /* for poll and epoll; st
 void scada_waitset_destroy(scada_waitset *ws);
 ```
 
+- `scada_tag_attach_retain` is `scada_tag_attach_opts` with the age bounds
+  of section 12. `opts` NULL means the defaults, as `scada_tag_attach`;
+  with `n` 0 it is `scada_tag_attach_opts`.
+  - It returns `SCADA_E_INVALID`, before step 1 of section 11.2, for
+    `bounds` NULL with `n` above 0, `n` above 1,000,000 (the tag limit of
+    section 14), a NULL `tag_name`, a `tag_name` that is not a tag name of
+    section 1 (1 to 127 bytes of `[a-z0-9_.-]`; the library reads at most
+    128 bytes of it, and a name without a NUL in those is not valid), a
+    `max_age_ns` not above 0, and two bounds for one name.
+  - A bound whose name is no RETAIN tag of an owner of the caller in the
+    generation it attaches to is not used, and is no error: during an
+    apply the configuration and the generation may differ (configuration
+    schemas contract 13.5), and such a name has no value to restore. It is
+    counted in `scada_retain_status_t.bounds_unused`, so that an unused
+    bound is not silent.
+  - A bound is judged once, when the value is restored into a `tags`
+    region this attach creates. A value restored BAD stays BAD with
+    RESTORED until the owner writes it; a later clock or a later bound does
+    not change it. The library keeps neither `bounds` nor the names after
+    the call.
+  - Every attach passes its bounds again. An attach without bounds that
+    reuses the region keeps what is in it, a value restored BAD by an
+    earlier attach included; one that creates the region restores the
+    value scada-tagd kept on file (section 12) as UNCERTAIN.
+  - Structures: `scada_retain_bound` is new; `scada_retain_status_t` keeps
+    its 24 bytes, its `reserved` word becomes `bounds_unused`;
+    `scada_tag_retain_info_t` does not change. Not implemented until the pull
+  request that closes #89 (section 12).
 - `scada_tag_write` uses `type`, `value`, `quality`, `quality_flags` and
   `source_time_ns` of its argument; the library sets the update times.
 - `read_many` and `write_many` read the clocks once for the whole call.
@@ -1952,7 +2050,7 @@ typedef struct {                 /* section 12; since attach; all 0 for an obser
   uint32_t final_waits_expired;  /* waits for FINAL files that ran out */
   uint32_t directory_unusable;   /* restores not done: the retain directory failed its checks */
   uint32_t ages_unknown;         /* values restored whose age is unknown */
-  uint32_t reserved;             /* 0 */
+  uint32_t bounds_unused;        /* 1.1: age bounds of the attach that named no RETAIN tag of the caller */
 } scada_retain_status_t;         /* 24 bytes */
 
 enum { SCADA_RETAIN_NONE = 0, SCADA_RETAIN_OWN_FINAL = 1,
@@ -2251,7 +2349,8 @@ ARM64:
     processes running without interruption.
 21. A generation change completes within 5 seconds with all processes
     reattached and retained values restored, UNCERTAIN with RESTORED and the
-    carried flags of section 12. Its queue part: no event
+    carried flags of section 12; the test passes no age bounds, so no value
+    is restored BAD. Its queue part: no event
     record whose post returned `SCADA_OK` is lost, and each request a driver
     executed was posted in the generation in which the driver took it.
 22. RT-safe functions make no system calls and no allocations, including the
@@ -2362,6 +2461,10 @@ and 17.4 that refer to section 5. The differences that remain:
 - OWNER_DOWN cannot be stored (section 6.2), so the pass-through of
   quality "unchanged" over the node link (reference 17.3) needs a mapping
   for a slave tag whose owner is down. It is for phase 11.
+- Reference 5.6 says a restored value reads UNCERTAIN with RESTORED until
+  the owner writes it. Since 1.1, a value restored under an age bound that
+  it exceeds, or whose age is unknown, reads BAD with RESTORED (section
+  12, #89).
 
 Confirmed by the product owner in review P1-01:
 
@@ -2457,6 +2560,43 @@ Smaller points where this contract adds to or narrows the reference:
 | 0.25 | 2026-11-16 | Issue #21 (P1-13, D-63). Wording promised for 1.0 by D-26, D-27, D-28, D-29, D-40 and D-45 written into sections 1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14 and 16; corrections to match the accepted decisions and the code: C1, section 1, every offset is a multiple of 8 except `DirectoryEntry.name_offset`, and an offset may equal the file size for an empty part; C2, section 3.1, the sweep leaves a temporary file of a listed region owned by its user and an entry under a listed name with the right owner; C3, section 11.2, the lock on `proc.<process>` is taken before the other own regions are looked at; C4, sections 8.1 and 8.2, ring entries are copied field by field with relaxed atomics, not word-wise. No behaviour changed. |
 | 0.26 | 2026-11-16 | Issue #112 (D-65). Section 13: the order of the checks of `scada_tag_write_string`; `SCADA_E_NOT_OWNER` comes before any check of the text, its length included, as D-29 says for every write. |
 | 1.0 | 2026-11-16 | Issue #21 (P1-13, D-66). Section 16: every point settled: the gap half of the default ring capacity (0 gaps in 30,000,000 changes at the reference load, 600 s, run 43905525505), huge pages not used, the read retry limit of 64 confirmed by a second 600 s run, suspend handled by option A (report only; option B in phase 5, #109); commands after lost audit records deferred by the owner, does not block 1.0. Layout version 1 frozen. Rulings of the product owner, 2026-11-22 (D-66): later changes are of three levels, layout version, minor version with a migration note, or editorial revision, each with a change-log row (introduction); what 1.0 freezes, the reserved fields and unknown values with their place in the code, the choices that close at the freeze (the 10/22 handle split, 4 free quality-flag bits, no spare bytes in `ChangeEntry`, `scada_value` and `scada_status`), and the constants that are not frozen (14.1); a worse figure on the target board changes no layout (16). Section 17: reference 1.1 section 5 matches this contract, and reference 1.1 corrects the lines of 3.1, 4.2, 6.1, 14.4 and 17.4 that refer to it (17.4: REMOTE writes need their event record, as in 9.3; ruling of 2026-11-22, D-66); 9.3 and 16: one event record per request or per change of state for AUTO and REMOTE, deferred to phase 5 (#83); reference 10.4 remains a gap for phase 7 (#75). Issue #41 stays open as the hardware acceptance before the first release on the target board. 1.0 is cut on top of 0.24 (#96, PR #111), the last phase 1 change. Committee review of PR #115, wording to match the code: the memory orders of 6.1, 9.1 and 9.2; kept records after an owner restart (6.3, #99); per-process liveness and `SCADA_E_BUSY` (6.2, 10, 10.1, #116); `scada-tagd` and tag records of other owners (6); queue names (3); accepted risks and deployment requirements (3.3, 3.4, #117); `ProcHeader.pid` marked A (10, #118); `scada_queue_next` not RT-safe (9.5, 13, #116); tags per owner (14); what the figures of 16 settle; the differences that remain (17); a missing code fence in 13. |
+| 1.1 | 2026-11-26 | Issue #151 (P2-14, D-143), approved by the product owner on 2026-11-26. Section 2: an owner is named `<process>` or `<process>.<writer>` with a writer that is not empty, whatever the number of owners of its process (committee recommendation on #136). Section 6: SUBSTITUTED also marks a value substituted by configuration and a value the device reports as forced; a consumer tells an entry by a person by its journal record (#89, second comment). Section 12: the age bound: the owner passes the bounds to its library at attach, which restores a value older than its bound, or of unknown age, as BAD with RESTORED before the region is `ready`; `scada-tagd` takes that record as no change and keeps the value on file (#89, first comment). Section 13: `scada_retain_bound`, `scada_tag_attach_retain`, `scada_retain_status_t.bounds_unused` in place of `reserved`. Section 17: the difference from reference 5.6. The retain part (the bound in the library and the kept record in `scada-tagd`) is implemented by the pull request that closes #89; until it is merged no owner passes bounds. |
+
+Migration, 1.0 to 1.1, in three parts. None is for data: the layout
+version stays 1, no structure in shared memory, file name, owner, mode or
+retain file format changes, and every tag set valid under 1.0 is valid
+under 1.1 with the same `config_hash`.
+
+- Owner names (section 2). 1.1 accepts more names than 1.0: the plain
+  owner `<process>` beside `<process>.<writer>` owners, and a
+  `<process>.<writer>` owner that is the only owner of its process. A
+  foreign prefix and an empty writer stay refused. Only the tag-set
+  builder applies the rule (`check_owner_names`, reached from `validate`,
+  `config_hash`, `build_header` and `GenerationHost::start`). Attach reads
+  an owner name from the header with the name grammar of section 1 only and uses
+  it as a name (region and retain file names, `scada_sub_open`); liveness,
+  the writer check and file ownership go by process index and uid. So a
+  1.0 library attaches to a generation that a 1.1 `scada-tagd` built from
+  such a tag set (the run in the pull request of #151). A 1.0
+  `scada-tagd` refuses such a tag set and does not start: `scada-tagd` and
+  `scada-conf` are built to 1.1 before a tag set has such a name.
+- SUBSTITUTED (section 6). Same bit, same encoding; only the meaning is
+  wider. A consumer that reads SUBSTITUTED as "entered by a person" uses
+  the journal record instead. No code read the narrower meaning at 1.0.
+  Drivers set SUBSTITUTED for the two new cases with #154, not yet.
+- The age bound and the kept record (sections 12 and 13). The bound is an
+  addition: a process that does not call `scada_tag_attach_retain`
+  restores UNCERTAIN, as under 1.0. The kept record is not limited to
+  processes with bounds: `scada-tagd` judges a record by its shape, so a
+  BAD + RESTORED record with the value and source time on file, written by
+  any owner, keeps the value on file, where 1.0 removed it (D-45), and the
+  next restart restores it UNCERTAIN unless a bound applies. The retain
+  part of 1.1 (the bound in the library and the kept record in
+  `scada-tagd`) is implemented by the pull request that closes #89. Until
+  it is merged, `libscada-tag` has no `scada_tag_attach_retain`, no owner
+  passes bounds, `retain_max_age` has no effect (configuration schemas
+  contract 5.2, CW-510), and `scada-tagd` and every owner come from one
+  build of the install tree.
 
 Migration, 0.26 to 1.0: none for data. The layout version stays 1, and no
 structure or behaviour changed: section 16 records settled points, section

@@ -1,0 +1,8 @@
+template: meter
+extends: base
+protocol: modbus
+points:
+  - { name: label, address: { table: holding, register: 20 } }
+  - { name: amps, address: { table: holding, register: 30, type: int16 } }
+  - { name: amps_exp, address: { table: holding, register: 31, type: int16 }, tag: false }
+  - { name: reset, access: wo, storage: volatile, address: { write: { on: { value: 1 }, off: { value: 0 } } } }

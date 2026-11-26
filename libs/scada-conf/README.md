@@ -110,8 +110,21 @@ evaluation parsed its text again), 100 instances of a 65,536-point
 `repeat` at the node limit, 20,000 instances whose expressions fail at
 18 MB, as 100 errors that each name the other instances.
 
-Stage 5 runs when stage 4 found no error. It checks what needs no point
-tags (`check_references`, `include/scada/conf/references.h`, D-113):
+Stage 5 runs when stage 4 found no error. On each merged point of the
+expanded tree (`src/merged_points.cpp`, D-115) it checks the keys that
+merging had to complete (CF-202), a value type that cannot hold its raw
+type (CF-504, the pairs that contract 4.7 decides), the range of an integer
+scaling (CF-516) and an integer value type with a scaling that is not
+integer (CF-517, for every protocol). Each value computed from a
+configuration expression (`register: "r * 65536"`, the ends of
+`read.ranges`, a `health` rule's field) is checked by
+`SchemaSet::check_value` against its key's rules in the protocol's schema,
+as stage 3 checks a value written there (CF-204 and the key's other rules),
+and a computed bit field as a whole (lo <= hi); a point with a wrong
+computed value gets no further check. One cause at many instances is one
+error that names the others, as in stage 4. About 2 µs a computed value:
+393,216 take 0.55 s (D-115). It also checks what needs no point tags (`check_references`,
+`include/scada/conf/references.h`, D-113):
 - names that must exist (CF-310): templates and `extends`, a template's
   protocol, areas, logging policies and aggregate tiers, enumerations (of
   the template's chain or `enums.yaml`), tasks, programs, interlocks,
@@ -301,7 +314,8 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   and its weighting of expressions) at their edges, and the parse of each
   expression once for all its evaluations. Each makes millions of nodes or
   units of work, so each is an executable of its own
-  (`scada-conf-limits-test`, `scada-conf-tree-limits-test`,
+  (`scada-conf-limits-test`, `scada-conf-checked-values-limits-test` for
+  the bound of the checked values of D-115, `scada-conf-tree-limits-test`,
   `scada-conf-expression-limits-test`) with its own time limit; the cases
   they share are in `tests/expand_cases.h`.
 - `tests/config_eval_test.cpp`: the values of configuration expressions and

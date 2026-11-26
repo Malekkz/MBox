@@ -428,11 +428,10 @@ private:
         }
         if (const std::optional<NodeId> divide = find(*scale, "divide_by")) {
             const ScalarType divisor = types_->of(*divide);
-            const std::optional<Integer> number =
-                parse_integer(document_->text(*divide));
-            const bool above_one = divisor == ScalarType::INTEGER && number &&
-                                   !number->negative && number->magnitude > 1;
-            if (above_one || divisor == ScalarType::DECIMAL) {
+            // An integer other than 1 (stage 3 refused one below 1).
+            if ((divisor == ScalarType::INTEGER &&
+                 !is_integer_one(*document_, *types_, *divide)) ||
+                divisor == ScalarType::DECIMAL) {
                 refuse(*divide);
             }
         }
@@ -582,35 +581,11 @@ private:
     }
 
     void check_one_field(NodeId field, const std::string& path) const {
-        if (document_->kind(field) != NodeKind::SEQUENCE) {
-            return;
+        if (std::optional<std::string> message =
+                bit_field_order_error(*document_, *types_, field, path)) {
+            error(CF_OUT_OF_RANGE, document_->items(field)[0],
+                  std::move(*message));
         }
-        const std::span<const NodeId> bounds = document_->items(field);
-        if (bounds.size() != 2 ||
-            types_->of(bounds[0]) != ScalarType::INTEGER ||
-            types_->of(bounds[1]) != ScalarType::INTEGER) {
-            return;
-        }
-        const std::optional<Integer> low =
-            parse_integer(document_->text(bounds[0]));
-        const std::optional<Integer> high =
-            parse_integer(document_->text(bounds[1]));
-        if (low && high && compare(*low, *high) > 0) {
-            error(CF_OUT_OF_RANGE, bounds[0],
-                  item(path, 0) + " must be between 0 and " +
-                      std::string(document_->text(bounds[1])));
-        }
-    }
-
-    static int compare(const Integer& lhs, const Integer& rhs) {
-        if (lhs.negative != rhs.negative) {
-            return lhs.negative ? -1 : 1;
-        }
-        if (lhs.magnitude == rhs.magnitude) {
-            return 0;
-        }
-        const bool smaller = lhs.magnitude < rhs.magnitude;
-        return smaller != lhs.negative ? -1 : 1;
     }
 
     const Document* document_;
@@ -619,6 +594,51 @@ private:
 };
 
 }  // namespace
+
+namespace {
+
+int compare(const Integer& lhs, const Integer& rhs) {
+    if (lhs.negative != rhs.negative) {
+        return lhs.negative ? -1 : 1;
+    }
+    if (lhs.magnitude == rhs.magnitude) {
+        return 0;
+    }
+    const bool smaller = lhs.magnitude < rhs.magnitude;
+    return smaller != lhs.negative ? -1 : 1;
+}
+
+}  // namespace
+
+bool is_integer_one(const Document& document, const ScalarTypes& types,
+                    NodeId node) {
+    if (types.of(node) != ScalarType::INTEGER) {
+        return false;
+    }
+    const std::optional<Integer> value = parse_integer(document.text(node));
+    return value && !value->negative && value->magnitude == 1;
+}
+
+std::optional<std::string> bit_field_order_error(const Document& document,
+                                                 const ScalarTypes& types,
+                                                 NodeId field,
+                                                 std::string_view path) {
+    if (document.kind(field) != NodeKind::SEQUENCE) {
+        return std::nullopt;
+    }
+    const std::span<const NodeId> bounds = document.items(field);
+    if (bounds.size() != 2 || types.of(bounds[0]) != ScalarType::INTEGER ||
+        types.of(bounds[1]) != ScalarType::INTEGER) {
+        return std::nullopt;
+    }
+    const std::optional<Integer> low = parse_integer(document.text(bounds[0]));
+    const std::optional<Integer> high = parse_integer(document.text(bounds[1]));
+    if (!low || !high || compare(*low, *high) <= 0) {
+        return std::nullopt;
+    }
+    return std::string(path) + "[0] must be between 0 and " +
+           std::string(document.text(bounds[1]));
+}
 
 void check_file_rules(const Document& document, const ScalarTypes& types,
                       FileType type, std::string_view protocol,

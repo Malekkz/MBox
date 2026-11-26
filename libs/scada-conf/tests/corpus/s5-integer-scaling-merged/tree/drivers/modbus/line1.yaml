@@ -1,0 +1,7 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.m1, template: meter, unit_id: 1, overrides: { rate: { scale: { divide_by: 2 } } } }

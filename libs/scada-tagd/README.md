@@ -184,8 +184,9 @@ before the first check. A reused generation keeps what the previous
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 1.0, sections 3, 5,
-  9.2, 9.5, 10, 11.1, 11.3 and 12; decisions D-27, D-36, D-38, D-46, D-47,
+- Contract: `docs/contracts/tag-database.md`, version 1.1, sections 3, 5,
+  9.2, 9.5, 10, 11.1, 11.3 and 12 (the kept record of a restore under an
+  age bound, section 12, comes with #89); decisions D-27, D-36, D-38, D-46, D-47,
   D-49, D-51, D-53, D-54 and D-59 in
   `docs/decisions.md`.
 - Public header: `include/scada/tagd/tagd.h`, namespace `scada::tagd`:

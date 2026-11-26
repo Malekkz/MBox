@@ -1,0 +1,12 @@
+# CF-504 on the merged point (contract 4.7; D-134, D-115): an integer value
+# type, or a counter, on a floating raw type, at each instance (the template
+# line is the note): power (int64 on float32), energy and state (counters;
+# state's enumeration does not make a counter valid). An enumeration (mode),
+# a double point (breaker) and float64 (voltage) are valid; pv1.inv2's
+# override makes voltage uint64, at the override's line. One cause met at
+# both instances is one error at the first, which names the other (M6 of
+# the review of #149, D-114). Invented.
+drivers/modbus/line1.yaml:7:13: CF-504
+drivers/modbus/line1.yaml:7:13: CF-504
+drivers/modbus/line1.yaml:7:13: CF-504
+drivers/modbus/line1.yaml:11:41: CF-504

@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -216,28 +217,53 @@ TEST(TagSetValidate, RejectsNamesOutsideTheGrammarOrTooLong) {
     }
 }
 
+// Contract 1.1, section 2: an owner is named `<process>` or
+// `<process>.<writer>` with a writer that is not empty, however many owners
+// its process has.
 TEST(TagSetValidate, AppliesTheOwnerNamingRule) {
     {
+        // The only owner of a process named `<process>.<writer>`: refused
+        // under 1.0.
         TagSet tag_set = samples::one_owner();
         tag_set.owners.front().name = "p.writer";
-        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
-                        "owner 'p.writer': the only owner of process 'p' must "
-                        "have the name of the process");
+        expect_valid(tag_set);
     }
     {
+        // The plain owner beside a `<process>.<writer>` owner: refused
+        // under 1.0.
         TagSet tag_set = samples::one_owner();
         tag_set.owners.push_back({.name = "p.second", .process = "p"});
-        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
-                        "owner 'p': process 'p' has several owners");
+        expect_valid(tag_set);
+        tag_set.owners.push_back({.name = "p.third.part", .process = "p"});
+        expect_valid(tag_set);
+    }
+    {
+        // A foreign prefix (also that of another process, `q.b`), an empty
+        // writer and a name that only starts like the process stay refused,
+        // beside other owners and alone.
+        for (const bool alone : {false, true}) {
+            for (const std::string_view name :
+                 {"px.b", "q.b", "p.", "px", "q"}) {
+                TagSet tag_set = samples::one_owner();
+                tag_set.processes.push_back(
+                    {.name = "q", .uid = samples::UID_OTHER});
+                if (alone) {
+                    tag_set.owners.clear();
+                }
+                tag_set.owners.push_back(
+                    {.name = std::string(name), .process = "p"});
+                expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT,
+                                "owner '" + std::string(name) +
+                                    "': an owner of process 'p' must be "
+                                    "named 'p' or <process>.<writer> with a "
+                                    "writer that is not empty");
+            }
+        }
     }
     {
         TagSet tag_set = samples::one_owner();
         tag_set.owners = {{.name = "p.a", .process = "p"},
-                          {.name = "px.b", .process = "p"}};
-        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT, "owner 'px.b'");
-        tag_set.owners.back().name = "p.";
-        expect_rejected(tag_set, StatusCode::INVALID_ARGUMENT, "owner 'p.'");
-        tag_set.owners.back().name = "p.b";
+                          {.name = "p.b", .process = "p"}};
         expect_valid(tag_set);
     }
 }
@@ -487,6 +513,35 @@ TEST(TagSetValidate, AppliesTheCountLimits) {
 // README. The expected value was computed from that description with a
 // separate program, so a change of the encoding fails here.
 TEST(TagSetHash, IsTheHashOfTheCanonicalEncoding) {
+    EXPECT_EQ(
+        hex(hash_of(samples::sample())),
+        "e1e7f39b7000624cf7715d4cf6ceee236e9d03d0f3b0adfc5f2bc218999e93aa");
+}
+
+// Contract 1.1 changes only which owner names are accepted: a tag set valid
+// under 1.0 is valid under 1.1 with the same `config_hash` (#151). The
+// values were computed by the 1.0 library (commit 0bc8052) for these
+// tag sets: the plain owner alone, `<process>.<writer>` owners only, and the
+// sample, which has both kinds in different processes.
+TEST(TagSetHash, ATagSetValidUnderContract10KeepsItsHash) {
+    TagSet plain = samples::one_owner();
+    samples::add_tags(plain, "p", "p.t", 2);
+
+    TagSet writers;
+    writers.processes = {{.name = "p", .uid = samples::UID_OTHER}};
+    writers.owners = {{.name = "p.b", .process = "p"},
+                      {.name = "p.a", .process = "p"}};
+    samples::add_tags(writers, "p.a", "p.a.t", 1);
+    samples::add_tags(writers, "p.b", "p.b.t", 1);
+
+    expect_valid(plain);
+    expect_valid(writers);
+    EXPECT_EQ(
+        hex(hash_of(plain)),
+        "57e592d2d35c9a0d0c41c7653208515bdcda8b7aee0fb75bdc91317216f68ff0");
+    EXPECT_EQ(
+        hex(hash_of(writers)),
+        "e3a63ec04f39d91f7cd57c730be9450cc4ecb698e88548d91a427f560035de95");
     EXPECT_EQ(
         hex(hash_of(samples::sample())),
         "e1e7f39b7000624cf7715d4cf6ceee236e9d03d0f3b0adfc5f2bc218999e93aa");

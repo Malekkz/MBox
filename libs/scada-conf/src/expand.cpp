@@ -7,6 +7,7 @@
 #include "config_eval.h"
 #include "expression_site.h"
 #include "expression_types.h"
+#include "grouped_errors.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
@@ -67,8 +68,6 @@ constexpr std::size_t MAX_POINTS = 65536;
 // `limits.max_tags` without a value (4.1 of the system file).
 constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
-// The other instances a merged error names (S7 of the delta review).
-constexpr std::size_t NAMED_INSTANCES = 10;
 // The nodes of parsed expressions kept for later evaluations, about 33 MB;
 // past it the cache is emptied (E1 of the review of #146).
 constexpr std::size_t MAX_COMPILED_NODES = 250'000;
@@ -399,7 +398,8 @@ public:
         : files_(files),
           diagnostics_(&diagnostics),
           limits_(limits),
-          counts_(counts) {}
+          counts_(counts),
+          grouped_(limits.kept_errors) {}
 
     std::optional<ExpandedTree> run() {
         for (const CheckedFile& file : files_) {
@@ -434,14 +434,6 @@ public:
 private:
     // --- Errors ----------------------------------------------------------
 
-    // A cause met at several instances (`error_in`).
-    struct Cause {
-        std::size_t first = 0;           // in `pending_`
-        std::size_t more = 0;            // other instances
-        Location last;                   // the instance it was last met at
-        std::vector<std::string> names;  // of the first other instances
-    };
-
     // An error at `site`: in the instance's own file it is there; in a
     // template it is at the instance, with the template's line as a note.
     void error(std::uint16_t code, const Value& site, std::string message,
@@ -474,87 +466,23 @@ private:
             diagnostic.location = *instance_;
         }
         // One cause in a template, met by many instances, is one error at
-        // the first, with their count (the ruling O-6 on #146). It is
-        // looked up before any text is kept, so a cause met again keeps
-        // nothing (D2 of the delta review).
-        std::string cause;
-        if (!diagnostic.notes.empty()) {
-            const Location& site = diagnostic.notes.front().location;
-            cause = std::to_string(code);
-            cause += '|';
-            cause += site.file;
-            cause += ':' + std::to_string(site.line) + ':' +
-                     std::to_string(site.column) + '|';
-            cause += diagnostic.message;
-            if (const auto group = causes_.find(cause);
-                group != causes_.end()) {
-                count_instance(group->second, diagnostic.location);
-                return;
-            }
-        }
-        // Past the kept limit an error is counted, not kept: the texts
-        // that suppress repeats and the causes are bounded by it (C2 of the
-        // review of #146, D2 of the delta review).
-        if (pending_.size() >= limits_.kept_errors) {
-            diagnostics_->count_unlisted_errors(1);
-            return;
-        }
-        if (!reported_.insert(format(diagnostic)).second) {
-            return;
-        }
-        if (!cause.empty()) {
-            causes_.emplace(std::move(cause), Cause{.first = pending_.size(),
-                                                    .more = 0,
-                                                    .last = diagnostic.location,
-                                                    .names = {}});
-        }
-        pending_.push_back(std::move(diagnostic));
-    }
-
-    // Counted once per instance: points of one instance that meet the
-    // cause are one.
-    void count_instance(Cause& seen, const Location& place) const {
-        if (place.file == seen.last.file && place.line == seen.last.line &&
-            place.column == seen.last.column) {
-            return;
-        }
-        ++seen.more;
-        seen.last = place;
-        if (seen.names.size() < NAMED_INSTANCES) {
-            seen.names.push_back(device_name_);
-        }
+        // the first, with their count (the ruling O-6 on #146); past the
+        // kept limit an error is counted, not kept (C2 of the review of
+        // #146, D2 of the delta review).
+        const std::string key = diagnostic.message;
+        grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_);
     }
 
     // Gives the buffered diagnostics, in the order they arose.
     void flush_diagnostics() {
         if (counts_ != nullptr) {
-            counts_->kept_texts = reported_.size();
-            counts_->causes = causes_.size();
+            counts_->kept_texts = grouped_.kept_texts();
+            counts_->causes = grouped_.causes();
             counts_->parses = parses_;
             counts_->typings = typings_;
             counts_->written_text = writer_.text_bytes();
         }
-        // The others by name, the first 10 (S7 of the delta review of
-        // #146); the note's values are those of the instance the error is
-        // at.
-        for (const auto& [cause, group] : causes_) {
-            if (group.more == 0) {
-                continue;
-            }
-            std::string others =
-                " (and " + std::to_string(group.more) +
-                (group.more == 1 ? " more instance: " : " more instances: ");
-            for (std::size_t i = 0; i < group.names.size(); ++i) {
-                others += (i == 0 ? "" : ", ") + group.names[i];
-            }
-            others += group.more > group.names.size() ? ", ...)" : ")";
-            pending_[group.first].message += others;
-        }
-        for (Diagnostic& diagnostic : pending_) {
-            diagnostics_->add(std::move(diagnostic));
-        }
-        pending_.clear();
-        causes_.clear();
+        grouped_.flush(*diagnostics_);
     }
 
     // --- Channels and devices -----------------------------------------------
@@ -1998,11 +1926,14 @@ private:
     // Steps 7 and 8, and the checks of the expanded instance.
     void finish_points(const Value& instance, Device& device) {
         const std::string template_name = template_of(instance);
-        // The identity checks' expressions (4.8, 2.4) have the parameters
-        // and no variable.
-        if (Value* identify = device.keys.find("identify")) {
-            context_ = "identify";
-            evaluate_below(*identify, {});
+        // The device's own expressions (2.4) have the parameters and no
+        // variable: the identity checks (4.8), the read ranges' ends (A.4)
+        // and a health rule's bit field (4.9; M7 of the review of #149).
+        for (const std::string_view key : {"identify", "read", "health"}) {
+            if (Value* own = device.keys.find(key)) {
+                context_ = std::string(key);
+                evaluate_below(*own, {});
+            }
         }
         if (device.points.size() > MAX_POINTS) {
             error(CF_TOO_MANY_POINTS, *instance.find("name"),
@@ -2384,6 +2315,16 @@ private:
             if (reason.starts_with(PREFIX)) {
                 reason = reason.substr(PREFIX.size());
             }
+            // A device's own key (`identify`, `read`, `health`) has the
+            // parameters only: the name is not one of the device's (item 7
+            // of the delta review of #149).
+            constexpr std::string_view UNBOUND =
+                " is not a parameter and no variable bound to this point";
+            if (local.empty() && !context_.starts_with("point ") &&
+                reason.ends_with(UNBOUND)) {
+                reason.replace(reason.size() - UNBOUND.size(), UNBOUND.size(),
+                               " is not a parameter of this device");
+            }
             report_evaluation(value, problem.column, reason,
                               detail_of(tree, bindings));
             return result;
@@ -2517,7 +2458,8 @@ private:
             ExpandedTree tree{.document = std::move(document).value(),
                               .types = {},
                               .instance_of = std::move(instance_of_),
-                              .instances = std::move(instances_)};
+                              .instances = std::move(instances_),
+                              .computed = std::move(computed_)};
             tree.types = ScalarTypes(tree.document);
             for (const auto& [node, type] : types_) {
                 tree.types.set(node, type);
@@ -2552,16 +2494,18 @@ private:
             return node.ok();
         }
 
-        void scalar(std::string_view text, ScalarType type,
-                    SourcePosition where) {
+        std::optional<NodeId> scalar(std::string_view text, ScalarType type,
+                                     SourcePosition where) {
             text_bytes_ += text.size();
             const Result<NodeId> node =
                 builder_.scalar(text, ScalarStyle::PLAIN, where);
             ok_ = ok_ && node.ok();
-            if (node.ok()) {
-                note(node.value());
-                types_.emplace_back(node.value(), type);
+            if (!node.ok()) {
+                return std::nullopt;
             }
+            note(node.value());
+            types_.emplace_back(node.value(), type);
+            return node.value();
         }
 
         void write_device(const Device& device) {
@@ -2603,7 +2547,10 @@ private:
             switch (value.kind) {
                 case NodeKind::SCALAR: {
                     if (value.computed) {
-                        scalar(value.text, value.type, where);
+                        if (const std::optional<NodeId> node =
+                                scalar(value.text, value.type, where)) {
+                            computed_.push_back(*node);
+                        }
                         return;
                     }
                     const Document& document = *value.file->document;
@@ -2649,6 +2596,7 @@ private:
         bool ok_ = true;
         std::uint32_t instance_ = ExpandedTree::NO_INSTANCE;
         std::vector<std::uint32_t> instance_of_;
+        std::vector<NodeId> computed_;
         std::vector<Location> instances_;
         std::vector<std::pair<NodeId, ScalarType>> types_;
         std::size_t text_bytes_ = 0;
@@ -2661,18 +2609,15 @@ private:
     Diagnostics* diagnostics_;
     ExpandLimits limits_;
     ExpandCounts* counts_;
+    // The diagnostics until the end of the run, one per cause (D-114).
+    GroupedErrors grouped_;
     std::map<std::string, const CheckedFile*, std::less<>> templates_;
     std::set<const CheckedFile*> faulty_templates_;
     std::map<const CheckedFile*, Value> roots_;
     // What is being evaluated, for the detail of a CF-410.
     std::string context_;
-    // The diagnostics until the end of the run, and the first of each cause
-    // with the number of other instances it arose at.
-    std::vector<Diagnostic> pending_;
-    std::map<std::string, Cause> causes_;
     std::map<const CheckedFile*, FileIndex> file_index_;
     std::vector<std::string> paths_;
-    std::set<std::string> reported_;
     bool failed_ = false;
     // An error in the instance being expanded, which ends its steps.
     bool device_failed_ = false;

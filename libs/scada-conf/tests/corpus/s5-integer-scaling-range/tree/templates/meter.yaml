@@ -1,0 +1,6 @@
+template: meter
+protocol: modbus
+points:
+  - { name: energy, address: { table: input, register: 10, type: int32 }, scale: { gain: 4294967296 } }
+  - { name: total, address: { table: input, register: 12, type: int32 }, scale: { gain: 4294967297 } }
+  - { name: count, value_type: uint64, address: { table: input, register: 14, type: uint16 }, scale: { offset: -1 } }

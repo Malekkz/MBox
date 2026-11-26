@@ -1,0 +1,12 @@
+template: meter
+protocol: modbus
+params:
+  first: { type: int, default: 0 }
+  flag: { type: int, default: 0 }
+  divisor: { type: int, default: 1 }
+points:
+  - { name: level, address: { table: holding, register: "first", type: uint16 } }
+  - { name: alarm, address: { table: holding, register: 1, bit: "flag", type: uint16 } }
+  - name: flow
+    address: { table: holding, register: 2, type: uint16 }
+    scale: { divide_by: "divisor" }

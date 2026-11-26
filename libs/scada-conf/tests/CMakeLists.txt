@@ -4,6 +4,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     corpus_test.cpp
     diagnostic_test.cpp
     expand_test.cpp
+    merged_points_test.cpp
     expression_test.cpp
     expression_types_test.cpp
     names_test.cpp
@@ -29,6 +30,9 @@ target_include_directories(scada-conf-unit-test
 # a time limit of its own, apart from the unit tests above.
 scada_add_test(scada-conf-limits-test KIND unit
   SOURCES limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-checked-values-limits-test KIND unit
+  SOURCES checked_values_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
 scada_add_test(scada-conf-tree-limits-test KIND unit
   SOURCES tree_limits_test.cpp

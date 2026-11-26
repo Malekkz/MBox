@@ -1,0 +1,8 @@
+# CF-516 on the merged point (contract 4.7 and 10.5; D-115): the range of
+# raw x gain + offset must fit the value type. total (int32 x (2^32 + 1))
+# can exceed int64; count (uint16 - 1) can fall below uint64. energy
+# (int32 x 2^32) fits exactly, and ps1.m2's override (gain 2^32, offset 1)
+# still fits. One cause met at both instances is one error at the first,
+# which names the other (D-114). Invented.
+drivers/modbus/line1.yaml:7:13: CF-516
+drivers/modbus/line1.yaml:7:13: CF-516

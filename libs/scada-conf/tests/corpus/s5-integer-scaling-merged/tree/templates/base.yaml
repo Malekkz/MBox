@@ -1,0 +1,4 @@
+template: base
+points:
+  - { name: flow, value_type: int64 }
+  - { name: level, enum: { 0: empty, 1: full } }
