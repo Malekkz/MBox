@@ -6,6 +6,7 @@
 #include "merged_points.h"
 
 #include "grouped_errors.h"
+#include "point_types.h"
 
 #include "scada/common/result.h"
 #include "scada/common/status.h"
@@ -709,15 +710,7 @@ private:
     // The raw type of a Modbus address (Annex A.2): one bit is `bool`; the
     // default is `bool` for coils and discrete inputs, `uint16` otherwise.
     [[nodiscard]] std::string raw_type_of(NodeId address) const {
-        if (child(address, "bit")) {
-            return "bool";
-        }
-        std::string written = text_of(address, "type");
-        if (!written.empty()) {
-            return written;
-        }
-        const std::string table = text_of(address, "table");
-        return table == "coil" || table == "discrete" ? "bool" : "uint16";
+        return modbus_raw_type(*document_, address);
     }
 
     [[nodiscard]] bool is_code(NodeId point) const {
@@ -732,34 +725,7 @@ private:
     // The point's value type, given or derived (4.7).
     [[nodiscard]] std::string value_type_of(NodeId point,
                                             const std::string& raw) const {
-        std::string given = text_of(point, "value_type");
-        if (!given.empty()) {
-            return given;
-        }
-        if (is_code(point)) {
-            return "int64";
-        }
-        if (raw == "bool") {
-            return "bool";
-        }
-        if (!raw_range(raw, 1)) {
-            return raw == "string" || raw == "bytes" ? "string" : "float64";
-        }
-        if (child(point, "exponent_from")) {
-            return "float64";
-        }
-        if (const std::optional<NodeId> scale = child_map(point, "scale")) {
-            if (child(*scale, "divide_by") && !is_one(*scale, "divide_by")) {
-                return "float64";
-            }
-            for (const std::string_view key : {"gain", "offset"}) {
-                const std::optional<NodeId> factor = child(*scale, key);
-                if (factor && !is_integer(*factor)) {
-                    return "float64";
-                }
-            }
-        }
-        return raw == "uint64" ? "uint64" : "int64";
+        return modbus_value_type(*tree_, point, raw);
     }
 
     // `divide_by: 1` in any written form (`0x1`) is an integer scaling, as
