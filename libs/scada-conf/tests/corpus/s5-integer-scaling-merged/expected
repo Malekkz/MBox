@@ -1,0 +1,9 @@
+# CF-517 at stage 5 (contract 4.7; D-115): an integer value type needs an
+# integer scaling, decided on the merged point when the value type and the
+# scaling come from different objects. flow takes int64 from the base and
+# divide_by 10 from the child; level's enumeration gives int64 and the child
+# gives gain 0.5; rate's divide_by 0x1 is an integer scaling, and the
+# device's override divide_by 2 is not, at the override's line. Invented.
+drivers/modbus/line1.yaml:7:13: CF-517
+drivers/modbus/line1.yaml:7:13: CF-517
+drivers/modbus/line1.yaml:7:91: CF-517

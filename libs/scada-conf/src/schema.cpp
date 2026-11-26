@@ -2264,6 +2264,216 @@ bool SchemaSet::has(std::string_view schema_file) const {
     return compiled_->names.contains(schema_file);
 }
 
+namespace {
+
+// The schemas that `start` joins for one node: itself and, transitively,
+// what its "$ref", "allOf" and "oneOf" name.
+void join_closure(const CompiledSchemas& schemas, SchemaId start,
+                  std::set<SchemaId>& out) {
+    std::vector<SchemaId> pending{start};
+    while (!pending.empty()) {
+        const SchemaId schema_id = pending.back();
+        pending.pop_back();
+        if (!out.insert(schema_id).second) {
+            continue;
+        }
+        const SchemaNode& rules = schemas.nodes.at(schema_id);
+        if (rules.ref) {
+            pending.push_back(*rules.ref);
+        }
+        pending.insert(pending.end(), rules.all_of.begin(), rules.all_of.end());
+        pending.insert(pending.end(), rules.one_of.begin(), rules.one_of.end());
+    }
+}
+
+// The schemas that `rules` itself gives the key `step`: its items for
+// "[]", its property of that name; its "unevaluatedProperties" schema apart
+// in `unevaluated`, as it applies only where no joined schema names the key.
+void own_rules(const SchemaNode& rules, std::string_view step,
+               std::set<SchemaId>& named, std::set<SchemaId>& unevaluated) {
+    if (step == "[]") {
+        if (rules.items) {
+            named.insert(*rules.items);
+        }
+        return;
+    }
+    for (const auto& [key, child] : rules.properties) {
+        if (key == step) {
+            named.insert(child);
+        }
+    }
+    if (rules.unevaluated == Unevaluated::SCHEMA) {
+        unevaluated.insert(rules.unevaluated_schema);
+    }
+}
+
+// The rules the closure of `start` gives `step`.
+std::set<SchemaId> rules_of(const CompiledSchemas& schemas, SchemaId start,
+                            std::string_view step) {
+    std::set<SchemaId> joined;
+    join_closure(schemas, start, joined);
+    std::set<SchemaId> named;
+    std::set<SchemaId> unevaluated;
+    for (const SchemaId schema_id : joined) {
+        own_rules(schemas.nodes.at(schema_id), step, named, unevaluated);
+    }
+    return named.empty() ? unevaluated : named;
+}
+
+// True if the branches of `rules`, a `oneOf`, give `step` different rules:
+// a value alone cannot choose its branch.
+bool splits(const CompiledSchemas& schemas, const SchemaNode& rules,
+            std::string_view step) {
+    std::optional<std::set<SchemaId>> first;
+    for (const SchemaId branch : rules.one_of) {
+        std::set<SchemaId> given = rules_of(schemas, branch, step);
+        if (given.empty()) {
+            continue;
+        }
+        if (!first) {
+            first = std::move(given);
+        } else if (given != *first) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The schemas of the key `step` below the schemas `from`: of the items for
+// "[]"; otherwise of the property of that name, or, where none of `from`
+// names it, of "unevaluatedProperties". Nothing, with `split` set, when a
+// `oneOf` joined at this step gives the key different rules.
+std::set<SchemaId> step_down(const CompiledSchemas& schemas,
+                             const std::set<SchemaId>& from,
+                             std::string_view step, bool& split) {
+    std::set<SchemaId> joined;
+    for (const SchemaId schema_id : from) {
+        join_closure(schemas, schema_id, joined);
+    }
+    std::set<SchemaId> named;
+    std::set<SchemaId> unevaluated;
+    for (const SchemaId schema_id : joined) {
+        const SchemaNode& rules = schemas.nodes.at(schema_id);
+        if (!rules.one_of.empty() && splits(schemas, rules, step)) {
+            split = true;
+            return {};
+        }
+        own_rules(rules, step, named, unevaluated);
+    }
+    return named.empty() ? unevaluated : named;
+}
+
+}  // namespace
+
+Result<KeyRules> SchemaSet::key_rules(std::string_view schema,
+                                      std::span<const std::string> path) const {
+    const auto found = compiled_->names.find(schema);
+    if (found == compiled_->names.end()) {
+        return Status(StatusCode::INTERNAL,
+                      "check_value: the schema is not in the set");
+    }
+    std::set<SchemaId> rules{found->second};
+    for (const std::string& step : path) {
+        bool split = false;
+        rules = step_down(*compiled_, rules, step, split);
+        if (split) {
+            return Status(StatusCode::INTERNAL,
+                          "check_value: a oneOf gives the key different rules");
+        }
+        if (rules.empty()) {
+            return Status(StatusCode::INTERNAL,
+                          "check_value: the schema gives the key no rule");
+        }
+    }
+    KeyRules key;
+    key.owner_ = compiled_.get();
+    key.schemas_.assign(rules.begin(), rules.end());
+    return key;
+}
+
+std::vector<std::string> SchemaSet::keys_split_by_one_of() const {
+    std::vector<std::string> found;
+    for (const SchemaNode& rules : compiled_->nodes) {
+        if (rules.one_of.size() < 2) {
+            continue;
+        }
+        std::set<std::string> keys;
+        for (const SchemaId branch : rules.one_of) {
+            std::set<SchemaId> joined;
+            join_closure(*compiled_, branch, joined);
+            for (const SchemaId schema_id : joined) {
+                for (const auto& [key, child] :
+                     compiled_->nodes.at(schema_id).properties) {
+                    keys.insert(key);
+                }
+            }
+        }
+        for (const std::string& key : keys) {
+            if (splits(*compiled_, rules, key)) {
+                found.push_back(rules.file + ": " + key);
+            }
+        }
+    }
+    return found;
+}
+
+Result<std::vector<ValueError>> SchemaSet::check_value(
+    const KeyRules& rules, std::string_view text,
+    std::string_view label) const {
+    if (rules.owner_ != compiled_.get() || rules.schemas_.empty()) {
+        return Status(StatusCode::INTERNAL,
+                      "check_value: the rules are not of this set");
+    }
+    std::vector<ValueError> errors;
+    DocumentBuilder builder;
+    const Result<FileIndex> file = builder.add_file(std::string(label));
+    if (!file.ok() ||
+        !builder
+             .scalar(
+                 text, ScalarStyle::PLAIN,
+                 SourcePosition{.file = file.value(), .line = 1, .column = 1})
+             .ok()) {
+        // A label of one name and a scalar of at most 64 KiB always fit.
+        panic("SchemaSet::check_value: the value is not kept");
+    }
+    Result<Document> document = builder.finish();
+    if (!document.ok()) {
+        panic("SchemaSet::check_value: the value is not kept");
+    }
+    ScalarTypes types(document.value());
+    for (const std::size_t schema_id : rules.schemas_) {
+        Diagnostics diagnostics;
+        Validator validator(*compiled_, document.value(), types, label);
+        validator.run(schema_id, diagnostics);
+        if (diagnostics.error_count() == 0) {
+            continue;
+        }
+        Report report;
+        diagnostics.move_into(report);
+        for (Diagnostic& diagnostic : report.errors) {
+            ValueError error{.code = diagnostic.code,
+                             .message = std::move(diagnostic.message)};
+            if (std::ranges::none_of(errors, [&error](const ValueError& seen) {
+                    return seen.code == error.code &&
+                           seen.message == error.message;
+                })) {
+                errors.push_back(std::move(error));
+            }
+        }
+    }
+    return errors;
+}
+
+Result<std::vector<ValueError>> SchemaSet::check_value(
+    std::string_view schema, std::span<const std::string> path,
+    std::string_view text, std::string_view label) const {
+    const Result<KeyRules> rules = key_rules(schema, path);
+    if (!rules.ok()) {
+        return rules.status();
+    }
+    return check_value(rules.value(), text, label);
+}
+
 void SchemaSet::validate(const Document& document, ScalarTypes& types,
                          std::string_view schema_file,
                          std::string_view file_label,

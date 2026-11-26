@@ -16,7 +16,9 @@
 #include "scada/conf/types.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -34,6 +36,25 @@ struct SchemaSource {
 [[nodiscard]] const std::vector<SchemaSource>& builtin_schema_sources();
 
 struct CompiledSchemas;
+class SchemaSet;
+
+// The rules a schema gives one key, found once for many values
+// (`SchemaSet::key_rules`).
+// Only `SchemaSet::key_rules` makes one, never empty, and only the set that
+// made it uses it (S4 of the review of #149).
+class KeyRules {
+private:
+    friend class SchemaSet;
+    KeyRules() = default;
+    const CompiledSchemas* owner_ = nullptr;
+    std::vector<std::size_t> schemas_;
+};
+
+// One error of a value at its key: its code and message.
+struct ValueError {
+    std::uint16_t code = 0;
+    std::string message;
+};
 
 // A compiled set of schema files. Immutable once compiled; may be shared
 // between validations.
@@ -66,6 +87,42 @@ public:
 
     // True if a schema file of this name is in the set.
     [[nodiscard]] bool has(std::string_view schema_file) const;
+
+    // Checks `text`, a value computed at expansion (contract 13.3), written
+    // as a plain scalar, against every rule that `schema` gives the key at
+    // `path` below it, as stage 3 checks a value written there: its type and
+    // form, "minimum" and "maximum", "x-scada-min" and "x-scada-max", "enum"
+    // and "const", with the same codes and messages, the key named `label`
+    // (decision D-115). `schema` names a file (`modbus.schema.json`) or a
+    // definition (`modbus.schema.json#/$defs/device`); `path` holds map
+    // keys, and "[]" for the items of a sequence. Every schema that a "$ref",
+    // "allOf" or "oneOf" joins at a step is followed; where several give the
+    // key a rule, the value must meet each. Gives the errors, none for a
+    // value that meets the rules, or INTERNAL when `schema` or `path` names
+    // no rule: a defect of the caller, not of the configuration.
+    [[nodiscard]] Result<std::vector<ValueError>> check_value(
+        std::string_view schema, std::span<const std::string> path,
+        std::string_view text, std::string_view label) const;
+
+    // The rules `schema` gives the key at `path`, as `check_value` finds
+    // them, to check many values with the overload below; INTERNAL when
+    // they name no rule, or when the branches of a `oneOf` on the path give
+    // the key different rules: stage 3 checks a value against one branch
+    // only, which a computed value alone cannot choose (M8 of the review of
+    // #149).
+    [[nodiscard]] Result<KeyRules> key_rules(
+        std::string_view schema, std::span<const std::string> path) const;
+
+    // Each key that the branches of a `oneOf` give different rules, as
+    // `<file>: <key>`: the keys `key_rules` refuses. None in the built-in
+    // set, which a test checks.
+    [[nodiscard]] std::vector<std::string> keys_split_by_one_of() const;
+
+    // `check_value` against rules found by `key_rules` of this set; INTERNAL
+    // for rules of another set.
+    [[nodiscard]] Result<std::vector<ValueError>> check_value(
+        const KeyRules& rules, std::string_view text,
+        std::string_view label) const;
 
     SchemaSet(SchemaSet&&) noexcept;
     SchemaSet& operator=(SchemaSet&&) noexcept;

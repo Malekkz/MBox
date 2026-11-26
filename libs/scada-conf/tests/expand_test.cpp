@@ -5,11 +5,17 @@
 
 #include "scada/conf/expand.h"
 #include "expand_cases.h"
+#include "merged_points.h"
 #include "scada/common/result.h"
+#include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "scada/conf/schema.h"
+#include "scada/conf/types.h"
 #include "scada/conf/validate.h"
+#include "scada/conf/yaml.h"
 #include "scada/test/temp_directory.h"
+#include "validate_internal.h"
 
 #include <gtest/gtest.h>
 
@@ -680,6 +686,44 @@ std::optional<NodeId> scalar_in(const ExpandedTree& tree, std::string_view text,
     return std::nullopt;
 }
 
+// Item 5 of the delta review of #149: an INTERNAL failure of stage 5 is
+// the failure of `validate_and_expand`, not a report. The built-in schemas
+// never give it, so stage 5 reads a set whose `modbus` names no key.
+TEST(MergedPoints, AnInternalFailureOfStageFiveFailsTheValidation) {
+    std::optional<test::TempDirectory> temp =
+        test::TempDirectory::create("scada-conf-expand-");
+    ASSERT_TRUE(temp.has_value());
+    if (!temp) {
+        return;
+    }
+    const Files files = {
+        {"system.yaml", std::string(SYSTEM)},
+        {"templates/meter_a.yaml",
+         "template: meter_a\nprotocol: modbus\n"
+         "params: { r: { type: int, default: 1 } }\npoints:\n"
+         "  - { name: p, address: { table: holding, register: \"r\", type: "
+         "uint16 } }\n"},
+        {"drivers/modbus/line1.yaml", one_device()}};
+    for (const auto& [path, content] : files) {
+        const fs::path full = temp->path() / path;
+        fs::create_directories(full.parent_path());
+        std::ofstream(full, std::ios::binary) << content;
+    }
+    std::string problem;
+    Result<SchemaSet> bare = SchemaSet::compile(
+        {SchemaSource{.name = "modbus.schema.json",
+                      .text = R"({"$defs": {"device": {"type": "object"},)"
+                              R"( "template": {"type": "object"}}})"}},
+        problem);
+    ASSERT_TRUE(bare.ok()) << problem;
+    const Result<Validation> failed =
+        validate_and_expand_with(temp->path(), {}, {}, bare.value());
+    EXPECT_EQ(failed.status().code(), StatusCode::INTERNAL);
+    const Result<Validation> passed = validate_and_expand(temp->path());
+    ASSERT_TRUE(passed.ok());
+    EXPECT_EQ(passed.value().report.error_count, 0U);
+}
+
 // `expanded_diagnostic` (expand.h) places a diagnostic of a later stage as
 // the expander does: at the instance, with the template's line as a note.
 TEST(Expand, AnExpandedDiagnostic) {
@@ -1034,8 +1078,8 @@ TEST(Expand, TheNamesOfIdentify) {
                 {"drivers/modbus/line1.yaml", one_device()}}),
         (Lines{
             "drivers/modbus/line1.yaml:7:11: error CF-410: expression \"100 + "
-            "zz\": \"zz\" is not a parameter and no variable bound to this "
-            "point\n  from template templates/meter_a.yaml:4:51 (identify)"}));
+            "zz\": \"zz\" is not a parameter of this device"
+            "\n  from template templates/meter_a.yaml:4:51 (identify)"}));
 }
 
 // B9 and the ruling O-9: a key the schema types as an integer takes an
@@ -1215,8 +1259,8 @@ TEST(Expand, BothSidesOfAndAndTheSecondRange) {
                        "holding, register: \"n + k\", type: uint16 } }\n"},
                       {"drivers/modbus/line1.yaml", one_device()}}),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-410: expression "
-                     "\"1..n\": \"n\" is not a parameter and no variable bound "
-                     "to this point\n  from template "
+                     "\"1..n\": \"n\" is not a parameter of this device"
+                     "\n  from template "
                      "templates/meter_a.yaml:4:30 (variable k)"}));
 }
 
@@ -1357,6 +1401,270 @@ TEST(Expand, Cf410InABlockScalarNamesItsPlaceInTheText) {
             "\"100 +\\n1 DIV k\\n\": division by zero at line 2, column 3 "
             "of the expression's text\n"
             "  from template templates/meter_a.yaml:9:17 (point p; k = 0)"}));
+}
+
+// --- Stage 5 on merged points (D-115) -------------------------------------
+
+// A template `meter_a` of Modbus with the points given, and one instance.
+Lines merged(std::string_view points, std::string_view more = {},
+             std::string_view base = {}) {
+    Files files{{"templates/meter_a.yaml",
+                 std::string("template: meter_a\nprotocol: modbus\n") +
+                     (base.empty() ? "" : "extends: base_a\n") + "points:\n" +
+                     std::string(points)},
+                {"drivers/modbus/line1.yaml", one_device(more)}};
+    if (!base.empty()) {
+        files.emplace("templates/base_a.yaml",
+                      "template: base_a\npoints:\n" + std::string(base));
+    }
+    return expand(files);
+}
+
+// CF-504 (D-134): an integer value type on a floating raw type, unless the
+// merged point is an enumeration or a double point; a counter on one
+// always (C5 of the review of #132).
+TEST(MergedPoints, IntegerValueTypesOnFloatingRawTypes) {
+    EXPECT_EQ(merged("  - { name: p, value_type: int64, address: { table: "
+                     "input, register: 10, type: float32 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type int64 cannot hold float32\n"
+                     "  from template templates/meter_a.yaml:4:28 (point p)"}));
+    // An enumeration of the base template makes it a code: valid.
+    EXPECT_EQ(merged("  - { name: p, value_type: int64, address: { table: "
+                     "input, register: 10, type: float32 } }\n",
+                     {}, "  - { name: p, enum: { 0: off, 1: on } }\n"),
+              Lines{"ps1.m1.p: {enum: {0: off, 1: on}, value_type: int64, "
+                    "address: {table: input, register: 10, type: float32}}"});
+    // An enumeration does not make a counter valid.
+    EXPECT_EQ(merged("  - { name: p, enum: { 0: off, 1: on }, counter: { "
+                     "limit: 100, at_limit: wrap }, address: { table: input, "
+                     "register: 10, type: float32 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": a counter cannot hold float32\n"
+                     "  from template templates/meter_a.yaml:4:50 (point p)"}));
+    // An override in the instance's file is at its own line.
+    EXPECT_EQ(merged("  - { name: p, address: { table: input, register: 10, "
+                     "type: float64 } }\n",
+                     "    overrides: { p: { value_type: uint64 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:35: error CF-504: "
+                     "\"ps1.m1.p\": value_type uint64 cannot hold float64"}));
+}
+
+// CF-517 at stage 5: keys that merging brought together, and a value type
+// derived from an enumeration.
+TEST(MergedPoints, IntegerScalingWhereMergingBringsTheKeys) {
+    EXPECT_EQ(merged("  - { name: p, scale: { divide_by: 10 }, address: { "
+                     "table: input, register: 10, type: int16 } }\n",
+                     {}, "  - { name: p, value_type: int64 }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-517: "
+                     "\"ps1.m1.p\": value_type int64 needs an integer "
+                     "scaling; use float64\n"
+                     "  from template templates/meter_a.yaml:5:36 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, enum: { 0: a, 5: b }, scale: { gain: "
+                     "0.5 }, address: { table: input, register: 10, type: "
+                     "uint16 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-517: "
+                     "\"ps1.m1.p\": value_type int64 (derived from the "
+                     "enumeration) needs an integer scaling; use float64\n"
+                     "  from template templates/meter_a.yaml:4:53 (point p)"}));
+    // An integer raw type with a decimal gain derives float64: valid.
+    EXPECT_EQ(merged("  - { name: p, scale: { gain: 0.5 }, address: { table: "
+                     "input, register: 10, type: uint16 } }\n"),
+              Lines{"ps1.m1.p: {scale: {gain: 0.5}, address: {table: input, "
+                    "register: 10, type: uint16}}"});
+}
+
+// CF-516: every raw value times the gain plus the offset fits the integer
+// value type; without a scaling, a raw type it cannot hold is CF-504.
+TEST(MergedPoints, IntegerScalingRanges) {
+    EXPECT_EQ(merged("  - { name: p, scale: { gain: 1000, offset: -5 }, "
+                     "address: { table: input, register: 10, type: int32 } "
+                     "}\n"),
+              Lines{"ps1.m1.p: {scale: {gain: 1000, offset: -5}, address: "
+                    "{table: input, register: 10, type: int32}}"});
+    // 2^31 x 2^32 is 2^63: the gain 2^32 just fits; 2^32 + 1 does not.
+    EXPECT_EQ(merged("  - { name: p, scale: { gain: 4294967297 }, address: { "
+                     "table: input, register: 10, type: int32 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-516: "
+                     "\"ps1.m1.p\": raw x gain + offset can exceed int64\n"
+                     "  from template templates/meter_a.yaml:4:31 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, scale: { offset: 1 }, address: { table: "
+                     "input, register: 10, type: uint64 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-516: "
+                     "\"ps1.m1.p\": raw x gain + offset can exceed uint64\n"
+                     "  from template templates/meter_a.yaml:4:33 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, value_type: int64, address: { table: "
+                     "input, register: 10, type: uint64 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type int64 cannot hold uint64\n"
+                     "  from template templates/meter_a.yaml:4:28 (point p)"}));
+    // An enumeration's int64 is derived, and the message says so (S2 of the
+    // review of #149).
+    EXPECT_EQ(merged("  - { name: p, enum: { 0: off, 1: on }, address: { "
+                     "table: input, register: 10, type: uint64 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type int64 (derived from the "
+                     "enumeration) cannot hold uint64\n"
+                     "  from template templates/meter_a.yaml:4:50 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, value_type: uint64, address: { table: "
+                     "input, register: 10, type: int16 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type uint64 cannot hold int16\n"
+                     "  from template templates/meter_a.yaml:4:28 (point p)"}));
+    // A bit field of a signed raw type is sign-extended: -8 to 7 here.
+    EXPECT_EQ(merged("  - { name: p, value_type: uint64, address: { table: "
+                     "input, register: 10, type: int16, field: [0, 3] } }\n",
+                     "    params: {}\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-504: "
+                     "\"ps1.m1.p\": value_type uint64 cannot hold int16\n"
+                     "  from template templates/meter_a.yaml:4:28 (point p)"}));
+}
+
+// CF-202: a merged map that still lacks a key no level gave.
+TEST(MergedPoints, IncompleteMergedMaps) {
+    EXPECT_EQ(merged("  - { name: p, address: { register: 10 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: the "
+                     "address of \"ps1.m1.p\" needs table\n"
+                     "  from template templates/meter_a.yaml:4:25 (point p)"}));
+    // `defaults` complete it.
+    EXPECT_EQ(merged("  - { name: p, address: { register: 10 } }\n",
+                     "    defaults: { address: { table: holding } }\n"),
+              Lines{"ps1.m1.p: {address: {table: holding, register: 10}}"});
+    EXPECT_EQ(merged("  - { name: p, address: { table: holding, register: "
+                     "10, type: string } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: the "
+                     "address of \"ps1.m1.p\" needs length\n"
+                     "  from template templates/meter_a.yaml:4:25 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, exponent_from: { point: e }, address: { "
+                     "table: holding, register: 10 } }\n"
+                     "  - { name: e, address: { table: holding, register: "
+                     "11 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: "
+                     "exponent_from of \"ps1.m1.p\" needs direction\n"
+                     "  from template templates/meter_a.yaml:4:31 (point p)"}));
+    EXPECT_EQ(merged("  - { name: p, address: { table: holding, register: "
+                     "10, device_time: { zone: local } } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-202: "
+                     "device_time of \"ps1.m1.p\" needs tz\n"
+                     "  from template templates/meter_a.yaml:4:70 (point p)"}));
+}
+
+// An `io` address needs the keys of its channel's backend (Annex B.2).
+TEST(MergedPoints, AnIoAddressNeedsTheKeysOfItsBackend) {
+    EXPECT_EQ(
+        expand({{"drivers/io/local.yaml",
+                 "channel: { name: local, backend: gpio, chip: main-gpio }\n"
+                 "devices:\n"
+                 "  - name: ps1.io\n"
+                 "    points:\n"
+                 "      - { name: run, value_type: bool, access: rw, storage: "
+                 "volatile, address: { line: 3, direction: output } }\n"}}),
+        (Lines{"drivers/io/local.yaml:5:80: error CF-202: the address of "
+               "\"ps1.io.run\" needs at_start"}));
+}
+
+// A value computed at expansion is checked as stage 3 checks the value
+// written there (D-115): CF-204 at the instance, with the template line and
+// the point, for a register, a bit and a divisor out of range, and for a
+// register of the device's identity checks.
+TEST(MergedPoints, ComputedValuesOutOfRange) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\n"
+        "params: { r: { type: int, default: 1 } }\n"
+        "identify:\n"
+        "  - { address: { table: holding, register: \"r * 70000\", type: "
+        "uint16 }, equals: 7 }\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: \"r * 65536\", "
+        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n";
+    // With r = 0 every value is in range but the divisor.
+    EXPECT_EQ(
+        expand({{"templates/meter_a.yaml", meter},
+                {"drivers/modbus/line1.yaml",
+                 one_device("    params: { r: 0 }\n")}}),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+               "scale.divide_by must be between 1 and any\n"
+               "  from template templates/meter_a.yaml:7:117 (point p)"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    params: { r: 2 }\n")}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "identify[0].address.register must be between 0 and "
+                     "65536\n"
+                     "  from template templates/meter_a.yaml:5:44 (identify)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.register must be between 0 and 65536\n"
+                     "  from template templates/meter_a.yaml:7:53 (point p)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-204: "
+                     "address.bit must be between 0 and 15\n"
+                     "  from template templates/meter_a.yaml:7:71 (point p)"}));
+}
+
+// A computed value at a key that its protocol's schema gives no rule is a
+// defect of the expander, not a valid value: INTERNAL.
+TEST(MergedPoints, AComputedValueWithoutARuleIsInternal) {
+    Diagnostics parsed;
+    std::optional<Document> document = parse_yaml(
+        "channels:\n"
+        "  - protocol: modbus\n"
+        "    devices:\n"
+        "      - name: ps1.m1\n"
+        "        points: [ { name: p, address: { nonsense: 5 } } ]\n",
+        "expanded", parsed);
+    if (!document.has_value()) {
+        ADD_FAILURE() << "not parsed";
+        return;
+    }
+    const Document& expanded = *document;
+    // The node at `key` of `map`, or `map` itself where it has none.
+    const auto member_at = [&expanded](NodeId map, std::string_view key) {
+        return expanded.find(map, key).value_or(map);
+    };
+    const NodeId device =
+        expanded
+            .items(member_at(
+                expanded.items(member_at(expanded.root(), "channels")).front(),
+                "devices"))
+            .front();
+    const NodeId point = expanded.items(member_at(device, "points")).front();
+    const NodeId value = member_at(member_at(point, "address"), "nonsense");
+    ASSERT_EQ(expanded.text(value), "5");
+    ExpandedTree tree{.document = std::move(document).value(),
+                      .types = {},
+                      .instance_of = {},
+                      .instances = {},
+                      .computed = {value}};
+    tree.types = ScalarTypes(tree.document);
+    Diagnostics diagnostics;
+    const Status status = check_merged_points(tree, {}, diagnostics);
+    EXPECT_EQ(status.code(), StatusCode::INTERNAL);
+    tree.computed.clear();
+    EXPECT_TRUE(check_merged_points(tree, {}, diagnostics).ok());
+}
+
+// B5 of the review of #144: an enumeration a template names must exist in
+// the instance's chain or enums.yaml (CF-310 at the instance).
+TEST(Expand, ATemplatesEnumerationAtTheInstance) {
+    const std::string base =
+        "template: meter_base\n"
+        "points: [ { name: s, enum: states } ]\n";
+    const std::string meter =
+        "template: meter_a\nextends: meter_base\nprotocol: modbus\n"
+        "points: [ { name: s, address: { table: holding, register: 1, type: "
+        "uint16 } } ]\n";
+    EXPECT_EQ(expand({{"templates/meter_base.yaml", base},
+                      {"templates/meter_a.yaml",
+                       meter + "enums: { states: { 0: off, 1: on } }\n"},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              Lines{"ps1.m1.s: {enum: states, address: {table: holding, "
+                    "register: 1, type: uint16}}"});
+    EXPECT_EQ(expand({{"templates/meter_base.yaml", base},
+                      {"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml", one_device()}}),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-310: "
+                     "enumeration \"states\" does not exist\n"
+                     "  from template templates/meter_base.yaml:2:28 (point "
+                     "s)"}));
 }
 
 }  // namespace

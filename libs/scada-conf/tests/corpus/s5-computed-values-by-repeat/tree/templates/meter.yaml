@@ -1,0 +1,14 @@
+template: meter
+protocol: modbus
+repeat:
+  - for: { n: [65536, 70000] }
+    points:
+      - { name: "level{n}", address: { table: holding, register: n, type: uint16 } }
+  - for: { b: "15..16" }
+    points:
+      - { name: "alarm{b}", address: { table: holding, register: 1, bit: "b", type: uint16 } }
+  - for: { d: "0..1" }
+    points:
+      - name: "flow{d}"
+        address: { table: holding, register: "2 + d", type: uint16 }
+        scale: { divide_by: "d" }
