@@ -35,7 +35,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -639,7 +641,13 @@ TEST(SerialTransport, EachRequestKeepsTheSilenceAfterTheLastAnswer) {
     if (!sim.has_value()) {
         FAIL() << "the simulator did not start";
     }
-    const CompiledChannel channel = serial_channel(30 * MILLISECOND);
+    CompiledChannel channel = serial_channel(30 * MILLISECOND);
+    // A time-out far above any stall of the simulator: a request that timed
+    // out would be followed by its quiet time, not by the silence after an
+    // answer, and a late answer would pair with the next request (delta
+    // check 3).
+    channel.devices[0].failure.timeout_ns = 10 * SECOND;
+    channel.devices[0].failure.write_timeout_ns = 10 * SECOND;
     SystemClock clock;  // the engine takes it to write
     SerialTransport transport(port(sim->where), clock);
     RecordingTags tags;
@@ -815,6 +823,10 @@ struct FullListener {
                 ::connect(fillers.back().get(), generic, sizeof(address));
             EXPECT_TRUE(begun == 0 || errno == EINPROGRESS);
         }
+        // The first one's handshake ends once the queue holds it: then the
+        // queue of one is full (delta check 6).
+        EXPECT_TRUE(
+            wait_ready(fillers.front().get(), POLLOUT, milliseconds{5'000}));
     }
 };
 
@@ -831,6 +843,88 @@ TEST(TcpTransport, AConnectThatGetsNoAnswerTimesOutAtItsDeadline) {
     EXPECT_EQ(transport.last_error(), ConnectError::TIMEOUT);
     EXPECT_EQ(transport.last_errno(), 0);  // no system call failed (S1)
     EXPECT_EQ(transport.poll_fd(), -1);
+}
+
+// True when nothing uses 127.0.0.1:`port`: a socket can be bound to it.
+bool port_is_free(std::uint32_t port) {
+    const Fd probe(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    (void)::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    address.sin_port = htons(static_cast<std::uint16_t>(port));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    const auto* generic = reinterpret_cast<const sockaddr*>(&address);
+    return ::bind(probe.get(), generic, sizeof(address)) == 0;
+}
+
+// The kernel's local port range, from which `connect` picks its ports.
+std::optional<std::pair<std::uint32_t, std::uint32_t>> local_port_range() {
+    std::ifstream file("/proc/sys/net/ipv4/ip_local_port_range");
+    std::uint32_t low = 0;
+    std::uint32_t high = 0;
+    if (!(file >> low >> high) || low > high || high > 65'535) {
+        return std::nullopt;
+    }
+    return std::pair{low, high};
+}
+
+// The local and peer ends of a connected socket, for a failure message.
+std::string ends_of(int descriptor) {
+    sockaddr_in local{};
+    sockaddr_in peer{};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    auto* local_generic = reinterpret_cast<sockaddr*>(&local);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    auto* peer_generic = reinterpret_cast<sockaddr*>(&peer);
+    socklen_t length = sizeof(local);
+    const bool named = ::getsockname(descriptor, local_generic, &length) == 0;
+    length = sizeof(peer);
+    const bool peered = ::getpeername(descriptor, peer_generic, &length) == 0;
+    if (!named || !peered) {
+        return "the ends are unknown";
+    }
+    return "local port " + std::to_string(ntohs(local.sin_port)) +
+           ", peer port " + std::to_string(ntohs(peer.sin_port));
+}
+
+TEST(TcpTransport, AConnectThatMeetsItselfIsRefused) {
+    // Review M1 through the transport: Linux gives `connect` the even ports
+    // of the local range, so connects to a free even port of that range,
+    // with nobody listening, meet themselves now and then. Each try is
+    // refused (ECONNREFUSED) or SELF; none may be OK.
+    const auto range = local_port_range();
+    if (!range.has_value()) {
+        FAIL() << "no local port range";
+    }
+    const auto [low, high] = *range;
+    const SystemClock clock;
+    std::uint32_t target = ((low + high) / 2) & ~1U;
+    for (; target <= high; target += 2) {
+        if (port_is_free(target)) {
+            break;
+        }
+    }
+    ASSERT_LE(target, high) << "no free even port in the range";
+    TcpTransport transport(
+        TcpEndpoint{.host = "127.0.0.1",
+                    .port = static_cast<std::uint16_t>(target)},
+        clock);
+    constexpr int MAX_TRIES = 200'000;
+    int tries = 0;
+    bool met = false;
+    for (; tries < MAX_TRIES && !met; ++tries) {
+        const IoStatus status = transport.connect(deadline_in(clock, SECOND));
+        ASSERT_NE(status, IoStatus::OK)
+            << "try " << tries << ": " << ends_of(transport.poll_fd());
+        met = status == IoStatus::FAILED &&
+              transport.last_error() == ConnectError::SELF;
+    }
+    EXPECT_TRUE(met) << "no self-connection in " << MAX_TRIES
+                     << " connects to port " << target
+                     << ": the kernel did not choose that port for a connect";
+    RecordProperty("tries", tries);
+    std::cout << "self-connection to port " << target << " after " << tries
+              << " tries\n";
 }
 
 TEST(TcpTransport, AReceiveWhoseDeadlineIsLongPastIsATimeOut) {
@@ -900,6 +994,14 @@ TEST(TcpTransport, TheDescriptorIsClosedOnExec) {
     EXPECT_NE(::fcntl(transport.poll_fd(), F_GETFD) & FD_CLOEXEC, 0);
 }
 
+// The name POSIX gives the target thread of SIGEV_THREAD_ID. glibc defines
+// it from 2.35; older glibc headers have only the union member, which is the
+// same field (delta check 4).
+#ifndef sigev_notify_thread_id
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage,readability-identifier-naming): the name the C library itself would define
+#define sigev_notify_thread_id _sigev_un._tid
+#endif
+
 // Signals the calling thread with SIGUSR2 every millisecond while it lives,
 // from a kernel timer, so that a wait of the thread is interrupted (T4).
 class Interrupter {
@@ -913,8 +1015,8 @@ public:
         sigevent event{};
         event.sigev_notify = SIGEV_THREAD_ID;
         event.sigev_signo = SIGUSR2;
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): the C library gives the thread of SIGEV_THREAD_ID only in this union
-        event._sigev_un._tid = ::gettid();
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): the thread of SIGEV_THREAD_ID is a member of a union in every C library
+        event.sigev_notify_thread_id = ::gettid();
         EXPECT_EQ(::timer_create(CLOCK_MONOTONIC, &event, &timer_), 0);
         const itimerspec every{
             .it_interval = {.tv_sec = 0, .tv_nsec = 1'000'000},
@@ -1043,7 +1145,10 @@ TEST(SerialTransport, ALockedFileThatIsNoTerminalIsNotATerminal) {
     // `device` that someone has locked is NOT_A_TTY, and is never locked.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
     const Fd locked(::open("/dev/null", O_RDONLY | O_CLOEXEC));
-    ASSERT_EQ(::flock(locked.get(), LOCK_EX | LOCK_NB), 0);
+    // A shared lock: /dev/null is the host's, and shared locks of other
+    // test processes coexist with it, while the transport's exclusive one
+    // would still fail against it (delta check 1).
+    ASSERT_EQ(::flock(locked.get(), LOCK_SH | LOCK_NB), 0);
     const SystemClock clock;
     SerialTransport transport(port("/dev/null"), clock);
     EXPECT_EQ(transport.connect(0), IoStatus::FAILED);
