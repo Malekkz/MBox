@@ -31,12 +31,14 @@ namespace scada::conf {
 // - stage 5, when stage 4 found no error: the names, duplicates, channel
 //   rules and expression types that need no point tags (references.h), and
 //   the checks of each merged point: CF-202, CF-504, CF-516, CF-517, and
-//   each computed value against its key's rules (CF-204 and others).
+//   each computed value against its key's rules (CF-204 and others), one
+//   error for one cause at many instances (D-115).
 // The rest of stage 5 comes with slice 7 of #100.
 //
 // Fails when the tree cannot be read (see `scan_tree`), and with INTERNAL
-// when a computed value's key has no rule in its schema, a defect of this
-// software; a tree that is wrong is a report with errors, not a failure.
+// when a computed value's key has no rule in its schema, or a `oneOf` gives
+// it different rules, a defect of this software that the built-in schemas
+// do not have; a tree that is wrong is a report with errors, not a failure.
 [[nodiscard]] Result<Report> validate_tree(const std::filesystem::path& root,
                                            const ScanLimits& limits = {});
 
