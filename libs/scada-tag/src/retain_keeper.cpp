@@ -68,12 +68,27 @@ bool is_restore(const RecordCopy& copy) noexcept {
     return (copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0;
 }
 
-// True if `copy` says its owner marked the value bad: quality BAD, written
-// by the owner (NOT_INIT not set). Its record is removed from the file
-// (decision D-45). A NOT_INIT record says nothing about the value on file.
-bool disowned(const RecordCopy& copy) noexcept {
+// True if `copy` has quality BAD and was written (NOT_INIT not set).
+bool written_bad(const RecordCopy& copy) noexcept {
     return copy.quality == to_raw(Quality::BAD) &&
            (copy.quality_flags & to_raw(QualityFlag::NOT_INIT)) == 0;
+}
+
+// True if `copy` may be what a restore under an age bound wrote (contract
+// 1.1, section 12): BAD with RESTORED and a value of the tag's type. It is
+// judged against the files, not taken as the owner marking the value bad.
+bool bound_restore(const RecordCopy& copy, TagType type) noexcept {
+    return written_bad(copy) &&
+           (copy.quality_flags & to_raw(QualityFlag::RESTORED)) != 0 &&
+           (type != TagType::BOOL || copy.value <= 1);
+}
+
+// True if `copy` says its owner marked the value bad: quality BAD, written
+// by the owner (NOT_INIT not set), and no restore under an age bound. Its
+// record is removed from the file (decision D-45). A NOT_INIT record says
+// nothing about the value on file.
+bool disowned(const RecordCopy& copy, TagType type) noexcept {
+    return written_bad(copy) && !bound_restore(copy, type);
 }
 
 // The value an owner stored in `copy`, a record of a tag `name` of type
@@ -93,8 +108,9 @@ RetainedValue value_seen(const std::string& name, TagType type,
 }
 
 // True if `copy` is exactly what the restore of `on_file` wrote, and the
-// owner has not written the tag since: UNCERTAIN, RESTORED with the carried
-// flags of the file, the value and source time on file. The file keeps the
+// owner has not written the tag since: UNCERTAIN, or BAD under an age bound
+// (contract 1.1, section 12), RESTORED with the carried flags of the file,
+// the value and source time on file. The file keeps the value and the
 // quality the owner stored, which the restored record no longer shows
 // (decision D-59). An owner may store RESTORED itself; a record that differs
 // in quality or flags is its write, not the restore, and is kept.
@@ -103,7 +119,8 @@ bool restored_as_on_file(const RetainedValue& on_file,
     const auto restored_flags = static_cast<std::uint16_t>(
         to_raw(QualityFlag::RESTORED) |
         (on_file.quality_flags & RETAIN_CARRIED_FLAGS));
-    return copy.quality == to_raw(Quality::UNCERTAIN) &&
+    return (copy.quality == to_raw(Quality::UNCERTAIN) ||
+            copy.quality == to_raw(Quality::BAD)) &&
            copy.quality_flags == restored_flags &&
            copy.type == to_raw(on_file.type) && on_file.value == copy.value &&
            on_file.source_time_ns == copy.source_time_ns;
@@ -509,18 +526,14 @@ bool RetainKeeper::read_owner(const Watched& watched,
             copy.type != to_raw(tag.type)) {
             continue;  // nothing learned: the record on file stays
         }
-        if (disowned(copy)) {
+        if (disowned(copy, tag.type)) {
             // BAD without NOT_INIT, read consistently: the owner wrote the
             // tag and marked it bad, so the tag starts again BAD with
             // NOT_INIT (decision D-45, reference 14.4).
-            if (state.values.erase(tag.name) != 0) {
-                state.dirty = true;
-                state.urgent = state.urgent || tag.now;
-            }
-            state.not_written.erase(tag.name);
+            forget(state, tag);
             continue;
         }
-        if (!holds_value(copy, tag.type)) {
+        if (!holds_value(copy, tag.type) && !bound_restore(copy, tag.type)) {
             // NOT_INIT: the owner has not written the tag in this life, for
             // example because its restore failed; nothing learned, the
             // record on file stays. So does anything else that is no value.
@@ -535,6 +548,14 @@ bool RetainKeeper::read_owner(const Watched& watched,
         note_restores(owner.name, restored_tags, restored_copies);
     }
     return true;
+}
+
+void RetainKeeper::forget(OwnerState& state, const RetainedTag& tag) {
+    if (state.values.erase(tag.name) != 0) {
+        state.dirty = true;
+        state.urgent = state.urgent || tag.now;
+    }
+    state.not_written.erase(tag.name);
 }
 
 bool RetainKeeper::note_value(OwnerState& state, const RetainedTag& tag,
@@ -553,6 +574,12 @@ bool RetainKeeper::note_value(OwnerState& state, const RetainedTag& tag,
     }
     // Anything else is the owner's write, also one that kept RESTORED on a
     // value it had restored (review B1).
+    if (copy.quality == to_raw(Quality::BAD)) {
+        // BAD with RESTORED but not as the restore wrote it: the owner
+        // marked the value bad (decision D-45).
+        forget(state, tag);
+        return false;
+    }
     state.not_written.erase(tag.name);  // a write of the owner
     if (known != state.values.end() && known->second == seen) {
         return false;
@@ -592,6 +619,18 @@ void RetainKeeper::note_restores(const std::string& owner,
             value.source_not_final =
                 value.source_not_final || (!source.own && !source.final);
             stamp = source.stamp;
+        } else if (copy.quality == to_raw(Quality::BAD)) {
+            // BAD with RESTORED that no file holds: not a restore this keeper
+            // can keep, so it is a value marked bad (contract 1.1, section
+            // 12; decision D-45). Only once every file could be looked at:
+            // after a look that could not read a file or found one damaged
+            // (contract 1.1, section 12), the file keeps the value, and the
+            // record, still unknown to this keeper, is looked up again at
+            // the next check.
+            if (loaded.complete && loaded.rejected.empty()) {
+                forget(state, tag);
+            }
+            continue;
         } else {
             // No file holds the restored value: it came from a file that
             // changed since, or from the owner itself (scada-link passing on
@@ -654,30 +693,11 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     } else if (current_ != nullptr) {
         file.source = current_->identity;
     }
-    // Decision D-59: what a later attach needs to tell the age of the
-    // values, in this boot and in another. A value the owner has not written
-    // since it was loaded is as old as the file it came from: while any is
-    // left, the file keeps the oldest of their stamps, so that a rewrite
-    // never makes an old value look new.
-    std::vector<RetainStamp> kept;
-    for (const auto& [tag, stamp] : state.not_written) {
-        if (state.values.contains(tag)) {
-            kept.push_back(stamp);
-        }
-    }
-    if (kept.empty()) {
-        const RetainClockSample clock = retain_clock_now();
-        file.written_time_ns = clock.realtime_ns;
-        file.written_boottime_ns = clock.boottime_ns;
-        file.boot_id = clock.boot_id;
-        file.clock_synced = clock.clock_synced;
-    } else {
-        const RetainStamp oldest = oldest_stamp(kept);
-        file.written_time_ns = oldest.written_time_ns;
-        file.written_boottime_ns = oldest.written_boottime_ns;
-        file.boot_id = oldest.boot_id;
-        file.clock_synced = oldest.clock_synced;
-    }
+    const RetainStamp stamp = file_stamp(state);
+    file.written_time_ns = stamp.written_time_ns;
+    file.written_boottime_ns = stamp.written_boottime_ns;
+    file.boot_id = stamp.boot_id;
+    file.clock_synced = stamp.clock_synced;
     file.config_hash = config_hash_;
     file.values.reserve(state.values.size());
     for (const auto& [tag, value] : state.values) {
@@ -686,6 +706,28 @@ void RetainKeeper::submit(const std::string& name, std::int64_t now_mono_ns) {
     const std::uint64_t token = ++state.token;
     state.pending_writes.push_back({token, now_mono_ns, since});
     writer_->submit(name, std::move(file), token);
+}
+
+RetainStamp RetainKeeper::file_stamp(const OwnerState& state) {
+    // Decision D-59: what a later attach needs to tell the age of the
+    // values, in this boot and in another. A value the owner has not written
+    // since it was loaded is as old as the file it came from: while any is
+    // left, the file keeps the oldest of their stamps, so that a rewrite
+    // never makes an old value look new. Otherwise the time of this write.
+    std::vector<RetainStamp> kept;
+    for (const auto& [tag, stamp] : state.not_written) {
+        if (state.values.contains(tag)) {
+            kept.push_back(stamp);
+        }
+    }
+    if (!kept.empty()) {
+        return oldest_stamp(kept);
+    }
+    const RetainClockSample clock = retain_clock_now();
+    return {.written_time_ns = clock.realtime_ns,
+            .written_boottime_ns = clock.boottime_ns,
+            .boot_id = clock.boot_id,
+            .clock_synced = clock.clock_synced};
 }
 
 void RetainKeeper::note_time_to_disk(const RetainWriter::Done& done,

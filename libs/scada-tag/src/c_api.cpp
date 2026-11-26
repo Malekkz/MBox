@@ -19,10 +19,14 @@
 #include "scada/tag/tag_set.h"
 #include "scada/tag/types.h"
 
+#include <string.h>  // NOLINT(modernize-deprecated-headers): strnlen is POSIX, declared here, not in <cstring>
+
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -218,8 +222,29 @@ int hand_over(scada::Result<std::unique_ptr<scada::tag::Attachment>> attached,
     return SCADA_OK;
 }
 
+// Copies the age bounds `bounds` into `into` (section 12). False for a NULL
+// name, a bound not above 0 and two bounds for one name.
+bool bounds_of(std::span<const scada_retain_bound> bounds,
+               std::map<std::string, std::int64_t, std::less<>>& into) {
+    for (const scada_retain_bound& bound : bounds) {
+        if (bound.tag_name == nullptr || bound.max_age_ns <= 0) {
+            return false;
+        }
+        // Contract 1.1, section 13: at most MAX_TAG_NAME_LENGTH + 1 bytes are
+        // read; a name without a NUL in them is not valid.
+        const std::string_view name(
+            bound.tag_name,
+            ::strnlen(bound.tag_name, scada::tag::MAX_TAG_NAME_LENGTH + 1));
+        if (!scada::tag::is_valid_name(name, scada::tag::MAX_TAG_NAME_LENGTH) ||
+            !into.try_emplace(std::string(name), bound.max_age_ns).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int attach(const char* process_name, const scada_attach_opts* opts,
-           scada_ctx** out) {
+           std::span<const scada_retain_bound> bounds, scada_ctx** out) {
     if (out == nullptr) {
         return SCADA_E_INVALID;
     }
@@ -228,7 +253,8 @@ int attach(const char* process_name, const scada_attach_opts* opts,
         return SCADA_E_INVALID;
     }
     scada::tag::AttachOptions options;
-    if (!options_of(opts, options)) {
+    if (!options_of(opts, options) ||
+        !bounds_of(bounds, options.retain_bounds)) {
         return SCADA_E_INVALID;
     }
     // A name longer than a process name is refused before it is copied.
@@ -299,12 +325,29 @@ int guarded(Call&& call) noexcept {
 extern "C" {
 
 int scada_tag_attach(const char* process_name, scada_ctx** out) {
-    return guarded([&] { return attach(process_name, nullptr, out); });
+    return guarded([&] { return attach(process_name, nullptr, {}, out); });
 }
 
 int scada_tag_attach_opts(const char* process_name,
                           const scada_attach_opts* opts, scada_ctx** out) {
-    return guarded([&] { return attach(process_name, opts, out); });
+    return guarded([&] { return attach(process_name, opts, {}, out); });
+}
+
+int scada_tag_attach_retain(const char* process_name,
+                            const scada_attach_opts* opts,
+                            const scada_retain_bound* bounds, size_t n,
+                            scada_ctx** out) {
+    if (out != nullptr) {
+        *out = nullptr;
+    }
+    if ((bounds == nullptr && n != 0) || n > scada::tag::MAX_TAGS) {
+        return SCADA_E_INVALID;
+    }
+    // The caller states that `bounds` holds `n` elements.
+    return guarded([&] {
+        return attach(process_name, opts,
+                      std::span<const scada_retain_bound>(bounds, n), out);
+    });
 }
 
 int scada_tag_observe(scada_ctx** out) {
@@ -353,6 +396,7 @@ int scada_tag_retain_status(scada_ctx* ctx, scada_retain_status_t* out) {
         out->final_waits_expired = status.final_waits_expired;
         out->directory_unusable = status.directory_unusable;
         out->ages_unknown = status.ages_unknown;
+        out->bounds_unused = status.bounds_unused;
         return SCADA_OK;
     });
 }

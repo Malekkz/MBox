@@ -32,6 +32,7 @@ and write with the sequence lock; change rings; and reliable queues.
   "The side of scada-tagd" below.
 - For every other process (`scada/tag/scada_tag.h`, the C interface of
   contract section 13): `scada_tag_attach`, `scada_tag_attach_opts`,
+  `scada_tag_attach_retain` (with the age bounds of retained values),
   `scada_tag_detach`, `scada_tag_heartbeat` and `scada_tag_status`. See
   "Attach" below.
 - Tags, in the same header: `scada_tag_resolve`, `scada_tag_info`,
@@ -54,8 +55,8 @@ and write with the sequence lock; change rings; and reliable queues.
 
 ## Interfaces
 
-- Contract: `docs/contracts/tag-database.md`, version 1.1, layout version 1.
-  The retain age bound of 1.1 (section 12) is not implemented yet (#89).
+- Contract: `docs/contracts/tag-database.md`, version 1.1, layout version 1; its retain part (section 12, #89) is
+  implemented here.
 - Public headers in `include/scada/tag/`, namespace `scada::tag`:
 
   | Header | Content |
@@ -338,7 +339,20 @@ is unknown, the quality on file, and whether the FINAL wait ran out for it.
 The age is CLOCK_BOOTTIME since the write in the same boot; in another boot
 CLOCK_REALTIME since the write, only if the clock was synchronised at the
 write and is now (`adjtimex`); otherwise unknown. Attach never refuses a
-value on its age. The file format is version 2; files of version 1 are
+value on its age. `scada_tag_attach_retain` takes a bound on the age for
+some tags (contract 1.1, section 12; D-144): a value whose age is greater
+than its tag's bound, or unknown, is restored with quality BAD instead of
+UNCERTAIN, with RESTORED, the carried flags, the value and the source time
+as above. `scada-tagd` takes that record as no change and keeps the value
+on file until the owner writes the tag, also after a look at the files
+that could not read one (it looks again at the next check). A bound is
+judged once, at the restore of an attach that creates the region; the
+library keeps neither the bounds nor the names, and every attach passes
+them again. A bound for a name that is no RETAIN tag of the process is not
+used and is counted in `scada_retain_status_t.bounds_unused`; a NULL name,
+a name that is no tag name (at most 128 bytes are read), a bound not above
+0, two bounds for one name or more than 1,000,000 bounds are
+`SCADA_E_INVALID`. The file format is version 2; files of version 1 are
 still read, as UNCERTAIN without flags. String tags cannot be retained.
 
 ## Tag read and write

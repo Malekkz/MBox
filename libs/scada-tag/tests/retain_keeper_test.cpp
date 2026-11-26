@@ -38,6 +38,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <ios>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -984,6 +986,129 @@ TEST_F(Keeper, ARestoredValueNotWrittenSinceKeepsTheQualityOnFile) {
     ASSERT_NE(find_retained(file, "plant.mode"), nullptr);
     EXPECT_EQ(*find_retained(file, "plant.mode"), stored.values.at(0));
     EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
+}
+
+// Contract 1.1, section 12 (#89): the record of a restore under an age
+// bound, BAD with RESTORED, is no change, and the file keeps the value.
+// `stored` is written without a stamp, so its age is unknown and any bound
+// applies.
+class KeeperWithBound : public Keeper {
+protected:
+    void SetUp() override {
+        Keeper::SetUp();
+        stored_.values = {{"plant.mode", TagType::INT64, VALUE_7,
+                           FIXED_SOURCE_TIME, Quality::GOOD,
+                           to_raw(QualityFlag::SUBSTITUTED)}};
+        const Fd directory = scada::tag::testing::open_directory(retain());
+        std::string detail;
+        ASSERT_TRUE(
+            write_retain_file(directory.get(), "io", stored_, detail).ok())
+            << detail;
+        start_host(retained_set());
+    }
+
+    // The process `io`, attached with a bound on plant.mode.
+    [[nodiscard]] Attached bounded() const {
+        AttachOptions with_bound = options();
+        with_bound.retain_bounds = {{"plant.mode", 1}};
+        std::string detail;
+        Result<Attached> result = Attachment::attach("io", with_bound, detail);
+        EXPECT_TRUE(result.ok()) << result.status().message() << ": " << detail;
+        return result.ok() ? std::move(result).value() : nullptr;
+    }
+
+    [[nodiscard]] const RetainedValue& stored() const {
+        return stored_.values.at(0);
+    }
+
+    // The owner writes plant.mode BAD after the restore, with `value` and
+    // `flags` (decision D-45): the value leaves the file at its next write.
+    void expect_bad_write_removes(Attachment& feeder, std::uint64_t value,
+                                  std::uint16_t flags) {
+        const std::int64_t now = scada::monotonic_ns();
+        EXPECT_TRUE(round(now).retain_written.empty());
+        write_flagged(feeder, "plant.mode", value, SCADA_QUALITY_BAD, flags);
+        write(feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
+        ASSERT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
+        const RetainFile file = file_of("io");
+        EXPECT_EQ(find_retained(file, "plant.mode"), nullptr);
+        EXPECT_EQ(value_in(file, "plant.level"), VALUE_5);
+    }
+
+private:
+    RetainFile stored_;
+};
+
+TEST_F(KeeperWithBound, ARestoreBeyondTheBoundIsNoChangeAndKeepsTheValue) {
+    const Attached feeder = bounded();
+    ASSERT_NE(feeder, nullptr);
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    ASSERT_EQ(feeder->resolve("plant.mode", handle), SCADA_OK);
+    scada_value restored{};
+    ASSERT_EQ(feeder->read(handle, restored), SCADA_OK);
+    ASSERT_EQ(restored.quality, SCADA_QUALITY_BAD);
+    ASSERT_EQ(restored.quality_flags,
+              SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
+    const std::int64_t now = scada::monotonic_ns();
+    EXPECT_TRUE(round(now).retain_written.empty());
+    // A write of another tag writes the file again; plant.mode stays as the
+    // owner stored it, for a later restore to judge again.
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
+    ASSERT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
+    const RetainFile file = file_of("io");
+    ASSERT_NE(find_retained(file, "plant.mode"), nullptr);
+    EXPECT_EQ(*find_retained(file, "plant.mode"), stored());
+}
+
+TEST_F(KeeperWithBound, AWriteOfTheOwnerAsBadStillRemovesTheValue) {
+    const Attached feeder = bounded();
+    ASSERT_NE(feeder, nullptr);
+    expect_bad_write_removes(*feeder, VALUE_7, 0);
+}
+
+TEST_F(KeeperWithBound, ABadWriteWithRestoredButOtherFlagsRemovesTheValue) {
+    const Attached feeder = bounded();
+    ASSERT_NE(feeder, nullptr);
+    // The value and source time on file, but not the carried SUBSTITUTED:
+    // not what the restore wrote, so the owner's write.
+    expect_bad_write_removes(*feeder, VALUE_7, SCADA_FLAG_RESTORED);
+}
+
+// T5 of the review of PR 152: a look that cannot read every file says
+// nothing; the file keeps the value and the record is looked up again.
+TEST_F(KeeperWithBound, AfterAnIncompleteLookTheFileKeepsTheValue) {
+    const Attached feeder = bounded();
+    ASSERT_NE(feeder, nullptr);
+    const std::int64_t now = scada::monotonic_ns();
+    EXPECT_TRUE(round(now).retain_written.empty());
+    // The owner's own file damaged: the look is incomplete. (The keeper
+    // still holds the file's values and writes them below.)
+    {
+        std::ofstream damaged(retain() / "io.bin",
+                              std::ios::binary | std::ios::trunc);
+        damaged << "not a retain file";
+    }
+    write_flagged(*feeder, "plant.mode", VALUE_8, SCADA_QUALITY_BAD,
+                  SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_5);
+    ASSERT_EQ(round(now + INTERVAL_NS).retain_written.size(), 1U);
+    ASSERT_NE(find_retained(file_of("io"), "plant.mode"), nullptr);
+    EXPECT_EQ(*find_retained(file_of("io"), "plant.mode"), stored());
+    // The file just written is whole again: the look is complete, and the
+    // value no file holds leaves the file.
+    write(*feeder, "plant.level", SCADA_TYPE_FLOAT64, VALUE_6);
+    ASSERT_EQ(round_after_the_gate(now + INTERVAL_NS).retain_written.size(),
+              1U);
+    EXPECT_EQ(find_retained(file_of("io"), "plant.mode"), nullptr);
+}
+
+TEST_F(KeeperWithBound, ABadRestoredRecordThatNoFileHoldsLeavesTheFile) {
+    const Attached feeder = bounded();
+    ASSERT_NE(feeder, nullptr);
+    // As a restore from another file would write it, with a value no file
+    // holds.
+    expect_bad_write_removes(*feeder, VALUE_8,
+                             SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
 }
 
 }  // namespace

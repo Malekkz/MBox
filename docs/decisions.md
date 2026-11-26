@@ -2561,3 +2561,23 @@ Consequences:
 - Slice 5b of #104 (the `sys.proc` tags of a driver's main thread) and the tag-set generator of #101 can build on the 1.1 rule.
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
+
+## D-144: The library part of the retain age bound
+Date: 2026-11-26
+Phase / issue: 2, #89 (P2-14b); contract text in tag database contract 1.1 (#151, D-143)
+Status: for review by a person (restart behaviour). The interface is the one the lead ruled on PR #152 and contract section 13 states; this decision records what the contract left to the code.
+
+Context: tag database contract 1.1, sections 12 and 13, says what the bound does, how the arguments are checked, that unused bounds are counted, that the library keeps neither the bounds nor the names, and that a BAD + RESTORED record is judged by its shape. It leaves open how the library holds the bounds during the restores of one attach, how it finds a tag's bound, and how `scada-tagd`'s keeper fits the rule into its existing paths.
+
+Decision:
+- `AttachOptions.retain_bounds` is a `std::map` from tag name to the bound in ns, with a transparent comparator so that a name of the header is looked up without a copy. `scada_tag_attach_retain` checks every bound before anything is opened: a NULL name, a name that is no tag name (read with `strnlen` up to 128 bytes, then `is_valid_name`), a bound not above 0, a second bound for a name. The C++ attach takes the map as given; its callers are the C interface and tests.
+- The attachment copies the map for the restores of its own attach (restores happen only when attach creates a `tags` region) and clears it at the end of attach, after `settle_retain_bounds` has counted in `bounds_unused` each bound whose name is no RETAIN tag of an owner of the process in the header (unknown, not RETAIN, a STRING tag, or another process's tag). The count is per attach, whether the region was created or reused.
+- The restore compares the age it already computes for `scada_tag_retain_info` with the bound: unknown, or greater, gives quality BAD; equal is within the bound. Nothing else of the restore changes.
+- `RetainKeeper`: a record that is BAD with RESTORED, with NOT_INIT clear and a valid value, is not taken as disowned (D-45) before it is compared with the files. `restored_as_on_file` accepts BAD as well as UNCERTAIN, so the exact record is no change. With the value and source time on file and other flags it is the owner's write, and a BAD one leaves the file. With another value it goes to `note_restores` as a restore from another file: a file that holds it gives its record; when none does and the look was complete with no file rejected, it leaves the file; otherwise nothing changes, and since the keeper still does not know the record, the next check looks again.
+
+Reason: the smallest change that meets sections 12 and 13: the age was already computed per tag at the restore, and the keeper already had the "no change" path of D-59, B1.
+
+Consequences:
+- No service passes bounds yet. `scada-conf` (#101) and the services that attach give `retain_max_age` to `scada_tag_attach_retain` when they exist; until then CW-510 is still right that the key has no effect, and configuration schemas 5.2 and CW-510 are revised with that work.
+- The age the bound is judged on, the file's stamp, is open with the owner (#89; contract 12, "What this age measures"). The library part is built on the age as section 12 defines it today. The stamp a file is written with is decided in one function, `RetainKeeper::file_stamp` (moved there from `submit`, no change of behaviour), and the age is computed from it in one, `retained_age_ns`. A change of what the age measures changes those two, not this interface.
+- Tests: restore tests "older than the bound", "unknown age", "within the bound", carried flags, unused bounds and their count, a reused region, the checks of the C interface (malformed and over-long names included) and a later attach without bounds; keeper tests of the kept record, of the three cases in which the value still leaves the file, and of an incomplete look. With the BAD restore taken out, the five tests that expect BAD fail; with the kept record taken out, the kept-record test fails; with the incomplete-look rule taken out, its test fails.

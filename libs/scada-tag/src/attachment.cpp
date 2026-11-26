@@ -591,7 +591,7 @@ void Attachment::restore_retained(std::span<std::byte> tags,
         load_retained(directory.get(), tagd_uid_, owner.name, wanted);
     // At most MAX_OWNERS + 1 files are read.
     files_rejected_ += static_cast<std::uint32_t>(loaded.rejected.size());
-    apply_retained(tags, owner_index, slots, loaded, wait_expired);
+    apply_retained(tags, owner_index, slots, wanted, loaded, wait_expired);
 }
 
 std::vector<bool> Attachment::wait_for_finals(
@@ -656,6 +656,7 @@ RetainOrigin origin_of(const RetainSource& source) noexcept {
 void Attachment::apply_retained(std::span<std::byte> tags,
                                 std::size_t owner_index,
                                 std::span<const std::uint32_t> slots,
+                                std::span<const WantedValue> wanted,
                                 const LoadedValues& loaded,
                                 const std::vector<bool>& wait_expired) {
     const std::int64_t now_real = realtime_ns();
@@ -696,12 +697,20 @@ void Attachment::apply_retained(std::span<std::byte> tags,
         if (!info.age_ns.has_value()) {
             ++ages_unknown_;
         }
+        // Section 12 (1.1, #89): a value older than its bound, or of
+        // unknown age, is restored BAD so that no reader acts on it; the
+        // value stays, and scada-tagd keeps it on file.
+        const auto bound = retain_bounds_.find(wanted[i].name);
+        const bool beyond_bound =
+            bound != retain_bounds_.end() &&
+            (!info.age_ns.has_value() || *info.age_ns > bound->second);
         // Not shared yet: the file has no name others look for.
         auto& record = shared_at<TagRecord>(tags, record_offset(slots[i]));
         record.value = value->value;
         // Decision D-59: never GOOD; the flags that describe the value
         // itself stay, STALE and COMM_FAIL (the live link) do not.
-        record.quality = to_raw(Quality::UNCERTAIN);
+        record.quality =
+            to_raw(beyond_bound ? Quality::BAD : Quality::UNCERTAIN);
         record.quality_flags = static_cast<std::uint16_t>(
             to_raw(QualityFlag::RESTORED) |
             (value->quality_flags & RETAIN_CARRIED_FLAGS));
@@ -711,6 +720,23 @@ void Attachment::apply_retained(std::span<std::byte> tags,
         ++values_restored_;
     }
     std::ranges::sort(retain_infos_, {}, &RetainInfo::handle);
+}
+
+void Attachment::settle_retain_bounds() {
+    const HeaderContents& contents = header_.contents();
+    for (const auto& bound : retain_bounds_) {
+        const std::optional<TagEntry> entry = header_.find_tag(bound.first);
+        const bool used =
+            entry.has_value() &&
+            (entry->flags & to_raw(TagFlag::RETAIN)) != 0 &&
+            entry->type != TagType::STRING &&
+            contents.owners.at(entry->owner_index).process_index ==
+                process_index_;
+        if (!used) {
+            ++bounds_unused_;
+        }
+    }
+    retain_bounds_.clear();
 }
 
 Status Attachment::attach_queue(std::size_t queue_id, std::string& detail) {
@@ -888,6 +914,7 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
         attachment->retain_dir_ = options.retain_dir.empty()
                                       ? std::string(DEFAULT_RETAIN_DIR)
                                       : options.retain_dir;
+        attachment->retain_bounds_ = options.retain_bounds;
         if (Status read = attachment->read_directory(detail); !read.ok()) {
             return read;
         }
@@ -903,6 +930,7 @@ Result<std::unique_ptr<Attachment>> Attachment::attach(
             }
             return attached;
         }
+        attachment->settle_retain_bounds();
         // Section 11.2, step 7: the generation may have been retired while
         // the regions were attached.
         if (attachment->header_.state() == GenerationState::RETIRING) {
@@ -1077,6 +1105,7 @@ AttachmentStatus Attachment::status() {
     status.records_repaired = records_repaired_;
     status.values_restored = values_restored_;
     status.ages_unknown = ages_unknown_;
+    status.bounds_unused = bounds_unused_;
     status.final_waits_expired = final_waits_expired_;
     status.files_rejected = files_rejected_;
     status.directory_unusable = directory_unusable_;

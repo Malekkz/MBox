@@ -26,6 +26,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -51,6 +53,12 @@ struct AttachOptions {
     std::string retain_dir;
     // The uid of scada-tagd; nothing: the uid of the user `scada-tagd`.
     std::optional<std::uint32_t> tagd_uid;
+    // The age bounds of section 12, in ns, by tag name; each above 0. A
+    // restored value of such a tag whose age is greater, or unknown, is
+    // restored BAD with RESTORED. A name that is no RETAIN tag of the process
+    // is not used.
+    // NOLINTNEXTLINE(readability-redundant-member-init): without it, GCC's -Wmissing-field-initializers flags every designated initializer that omits the field
+    std::map<std::string, std::int64_t, std::less<>> retain_bounds = {};
 };
 
 // The process index of an observer, which is no process (section 11.4).
@@ -98,6 +106,9 @@ struct AttachmentStatus {
     std::uint32_t final_waits_expired = 0;
     // Values restored whose age is unknown (decision D-59).
     std::uint32_t ages_unknown = 0;
+    // Age bounds of the attach that named no RETAIN tag of the process
+    // (contract 1.1, section 13).
+    std::uint32_t bounds_unused = 0;
     // Retain files that failed their checks and were ignored.
     std::uint32_t files_rejected = 0;
     // Owners whose retained values were not restored because the retain
@@ -715,6 +726,7 @@ private:
     // `restore_retained` says, and records what it did in `retain_infos_`.
     void apply_retained(std::span<std::byte> tags, std::size_t owner_index,
                         std::span<const std::uint32_t> slots,
+                        std::span<const WantedValue> wanted,
                         const LoadedValues& loaded,
                         const std::vector<bool>& wait_expired);
     // A FINAL retain file an attach waits for: that of `owner` for the
@@ -793,6 +805,13 @@ private:
     std::uint32_t records_repaired_ = 0;
     std::uint32_t tagd_uid_ = 0;
     std::string retain_dir_;  // for a process: where retained values are
+    // The age bounds of section 12, copied from the options for the
+    // restores of attach and cleared after it (section 13: not kept).
+    std::map<std::string, std::int64_t, std::less<>> retain_bounds_;
+    std::uint32_t bounds_unused_ = 0;
+    // Counts the bounds of `retain_bounds_` that name no RETAIN tag of this
+    // process in `bounds_unused_`, then clears them.
+    void settle_retain_bounds();
     std::uint32_t values_restored_ = 0;
     std::uint32_t ages_unknown_ = 0;
     std::uint32_t final_waits_expired_ = 0;

@@ -334,11 +334,19 @@ private:
     // Reads the RETAIN tags of `owner` in `watched` into the state of its
     // name. False if its `tags` region is missing.
     bool read_owner(const Watched& watched, const WatchedOwner& owner);
+    // Drops the value of `tag` from the owner's file at its next write: the
+    // owner marked it bad (decision D-45).
+    static void forget(OwnerState& state, const RetainedTag& tag);
+    // The stamp a file of `state` is written with: the one place that
+    // decides what the age of a restored value measures (contract 1.1,
+    // section 12, "What this age measures"; decision D-59, B2).
+    [[nodiscard]] static RetainStamp file_stamp(const OwnerState& state);
     // What `read_owner` learns from `copy`, a record of `tag` that holds a
-    // value: a change of value, quality or flags makes the owner dirty; a
-    // write of the owner, unlike the restore, ends the stamp it came with.
-    // True for a restore of a value this keeper does not have as it is on
-    // file, which `note_restores` takes.
+    // value or is BAD with RESTORED (contract 1.1, section 12): a change of
+    // value, quality or flags makes the owner dirty; a write of the owner,
+    // unlike the restore, ends the stamp it came with. True for a restore of a
+    // value this keeper does not have as it is on file, which `note_restores`
+    // takes.
     [[nodiscard]] static bool note_value(OwnerState& state,
                                          const RetainedTag& tag,
                                          const RecordCopy& copy);

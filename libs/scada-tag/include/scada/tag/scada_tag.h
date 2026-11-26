@@ -59,6 +59,13 @@ typedef struct {
     int64_t tagd_uid;       /* -1: look up the user scada-tagd */
 } scada_attach_opts; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
+/* One age bound of scada_tag_attach_retain (section 12, contract 1.1). */
+/* NOLINTNEXTLINE(modernize-use-using): C interface */
+typedef struct {
+    const char* tag_name; /* NUL-terminated */
+    int64_t max_age_ns;   /* above 0 */
+} scada_retain_bound; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
+
 /* Values of scada_status.generation_state. */
 /* NOLINTNEXTLINE(performance-enum-size): a C enumeration; C gives it the type int */
 enum {
@@ -121,6 +128,30 @@ int scada_tag_attach(const char* process_name, scada_ctx** out);
  * replaced (section 3: for tests). */
 int scada_tag_attach_opts(const char* process_name,
                           const scada_attach_opts* opts, scada_ctx** out);
+
+/*
+ * As scada_tag_attach_opts (`opts` may be NULL), with `n` age bounds for the
+ * retained values of the caller's tags (section 12, contract 1.1). A value
+ * restored into a `tags` region this attach creates, whose age is greater
+ * than its tag's bound or unknown, is restored BAD with RESTORED, its value
+ * and source time kept; otherwise UNCERTAIN with RESTORED. A bound is
+ * judged once, at that restore. A bound whose name is no RETAIN tag of the
+ * caller is not used and is counted in scada_retain_status_t.bounds_unused.
+ * With `n` 0 this is scada_tag_attach_opts. The library keeps neither the
+ * bounds nor the names after the call; every attach passes them again.
+ *
+ * SCADA_E_INVALID, before anything is opened: `bounds` NULL with `n` above
+ * 0, `n` above 1,000,000, a NULL `tag_name`, a `tag_name` that is no tag
+ * name (1 to 127 bytes of [a-z0-9_.-]; at most 128 bytes are read, and a
+ * name without a NUL in them is not valid), a `max_age_ns` not above 0,
+ * two bounds for one name; otherwise as scada_tag_attach.
+ *
+ * Not real-time.
+ */
+int scada_tag_attach_retain(const char* process_name,
+                            const scada_attach_opts* opts,
+                            const scada_retain_bound* bounds, size_t n,
+                            scada_ctx** out);
 
 /*
  * Opens an observer context on the current generation and stores it in
@@ -246,7 +277,9 @@ typedef struct {
                                      owner, mode or group */
     uint32_t ages_unknown;        /* values restored whose age is unknown
                                      (scada_tag_retain_info) */
-    uint32_t reserved;            /* 0 */
+    uint32_t bounds_unused;       /* age bounds of scada_tag_attach_retain
+                                     that named no RETAIN tag of the caller
+                                     (contract 1.1, section 13) */
 } scada_retain_status_t; /* NOLINT(readability-identifier-naming): the name is fixed by the contract, section 13 */
 
 /*

@@ -24,13 +24,16 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <ios>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -102,6 +105,33 @@ protected:
                                detail);
         EXPECT_TRUE(result.ok()) << result.status().message() << ": " << detail;
         return result.ok() ? std::move(result).value() : nullptr;
+    }
+
+    // As `attached`, with the age bounds `bounds` (section 12, 1.1).
+    [[nodiscard]] Attached attached_with_bounds(
+        std::string_view process,
+        std::map<std::string, std::int64_t, std::less<>> bounds) {
+        std::string detail;
+        Result<Attached> result =
+            Attachment::attach(process,
+                               {.base_dir = base().string(),
+                                .retain_dir = retain_.string(),
+                                .tagd_uid = uid(),
+                                .retain_bounds = std::move(bounds)},
+                               detail);
+        EXPECT_TRUE(result.ok()) << result.status().message() << ": " << detail;
+        return result.ok() ? std::move(result).value() : nullptr;
+    }
+
+    // `values_file()` written `age` ago in this boot, so that its values
+    // have a known age of at least `age`.
+    void write_file_of_age(std::int64_t age) const {
+        const RetainClockSample now = retain_clock_now();
+        RetainFile file = values_file();
+        file.written_time_ns = now.realtime_ns - age;
+        file.written_boottime_ns = now.boottime_ns - age;
+        file.boot_id = now.boot_id;
+        write_file("io", file);
     }
 
     void write_file(std::string_view owner, const RetainFile& file) const {
@@ -708,9 +738,9 @@ TEST_F(Restore, TheCInterfaceGivesTheInformationOfOwnTagsOnly) {
     ASSERT_EQ(scada_tag_retain_info(ctx, handle, &info), SCADA_OK);
     EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_PERIODIC);
     scada_retain_status_t status{};
-    status.reserved = NOT_CLEARED;
+    status.bounds_unused = NOT_CLEARED;
     ASSERT_EQ(scada_tag_retain_status(ctx, &status), SCADA_OK);
-    EXPECT_EQ(status.reserved, 0U);
+    EXPECT_EQ(status.bounds_unused, 0U);  // no bounds passed
 
     // Errors zero the output.
     info.origin = SCADA_RETAIN_OTHER_OWNER;
@@ -730,6 +760,243 @@ TEST_F(Restore, TheCInterfaceGivesTheInformationOfOwnTagsOnly) {
     EXPECT_EQ(scada_tag_retain_info(observer, observed, &info),
               SCADA_E_NOT_OWNER);
     scada_tag_detach(observer);
+    scada_tag_detach(ctx);
+}
+
+// The age bound of section 12 (contract 1.1, #89). The file is written a
+// known time ago in this boot: half the time since boot, at least 2 ns.
+class RestoreWithBound : public Restore {
+protected:
+    void SetUp() override {
+        Restore::SetUp();
+        age_ = retain_clock_now().boottime_ns / 2;
+        ASSERT_GE(age_, 2);
+    }
+
+    [[nodiscard]] std::int64_t age() const { return age_; }
+
+private:
+    std::int64_t age_ = 0;
+};
+
+TEST_F(RestoreWithBound, AValueOlderThanTheBoundIsRestoredBadWithItsValue) {
+    write_file_of_age(age());
+    start_host(retained_set());
+    const Attached feeder =
+        attached_with_bounds("io", {{"plant.level", age() / 2}});
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().values_restored, 2U);
+    const scada_value level = read(*feeder, "plant.level");
+    EXPECT_EQ(level.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(level.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(level.value, LEVEL_BITS);
+    EXPECT_EQ(level.source_time_ns, SOURCE_TIME);
+    const scada_tag_retain_info_t info = info_of(*feeder, "plant.level");
+    EXPECT_EQ(info.age_known, 1);
+    EXPECT_GE(info.age_ns, age());
+    EXPECT_EQ(info.stored_quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(info.origin, SCADA_RETAIN_OWN_PERIODIC);
+    // A tag without a bound is restored as before.
+    const scada_value mode = read(*feeder, "plant.mode");
+    EXPECT_EQ(mode.quality, SCADA_QUALITY_UNCERTAIN);
+    EXPECT_EQ(mode.quality_flags, SCADA_FLAG_RESTORED);
+}
+
+TEST_F(RestoreWithBound, AValueWithinTheBoundIsRestoredUncertain) {
+    write_file_of_age(age());
+    start_host(retained_set());
+    const Attached feeder = attached_with_bounds(
+        "io", {{"plant.level", age() + AN_HOUR}, {"plant.mode", AN_HOUR}});
+    ASSERT_NE(feeder, nullptr);
+    for (const std::string_view name : {"plant.level", "plant.mode"}) {
+        const scada_value value = read(*feeder, name);
+        EXPECT_EQ(value.quality, SCADA_QUALITY_UNCERTAIN) << name;
+        EXPECT_EQ(value.quality_flags, SCADA_FLAG_RESTORED) << name;
+    }
+    EXPECT_EQ(read(*feeder, "plant.level").value, LEVEL_BITS);
+}
+
+TEST_F(Restore, AValueOfUnknownAgeIsRestoredBadUnderABound) {
+    RetainFile file = values_file();
+    file.written_time_ns = scada::realtime_ns() - AN_HOUR;
+    file.written_boottime_ns = 1;
+    file.boot_id.fill(OTHER_BOOT_BYTE);  // another boot
+    file.clock_synced = false;
+    write_file("io", file);
+    start_host(retained_set());
+    // A bound far longer than any age: an unknown age still exceeds it.
+    constexpr std::int64_t TEN_YEARS = AN_HOUR * 24 * 3650;
+    const Attached feeder =
+        attached_with_bounds("io", {{"plant.mode", TEN_YEARS}});
+    ASSERT_NE(feeder, nullptr);
+    EXPECT_EQ(feeder->status().ages_unknown, 2U);
+    const scada_value mode = read(*feeder, "plant.mode");
+    EXPECT_EQ(mode.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(mode.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(mode.value, 3U);
+    EXPECT_EQ(mode.source_time_ns, SOURCE_TIME + 1);
+    EXPECT_EQ(info_of(*feeder, "plant.mode").age_known, 0);
+    // Without a bound, an unknown age is restored UNCERTAIN (D-59).
+    EXPECT_EQ(read(*feeder, "plant.level").quality, SCADA_QUALITY_UNCERTAIN);
+}
+
+TEST_F(RestoreWithBound, ARestoreBeyondTheBoundKeepsTheCarriedFlags) {
+    const RetainClockSample now = retain_clock_now();
+    RetainFile file = values_file();
+    file.written_time_ns = now.realtime_ns - age();
+    file.written_boottime_ns = now.boottime_ns - age();
+    file.boot_id = now.boot_id;
+    for (RetainedValue& value : file.values) {
+        value.quality_flags = static_cast<std::uint16_t>(
+            SCADA_FLAG_SUBSTITUTED | SCADA_FLAG_STALE);
+    }
+    write_file("io", file);
+    start_host(retained_set());
+    const Attached feeder = attached_with_bounds("io", {{"plant.level", 1}});
+    ASSERT_NE(feeder, nullptr);
+    const scada_value level = read(*feeder, "plant.level");
+    EXPECT_EQ(level.quality, SCADA_QUALITY_BAD);
+    // SUBSTITUTED describes the value and is carried; STALE is not.
+    EXPECT_EQ(level.quality_flags,
+              SCADA_FLAG_RESTORED | SCADA_FLAG_SUBSTITUTED);
+}
+
+TEST_F(RestoreWithBound, ABoundOfATagThatIsNotRetainedOrUnknownIsNotUsed) {
+    write_file_of_age(age());
+    start_host(retained_set());
+    const Attached feeder =
+        attached_with_bounds("io", {{"plant.count", 1}, {"no.such.tag", 1}});
+    ASSERT_NE(feeder, nullptr);
+    // Both are counted: an unused bound is not silent (section 13).
+    EXPECT_EQ(feeder->status().bounds_unused, 2U);
+    EXPECT_EQ(read(*feeder, "plant.level").quality, SCADA_QUALITY_UNCERTAIN);
+    const scada_value count = read(*feeder, "plant.count");
+    EXPECT_EQ(count.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(count.quality_flags, SCADA_FLAG_NOT_INIT);
+}
+
+TEST_F(RestoreWithBound, AReusedRegionRestoresNothingSoTheBoundWaits) {
+    start_host(retained_set());
+    {
+        const Attached feeder = attached("io");
+        ASSERT_NE(feeder, nullptr);
+    }
+    write_file_of_age(age());
+    const Attached again = attached_with_bounds("io", {{"plant.level", 1}});
+    ASSERT_NE(again, nullptr);
+    EXPECT_GT(again->status().regions_reused, 0U);
+    EXPECT_EQ(again->status().values_restored, 0U);
+    EXPECT_EQ(read(*again, "plant.level").quality_flags, SCADA_FLAG_NOT_INIT);
+}
+
+// The C interface of the bound (section 13), with the options of the test.
+class RestoreWithBoundThroughC : public RestoreWithBound {
+protected:
+    void SetUp() override {
+        RestoreWithBound::SetUp();
+        write_file_of_age(age());
+        start_host(retained_set());
+        base_dir_ = base().string();
+        retain_dir_ = retain().string();
+    }
+
+    [[nodiscard]] scada_attach_opts opts() const {
+        return {.base_dir = base_dir_.c_str(),
+                .retain_dir = retain_dir_.c_str(),
+                .tagd_uid = uid()};
+    }
+
+    // Expects `bounds` refused with SCADA_E_INVALID and `*out` set to NULL.
+    void expect_bounds_refused(const scada_retain_bound* bounds,
+                               std::size_t n) const {
+        auto* ctx = std::bit_cast<scada_ctx*>(std::uintptr_t{1});
+        const scada_attach_opts options = opts();
+        EXPECT_EQ(scada_tag_attach_retain("io", &options, bounds, n, &ctx),
+                  SCADA_E_INVALID);
+        EXPECT_EQ(ctx, nullptr);
+    }
+
+    // Expects the one bound `name`, `max_age_ns` refused.
+    void expect_bound_refused(const char* name, std::int64_t max_age_ns) const {
+        const std::array<scada_retain_bound, 1> bound{
+            {{.tag_name = name, .max_age_ns = max_age_ns}}};
+        expect_bounds_refused(bound.data(), 1);
+    }
+
+    // Reads plant.level through `ctx`.
+    [[nodiscard]] static scada_value level_of(scada_ctx* ctx) {
+        std::uint32_t handle = SCADA_INVALID_HANDLE;
+        EXPECT_EQ(scada_tag_resolve(ctx, "plant.level", &handle), SCADA_OK);
+        scada_value level{};
+        EXPECT_EQ(scada_tag_read(ctx, handle, &level), SCADA_OK);
+        return level;
+    }
+
+    // `bounds_unused` of `ctx`.
+    [[nodiscard]] static std::uint32_t unused_of(scada_ctx* ctx) {
+        scada_retain_status_t status{};
+        EXPECT_EQ(scada_tag_retain_status(ctx, &status), SCADA_OK);
+        return status.bounds_unused;
+    }
+
+private:
+    std::string base_dir_;
+    std::string retain_dir_;
+};
+
+TEST_F(RestoreWithBoundThroughC, BoundsThatAreNotValidAreRefused) {
+    expect_bounds_refused(nullptr, 1);
+    const std::array<scada_retain_bound, 1> one{
+        {{.tag_name = "plant.level", .max_age_ns = 1}}};
+    expect_bounds_refused(one.data(), MAX_TAGS + 1);
+    expect_bound_refused(nullptr, 1);
+    expect_bound_refused("plant.level", 0);
+    expect_bound_refused("plant.level", -1);
+    // Names that are no tag names: upper case, empty, a space, and 128 bytes
+    // or more (only 128 bytes are read, so the NUL after them is not seen).
+    const std::string too_long(MAX_TAG_NAME_LENGTH + 1, 'a');
+    const std::string longer(MAX_TAG_NAME_LENGTH + 50, 'a');
+    for (const char* name :
+         {"Plant.Level", "", "plant level", too_long.c_str(), longer.c_str()}) {
+        expect_bound_refused(name, 1);
+    }
+    const std::array<scada_retain_bound, 2> twice{
+        {{.tag_name = "plant.level", .max_age_ns = 1},
+         {.tag_name = "plant.level", .max_age_ns = 2}}};
+    expect_bounds_refused(twice.data(), 2);
+    const scada_attach_opts options = opts();
+    EXPECT_EQ(scada_tag_attach_retain("io", &options, one.data(), 1, nullptr),
+              SCADA_E_INVALID);
+    // Nothing was attached: no region of io exists.
+    EXPECT_FALSE(std::filesystem::exists(generation_dir() / "tags.io"));
+}
+
+TEST_F(RestoreWithBoundThroughC, BoundsAreAppliedCountedAndNotKept) {
+    // A name of 127 bytes is a tag name: valid, and unused here.
+    const std::string longest(MAX_TAG_NAME_LENGTH, 'a');
+    const std::array<scada_retain_bound, 2> used_and_unused{
+        {{.tag_name = "plant.level", .max_age_ns = 1},
+         {.tag_name = longest.c_str(), .max_age_ns = 1}}};
+    const scada_attach_opts options = opts();
+    scada_ctx* ctx = nullptr;
+    ASSERT_EQ(scada_tag_attach_retain("io", &options, used_and_unused.data(), 2,
+                                      &ctx),
+              SCADA_OK);
+    EXPECT_EQ(unused_of(ctx), 1U);
+    const scada_value restored = level_of(ctx);
+    EXPECT_EQ(restored.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(restored.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(restored.value, LEVEL_BITS);
+    scada_tag_detach(ctx);
+
+    // No bounds: as scada_tag_attach_opts. The region is reused, so the
+    // value restored BAD by the attach before stays as it is (section 13).
+    ASSERT_EQ(scada_tag_attach_retain("io", &options, nullptr, 0, &ctx),
+              SCADA_OK);
+    const scada_value kept = level_of(ctx);
+    EXPECT_EQ(kept.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(kept.quality_flags, SCADA_FLAG_RESTORED);
+    EXPECT_EQ(unused_of(ctx), 0U);
     scada_tag_detach(ctx);
 }
 
