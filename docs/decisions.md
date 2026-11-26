@@ -2362,6 +2362,39 @@ Decision: the first step of `setup-build-machine` moves every file of `/etc/apt/
 Reason: apt then reads only what the pipeline installs from, so a source the project does not use cannot stop it. Moving the files is visible in the log and is the same on both architectures. Ignoring a failed `update` would also hide a failure of the Ubuntu archive.
 Consequences: the herd7 cache key hashes `action.yml`, so the model check builds herd7 again once (version 7.58, checked against its commit). Tool versions still come with the runner image: LLVM 18 is preinstalled there and apt finds it the newest version; CMake (3.31.6), GCC (13.3.0) and Python (3.12.3) are the image's own. Pinning them is #141, not this decision.
 
+## D-117: Run-time expressions checked against the tags (stage 5)
+Date: 2026-11-26
+Phase / issue: 2, #100 (P2-03), slice 7b
+Status: proposed
+
+Context: contract 5.6 has virtual tags, alarm expressions, `suppress_when` and interlock conditions compiled and type-checked at validation, over the tags of the expanded tree (2.6), with patterns resolved then (2.5), a cycle of virtual tags refused (CF-525) and a virtual tag's `value_type` derived from its expression. Slice 7a (D-116) built the tags by name and type; a virtual tag's type was left empty. Some points are left open, below.
+Options: for each open point, the simplest reading of 5.6, or a question on #136 where the contract does not decide.
+Decision: `check_run_time_expressions` (`src/runtime_expressions.cpp`) runs after the tags are collected and before the references to them are checked (D-116), so every later check reads a virtual tag's derived type.
+- **The sites:**
+  - a virtual tag's `expr` in `tags/*.yaml`, run by its `task` (`normal` by default, 5.1);
+  - an interlock's `condition` in `outputs/*.yaml`, run by its `task` (`normal` by default, 7.3);
+  - an alarm's `expr` (of `type: expression`) and `suppress_when`, wherever the alarm stands: `alarms/*.yaml`, a tag of a tag file, a point or a bit of the expanded tree. An alarm runs in no control task (`scada-alarm`).
+  
+  An expression of the expanded tree is placed at its instance with the template note and the point, and one cause at many instances is one error (D-114). Structured text is not in phase 2.
+- **Names and types** (`run_time_type`, `src/expression_types.cpp`):
+  - a reference is a tag, read as its type: `bool` BOOL, `float64` REAL, the integer types (and an enumeration, a double point) INT; a `uint64` tag reads as INT (5.6);
+  - `x.quality` is INT and `x.age` TIME when `x` is a tag; a name that is both a tag and such an attribute is CF-521;
+  - a STRING tag is CF-522, also through `.quality`, `.age`, `tag("...")` or a pattern;
+  - a name that is no tag is CF-310 `tag {name} does not exist`, in the form of D-116;
+  - `quality`, `age` and `is_good` take one tag reference (a tag by name or `tag("...")`, not `x.quality`);
+  - `tag("...")` names one tag; a pattern there is CF-523.
+- **Aggregates:** one pattern, resolved now against every tag (2.5), CF-311 `pattern {pattern} matches no tag` when it matches none; or two or more tag references. BOOL inputs are CF-523 for `sum`, `avg`, `min_of` and `max_of`; `count_good` takes any input but STRING.
+- **Time functions** (`moving_avg`, `rate`, `totalise`): a tag reference that is a number and a TIME literal. The window must be 1 to 10,000 cycles of the task's period, the window at least one period and at most 10,000 (CF-524). The periods are those of `control/tasks.yaml`, else `fast` 10 ms, `normal` 100 ms, `slow` 1 s (9.1). An alarm's windows are not checked: 5.6 names no task for them (on #136). A task that does not exist is CF-310 elsewhere (D-113), and its windows are not checked.
+- **Results:** an alarm's `expr`, its `suppress_when` and an interlock's `condition` are BOOL, or CF-523 `expression: the result must be BOOL, not {type}`.
+- **Virtual tags:**
+  - What one reads: the virtual tags it names, with `.quality` or `.age`, through `tag("...")`, or through a pattern that matches them (5.6: a cycle through a pattern that matches the tag itself counts).
+  - The components of that graph are found with Tarjan's walk, iteratively, and each is complete before any that reads it. A component of more than one tag, or a tag that reads itself, is CF-525 `virtual tags form a cycle: {names}`, once, at the name of its first tag in the order written, the names in that order. Its tags stay of unknown type.
+  - Every other virtual tag is typed after its inputs: BOOL gives `bool`, INT `int64`, REAL `float64`, TIME `int64` (milliseconds, 5.6). A given `value_type` that is not the derived one is CF-527 `{name}: the expression gives {value type}`, at the given `value_type`, named as `value_type` is written. The given type stays the tag's, as its readers expect it.
+  - An expression that reads a tag of unknown type (in a cycle, or whose own expression is refused) is not checked further and gives no error of its own: the cause is reported where it stands.
+- **Cost:** a pattern's tags are found from its prefix before the first wildcard, in the ordered tag names. Once every virtual tag is typed, the result of a pattern and of an expression text (with its task) is kept for the next site that has the same, at most 65,536 of each, so one template line at every instance is checked once.
+Reason: this is 5.6 as written. Where it does not decide (the windows of an alarm, a given `value_type` that differs from the derived one only in width), the narrower reading is taken and asked on #136, so that nothing is accepted that a ruling might refuse later, except the alarm's window, which is not checked rather than guessed.
+Consequences: tests whose run-time expressions named tags that do not exist now list their CF-310, or define the tags where the test is about something else; the corpus case `s3-valid-expressions` defines the tags it reads. Corpus case `s5-run-time-expressions`. The README's code table names the source of each code.
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)
