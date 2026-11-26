@@ -10,11 +10,15 @@ scada_add_library(scada-driver
   SOURCES
     src/channel_engine.cpp
     src/failure.cpp
+    src/fd_io.cpp
     src/plan.cpp
     src/point_rules.cpp
     src/raw_value.cpp
     src/sample_processing.cpp
     src/scheduler.cpp
+    src/serial_transport.cpp
+    src/system_clock.cpp
+    src/tcp_transport.cpp
     src/tzif.cpp
     src/utf8.cpp
     src/write_conversion.cpp

@@ -10,6 +10,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     point_rules_test.cpp
     sample_processing_test.cpp
     channel_engine_test.cpp
+    connections_test.cpp
     engine_random_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
@@ -46,3 +47,27 @@ scada_add_test(scada-driver-zones-test KIND integration
   DEPENDS scada::driver)
 target_compile_definitions(scada-driver-zones-test PRIVATE
   "SCADA_ZONEINFO_DIR=\"${SCADA_ZONEINFO_DIR}\"")
+
+# The test protocol's simulator as a process of its own (contract 14), for
+# the integration test of the real transports.
+add_executable(scada-driver-test-sim
+  test_sim_main.cpp loopback.cpp test_protocol.cpp)
+# loopback.cpp checks its inputs with GoogleTest assertions.
+target_link_libraries(scada-driver-test-sim PRIVATE scada::driver GTest::gtest)
+scada_target_defaults(scada-driver-test-sim)
+
+# The TCP and serial transports across the boundary: real sockets against
+# the simulator process and against the test, a pseudo-terminal pair for
+# the serial port (decision D-141).
+set(sim_command ${CMAKE_CROSSCOMPILING_EMULATOR}
+  "$<TARGET_FILE:scada-driver-test-sim>")
+list(JOIN sim_command "|" sim_command)
+scada_add_test(scada-driver-transport-test KIND integration
+  SOURCES
+    transport_integration_test.cpp
+    loopback.cpp
+    sim_transport.cpp
+    test_protocol.cpp
+  DEPENDS scada::driver scada::test-support
+  ENVIRONMENT "SCADA_DRIVER_TEST_SIM_COMMAND=${sim_command}")
+add_dependencies(scada-driver-transport-test scada-driver-test-sim)

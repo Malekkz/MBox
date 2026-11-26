@@ -2,8 +2,8 @@
 #define SCADA_DRIVER_TRANSPORT_H
 
 // What the channel engine needs of a connection and of time (driver
-// interface contract 7.1 to 7.3). The real TCP and serial transports come
-// with slice 4 and keep the rules stated here; the conformance tests drive a
+// interface contract 7.1 to 7.3). The real TCP and serial transports
+// (connections.h) keep the rules stated here; the conformance tests drive a
 // simulated one on an injected clock, so every deadline is exact and
 // nothing sleeps.
 
@@ -78,7 +78,8 @@ public:
     // reads once without blocking: at most `into.size()` bytes into `into`,
     // setting `received`. OK with `received` > 0; TIMEOUT only when nothing
     // is readable after the wait (a worker stalled past its deadline still
-    // reads what arrived); CLOSED.
+    // reads what arrived); CLOSED. An empty `into` is FAILED, a caller's
+    // fault: the engine never passes one (S5).
     virtual IoStatus receive(std::span<std::byte> into,
                              std::int64_t deadline_ns,
                              std::size_t& received) noexcept = 0;
