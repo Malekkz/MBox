@@ -194,13 +194,14 @@ void Worker::serve(TagWriter& writer) noexcept {
         moved();
         writer.notify();
         refused_.store(writer.refused(), std::memory_order_relaxed);
-        if (stopping()) {
-            break;
-        }
+        // After a stop the stop eventfd is readable: this wait returns at
+        // once, and the loop ends at its check.
         wait_until(next, -1);
         moved();
     }
-    // Stopped at a boundary: nothing is in flight. An orderly close.
+    // Stopped at a boundary: nothing more is read. The close is orderly (a
+    // FIN), but on a stream with unread bytes, an abandoned read's answer,
+    // the kernel sends a reset instead.
     transport_->close(false);
     transport_->set_wake(-1);
 }

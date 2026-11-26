@@ -6,6 +6,7 @@
 #include "scada/driver/driver.h"
 #include "../src/tag_writer.h"
 #include "channel_builder.h"
+#include "scada/common/fd.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/plan.h"
@@ -22,15 +23,20 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <fcntl.h>
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal functions are declared here, not in <csignal>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace scada::driver::test {
 namespace {
@@ -183,8 +189,32 @@ TEST(Driver, OnlyTheStopSignalsAreBlocked) {
                    ::sigismember(&before, number);
         });
     };
-    EXPECT_TRUE(all_blocked({SIGTERM, SIGINT, SIGHUP}));
+    EXPECT_TRUE(all_blocked({SIGTERM, SIGINT, SIGHUP, SIGPIPE}));
     EXPECT_TRUE(unchanged({SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGILL}));
+    ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, &before, nullptr), 0);
+}
+
+TEST(Driver, AWriteToAPipeNobodyReadsFailsAndTheProcessRunsOn) {
+    // Delta 2: with SIGPIPE blocked, a write to a standard error whose
+    // reader has gone gives EPIPE instead of ending the process.
+    sigset_t before{};
+    ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, nullptr, &before), 0);
+    ASSERT_TRUE(block_stop_signals().ok());
+    std::array<int, 2> ends{-1, -1};
+    ASSERT_EQ(::pipe2(ends.data(), O_CLOEXEC), 0);
+    Fd reader(ends[0]);
+    const Fd writer(ends[1]);
+    reader.reset();  // the reader has gone
+    const char byte = 'x';
+    const ssize_t wrote = ::write(writer.get(), &byte, 1);
+    const int error = errno;
+    EXPECT_TRUE(wrote == -1 && error == EPIPE) << wrote << " " << error;
+    // Take the pending SIGPIPE, so that restoring the mask delivers none.
+    sigset_t pipe{};
+    ASSERT_EQ(::sigemptyset(&pipe), 0);
+    ASSERT_EQ(::sigaddset(&pipe, SIGPIPE), 0);
+    const timespec now{};
+    EXPECT_EQ(::sigtimedwait(&pipe, nullptr, &now), SIGPIPE);
     ASSERT_EQ(::pthread_sigmask(SIG_SETMASK, &before, nullptr), 0);
 }
 

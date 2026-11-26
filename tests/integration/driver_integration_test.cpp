@@ -246,7 +246,49 @@ TEST_F(DriverProcess, ADisabledChannelOwnsAndWritesItsTags) {
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 
+TEST_F(DriverProcess, The91WritesComeBeforeTheResolve) {
+    // Review M6: 9.1 is written by the owner's thread before the main
+    // thread resolves the names. A start that then fails on a point
+    // without a tag has already written the channel's tags NOT_INIT.
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "22"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    const std::vector<std::string> channel =
+        tcp_channel("line1", port_of(*sim));
+    ASSERT_TRUE(run_until(
+        joined(channel, device("d1", 1, "0")), "d1.v",
+        [](const scada_value& value) { return good_with(value, 22); }));
+    auto failing = start_driver(
+        joined(channel, device("d1", 1, "0"), device("d9", 1, "0")));
+    if (!failing.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(*failing, "the tag set has no tag d9.v"));
+    EXPECT_TRUE(holds(
+        read(handle("d1.v")), SCADA_QUALITY_BAD,
+        SCADA_FLAG_NOT_INIT | SCADA_FLAG_LOCAL_TIME | SCADA_FLAG_OWNER_DOWN,
+        22));
+}
+
 // --- The owners of the tags (review M3) -------------------------------------
+
+TEST_F(DriverProcess, AnOwnerNoChannelWritesFailsTheStart) {
+    // Delta 3: the tag set has owners drv-test.a and drv-test.b; a driver
+    // with channel b only would leave a's tags as the previous life left
+    // them. The start fails, naming the owner.
+    start_tagd(
+        {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
+    const LocalPort port(false);
+    auto driver = start_driver(
+        joined(tcp_channel("b", port.port()), device("d2", 2, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(
+        *driver, "owner drv-test.a of this process is written by no channel"));
+}
 
 TEST_F(DriverProcess, TwoChannelsOnOneOwnerFailTheStart) {
     start_tagd({{.name = "a", .tags = {"d1.v"}, .owner = "drv-test"},
@@ -304,7 +346,8 @@ TEST_F(DriverProcess, EveryDeliveryWakesTheConsumers) {
     drain();
     const std::uint32_t before = driver_status().cycle_seq;
     ASSERT_TRUE(changes(4));
-    EXPECT_GE(driver_status().cycle_seq - before, 4U);
+    // The fourth change is written before its notify: wait for the counter.
+    EXPECT_TRUE(cycles_since(before, 4));
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 

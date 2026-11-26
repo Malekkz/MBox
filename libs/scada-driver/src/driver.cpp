@@ -61,6 +61,8 @@ constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
 // (stopped, frozen, a paused machine): the workers are not judged by that
 // time (review M7).
 constexpr std::int64_t PAUSE_PERIODS = 2;
+// "process paused" is logged at most this often, with the pauses since.
+constexpr std::int64_t PAUSE_LOG_PERIOD_NS = 10 * NS_PER_S;
 constexpr std::chrono::milliseconds LOG_FLUSH_LIMIT{1000};
 
 std::int64_t add(std::int64_t left, std::int64_t right) noexcept {
@@ -136,7 +138,10 @@ std::int64_t stall_limit_ns(const CompiledChannel& channel,
 
 Status block_stop_signals() noexcept {
     sigset_t stops{};
-    if (!stop_signals(stops) ||
+    // SIGPIPE too, never taken: a write to a standard error or a socket
+    // nobody reads any more fails with EPIPE instead of ending the process
+    // (delta 2; as scada-sim, while scada-tagd leaves it at its default).
+    if (!stop_signals(stops) || ::sigaddset(&stops, SIGPIPE) != 0 ||
         ::pthread_sigmask(SIG_BLOCK, &stops, nullptr) != 0) {
         return {StatusCode::INTERNAL, "cannot block the stop signals"};
     }
@@ -234,6 +239,10 @@ private:
     [[nodiscard]] Status owner_of(const CompiledChannel& channel,
                                   std::optional<std::uint16_t>& owner) noexcept;
     [[nodiscard]] Status make_workers() noexcept;
+    // Every owner of this process is the owner of one channel.
+    [[nodiscard]] Status every_owner_claimed(
+        const std::map<std::uint16_t, const CompiledChannel*>&
+            claimed) noexcept;
     [[nodiscard]] Status resolve(const CompiledChannel& channel,
                                  std::optional<std::uint16_t> owner,
                                  PointHandles& out) noexcept;
@@ -266,6 +275,7 @@ private:
     std::optional<std::chrono::microseconds> watchdog_interval_;
     std::int64_t last_watchdog_ns_ = 0;
     bool feeding_ = true;
+    bool ready_ = false;  // READY=1 was sent (or there is no service manager)
     bool heartbeat_logged_ = false;
     Fd signals_;
     scada_ctx* ctx_ = nullptr;
@@ -275,6 +285,8 @@ private:
     std::vector<std::uint64_t> seen_;
     std::vector<std::int64_t> moved_ns_;
     std::int64_t last_check_ns_ = 0;
+    std::uint64_t pauses_ = 0;  // pauses not yet logged
+    std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
     std::int64_t next_refused_log_ns_ = 0;
@@ -365,6 +377,36 @@ Status Driver::Impl::owner_of(const CompiledChannel& channel,
     return {};
 }
 
+Status Driver::Impl::every_owner_claimed(
+    const std::map<std::uint16_t, const CompiledChannel*>& claimed) noexcept {
+    // An owner of this process that no channel writes would keep the
+    // values of the previous life, GOOD, for as long as the driver runs:
+    // the start fails, naming it (the lead's ruling, delta 3). The main
+    // thread's own owner, for the `sys.proc` tags, is the exception that
+    // comes with slice 5b (after #151).
+    scada_status status{};
+    if (scada_tag_status(ctx_, &status) != SCADA_OK &&
+        status.owner_count == 0) {
+        return fail_start({StatusCode::UNAVAILABLE, "no tag status"},
+                          "the tag library gave no status");
+    }
+    for (std::uint16_t owner = 0; owner < status.owner_count; ++owner) {
+        scada_owner_info_t info{};
+        if (scada_owner_info(ctx_, owner, &info) != SCADA_OK) {
+            return fail_start({StatusCode::UNAVAILABLE, "no owner information"},
+                              "the tag library gave no information on owner " +
+                                  std::to_string(owner));
+        }
+        if (info.owned != 0 && !claimed.contains(owner)) {
+            return fail_start({StatusCode::FAILED_PRECONDITION,
+                               "an owner of the process has no channel"},
+                              "owner " + text_of(info.name) +
+                                  " of this process is written by no channel");
+        }
+    }
+    return {};
+}
+
 Status Driver::Impl::make_workers() noexcept {
     // One worker per channel, disabled ones too: every tag has one writing
     // thread (TD 13.2), which writes 9.1 before anything else (review M2,
@@ -408,6 +450,10 @@ Status Driver::Impl::make_workers() noexcept {
         workers_.push_back(std::make_unique<Worker>(
             channel, *protocol_, std::move(transport), *clock_, ctx_, owner,
             caps_of(channel, *protocol_), stall_limit_ns(channel, *protocol_)));
+    }
+    Status every = every_owner_claimed(claimed);
+    if (!every.ok()) {
+        return every;
     }
     seen_.assign(workers_.size(), 0);
     moved_ns_.assign(workers_.size(), scada::monotonic_ns());
@@ -511,7 +557,8 @@ Status Driver::Impl::await_running() noexcept {
 }
 
 void Driver::Impl::feed_watchdog() noexcept {
-    if (!notifier_.has_value() || !watchdog_interval_.has_value()) {
+    // Not before READY=1: the service manager's watchdog runs from then on.
+    if (!ready_ || !notifier_.has_value() || !watchdog_interval_.has_value()) {
         return;
     }
     // At half the interval, the usual period (notify.h).
@@ -554,22 +601,29 @@ Driver::Impl::Beat Driver::Impl::beat() noexcept {
 }
 
 Worker* Driver::Impl::stalled(std::int64_t now) noexcept {
-    const std::int64_t late = settings_.heartbeat_period_ns * PAUSE_PERIODS;
-    if (last_check_ns_ != 0 && now - last_check_ns_ > late) {
-        // The main thread itself did not run for that time: the process
-        // was paused. Judge the workers from now on, by time this thread
-        // observes (review M7).
-        log(LogLevel::NOTICE, "process paused",
-            {{"MESSAGE_ID", "driver-paused"},
-             {"PAUSE_MS", std::to_string((now - last_check_ns_) / NS_PER_MS)}});
-        for (std::size_t index = 0; index < workers_.size(); ++index) {
-            seen_[index] = workers_[index]->progress();
-            moved_ns_[index] = now;
-        }
-        last_check_ns_ = now;
-        return nullptr;
-    }
+    const std::int64_t period = settings_.heartbeat_period_ns;
+    const std::int64_t gap = last_check_ns_ == 0 ? 0 : now - last_check_ns_;
     last_check_ns_ = now;
+    if (gap > period * PAUSE_PERIODS) {
+        // The main thread itself did not run for that time: the process
+        // was paused (or this thread was not scheduled). Only the time it
+        // lost is credited to every worker, its history kept, so that
+        // repeated short pauses never hide a worker that is stuck (review
+        // M7, delta 1).
+        const std::int64_t lost = gap - period;
+        for (std::int64_t& moved : moved_ns_) {
+            moved = add(moved, lost);
+        }
+        ++pauses_;
+        if (now >= next_pause_log_ns_) {
+            next_pause_log_ns_ = add(now, PAUSE_LOG_PERIOD_NS);
+            log(LogLevel::NOTICE, "process paused",
+                {{"MESSAGE_ID", "driver-paused"},
+                 {"PAUSE_MS", std::to_string(gap / NS_PER_MS)},
+                 {"PAUSES", std::to_string(pauses_)}});
+            pauses_ = 0;
+        }
+    }
     for (std::size_t index = 0; index < workers_.size(); ++index) {
         Worker& worker = *workers_[index];
         if (worker.returned()) {
@@ -748,6 +802,7 @@ Status Driver::Impl::start() noexcept {
             fail_start({StatusCode::IO_ERROR, "the notification was not sent"},
                        "cannot report readiness to the service manager");
     }
+    ready_ = status.ok();
     return status;
 }
 

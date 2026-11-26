@@ -16,9 +16,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scada::test::driver_it {
@@ -127,8 +129,10 @@ TEST_F(DriverProcess, AWrongOrDeadNotifySocketFailsTheStart) {
     }
     EXPECT_TRUE(fails_start(*wrong, "invalid environment"));
     // A path nobody listens on: READY cannot be sent.
-    auto dead = start_driver(
-        args, {.socket = (base().parent_path() / "nobody.sock").string()});
+    // A short absolute path, whatever TMPDIR is: a socket path is at most
+    // 107 bytes.
+    auto dead =
+        start_driver(args, {.socket = "/nonexistent-scada-notify.sock"});
     if (!dead.has_value()) {
         FAIL() << "no driver";
     }
@@ -218,11 +222,12 @@ TEST_F(DriverProcess, AnIdleWorkerStopsAtOnce) {
 }
 
 TEST_F(DriverProcess, APeerCloseOfAnIdleConnectionIsSeenAtOnce) {
-    // The peer closes after one answer while the worker waits for its next
-    // poll in 10 s: POLLRDHUP on the connection ends the wait, and the
-    // tag goes COMM_FAIL well before the wait's cap (1 s).
+    // The worker waits for its next poll in 10 s, its wait capped at 1 s;
+    // the peer goes (the simulator is killed) during that wait: POLLRDHUP
+    // on the connection ends it, and the tag goes COMM_FAIL well before the
+    // cap.
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
-    auto sim = start_sim({"--set", "1", "0", "0", "8", "--close-after", "1"});
+    auto sim = start_sim({"--set", "1", "0", "0", "8"});
     if (!sim.has_value()) {
         FAIL() << "no simulator";
     }
@@ -232,99 +237,140 @@ TEST_F(DriverProcess, APeerCloseOfAnIdleConnectionIsSeenAtOnce) {
         FAIL() << "no driver";
     }
     observe();
-    // The answer and the close come at once: the tag is GOOD for a moment
-    // only, so its changes are read from the ring, with their times.
-    const std::optional<scada_change> good =
+    ASSERT_TRUE(eventually(handle("d1.v"), [](const scada_value& value) {
+        return good_with(value, 8);
+    }));
+    const std::int64_t killed_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            SteadyClock::now().time_since_epoch())
+            .count();
+    ASSERT_TRUE(end_with(*sim, SIGKILL).has_value());
+    const std::optional<scada_change> failed =
         next_change_where([](const scada_change& change) {
-            return change.quality == SCADA_QUALITY_GOOD;
+            return (change.quality_flags & SCADA_FLAG_COMM_FAIL) != 0;
         });
-    const std::optional<scada_change> failed = next_change();
-    if (!good.has_value() || !failed.has_value()) {
+    if (!failed.has_value()) {
         FAIL() << driver->err();
     }
-    EXPECT_NE(failed->quality_flags & SCADA_FLAG_COMM_FAIL, 0);
-    EXPECT_LT(failed->update_mono_ns - good->update_mono_ns, 600'000'000);
+    EXPECT_LT(failed->update_mono_ns - killed_ns, 600'000'000);
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 
-TEST_F(DriverProcess, AStopWithAHungWorkerKeepsTheHeartbeatAndEndsInTheBudget) {
-    // Channel b hangs deaf to the stop; its stall limit (3 s) is longer
-    // than the stop budget (2 s). The stop waits for the workers with the
-    // heartbeat going on (the process is never down while it runs), then
-    // ends with the stall status within the budget.
-    start_tagd(
-        {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
-    auto sim = start_sim({"--set", "1", "0", "0", "1"});
-    if (!sim.has_value()) {
-        FAIL() << "no simulator";
+// Channel a reads unit 1 of its own simulator; channel b hangs in its first
+// receive (`--hang`), deaf to the stop, on another. `start` returns once
+// b's request has reached its simulator, so that b is in its hang.
+class HungChannel : public DriverProcess {
+protected:
+    ::testing::AssertionResult start(const std::string& connect_ms,
+                                     const std::string& timeout_ms) {
+        start_tagd(tags_);
+        std::optional<ChildProcess> live =
+            start_sim({"--set", "1", "0", "0", "1"});
+        std::optional<ChildProcess> hung = start_sim({});
+        if (!live.has_value() || !hung.has_value()) {
+            return ::testing::AssertionFailure() << "no simulator";
+        }
+        live_ = std::make_unique<ChildProcess>(std::move(*live));
+        hung_ = std::make_unique<ChildProcess>(std::move(*hung));
+        std::optional<ChildProcess> driver = start_driver(
+            joined(tcp_channel("a", port_of(*live_)), device("d1", 1, "0"),
+                   faulty("b", port_of(*hung_), "--hang", connect_ms),
+                   device("d2", 1, "0", timeout_ms)));
+        if (!driver.has_value()) {
+            return ::testing::AssertionFailure() << "no driver";
+        }
+        driver_ = std::make_unique<ChildProcess>(std::move(*driver));
+        const ::testing::AssertionResult ready =
+            receives(listener(), "READY=1");
+        return ready ? prints(*hung_, "request ") : ready;
     }
-    auto driver = start_driver(
-        joined(tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
-               faulty("b", port_of(*sim), "--hang"), device("d2", 2, "0")));
-    if (!driver.has_value()) {
-        FAIL() << "no driver";
+
+    ChildProcess& driver() { return *driver_; }
+
+    // Stops the driver for 150 ms every 500 ms until it ends, at most 8 s;
+    // its end, if it came.
+    std::optional<ChildEnding> pause_repeatedly() {
+        const auto started = SteadyClock::now();
+        std::optional<ChildEnding> ending;
+        while (!ending.has_value() && since(started) < milliseconds{8000} &&
+               driver_->send_signal(SIGSTOP)) {
+            // Stopped, the driver cannot end: this only paces the stop.
+            (void)driver_->wait_for_ending(milliseconds{150});
+            if (!driver_->send_signal(SIGCONT)) {
+                break;
+            }
+            ending = driver_->wait_for_ending(milliseconds{350});
+        }
+        return ending;
     }
-    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    [[nodiscard]] const std::vector<ChannelTags>& tags() const { return tags_; }
+
+private:
+    const std::vector<ChannelTags> tags_{{.name = "a", .tags = {"d1.v"}},
+                                         {.name = "b", .tags = {"d2.v"}}};
+    std::unique_ptr<ChildProcess> live_;
+    std::unique_ptr<ChildProcess> hung_;
+    std::unique_ptr<ChildProcess> driver_;
+};
+
+TEST_F(HungChannel, AStopKeepsTheHeartbeatAndEndsInTheBudget) {
+    // b's stall limit (3 s) is longer than the stop budget (2 s). The stop
+    // waits for the workers with the heartbeat going on (the process is
+    // never down while it runs), then ends with the stall status within the
+    // budget.
+    ASSERT_TRUE(start("1000", "500"));
     observe();
     const auto stop = SteadyClock::now();
-    ASSERT_TRUE(driver->send_signal(SIGTERM));
+    ASSERT_TRUE(driver().send_signal(SIGTERM));
     bool down = false;
-    const std::optional<ChildEnding> ending = end_watching(*driver, down);
+    const std::optional<ChildEnding> ending = end_watching(driver(), down);
     if (!ending.has_value()) {
         FAIL() << "did not end";
     }
     EXPECT_FALSE(down);
     EXPECT_TRUE(
         !ending->by_signal && ending->number == EXIT_STALL &&
-        has(driver->err(), R"(MESSAGE_ID="driver-stop-overrun" CHANNEL="b")"))
-        << driver->err();
+        has(driver().err(), R"(MESSAGE_ID="driver-stop-overrun" CHANNEL="b")"))
+        << driver().err();
     EXPECT_TRUE(between(since(stop), milliseconds{1900}, milliseconds{2900}));
 }
 
-TEST_F(DriverProcess, TheStallCheckGoesOnWhileStopping) {
-    // Channel b hangs with a stall limit of 1 s, below the stop budget: a
-    // stop right after READY ends with the stall status when its limit
-    // passes, not at the end of the budget.
-    start_tagd(
-        {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
-    auto sim = start_sim({"--set", "1", "0", "0", "1"});
-    if (!sim.has_value()) {
-        FAIL() << "no simulator";
-    }
-    auto driver = start_driver(
-        joined(tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
-               faulty("b", port_of(*sim), "--hang", "300"),
-               device("d2", 2, "0", "300")));
-    if (!driver.has_value()) {
-        FAIL() << "no driver";
-    }
-    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
-    ASSERT_TRUE(driver->send_signal(SIGTERM));
-    EXPECT_TRUE(ends_with(*driver, EXIT_STALL, milliseconds{1700}));
+TEST_F(HungChannel, TheStallCheckGoesOnWhileStopping) {
+    // b's stall limit is 1 s, below the stop budget: a stop once b hangs
+    // ends with the stall status when its limit passes, not at the end of
+    // the budget. (Without waiting for b's request, a stop that came before
+    // b's first step ended the run with 0: the race of the earlier version.)
+    ASSERT_TRUE(start("300", "300"));
+    ASSERT_TRUE(driver().send_signal(SIGTERM));
+    EXPECT_TRUE(ends_with(driver(), EXIT_STALL, milliseconds{1700}));
 }
 
-TEST_F(DriverProcess, ARetiringGenerationWithAHungWorkerEndsInTheBudget) {
-    // Review M1: the generation retires (a changed tag set) while channel b
-    // hangs: the run fails, and the bounded stop ends the process instead
-    // of a join that would never return.
-    const std::vector<ChannelTags> tags{{.name = "a", .tags = {"d1.v"}},
-                                        {.name = "b", .tags = {"d2.v"}}};
-    start_tagd(tags);
-    auto sim = start_sim({"--set", "1", "0", "0", "1"});
-    if (!sim.has_value()) {
-        FAIL() << "no simulator";
+TEST_F(HungChannel, ARetiringGenerationEndsInTheBudget) {
+    // Review M1: the generation retires (a changed tag set) while b hangs:
+    // the run fails, and the bounded stop ends the process instead of a
+    // join that would never return.
+    ASSERT_TRUE(start("1000", "500"));
+    restart_tagd(&tags(), {"spare.v"});
+    EXPECT_TRUE(ends_with(driver(), EXIT_ERROR, milliseconds{10'000}));
+    EXPECT_TRUE(has(driver().err(), R"(MESSAGE_ID="driver-retiring")") &&
+                has(driver().err(), R"(MESSAGE_ID="driver-stop-overrun")"));
+}
+
+TEST_F(HungChannel, ShortPausesOfTheProcessDoNotHideAStall) {
+    // Delta 1: the process is stopped for 150 ms every 500 ms while b
+    // hangs (limit 1 s). Only the time the main thread lost is credited,
+    // so the stall is still found: within 1 s of b's own time, about
+    // 1.3 s, well under 4 s.
+    ASSERT_TRUE(start("300", "300"));
+    const auto started = SteadyClock::now();
+    const std::optional<ChildEnding> ending = pause_repeatedly();
+    if (!ending.has_value()) {
+        FAIL() << "the stall was never found: " << driver().err();
     }
-    auto driver = start_driver(
-        joined(tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
-               faulty("b", port_of(*sim), "--hang"), device("d2", 2, "0")));
-    if (!driver.has_value()) {
-        FAIL() << "no driver";
-    }
-    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
-    restart_tagd(&tags, {"spare.v"});
-    EXPECT_TRUE(ends_with(*driver, EXIT_ERROR, milliseconds{10'000}));
-    EXPECT_TRUE(has(driver->err(), R"(MESSAGE_ID="driver-retiring")"));
-    EXPECT_TRUE(has(driver->err(), R"(MESSAGE_ID="driver-stop-overrun")"));
+    EXPECT_TRUE(!ending->by_signal && ending->number == EXIT_STALL)
+        << driver().err();
+    EXPECT_LT(since(started), milliseconds{4000});
+    EXPECT_LE(count_of(driver().err(), R"(MESSAGE_ID="driver-paused")"), 1U);
 }
 
 // --- Conformance test 2: the channel watchdog -------------------------------
@@ -413,6 +459,10 @@ TEST_F(DriverProcess, APauseOfTheWholeProcessIsNotAStall) {
     if (!driver.has_value()) {
         FAIL() << "no driver";
     }
+    // READY first: the main loop then checks the workers, so a pause is
+    // seen by a check that comes late (a SIGSTOP before the first check
+    // gives no record).
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
     observe();
     const std::uint32_t tag = handle("d1.v");
     ASSERT_TRUE(eventually(
@@ -421,8 +471,8 @@ TEST_F(DriverProcess, APauseOfTheWholeProcessIsNotAStall) {
     ASSERT_TRUE(eventually(tag, [](const scada_value& value) {
         return !owner_down(value) && good_with(value, 6);
     }));
-    ASSERT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-paused")"));
-    EXPECT_TRUE(stops_cleanly(*driver) && !has(driver->err(), "stalled"))
+    EXPECT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-paused")") &&
+                stops_cleanly(*driver) && !has(driver->err(), "stalled"))
         << driver->err();
 }
 

@@ -96,9 +96,12 @@ struct DriverSettings {
 // (SIGTERM, SIGINT, SIGHUP) on the calling thread (DI 2.4). `main` calls it
 // first, before any thread starts, the logger's included: a thread inherits
 // the mask of its creator, and a stop signal sent to the process must reach
-// only the signalfd, never a thread that would die of it. Every other
-// signal keeps its default: SIGABRT and the fault signals end the process
-// at once with a core (review M8). INTERNAL if the mask cannot be set.
+// only the signalfd, never a thread that would die of it. SIGPIPE is
+// blocked as well and never taken, so that a write to a closed standard
+// error or socket fails with EPIPE instead of ending the process. Every
+// other signal keeps its default: SIGABRT and the fault signals end the
+// process at once with a core (review M8). INTERNAL if the mask cannot be
+// set.
 [[nodiscard]] Status block_stop_signals() noexcept;
 
 // How a run ended.

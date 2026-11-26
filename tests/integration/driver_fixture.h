@@ -528,6 +528,20 @@ protected:
         return true;
     }
 
+    // True when drv-test's cycle counter (`scada_tag_notify`) reaches
+    // `before` + `count` within WAIT_LIMIT.
+    bool cycles_since(std::uint32_t before, std::uint32_t count) {
+        const auto end = SteadyClock::now() + WAIT_LIMIT;
+        while (SteadyClock::now() < end) {
+            if (driver_status().cycle_seq - before >= count) {
+                return true;
+            }
+            scada_change change{};
+            (void)scada_sub_next(sub_, &change, 50);
+        }
+        return false;
+    }
+
     // Takes every change already in the ring.
     void drain() {
         scada_change change{};
