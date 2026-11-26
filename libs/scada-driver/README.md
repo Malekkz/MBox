@@ -203,8 +203,11 @@ ctest --preset integration -R 'scada-driver-(zones|transport)'
   and over a pseudo-terminal pair; the simulator reports every request and
   answer with its monotonic time, so the test checks the silence before
   each serial request. The rest runs against peers the test holds: a
-  refused and a closed connection, a partial send, the abortive close, the
+  refused and a closed connection, a connect that times out, a send after
+  a reset, a partial send, the abortive close, an interrupted wait, the
   socket options, a port opened twice, a rate and a parity the port does
-  not take, paths that are not ports. A pseudo-terminal has no bit rate or
+  not take, an inherited mark or space parity, bytes queued before the
+  connect, paths that are not ports. The self-connection check, the receive
+  loop and the discard limit are unit tests (`connections_test.cpp`). A pseudo-terminal has no bit rate or
   parity (7.2): line timing is tested on the target board (#41). Every wait
   is on a condition with a time-out; nothing sleeps.

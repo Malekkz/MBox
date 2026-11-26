@@ -147,7 +147,9 @@ IoStatus TcpTransport::connect(std::int64_t deadline_ns) noexcept {
     error_ = ConnectError::NONE;
     errno_ = 0;
     SocketAddress address;
-    if (!parse(endpoint_.host, endpoint_.port, address)) {
+    // Port 0 connects nowhere: refused before any system call (S5).
+    if (endpoint_.port == 0 ||
+        !parse(endpoint_.host, endpoint_.port, address)) {
         return fail_connect(ConnectError::ADDRESS, 0, IoStatus::FAILED);
     }
     fd_ = Fd(::socket(address.family,
@@ -162,20 +164,19 @@ IoStatus TcpTransport::connect(std::int64_t deadline_ns) noexcept {
         return fail_connect(ConnectError::SYSTEM, errno, IoStatus::FAILED);
     }
     const sockaddr* generic = generic_of(address);
-    int result = ::connect(fd_.get(), generic, address.length);
-    while (result != 0 && errno == EINTR) {
-        result = ::connect(fd_.get(), generic, address.length);
-    }
+    // An interrupted non-blocking connect goes on in the background, like
+    // one in progress (EINTR; a second connect would give EALREADY, S4).
+    const int result = ::connect(fd_.get(), generic, address.length);
     int error = 0;
     if (result != 0) {
-        if (errno != EINPROGRESS) {
+        if (errno != EINPROGRESS && errno != EINTR) {
             error = errno;
         } else {
             short revents = 0;
             const detail::Readiness ready = detail::wait_for(
                 fd_.get(), POLLOUT, deadline_ns, *clock_, revents, error);
             if (ready == detail::Readiness::TIMEOUT) {
-                return fail_connect(ConnectError::TIMEOUT, ETIMEDOUT,
+                return fail_connect(ConnectError::TIMEOUT, 0,
                                     IoStatus::TIMEOUT);
             }
             if (ready == detail::Readiness::FAILED) {
@@ -194,6 +195,13 @@ IoStatus TcpTransport::connect(std::int64_t deadline_ns) noexcept {
     }
     if (error != 0) {
         return fail_connect(ConnectError::SYSTEM, error, IoStatus::FAILED);
+    }
+    // A connect to one of the host's own addresses on a free port of the
+    // local range can meet itself with nobody listening; every frame would
+    // come back as its own answer, a write "confirmed" with nothing done
+    // (review M1; command safety).
+    if (detail::connected_to_itself(fd_.get())) {
+        return fail_connect(ConnectError::SELF, 0, IoStatus::FAILED);
     }
     return IoStatus::OK;
 }

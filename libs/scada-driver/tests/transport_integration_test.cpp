@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -35,6 +36,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -49,6 +52,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX signal numbers are declared here, not in <csignal>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <termios.h>
@@ -412,6 +416,10 @@ TEST(TcpTransport, AHostNameIsRefusedWithoutAnyConnect) {
     EXPECT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::FAILED);
     EXPECT_EQ(transport.last_error(), ConnectError::ADDRESS);
     EXPECT_EQ(transport.poll_fd(), -1);
+    // Port 0 connects nowhere: refused the same way (S5).
+    TcpTransport nowhere(TcpEndpoint{.host = "127.0.0.1", .port = 0}, clock);
+    EXPECT_EQ(nowhere.connect(deadline_in(clock, SECOND)), IoStatus::FAILED);
+    EXPECT_EQ(nowhere.last_error(), ConnectError::ADDRESS);
 }
 
 TEST(TcpTransport, TheSocketHasNoDelayAndTheChannelsUserTimeout) {
@@ -482,23 +490,48 @@ TEST(TcpTransport, APeersCloseIsSeenWithoutConsumingItsLastBytes) {
               IoStatus::CLOSED);
 }
 
-TEST(TcpTransport, AFrameTheKernelDoesNotTakeWholeIsPartial) {
-    // 7.3: a partial send closes the connection; nothing taken at all is
-    // FAILED. The peer never reads, so the buffers fill.
-    const Listener listener = Listener::open(1);
-    const SystemClock clock;
-    TcpTransport transport(loopback(listener.port), clock);
-    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
-    const Fd peer = listener.accept();
-    const std::vector<std::byte> large(64U << 20U);
-    EXPECT_EQ(transport.send(large), IoStatus::PARTIAL);
+// The C library defines these in kernel headers that <sys/socket.h>
+// includes; the names are POSIX's.
+// NOLINTBEGIN(misc-include-cleaner): reached through <sys/socket.h>
+constexpr int SOCKET_LEVEL = SOL_SOCKET;
+constexpr int RECEIVE_BUFFER = SO_RCVBUF;
+constexpr int SEND_BUFFER = SO_SNDBUF;
+constexpr int LINGER = SO_LINGER;
+// NOLINTEND(misc-include-cleaner)
+
+// Sets a socket buffer to its least, so that a test does not depend on the
+// host's defaults (S6).
+bool shrink(int descriptor, int buffer) {
+    constexpr int SMALL = 4'096;
+    return ::setsockopt(descriptor, SOCKET_LEVEL, buffer, &SMALL,
+                        sizeof(SMALL)) == 0;
+}
+
+// Sends one byte at a time until a send is not OK, at most a million.
+IoStatus send_until_refused(Transport& transport) {
     const std::array<std::byte, 1> one{};
     IoStatus status = IoStatus::OK;
     for (int attempt = 0; attempt < 1'000'000 && status == IoStatus::OK;
          ++attempt) {
         status = transport.send(one);
     }
-    EXPECT_EQ(status, IoStatus::FAILED);
+    return status;
+}
+
+TEST(TcpTransport, AFrameTheKernelDoesNotTakeWholeIsPartial) {
+    // 7.3: a partial send closes the connection; nothing taken at all is
+    // FAILED. The peer never reads, so the buffers fill: small ones on both
+    // sides, so that 1 MiB exceeds them whatever the host's defaults (S6).
+    const Listener listener = Listener::open(1);
+    ASSERT_TRUE(shrink(listener.fd.get(), RECEIVE_BUFFER));
+    const SystemClock clock;
+    TcpTransport transport(loopback(listener.port), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    ASSERT_TRUE(shrink(transport.poll_fd(), SEND_BUFFER));
+    const Fd peer = listener.accept();
+    const std::vector<std::byte> large(1U << 20U);
+    EXPECT_EQ(transport.send(large), IoStatus::PARTIAL);
+    EXPECT_EQ(send_until_refused(transport), IoStatus::FAILED);
     EXPECT_EQ(transport.last_errno(), EAGAIN);
 }
 
@@ -576,13 +609,24 @@ TEST(SerialTransport, AnEngineReadsADeviceThroughTheSimulator) {
 std::size_t gaps_kept(const Sim& sim, std::int64_t gap_ns) {
     const auto requests = sim.lines("request");
     const auto answers = sim.lines("answer");
+    // Each request with the last answer stamped before it, by time, not by
+    // position: a stall of the simulator cannot pair them wrongly (S6).
+    std::vector<std::int64_t> answered;
+    answered.reserve(answers.size());
+    for (const auto& answer : answers) {
+        answered.push_back(std::stoll(answer[1]));
+    }
     std::size_t kept = 0;
-    for (std::size_t index = 1;
-         index < requests.size() && index - 1 < answers.size(); ++index) {
-        const std::int64_t answered = std::stoll(answers[index - 1][1]);
+    for (std::size_t index = 1; index < requests.size(); ++index) {
         const std::int64_t asked = std::stoll(requests[index][1]);
-        EXPECT_GE(asked - answered, gap_ns) << "request " << index;
-        kept += asked - answered >= gap_ns ? 1 : 0;
+        const auto before =
+            std::lower_bound(answered.begin(), answered.end(), asked);
+        if (before == answered.begin()) {
+            continue;
+        }
+        const std::int64_t last = *std::prev(before);
+        EXPECT_GE(asked - last, gap_ns) << "request " << index;
+        kept += asked - last >= gap_ns ? 1 : 0;
     }
     return kept;
 }
@@ -745,6 +789,265 @@ TEST(SerialTransport, SendReceiveAndDiscardOverThePort) {
     EXPECT_EQ(
         transport.receive(into, deadline_in(clock, 20 * MILLISECOND), got),
         IoStatus::TIMEOUT);
+}
+
+// --- The review of PR 148 ----------------------------------------------------
+
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes): the parts are what the tests look at
+
+// A listener whose accept queue is held full: a connect to it waits for
+// its deadline (T1). A backlog of 0 holds one connection; three keep it so.
+struct FullListener {
+    Listener listener = Listener::open(0);
+    std::vector<Fd> fillers;
+
+    FullListener() {
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        (void)::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+        address.sin_port = htons(listener.port);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+        const auto* generic = reinterpret_cast<const sockaddr*>(&address);
+        for (int index = 0; index < 3; ++index) {
+            fillers.emplace_back(::socket(
+                AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
+            const int begun =
+                ::connect(fillers.back().get(), generic, sizeof(address));
+            EXPECT_TRUE(begun == 0 || errno == EINPROGRESS);
+        }
+    }
+};
+
+// NOLINTEND(misc-non-private-member-variables-in-classes)
+
+TEST(TcpTransport, AConnectThatGetsNoAnswerTimesOutAtItsDeadline) {
+    const FullListener full;
+    const SystemClock clock;
+    TcpTransport transport(loopback(full.listener.port), clock);
+    const std::int64_t started = clock.monotonic_ns();
+    EXPECT_EQ(transport.connect(started + 300 * MILLISECOND),
+              IoStatus::TIMEOUT);
+    EXPECT_GE(clock.monotonic_ns() - started, 300 * MILLISECOND);
+    EXPECT_EQ(transport.last_error(), ConnectError::TIMEOUT);
+    EXPECT_EQ(transport.last_errno(), 0);  // no system call failed (S1)
+    EXPECT_EQ(transport.poll_fd(), -1);
+}
+
+TEST(TcpTransport, AReceiveWhoseDeadlineIsLongPastIsATimeOut) {
+    // Review M2: no overflow in the time left, whatever the deadline.
+    const Listener listener = Listener::open(1);
+    const SystemClock clock;
+    TcpTransport transport(loopback(listener.port), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    const Fd peer = listener.accept();
+    std::array<std::byte, 16> into{};
+    std::size_t got = 1;
+    EXPECT_EQ(
+        transport.receive(into, std::numeric_limits<std::int64_t>::min(), got),
+        IoStatus::TIMEOUT);
+    EXPECT_EQ(got, 0U);
+}
+
+TEST(TcpTransport, ASendAfterThePeersResetIsClosed) {
+    // T2: MSG_NOSIGNAL: the send fails CLOSED, no SIGPIPE ends the process.
+    const Listener listener = Listener::open(1);
+    const SystemClock clock;
+    TcpTransport transport(loopback(listener.port), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    Fd peer = listener.accept();
+    const linger reset{.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(
+        ::setsockopt(peer.get(), SOCKET_LEVEL, LINGER, &reset, sizeof(reset)),
+        0);
+    peer.reset();
+    ASSERT_TRUE(wait_ready(transport.poll_fd(), POLLIN, milliseconds{5'000}));
+    // The first send after a reset fails with ECONNRESET; the next ones
+    // with EPIPE, which raises SIGPIPE without MSG_NOSIGNAL.
+    const auto request = read_request(1, 0, 1);
+    EXPECT_EQ(transport.send(request), IoStatus::CLOSED);
+    EXPECT_EQ(transport.send(request), IoStatus::CLOSED);
+    EXPECT_EQ(transport.last_errno(), EPIPE);
+}
+
+TEST(TcpTransport, AnIpv6LiteralConnects) {
+    // T5: skipped on a host without IPv6 on its loopback.
+    const Fd listener(::socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0));
+    sockaddr_in6 address{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr = in6addr_loopback;
+    socklen_t length = sizeof(address);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    auto* generic = reinterpret_cast<sockaddr*>(&address);
+    if (!listener.valid() ||
+        ::bind(listener.get(), generic, sizeof(address)) != 0) {
+        GTEST_SKIP() << "no IPv6 loopback on this host";
+    }
+    ASSERT_EQ(::listen(listener.get(), 1), 0);
+    ASSERT_EQ(::getsockname(listener.get(), generic, &length), 0);
+    const SystemClock clock;
+    TcpTransport transport(
+        TcpEndpoint{.host = "::1", .port = ntohs(address.sin6_port)}, clock);
+    EXPECT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+}
+
+TEST(TcpTransport, TheDescriptorIsClosedOnExec) {
+    // T4: a child the driver starts never holds a connection.
+    const Listener listener = Listener::open(1);
+    const SystemClock clock;
+    TcpTransport transport(loopback(listener.port), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): fcntl has no other form
+    EXPECT_NE(::fcntl(transport.poll_fd(), F_GETFD) & FD_CLOEXEC, 0);
+}
+
+// Signals the calling thread with SIGUSR2 every millisecond while it lives,
+// from a kernel timer, so that a wait of the thread is interrupted (T4).
+class Interrupter {
+public:
+    Interrupter() {
+        struct sigaction action {};
+        action.sa_handler = [](int /*signal*/) { ++hits(); };
+        (void)::sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;  // no SA_RESTART
+        EXPECT_EQ(::sigaction(SIGUSR2, &action, &previous_), 0);
+        sigevent event{};
+        event.sigev_notify = SIGEV_THREAD_ID;
+        event.sigev_signo = SIGUSR2;
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): the C library gives the thread of SIGEV_THREAD_ID only in this union
+        event._sigev_un._tid = ::gettid();
+        EXPECT_EQ(::timer_create(CLOCK_MONOTONIC, &event, &timer_), 0);
+        const itimerspec every{
+            .it_interval = {.tv_sec = 0, .tv_nsec = 1'000'000},
+            .it_value = {.tv_sec = 0, .tv_nsec = 1'000'000}};
+        EXPECT_EQ(::timer_settime(timer_, 0, &every, nullptr), 0);
+    }
+    ~Interrupter() {
+        (void)::timer_delete(timer_);
+        (void)::sigaction(SIGUSR2, &previous_, nullptr);
+    }
+    Interrupter(const Interrupter&) = delete;
+    Interrupter& operator=(const Interrupter&) = delete;
+    Interrupter(Interrupter&&) = delete;
+    Interrupter& operator=(Interrupter&&) = delete;
+
+    static std::atomic<int>& hits() {
+        static std::atomic<int> count{0};
+        return count;
+    }
+
+private:
+    struct sigaction previous_ {};
+    timer_t timer_{};
+};
+
+TEST(TcpTransport, AnInterruptedWaitGoesOnToItsDeadline) {
+    // T4: EINTR from `ppoll` is no failure: the wait goes on to the same
+    // deadline and ends TIMEOUT, not CLOSED.
+    const Listener listener = Listener::open(1);
+    const SystemClock clock;
+    TcpTransport transport(loopback(listener.port), clock);
+    ASSERT_EQ(transport.connect(deadline_in(clock, SECOND)), IoStatus::OK);
+    const Fd peer = listener.accept();
+    std::array<std::byte, 16> into{};
+    std::size_t got = 0;
+    const int before = Interrupter::hits().load();
+    IoStatus status = IoStatus::OK;
+    const std::int64_t started = clock.monotonic_ns();
+    {
+        const Interrupter interrupter;
+        status = transport.receive(into, started + 100 * MILLISECOND, got);
+    }
+    EXPECT_EQ(status, IoStatus::TIMEOUT);
+    EXPECT_GE(clock.monotonic_ns() - started, 100 * MILLISECOND);
+    EXPECT_GT(Interrupter::hits().load(), before);
+}
+
+TEST(SerialTransport, AnotherOpenOfTheConnectedPortIsRefused) {
+    // T4: TIOCEXCL refuses every later open without CAP_SYS_ADMIN, as the
+    // pipeline runs; root passes it, so the test is skipped there.
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "root opens an exclusive terminal anyway";
+    }
+    const Pty pty = Pty::open();
+    const SystemClock clock;
+    SerialTransport transport(port(pty.path), clock);
+    ASSERT_EQ(transport.connect(0), IoStatus::OK);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+    const Fd other(::open(pty.path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC));
+    EXPECT_FALSE(other.valid());
+    EXPECT_EQ(errno, EBUSY);
+}
+
+TEST(SerialTransport, BytesQueuedBeforeTheConnectAreDropped) {
+    // T4: the flush after the open: nothing that came before belongs to an
+    // exchange of this connection.
+    const Pty pty = Pty::open();
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-vararg): open has no other form
+    const Fd held(
+        ::open(pty.path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC));
+    // NOLINTEND(cppcoreguidelines-pro-type-vararg)
+    ASSERT_TRUE(held.valid());
+    termios raw{};
+    ASSERT_EQ(::tcgetattr(held.get(), &raw), 0);
+    ::cfmakeraw(&raw);
+    ASSERT_EQ(::tcsetattr(held.get(), TCSANOW, &raw), 0);
+    const std::array<std::byte, 3> early{std::byte{1}, std::byte{2},
+                                         std::byte{3}};
+    ASSERT_EQ(::write(pty.master.get(), early.data(), early.size()), 3);
+    ASSERT_TRUE(wait_ready(held.get(), POLLIN, milliseconds{5'000}));
+    const SystemClock clock;
+    SerialTransport transport(port(pty.path), clock);
+    ASSERT_EQ(transport.connect(0), IoStatus::OK);
+    EXPECT_FALSE(transport.discard_input());
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): fcntl has no other form
+    EXPECT_NE(::fcntl(transport.poll_fd(), F_GETFD) & FD_CLOEXEC, 0);
+}
+
+TEST(SerialTransport, AFrameThePortDoesNotTakeWholeIsPartial) {
+    // T5: the master reads nothing, so the port's queue fills.
+    const Pty pty = Pty::open();
+    const SystemClock clock;
+    SerialTransport transport(port(pty.path), clock);
+    ASSERT_EQ(transport.connect(0), IoStatus::OK);
+    const std::vector<std::byte> large(1U << 20U);
+    EXPECT_EQ(transport.send(large), IoStatus::PARTIAL);
+    EXPECT_EQ(send_until_refused(transport), IoStatus::FAILED);
+    EXPECT_EQ(transport.last_errno(), EAGAIN);
+}
+
+TEST(SerialTransport, AnInheritedMarkOrSpaceParityIsCleared) {
+    // Review M5: a pseudo-terminal keeps CMSPAR; the connect clears it.
+    const Pty pty = Pty::open();
+    {
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-vararg): open has no other form
+        const Fd earlier(
+            ::open(pty.path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC));
+        // NOLINTEND(cppcoreguidelines-pro-type-vararg)
+        termios settings{};
+        ASSERT_EQ(::tcgetattr(earlier.get(), &settings), 0);
+        settings.c_cflag |= CMSPAR;
+        ASSERT_EQ(::tcsetattr(earlier.get(), TCSANOW, &settings), 0);
+        ASSERT_EQ(::tcgetattr(earlier.get(), &settings), 0);
+        ASSERT_NE(settings.c_cflag & CMSPAR, 0U);
+    }
+    const SystemClock clock;
+    SerialTransport transport(port(pty.path), clock);
+    ASSERT_EQ(transport.connect(0), IoStatus::OK);
+    termios held{};
+    ASSERT_EQ(::tcgetattr(transport.poll_fd(), &held), 0);
+    EXPECT_EQ(held.c_cflag & CMSPAR, 0U);
+}
+
+TEST(SerialTransport, ALockedFileThatIsNoTerminalIsNotATerminal) {
+    // Review M4: the terminal check comes before the lock, so a wrong
+    // `device` that someone has locked is NOT_A_TTY, and is never locked.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
+    const Fd locked(::open("/dev/null", O_RDONLY | O_CLOEXEC));
+    ASSERT_EQ(::flock(locked.get(), LOCK_EX | LOCK_NB), 0);
+    const SystemClock clock;
+    SerialTransport transport(port("/dev/null"), clock);
+    EXPECT_EQ(transport.connect(0), IoStatus::FAILED);
+    EXPECT_EQ(transport.last_error(), ConnectError::NOT_A_TTY);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

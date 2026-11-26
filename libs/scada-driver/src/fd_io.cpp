@@ -8,9 +8,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
-#include <limits>
+#include <iterator>
 #include <span>
 
+#include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -46,10 +47,7 @@ Readiness wait_for(int descriptor, short events, std::int64_t deadline_ns,
                    const Clock& clock, short& revents, int& error) noexcept {
     pollfd entry{.fd = descriptor, .events = events, .revents = 0};
     for (;;) {
-        const timespec left =
-            to_timespec(deadline_ns == std::numeric_limits<std::int64_t>::max()
-                            ? deadline_ns
-                            : deadline_ns - clock.monotonic_ns());
+        const timespec left = to_timespec(time_left(deadline_ns, clock));
         const int ready = ::ppoll(&entry, 1, &left, nullptr);
         if (ready > 0) {
             revents = entry.revents;
@@ -101,16 +99,65 @@ IoStatus read_once(int descriptor, bool socket, std::span<std::byte> into,
     return IoStatus::CLOSED;  // a reset, a user time-out, EIO of a lost port
 }
 
+std::int64_t time_left(std::int64_t deadline_ns, const Clock& clock) noexcept {
+    const std::int64_t now = clock.monotonic_ns();
+    // No subtraction that can overflow: a deadline at or before now leaves
+    // nothing, whatever its value (review M2).
+    return deadline_ns <= now ? 0 : deadline_ns - now;
+}
+
 IoStatus receive_by(int descriptor, bool socket, std::span<std::byte> into,
                     std::int64_t deadline_ns, const Clock& clock,
                     std::size_t& received, int& error) noexcept {
-    received = 0;
-    short revents = 0;
-    if (wait_for(descriptor, POLLIN, deadline_ns, clock, revents, error) ==
-        Readiness::FAILED) {
-        return IoStatus::CLOSED;
+    return receive_loop(
+        [&] {
+            short revents = 0;
+            return wait_for(descriptor, POLLIN, deadline_ns, clock, revents,
+                            error);
+        },
+        [&](std::size_t& got) {
+            return read_once(descriptor, socket, into, got, error);
+        },
+        deadline_ns, clock, received);
+}
+
+namespace {
+
+// One end's address of `descriptor`, read into `out` (sockaddr_in6 holds
+// either family's); false if it has none or it does not fit.
+template <class Address>
+bool end_address(int descriptor, bool peer, Address& out) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
+    auto* generic = reinterpret_cast<sockaddr*>(&out);
+    socklen_t length = sizeof(out);
+    const int result = peer ? ::getpeername(descriptor, generic, &length)
+                            : ::getsockname(descriptor, generic, &length);
+    return result == 0 && length <= sizeof(out);
+}
+
+}  // namespace
+
+bool connected_to_itself(int descriptor) noexcept {
+    sockaddr_in6 local{};
+    sockaddr_in6 peer{};
+    if (!end_address(descriptor, false, local) ||
+        !end_address(descriptor, true, peer) ||
+        local.sin6_family != peer.sin6_family) {
+        return false;
     }
-    return read_once(descriptor, socket, into, received, error);
+    if (local.sin6_family == AF_INET6) {
+        return local.sin6_port == peer.sin6_port &&
+               std::equal(std::begin(local.sin6_addr.s6_addr),
+                          std::end(local.sin6_addr.s6_addr),
+                          std::begin(peer.sin6_addr.s6_addr));
+    }
+    sockaddr_in local4{};
+    sockaddr_in peer4{};
+    return local.sin6_family == AF_INET &&
+           end_address(descriptor, false, local4) &&
+           end_address(descriptor, true, peer4) &&
+           local4.sin_port == peer4.sin_port &&
+           local4.sin_addr.s_addr == peer4.sin_addr.s_addr;
 }
 
 bool drop_readable(int descriptor, bool socket) noexcept {

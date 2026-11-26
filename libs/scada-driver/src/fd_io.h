@@ -40,8 +40,46 @@ enum class Readiness : std::uint8_t {
                                  std::span<std::byte> into,
                                  std::size_t& received, int& error) noexcept;
 
-// `wait_for` POLLIN up to the deadline, then `read_once`, whatever the wait
-// saw: a worker stalled past its deadline still reads what arrived.
+// The time from now to `deadline_ns`, 0 when it has passed, for any
+// deadline (review M2).
+[[nodiscard]] std::int64_t time_left(std::int64_t deadline_ns,
+                                     const Clock& clock) noexcept;
+
+// The loop of `receive_by`, apart from its system calls so that a test can
+// drive it: `wait()` waits for input up to the deadline and returns a
+// Readiness; `read(received)` makes one read that does not block and
+// returns OK, TIMEOUT (nothing readable), CLOSED or FAILED. After every
+// wait, whatever it saw, one read: a worker stalled past its deadline still
+// reads what arrived. A wait that saw input whose read then finds nothing
+// (another reader took it, a wake without data) waits again while the
+// deadline has not passed (review M3): only the deadline makes a TIMEOUT.
+template <class Wait, class Read>
+[[nodiscard]] IoStatus receive_loop(const Wait& wait, const Read& read,
+                                    std::int64_t deadline_ns,
+                                    const Clock& clock,
+                                    std::size_t& received) noexcept {
+    received = 0;
+    for (;;) {
+        const Readiness ready = wait();
+        if (ready == Readiness::FAILED) {
+            return IoStatus::CLOSED;
+        }
+        const IoStatus status = read(received);
+        if (status != IoStatus::TIMEOUT || ready == Readiness::TIMEOUT ||
+            time_left(deadline_ns, clock) == 0) {
+            return status;
+        }
+    }
+}
+
+// True when the connected socket `descriptor` has the same local and peer
+// address and port: a TCP self-connection, which a connect to one of the
+// host's own addresses on a free port of the local port range can make
+// with nobody listening, and which echoes every frame back as its answer
+// (review M1). False on a socket that is not connected.
+[[nodiscard]] bool connected_to_itself(int descriptor) noexcept;
+
+// `receive_loop` over `wait_for` POLLIN and `read_once` on `descriptor`.
 [[nodiscard]] IoStatus receive_by(int descriptor, bool socket,
                                   std::span<std::byte> into,
                                   std::int64_t deadline_ns, const Clock& clock,

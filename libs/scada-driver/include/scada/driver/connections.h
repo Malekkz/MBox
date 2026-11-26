@@ -27,7 +27,7 @@ namespace scada::driver {
 // (7.2, CS A.1).
 enum class ConnectError : std::uint8_t {
     NONE = 0,
-    ADDRESS,    // `host` is not a literal IPv4 or IPv6 address (7.3, O-7)
+    ADDRESS,    // `host` is not a literal IPv4 or IPv6 address, or port 0
     PATH,       // `device` is not an absolute path under /dev/ (CS A.1)
     NO_PORT,    // no such serial port (unplugged, wrong path)
     BUSY,       // the port is open elsewhere (opened exclusively, 7.2)
@@ -37,6 +37,7 @@ enum class ConnectError : std::uint8_t {
     FORMAT,     // the port refuses the parity or the stop bits
     REFUSED,    // the peer refused the connection
     TIMEOUT,    // `connect_timeout` passed first
+    SELF,       // the socket connected to itself (review M1): nobody there
     SYSTEM,     // any other failure; `last_errno` says which
 };
 
@@ -74,7 +75,9 @@ struct TcpEndpoint {
 // TCP_NODELAY (a request is one frame, sent whole) and TCP_USER_TIMEOUT,
 // and waits for it up to the deadline in `ppoll`: the engine's connect
 // blocks the worker up to `connect_timeout` (D-140, Q14). REFUSED is a
-// refusal by the peer; a host that is not a literal is FAILED with
+// refusal by the peer; a socket that connected to itself (no peer at
+// all, review M1) is FAILED with ConnectError::SELF; a host that is not a
+// literal, or port 0, is FAILED with
 // ConnectError::ADDRESS and makes no system call. `send` never blocks: a
 // frame the kernel does not take whole is PARTIAL, nothing taken (a full
 // send buffer) FAILED, a reset or a closed peer CLOSED. `receive` waits in
@@ -85,6 +88,8 @@ struct TcpEndpoint {
 class TcpTransport final : public Transport {
 public:
     TcpTransport(TcpEndpoint endpoint, const Clock& clock);
+    // The clock is kept by reference: never a temporary (S5).
+    TcpTransport(TcpEndpoint endpoint, const Clock&& clock) = delete;
     ~TcpTransport() override;
     TcpTransport(const TcpTransport&) = delete;
     TcpTransport& operator=(const TcpTransport&) = delete;
@@ -102,7 +107,10 @@ public:
 
     // Why the last connect failed; NONE after one that returned OK.
     [[nodiscard]] ConnectError last_error() const noexcept { return error_; }
-    // The `errno` of the last failure of any call, 0 if none.
+    // The `errno` of the last system call that failed, in any call since
+    // the last connect, which sets it to 0 first (S1). 0 when no system call
+    // failed: after a connect that returned OK, and after one the transport
+    // itself refused or that ran out of time (ADDRESS, TIMEOUT, SELF).
     [[nodiscard]] int last_errno() const noexcept { return errno_; }
 
 private:
@@ -153,6 +161,7 @@ struct SerialSettings {
 class SerialTransport final : public Transport {
 public:
     SerialTransport(SerialSettings settings, const Clock& clock);
+    SerialTransport(SerialSettings settings, const Clock&& clock) = delete;
     ~SerialTransport() override;
     SerialTransport(const SerialTransport&) = delete;
     SerialTransport& operator=(const SerialTransport&) = delete;
@@ -168,6 +177,9 @@ public:
                      std::size_t& received) noexcept override;
     bool discard_input() noexcept override;
 
+    // As TcpTransport's: why the last connect failed (NONE after OK), and
+    // the `errno` of the last failed system call since the last connect, 0
+    // when none failed (PATH, RATE and FORMAT are the transport's own).
     [[nodiscard]] ConnectError last_error() const noexcept { return error_; }
     [[nodiscard]] int last_errno() const noexcept { return errno_; }
     // True when the last connect set the port's low-latency mode.

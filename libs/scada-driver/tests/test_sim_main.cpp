@@ -20,6 +20,7 @@
 
 #include "loopback.h"
 #include "scada/common/clock.h"
+#include "scada/common/fd.h"
 #include "test_protocol.h"
 
 #include <array>
@@ -215,8 +216,8 @@ bool take_input(int descriptor, std::vector<std::byte>& pending) {
 }
 
 int run_tcp(SimBus& bus, const Options& options) {
-    const int listener = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (listener < 0) {
+    const scada::Fd listener(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
+    if (!listener.valid()) {
         return 1;
     }
     sockaddr_in address{};
@@ -226,15 +227,16 @@ int run_tcp(SimBus& bus, const Options& options) {
     socklen_t length = sizeof(address);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,scada-banned): the socket interface takes every address type through a sockaddr pointer
     auto* generic = reinterpret_cast<sockaddr*>(&address);
-    if (::bind(listener, generic, sizeof(address)) != 0 ||
-        ::listen(listener, 1) != 0 ||
-        ::getsockname(listener, generic, &length) != 0) {
+    if (::bind(listener.get(), generic, sizeof(address)) != 0 ||
+        ::listen(listener.get(), 1) != 0 ||
+        ::getsockname(listener.get(), generic, &length) != 0) {
         return 1;
     }
     say("tcp " + std::to_string(ntohs(address.sin_port)));
     for (;;) {
-        const int client = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
-        if (client < 0) {
+        scada::Fd client(
+            ::accept4(listener.get(), nullptr, nullptr, SOCK_CLOEXEC));
+        if (!client.valid()) {
             if (errno == EINTR) {
                 continue;
             }
@@ -242,13 +244,13 @@ int run_tcp(SimBus& bus, const Options& options) {
         }
         std::vector<std::byte> pending;
         std::size_t answered = 0;
-        while (take_input(client, pending)) {
-            answered += serve(pending, bus, client);
+        while (take_input(client.get(), pending)) {
+            answered += serve(pending, bus, client.get());
             if (options.close_after && answered >= *options.close_after) {
                 break;
             }
         }
-        ::close(client);
+        client.reset();  // closed before it says so
         if (options.close_after) {
             say("closed");
         }
@@ -256,24 +258,25 @@ int run_tcp(SimBus& bus, const Options& options) {
 }
 
 int run_pty(SimBus& bus) {
-    const int master = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    const scada::Fd master(::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC));
     std::array<char, PATH_CAPACITY> path{};
-    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0 ||
-        ::ptsname_r(master, path.data(), path.size()) != 0) {
+    if (!master.valid() || ::grantpt(master.get()) != 0 ||
+        ::unlockpt(master.get()) != 0 ||
+        ::ptsname_r(master.get(), path.data(), path.size()) != 0) {
         return 1;
     }
     // The simulator holds the other end open too, so that the master does
     // not see a hang-up before the transport opens it, or between two of
     // its connects.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open has no other form
-    const int held = ::open(path.data(), O_RDWR | O_NOCTTY | O_CLOEXEC);
-    if (held < 0) {
+    const scada::Fd held(::open(path.data(), O_RDWR | O_NOCTTY | O_CLOEXEC));
+    if (!held.valid()) {
         return 1;
     }
     say(std::string("pty ") + path.data());
     std::vector<std::byte> pending;
-    while (take_input(master, pending)) {
-        (void)serve(pending, bus, master);
+    while (take_input(master.get(), pending)) {
+        (void)serve(pending, bus, master.get());
     }
     return 1;
 }

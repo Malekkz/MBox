@@ -136,7 +136,16 @@ ConnectError open_error(int number) noexcept {
     }
 }
 
-constexpr tcflag_t FORMAT_BITS = CSIZE | PARENB | PARODD | CSTOPB;
+// Mark or space parity (CMSPAR, where the C library has it) is never set:
+// it is cleared with the rest and checked in the read-back, so that one
+// inherited from an earlier user of the port is not kept (review M5).
+#ifdef CMSPAR
+constexpr tcflag_t MARK_OR_SPACE = CMSPAR;
+#else
+constexpr tcflag_t MARK_OR_SPACE = 0;
+#endif
+constexpr tcflag_t FORMAT_BITS =
+    CSIZE | PARENB | PARODD | CSTOPB | MARK_OR_SPACE;
 
 // The C library defines these in kernel headers (asm/..., linux/...) that
 // <sys/ioctl.h> and <linux/serial.h> include.
@@ -261,6 +270,15 @@ IoStatus SerialTransport::connect(std::int64_t /*deadline_ns*/) noexcept {
     if (!fd_.valid()) {
         const int number = errno;
         return fail_connect(open_error(number), number);
+    }
+    // A terminal first: a wrong `device` (a file, /dev/null) is refused
+    // before it is locked, never locked as if it were a port (review M4).
+    termios probe{};
+    if (::tcgetattr(fd_.get(), &probe) != 0) {
+        const int number = errno;
+        return fail_connect(
+            number == ENOTTY ? ConnectError::NOT_A_TTY : ConnectError::SYSTEM,
+            number);
     }
     // Exclusive: `flock` binds every process that asks, root included;
     // TIOCEXCL refuses any later open by another user (7.2).

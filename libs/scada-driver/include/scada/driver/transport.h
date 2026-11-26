@@ -78,7 +78,8 @@ public:
     // reads once without blocking: at most `into.size()` bytes into `into`,
     // setting `received`. OK with `received` > 0; TIMEOUT only when nothing
     // is readable after the wait (a worker stalled past its deadline still
-    // reads what arrived); CLOSED.
+    // reads what arrived); CLOSED. An empty `into` is FAILED, a caller's
+    // fault: the engine never passes one (S5).
     virtual IoStatus receive(std::span<std::byte> into,
                              std::int64_t deadline_ns,
                              std::size_t& received) noexcept = 0;
