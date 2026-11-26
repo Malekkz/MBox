@@ -31,6 +31,9 @@ target_include_directories(scada-conf-unit-test
 scada_add_test(scada-conf-limits-test KIND unit
   SOURCES limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-checked-values-limits-test KIND unit
+  SOURCES checked_values_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
 scada_add_test(scada-conf-tree-limits-test KIND unit
   SOURCES tree_limits_test.cpp
   DEPENDS scada::conf scada::test-support)

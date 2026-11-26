@@ -314,7 +314,8 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   and its weighting of expressions) at their edges, and the parse of each
   expression once for all its evaluations. Each makes millions of nodes or
   units of work, so each is an executable of its own
-  (`scada-conf-limits-test`, `scada-conf-tree-limits-test`,
+  (`scada-conf-limits-test`, `scada-conf-checked-values-limits-test` for
+  the bound of the checked values of D-115, `scada-conf-tree-limits-test`,
   `scada-conf-expression-limits-test`) with its own time limit; the cases
   they share are in `tests/expand_cases.h`.
 - `tests/config_eval_test.cpp`: the values of configuration expressions and
