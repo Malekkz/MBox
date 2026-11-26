@@ -499,6 +499,109 @@ TEST(MergedPoints, TheKeptLimitOfTheGrouping) {
     EXPECT_EQ(report.error_count, 3U);
 }
 
+// Item 4 of the delta review: what makes one cause. Its code, the
+// template's file, line and column and the key; met again at another
+// instance, which is another place: another column of one line, or the
+// same line of another file. A note that is not a template's is no cause.
+TEST(MergedPoints, WhatMakesOneCause) {
+    struct Made {
+        std::uint16_t code;
+        Location at;
+        std::string note_kind;
+        Location note;
+        std::string instance;
+    };
+    const auto run = [](const std::vector<Made>& made) {
+        Diagnostics diagnostics;
+        GroupedErrors grouped(MAX_KEPT_ERRORS);
+        for (const Made& one : made) {
+            Diagnostic diagnostic;
+            diagnostic.code = one.code;
+            diagnostic.location = one.at;
+            diagnostic.message = "m";
+            diagnostic.notes.push_back(Diagnostic::Note{
+                .kind = one.note_kind, .location = one.note, .detail = {}});
+            grouped.add(std::move(diagnostic), "m", one.instance, diagnostics);
+        }
+        grouped.flush(diagnostics);
+        Report report;
+        diagnostics.move_into(report);
+        Lines found;
+        for (const Diagnostic& error : report.errors) {
+            found.push_back(error.location.file + ":" +
+                            std::to_string(error.location.line) + ":" +
+                            std::to_string(error.location.column) + " CF-" +
+                            std::to_string(error.code) + " " + error.message);
+        }
+        return found;
+    };
+    const auto at = [](std::string file, std::uint32_t line,
+                       std::uint32_t column) {
+        return Location{
+            .file = std::move(file), .line = line, .column = column};
+    };
+    constexpr std::uint16_t CODE = 516;
+    constexpr std::uint16_t OTHER_CODE = 517;
+    const Location site = at("templates/t.yaml", 5, 31);
+    // One cause at three instances on one line, and one in another file
+    // at the same line and column.
+    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
+                   {CODE, at("a.yaml", 7, 30), "template", site, "d2"},
+                   {CODE, at("a.yaml", 7, 57), "template", site, "d3"},
+                   {CODE, at("b.yaml", 7, 3), "template", site, "d4"}}),
+              Lines{"a.yaml:7:3 CF-516 m (and 3 more instances: d2, d3, d4)"});
+    // Points of one instance that meet the cause count once.
+    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
+                   {CODE, at("a.yaml", 7, 3), "template", site, "d1"},
+                   {CODE, at("a.yaml", 8, 3), "template", site, "d2"}}),
+              Lines{"a.yaml:7:3 CF-516 m (and 1 more instance: d2)"});
+    // Another template line, column, file or code is another cause.
+    for (const Location& other :
+         {at("templates/t.yaml", 6, 31), at("templates/t.yaml", 5, 40),
+          at("templates/u.yaml", 5, 31)}) {
+        EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
+                       {CODE, at("a.yaml", 8, 3), "template", other, "d2"}}),
+                  (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-516 m"}))
+            << other.file << ":" << other.line << ":" << other.column;
+    }
+    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "template", site, "d1"},
+                   {OTHER_CODE, at("a.yaml", 8, 3), "template", site, "d2"}}),
+              (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-517 m"}));
+    // A note of another kind is no cause.
+    EXPECT_EQ(run({{CODE, at("a.yaml", 7, 3), "include", site, "d1"},
+                   {CODE, at("a.yaml", 8, 3), "include", site, "d2"}}),
+              (Lines{"a.yaml:7:3 CF-516 m", "a.yaml:8:3 CF-516 m"}));
+}
+
+// Item 4 of the delta review, through a whole tree: two channel files, and
+// several devices on one line.
+TEST(MergedPoints, OneCauseOverChannelFilesAndOneLine) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - { name: a, value_type: int64, address: { table: input, register: "
+        "1, type: float32 } }\n";
+    const auto line = [](std::string_view name, std::string_view devices) {
+        return "channel:\n  name: " + std::string(name) +
+               "\n  type: rtu\n  device: /dev/serial/by-path/platform-" +
+               std::string(name) + "\n  baud: 9600\ndevices: [ " +
+               std::string(devices) + " ]\n";
+    };
+    EXPECT_EQ(
+        errors(expand(
+            {{"templates/meter_a.yaml", meter},
+             {"drivers/modbus/line1.yaml",
+              line("line1",
+                   "{ name: ps1.m1, template: meter_a, unit_id: 1 }, "
+                   "{ name: ps1.m2, template: meter_a, unit_id: 2 }")},
+             {"drivers/modbus/line2.yaml",
+              line("line2",
+                   "{ name: ps1.m3, template: meter_a, unit_id: 1 }")}})),
+        Lines{"drivers/modbus/line1.yaml:6:20: error CF-504: \"ps1.m1.a\": "
+              "value_type int64 cannot hold float32 (and 2 more instances: "
+              "ps1.m2, ps1.m3)\n  from template templates/meter_a.yaml:4:28 "
+              "(point a)"});
+}
+
 // S5: the range of a bit field (one bit, a few, all 64), a product past 64
 // bits, a point refused once, and the derived type of a double point.
 TEST(MergedPoints, BitFieldRangesAndOneErrorAPoint) {
