@@ -458,7 +458,7 @@ TEST(MergedPoints, TheEdgesOfAnIntegerScaling) {
 // epoch are in `MergedPoints.IncompleteMergedMaps`.
 TEST(MergedPoints, EveryKeyAMergedMapNeeds) {
     const std::vector<std::pair<std::string_view, std::string_view>> rows = {
-        {"exponent_from: { point: q }, address: { table: input, register: 1, "
+        {"exponent_from: { point: p }, address: { table: input, register: 1, "
          "type: int16 }",
          "drivers/modbus/line1.yaml:7:11: error CF-202: exponent_from of "
          "\"ps1.m1.p\" needs direction\n  from template "
