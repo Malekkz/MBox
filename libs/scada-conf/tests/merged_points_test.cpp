@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -394,19 +395,20 @@ TEST(MergedPoints, EveryKeyAMergedMapNeeds) {
 // The kept limit of the grouping: the diagnostic at the limit is counted,
 // not kept, and a repeated text is dropped (S5 of the review of #149).
 TEST(MergedPoints, TheKeptLimitOfTheGrouping) {
-    const auto diagnostic = [](std::uint16_t code, std::string message) {
+    constexpr std::uint16_t CF_OUT_OF_RANGE = 204;
+    const auto diagnostic = [](std::string message) {
         Diagnostic made;
-        made.code = code;
+        made.code = CF_OUT_OF_RANGE;
         made.location = Location{.file = "f.yaml", .line = 1, .column = 1};
         made.message = std::move(message);
         return made;
     };
     Diagnostics diagnostics;
     GroupedErrors grouped(2);
-    grouped.add(diagnostic(204, "a"), {}, "d1", diagnostics);
-    grouped.add(diagnostic(204, "a"), {}, "d1", diagnostics);
-    grouped.add(diagnostic(204, "b"), {}, "d1", diagnostics);
-    grouped.add(diagnostic(204, "c"), {}, "d1", diagnostics);
+    grouped.add(diagnostic("a"), {}, "d1", diagnostics);
+    grouped.add(diagnostic("a"), {}, "d1", diagnostics);
+    grouped.add(diagnostic("b"), {}, "d1", diagnostics);
+    grouped.add(diagnostic("c"), {}, "d1", diagnostics);
     grouped.flush(diagnostics);
     Report report;
     diagnostics.move_into(report);
@@ -482,7 +484,8 @@ TEST(MergedPoints, OneErrorForARefusedPoint) {
 
 // The keys of an io address by its channel's backend (B.2, B.3).
 TEST(MergedPoints, TheKeysOfAnIoBackend) {
-    const auto io = [](std::string_view backend, std::string_view address) {
+    const auto expanded = [](std::string_view backend,
+                             std::string_view address) {
         return errors(expand(
             {{"templates/sensor_a.yaml",
               "template: sensor_a\nprotocol: io\npoints:\n"
@@ -493,17 +496,17 @@ TEST(MergedPoints, TheKeysOfAnIoBackend) {
                   ", device: adc0 }\n"
                   "devices:\n  - { name: ps1.s1, template: sensor_a }\n"}}));
     };
-    EXPECT_EQ(io("iio", "{ channel: in_voltage0 }"), Lines{});
-    EXPECT_EQ(io("iio", "{ filter: 1s }"),
+    EXPECT_EQ(expanded("iio", "{ channel: in_voltage0 }"), Lines{});
+    EXPECT_EQ(expanded("iio", "{ filter: 1s }"),
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs channel\n  from template "
                     "templates/sensor_a.yaml:4:29 (point level)"});
-    EXPECT_EQ(io("simulator", "{ profile: { type: ramp } }"), Lines{});
-    EXPECT_EQ(io("simulator", "{ filter: 1s }"),
+    EXPECT_EQ(expanded("simulator", "{ profile: { type: ramp } }"), Lines{});
+    EXPECT_EQ(expanded("simulator", "{ filter: 1s }"),
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs profile\n  from template "
                     "templates/sensor_a.yaml:4:29 (point level)"});
-    EXPECT_EQ(io("simulator", "{ profile: { period: 10 } }"),
+    EXPECT_EQ(expanded("simulator", "{ profile: { period: 10 } }"),
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the profile of "
                     "\"ps1.s1.level\" needs type\n  from template "
                     "templates/sensor_a.yaml:4:40 (point level)"});

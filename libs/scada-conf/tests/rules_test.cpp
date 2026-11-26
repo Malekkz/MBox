@@ -545,10 +545,16 @@ TEST(Rules, AnIntegerOneInAnyForm) {
         Diagnostics diagnostics;
         const std::optional<Document> document = parse_yaml(
             "n: " + std::string(row.text) + "\n", "f.yaml", diagnostics);
-        ASSERT_TRUE(document) << row.text;
+        if (!document) {
+            ADD_FAILURE() << "parse error: " << row.text;
+            continue;
+        }
         const std::optional<NodeId> node =
             document->find(document->root(), "n");
-        ASSERT_TRUE(node) << row.text;
+        if (!node) {
+            ADD_FAILURE() << "no key n: " << row.text;
+            continue;
+        }
         ScalarTypes types(*document);
         types.set(*node, row.type);
         EXPECT_EQ(is_integer_one(*document, types, *node), row.one) << row.text;
