@@ -23,6 +23,7 @@
 #include <functional>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -45,6 +46,9 @@ constexpr std::uint64_t INT64_MAGNITUDE = std::uint64_t{1} << 63;
 constexpr std::uint64_t UINT64_TOP = ~std::uint64_t{0};
 constexpr std::uint64_t MAX_BIT_WIDTH = 64;
 constexpr std::uint64_t MOD10K_BASE = 10000;
+// The results of computed values kept, so that a value met at many
+// instances is checked once (D-115).
+constexpr std::size_t MAX_CHECKED_VALUES = 65536;
 
 // An integer as a sign and a magnitude of up to 64 bits, enough for every
 // raw value; `overflow` is set when a result needs more, which no value type
@@ -360,16 +364,43 @@ private:
     void check_value(const std::string& schema, NodeId node,
                      const std::vector<std::string>& steps,
                      const std::string& label) {
-        Result<std::vector<ValueError>> errors =
-            SchemaSet::builtin().check_value(schema, steps,
-                                             document_->text(node), label);
-        if (!errors.ok()) {
-            status_ = errors.status();
-            return;
+        // The rules of a key are found once per protocol and path.
+        std::string key = schema;
+        for (const std::string& step : steps) {
+            key += '/' + step;
         }
-        for (ValueError& found : errors.value()) {
+        auto found = key_rules_.find(key);
+        if (found == key_rules_.end()) {
+            Result<KeyRules> rules =
+                SchemaSet::builtin().key_rules(schema, steps);
+            if (!rules.ok()) {
+                status_ = rules.status();
+                return;
+            }
+            found = key_rules_.emplace(key, std::move(rules).value()).first;
+        }
+        // A value met again at the same key is not checked again (the same
+        // register at every instance); the results kept are bounded.
+        const std::string_view text = document_->text(node);
+        std::string seen = key;
+        seen += '\0';
+        seen += text;
+        seen += '\0';
+        seen += label;
+        auto result = checked_.find(seen);
+        if (result == checked_.end()) {
+            if (checked_.size() >= MAX_CHECKED_VALUES) {
+                checked_.clear();
+            }
+            result =
+                checked_
+                    .emplace(std::move(seen), SchemaSet::builtin().check_value(
+                                                  found->second, text, label))
+                    .first;
+        }
+        for (const ValueError& error : result->second) {
             diagnostics_->add(expanded_diagnostic(
-                *tree_, found.code, node, std::move(found.message),
+                *tree_, error.code, node, error.message,
                 point_name_.empty() ? std::string() : "point " + point_name_));
         }
     }
@@ -727,6 +758,8 @@ private:
     std::set<std::string, std::less<>> global_enums_;
     std::set<std::string, std::less<>> device_enums_;
     std::vector<NodeId> computed_;
+    std::map<std::string, KeyRules, std::less<>> key_rules_;
+    std::map<std::string, std::vector<ValueError>, std::less<>> checked_;
     Status status_;
 };
 

@@ -1201,6 +1201,22 @@ TEST(CheckValue, EverySchemaJoinedAtAStep) {
               Lines{"CF-204: n must be between 5 and any"});
 }
 
+// The rules of a key are found once and check many values, with the same
+// results as one call each.
+TEST(CheckValue, TheRulesOfAKeyFoundOnce) {
+    const SchemaSet& set = SchemaSet::builtin();
+    const std::vector<std::string> bit{"points", "[]", "address", "bit"};
+    const Result<KeyRules> rules = set.key_rules(MODBUS_DEVICE, bit);
+    ASSERT_TRUE(rules.ok());
+    EXPECT_TRUE(set.check_value(rules.value(), "15", "address.bit").empty());
+    const std::vector<ValueError> errors =
+        set.check_value(rules.value(), "16", "address.bit");
+    ASSERT_EQ(errors.size(), 1U);
+    EXPECT_EQ(errors.front().message, "address.bit must be between 0 and 15");
+    const std::vector<std::string> nonsense{"points", "nonsense"};
+    EXPECT_FALSE(set.key_rules(MODBUS_DEVICE, nonsense).ok());
+}
+
 // A schema or a key that gives no rule is a defect of the caller: INTERNAL,
 // never a value taken as valid.
 TEST(CheckValue, AKeyWithoutARuleIsInternal) {

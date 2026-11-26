@@ -2320,9 +2320,8 @@ std::set<SchemaId> step_down(const CompiledSchemas& schemas,
 
 }  // namespace
 
-Result<std::vector<ValueError>> SchemaSet::check_value(
-    std::string_view schema, std::span<const std::string> path,
-    std::string_view text, std::string_view label) const {
+Result<KeyRules> SchemaSet::key_rules(std::string_view schema,
+                                      std::span<const std::string> path) const {
     const auto found = compiled_->names.find(schema);
     if (found == compiled_->names.end()) {
         return Status(StatusCode::INTERNAL,
@@ -2336,6 +2335,15 @@ Result<std::vector<ValueError>> SchemaSet::check_value(
                           "check_value: the schema gives the key no rule");
         }
     }
+    KeyRules key;
+    key.schemas_.assign(rules.begin(), rules.end());
+    return key;
+}
+
+std::vector<ValueError> SchemaSet::check_value(const KeyRules& rules,
+                                               std::string_view text,
+                                               std::string_view label) const {
+    std::vector<ValueError> errors;
     DocumentBuilder builder;
     const Result<FileIndex> file = builder.add_file(std::string(label));
     if (!file.ok() ||
@@ -2344,19 +2352,21 @@ Result<std::vector<ValueError>> SchemaSet::check_value(
                  text, ScalarStyle::PLAIN,
                  SourcePosition{.file = file.value(), .line = 1, .column = 1})
              .ok()) {
-        return Status(StatusCode::INTERNAL,
-                      "check_value: the value is not kept");
+        // A label of one name and a scalar of at most 64 KiB always fit.
+        panic("SchemaSet::check_value: the value is not kept");
     }
     Result<Document> document = builder.finish();
     if (!document.ok()) {
-        return document.status();
+        panic("SchemaSet::check_value: the value is not kept");
     }
-    std::vector<ValueError> errors;
-    for (const SchemaId schema_id : rules) {
-        ScalarTypes types(document.value());
+    ScalarTypes types(document.value());
+    for (const std::size_t schema_id : rules.schemas_) {
         Diagnostics diagnostics;
         Validator validator(*compiled_, document.value(), types, label);
         validator.run(schema_id, diagnostics);
+        if (diagnostics.error_count() == 0) {
+            continue;
+        }
         Report report;
         diagnostics.move_into(report);
         for (Diagnostic& diagnostic : report.errors) {
@@ -2371,6 +2381,16 @@ Result<std::vector<ValueError>> SchemaSet::check_value(
         }
     }
     return errors;
+}
+
+Result<std::vector<ValueError>> SchemaSet::check_value(
+    std::string_view schema, std::span<const std::string> path,
+    std::string_view text, std::string_view label) const {
+    const Result<KeyRules> rules = key_rules(schema, path);
+    if (!rules.ok()) {
+        return rules.status();
+    }
+    return check_value(rules.value(), text, label);
 }
 
 void SchemaSet::validate(const Document& document, ScalarTypes& types,

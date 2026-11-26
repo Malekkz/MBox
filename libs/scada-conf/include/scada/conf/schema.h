@@ -36,6 +36,18 @@ struct SchemaSource {
 [[nodiscard]] const std::vector<SchemaSource>& builtin_schema_sources();
 
 struct CompiledSchemas;
+class SchemaSet;
+
+// The rules a schema gives one key, found once for many values
+// (`SchemaSet::key_rules`).
+class KeyRules {
+public:
+    KeyRules() = default;
+
+private:
+    friend class SchemaSet;
+    std::vector<std::size_t> schemas_;
+};
 
 // One error of a value at its key: its code and message.
 struct ValueError {
@@ -90,6 +102,17 @@ public:
     [[nodiscard]] Result<std::vector<ValueError>> check_value(
         std::string_view schema, std::span<const std::string> path,
         std::string_view text, std::string_view label) const;
+
+    // The rules `schema` gives the key at `path`, as `check_value` finds
+    // them, to check many values with the overload below; INTERNAL when
+    // they name no rule.
+    [[nodiscard]] Result<KeyRules> key_rules(
+        std::string_view schema, std::span<const std::string> path) const;
+
+    // `check_value` against rules found by `key_rules` of this set.
+    [[nodiscard]] std::vector<ValueError> check_value(
+        const KeyRules& rules, std::string_view text,
+        std::string_view label) const;
 
     SchemaSet(SchemaSet&&) noexcept;
     SchemaSet& operator=(SchemaSet&&) noexcept;
