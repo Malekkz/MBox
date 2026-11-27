@@ -25,11 +25,22 @@ The library is built in slices. These are the first two:
 | The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 | The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
 | The driver process: main thread, a worker per channel, the writes after attach, the channel watchdog, the bounded stop | `scada/driver/driver.h` | 2.3, 2.4, 2.6, 9.1, 10 (decision D-142) |
+| The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-146) |
 
-Not yet here: the system tags, identity and restarts, and the workers' log
-queues (slice 5b),
+The worker writes the `sys.drv.<channel>.*` and `sys.dev.<device>.*` tags
+of 11.1: states when they change, counters at most once a second, averages
+rounded to 0.1 ms. At the stop it writes the counters' last values, then the
+channel and its devices as not connected. The main thread writes the
+`sys.proc.<process>.*` tags as the owner named like the process, and
+`config_state` 0 again at the stop. A tag set must list them all (CS 12.5);
+a driver whose tag set lacks one does not start. The device tags of slices
+not built yet (`restarts`, `selections_lost`, `last_command_stage`) read
+NOT_INIT.
+
+Not yet here: the identity and restart tags (slice 5b-2), the workers' log
+queues (slice 5b-3),
 commands, the generation change and reload. `docs/decisions.md` D-130 to
-D-142 record the choices the contracts left open.
+D-142, D-145 and D-146 record the choices the contracts left open.
 
 ## What it does
 

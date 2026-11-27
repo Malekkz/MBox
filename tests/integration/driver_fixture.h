@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -69,8 +70,9 @@ inline constexpr int EXIT_STALL = 4;
 inline constexpr milliseconds HEARTBEAT_TIMEOUT{1500};
 
 // One channel of the tag set: its name and its INT64 tags
-// `<device>.<point>`. The owner is `drv-test` for a single channel and
-// `drv-test.<channel>` for several (TD 1), unless `owner` names another.
+// `<device>.<point>`. The owner is `drv-test.<channel>` (CS 12.5, TD 1.1),
+// unless `owner` names another; `drv-test` itself is the main thread's,
+// with the `sys.proc.drv-test.*` tags (D-146).
 // `retain` gives every tag RETAIN.
 struct ChannelTags {
     std::string name;
@@ -78,7 +80,124 @@ struct ChannelTags {
     // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
     std::string owner{};
     bool retain = false;
+    // The system tags of the channel and its devices (11.1) are listed.
+    bool system_tags = true;
+    // The owner of those system tags when not the channel's: a tag set the
+    // driver must refuse (review S3).
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::string system_owner{};
 };
+
+// One system tag of driver interface contract 11.1: its signal and type.
+struct SystemTag {
+    std::string_view signal;
+    std::string_view type;
+};
+
+// The system tags of 11.1 that slice 5b-1 writes, as CS 12.5 names them:
+// written out here, not taken from the library, so that a wrong name or
+// type in the driver fails the start (D-146).
+inline constexpr std::array<SystemTag, 5> CHANNEL_SYSTEM_TAGS{{
+    {.signal = "state", .type = "int64"},
+    {.signal = "connects", .type = "uint64"},
+    {.signal = "refused_connects", .type = "uint64"},
+    {.signal = "secured", .type = "bool"},
+    {.signal = "requests_per_s", .type = "float64"},
+}};
+inline constexpr std::array<SystemTag, 7> PROCESS_SYSTEM_TAGS{{
+    {.signal = "realtime", .type = "bool"},
+    {.signal = "config_id", .type = "uint64"},
+    {.signal = "config_state", .type = "int64"},
+    {.signal = "stale_outcomes", .type = "uint64"},
+    {.signal = "answers_dropped", .type = "uint64"},
+    {.signal = "safe_unjournalled", .type = "uint64"},
+    {.signal = "log_dropped", .type = "uint64"},
+}};
+// scada-drv-test's poll groups.
+inline constexpr std::array<std::string_view, 3> POLL_GROUPS{"fast", "normal",
+                                                             "slow"};
+inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
+    {.signal = "state", .type = "int64"},
+    {.signal = "last_ok_time", .type = "int64"},
+    {.signal = "requests", .type = "uint64"},
+    {.signal = "errors", .type = "uint64"},
+    {.signal = "timeouts", .type = "uint64"},
+    {.signal = "response_ms", .type = "float64"},
+    {.signal = "requests_per_scan", .type = "uint64"},
+    {.signal = "pacing_limited", .type = "bool"},
+    {.signal = "last_status", .type = "int64"},
+    {.signal = "exceptions", .type = "uint64"},
+    {.signal = "refusals", .type = "uint64"},
+    {.signal = "sentinels", .type = "uint64"},
+    {.signal = "invalid", .type = "uint64"},
+    {.signal = "points_absent", .type = "uint64"},
+}};
+
+// The device tags the validator generates for every device (11.1) that no
+// slice built yet writes: the driver resolves none of them, and they read
+// BAD with NOT_INIT, from the walk of 9.1, for the driver's whole life
+// (5b-2 brings `restarts`, the command slices the other two; review S2).
+// `refresh_failures` and the identity tags are only for some devices.
+inline constexpr std::array<SystemTag, 3> UNWRITTEN_DEVICE_TAGS{{
+    {.signal = "restarts", .type = "uint64"},
+    {.signal = "selections_lost", .type = "uint64"},
+    {.signal = "last_command_stage", .type = "int64"},
+}};
+
+// The devices of a channel's point tags, in order of first appearance.
+inline std::vector<std::string> devices_of(const ChannelTags& channel) {
+    std::vector<std::string> devices;
+    for (const std::string& tag : channel.tags) {
+        std::string device = tag.substr(0, tag.find('.'));
+        if (std::find(devices.begin(), devices.end(), device) ==
+            devices.end()) {
+            devices.push_back(std::move(device));
+        }
+    }
+    return devices;
+}
+
+// The system tags of `channel` and of each device of its point tags
+// (CS 12.5), with their types.
+inline std::vector<std::pair<std::string, std::string_view>> system_tags_of(
+    const ChannelTags& channel) {
+    std::vector<std::pair<std::string, std::string_view>> out;
+    const std::vector<std::string> devices = devices_of(channel);
+    out.reserve(CHANNEL_SYSTEM_TAGS.size() + POLL_GROUPS.size() +
+                (devices.size() *
+                 (DEVICE_SYSTEM_TAGS.size() + UNWRITTEN_DEVICE_TAGS.size())));
+    const std::string drv = "sys.drv." + channel.name + ".";
+    for (const SystemTag& tag : CHANNEL_SYSTEM_TAGS) {
+        out.emplace_back(drv + std::string(tag.signal), tag.type);
+    }
+    for (const std::string_view group : POLL_GROUPS) {
+        out.emplace_back(drv + "period." + std::string(group), "float64");
+    }
+    for (const std::string& device : devices) {
+        for (const SystemTag& tag : DEVICE_SYSTEM_TAGS) {
+            out.emplace_back(
+                "sys.dev." + device + "." + std::string(tag.signal), tag.type);
+        }
+        for (const SystemTag& tag : UNWRITTEN_DEVICE_TAGS) {
+            out.emplace_back(
+                "sys.dev." + device + "." + std::string(tag.signal), tag.type);
+        }
+    }
+    return out;
+}
+
+// Appends the tag `name` of `owner`, of `type`, to the JSON list `tags`.
+inline void append_tag(std::string& tags, const std::string& name,
+                       const std::string& owner, std::string_view type,
+                       bool retain) {
+    tags += tags.empty() ? R"({"name": ")" : R"(, {"name": ")";
+    tags += name;
+    tags += R"(", "owner": ")";
+    tags += owner;
+    tags += R"(", "type": ")";
+    tags += type;
+    tags += retain ? R"(", "retain": true})" : R"("})";
+}
 
 // The port of the simulator's first line, `tcp <port>`; 0 if none.
 inline std::uint16_t port_of(const ChildProcess& sim) {
@@ -346,6 +465,47 @@ protected:
     }
 
     // Writes the tag set and starts scada-tagd.
+    // The next tag set has no owner `drv-test` and no `sys.proc` tags.
+    void without_process_tags() { process_tags_ = false; }
+    // The next tag sets lack the tag `name`, or give it `type` (review S4).
+    void omit_tag(const std::string& name) { omitted_.push_back(name); }
+    void retype_tag(const std::string& name, const std::string& type) {
+        retyped_.emplace_back(name, type);
+    }
+    // The next tag sets give the owner `drv-test` the INT64 tag `name` too,
+    // which no code of the driver writes (review M8).
+    void add_process_tag(const std::string& name) {
+        process_extra_tags_.push_back(name);
+    }
+    // Writes `value` GOOD to the tag `name` of process drv-test, attached as
+    // that process, then detaches: what a previous life of the driver
+    // would have left. False if any call is refused.
+    bool write_as_driver(const std::string& name, std::int64_t value) {
+        const scada_attach_opts options{.base_dir = base_.c_str(),
+                                        .retain_dir = nullptr,
+                                        .tagd_uid = std::int64_t{::geteuid()}};
+        scada_ctx* ctx = nullptr;
+        if (scada_tag_attach_opts("drv-test", &options, &ctx) != SCADA_OK) {
+            return false;
+        }
+        std::uint32_t tag = SCADA_INVALID_HANDLE;
+        scada_value written{};
+        written.type = SCADA_TYPE_INT64;
+        written.value = std::bit_cast<std::uint64_t>(value);
+        written.quality = SCADA_QUALITY_GOOD;
+        const bool done =
+            scada_tag_resolve(ctx, name.c_str(), &tag) == SCADA_OK &&
+            scada_tag_write(ctx, tag, &written) == SCADA_OK &&
+            scada_tag_notify(ctx) == SCADA_OK;
+        scada_tag_detach(ctx);
+        return done;
+    }
+    // The next tag sets are whole again.
+    void whole_tag_sets() {
+        omitted_.clear();
+        retyped_.clear();
+    }
+
     void start_tagd(const std::vector<ChannelTags>& channels,
                     const std::vector<std::string>& extra_tags = {}) {
         write_tag_set(channels, extra_tags);
@@ -542,6 +702,31 @@ protected:
         return false;
     }
 
+    // True when, within `limit`, a read of `tag` right after a notify of
+    // drv-test (its cycle counter, TD 10) holds `holds`: a value written
+    // and its readers woken, not only written (review S4).
+    bool notified_while(std::uint32_t tag,
+                        const std::function<bool(const scada_value&)>& holds,
+                        milliseconds limit = WAIT_LIMIT) {
+        std::uint16_t index = 0;
+        scada_waitset* set = nullptr;
+        if (scada_proc_resolve(ctx_, "drv-test", &index) != SCADA_OK ||
+            scada_waitset_create(ctx_, &set) != SCADA_OK) {
+            return false;
+        }
+        bool seen = false;
+        if (scada_waitset_add_cycle(set, index) == SCADA_OK) {
+            const auto end = SteadyClock::now() + limit;
+            while (!seen && SteadyClock::now() < end) {
+                if (scada_waitset_wait(set, 50) == SCADA_OK) {
+                    seen = holds(read(tag));
+                }
+            }
+        }
+        scada_waitset_destroy(set);
+        return seen;
+    }
+
     // Takes every change already in the ring.
     void drain() {
         scada_change change{};
@@ -609,38 +794,38 @@ private:
         std::string owners;
         std::string tags;
         owners_.clear();
-        const auto add_tag = [&](const std::string& name,
-                                 const std::string& owner, bool retain) {
-            tags += tags.empty() ? R"({"name": ")" : R"(, {"name": ")";
-            tags += name;
-            tags += R"(", "owner": ")";
-            tags += owner;
-            tags += retain ? R"(", "type": "int64", "retain": true})"
-                           : R"(", "type": "int64"})";
-        };
         for (const ChannelTags& channel : channels) {
-            std::string owner = channel.owner;
-            if (owner.empty()) {
-                owner = "drv-test";
-                if (channels.size() > 1) {
-                    owner += ".";
-                    owner += channel.name;
-                }
-            }
-            if (std::find(owners_.begin(), owners_.end(), owner) ==
-                owners_.end()) {
-                owners_.push_back(owner);
-                owners += owners.empty() ? R"({"name": ")" : R"(, {"name": ")";
-                owners += owner;
-                owners +=
-                    R"(", "process": "drv-test", "change_ring_capacity": 1024})";
-            }
+            const std::string owner = channel.owner.empty()
+                                          ? "drv-test." + channel.name
+                                          : channel.owner;
+            add_owner(owners, owner);
             for (const std::string& tag : channel.tags) {
-                add_tag(tag, owner, channel.retain);
+                add_tag(tags, tag, owner, "int64", channel.retain);
+            }
+            // With the channel's owner (CS 12.5), or the one the test gives.
+            if (channel.system_tags) {
+                const std::string& system =
+                    channel.system_owner.empty() ? owner : channel.system_owner;
+                add_owner(owners, system, false);
+                for (const auto& [name, type] : system_tags_of(channel)) {
+                    add_tag(tags, name, system, type, false);
+                }
             }
         }
         for (const std::string& tag : extra_tags) {
-            add_tag(tag, owners_.front(), false);
+            add_tag(tags, tag, owners_.front(), "int64", false);
+        }
+        // The main thread's owner, unless a channel already took the name,
+        // and its tags (11.1).
+        if (process_tags_) {
+            add_owner(owners, "drv-test", false);
+            for (const std::string& extra : process_extra_tags_) {
+                add_tag(tags, extra, "drv-test", "int64", false);
+            }
+            for (const SystemTag& tag : PROCESS_SYSTEM_TAGS) {
+                add_tag(tags, "sys.proc.drv-test." + std::string(tag.signal),
+                        "drv-test", tag.type, false);
+            }
         }
         const std::string uid = std::to_string(::geteuid());
         std::ofstream file(tag_set_path());
@@ -652,9 +837,45 @@ private:
              << R"(], "queues": [], "tags": [)" << tags << "]}\n";
     }
 
+    // Appends the tag to `tags` as `append_tag` does, unless `omit_tag`
+    // named it, with the type `retype_tag` gave it.
+    void add_tag(std::string& tags, const std::string& name,
+                 const std::string& owner, std::string_view type, bool retain) {
+        if (std::find(omitted_.begin(), omitted_.end(), name) !=
+            omitted_.end()) {
+            return;
+        }
+        for (const auto& [retyped, other] : retyped_) {
+            if (retyped == name) {
+                type = other;
+            }
+        }
+        append_tag(tags, name, owner, type, retain);
+    }
+
+    // Adds `owner` of process drv-test to the JSON list `owners` once;
+    // `observed`: it is one `observe` may subscribe to (a channel's).
+    void add_owner(std::string& owners, const std::string& owner,
+                   bool observed = true) {
+        if (std::find(owners_.begin(), owners_.end(), owner) != owners_.end() ||
+            owners.find(R"("name": ")" + owner + "\"") != std::string::npos) {
+            return;
+        }
+        if (observed) {
+            owners_.push_back(owner);
+        }
+        owners += owners.empty() ? R"({"name": ")" : R"(, {"name": ")";
+        owners += owner;
+        owners += R"(", "process": "drv-test", "change_ring_capacity": 1024})";
+    }
+
     std::optional<scada::test::TempDirectory> temp_;
     std::filesystem::path base_;
     std::vector<std::string> owners_;
+    std::vector<std::string> omitted_;
+    std::vector<std::string> process_extra_tags_;
+    std::vector<std::pair<std::string, std::string>> retyped_;
+    bool process_tags_ = true;  // the owner `drv-test` and its tags
     std::optional<RunningTagd> tagd_;
     std::unique_ptr<NotifyListener> listener_;
     scada_ctx* ctx_ = nullptr;

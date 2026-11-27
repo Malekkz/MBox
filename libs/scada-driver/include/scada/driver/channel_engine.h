@@ -12,11 +12,13 @@
 //
 // Orders (writes, select and operate, READ_NOW) come with the command
 // slices; this engine sends none yet. Identity checks and device restarts
-// (7.6) come with slice 5b.
+// (7.6) come with slice 5b-2. The counts behind the system tags (11.1) are
+// kept here and published by the worker (D-146).
 
 #include "scada/common/realtime.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/protocol.h"
@@ -50,6 +52,12 @@ public:
     // `sys.dev.<device>.state` (3.5) changed.
     SCADA_RT virtual void device_state(std::uint32_t device,
                                        DeviceStatus state) noexcept = 0;
+
+    // `sys.drv.<channel>.state` (11.1) changed. It is called before a
+    // connect is begun, so a sink that wants CONNECTING seen while the
+    // connect blocks wakes its readers here. Called only from the exchange,
+    // which is not real-time (DI 2.5). A sink without the tag ignores it.
+    virtual void channel_link(ChannelLink /*link*/) noexcept {}
 };
 
 // Counts of the engine, for the diagnostics of 11.1 and for the tests.
@@ -131,6 +139,22 @@ public:
         return counts_;
     }
     [[nodiscard]] bool connected() const noexcept { return connected_; }
+    [[nodiscard]] ChannelLink link() const noexcept { return link_; }
+
+    // The system tag counts of device `device` (11.1, D-146), an index of
+    // the channel's devices; every count 0 for an index out of range.
+    [[nodiscard]] const DeviceCounts& device_counts(
+        std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.response_ms`; 0 for an index out of range.
+    [[nodiscard]] double response_ms(std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.points_absent`: its points ABSENT now; 0 for an
+    // index out of range.
+    [[nodiscard]] std::uint64_t points_absent(
+        std::uint32_t device) const noexcept;
+    // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.
+    [[nodiscard]] double requests_per_s(std::int64_t now_ns) noexcept {
+        return request_rate_.per_second(now_ns);
+    }
 
 private:
     // How one attempt ended.
@@ -179,7 +203,9 @@ private:
         std::uint32_t attempts = 0;  // failed attempts of the request
         std::uint32_t verdict_request = 0;
         bool any_resting = false;
-        DeviceState protocol;  // the protocol's own state (2.2)
+        DeviceState protocol;     // the protocol's own state (2.2)
+        DeviceCounts diag;        // its system tag counts (11.1)
+        ResponseWindow response;  // its times to the first byte
         DeviceStatus published = DeviceStatus::DISABLED;
         bool verdict_pending = false;
         bool comm_failed = false;     // its points were written COMM_FAIL
@@ -220,6 +246,11 @@ private:
     // jammed); false when bytes were found, with the quiet time restarted.
     bool settle(std::int64_t now_ns) noexcept;
     SCADA_RT void sync_scheduler() noexcept;
+    // The link changed: kept and told to the sink. Not real-time.
+    void set_link(ChannelLink link) noexcept;
+    // Counts the answer `decoded` of device `device` (11.1, D-146).
+    SCADA_RT void count_answer(DeviceRun& run,
+                               const DecodeResult& decoded) noexcept;
     SCADA_RT void publish_states() noexcept;
     SCADA_RT void fail_points(std::uint32_t device) noexcept;
     // The points of `request` are written BAD with COMM_FAIL now.
@@ -260,6 +291,11 @@ private:
     std::vector<CompanionInput> companions_;
     ProcessedSample processed_;
     EngineCounts counts_;
+    RateWindow request_rate_;
+    ChannelLink link_ = ChannelLink::DISCONNECTED;
+    // When the answer being waited for brought its first byte (11.1,
+    // `response_ms`); set by `wait_answer`.
+    std::int64_t first_byte_ns_ = 0;
     bool connected_ = false;
     // A close the driver made itself, and when (7.3, R-17): the rules of a
     // lost connection apply when `connect_timeout` passes without the

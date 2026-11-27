@@ -23,7 +23,7 @@
 namespace scada::driver {
 
 // Why the last connect of a transport did not return OK, for the channel's
-// diagnostics (slice 5b): a rate the port refuses has a diagnostic of its own
+// log records (slice 5b-3): a rate the port refuses has a diagnostic of its own
 // (7.2, CS A.1).
 enum class ConnectError : std::uint8_t {
     NONE = 0,

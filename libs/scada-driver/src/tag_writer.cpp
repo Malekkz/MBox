@@ -3,10 +3,12 @@
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/tag_value.h"
 #include "scada/tag/scada_tag.h"
 #include "scada/tag/types.h"
+#include "system_tags.h"
 
 #include <algorithm>
 #include <array>
@@ -127,9 +129,48 @@ Status write_owner_not_initialised(scada_ctx* ctx,
     return {};
 }
 
-TagWriter::TagWriter(scada_ctx* ctx, PointHandles handles, std::size_t strings)
-    : ctx_(ctx), handles_(std::move(handles)) {
+TagWriter::TagWriter(scada_ctx* ctx, PointHandles handles, std::size_t strings,
+                     SystemTagHandles system)
+    : ctx_(ctx), handles_(std::move(handles)), system_(ctx, std::move(system)) {
     pending_.reserve(strings);
+}
+
+void TagWriter::channel_link(ChannelLink link) noexcept {
+    if (!system_.link(link)) {
+        return;
+    }
+    written_ = true;
+    if (link == ChannelLink::CONNECTING) {
+        notify();
+    }
+}
+
+void TagWriter::publish_system(ChannelEngine& engine,
+                               const CompiledChannel& channel,
+                               std::int64_t now_ns, bool all) noexcept {
+    if (system_.publish(engine, channel, now_ns, all)) {
+        written_ = true;
+    }
+}
+
+void TagWriter::flush_system(ChannelEngine& engine,
+                             const CompiledChannel& channel,
+                             std::int64_t now_ns) noexcept {
+    if (system_.flush(engine, channel, now_ns)) {
+        written_ = true;
+    }
+}
+
+void TagWriter::stopped_system(const CompiledChannel& channel) noexcept {
+    if (system_.stopped(channel)) {
+        written_ = true;
+    }
+}
+
+void TagWriter::publish_idle(const CompiledChannel& channel) noexcept {
+    if (system_.publish_idle(channel)) {
+        written_ = true;
+    }
 }
 
 std::uint32_t TagWriter::handle(std::uint32_t device,

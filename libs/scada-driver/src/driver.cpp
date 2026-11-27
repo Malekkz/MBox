@@ -12,6 +12,7 @@
 #include "scada/service/notify.h"
 #include "scada/tag/scada_tag.h"
 #include "stall_watch.h"
+#include "system_tags.h"
 #include "tag_writer.h"
 #include "worker.h"
 
@@ -40,7 +41,11 @@
 namespace scada::driver {
 namespace {
 
+using detail::ChannelSignal;
+using detail::DeviceSignal;
 using detail::PointHandles;
+using detail::SystemSlot;
+using detail::SystemTagHandles;
 using detail::Worker;
 
 constexpr std::int64_t NS_PER_S = 1'000'000'000;
@@ -242,6 +247,20 @@ private:
     [[nodiscard]] Status resolve(const CompiledChannel& channel,
                                  std::optional<std::uint16_t> owner,
                                  PointHandles& out) noexcept;
+    // The system tags of the channel and its devices (11.1, D-146), with
+    // the same checks as the point tags.
+    [[nodiscard]] Status resolve_system(const CompiledChannel& channel,
+                                        std::optional<std::uint16_t> owner,
+                                        SystemTagHandles& out) noexcept;
+    // One system tag of `owner`, of `type`; `whose` names the writer for
+    // a message ("channel c", "the main thread").
+    [[nodiscard]] Status resolve_one(const std::string& whose,
+                                     std::optional<std::uint16_t> owner,
+                                     const std::string& name, std::uint8_t type,
+                                     std::uint32_t& handle) noexcept;
+    // The owner named like the process, the main thread's (CS 12.5): its
+    // 9.1 walk, its `sys.proc` tags resolved and written (D-146).
+    [[nodiscard]] Status take_process_owner() noexcept;
     [[nodiscard]] Status begin_workers() noexcept;
     [[nodiscard]] Status await_running() noexcept;
     // One heartbeat and watchdog notification.
@@ -257,6 +276,17 @@ private:
     void stop_all() noexcept;
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
+    // The settings' write of the system tags, or the library's.
+    [[nodiscard]] detail::TagWriteFn system_write() const noexcept {
+        return settings_.system_write != nullptr ? settings_.system_write
+                                                 : &scada_tag_write;
+    }
+    // Logs the refused writes of the process's own tags if their count
+    // changed since it was last logged (review M4).
+    void log_process_refused() noexcept;
+    // At the stop, once every worker returned: `config_state` LOADING
+    // again (review M3), and the refused writes of the stop logged.
+    void process_stopped() noexcept;
 
     const CompiledConfig* config_;
     const FrameProtocol* protocol_;
@@ -277,6 +307,8 @@ private:
     scada_ctx* ctx_ = nullptr;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::optional<std::uint16_t>> owners_;  // per worker
+    std::optional<std::uint16_t> process_owner_;        // the main thread's
+    std::optional<detail::ProcessTags> process_tags_;
     // Per worker: the progress last seen and when it last moved.
     // After the settings, whose period it takes once they are valid.
     detail::StallWatch watch_{settings_status_.ok()
@@ -287,6 +319,7 @@ private:
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
+    std::uint64_t logged_process_refused_ = 0;  // the main thread's tags
     std::int64_t next_refused_log_ns_ = 0;
     std::string detail_;  // what failed, with names, for the log
 };
@@ -348,30 +381,34 @@ Status Driver::Impl::attach() noexcept {
 Status Driver::Impl::owner_of(const CompiledChannel& channel,
                               std::optional<std::uint16_t>& owner) noexcept {
     owner.reset();
+    // The first point tag, or, for a channel without one, its own state tag
+    // (11.1, D-146): every channel has system tags.
+    std::string name = detail::channel_tag_name(
+        channel.name, detail::channel_signal(ChannelSignal::STATE).name);
     for (const CompiledDevice& device : channel.devices) {
-        for (const CompiledPoint& point : device.points) {
-            if (!point.rules.has_tag) {
-                continue;
-            }
-            const std::string name = point_tag_name(device, point);
-            std::uint32_t handle = SCADA_INVALID_HANDLE;
-            scada_tag_info_t info{};
-            if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
-                scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
-                return fail_start({StatusCode::NOT_FOUND, "a point has no tag"},
-                                  "the tag set has no tag " + name);
-            }
-            if (info.owned == 0) {
-                return fail_start({StatusCode::FAILED_PRECONDITION,
-                                   "a point's tag is not this process's"},
-                                  "tag " + name + " is owned by " +
-                                      text_of(info.owner) +
-                                      ", not a thread of " + settings_.process);
-            }
-            owner = info.owner_index;
-            return {};
+        const auto tagged = std::find_if(
+            device.points.begin(), device.points.end(),
+            [](const CompiledPoint& point) { return point.rules.has_tag; });
+        if (tagged != device.points.end()) {
+            name = point_tag_name(device, *tagged);
+            break;
         }
     }
+    std::uint32_t handle = SCADA_INVALID_HANDLE;
+    scada_tag_info_t info{};
+    if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
+        scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
+        return fail_start({StatusCode::NOT_FOUND, "a channel's tag is missing"},
+                          "the tag set has no tag " + name);
+    }
+    if (info.owned == 0) {
+        return fail_start({StatusCode::FAILED_PRECONDITION,
+                           "a channel's tag is not this process's"},
+                          "tag " + name + " is owned by " +
+                              text_of(info.owner) + ", not a thread of " +
+                              settings_.process);
+    }
+    owner = info.owner_index;
     return {};
 }
 
@@ -380,8 +417,7 @@ Status Driver::Impl::every_owner_claimed(
     // An owner of this process that no channel writes would keep the
     // values of the previous life, GOOD, for as long as the driver runs:
     // the start fails, naming it (the lead's ruling, delta 3). The main
-    // thread's own owner, for the `sys.proc` tags, is the exception that
-    // comes with slice 5b (after #151).
+    // thread's own owner, for the `sys.proc` tags, is the exception (D-146).
     scada_status status{};
     if (scada_tag_status(ctx_, &status) != SCADA_OK &&
         status.owner_count == 0) {
@@ -395,7 +431,8 @@ Status Driver::Impl::every_owner_claimed(
                               "the tag library gave no information on owner " +
                                   std::to_string(owner));
         }
-        if (info.owned != 0 && !claimed.contains(owner)) {
+        if (info.owned != 0 && !claimed.contains(owner) &&
+            owner != process_owner_) {
             return fail_start({StatusCode::FAILED_PRECONDITION,
                                "an owner of the process has no channel"},
                               "owner " + text_of(info.name) +
@@ -416,6 +453,13 @@ Status Driver::Impl::make_workers() noexcept {
         Status found = owner_of(channel, owner);
         if (!found.ok()) {
             return found;
+        }
+        if (owner.has_value() && owner == process_owner_) {
+            return fail_start({StatusCode::FAILED_PRECONDITION,
+                               "a channel writes the main thread's owner"},
+                              "channel " + channel.name + " writes owner " +
+                                  settings_.process +
+                                  ", the main thread's (CS 12.5)");
         }
         if (owner.has_value()) {
             const auto [at, fresh] = claimed.emplace(*owner, &channel);
@@ -514,6 +558,140 @@ Status Driver::Impl::resolve(const CompiledChannel& channel,
     return {};
 }
 
+Status Driver::Impl::resolve_one(const std::string& whose,
+                                 std::optional<std::uint16_t> owner,
+                                 const std::string& name, std::uint8_t type,
+                                 std::uint32_t& handle) noexcept {
+    scada_tag_info_t info{};
+    if (scada_tag_resolve(ctx_, name.c_str(), &handle) != SCADA_OK ||
+        scada_tag_info(ctx_, handle, &info) != SCADA_OK) {
+        return fail_start({StatusCode::NOT_FOUND, "a system tag is missing"},
+                          "the tag set has no tag " + name);
+    }
+    if (info.type != type) {
+        return fail_start({StatusCode::FAILED_PRECONDITION,
+                           "a system tag is not of its type"},
+                          "tag " + name + " is not of its type (11.1)");
+    }
+    // Its writer is the owner's only thread (CS 12.5, TD 13.2).
+    if (!owner.has_value() || info.owner_index != *owner) {
+        return fail_start(
+            {StatusCode::FAILED_PRECONDITION, "a system tag has another owner"},
+            "tag " + name + " of " + whose + " is owned by " +
+                text_of(info.owner) + ", not by the owner of " + whose);
+    }
+    return {};
+}
+
+Status Driver::Impl::take_process_owner() noexcept {
+    scada_status status{};
+    if (scada_tag_status(ctx_, &status) != SCADA_OK &&
+        status.owner_count == 0) {
+        return fail_start({StatusCode::UNAVAILABLE, "no tag status"},
+                          "the tag library gave no status");
+    }
+    for (std::uint16_t owner = 0; owner < status.owner_count; ++owner) {
+        scada_owner_info_t info{};
+        if (scada_owner_info(ctx_, owner, &info) == SCADA_OK &&
+            info.owned != 0 && text_of(info.name) == settings_.process) {
+            process_owner_ = owner;
+            break;
+        }
+    }
+    if (!process_owner_.has_value()) {
+        return fail_start(
+            {StatusCode::NOT_FOUND, "the process has no owner of its own"},
+            "the tag set has no owner " + settings_.process +
+                " for the sys.proc tags (CS 12.5)");
+    }
+    // 9.1 by owner slot, on the main thread before any worker starts: it is
+    // this owner's first, and only, writer (TD 13.2).
+    const Status walked =
+        detail::write_owner_not_initialised(ctx_, *process_owner_);
+    if (!walked.ok()) {
+        return fail_start(walked, "the writes of 9.1 for owner " +
+                                      settings_.process + " were refused");
+    }
+    detail::ProcessTags::Slots slots{};
+    for (std::size_t signal = 0; signal < detail::PROCESS_SIGNALS; ++signal) {
+        const detail::SignalSpec& spec =
+            detail::process_signal(static_cast<detail::ProcessSignal>(signal));
+        SystemSlot& slot = slots.at(signal);
+        slot.type = spec.type;
+        const Status resolved =
+            resolve_one("the main thread", process_owner_,
+                        detail::process_tag_name(settings_.process, spec.name),
+                        spec.type, slot.handle);
+        if (!resolved.ok()) {
+            return resolved;
+        }
+    }
+    process_tags_.emplace(ctx_, slots, system_write());
+    const bool wrote = process_tags_->publish_start();
+    // As a refused write of 9.1 (D-142): the tags would keep the previous
+    // life's values (review M4).
+    if (process_tags_->refused() != 0) {
+        return fail_start(
+            {StatusCode::IO_ERROR, "a write of the process's tags was refused"},
+            "the writes of the sys.proc tags of " + settings_.process +
+                " were refused");
+    }
+    if (wrote) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
+    return {};
+}
+
+Status Driver::Impl::resolve_system(const CompiledChannel& channel,
+                                    std::optional<std::uint16_t> owner,
+                                    SystemTagHandles& out) noexcept {
+    out.groups = channel.poll_groups.size();
+    out.devices = channel.devices.size();
+    out.write = system_write();
+    const auto add = [&](const std::string& name, std::uint8_t type) {
+        SystemSlot slot{.type = type};
+        Status status = resolve_one("channel " + channel.name, owner, name,
+                                    type, slot.handle);
+        out.slots.push_back(slot);
+        if (out.slots.size() % HEARTBEAT_EVERY_TAGS == 0) {
+            (void)beat();  // a retiring generation is seen by the loop
+        }
+        return status;
+    };
+    for (std::size_t signal = 0; signal < detail::CHANNEL_SIGNALS; ++signal) {
+        const detail::SignalSpec& spec =
+            detail::channel_signal(static_cast<ChannelSignal>(signal));
+        Status status =
+            add(detail::channel_tag_name(channel.name, spec.name), spec.type);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    for (const CompiledPollGroup& group : channel.poll_groups) {
+        Status status =
+            add(detail::channel_tag_name(channel.name, "period." + group.name),
+                SCADA_TYPE_FLOAT64);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    // Every device, disabled ones too: CS 12.5 gives each its set.
+    for (const CompiledDevice& device : channel.devices) {
+        for (std::size_t signal = 0; signal < detail::DEVICE_SIGNALS;
+             ++signal) {
+            const detail::SignalSpec& spec =
+                detail::device_signal(static_cast<DeviceSignal>(signal));
+            Status status =
+                add(detail::device_tag_name(device.name, spec.name), spec.type);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+    }
+    return {};
+}
+
 Status Driver::Impl::begin_workers() noexcept {
     for (std::size_t index = 0; index < workers_.size(); ++index) {
         Worker& worker = *workers_[index];
@@ -522,7 +700,12 @@ Status Driver::Impl::begin_workers() noexcept {
         if (!resolved.ok()) {
             return resolved;
         }
-        worker.begin(std::move(handles));
+        SystemTagHandles system;
+        resolved = resolve_system(worker.channel(), owners_[index], system);
+        if (!resolved.ok()) {
+            return resolved;
+        }
+        worker.begin(std::move(handles), std::move(system));
     }
     return {};
 }
@@ -676,6 +859,7 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
     const std::int64_t until = add(scada::monotonic_ns(), STOP_BUDGET_NS);
     for (;;) {
         if (all_joined()) {
+            process_stopped();
             return end;
         }
         const std::int64_t now = scada::monotonic_ns();
@@ -751,7 +935,11 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
         return;
     }
     next_refused_log_ns_ = add(now, REFUSED_LOG_PERIOD_NS);
-    for (std::size_t index = 0; index < workers_.size(); ++index) {
+    // A start that failed before the counts were set up has none to log:
+    // the stop logs from `finish` in every end (review M4).
+    const std::size_t workers =
+        std::min(workers_.size(), logged_refused_.size());
+    for (std::size_t index = 0; index < workers; ++index) {
         const std::uint64_t refused = workers_[index]->refused_writes();
         if (refused != logged_refused_[index]) {
             log(LogLevel::WARNING, "tag writes refused",
@@ -761,6 +949,33 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
             logged_refused_[index] = refused;
         }
     }
+    log_process_refused();
+}
+
+void Driver::Impl::log_process_refused() noexcept {
+    if (!process_tags_.has_value() ||
+        process_tags_->refused() == logged_process_refused_) {
+        return;
+    }
+    logged_process_refused_ = process_tags_->refused();
+    log(LogLevel::WARNING, "tag writes refused",
+        {{"MESSAGE_ID", "driver-writes-refused"},
+         {"OWNER", settings_.process},
+         {"COUNT", std::to_string(logged_process_refused_)}});
+}
+
+void Driver::Impl::process_stopped() noexcept {
+    if (!process_tags_.has_value()) {
+        return;
+    }
+    if (process_tags_->stopped()) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
+    // The workers' refused writes of their stop, and this one's, at once:
+    // no heartbeat follows (review M4).
+    next_refused_log_ns_ = 0;
+    log_refused(scada::monotonic_ns());
 }
 
 Status Driver::Impl::start() noexcept {
@@ -770,6 +985,9 @@ Status Driver::Impl::start() noexcept {
     }
     if (status.ok()) {
         status = attach();
+    }
+    if (status.ok()) {
+        status = take_process_owner();
     }
     if (status.ok()) {
         status = make_workers();
@@ -787,6 +1005,10 @@ Status Driver::Impl::start() noexcept {
                        "cannot report readiness to the service manager");
     }
     ready_ = status.ok();
+    if (ready_ && process_tags_.has_value() && process_tags_->applied()) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
     return status;
 }
 
