@@ -2308,6 +2308,17 @@ Decision: `check_merged_points` reads each point of the expanded tree (D-114), w
 Reason: each check reads the point as the driver will, after every merge, so a template that a base, a default or an override completes is valid, and one that none completes is refused at the instance that uses it.
 Consequences: the corpus case `s5-integer-on-floating-raw` is the one saved in the slice that moved CF-504 to stage 5, with instances added, since only expanded points are checked. The cases `s5-computed-values-by-parameter` and `s5-computed-values-by-repeat` give `register` 70000, `bit` 16 and `divide_by` 0 through a parameter and through a `repeat` variable, beside each key's edge, which passes. `s5-integer-scaling-range` (CF-516), `s5-integer-scaling-merged` (CF-517) and `s5-incomplete-merged-maps` (CF-202) are conformance test 2 at stage 5. The references that need point tags come with slice 7 of #100.
 
+## D-118: The pipeline's apt reads only the distribution's sources
+Date: 2026-11-27
+Phase / issue: 2, #160
+Status: proposed
+
+Context: the runner images `ubuntu-24.04` and `ubuntu-24.04-arm` carry apt sources of their own besides the Ubuntu archive, among them `packages.microsoft.com`. On 2026-11-27 that host answered `403 Forbidden` for its `InRelease`, which apt reports as "is no longer signed". `apt-get update` then fails, and with it the LLVM step of `setup-build-machine`, in every job, on the same image version (20261122.23.1) that passed the day before. The pipeline installs nothing from those sources: LLVM 18 (`clang-18`, `clang-format-18`, `clang-tidy-18`, `clang-tools-18`, `libclang-rt-18-dev`, `llvm-18`, version `1:18.1.3-1ubuntu1`) and the OCaml packages that build herd7 (`ocaml-nox`, `ocaml-dune`, `menhir`, `libmenhir-ocaml-dev`, `libzarith-ocaml-dev`) are packages of the Ubuntu archive.
+Options: move every source list but the distribution's aside before `apt-get update`; give `apt-get update` a list of sources to read (`-o Dir::Etc::sourceparts`); let `update` fail and install from the lists it fetched; pin LLVM elsewhere.
+Decision: the first step of `setup-build-machine` moves every file of `/etc/apt/sources.list.d` except `ubuntu.sources` aside, for the job only, and prints the sources apt then reads. Without `ubuntu.sources` the step fails. Nothing else changes: the same packages at the same versions, the same retries, checks and flags.
+Reason: apt then reads only what the pipeline installs from, so a source the project does not use cannot stop it. Moving the files is visible in the log and is the same on both architectures. Ignoring a failed `update` would also hide a failure of the Ubuntu archive.
+Consequences: the herd7 cache key hashes `action.yml`, so the model check builds herd7 again once (version 7.58, checked against its commit). Tool versions still come with the runner image: LLVM 18 is preinstalled there and apt finds it the newest version; CMake (3.31.6), GCC (13.3.0) and Python (3.12.3) are the image's own. Pinning them is #141, not this decision.
+
 ## D-130: Device local times are converted with a table built from the unit's compiled zone files
 Date: 2026-11-23
 Phase / issue: 2, #104 (P2-07); review of PR 128 (C++ B3, SCADA decisions; delta check N2, N3, N6)
