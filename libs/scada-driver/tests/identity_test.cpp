@@ -204,12 +204,12 @@ TEST(Identity, APatternIsCheckedAsTheMatcherTakesIt) {
     // Ruling item 5: at most 250 bytes, no single backslash at the end, on a
     // STRING point only.
     EXPECT_TRUE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"),
-                                TagType::STRING)
+        validate_identity_check(
+            check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"), TagType::STRING)
             .ok());
     EXPECT_FALSE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"),
-                                TagType::UINT64)
+        validate_identity_check(
+            check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"), TagType::UINT64)
             .ok());
     EXPECT_FALSE(
         validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "a\\"),
