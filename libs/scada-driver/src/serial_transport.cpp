@@ -348,8 +348,8 @@ IoStatus SerialTransport::receive(std::span<std::byte> into,
     if (!fd_.valid()) {
         return IoStatus::CLOSED;
     }
-    return detail::receive_by(fd_.get(), false, into, deadline_ns, *clock_,
-                              received, errno_);
+    return detail::receive_by(fd_.get(), wake(), false, into, deadline_ns,
+                              *clock_, received, errno_);
 }
 
 bool SerialTransport::discard_input() noexcept {

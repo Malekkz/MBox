@@ -1,4 +1,5 @@
-# The only place that names a package manager (docs/decisions.md, D-13).
+# The only place that names a package manager (docs/decisions.md, D-13);
+# apt reads the distribution's sources only (D-118).
 # Everything after this step uses the presets, as on a developer machine.
 name: Set up the build machine
 description: >
@@ -19,6 +20,31 @@ inputs:
 runs:
   using: composite
   steps:
+    # apt reads only the distribution's own sources (decision D-118, issue
+    # #160). Every package the pipeline installs comes from the Ubuntu
+    # archive; the runner image adds sources of its own, and one of them
+    # failing stops `apt-get update` for all. The others are moved aside
+    # for this job, not changed. Without the distribution's file the job
+    # stops here rather than install from somewhere else.
+    - name: Read only the distribution's apt sources
+      shell: bash
+      run: |
+        keep=/etc/apt/sources.list.d/ubuntu.sources
+        if [ ! -f "${keep}" ]; then
+          echo "no ${keep}: the distribution's apt sources are not where expected" >&2
+          exit 1
+        fi
+        aside="${RUNNER_TEMP}/apt-sources-not-read"
+        mkdir -p "${aside}"
+        for list in /etc/apt/sources.list.d/*; do
+          if [ "${list}" != "${keep}" ]; then
+            echo "not read: ${list}"
+            sudo mv "${list}" "${aside}/"
+          fi
+        done
+        echo "apt sources read:"
+        grep -hE '^[[:space:]]*(deb|URIs:|Suites:)' /etc/apt/sources.list "${keep}" || true
+
     - name: Install LLVM ${{ inputs.llvm-version }}
       shell: bash
       env:

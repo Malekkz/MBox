@@ -173,8 +173,14 @@ IoStatus TcpTransport::connect(std::int64_t deadline_ns) noexcept {
             error = errno;
         } else {
             short revents = 0;
-            const detail::Readiness ready = detail::wait_for(
-                fd_.get(), POLLOUT, deadline_ns, *clock_, revents, error);
+            const detail::Readiness ready =
+                detail::wait_for(fd_.get(), POLLOUT, wake(), deadline_ns,
+                                 *clock_, revents, error);
+            if (ready == detail::Readiness::WOKEN) {
+                // A stop: given up, closed, no diagnostic (DI 10).
+                fd_.reset();
+                return IoStatus::ABANDONED;
+            }
             if (ready == detail::Readiness::TIMEOUT) {
                 return fail_connect(ConnectError::TIMEOUT, 0,
                                     IoStatus::TIMEOUT);
@@ -237,8 +243,8 @@ IoStatus TcpTransport::receive(std::span<std::byte> into,
     if (!fd_.valid()) {
         return IoStatus::CLOSED;
     }
-    return detail::receive_by(fd_.get(), true, into, deadline_ns, *clock_,
-                              received, errno_);
+    return detail::receive_by(fd_.get(), wake(), true, into, deadline_ns,
+                              *clock_, received, errno_);
 }
 
 bool TcpTransport::discard_input() noexcept {

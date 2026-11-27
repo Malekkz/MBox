@@ -59,6 +59,9 @@ public:
     }
     // The peer closes the connection now.
     void close_by_peer() noexcept { peer_closed_ = true; }
+    // Every connect and receive from now on is given up as a stop would
+    // (the wake descriptor readable, DI 10).
+    void abandon() noexcept { abandon_ = true; }
     // The peer closes the connection right after the next `checks` calls of
     // `closed_by_peer`, which still answer false.
     void close_by_peer_after_checks(int checks) noexcept {
@@ -147,6 +150,7 @@ private:
     std::map<std::uint8_t, std::int64_t> latencies_;
     bool open_ = false;
     bool peer_closed_ = false;
+    bool abandon_ = false;
     int refusals_ = 0;
     std::int64_t refuse_ns_ = 0;
     std::int64_t connect_delay_ns_ = 0;

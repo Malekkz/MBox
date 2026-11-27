@@ -4,10 +4,10 @@
 // The real connections of a channel behind `Transport` (transport.h): a
 // TCP socket for `tcp` and `rtu_over_tcp`, a serial port for `rtu`, and the
 // system's clocks (driver interface contract 7.1 to 7.3, decision D-141).
-// The worker of slice 5 builds one per channel from the compiled keys and
-// hands it to its ChannelEngine. Every call follows the rules transport.h
-// states; what each class adds is stated here. None of it is real-time
-// (DI 2.5) except the clock reads.
+// A driver's `TransportFactory` (driver.h) builds one per channel from the
+// compiled keys, and the channel's worker hands it to its ChannelEngine. Every
+// call follows the rules transport.h states; what each class adds is stated
+// here. None of it is real-time (DI 2.5) except the clock reads.
 
 #include "scada/common/fd.h"
 #include "scada/common/realtime.h"
@@ -23,7 +23,7 @@
 namespace scada::driver {
 
 // Why the last connect of a transport did not return OK, for the channel's
-// diagnostics (slice 5): a rate the port refuses has a diagnostic of its own
+// diagnostics (slice 5b): a rate the port refuses has a diagnostic of its own
 // (7.2, CS A.1).
 enum class ConnectError : std::uint8_t {
     NONE = 0,

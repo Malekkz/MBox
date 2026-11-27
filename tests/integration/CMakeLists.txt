@@ -247,3 +247,24 @@ scada_add_test(scada-test-cleanup-integration-test KIND integration
     "SCADA_KILLED_RUNNER_COMMAND=${killed_runner_command}")
 add_dependencies(scada-test-cleanup-integration-test
   scada-tagd scada-sim scada-test-killed-runner)
+
+# The driver process through real tags (decision D-142): scada-tagd, the
+# test protocol's simulator and the test protocol's driver process.
+scada_test_command(tagd_command scada-tagd)
+scada_test_command(drv_test_command scada-drv-test)
+scada_test_command(driver_sim_command scada-driver-test-sim)
+scada_add_test(scada-driver-process-integration-test KIND integration
+  SOURCES driver_integration_test.cpp driver_stop_integration_test.cpp
+    tag_writer_integration_test.cpp
+  DEPENDS scada::tagd scada::tag scada::service scada::test-support
+    scada::driver
+  ENVIRONMENT
+    "SCADA_TAGD_COMMAND=${tagd_command}"
+    "SCADA_DRV_TEST_COMMAND=${drv_test_command}"
+    "SCADA_DRIVER_TEST_SIM_COMMAND=${driver_sim_command}")
+add_dependencies(scada-driver-process-integration-test
+  scada-tagd scada-drv-test scada-driver-test-sim)
+# The TagWriter of a worker, tested in this process (its header is the
+# library's own, not installed).
+target_include_directories(scada-driver-process-integration-test PRIVATE
+  ${PROJECT_SOURCE_DIR}/libs/scada-driver/src)

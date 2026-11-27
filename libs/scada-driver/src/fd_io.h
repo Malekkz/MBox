@@ -18,13 +18,15 @@ enum class Readiness : std::uint8_t {
     READY = 1,  // one of `events`, or a hang-up or an error, is pending
     TIMEOUT,    // the deadline passed first
     FAILED,     // `ppoll` failed; `error` says why
+    WOKEN,      // the wake descriptor is readable (it wins over `events`)
 };
 
 // Waits in `ppoll` until `descriptor` has one of `events` (or POLLHUP,
-// POLLERR), or `deadline_ns` of `clock` passed. A deadline already past polls
-// once with time-out 0. An interrupted wait goes on to the same deadline.
-// `revents` gets the events seen.
-[[nodiscard]] Readiness wait_for(int descriptor, short events,
+// POLLERR), `wake` is readable, or `deadline_ns` of `clock` passed. A
+// deadline already past polls once with time-out 0. An interrupted wait
+// goes on to the same deadline. `revents` gets the events seen on
+// `descriptor`. `wake` -1 waits on `descriptor` alone.
+[[nodiscard]] Readiness wait_for(int descriptor, short events, int wake,
                                  std::int64_t deadline_ns, const Clock& clock,
                                  short& revents, int& error) noexcept;
 
@@ -53,6 +55,7 @@ enum class Readiness : std::uint8_t {
 // reads what arrived. A wait that saw input whose read then finds nothing
 // (another reader took it, a wake without data) waits again while the
 // deadline has not passed (review M3): only the deadline makes a TIMEOUT.
+// A WOKEN wait gives ABANDONED without a read (DI 10).
 template <class Wait, class Read>
 [[nodiscard]] IoStatus receive_loop(const Wait& wait, const Read& read,
                                     std::int64_t deadline_ns,
@@ -63,6 +66,9 @@ template <class Wait, class Read>
         const Readiness ready = wait();
         if (ready == Readiness::FAILED) {
             return IoStatus::CLOSED;
+        }
+        if (ready == Readiness::WOKEN) {
+            return IoStatus::ABANDONED;
         }
         const IoStatus status = read(received);
         if (status != IoStatus::TIMEOUT || ready == Readiness::TIMEOUT ||
@@ -79,8 +85,9 @@ template <class Wait, class Read>
 // (review M1). False on a socket that is not connected.
 [[nodiscard]] bool connected_to_itself(int descriptor) noexcept;
 
-// `receive_loop` over `wait_for` POLLIN and `read_once` on `descriptor`.
-[[nodiscard]] IoStatus receive_by(int descriptor, bool socket,
+// `receive_loop` over `wait_for` POLLIN (and `wake`) and `read_once` on
+// `descriptor`.
+[[nodiscard]] IoStatus receive_by(int descriptor, int wake, bool socket,
                                   std::span<std::byte> into,
                                   std::int64_t deadline_ns, const Clock& clock,
                                   std::size_t& received, int& error) noexcept;
