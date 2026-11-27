@@ -252,11 +252,15 @@ private:
     [[nodiscard]] Status resolve_system(const CompiledChannel& channel,
                                         std::optional<std::uint16_t> owner,
                                         SystemTagHandles& out) noexcept;
-    // One tag of the channel's owner, of `type`.
-    [[nodiscard]] Status resolve_one(const CompiledChannel& channel,
+    // One system tag of `owner`, of `type`; `whose` names the writer for
+    // a message ("channel c", "the main thread").
+    [[nodiscard]] Status resolve_one(const std::string& whose,
                                      std::optional<std::uint16_t> owner,
                                      const std::string& name, std::uint8_t type,
                                      std::uint32_t& handle) noexcept;
+    // The owner named like the process, the main thread's (CS 12.5): its
+    // 9.1 walk, its `sys.proc` tags resolved and written (D-144).
+    [[nodiscard]] Status take_process_owner() noexcept;
     [[nodiscard]] Status begin_workers() noexcept;
     [[nodiscard]] Status await_running() noexcept;
     // One heartbeat and watchdog notification.
@@ -292,6 +296,8 @@ private:
     scada_ctx* ctx_ = nullptr;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::optional<std::uint16_t>> owners_;  // per worker
+    std::optional<std::uint16_t> process_owner_;        // the main thread's
+    std::optional<detail::ProcessTags> process_tags_;
     // Per worker: the progress last seen and when it last moved.
     // After the settings, whose period it takes once they are valid.
     detail::StallWatch watch_{settings_status_.ok()
@@ -399,8 +405,7 @@ Status Driver::Impl::every_owner_claimed(
     // An owner of this process that no channel writes would keep the
     // values of the previous life, GOOD, for as long as the driver runs:
     // the start fails, naming it (the lead's ruling, delta 3). The main
-    // thread's own owner, for the `sys.proc` tags, is the exception that
-    // comes with slice 5b (after #151).
+    // thread's own owner, for the `sys.proc` tags, is the exception (D-144).
     scada_status status{};
     if (scada_tag_status(ctx_, &status) != SCADA_OK &&
         status.owner_count == 0) {
@@ -414,7 +419,8 @@ Status Driver::Impl::every_owner_claimed(
                               "the tag library gave no information on owner " +
                                   std::to_string(owner));
         }
-        if (info.owned != 0 && !claimed.contains(owner)) {
+        if (info.owned != 0 && !claimed.contains(owner) &&
+            owner != process_owner_) {
             return fail_start({StatusCode::FAILED_PRECONDITION,
                                "an owner of the process has no channel"},
                               "owner " + text_of(info.name) +
@@ -435,6 +441,13 @@ Status Driver::Impl::make_workers() noexcept {
         Status found = owner_of(channel, owner);
         if (!found.ok()) {
             return found;
+        }
+        if (owner.has_value() && owner == process_owner_) {
+            return fail_start({StatusCode::FAILED_PRECONDITION,
+                               "a channel writes the main thread's owner"},
+                              "channel " + channel.name + " writes owner " +
+                                  settings_.process +
+                                  ", the main thread's (CS 12.5)");
         }
         if (owner.has_value()) {
             const auto [at, fresh] = claimed.emplace(*owner, &channel);
@@ -533,7 +546,7 @@ Status Driver::Impl::resolve(const CompiledChannel& channel,
     return {};
 }
 
-Status Driver::Impl::resolve_one(const CompiledChannel& channel,
+Status Driver::Impl::resolve_one(const std::string& whose,
                                  std::optional<std::uint16_t> owner,
                                  const std::string& name, std::uint8_t type,
                                  std::uint32_t& handle) noexcept {
@@ -548,13 +561,63 @@ Status Driver::Impl::resolve_one(const CompiledChannel& channel,
                            "a system tag is not of its type"},
                           "tag " + name + " is not of its type (11.1)");
     }
-    // The channel's worker writes them: the channel's owner (CS 12.5).
+    // Its writer is the owner's only thread (CS 12.5, TD 13.2).
     if (!owner.has_value() || info.owner_index != *owner) {
-        return fail_start({StatusCode::FAILED_PRECONDITION,
-                           "a channel's tags have two owners"},
-                          "tag " + name + " of channel " + channel.name +
-                              " is owned by " + text_of(info.owner) +
-                              ", not by the channel's owner");
+        return fail_start(
+            {StatusCode::FAILED_PRECONDITION, "a system tag has another owner"},
+            "tag " + name + " of " + whose + " is owned by " +
+                text_of(info.owner) + ", not by the owner of " + whose);
+    }
+    return {};
+}
+
+Status Driver::Impl::take_process_owner() noexcept {
+    scada_status status{};
+    if (scada_tag_status(ctx_, &status) != SCADA_OK &&
+        status.owner_count == 0) {
+        return fail_start({StatusCode::UNAVAILABLE, "no tag status"},
+                          "the tag library gave no status");
+    }
+    for (std::uint16_t owner = 0; owner < status.owner_count; ++owner) {
+        scada_owner_info_t info{};
+        if (scada_owner_info(ctx_, owner, &info) == SCADA_OK &&
+            info.owned != 0 && text_of(info.name) == settings_.process) {
+            process_owner_ = owner;
+            break;
+        }
+    }
+    if (!process_owner_.has_value()) {
+        return fail_start(
+            {StatusCode::NOT_FOUND, "the process has no owner of its own"},
+            "the tag set has no owner " + settings_.process +
+                " for the sys.proc tags (CS 12.5)");
+    }
+    // 9.1 by owner slot, on the main thread before any worker starts: it is
+    // this owner's first, and only, writer (TD 13.2).
+    const Status walked =
+        detail::write_owner_not_initialised(ctx_, *process_owner_);
+    if (!walked.ok()) {
+        return fail_start(walked, "the writes of 9.1 for owner " +
+                                      settings_.process + " were refused");
+    }
+    detail::ProcessTags::Slots slots{};
+    for (std::size_t signal = 0; signal < detail::PROCESS_SIGNALS; ++signal) {
+        const detail::SignalSpec& spec =
+            detail::process_signal(static_cast<detail::ProcessSignal>(signal));
+        SystemSlot& slot = slots.at(signal);
+        slot.type = spec.type;
+        const Status resolved =
+            resolve_one("the main thread", process_owner_,
+                        detail::process_tag_name(settings_.process, spec.name),
+                        spec.type, slot.handle);
+        if (!resolved.ok()) {
+            return resolved;
+        }
+    }
+    process_tags_.emplace(ctx_, slots);
+    if (process_tags_->publish_start()) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
     }
     return {};
 }
@@ -566,7 +629,8 @@ Status Driver::Impl::resolve_system(const CompiledChannel& channel,
     out.devices = channel.devices.size();
     const auto add = [&](const std::string& name, std::uint8_t type) {
         SystemSlot slot{.type = type};
-        Status status = resolve_one(channel, owner, name, type, slot.handle);
+        Status status = resolve_one("channel " + channel.name, owner, name,
+                                    type, slot.handle);
         out.slots.push_back(slot);
         if (out.slots.size() % HEARTBEAT_EVERY_TAGS == 0) {
             (void)beat();  // a retiring generation is seen by the loop
@@ -869,6 +933,9 @@ Status Driver::Impl::start() noexcept {
         status = attach();
     }
     if (status.ok()) {
+        status = take_process_owner();
+    }
+    if (status.ok()) {
         status = make_workers();
     }
     if (status.ok()) {
@@ -884,6 +951,10 @@ Status Driver::Impl::start() noexcept {
                        "cannot report readiness to the service manager");
     }
     ready_ = status.ok();
+    if (ready_ && process_tags_.has_value() && process_tags_->applied()) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
     return status;
 }
 

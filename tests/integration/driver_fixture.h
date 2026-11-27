@@ -70,8 +70,9 @@ inline constexpr int EXIT_STALL = 4;
 inline constexpr milliseconds HEARTBEAT_TIMEOUT{1500};
 
 // One channel of the tag set: its name and its INT64 tags
-// `<device>.<point>`. The owner is `drv-test` for a single channel and
-// `drv-test.<channel>` for several (TD 1), unless `owner` names another.
+// `<device>.<point>`. The owner is `drv-test.<channel>` (CS 12.5, TD 1.1),
+// unless `owner` names another; `drv-test` itself is the main thread's,
+// with the `sys.proc.drv-test.*` tags (D-144).
 // `retain` gives every tag RETAIN.
 struct ChannelTags {
     std::string name;
@@ -98,6 +99,15 @@ inline constexpr std::array<SystemTag, 5> CHANNEL_SYSTEM_TAGS{{
     {.signal = "refused_connects", .type = "uint64"},
     {.signal = "secured", .type = "bool"},
     {.signal = "requests_per_s", .type = "float64"},
+}};
+inline constexpr std::array<SystemTag, 7> PROCESS_SYSTEM_TAGS{{
+    {.signal = "realtime", .type = "bool"},
+    {.signal = "config_id", .type = "uint64"},
+    {.signal = "config_state", .type = "int64"},
+    {.signal = "stale_outcomes", .type = "uint64"},
+    {.signal = "answers_dropped", .type = "uint64"},
+    {.signal = "safe_unjournalled", .type = "uint64"},
+    {.signal = "log_dropped", .type = "uint64"},
 }};
 // scada-drv-test's poll groups.
 inline constexpr std::array<std::string_view, 3> POLL_GROUPS{"fast", "normal",
@@ -154,6 +164,19 @@ inline std::vector<std::pair<std::string, std::string_view>> system_tags_of(
         }
     }
     return out;
+}
+
+// Appends the tag `name` of `owner`, of `type`, to the JSON list `tags`.
+inline void append_tag(std::string& tags, const std::string& name,
+                       const std::string& owner, std::string_view type,
+                       bool retain) {
+    tags += tags.empty() ? R"({"name": ")" : R"(, {"name": ")";
+    tags += name;
+    tags += R"(", "owner": ")";
+    tags += owner;
+    tags += R"(", "type": ")";
+    tags += type;
+    tags += retain ? R"(", "retain": true})" : R"("})";
 }
 
 // The port of the simulator's first line, `tcp <port>`; 0 if none.
@@ -422,6 +445,9 @@ protected:
     }
 
     // Writes the tag set and starts scada-tagd.
+    // The next tag set has no owner `drv-test` and no `sys.proc` tags.
+    void without_process_tags() { process_tags_ = false; }
+
     void start_tagd(const std::vector<ChannelTags>& channels,
                     const std::vector<std::string>& extra_tags = {}) {
         write_tag_set(channels, extra_tags);
@@ -685,50 +711,32 @@ private:
         std::string owners;
         std::string tags;
         owners_.clear();
-        const auto add_typed = [&](const std::string& name,
-                                   const std::string& owner,
-                                   std::string_view type, bool retain) {
-            tags += tags.empty() ? R"({"name": ")" : R"(, {"name": ")";
-            tags += name;
-            tags += R"(", "owner": ")";
-            tags += owner;
-            tags += R"(", "type": ")";
-            tags += type;
-            tags += retain ? R"(", "retain": true})" : R"("})";
-        };
-        const auto add_tag = [&](const std::string& name,
-                                 const std::string& owner, bool retain) {
-            add_typed(name, owner, "int64", retain);
-        };
         for (const ChannelTags& channel : channels) {
-            std::string owner = channel.owner;
-            if (owner.empty()) {
-                owner = "drv-test";
-                if (channels.size() > 1) {
-                    owner += ".";
-                    owner += channel.name;
-                }
-            }
-            if (std::find(owners_.begin(), owners_.end(), owner) ==
-                owners_.end()) {
-                owners_.push_back(owner);
-                owners += owners.empty() ? R"({"name": ")" : R"(, {"name": ")";
-                owners += owner;
-                owners +=
-                    R"(", "process": "drv-test", "change_ring_capacity": 1024})";
-            }
+            const std::string owner = channel.owner.empty()
+                                          ? "drv-test." + channel.name
+                                          : channel.owner;
+            add_owner(owners, owner);
             for (const std::string& tag : channel.tags) {
-                add_tag(tag, owner, channel.retain);
+                append_tag(tags, tag, owner, "int64", channel.retain);
             }
             // With the channel's owner (CS 12.5).
             if (channel.system_tags) {
                 for (const auto& [name, type] : system_tags_of(channel)) {
-                    add_typed(name, owner, type, false);
+                    append_tag(tags, name, owner, type, false);
                 }
             }
         }
         for (const std::string& tag : extra_tags) {
-            add_tag(tag, owners_.front(), false);
+            append_tag(tags, tag, owners_.front(), "int64", false);
+        }
+        // The main thread's owner, unless a channel already took the name,
+        // and its tags (11.1).
+        if (process_tags_) {
+            add_owner(owners, "drv-test", false);
+            for (const SystemTag& tag : PROCESS_SYSTEM_TAGS) {
+                append_tag(tags, "sys.proc.drv-test." + std::string(tag.signal),
+                           "drv-test", tag.type, false);
+            }
         }
         const std::string uid = std::to_string(::geteuid());
         std::ofstream file(tag_set_path());
@@ -740,9 +748,26 @@ private:
              << R"(], "queues": [], "tags": [)" << tags << "]}\n";
     }
 
+    // Adds `owner` of process drv-test to the JSON list `owners` once;
+    // `observed`: it is one `observe` may subscribe to (a channel's).
+    void add_owner(std::string& owners, const std::string& owner,
+                   bool observed = true) {
+        if (std::find(owners_.begin(), owners_.end(), owner) != owners_.end() ||
+            owners.find(R"("name": ")" + owner + "\"") != std::string::npos) {
+            return;
+        }
+        if (observed) {
+            owners_.push_back(owner);
+        }
+        owners += owners.empty() ? R"({"name": ")" : R"(, {"name": ")";
+        owners += owner;
+        owners += R"(", "process": "drv-test", "change_ring_capacity": 1024})";
+    }
+
     std::optional<scada::test::TempDirectory> temp_;
     std::filesystem::path base_;
     std::vector<std::string> owners_;
+    bool process_tags_ = true;  // the owner `drv-test` and its tags
     std::optional<RunningTagd> tagd_;
     std::unique_ptr<NotifyListener> listener_;
     scada_ctx* ctx_ = nullptr;

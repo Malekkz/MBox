@@ -293,8 +293,8 @@ TEST_F(DriverProcess, AnOwnerNoChannelWritesFailsTheStart) {
 }
 
 TEST_F(DriverProcess, TwoChannelsOnOneOwnerFailTheStart) {
-    start_tagd({{.name = "a", .tags = {"d1.v"}, .owner = "drv-test"},
-                {.name = "b", .tags = {"d2.v"}, .owner = "drv-test"}});
+    start_tagd({{.name = "a", .tags = {"d1.v"}, .owner = "drv-test.ab"},
+                {.name = "b", .tags = {"d2.v"}, .owner = "drv-test.ab"}});
     const LocalPort port(false);
     auto driver = start_driver(
         joined(tcp_channel("a", port.port()), device("d1", 1, "0"),
@@ -303,7 +303,7 @@ TEST_F(DriverProcess, TwoChannelsOnOneOwnerFailTheStart) {
         FAIL() << "no driver";
     }
     EXPECT_TRUE(
-        fails_start(*driver, "channels a and b both write owner drv-test"));
+        fails_start(*driver, "channels a and b both write owner drv-test.ab"));
 }
 
 TEST_F(DriverProcess, ATagOfAnotherChannelsOwnerFailsTheStart) {
@@ -607,6 +607,57 @@ TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
     }
     EXPECT_TRUE(fails_start(
         *wrong, "tag sys.drv.line1.connects is not of its type (11.1)"));
+}
+
+TEST_F(SystemTags, OfTheProcessAreTheMainThreads) {
+    // `sys.proc.drv-test.*`, owner `drv-test`, written by the main thread
+    // (D-144): no real-time thread, no `config_id` until the compile step,
+    // APPLIED (1) once READY=1 is sent, every count 0. The owner has no
+    // channel and is no unused owner.
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto driver = start_driver(joined(
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    observe();
+    ASSERT_TRUE(eventually(handle("sys.proc.drv-test.config_state"),
+                           [](const scada_value& value) {
+                               return good(value) && as_i64(value) == 1;
+                           }));
+    EXPECT_TRUE(
+        zero({"sys.proc.drv-test.realtime", "sys.proc.drv-test.config_id",
+              "sys.proc.drv-test.stale_outcomes",
+              "sys.proc.drv-test.answers_dropped",
+              "sys.proc.drv-test.safe_unjournalled",
+              "sys.proc.drv-test.log_dropped"}));
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(DriverProcess, TheMainThreadsOwnerIsNoChannels) {
+    // CS 12.5: the owner named like the process is the main thread's; a
+    // channel on it would be its second writer (TD 13.2).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}, .owner = "drv-test"}});
+    auto driver = start_driver(joined(
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(
+        *driver, "channel line1 writes owner drv-test, the main thread's"));
+}
+
+TEST_F(DriverProcess, ATagSetWithoutTheProcessOwnerFailsTheStart) {
+    without_process_tags();
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto driver = start_driver(joined(
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(
+        *driver, "the tag set has no owner drv-test for the sys.proc tags"));
 }
 
 TEST_F(DriverProcess, StaleAfterMaxAgeAndClearedByTheNextRead) {

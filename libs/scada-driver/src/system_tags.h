@@ -1,9 +1,10 @@
 #ifndef SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 #define SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 
-// The system tags of one channel and its devices (driver interface contract
-// 11.1, decision D-144), written by the channel's worker, which owns them
-// with the channel's point tags (CS 12.5).
+// The system tags of driver interface contract 11.1 (decision D-144): those
+// of one channel and its devices, written by the channel's worker, which
+// owns them with the channel's point tags, and those of the process,
+// written by the main thread as the owner named like the process (CS 12.5).
 
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
@@ -52,6 +53,24 @@ enum class DeviceSignal : std::uint8_t {
 };
 inline constexpr std::size_t DEVICE_SIGNALS = 14;
 
+// The signals of `sys.proc.<process>.<signal>`, in slot order.
+enum class ProcessSignal : std::uint8_t {
+    REALTIME = 0,
+    CONFIG_ID,
+    CONFIG_STATE,
+    STALE_OUTCOMES,
+    ANSWERS_DROPPED,
+    SAFE_UNJOURNALLED,
+    LOG_DROPPED,
+};
+inline constexpr std::size_t PROCESS_SIGNALS = 7;
+
+// `sys.proc.<process>.config_state` (11.1).
+enum class ConfigState : std::uint8_t {
+    LOADING = 0,
+    APPLIED = 1,
+};
+
 // One signal's name and tag type (11.1).
 struct SignalSpec {
     std::string_view name;
@@ -60,12 +79,16 @@ struct SignalSpec {
 
 [[nodiscard]] const SignalSpec& channel_signal(ChannelSignal signal) noexcept;
 [[nodiscard]] const SignalSpec& device_signal(DeviceSignal signal) noexcept;
+[[nodiscard]] const SignalSpec& process_signal(ProcessSignal signal) noexcept;
 
 // `sys.drv.<channel>.<signal>` and `sys.dev.<device>.<signal>`.
 [[nodiscard]] std::string channel_tag_name(std::string_view channel,
                                            std::string_view signal);
 [[nodiscard]] std::string device_tag_name(std::string_view device,
                                           std::string_view signal);
+// `sys.proc.<process>.<signal>`.
+[[nodiscard]] std::string process_tag_name(std::string_view process,
+                                           std::string_view signal);
 
 // One system tag: its handle and type, and the value last written.
 struct SystemSlot {
@@ -74,6 +97,12 @@ struct SystemSlot {
     bool written = false;
     std::uint64_t last = 0;  // the bits of the value last written
 };
+
+// Writes `bits` to `slot`, GOOD with no flags and source time 0, if it
+// differs from the value last written or with `all`; true if it wrote. A
+// write the library refuses is counted in `refused`. Not real-time.
+bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
+                std::uint64_t& refused) noexcept;
 
 // The slots of a channel: CHANNEL_SIGNALS, then one `period.<group>` per
 // poll group, then DEVICE_SIGNALS per device of the channel (disabled ones
@@ -130,6 +159,35 @@ private:
     scada_ctx* ctx_;
     SystemTagHandles handles_;
     std::int64_t due_ns_ = 0;
+    std::uint64_t refused_ = 0;
+};
+
+// The `sys.proc.<process>.*` tags, written by the main thread (D-144). The
+// counters stay 0 until the slices that count them: the command slices
+// (`stale_outcomes`, `answers_dropped`), the fail-safe slice
+// (`safe_unjournalled`) and 5b-3 (`log_dropped`).
+class ProcessTags {
+public:
+    // One slot per ProcessSignal, in order, resolved by the main thread.
+    using Slots = std::array<SystemSlot, PROCESS_SIGNALS>;
+
+    // `ctx` is borrowed and used only from the main thread.
+    ProcessTags(scada_ctx* ctx, const Slots& slots) noexcept;
+
+    // Every signal at the start: no real-time thread (a driver has none,
+    // DI 2.5), `config_id` 0 until the compile step gives one (slice 8),
+    // LOADING, every count 0. True when it wrote anything.
+    bool publish_start() noexcept;
+
+    // `config_state` APPLIED, once READY=1 is sent. True if it wrote.
+    bool applied() noexcept;
+
+    // Writes the library refused.
+    [[nodiscard]] std::uint64_t refused() const noexcept { return refused_; }
+
+private:
+    scada_ctx* ctx_;
+    Slots slots_;
     std::uint64_t refused_ = 0;
 };
 

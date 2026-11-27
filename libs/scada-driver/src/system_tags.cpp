@@ -48,6 +48,16 @@ constexpr std::array<SignalSpec, DEVICE_SIGNALS> DEVICE_SPECS{{
     {.name = "points_absent", .type = SCADA_TYPE_UINT64},
 }};
 
+constexpr std::array<SignalSpec, PROCESS_SIGNALS> PROCESS_SPECS{{
+    {.name = "realtime", .type = SCADA_TYPE_BOOL},
+    {.name = "config_id", .type = SCADA_TYPE_UINT64},
+    {.name = "config_state", .type = SCADA_TYPE_INT64},
+    {.name = "stale_outcomes", .type = SCADA_TYPE_UINT64},
+    {.name = "answers_dropped", .type = SCADA_TYPE_UINT64},
+    {.name = "safe_unjournalled", .type = SCADA_TYPE_UINT64},
+    {.name = "log_dropped", .type = SCADA_TYPE_UINT64},
+}};
+
 std::uint64_t bits_of(std::int64_t value) noexcept {
     return std::bit_cast<std::uint64_t>(value);
 }
@@ -72,6 +82,10 @@ const SignalSpec& device_signal(DeviceSignal signal) noexcept {
     return DEVICE_SPECS.at(static_cast<std::size_t>(signal));
 }
 
+const SignalSpec& process_signal(ProcessSignal signal) noexcept {
+    return PROCESS_SPECS.at(static_cast<std::size_t>(signal));
+}
+
 std::string channel_tag_name(std::string_view channel,
                              std::string_view signal) {
     std::string name = "sys.drv.";
@@ -83,6 +97,57 @@ std::string device_tag_name(std::string_view device, std::string_view signal) {
     std::string name = "sys.dev.";
     name.append(device).append(".").append(signal);
     return name;
+}
+
+std::string process_tag_name(std::string_view process,
+                             std::string_view signal) {
+    std::string name = "sys.proc.";
+    name.append(process).append(".").append(signal);
+    return name;
+}
+
+bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
+                std::uint64_t& refused) noexcept {
+    if (slot.handle == SCADA_INVALID_HANDLE ||
+        (!all && slot.written && slot.last == bits)) {
+        return false;
+    }
+    // GOOD, no flags, source time 0: the library stores its own update
+    // time with LOCAL_TIME (TD 13), the time the value was taken.
+    scada_value value{};
+    value.type = slot.type;
+    value.value = bits;
+    value.quality = SCADA_QUALITY_GOOD;
+    value.quality_flags = 0;
+    value.source_time_ns = 0;
+    if (scada_tag_write(ctx, slot.handle, &value) != SCADA_OK) {
+        ++refused;
+        return false;
+    }
+    slot.written = true;
+    slot.last = bits;
+    return true;
+}
+
+ProcessTags::ProcessTags(scada_ctx* ctx, const Slots& slots) noexcept
+    : ctx_(ctx), slots_(slots) {}
+
+bool ProcessTags::publish_start() noexcept {
+    static_assert(static_cast<int>(ConfigState::LOADING) == 0);
+    // Every signal 0 at the start: false, no `config_id`, LOADING, no count.
+    bool wrote = false;
+    for (SystemSlot& slot : slots_) {
+        wrote = write_slot(ctx_, slot, 0, true, refused_) || wrote;
+    }
+    return wrote;
+}
+
+bool ProcessTags::applied() noexcept {
+    SystemSlot& state =
+        slots_.at(static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
+    return write_slot(ctx_, state,
+                      bits_of(static_cast<std::int64_t>(ConfigState::APPLIED)),
+                      false, refused_);
 }
 
 SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept
@@ -98,26 +163,7 @@ bool SystemTags::put(std::size_t slot, std::uint64_t bits, bool all) noexcept {
     if (slot >= handles_.slots.size()) {
         return false;
     }
-    SystemSlot& target = handles_.slots[slot];
-    if (target.handle == SCADA_INVALID_HANDLE ||
-        (!all && target.written && target.last == bits)) {
-        return false;
-    }
-    // GOOD, no flags, source time 0: the library stores its own update
-    // time with LOCAL_TIME (TD 13), the time the value was taken.
-    scada_value value{};
-    value.type = target.type;
-    value.value = bits;
-    value.quality = SCADA_QUALITY_GOOD;
-    value.quality_flags = 0;
-    value.source_time_ns = 0;
-    if (scada_tag_write(ctx_, target.handle, &value) != SCADA_OK) {
-        ++refused_;
-        return false;
-    }
-    target.written = true;
-    target.last = bits;
-    return true;
+    return write_slot(ctx_, handles_.slots[slot], bits, all, refused_);
 }
 
 bool SystemTags::link(ChannelLink link) noexcept {
