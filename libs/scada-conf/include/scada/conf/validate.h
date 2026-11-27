@@ -32,8 +32,10 @@ namespace scada::conf {
 //   rules and expression types that need no point tags (references.h), and
 //   the checks of each merged point: CF-202, CF-504, CF-516, CF-517, and
 //   each computed value against its key's rules (CF-204 and others), one
-//   error for one cause at many instances (D-115).
-// The rest of stage 5 comes with slice 7 of #100.
+//   error for one cause at many instances (D-115); the tags of the expanded
+//   tree and every reference to a tag outside an expression, a point within
+//   a device or a poll group (CF-301, CF-302, CF-310, CF-312, CF-604; D-116).
+// The rest of stage 5 comes with slices 7b to 7e of #100.
 //
 // Fails when the tree cannot be read (see `scan_tree`), and with INTERNAL
 // when a computed value's key has no rule in its schema, or a `oneOf` gives
