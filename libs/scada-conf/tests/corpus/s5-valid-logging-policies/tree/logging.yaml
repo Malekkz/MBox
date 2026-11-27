@@ -1,0 +1,17 @@
+aggregate_tiers:
+  - { name: 1m,  interval: 1m }
+  - { name: 15m, interval: 15m }
+  - { name: 1h,  interval: 1h }
+default_policy: process_default
+policies:
+  process_default:
+    mode: on_change
+    deadband: 0.5%
+    max_interval: 5m
+    raw_retention: 90d
+    tiers: { 1m: 1y, 1h: 10y }
+  counters:
+    mode: periodic
+    interval: 1m
+    raw_retention: 1y
+    tiers: { 1h: 10y }

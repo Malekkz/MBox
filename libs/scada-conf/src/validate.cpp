@@ -15,6 +15,7 @@
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
 #include "tag_names.h"
+#include "tag_rules.h"
 #include "validate_internal.h"
 
 #include <cstdint>
@@ -309,6 +310,7 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                                            &validation.run_time);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);
+                check_tag_rules(tags, *validation.expanded, checked, stage5);
             }
             stage5.move_into(report);
         }

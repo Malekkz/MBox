@@ -1,0 +1,9 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 19200
+  parity: even
+devices:
+  - { name: ps1.fm1, template: flow_meter_x, unit_id: 11, timeout: 300ms, retries: 2 }
+  - { name: ps1.fm2, template: flow_meter_x, unit_id: 12, timeout: 300ms, retries: 2 }

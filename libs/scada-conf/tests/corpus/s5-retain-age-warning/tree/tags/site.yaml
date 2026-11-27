@@ -1,0 +1,2 @@
+tags:
+  - { name: site.setpoint, type: manual, value_type: float64, area: site, retain_max_age: 1h }
