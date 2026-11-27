@@ -65,7 +65,7 @@ constexpr std::size_t SAMPLE_BYTES = 28;
 constexpr std::size_t MAX_SAMPLES = 16;
 constexpr unsigned OUTCOMES = 5;
 constexpr unsigned KINDS = 6;
-constexpr unsigned TAG_TYPES = 4;
+constexpr unsigned TAG_TYPES = 5;  // BOOL to STRING (#169)
 constexpr std::array<std::uint8_t, 6> WIDTHS{0, 1, 8, 16, 32, 64};
 constexpr std::int64_t SECOND = 1'000'000'000;
 constexpr std::uint64_t COUNTER_LIMIT = 65535;
@@ -128,6 +128,8 @@ constexpr unsigned HEALTH = 1;          // a `health` rule on companion 1
 constexpr unsigned QUALITY_RULE = 2;    // a `quality_from` rule
 constexpr unsigned HEALTH_FRESH = 3;    // companion 1 is never stale
 constexpr unsigned TIME_RAW = 4;        // companion 0 holds a device time
+constexpr unsigned DOUBLE_POINT = 5;    // `kind: double_point` (#169)
+constexpr unsigned RAW_RANGE = 6;       // `raw_range` (#169)
 constexpr unsigned STATUS_GOOD = 0;     // of the status byte: always good
 constexpr unsigned SLOTS = 3;           // two companions and one past them
 constexpr unsigned ACTIONS = 3;
@@ -204,6 +206,19 @@ PointRules rules_from(std::span<const std::uint8_t> header) {
         rules.health.push_back(scada::driver::HealthRule{
             .companion = 1, .good = {1}, .comm_fail = true});
     }
+    if (option(features, DOUBLE_POINT)) {
+        using scada::driver::DoublePoint;
+        rules.double_point = scada::driver::DoublePointRule{
+            .states = {{.raw = 0, .code = DoublePoint::INTERMEDIATE},
+                       {.raw = 1, .code = DoublePoint::OPEN},
+                       {.raw = 2, .code = DoublePoint::CLOSED},
+                       {.raw = 3, .code = DoublePoint::BAD_STATE}}};
+    }
+    if (option(features, RAW_RANGE)) {
+        const auto low = static_cast<double>(gain);
+        rules.raw_range = scada::driver::RawRange{
+            .min = low, .max = low + static_cast<double>(header[OFFSET_BYTE])};
+    }
     if (option(features, TIME_COMPANION)) {
         rules.time_companion =
             static_cast<std::uint8_t>(header[MARKER_BYTE] % SLOTS);
@@ -273,8 +288,11 @@ std::array<CompanionInput, 2> companions_for(
         first.number_i = raw.number_i;
     }
     constexpr unsigned STATUS_WIDTH = 16;
-    const bool healthy =
-        option(header[STATUS_BYTE], STATUS_GOOD) || (bytes[1] & 1U) != 0;
+    // The status bit is the low bit of the sample's last byte, not of the
+    // width byte, so that health and width vary apart (#169).
+    constexpr std::size_t STATUS_OF_SAMPLE = SAMPLE_BYTES - 1;
+    const bool healthy = option(header[STATUS_BYTE], STATUS_GOOD) ||
+                         (bytes[STATUS_OF_SAMPLE] & 1U) != 0;
     return {
         CompanionInput{
             .outcome = static_cast<Outcome>(1U + (bytes[3] % OUTCOMES)),
@@ -304,7 +322,7 @@ bool same_value(const scada::driver::TagValue& got,
             return std::bit_cast<std::uint64_t>(got.f) ==
                    std::bit_cast<std::uint64_t>(want.f);
         case TagType::STRING:
-            return true;  // never written
+            return got.text == want.text;
     }
     return false;
 }
@@ -321,7 +339,8 @@ scada::driver::TagValue other_substitute(TagType type) {
         case TagType::FLOAT64:
             return scada::driver::float64_value(1.0);
         case TagType::STRING:
-            break;
+            // Static text: a substitute borrows its text (#169).
+            return scada::driver::string_value("other");
     }
     return scada::driver::zero_value(type);
 }

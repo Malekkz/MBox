@@ -14,6 +14,7 @@
 // writes BAD for any that reach it anyway, so that no rule value can cause
 // undefined behaviour.
 
+#include "scada/common/realtime.h"
 #include "scada/common/status.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/tag_value.h"
@@ -231,7 +232,10 @@ struct PointRules {
 // an INT64 or UINT64 value other than an enumeration or a double point
 // (CF-504, decision D-134), a zone table for every
 // local device time. Returns INVALID_ARGUMENT naming the first failure.
-[[nodiscard]] Status validate_point_rules(const PointRules& rules) noexcept;
+// Real-time: no allocation, one pass over the rules' lists; process_sample
+// calls it for every sample, so that refused rules give BAD (#169).
+SCADA_RT [[nodiscard]] Status validate_point_rules(
+    const PointRules& rules) noexcept;
 
 }  // namespace scada::driver
 

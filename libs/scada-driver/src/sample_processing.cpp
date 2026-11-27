@@ -795,6 +795,35 @@ void process_device_invalid(Work& work) noexcept {
     hold_last(work, mapping);
 }
 
+// Steps 1 to 6 for rules validate_point_rules accepts: the outcome, then
+// the worst of all `quality_from` and `health` rules (CS 4.7, 4.9).
+void process_outcome(Work& work) noexcept {
+    PointState& state = *work.state;
+    const RawSample& sample = *work.sample;
+    switch (sample.outcome) {
+        case Outcome::VALUE:
+            process_value(work);
+            break;
+        case Outcome::NO_VALUE:
+            state.holding = false;
+            work.mark = bad(device_mark(sample.mark).flags);
+            break;
+        case Outcome::ABSENT:
+            state.holding = false;
+            work.mark = bad(0);
+            break;
+        case Outcome::DEVICE_INVALID:
+            process_device_invalid(work);
+            break;
+        case Outcome::COMM_FAIL:
+            state.holding = false;
+            work.mark = bad(flag(QualityFlag::COMM_FAIL));
+            break;
+    }
+    work.mark = worse(work.mark, quality_from_rules(work));
+    work.mark = worse(work.mark, health_mark(work));
+}
+
 // Fills `out` from the state's last value and mark.
 void fill_writes(const PointRules& rules, const PointState& state,
                  ProcessedSample& out) noexcept {
@@ -878,32 +907,18 @@ void process_sample(const PointRules& rules, PointState& state,
     work.times = &times;
     work.out = &out;
 
-    switch (sample.outcome) {
-        case Outcome::VALUE:
-            process_value(work);
-            break;
-        case Outcome::NO_VALUE:
-            out.counts.sentinel = true;
-            state.holding = false;
-            work.mark = bad(device_mark(sample.mark).flags);
-            break;
-        case Outcome::ABSENT:
-            state.holding = false;
-            work.mark = bad(0);
-            break;
-        case Outcome::DEVICE_INVALID:
-            process_device_invalid(work);
-            break;
-        case Outcome::COMM_FAIL:
-            state.holding = false;
-            work.mark = bad(flag(QualityFlag::COMM_FAIL));
-            break;
+    // Rules that validate_point_rules refuses give BAD with OUT_OF_RANGE on
+    // every path, the value kept: no marker, hold or companion applies to
+    // them (#169; decision D-131). The compile step refuses them first.
+    if (!validate_point_rules(rules).ok()) {
+        state.holding = false;
+        work.mark = bad(flag(QualityFlag::OUT_OF_RANGE));
+    } else {
+        process_outcome(work);
     }
-
-    // Step 6 for every outcome and every marker action: the worst of all
-    // rules is the tag's quality (CS 4.7, 4.9).
-    work.mark = worse(work.mark, quality_from_rules(work));
-    work.mark = worse(work.mark, health_mark(work));
+    if (sample.outcome == Outcome::NO_VALUE) {
+        out.counts.sentinel = true;
+    }
 
     // ABSENT is counted while it lasts; a lost answer says nothing either
     // way.

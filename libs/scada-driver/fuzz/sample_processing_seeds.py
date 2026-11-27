@@ -30,8 +30,8 @@ def sample(kind='signed', width=16, outcome='value', quality=0, number=0, flt=0.
         fbits = bits
     else:
         fbits = 0 if flt_bits is None else flt_bits
-    # Byte 1 is also the health companion's status when the header does not
-    # make it good: an odd byte reads 1.
+    # Bit 0 of the last byte (the top byte of the float field) is the health
+    # companion's status when the header does not make it good (#169).
     b = bytes([KIND[kind], WIDTH[width], OUTCOME[outcome], quality])
     b += struct.pack('<Q', pattern & (2**64 - 1))
     b += struct.pack('<Q', number & (2**64 - 1))
@@ -91,8 +91,8 @@ seeds = {
     'uncertain-companion-with-substituted': header(features=0b10001, marker=3)
         + bytes([1, 3, 10, 0]) + sample(number=1_800_000_000 * 10**9, pattern=0x8)[4:],
     'health-bad-then-good': header(features=0b01010, status=0)
-        + bytes([1, 2]) + sample(number=42)[2:]   # width 8, status 0: BAD
-        + sample(number=43),                       # width 16, status 1: good
+        + sample(number=42)                      # status 0: BAD
+        + sample(number=43, flt_bits=1 << 56),   # status 1: good
 }
 for name, data in seeds.items():
     with open(os.path.join(out, name), 'wb') as f:
