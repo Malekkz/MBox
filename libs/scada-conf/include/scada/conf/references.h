@@ -4,7 +4,7 @@
 // Stage 5 of validation, the part that needs no expansion (configuration
 // schemas contract, sections 1.4, 10.3 and Annex A.1; decision D-113): names
 // that must exist, names defined twice, and the protocol rules of a channel.
-// What needs the tags of expanded instances waits for the expander (#103):
+// What needs the tags of expanded instances is in `src/tag_names.h` (D-116):
 // a reference to a tag gives no error here.
 
 #include "scada/conf/diagnostic.h"
@@ -28,7 +28,6 @@ struct CheckedFile {
 //   enumeration, task, program, interlock, output, alarm priority or alarm
 //   class that does not exist;
 // - CF-303 for a channel, device or interlock name given twice;
-// - CF-301 and CF-302 for the tags that tag files and interlocks define;
 // - CF-622 for `data_bits: 7` and a loopback, multicast or broadcast host of
 //   a Modbus channel;
 // - CF-410 for a configuration expression of a template that fails over

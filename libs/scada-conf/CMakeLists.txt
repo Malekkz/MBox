@@ -47,12 +47,15 @@ scada_add_library(scada-conf
     src/merged_points.cpp
     src/names.cpp
     src/node.cpp
+    src/point_types.cpp
+    src/name_pattern.cpp
     src/path_class.cpp
     src/read.cpp
     src/references.cpp
     src/rules.cpp
     src/scalar.cpp
     src/schema.cpp
+    src/tag_names.cpp
     src/tree_scan.cpp
     src/utf8.cpp
     src/validate.cpp

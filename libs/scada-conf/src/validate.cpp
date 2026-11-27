@@ -13,6 +13,7 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "tag_names.h"
 #include "validate_internal.h"
 
 #include <cstdint>
@@ -284,8 +285,9 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
         const bool stage4_failed = stage4.error_count() > 0;
         stage4.move_into(report);
         if (!stage4_failed) {
-            // Stage 5: what needs no point tags (D-113); the rest comes with
-            // slice 7 of #100.
+            // Stage 5: what needs no point tags (D-113), the merged points
+            // (D-115) and the tag references (D-116); the rest comes with
+            // slices 7b to 7e of #100.
             Diagnostics stage5;
             check_references(checked, stage5);
             if (validation.expanded) {
@@ -294,6 +296,12 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 if (!merged.ok()) {
                     return merged;
                 }
+                // The tags of the expanded tree and the references to them
+                // (D-116, slice 7a of #100).
+                const TagNames tags =
+                    collect_tags(*validation.expanded, checked, stage5);
+                check_tag_references(tags, *validation.expanded, checked,
+                                     stage5);
             }
             stage5.move_into(report);
         }
