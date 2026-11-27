@@ -13,6 +13,7 @@
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
+#include "tree_reader.h"
 
 #include <algorithm>
 #include <array>
@@ -181,63 +182,6 @@ void each_record(const Records& records, std::string_view family,
     }
 }
 
-// Reads one Document: the expanded tree or a file of the tree.
-class Reader {
-public:
-    explicit Reader(const Document& document) : document_(&document) {}
-
-    [[nodiscard]] const Document& document() const { return *document_; }
-
-    [[nodiscard]] std::optional<NodeId> child(NodeId map,
-                                              std::string_view key) const {
-        if (document_->kind(map) != NodeKind::MAP) {
-            return std::nullopt;
-        }
-        return document_->find(map, key);
-    }
-
-    // The scalar at `key` of `map`, or nothing.
-    [[nodiscard]] std::optional<NodeId> scalar(NodeId map,
-                                               std::string_view key) const {
-        const std::optional<NodeId> node = child(map, key);
-        if (!node || document_->kind(*node) != NodeKind::SCALAR) {
-            return std::nullopt;
-        }
-        return node;
-    }
-
-    // The text of the scalar at `key` of `map`, a view into the Document;
-    // empty if there is none.
-    [[nodiscard]] std::string_view text_of(NodeId map,
-                                           std::string_view key) const {
-        const std::optional<NodeId> node = scalar(map, key);
-        return node ? document_->text(*node) : std::string_view();
-    }
-
-    // The items of the sequence at `key` of `map`; none if it is not one.
-    [[nodiscard]] std::span<const NodeId> items(NodeId map,
-                                                std::string_view key) const {
-        const std::optional<NodeId> node = child(map, key);
-        if (!node || document_->kind(*node) != NodeKind::SEQUENCE) {
-            return {};
-        }
-        return document_->items(*node);
-    }
-
-    // The entries of the map at `key` of `map`; none if it is not one.
-    [[nodiscard]] std::span<const Entry> entries(NodeId map,
-                                                 std::string_view key) const {
-        const std::optional<NodeId> node = child(map, key);
-        if (!node || document_->kind(*node) != NodeKind::MAP) {
-            return {};
-        }
-        return document_->entries(*node);
-    }
-
-private:
-    const Document* document_;
-};
-
 // The poll groups of a written channel (4.6): its own, which replace the
 // defaults, or the defaults (D-116). Views into `document`, or constant.
 std::vector<std::string_view> channel_poll_groups(const Reader& reader,
@@ -255,76 +199,6 @@ std::vector<std::string_view> channel_poll_groups(const Reader& reader,
     std::ranges::sort(groups);
     return groups;
 }
-
-// The errors of stage 5 at the nodes of one tree (D-114, D-116): an error
-// on the expanded tree is at its instance with the template note, one
-// cause at many instances is one error, and an error that the instance's
-// own file contributes to is never grouped. An error of another file goes
-// to the Diagnostics at once, which keep the first of the sorted order
-// (contract 1.4) however many the expanded tree has.
-class Reporter {
-public:
-    Reporter(const ExpandedTree& tree, Diagnostics& diagnostics)
-        : tree_(&tree), diagnostics_(&diagnostics), grouped_(MAX_KEPT_ERRORS) {}
-
-    // An error at `node` of `document`. On the expanded tree, `detail` is
-    // the note's detail ("point flow") and `device` the instance's name.
-    // `key`, when given, names the cause in place of the message.
-    void error(const Document& document, NodeId node, std::uint16_t code,
-               std::string message, std::string_view detail = {},
-               std::string_view device = {}, std::string_view key = {}) {
-        if (&document != &tree_->document) {
-            diagnostics_->error(code, document.location(node),
-                                std::move(message));
-            return;
-        }
-        Diagnostic diagnostic = expanded_diagnostic(
-            *tree_, code, node, std::move(message), std::string(detail));
-        std::string cause = key.empty()
-                                ? instance_free_key(diagnostic.message, device)
-                                : std::string(key);
-        // "first at <the instance's own place>" names the instance too.
-        if (const std::string own = own_place(node);
-            !own.empty() && cause.ends_with(own)) {
-            cause.replace(cause.size() - own.size(), own.size(), "<instance>");
-        }
-        grouped_.add(std::move(diagnostic), cause, device, *diagnostics_,
-                     !written_in_instance(*tree_, node));
-    }
-
-    // An error with no node: CF-1001 past the process tags of a tree
-    // without system.yaml.
-    void error_at(Location location, std::uint16_t code, std::string message) {
-        diagnostics_->error(code, std::move(location), std::move(message));
-    }
-
-    // Where an error at `node` of `document` is reported, for "first at":
-    // on the expanded tree, the instance's place.
-    [[nodiscard]] Location place_of(const Document& document,
-                                    NodeId node) const {
-        if (&document == &tree_->document) {
-            return expanded_diagnostic(*tree_, 0, node, {}).location;
-        }
-        return document.location(node);
-    }
-
-    void flush() { grouped_.flush(*diagnostics_); }
-
-private:
-    // "<file>:<line>" of the instance `node` belongs to, or nothing.
-    [[nodiscard]] std::string own_place(NodeId node) const {
-        if (node >= tree_->instance_of.size() ||
-            tree_->instance_of[node] >= tree_->instances.size()) {
-            return {};
-        }
-        const Location& instance = tree_->instances[tree_->instance_of[node]];
-        return instance.file + ":" + std::to_string(instance.line);
-    }
-
-    const ExpandedTree* tree_;
-    Diagnostics* diagnostics_;
-    GroupedErrors grouped_;
-};
 
 }  // namespace
 

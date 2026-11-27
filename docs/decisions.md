@@ -2897,3 +2897,32 @@ Consequences:
     - no walk of 9.1 for the process owner.
 - Not tested, and why:
   - A demoted device's recovery has no process test. The simulator cannot make a silent unit answer again; the engine's unit tests cover it.
+
+## D-119: Retained values, logging and alarms of the tags (stage 5)
+Date: 2026-11-27
+Phase / issue: 2, #100 (P2-03), slice 7c
+Status: proposed
+
+Context: contract 5.2, 6 and 8 give rules on the keys of a tag (CF-505 to CF-509, warning CW-510), on logging (CF-801 to CF-803) and on alarms (CF-811 to CF-815). Each needs the tags of the expanded tree (D-116), or several files at once, so they are rules of stage 5. Some points are left open, below.
+Options: for each open point, the simplest reading of the contract, or a question on #136 where it does not decide.
+Decision: `check_tag_rules` (`src/tag_rules.cpp`) runs after the references (D-116), so it reads the derived type of a virtual tag (D-117). A tag of these rules is a point that has a tag (not `tag: false`), a bit, or a tag of a tag file. A device given twice is checked once (CF-303). Past `limits.max_tags` (CF-1001), the rules that read a tag's value type are not checked: CF-507, CF-803, CF-814 and CF-815. The others are. An error of a template's point is at its instance, with the template note, and one cause at many instances is one error (D-114).
+- **Retained values (5.2):**
+  - a tag is retained when `retain` is `true`, or when a manual tag gives no `retain` (5.1). CF-507 `string tags cannot be retained` is at `retain`, else at the manual tag's `value_type`.
+  - CF-506 for `retain_now: true` and for any `retain_max_age` on a tag that is not retained. `retain_now: false` needs nothing.
+  - CF-509 for any `retain_now`, `true` or `false`, on a virtual tag, and then no CF-506. A point has no `retain_now` key: the schema refuses it at stage 3, so CF-509 "on a point tag" is never reached (on #136).
+  - CF-508 for `retain_max_age` on a tag of `kind: counter`, a point's or a tag file's. The other tags 5.2 lists are generated (12.5) and have no key a user writes, so CF-508 cannot reach them. Conformance test 10 has an output mode tag "through an override", which no key of the schemas gives (on #136).
+  - CW-510 `retain_max_age has no effect until the tag database supports it (#89)` for every `retain_max_age`. On a template's point it is given once, at the first instance: a warning is not grouped with errors and is not counted as one.
+- **Logging (6):**
+  - the settings of a tag are: its `logging`; without it, `default_policy`; `none` logs nothing. A map with `policy` takes the policy and overrides `mode` and `deadband`. A map without `policy` must give `mode` and `raw_retention`: one CF-802 for each it lacks, at the `logging` map. A policy name that does not exist is CF-310 of the references, and nothing more.
+  - CF-803 `string tag {name} can be logged on change only` when the mode of those settings is `periodic` or `both`. It is at the tag's `logging`, or at its name when the mode comes from `default_policy`. So a periodic `default_policy` refuses every STRING tag without `logging` (on #136).
+  - CF-801 compares each tier of `aggregate_tiers` with the one before: `its interval must be longer than that of {tier}` when it is not longer, else `its interval must be a whole multiple of that of {tier}`. The error is at the interval. A tier whose interval the schema refused is skipped, and the next tier is not compared with it.
+- **Percentages (2.2):** CF-505 `{name}: a percentage needs range` for a percentage `deadband` of an alarm or of logging settings on a tag that gives no `range`. The deadband may come from a policy, also `default_policy`. The error is at the tag's own `deadband`; for a policy's deadband, at the tag's `logging` or its name. Only a point and a tag of a tag file have `range`. A bit, a generated tag and a STRING tag have none, so a percentage on them is always CF-505 (on #136, with the default policy).
+- **Alarms (8):**
+  - the alarms are those of a point, a bit, a tag of a tag file and `alarms/*.yaml`. The tag of an alarm is its `tag`, else the tag it is written in; an expression alarm is on no tag and is not checked here. An alarm on a tag that does not exist is CF-310 of the references (D-116), and nothing more.
+  - CF-811 `{key} is given in {a} and {b}` at the key of each later alarms file, in path order, naming the first file that gives `priorities`, `max_shelve` or `classes`.
+  - CF-812 `tag {name} has two alarms with id {id}` at each alarm after the first of an id on a tag, at its `id`, else at the alarm. The id defaults to the type. The alarms are taken in the order of the expanded tree (channels, devices, points, bits), then of the files in path order. The state tags of such alarms are made once and are not CF-302 (D-116).
+  - CF-813 `tag {name}: {a} must be above {b}`, with `{a}` and `{b}` the ids. Each `high_high` alarm whose limit is a number is compared with the highest numeric `high` limit of its tag, and each `low` with the highest numeric `low_low`. An equal limit is not above it. The error is at the limit of the `high_high` or `low` alarm. One error per alarm, however many the others: the check is linear in the alarms of a tag. A limit given as a tag is not compared.
+  - CF-814 `string tag {name} cannot have alarms` for any alarm on a STRING tag, at the alarm.
+  - CF-815 `BOOL tag {name} cannot have a {type} alarm` for the four limit types, `high_high`, `high`, `low` and `low_low` (8: "the four limit types"), at the `type`. `deviation` and `rate_of_change` also take a `limit`; on a BOOL tag they are not refused here (on #136).
+
+Consequences: the warnings CW-804 (retention classes) and CW-805 (an interval finer than the refresh) are not in this slice. CW-805 reads the poll groups and the tasks, which slice 7d has. `Reader` and `Reporter` move from `src/tag_names.cpp` to `src/tree_reader.h` and are shared, unchanged except for `Reporter::warning`. Measured in release on x86-64, on 2 instances of a 20,000-point `repeat`, each point with `range`, `retain`, a logging policy and four limit alarms: 1.69 s, against 1.42 s without the check; peak memory 285 MB, the same.
