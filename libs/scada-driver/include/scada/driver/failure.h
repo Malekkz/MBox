@@ -13,6 +13,7 @@
 #include "scada/common/realtime.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace scada::driver {
@@ -68,6 +69,13 @@ public:
         bool enabled = true;
         bool has_poll_group = true;  // at least one point in a poll group
         bool identify = false;       // has identity checks (3.6; D-147)
+        // With `identify`: how long a pending check may take before a value
+        // it cannot read is a mismatch, max(startup_grace, 3 periods of the
+        // identity points' group) (ruling item 2).
+        std::int64_t identity_wait_ns = 0;
+        // The longest period of the channel's groups: a restart re-arms the
+        // grace once until that long passes without another (item 6).
+        std::int64_t full_period_ns = 0;
     };
     // `lost_after_timeouts` is the channel's key (CS) on `tcp`, and 0 where
     // read timeouts never close the connection (serial, `rtu_over_tcp`).
@@ -125,7 +133,8 @@ public:
     // answered since has its back-off doubled first, up to `backoff_max`, so
     // that a unit that answers probes and no poll does not flap at the same
     // rate for ever (review G6). An answer makes an INITIALISING device
-    // RUNNING. Returns true when some device was demoted by this call.
+    // RUNNING, but not while its identity check is pending (review M4).
+    // Returns true when some device was demoted by this call.
     SCADA_RT bool request_ended(std::uint32_t device, RequestEnd end,
                                 std::int64_t now_ns) noexcept;
 
@@ -154,22 +163,30 @@ public:
     // RUNNING only once a poll answers (D-147).
     SCADA_RT void identity_passed(std::uint32_t device) noexcept;
 
-    // The identity check of an INITIALISING `device` failed with `refuse` at
-    // `now_ns`: MISMATCH, its check due again after `backoff`, which does
-    // not grow (DI 3.6).
+    // The identity check of an INITIALISING or MISMATCH `device` failed with
+    // `refuse` at `now_ns`: MISMATCH, its check due again after `backoff`,
+    // which does not grow (DI 3.6), whether it entered MISMATCH now or a
+    // re-check failed (review M5).
     SCADA_RT void identity_mismatched(std::uint32_t device,
                                       std::int64_t now_ns) noexcept;
 
     // A restart of `device` was detected at `now_ns` (D-147): every RUNNING
     // device of its unit is INITIALISING again, with its identity check
-    // pending and, when `rearm_grace`, its grace started again. A device
-    // already INITIALISING, or in any other state, is left as it is.
-    SCADA_RT void restarted(std::uint32_t device, std::int64_t now_ns,
-                            bool rearm_grace) noexcept;
+    // pending; the grace starts again, unless the unit restarted less than
+    // `full_period_ns` ago (once until a full period of every group passes
+    // without a restart, ruling item 6). A device INITIALISING, DEMOTED or
+    // MISMATCH is left as it is.
+    SCADA_RT void restarted(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     // The identity check of `device` is pending: no verdict since the
     // connect, recovery or restart that started it.
     [[nodiscard]] bool identity_pending(std::uint32_t device) const noexcept;
+    // When the pending check began (a connect, a recovery, a restart, or a
+    // MISMATCH re-check falling due) and when it is to end (ruling item 2).
+    [[nodiscard]] std::int64_t identity_since_ns(
+        std::uint32_t device) const noexcept;
+    [[nodiscard]] std::int64_t identity_deadline_ns(
+        std::uint32_t device) const noexcept;
 
     [[nodiscard]] DeviceStatus state(std::uint32_t device) const noexcept;
     // When a demoted device's next probe is due, or a MISMATCH device's
@@ -194,7 +211,16 @@ private:
         // Recovered by a probe, and no poll answered since (review G6).
         bool probe_recovered = false;
         bool identity_pending = false;  // D-147
+        std::int64_t identity_since_ns = 0;
+        // When its unit last restarted; NO_RESTART before the first.
+        std::int64_t last_restart_ns = NO_RESTART;
     };
+
+    static constexpr std::int64_t NO_RESTART =
+        std::numeric_limits<std::int64_t>::min();
+
+    // The check of `device` is pending from `now_ns` (with `identify`).
+    void begin_check(std::uint32_t device, std::int64_t now_ns) noexcept;
 
     // Adds a failure of `device` outside its grace to its unit's count and
     // demotes every device of the unit whose limit it reaches; true when

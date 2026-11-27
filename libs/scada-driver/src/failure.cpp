@@ -73,7 +73,10 @@ void FailureTracker::connected(std::int64_t now_ns) noexcept {
         run.grace_until_ns =
             later(now_ns, devices_[index].rules.startup_grace_ns);
         // A demoted device is checked when a probe recovers it.
-        run.identity_pending = devices_[index].identify && !run.demoted;
+        run.identity_pending = false;
+        if (!run.demoted) {
+            begin_check(static_cast<std::uint32_t>(index), now_ns);
+        }
     }
 }
 
@@ -114,7 +117,10 @@ bool FailureTracker::add_to_run(std::uint32_t device) noexcept {
     // Every eligible unit must be in the run (with none eligible, the run
     // alone decides, as the contract's rule reads).
     for (std::uint32_t other = 0; other < devices_.size(); ++other) {
-        if (!polled(other) || !devices_[other].has_poll_group) {
+        // A device whose identity check is pending reads only its identity,
+        // which adds nothing to the run: not eligible (review S8).
+        if (!polled(other) || !devices_[other].has_poll_group ||
+            runs_[other].identity_pending) {
             continue;
         }
         if (!run_units_[unit_index_[other]]) {
@@ -140,7 +146,9 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
     }
     if (end == RequestEnd::ANSWERED) {
         count_of(device) = 0;
-        run.state = DeviceStatus::RUNNING;
+        if (!run.identity_pending) {
+            run.state = DeviceStatus::RUNNING;  // never before its check (M4)
+        }
         // Only a poll that answered resets the probe back-off (Q3): a unit
         // that answers probes but no poll keeps its growing back-off.
         run.backoff_ns = devices_[device].rules.backoff_ns;
@@ -200,7 +208,7 @@ void FailureTracker::probe_ended(std::uint32_t device, bool answered,
             run.state = DeviceStatus::INITIALISING;
             run.demoted = false;
             run.probe_recovered = true;
-            run.identity_pending = devices_[other].identify;
+            begin_check(other, now_ns);
             continue;
         }
         run.backoff_ns = doubled(run.backoff_ns, rules);
@@ -266,31 +274,64 @@ void FailureTracker::identity_passed(std::uint32_t device) noexcept {
 void FailureTracker::identity_mismatched(std::uint32_t device,
                                          std::int64_t now_ns) noexcept {
     if (device >= devices_.size() ||
-        runs_[device].state != DeviceStatus::INITIALISING) {
+        (runs_[device].state != DeviceStatus::INITIALISING &&
+         runs_[device].state != DeviceStatus::MISMATCH)) {
         return;
     }
     Run& run = runs_[device];
     run.state = DeviceStatus::MISMATCH;
     run.identity_pending = false;
-    // At the constant `backoff` (DI 3.6), not the probe's grown one.
+    // At the constant `backoff` (DI 3.6), not the probe's grown one, after
+    // the first mismatch and after every failed re-check (review M5). The
+    // re-check is a check of its own, with its own deadline.
     run.probe_due_ns = later(now_ns, devices_[device].rules.backoff_ns);
+    run.identity_since_ns = run.probe_due_ns;
 }
 
-void FailureTracker::restarted(std::uint32_t device, std::int64_t now_ns,
-                               bool rearm_grace) noexcept {
+void FailureTracker::begin_check(std::uint32_t device,
+                                 std::int64_t now_ns) noexcept {
+    Run& run = runs_[device];
+    run.identity_pending = devices_[device].identify;
+    run.identity_since_ns = now_ns;
+}
+
+std::int64_t FailureTracker::identity_since_ns(
+    std::uint32_t device) const noexcept {
+    return device < devices_.size() ? runs_[device].identity_since_ns : 0;
+}
+
+std::int64_t FailureTracker::identity_deadline_ns(
+    std::uint32_t device) const noexcept {
+    if (device >= devices_.size()) {
+        return 0;
+    }
+    return later(runs_[device].identity_since_ns,
+                 devices_[device].identity_wait_ns);
+}
+
+void FailureTracker::restarted(std::uint32_t device,
+                               std::int64_t now_ns) noexcept {
     if (device >= devices_.size()) {
         return;
     }
-    // The unit restarted: every device of it (D-147, ruling item 6).
+    // The unit restarted: every device of it (D-147, ruling item 6). The
+    // grace starts again once, until a full period of every group passes
+    // without a restart of the unit.
     for (std::uint32_t other = 0; other < devices_.size(); ++other) {
         Run& run = runs_[other];
-        if (unit_index_[other] != unit_index_[device] ||
-            run.state != DeviceStatus::RUNNING) {
+        if (unit_index_[other] != unit_index_[device]) {
             continue;
         }
+        const bool rearm =
+            run.last_restart_ns == NO_RESTART ||
+            now_ns - run.last_restart_ns >= devices_[other].full_period_ns;
+        run.last_restart_ns = now_ns;
+        if (run.state != DeviceStatus::RUNNING) {
+            continue;  // counted by the engine, nothing else (item 6)
+        }
         run.state = DeviceStatus::INITIALISING;
-        run.identity_pending = devices_[other].identify;
-        if (rearm_grace) {
+        begin_check(other, now_ns);
+        if (rearm) {
             run.grace_until_ns =
                 later(now_ns, devices_[other].rules.startup_grace_ns);
         }
