@@ -1,6 +1,7 @@
 #include "scada/conf/validate.h"
 
 #include "merged_points.h"
+#include "runtime_expressions.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
@@ -298,8 +299,14 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 }
                 // The tags of the expanded tree and the references to them
                 // (D-116, slice 7a of #100).
-                const TagNames tags =
+                TagNames tags =
                     collect_tags(*validation.expanded, checked, stage5);
+                // Virtual tags get their types from their expressions before
+                // any reference reads them (D-117, slice 7b of #100).
+                check_run_time_expressions(tags, *validation.expanded, checked,
+                                           stage5, expand_limits.kept_run_time,
+                                           expand_limits.run_time_pattern_work,
+                                           &validation.run_time);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);
             }

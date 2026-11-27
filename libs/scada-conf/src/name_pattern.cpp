@@ -1,16 +1,24 @@
 #include "name_pattern.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace scada::conf {
 
 bool matches_name_pattern(std::string_view pattern, std::string_view name) {
+    std::uint64_t unused = 0;
+    return matches_name_pattern(pattern, name, unused);
+}
+
+bool matches_name_pattern(std::string_view pattern, std::string_view name,
+                          std::uint64_t& steps) {
     std::size_t cursor = 0;
     std::size_t pos = 0;
     std::size_t star = std::string_view::npos;
     std::size_t resume = 0;
     while (pos < name.size()) {
+        ++steps;
         if (cursor < pattern.size() &&
             (pattern[cursor] == name[pos] ||
              (pattern[cursor] == '?' && name[pos] != '.'))) {

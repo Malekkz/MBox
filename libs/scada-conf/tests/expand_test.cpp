@@ -1373,7 +1373,10 @@ TEST(Expand, AlarmsOnABitAreNotEvaluated) {
                  "      0: { name: fault, alarms: [ { type: state, alarm_on: "
                  "true, priority: high, suppress_when: ps1.station.maint } ] "
                  "}\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
+                {"drivers/modbus/line1.yaml", one_device()},
+                {"tags/site.yaml",
+                 "tags:\n  - { name: ps1.station.maint, type: internal, "
+                 "value_type: bool }\n"}}),
         Lines{"ps1.m1.w: {tag: false, address: {table: holding, register: 1, "
               "type: uint16}, bits: {0: {name: fault, alarms: [{type: state, "
               "alarm_on: true, priority: high, suppress_when: "

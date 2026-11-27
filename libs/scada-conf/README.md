@@ -152,8 +152,22 @@ they stand, programs: CF-310, and CF-312 for a `limit` or `setpoint` that
 is not a number), every point a device's rules name, `applies_to` included
 (CF-310, CF-311), and each point's poll group, given or the default
 `normal` (CF-604). Errors on the expanded tree are grouped as in stage 4.
-Owner names are #101's and are not used. The names and types of run-time
-expressions follow in slice 7b of #100.
+Owner names are #101's and are not used.
+
+Stage 5 then checks every run-time expression against those tags
+(`src/runtime_expressions.cpp`, D-117): virtual tags, alarm expressions,
+`suppress_when` and interlock conditions. Virtual tags are typed first, in
+the order their inputs need, and their derived types enter the tags before
+any later check reads them. It gives CF-310 for a name that is no tag,
+CF-311 for a pattern that matches none, CF-521 for an ambiguous `.quality`
+or `.age`, CF-522 for a STRING tag, CF-523 for a type that does not fit or
+a result that must be BOOL, CF-524 for a time function's window out of its
+task's range, CF-525 for virtual tags that form a cycle and CF-527 for a
+given `value_type` that is not the derived one. Matching patterns against the
+tags has a work budget of 1e10 units, 32 per name visited and 1 per step
+of the matcher (`ExpandLimits::run_time_pattern_work`): past it the tree
+is refused with CF-113. The worst accepted tree takes about 14.4 s in
+release on x86-64 (D-117).
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
@@ -174,7 +188,7 @@ slice of #100.
 | CF-110 | `src/yaml_parser.cpp` |
 | CF-111 | `src/schema.cpp`, `src/yaml_parser.cpp` |
 | CF-112 | `src/yaml_parser.cpp` |
-| CF-113 | `src/expand.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
+| CF-113 | `src/expand.cpp`, `src/runtime_expressions.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
 | CF-114 | `src/yaml_parser.cpp` |
 | CF-201 | `src/rules.cpp`, `src/schema.cpp` |
 | CF-202 | `src/expand.cpp`, `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp`, `src/validate.cpp` |
@@ -193,7 +207,7 @@ slice of #100.
 | CF-302 | `src/tag_names.cpp` |
 | CF-303 | `src/references.cpp` |
 | CF-310 | `src/expression_types.cpp`, `src/merged_points.cpp`, `src/references.cpp`, `src/tag_names.cpp` |
-| CF-311 | `src/tag_names.cpp` (`applies_to`); slice 7b of #100 (expressions) |
+| CF-311 | `src/tag_names.cpp` (`applies_to`); `src/expression_types.cpp` (expressions) |
 | CF-312 | `src/tag_names.cpp` |
 | CF-401 | `src/expand.cpp` |
 | CF-402 | `src/expand.cpp` |
@@ -217,13 +231,13 @@ slice of #100.
 | CF-508 | slice 7c of #100 |
 | CF-509 | slice 7c of #100 |
 | CF-520 | `src/expression.cpp`, `src/schema.cpp` |
-| CF-521 | slice 7b of #100 |
-| CF-522 | slice 7b of #100 |
-| CF-523 | `src/config_eval.cpp`, `src/expand.cpp`, `src/expression_types.cpp`, `src/references.cpp` |
-| CF-524 | slice 7b of #100 |
-| CF-525 | slice 7b of #100 |
+| CF-521 | `src/expression_types.cpp` |
+| CF-522 | `src/expression_types.cpp` |
+| CF-523 | `src/config_eval.cpp`, `src/expand.cpp`, `src/expression_types.cpp`, `src/references.cpp`, `src/runtime_expressions.cpp` |
+| CF-524 | `src/expression_types.cpp` |
+| CF-525 | `src/runtime_expressions.cpp` |
 | CF-526 | `src/expression.cpp` |
-| CF-527 | slice 7b of #100 |
+| CF-527 | `src/runtime_expressions.cpp` |
 | CF-528 | `src/expression.cpp` |
 | CF-529 | `src/expression.cpp` |
 | CF-516 | `src/merged_points.cpp` |
@@ -494,6 +508,15 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
 - `tests/tag_names_test.cpp`: the tags of the expanded tree (point, bit and
   generated tags and their types, CF-301, CF-302, CF-403, CF-1001), the
   references to them outside expressions (CF-310, CF-311, CF-312, CF-604),
-  and one cause at many instances given once.
+  and one cause at many instances given once. `tests/tag_names_prefix_test.cpp`:
+  the tags under a prefix, in the order of names, for the patterns of
+  run-time expressions.
+- `tests/runtime_expressions_test.cpp`: the run-time expressions against
+  the tags (D-117): types, cycles of virtual tags and interlocks, task
+  windows, BOOL results, grouping, and what is kept.
+  `tests/runtime_limits_test.cpp` (`scada-conf-runtime-limits-test`, an
+  executable of its own) bounds the work of patterns over tens of
+  thousands of tags: each pattern a vertex walked once, resolved once for
+  all its uses.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

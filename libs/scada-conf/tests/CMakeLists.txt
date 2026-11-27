@@ -14,7 +14,9 @@ scada_add_test(scada-conf-unit-test KIND unit
     references_test.cpp
     rules_test.cpp
     scalar_test.cpp
+    runtime_expressions_test.cpp
     tag_names_test.cpp
+    tag_names_prefix_test.cpp
     schema_examples_test.cpp
     schema_test.cpp
     tree_scan_test.cpp
@@ -50,4 +52,9 @@ scada_add_test(scada-conf-tree-limits-test KIND unit
   DEPENDS scada::conf scada::test-support)
 scada_add_test(scada-conf-expression-limits-test KIND unit
   SOURCES expression_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+# The work of the run-time expressions of stage 5 at tens of thousands of
+# tags and patterns (D-117), with its own time limit.
+scada_add_test(scada-conf-runtime-limits-test KIND unit
+  SOURCES runtime_limits_test.cpp
   DEPENDS scada::conf scada::test-support)

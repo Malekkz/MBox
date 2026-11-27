@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scada::conf {
@@ -91,6 +92,24 @@ public:
     // name, 0 for none: a device given twice is checked once (CF-303).
     [[nodiscard]] NodeId device_at(std::string_view device) const;
 
+    // Gives tag `name` of a tag file its value type: a virtual tag's, from
+    // its expression (D-117). Nothing for another name. `value_type` is a
+    // constant or a view into a Document of the tree.
+    void set_value_type(std::string_view name, std::string_view value_type);
+
+    // Calls `visit(name, info)` for each tag whose name starts with
+    // `prefix`, in the order of names, until it returns false: the stored
+    // tags, and those of the devices and channels, each once. `name` and
+    // `info` are valid during the call only. The tags of devices and
+    // channels are made and sorted at the first call, once (item 1 of the
+    // budget check of #163), so a call costs the names it visits and a
+    // search; the TagNames is not changed by it otherwise, and is not for
+    // use from two threads at once.
+    void each_with_prefix(
+        std::string_view prefix,
+        const std::function<bool(std::string_view, const TagInfo&)>& visit)
+        const;
+
 private:
     friend class TagCollector;
 
@@ -108,6 +127,11 @@ private:
 
     [[nodiscard]] std::optional<TagInfo> device_tag(
         std::string_view name) const;
+    // Adds to `found` the tags of devices and channels that start with
+    // `prefix`, in no order.
+    void family_with_prefix(
+        std::string_view prefix,
+        std::vector<std::pair<std::string, TagInfo>>& found) const;
     [[nodiscard]] std::optional<TagInfo> channel_tag(
         std::string_view name) const;
 
@@ -117,6 +141,10 @@ private:
     std::map<std::string, Channel, std::less<>> channels_;
     std::size_t count_ = 0;
     bool complete_ = true;
+    // The tags of devices and channels, sorted by name: made at the first
+    // `each_with_prefix`, after the tags are collected.
+    mutable std::vector<std::pair<std::string, TagInfo>> family_;
+    mutable bool family_made_ = false;
 };
 
 // The tags of `tree` and `files` (12.4, 12.5): point and bit tags, the tags
