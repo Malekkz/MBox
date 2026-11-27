@@ -1,12 +1,14 @@
 #ifndef SCADA_CONF_SRC_EXPRESSION_TYPES_H
 #define SCADA_CONF_SRC_EXPRESSION_TYPES_H
 
-// The types of a configuration expression (configuration schemas contract
-// 5.6, the operator and function tables; decision D-113). Run-time
-// expressions read tags and are checked once the expanded tree has them.
+// The types of an expression (configuration schemas contract 5.6, the
+// operator and function tables): a configuration expression's over
+// parameters and variables (D-113), a run-time expression's over the tags of
+// the expanded tree (D-117).
 
 #include "scada/conf/expression.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -50,6 +52,52 @@ using NameTypes = std::function<std::optional<ValueType>(std::string_view)>;
 [[nodiscard]] std::optional<ValueType> configuration_type(
     const Expression& tree, const NameTypes& names, TypeError& error,
     std::vector<ValueType>* node_types = nullptr);
+
+// How a run-time expression reads a tag (5.6): a BOOL, INT or REAL value;
+// a STRING tag, which no expression may use (CF-522); or a virtual tag whose
+// type is not known, because its own expression is refused or is in a cycle
+// (D-117), which is reported there and not again.
+enum class TagRead : std::uint8_t { BOOL, INT, REAL, STRING, UNKNOWN };
+
+// What the tags a name pattern matches are read as, in the order of their
+// names: all an aggregate needs (D-117), in a size that does not grow with
+// the tags, so that one use of a pattern costs the same whatever it matches.
+struct PatternReads {
+    std::size_t count = 0;
+    // The first tag read as STRING or not typed yet (UNKNOWN), if any.
+    std::string first_odd;
+    TagRead odd = TagRead::INT;
+    // The first BOOL tag, if any.
+    std::string first_bool;
+    bool any_real = false;
+};
+
+// Adds to `reads` a tag of `name`, read as `read`, after those added
+// before.
+void add_read(PatternReads& reads, std::string_view name, TagRead read);
+
+// What a run-time expression is checked against (D-117).
+struct RunTimeContext {
+    // How tag `name` is read, or nothing if no tag has that name.
+    std::function<std::optional<TagRead>(std::string_view)> tag;
+    // How the tags that name pattern `pattern` (2.5) matches are read; a
+    // count of 0 if none.
+    std::function<PatternReads(std::string_view)> matching;
+    // The task that runs the expression and its period, for the window of
+    // a time function (CF-524); an empty name where no task runs it.
+    std::string task;
+    std::int64_t period_ms = 0;
+};
+
+// The type of `tree`, a run-time expression that parsed, or nothing with
+// the first error in `error`: CF-310 for a name that is no tag, CF-311 for a
+// pattern that matches none, CF-521 for an ambiguous `.quality` or `.age`,
+// CF-522 for a STRING tag, CF-523 for a type that does not fit, CF-524 for
+// a time function's window out of range. An error of code 0 is a tag of
+// unknown type: the expression is not checked further, and nothing is
+// reported.
+[[nodiscard]] std::optional<ValueType> run_time_type(
+    const Expression& tree, const RunTimeContext& context, TypeError& error);
 
 }  // namespace scada::conf
 

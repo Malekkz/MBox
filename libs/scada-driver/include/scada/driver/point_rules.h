@@ -14,6 +14,7 @@
 // writes BAD for any that reach it anyway, so that no rule value can cause
 // undefined behaviour.
 
+#include "scada/common/realtime.h"
 #include "scada/common/status.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/tag_value.h"
@@ -196,6 +197,9 @@ struct PointRules {
     tag::TagType tag_type = tag::TagType::INT64;
     // The raw type's kind (CS 4.7 `type`), for the checks of
     // `validate_point_rules`; the processing reads the kind of each sample.
+    // Required: the compile step sets it from the configuration for every
+    // point of every protocol. The default is no choice to rely on: a BOOL
+    // or STRING point left with it is refused, and every sample BAD (#169).
     RawKind raw_kind = RawKind::UNSIGNED;
     bool has_tag = true;  // `tag: false` writes only the bits
     bool invert = false;  // BOOL points: the device's 1 is `false`
@@ -229,9 +233,14 @@ struct PointRules {
 // enumeration only on an INT64 tag and without a scale, an integer tag only
 // with an integer scaling and no exponent (CF-517), no floating raw type on
 // an INT64 or UINT64 value other than an enumeration or a double point
-// (CF-504, decision D-134), a zone table for every
-// local device time. Returns INVALID_ARGUMENT naming the first failure.
-[[nodiscard]] Status validate_point_rules(const PointRules& rules) noexcept;
+// (CF-504, decision D-134), the tag and raw types the compile step pairs
+// (CF-504: a STRING tag on a string raw and only there, a BOOL tag on a bool
+// raw, no counter on a floating raw; #169), a zone table for every local
+// device time. Returns INVALID_ARGUMENT naming the first failure.
+// Real-time: no allocation, one pass over the rules' lists; process_sample
+// calls it for every sample, so that refused rules give BAD (#169).
+SCADA_RT [[nodiscard]] Status validate_point_rules(
+    const PointRules& rules) noexcept;
 
 }  // namespace scada::driver
 

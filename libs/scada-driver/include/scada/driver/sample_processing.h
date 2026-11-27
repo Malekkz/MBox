@@ -164,7 +164,9 @@ struct SampleTimes {
 // holds one input per slot of `rules.companions`, in order; a missing slot
 // counts as COMM_FAIL. The returned STRING value (if any) points into
 // `state`, and is valid until the next call with `state`. Rules that
-// validate_point_rules refuses give BAD, never undefined behaviour.
+// validate_point_rules refuses give BAD with OUT_OF_RANGE for every outcome,
+// the value kept, never undefined behaviour: no marker, hold or companion
+// rule is applied to them (#169).
 SCADA_RT void process_sample(const PointRules& rules, PointState& state,
                              const RawSample& sample,
                              std::span<const CompanionInput> companions,

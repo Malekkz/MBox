@@ -39,7 +39,28 @@ struct Expanded {
     Lines lines;
     std::size_t error_count = 0;
     ExpandCounts counts;
+    // The work of stage 5 on run-time expressions.
+    RunTimeCounts run_time;
 };
+
+// Validates the tree of `files` with a system.yaml: the whole result, for
+// tests that read the expanded tree itself.
+inline Result<Validation> validated(const Files& files) {
+    std::optional<test::TempDirectory> temp =
+        test::TempDirectory::create("scada-conf-expand-");
+    if (!temp) {
+        return Status(StatusCode::INTERNAL, "no temporary directory");
+    }
+    Files all = files;
+    all.try_emplace("system.yaml", SYSTEM);
+    for (const auto& [path, content] : all) {
+        const fs::path full = temp->path() / path;
+        fs::create_directories(full.parent_path());
+        std::ofstream out(full, std::ios::binary);
+        out << content;
+    }
+    return validate_and_expand(temp->path(), {}, {});
+}
 
 // Validates and expands the tree of `files` with a system.yaml, under
 // `limits`: its errors in the form of contract 1.4 (with their notes), or
@@ -52,7 +73,8 @@ inline Expanded expand_limited(const Files& files, const ExpandLimits& limits,
     if (!temp) {
         return {.lines = {"no temporary directory"},
                 .error_count = 0,
-                .counts = {}};
+                .counts = {},
+                .run_time = {}};
     }
     Files all = files;
     all.try_emplace("system.yaml", SYSTEM);
@@ -67,12 +89,16 @@ inline Expanded expand_limited(const Files& files, const ExpandLimits& limits,
         validate_and_expand(temp->path(), {}, limits);
     EXPECT_TRUE(validation.ok());
     if (!validation.ok()) {
-        return {.lines = {"not validated"}, .error_count = 0, .counts = {}};
+        return {.lines = {"not validated"},
+                .error_count = 0,
+                .counts = {},
+                .run_time = {}};
     }
     const Validation& result = validation.value();
     Expanded expanded{.lines = {},
                       .error_count = result.report.error_count,
-                      .counts = result.expansion};
+                      .counts = result.expansion,
+                      .run_time = result.run_time};
     if (!result.report.errors.empty()) {
         for (const Diagnostic& error : result.report.errors) {
             expanded.lines.push_back(format(error));
