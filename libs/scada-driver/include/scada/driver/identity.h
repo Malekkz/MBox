@@ -32,17 +32,20 @@ struct ExpectedValue {
     std::string text{};
 };
 
-// True when `read` is `expected`: the same type and value. A FLOAT64 NaN is
-// equal to nothing.
-[[nodiscard]] bool same_value(const ExpectedValue& expected,
-                              const TagValue& read) noexcept;
+// How two values order (D-145).
+enum class ValueOrder : std::uint8_t { LESS = 1, EQUAL, GREATER, UNORDERED };
 
-// Below (negative), equal (0) or above (positive) `bound`, for two values of
-// one numeric type or BOOL; `comparable` is false for any other pair, a
-// STRING or a NaN included.
-[[nodiscard]] int compare_value(const TagValue& read,
-                                const ExpectedValue& bound,
-                                bool& comparable) noexcept;
+// `left` against `right`, exactly: INT64, UINT64 and FLOAT64 against each
+// other by their mathematical values (a signed and an unsigned integer
+// without conversion, an integer and a FLOAT64 without rounding either), a
+// BOOL against a BOOL (false below true), a STRING equal to a STRING of the
+// same bytes and else UNORDERED, a NaN UNORDERED, and any other pair
+// UNORDERED. The one comparison of identity checks and restart rules.
+SCADA_RT [[nodiscard]] ValueOrder compare_values(
+    const TagValue& left, const TagValue& right) noexcept;
+
+// `value` as a TagValue; a STRING's text points into `value`.
+SCADA_RT [[nodiscard]] TagValue as_value(const ExpectedValue& value) noexcept;
 
 // One entry of `identify` (CS 4.8).
 struct IdentityCheck {
@@ -58,9 +61,11 @@ struct IdentityCheck {
     std::string pattern;
 };
 
-// True when `read`, the value of the check's point, passes `check`.
-[[nodiscard]] bool identity_matches(const IdentityCheck& check,
-                                    const TagValue& read) noexcept;
+// True when `read`, the value of the check's point, passes `check`. A
+// STRING is the cleaned text of identity_text.h, and the pattern is matched
+// against it.
+SCADA_RT [[nodiscard]] bool identity_matches(const IdentityCheck& check,
+                                             const TagValue& read) noexcept;
 
 // One entry of `restart_indication` (CS 4.9).
 struct RestartRule {
@@ -76,23 +81,30 @@ struct RestartRule {
     ExpectedValue value{};
 };
 
-// The restart rules of one device, over the valid samples of their points.
-// The first sample after `reset` is the baseline of DECREASES and CHANGES;
-// EQUALS holds on its rising edge only, so that a flag the device leaves set
-// is one restart, not one per poll (D-145).
+// The restart rules of one device, over the valid samples of their points
+// (ProcessedSample::rule_valid and rule_value: before a counter's hold). A
+// sample that is not valid is not given: it neither fires a rule nor moves
+// its baseline, and an `equals` edge is taken across it. The baseline is
+// the first valid sample after the watch was made or `reset`, which the
+// engine does at an attach and a reload of the device only: it survives a
+// lost connection, so that a device that restarts and drops its connection
+// is counted (D-145). EQUALS holds on its rising edge only, so that a flag
+// the device leaves set is one restart, not one per poll.
 class RestartWatch {
 public:
     // `rules` is borrowed and outlives the watch. Allocates.
     explicit RestartWatch(std::span<const RestartRule> rules);
 
-    // A new connection: every rule starts again from its next sample. A
-    // power-up flag found set then is not a restart: the identity check of
-    // the connect covers the device as a restart would.
+    // An attach or a reload of the device: every rule starts again from
+    // its next valid sample.
     SCADA_RT void reset() noexcept;
 
-    // A valid sample `value` of point `point`; true when a rule on that
-    // point holds, which makes the device restarted (7.6).
-    SCADA_RT bool sample(std::uint32_t point, const TagValue& value) noexcept;
+    // A valid sample `value` of point `point`; `counter_wrapped` when the
+    // point is a counter whose decrease processing read as a wrap (contract
+    // 5.4), which DECREASES does not take for a restart. True when a rule on
+    // that point holds: the device restarted (7.6).
+    SCADA_RT bool sample(std::uint32_t point, const TagValue& value,
+                         bool counter_wrapped) noexcept;
 
 private:
     struct Last {

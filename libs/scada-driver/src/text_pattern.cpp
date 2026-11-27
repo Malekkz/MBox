@@ -4,106 +4,53 @@
 #include <string_view>
 
 namespace scada::driver {
-namespace {
 
-// One part of the pattern between two unescaped stars: `begin` to `end` in
-// the pattern, escapes still in it.
-struct Part {
-    std::size_t begin = 0;
-    std::size_t end = 0;
-};
-
-// The part that starts at `from`: up to the next unescaped `*` or the end.
-Part part_at(std::string_view pattern, std::size_t from) noexcept {
-    std::size_t index = from;
-    while (index < pattern.size() && pattern[index] != '*') {
-        // An escape takes the next character with it, a star too; one at
-        // the end stands for itself.
-        const bool escape =
-            pattern[index] == '\\' && index + 1 < pattern.size();
-        index += escape ? std::size_t{2} : std::size_t{1};
-    }
-    return Part{.begin = from, .end = index};
-}
-
-// True when `part` matches `text` from `start` on; `used` is then the number of
-// text bytes it took. A part has no star, so it takes exactly one byte per
-// element (a literal, an escaped character or `?`).
-bool fits(std::string_view pattern, Part part, std::string_view text,
-          std::size_t start, std::size_t& used) noexcept {
-    std::size_t position = start;
-    for (std::size_t index = part.begin; index < part.end; ++index) {
-        if (position >= text.size()) {
+bool text_matches_counted(std::string_view pattern, std::string_view text,
+                          std::size_t& comparisons) noexcept {
+    comparisons = 0;
+    constexpr auto NONE = static_cast<std::size_t>(-1);
+    std::size_t at_pattern = 0;
+    std::size_t at_text = 0;
+    // The pattern position just past the last `*` met, and the text
+    // position it was tried from: where to resume when a literal fails.
+    std::size_t star = NONE;
+    std::size_t star_text = 0;
+    while (at_text < text.size()) {
+        if (at_pattern < pattern.size() && pattern[at_pattern] == '*') {
+            star = ++at_pattern;
+            star_text = at_text;
+            continue;
+        }
+        if (at_pattern < pattern.size()) {
+            // One element: an escaped byte, `?`, or a literal byte.
+            const bool escaped =
+                pattern[at_pattern] == '\\' && at_pattern + 1 < pattern.size();
+            const char wanted =
+                escaped ? pattern[at_pattern + 1] : pattern[at_pattern];
+            const bool any = !escaped && wanted == '?';
+            ++comparisons;
+            if (any || text[at_text] == wanted) {
+                at_pattern += escaped ? std::size_t{2} : std::size_t{1};
+                ++at_text;
+                continue;
+            }
+        }
+        if (star == NONE) {
             return false;
         }
-        char wanted = pattern[index];
-        bool any = false;
-        if (wanted == '\\' && index + 1 < part.end) {
-            wanted = pattern[++index];
-        } else if (wanted == '?') {
-            any = true;
-        }
-        if (!any && text[position] != wanted) {
-            return false;
-        }
-        ++position;
+        // The last star takes one byte more; the rest is tried again.
+        at_pattern = star;
+        at_text = ++star_text;
     }
-    used = position - start;
-    return true;
-}
-
-// The text bytes `part` takes: one per element.
-std::size_t length_of(std::string_view pattern, Part part) noexcept {
-    std::size_t length = 0;
-    for (std::size_t index = part.begin; index < part.end; ++index) {
-        if (pattern[index] == '\\' && index + 1 < part.end) {
-            ++index;
-        }
-        ++length;
+    while (at_pattern < pattern.size() && pattern[at_pattern] == '*') {
+        ++at_pattern;
     }
-    return length;
+    return at_pattern == pattern.size();
 }
-
-}  // namespace
 
 bool text_matches(std::string_view pattern, std::string_view text) noexcept {
-    // The first part is anchored at the start of the text.
-    Part part = part_at(pattern, 0);
-    std::size_t used = 0;
-    if (!fits(pattern, part, text, 0, used)) {
-        return false;
-    }
-    if (part.end == pattern.size()) {
-        return used == text.size();  // no star: the whole text, exactly
-    }
-    std::size_t position = used;
-    std::size_t from = part.end + 1;  // past the star
-    for (;;) {
-        part = part_at(pattern, from);
-        if (part.end == pattern.size()) {
-            // The last part is anchored at the end of the text, and must not
-            // overlap what the parts before took.
-            const std::size_t length = length_of(pattern, part);
-            if (length > text.size() - position) {
-                return false;
-            }
-            return fits(pattern, part, text, text.size() - length, used);
-        }
-        // A middle part at its first fit: a later fit leaves less text for
-        // the parts after it and gains nothing, since a star is between.
-        bool placed = false;
-        for (std::size_t start = position; start <= text.size(); ++start) {
-            if (fits(pattern, part, text, start, used)) {
-                position = start + used;
-                placed = true;
-                break;
-            }
-        }
-        if (!placed) {
-            return false;
-        }
-        from = part.end + 1;
-    }
+    std::size_t comparisons = 0;
+    return text_matches_counted(pattern, text, comparisons);
 }
 
 }  // namespace scada::driver

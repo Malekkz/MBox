@@ -250,6 +250,10 @@ struct Work {
     bool confirmed = false;
     // Set for a STRING value taken from the sample.
     std::span<const std::byte> text;
+    // A counter's `on_decrease: hold` replaced the value computed, which is
+    // `unheld` (for the restart rules, D-145).
+    bool counter_held = false;
+    TagValue unheld{};
     std::int64_t source_time_ns = 0;
     std::uint16_t time_flags = 0;
 };
@@ -469,6 +473,7 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
         const std::uint64_t half = rule.limit / 2U;
         const bool wrap =
             !rule.saturate && state.counter_previous >= half && current < half;
+        work.out->counts.counter_wrapped = wrap;
         if (!wrap) {
             switch (rule.on_decrease) {
                 case CounterRule::OnDecrease::ACCEPT:
@@ -477,6 +482,8 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
                     // Keep the counter's own last value, not whatever the
                     // tag held last, until the counter passes it.
                     state.counter_holding = true;
+                    work.counter_held = true;
+                    work.unheld = work.value;
                     work.value = state.counter_held;
                     work.mark = worse(work.mark, UNCERTAIN_MARK);
                     return true;
@@ -934,6 +941,24 @@ void process_sample(const PointRules& rules, PointState& state,
     state.flags = flags;
     state.source_time_ns = work.source_time_ns;
 
+    fill_writes(rules, state, out);
+    if (work.new_value && work.from_device && work.confirmed &&
+        work.mark.quality != Quality::BAD && !state.holding) {
+        out.rule_valid = true;
+        out.rule_value = work.counter_held ? work.unheld : out.tag.value;
+    }
+}
+
+void withhold_point(const PointRules& rules, PointState& state,
+                    std::uint16_t flags, std::int64_t source_time_ns,
+                    ProcessedSample& out) noexcept {
+    out = ProcessedSample{};
+    state.quality = Quality::BAD;
+    state.flags = flags;
+    state.source_time_ns = source_time_ns;
+    state.has_value = false;
+    state.has_valid = false;
+    state.holding = false;
     fill_writes(rules, state, out);
 }
 
