@@ -140,13 +140,20 @@ error that names the others, as in stage 4. About 2 µs a computed value:
 
 Stage 5 also builds the tags of the expanded tree by name, with their value
 types (`src/tag_names.cpp`, D-116): point and bit tags, the tags of tag files,
-interlocks, and the generated tags of section 12.5. It gives CF-301 for a
-user's tag in `sys` and CF-302 for a name given twice, and checks every
-reference to a tag outside an expression (outputs, the local panel, alarms,
-programs: CF-310, and CF-312 for a `limit` or `setpoint` that is not a
-number), every point a device's rules name (CF-310) and each point's poll
-group (CF-604). Owner names are #101's and are not used. The names and types
-of run-time expressions follow in slice 7b of #100.
+interlocks, and the generated tags of section 12.5. The tags of a device
+(`sys.dev.*`) and a channel (`sys.drv.*`) are found from their names and the
+signal tables of driver interface contract 11.1, not stored one by one. It
+gives CF-301 for a user's name in `sys` (a tag, a device, an output, an
+expression alarm), CF-302 for a name given twice, generated names included,
+CF-403 for a generated name over 127 bytes and CF-1001 when the tags,
+generated tags included, pass `limits.max_tags`. It checks every reference
+to a tag outside an expression (outputs, the local panel, alarms wherever
+they stand, programs: CF-310, and CF-312 for a `limit` or `setpoint` that
+is not a number), every point a device's rules name, `applies_to` included
+(CF-310, CF-311), and each point's poll group, given or the default
+`normal` (CF-604). Errors on the expanded tree are grouped as in stage 4.
+Owner names are #101's and are not used. The names and types of run-time
+expressions follow in slice 7b of #100.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
@@ -186,11 +193,11 @@ slice of #100.
 | CF-302 | `src/tag_names.cpp` |
 | CF-303 | `src/references.cpp` |
 | CF-310 | `src/expression_types.cpp`, `src/merged_points.cpp`, `src/references.cpp`, `src/tag_names.cpp` |
-| CF-311 | slice 7b of #100 |
+| CF-311 | `src/tag_names.cpp` (`applies_to`); slice 7b of #100 (expressions) |
 | CF-312 | `src/tag_names.cpp` |
 | CF-401 | `src/expand.cpp` |
 | CF-402 | `src/expand.cpp` |
-| CF-403 | `src/expand.cpp` |
+| CF-403 | `src/expand.cpp`; `src/tag_names.cpp` (the names of 12.5) |
 | CF-410 | `src/config_eval.cpp`, `src/expand.cpp`, `src/references.cpp` |
 | CF-411 | `src/expand.cpp` |
 | CF-412 | `src/expand.cpp` |
@@ -282,7 +289,7 @@ slice of #100.
 | CF-920 | `src/validate.cpp` |
 | CF-921 | not in phase 2 (block library and structured text) |
 | CF-922 | not in phase 2 (block library and structured text) |
-| CF-1001 | `src/expand.cpp` |
+| CF-1001 | `src/expand.cpp` (point and bit tags); `src/tag_names.cpp` (all tags) |
 | CF-1002 | #101 and #102 (stages 6 and 7) |
 | CF-1003 | #101 and #102 (stages 6 and 7) |
 | CF-1004 | #101 and #102 (stages 6 and 7) |
@@ -477,7 +484,8 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   the failures that are CF-410.
 - `tests/references_test.cpp`: each check of stage 5 on a whole tree.
 - `tests/tag_names_test.cpp`: the tags of the expanded tree (point, bit and
-  generated tags, CF-301, CF-302) and the references to them outside
-  expressions (CF-310, CF-312, CF-604).
+  generated tags and their types, CF-301, CF-302, CF-403, CF-1001), the
+  references to them outside expressions (CF-310, CF-311, CF-312, CF-604),
+  and one cause at many instances given once.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.
