@@ -72,6 +72,10 @@ public:
     void publish_system(ChannelEngine& engine, const CompiledChannel& channel,
                         std::int64_t now_ns, bool all) noexcept;
 
+    // The last values of the counters, at the stop (SystemTags::flush).
+    void flush_system(ChannelEngine& engine, const CompiledChannel& channel,
+                      std::int64_t now_ns) noexcept;
+
     // The system tags of a channel that has no engine, a disabled one
     // (SystemTags::publish_idle).
     void publish_idle(const CompiledChannel& channel) noexcept;

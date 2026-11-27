@@ -213,6 +213,9 @@ void Worker::serve(TagWriter& writer) noexcept {
     // the kernel sends a reset instead.
     transport_->close(false);
     transport_->set_wake(-1);
+    // The counters' last values, which the period may have held back: a
+    // reader after the stop sees every request the channel sent (D-145).
+    writer.flush_system(*engine, *channel_, clock_->monotonic_ns());
     // The channel's state says so (11.1).
     writer.channel_link(ChannelLink::DISCONNECTED);
     writer.notify();

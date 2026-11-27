@@ -129,6 +129,14 @@ public:
     bool publish(ChannelEngine& engine, const CompiledChannel& channel,
                  std::int64_t now_ns, bool all) noexcept;
 
+    // Writes the counters, times and averages that changed since they were
+    // last written, whatever the period: their last values, at the stop,
+    // once the connection is closed and nothing more is counted (D-145).
+    // The states are not written: the stop writes the channel's own. Returns
+    // true when it wrote anything. Not real-time.
+    bool flush(ChannelEngine& engine, const CompiledChannel& channel,
+               std::int64_t now_ns) noexcept;
+
     // Writes every signal of a channel that has no engine, a disabled one
     // (CS 4.6), once at its start: never connected, every device DISABLED,
     // every count 0 (9.1: "Diagnostic tags are written with their current

@@ -171,6 +171,11 @@ bool SystemTags::link(ChannelLink link) noexcept {
                bits_of(static_cast<std::int64_t>(link)), false);
 }
 
+bool SystemTags::flush(ChannelEngine& engine, const CompiledChannel& channel,
+                       std::int64_t now_ns) noexcept {
+    return put_counters(engine, channel, now_ns, false);
+}
+
 bool SystemTags::put_states(ChannelEngine& engine,
                             const CompiledChannel& channel, std::int64_t now_ns,
                             bool all) noexcept {

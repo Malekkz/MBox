@@ -16,6 +16,7 @@
 
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -520,6 +521,127 @@ TEST_F(SystemTags, ShowTheChannelAndItsDevices) {
     // The stop closed the connection, and the state says so before the
     // process ended; the read adds OWNER_DOWN only.
     EXPECT_EQ(as_i64(read(handle("sys.drv.line1.state"))), 0);
+}
+
+TEST_F(SystemTags, TheStopWritesTheCountersLastValues) {
+    // The period holds back a counter's newest value up to a second; the
+    // stop writes it, so that `requests` after the stop is every request
+    // the simulator received from the driver (D-145).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(
+        joined(tcp_channel("line1", port_of(*sim)), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    ASSERT_TRUE(eventually(
+        handle("sys.dev.d1.requests"),
+        [](const auto& value) { return good(value) && value.value >= 3; }))
+        << driver->err();
+    // Stopped while the tag is behind the simulator: a value held back.
+    const std::uint64_t shown = read(handle("sys.dev.d1.requests")).value;
+    ASSERT_TRUE(prints_times(*sim, "request ", shown + 1));
+    ASSERT_TRUE(stops_cleanly(*driver));
+    // Every request is printed before the simulator sees the close.
+    ASSERT_TRUE(prints(*sim, "peer closed"));
+    const std::size_t received = count_of(sim->out(), "request ");
+    EXPECT_EQ(read(handle("sys.dev.d1.requests")).value, received)
+        << sim->out();
+}
+
+// The point of the simulator's unit 1, read: GOOD, 7.
+bool read_seven(const scada_value& value) {
+    return good_with(value, 7);
+}
+
+// A counter written at least once after a request: GOOD, at least 1.
+bool counted_one(const scada_value& value) {
+    return good(value) && value.value >= 1;
+}
+
+TEST_F(SystemTags, AStateIsWrittenInTheStepThatChangedIt) {
+    // One device in the slow group (10 s): its state RUNNING is written in
+    // the step of its first answer, with the point, not at the next second
+    // (D-145).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(
+        joined(tcp_channel("line1", port_of(*sim)), device("d1", 1, "2")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    ASSERT_TRUE(eventually(handle("d1.v"), read_seven)) << driver->err();
+    const std::int64_t answered = read(handle("d1.v")).update_time_ns;
+    const scada_value state = read(handle("sys.dev.d1.state"));
+    EXPECT_EQ(as_i64(state), 3);  // RUNNING
+    EXPECT_LT(state.update_time_ns - answered, 500'000'000);
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(SystemTags, ACounterIsWrittenWithinItsPeriodOfAChange) {
+    // One device in the slow group (10 s): nothing else wakes the worker.
+    // Its `requests` is written within a second of its first answer: the
+    // worker wakes for it, and waits neither for the next poll, 10 s later,
+    // nor for the cap of every wait, a third of the stall limit: 5 s with a
+    // connect timeout of 5 s (2.6; D-145).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(joined(
+        tcp_channel("line1", port_of(*sim), "5000"), device("d1", 1, "2")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    ASSERT_TRUE(eventually(handle("d1.v"), read_seven)) << driver->err();
+    const std::int64_t answered = read(handle("d1.v")).update_time_ns;
+    ASSERT_TRUE(eventually(handle("sys.dev.d1.requests"), counted_one));
+    EXPECT_LT(read(handle("sys.dev.d1.requests")).update_time_ns - answered,
+              1'500'000'000);
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(SystemTags, ACounterIsWrittenAtMostOnceASecond) {
+    // The fast group (200 ms) counts five requests a second: two writes of
+    // `requests` in a row are a second apart, less the scheduling slack
+    // (11.1).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(
+        joined(tcp_channel("line1", port_of(*sim)), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    const std::uint32_t tag = handle("sys.dev.d1.requests");
+    ASSERT_TRUE(eventually(tag, [](const auto& value) {
+        return good(value) && value.value >= 1;
+    }));
+    std::vector<std::int64_t> times;
+    for (int write = 0; write < 3; ++write) {
+        const std::uint64_t before = read(tag).value;
+        ASSERT_TRUE(eventually(tag, [before](const scada_value& value) {
+            return value.value != before;
+        }));
+        times.push_back(read(tag).update_time_ns);
+    }
+    for (std::size_t index = 1; index < times.size(); ++index) {
+        EXPECT_GE(times[index] - times[index - 1], 900'000'000) << index;
+    }
+    EXPECT_TRUE(stops_cleanly(*driver));
 }
 
 TEST_F(DriverProcess, ARefusedConnectIsCountedOnTheChannel) {

@@ -145,6 +145,14 @@ void TagWriter::publish_system(ChannelEngine& engine,
     }
 }
 
+void TagWriter::flush_system(ChannelEngine& engine,
+                             const CompiledChannel& channel,
+                             std::int64_t now_ns) noexcept {
+    if (system_.flush(engine, channel, now_ns)) {
+        written_ = true;
+    }
+}
+
 void TagWriter::publish_idle(const CompiledChannel& channel) noexcept {
     if (system_.publish_idle(channel)) {
         written_ = true;
