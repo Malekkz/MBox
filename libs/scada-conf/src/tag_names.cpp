@@ -227,10 +227,12 @@ std::vector<std::string_view> channel_poll_groups(const Reader& reader,
     return groups;
 }
 
-// The errors of stage 5 at the nodes of one tree, grouped (D-114, D-116):
-// an error on the expanded tree is at its instance with the template note,
-// one cause at many instances is one error, and an error that the
-// instance's own file contributes to is never grouped.
+// The errors of stage 5 at the nodes of one tree (D-114, D-116): an error
+// on the expanded tree is at its instance with the template note, one
+// cause at many instances is one error, and an error that the instance's
+// own file contributes to is never grouped. An error of another file goes
+// to the Diagnostics at once, which keep the first of the sorted order
+// (contract 1.4) however many the expanded tree has.
 class Reporter {
 public:
     Reporter(const ExpandedTree& tree, Diagnostics& diagnostics)
@@ -243,13 +245,8 @@ public:
                std::string message, std::string_view detail = {},
                std::string_view device = {}, std::string_view key = {}) {
         if (&document != &tree_->document) {
-            Diagnostic diagnostic{.severity = Severity::ERROR,
-                                  .code = code,
-                                  .location = document.location(node),
-                                  .message = std::move(message),
-                                  .notes = {}};
-            const std::string text = diagnostic.message;
-            grouped_.add(std::move(diagnostic), text, {}, *diagnostics_, false);
+            diagnostics_->error(code, document.location(node),
+                                std::move(message));
             return;
         }
         Diagnostic diagnostic = expanded_diagnostic(
@@ -266,15 +263,10 @@ public:
                      !written_in_instance(*tree_, node));
     }
 
-    // An error with no node: CF-1001 past the process tags.
+    // An error with no node: CF-1001 past the process tags of a tree
+    // without system.yaml.
     void error_at(Location location, std::uint16_t code, std::string message) {
-        Diagnostic diagnostic{.severity = Severity::ERROR,
-                              .code = code,
-                              .location = std::move(location),
-                              .message = std::move(message),
-                              .notes = {}};
-        const std::string text = diagnostic.message;
-        grouped_.add(std::move(diagnostic), text, {}, *diagnostics_, false);
+        diagnostics_->error(code, std::move(location), std::move(message));
     }
 
     // Where an error at `node` of `document` is reported, for "first at":
@@ -452,11 +444,11 @@ private:
         }
     }
 
-    // A generated tag (12.5) made from `cause`.
-    void add_generated(const std::string& name, std::string_view type,
+    // A generated tag (12.5) made from `cause`; false if it is not added.
+    bool add_generated(const std::string& name, std::string_view type,
                        TagOrigin origin, const Cause& cause) {
         if (stopped_) {
-            return;
+            return false;
         }
         if (name.size() > MAX_TAG_NAME_BYTES) {
             // The byte count differs between instances: the cause is the
@@ -469,7 +461,13 @@ private:
                    "generated tag " + quote_text(name) + " is " +
                        std::to_string(name.size()) + " bytes, the limit is 127",
                    key);
-            return;
+            return false;
+        }
+        // The tags of devices and channels are not in the map: a name of
+        // theirs is looked for there (item 4 of the delta review).
+        if (const std::optional<TagInfo> family = family_tag(name)) {
+            report(cause, CF_TAG_TWICE, twice(name, place_of(*family)));
+            return false;
         }
         const TagInfo info{.value_type = type,
                            .origin = origin,
@@ -483,19 +481,19 @@ private:
             if (count(1, cause)) {
                 made(entry->first);
             }
-            return;
+            return true;
         }
         const TagInfo& first = entry->second;
         if (origin == TagOrigin::ALARM_STATE &&
             first.origin == TagOrigin::ALARM_STATE) {
-            return;  // two alarms of one id on one tag: CF-812, slice 7c
+            return false;  // two alarms of one id on one tag: CF-812, slice 7c
         }
         if (first.origin == TagOrigin::GENERATED ||
             first.origin == TagOrigin::ALARM_STATE ||
             first.document == nullptr) {
             // Two causes made one name: at the second (M3 of the review).
             report(cause, CF_TAG_TWICE, twice(name, place_of(first)));
-            return;
+            return false;
         }
         // A user's tag of a generated name: at the user's tag, which is the
         // name to change; "first at" names what made the other (D-116).
@@ -507,6 +505,19 @@ private:
             first.document == &tree_->document ? point_detail(first)
                                                : std::string(),
             first.device);
+        return false;
+    }
+
+    // The tag of a device or a channel of this name, or nothing.
+    [[nodiscard]] std::optional<TagInfo> family_tag(
+        std::string_view name) const {
+        if (name.starts_with(DEVICE_PREFIX)) {
+            return tags_.device_tag(name);
+        }
+        if (name.starts_with(CHANNEL_PREFIX)) {
+            return tags_.channel_tag(name);
+        }
+        return std::nullopt;
     }
 
     // "point <name>" of a point or bit tag of the expanded tree.
@@ -617,29 +628,15 @@ private:
                           .point = 0,
                           .device = {}};
         const std::size_t tags = CHANNEL_SIGNALS.size() + groups.size();
-        std::string longest = dotted({"sys.drv", channel, "refused_connects"});
-        for (const std::string_view group : groups) {
-            std::string period = dotted({"sys.drv", channel, "period", group});
-            if (period.size() > longest.size()) {
-                longest = std::move(period);
-            }
-        }
         const auto [entry, added] = tags_.channels_.try_emplace(
             std::string(channel),
             TagNames::Channel{.name = name, .groups = std::move(groups)});
         if (!added || stopped_) {
             return;  // a channel given twice: CF-303
         }
-        if (longest.size() > MAX_TAG_NAME_BYTES) {
-            generated_too_long(longest, cause);
-        }
+        // A channel's and a poll group's name are identifiers of at most 31
+        // bytes (2.1): its tags stay within 127 bytes.
         count(tags, cause);
-    }
-
-    void generated_too_long(const std::string& name, const Cause& cause) {
-        report(cause, CF_GENERATED_TOO_LONG,
-               "generated tag " + quote_text(name) + " is " +
-                   std::to_string(name.size()) + " bytes, the limit is 127");
     }
 
     void collect_device(NodeId device, std::string_view protocol,
@@ -665,12 +662,9 @@ private:
                           .point = 0,
                           .device = device_name};
         // A device in `sys`: one CF-301, at its name (S2 of the review).
+        // A device's name is at most 100 bytes (2.1): its tags stay within
+        // 127 bytes.
         const bool in_system = refuse_system(device_name, cause);
-        const std::string longest =
-            dotted({"sys.dev", device_name, "last_command_stage"});
-        if (longest.size() > MAX_TAG_NAME_BYTES) {
-            generated_too_long(longest, cause);
-        }
         // `refresh_failures` is counted with the output that refreshes it.
         if (!count(DEVICE_SIGNALS.size() - 1 +
                        (record.identify ? IDENTITY_SIGNALS.size() : 0),
@@ -895,7 +889,9 @@ private:
                                           .device = cause.device})) {
                 return;
             }
-            make_state_tags(base, alarm_id, cause);
+            // An expression alarm is on no tag: its state tags are CF-302
+            // against any other of their name (M3 of the delta review).
+            make_state_tags(base, alarm_id, TagOrigin::GENERATED, cause);
         } else {
             if (const std::string_view given = reader.text_of(alarm, "tag");
                 !given.empty()) {
@@ -905,7 +901,7 @@ private:
                 return;
             }
             if (tags_.find(base)) {
-                make_state_tags(base, alarm_id, cause);
+                make_state_tags(base, alarm_id, TagOrigin::ALARM_STATE, cause);
             } else {
                 waiting_.emplace(std::move(base),
                                  Waiting{.id = alarm_id, .cause = cause});
@@ -914,12 +910,14 @@ private:
         release();
     }
 
+    // The state tag, then its `shelved_until`: one error for an alarm whose
+    // state tag is not made.
     void make_state_tags(std::string_view base, std::string_view alarm_id,
-                         const Cause& cause) {
+                         TagOrigin origin, const Cause& cause) {
         const std::string state = dotted({base, "alarm", alarm_id});
-        add_generated(state + ".shelved_until", "int64", TagOrigin::ALARM_STATE,
-                      cause);
-        add_generated(state, "int64", TagOrigin::ALARM_STATE, cause);
+        if (add_generated(state, "int64", origin, cause)) {
+            add_generated(state + ".shelved_until", "int64", origin, cause);
+        }
     }
 
     // The alarms waiting for the tags made since: a work list, not
@@ -935,7 +933,8 @@ private:
             }
             waiting_.erase(first, last);
             for (const Waiting& alarm : released) {
-                make_state_tags(name, alarm.id, alarm.cause);
+                make_state_tags(name, alarm.id, TagOrigin::ALARM_STATE,
+                                alarm.cause);
             }
         }
         ready_.clear();
@@ -945,7 +944,8 @@ private:
 
     // 12.5: the tags of an output. Those of the target's type need the
     // target: an output whose target is not a tag has none (CF-310). An
-    // output given twice makes its tags once (CF-303).
+    // output given twice is CF-302 once, at its `.mode`, and its tags are
+    // made once: CF-303 does not name outputs (D-116).
     void collect_output(const Reader& reader, NodeId output) {
         const std::optional<NodeId> name = reader.scalar(output, "name");
         if (!name || stopped_) {
@@ -956,11 +956,15 @@ private:
                           .node = *name,
                           .point = 0,
                           .device = {}};
-        if (!outputs_.insert(base).second || refuse_system(base, cause)) {
+        if (refuse_system(base, cause)) {
             return;
         }
-        add_generated(dotted({base, "mode"}), "int64", TagOrigin::GENERATED,
-                      cause);
+        const bool again = !outputs_.insert(base).second;
+        if (!add_generated(dotted({base, "mode"}), "int64",
+                           TagOrigin::GENERATED, cause) &&
+            again) {
+            return;
+        }
         add_generated(dotted({base, "status"}), "int64", TagOrigin::GENERATED,
                       cause);
         // A copy: the map grows below (M8 of the review).
@@ -995,8 +999,16 @@ private:
             return;
         }
         device->second.refreshed = true;
+        const std::string name =
+            dotted({"sys.dev", target->device, REFRESH_FAILURES});
+        // A stored tag of this name came first (item 4 of the delta review).
+        if (const auto stored = tags_.tags_.find(name);
+            stored != tags_.tags_.end()) {
+            report(cause, CF_TAG_TWICE, twice(name, place_of(stored->second)));
+            return;
+        }
         if (count(1, cause)) {
-            made(dotted({"sys.dev", target->device, REFRESH_FAILURES}));
+            made(name);
         }
     }
 
@@ -1314,13 +1326,18 @@ private:
 
     // CF-604 for a point's poll group, given or the default `normal`, that
     // its channel does not have (M6 of the review): at the poll group, or
-    // at the point's name for the default.
+    // at the point's name for the default. A `wo` point is never read
+    // (4.7) and has no default group; a group given to it is checked as
+    // any other, and refused by CF-614 (slice 7d).
     void check_poll_group(NodeId point) {
         if (groups_ == nullptr) {
             return;
         }
         const std::optional<NodeId> given =
             expanded_.scalar(point, "poll_group");
+        if (!given && expanded_.text_of(point, "access") == "wo") {
+            return;
+        }
         const std::optional<NodeId> site =
             given ? given : expanded_.scalar(point, "name");
         const std::string_view group =
@@ -1468,61 +1485,6 @@ std::optional<TagInfo> TagNames::channel_tag(std::string_view name) const {
         }
     }
     return std::nullopt;
-}
-
-void TagNames::set_value_type(std::string_view name,
-                              std::string_view value_type) {
-    if (const auto found = tags_.find(name);
-        found != tags_.end() && found->second.origin == TagOrigin::TAG_FILE) {
-        found->second.value_type = value_type;
-    }
-}
-
-void TagNames::each_with_prefix(
-    std::string_view prefix,
-    const std::function<void(std::string_view, const TagInfo&)>& visit) const {
-    for (auto entry = tags_.lower_bound(prefix);
-         entry != tags_.end() && entry->first.starts_with(prefix); ++entry) {
-        visit(entry->first, entry->second);
-    }
-    each_generated(prefix, visit);
-}
-
-void TagNames::each_generated(
-    std::string_view prefix,
-    const std::function<void(std::string_view, const TagInfo&)>& visit) const {
-    // The tags of a device or a channel are made here, one name at a time.
-    const auto offer = [&](const std::string& name) {
-        if (name.starts_with(prefix)) {
-            if (const std::optional<TagInfo> info = find(name)) {
-                visit(name, *info);
-            }
-        }
-    };
-    const auto may_hold = [prefix](std::string_view family) {
-        return family.starts_with(prefix) || prefix.starts_with(family);
-    };
-    if (may_hold(DEVICE_PREFIX)) {
-        for (const auto& [device, record] : devices_) {
-            for (const auto& signals :
-                 {std::span<const Signal>(DEVICE_SIGNALS),
-                  std::span<const Signal>(IDENTITY_SIGNALS)}) {
-                for (const Signal& signal : signals) {
-                    offer(dotted({"sys.dev", device, signal.name}));
-                }
-            }
-        }
-    }
-    if (may_hold(CHANNEL_PREFIX)) {
-        for (const auto& [channel, record] : channels_) {
-            for (const Signal& signal : CHANNEL_SIGNALS) {
-                offer(dotted({"sys.drv", channel, signal.name}));
-            }
-            for (const std::string_view group : record.groups) {
-                offer(dotted({"sys.drv", channel, "period", group}));
-            }
-        }
-    }
 }
 
 const std::vector<std::string_view>* TagNames::points_of(

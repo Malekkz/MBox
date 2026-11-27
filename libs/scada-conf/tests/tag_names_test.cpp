@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -638,6 +639,255 @@ TEST(TagNames, LocalOutputsAndTheIoProcess) {
                "\"ps1.step.failsafe\" does not exist",
                "alarms/site.yaml:9:62: error CF-310: tag "
                "\"sys.dev.ps1.m1.refresh_failures\" does not exist"}));
+}
+
+// Item 1 of the delta review: a `wo` point is never read (4.7) and has no
+// default poll group, so a channel's own groups without `normal` refuse
+// only the point that is read.
+TEST(TagNames, AWriteOnlyPointHasNoPollGroup) {
+    const std::string line =
+        "channel:\n  name: line1\n  type: rtu\n"
+        "  device: /dev/serial/by-path/platform-serial1\n  baud: 9600\n"
+        "  poll_groups:\n    quick: { period: 1s, priority: 1 }\n"
+        "devices:\n  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n";
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - { name: cmd, access: wo, storage: volatile, address: { table: "
+        "holding, register: 1, type: uint16 } }\n"
+        "  - { name: b, address: { table: holding, register: 2, type: uint16 "
+        "} }\n";
+    EXPECT_EQ(errors(expand({{"templates/meter_a.yaml", meter},
+                             {"drivers/modbus/line1.yaml", line}})),
+              Lines{"drivers/modbus/line1.yaml:9:13: error CF-604: poll group "
+                    "\"normal\" does not exist on channel \"line1\"\n  from "
+                    "template templates/meter_a.yaml:5:13 (point b)"});
+}
+
+// Item 2 of the delta review: the errors of another file are not held
+// behind those of the expanded tree, so the first of the sorted order are
+// listed however many the expanded tree has.
+TEST(TagNames, TheFirstErrorsAreListedInOrder) {
+    constexpr int POINTS = 2100;
+    std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
+    for (int point = 0; point < POINTS; ++point) {
+        meter += "  - { name: p" + std::to_string(point) +
+                 ", address: { table: holding, register: 1, type: uint16 }, "
+                 "poll_group: hourly }\n";
+    }
+    const Expanded expanded =
+        expand_limited({{"areas.yaml", std::string(AREAS)},
+                        {"templates/meter_a.yaml", meter},
+                        {"drivers/modbus/line1.yaml", one_device()},
+                        {"alarms/a.yaml", alarm_on("ps1.m1.nope")}},
+                       {});
+    EXPECT_EQ(expanded.error_count, std::size_t{POINTS} + 1);
+    ASSERT_FALSE(expanded.lines.empty());
+    EXPECT_EQ(expanded.lines.front(),
+              "alarms/a.yaml:2:12: error CF-310: tag \"ps1.m1.nope\" does not "
+              "exist");
+}
+
+// Item 3 of the delta review: an expression alarm is on no tag, so its
+// state tags against those of an alarm on a tag are CF-302.
+TEST(TagNames, AnExpressionAlarmOfATagsStateName) {
+    EXPECT_EQ(with_alarms(alarm_on("ps1.m1.flow") +
+                          "  - { type: expression, name: ps1.m1.flow, id: "
+                          "high, expr: \"ps1.m1.flow > 3\", priority: high, "
+                          "area: ps1 }\n"),
+              Lines{"alarms/site.yaml:3:5: error CF-302: tag "
+                    "\"ps1.m1.flow.alarm.high\" is defined twice; first at "
+                    "alarms/site.yaml:2"});
+}
+
+// Item 4 of the delta review: a stored tag of a device tag's name is
+// CF-302, although a device's tags are not stored.
+TEST(TagNames, AStoredTagOfADeviceTagsName) {
+    EXPECT_EQ(
+        errors(expand(
+            {{"areas.yaml", std::string(AREAS)},
+             {"templates/meter_a.yaml", std::string(METER)},
+             {"drivers/modbus/line1.yaml",
+              channel("  - { name: ps1.p1, template: meter_a, unit_id: 1 }\n"
+                      "  - { name: ps1.p1.state.alarm, template: meter_a, "
+                      "unit_id: 2 }\n")},
+             {"alarms/site.yaml",
+              alarm_on("sys.dev.ps1.p1.state", ", id: errors")}})),
+        Lines{"alarms/site.yaml:2:5: error CF-302: tag "
+              "\"sys.dev.ps1.p1.state.alarm.errors\" is defined twice; first "
+              "at drivers/modbus/line1.yaml:8"});
+}
+
+// Item 6 of the delta review: the grouping. An instance's own part is
+// never grouped; an alarm at a `tag: false` point is one cause whatever
+// the instance's name; "first at" the instance's own place is the same
+// cause at every instance.
+TEST(TagNames, WhatIsOneCause) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - name: status\n"
+        "    address: { table: holding, register: 1, type: uint16 }\n"
+        "    tag: false\n"
+        "    alarms: [ { type: high, limit: 4, priority: high, area: ps1 } ]\n"
+        "  - name: a\n"
+        "    address: { table: holding, register: 2, type: uint16 }\n"
+        "    alarms: [ { type: high, limit: 4, priority: high, area: ps1 } ]\n"
+        "  - { name: a.alarm.high, address: { table: holding, register: 3, "
+        "type: uint16 } }\n";
+    EXPECT_EQ(
+        three_meters(meter, {},
+                     "  - { name: ps1.m4, template: meter_a, unit_id: 4, "
+                     "identify: [ { point: model, equals: 7 } ] }\n"
+                     "  - { name: ps1.m5, template: meter_a, unit_id: 5, "
+                     "identify: [ { point: model, equals: 7 } ] }\n"),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-302: tag "
+               "\"ps1.m1.a.alarm.high\" is defined twice; first at "
+               "drivers/modbus/line1.yaml:7 (and 4 more instances: ps1.m2, "
+               "ps1.m3, ps1.m4, ps1.m5)\n  from template "
+               "templates/meter_a.yaml:11:13 (point a.alarm.high)",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: tag "
+               "\"ps1.m1.status\" does not exist (and 4 more instances: "
+               "ps1.m2, ps1.m3, ps1.m4, ps1.m5)\n  from template "
+               "templates/meter_a.yaml:7:15 (point status)",
+               "drivers/modbus/line1.yaml:16:73: error CF-310: point "
+               "\"model\" does not exist",
+               "drivers/modbus/line1.yaml:17:73: error CF-310: point "
+               "\"model\" does not exist"}));
+}
+
+// Item 6: an alarm on a tag made later (an output's, another alarm's
+// state) waits for it; a device given twice is CF-303 alone, its tags and
+// checks made once; an output given twice is CF-302 once, at its `.mode`
+// (CF-303 does not name outputs; D-116).
+TEST(TagNames, AlarmsOnLaterTagsAndNamesGivenTwice) {
+    const std::string outputs =
+        "outputs:\n"
+        "  - { name: ps1.out, area: ps1, kind: setpoint, target: ps1.m1.flow, "
+        "no_feedback: true, interlocks: [], safe_state: hold }\n"
+        "  - { name: ps1.out, area: ps1, kind: setpoint, target: ps1.m1.flow, "
+        "no_feedback: true, interlocks: [], safe_state: hold }\n";
+    const std::string alarms =
+        alarm_on("ps1.out.status.alarm.high") +
+        "  - { tag: ps1.out.status, type: high, limit: 4, priority: high, "
+        "area: ps1 }\n"
+        "  - { tag: ps1.m1.flow, type: deviation, limit: 1, setpoint: "
+        "ps1.out.status.alarm.high.alarm.high, priority: high, area: ps1 }\n";
+    const std::string meter =
+        std::string(METER) +
+        "  - { name: c, address: { table: holding, register: 4, type: uint16 "
+        "}, poll_group: hourly }\n";
+    EXPECT_EQ(
+        errors(expand({{"areas.yaml", std::string(AREAS)},
+                       {"templates/meter_a.yaml", meter},
+                       {"drivers/modbus/line1.yaml",
+                        channel("  - { name: ps1.m1, template: meter_a, "
+                                "unit_id: 1 }\n"
+                                "  - { name: ps1.m1, template: meter_a, "
+                                "unit_id: 2 }\n")},
+                       {"outputs/ps1.yaml", outputs},
+                       {"alarms/site.yaml", alarms}})),
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-604: poll group "
+               "\"hourly\" does not exist on channel \"line1\"\n  from "
+               "template templates/meter_a.yaml:11:84 (point c)",
+               "drivers/modbus/line1.yaml:8:13: error CF-303: device "
+               "\"ps1.m1\" is defined twice; first at "
+               "drivers/modbus/line1.yaml:7",
+               "outputs/ps1.yaml:3:13: error CF-302: tag \"ps1.out.mode\" "
+               "is defined twice; first at outputs/ps1.yaml:2"}));
+}
+
+// Item 6: the identity tags and `refresh_failures` count against
+// `limits.max_tags`, as the tags of an output do.
+TEST(TagNames, TheCountOfDeviceTags) {
+    const std::string meter =
+        std::string(METER) + "identify: [ { point: flow, equals: 7 } ]\n";
+    const auto with_limit = [&meter](int limit, std::string_view outputs) {
+        Files files{
+            {"system.yaml", std::string(SYSTEM) + "limits: { max_tags: " +
+                                std::to_string(limit) + " }\n"},
+            {"areas.yaml", std::string(AREAS)},
+            {"templates/meter_a.yaml", meter},
+            {"drivers/modbus/line1.yaml", one_device()}};
+        if (!outputs.empty()) {
+            files.emplace("outputs/ps1.yaml", std::string(outputs));
+        }
+        return errors(expand(files));
+    };
+    // 51 tags without identify (GeneratedTagsCountAgainstTheLimit), and the
+    // two identity tags.
+    EXPECT_EQ(with_limit(53, {}), Lines{});
+    EXPECT_EQ(with_limit(52, {}).size(), 1U);
+    // An output of five tags with `refresh`, and the device's
+    // `refresh_failures`.
+    const std::string_view refreshed =
+        "outputs:\n  - { name: ps1.sp, area: ps1, kind: setpoint, target: "
+        "ps1.m1.flow, no_feedback: true, interlocks: [], safe_state: hold, "
+        "refresh: 10s }\n";
+    EXPECT_EQ(with_limit(59, refreshed), Lines{});
+    EXPECT_EQ(with_limit(58, refreshed),
+              Lines{"outputs/ps1.yaml:2:13: error CF-1001: 59 tags, the limit "
+                    "is 58"});
+}
+
+// Item 6: the types and places of the other tags: an interlock is BOOL; an
+// `io` point's given value type holds; a `pulse` and a `trigger` have no
+// fail-safe tag; a bit's alarm names its tag; an expression alarm in a
+// template makes its state tag from its name.
+TEST(TagNames, MoreTypesAndPlaces) {
+    const std::string meter =
+        std::string(METER) +
+        "  - name: word\n"
+        "    address: { table: holding, register: 5, type: uint16 }\n"
+        "    tag: false\n"
+        "    bits: { 2: { name: hot, alarms: [ { tag: site.nope, type: high, "
+        "limit: 1, priority: high, area: ps1 } ] } }\n"
+        "    alarms: [ { type: expression, name: site.pump_hot, expr: "
+        "\"ps1.m1.flow > 3\", priority: high, area: ps1 } ]\n";
+    std::string alarms = "alarms:\n";
+    for (const std::string_view tag :
+         {"ps1.ok", "ps1.io.count", "ps1.pulse.failsafe", "ps1.trig.failsafe",
+          "site.pump_hot.alarm.expression"}) {
+        alarms +=
+            "  - { tag: ps1.m1.flow, type: deviation, limit: 1, "
+            "setpoint: " +
+            std::string(tag) + ", priority: high, area: ps1 }\n";
+    }
+    const std::string outputs =
+        "interlocks:\n  - { name: ps1.ok, condition: \"ps1.m1.flow > 1\", "
+        "message: low }\n"
+        "outputs:\n"
+        "  - { name: ps1.pulse, area: ps1, kind: pulse, target: ps1.io.lamp, "
+        "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
+        "hold, on_control_loss: { action: hold } }\n"
+        "  - { name: ps1.trig, area: ps1, kind: trigger, target: ps1.io.lamp, "
+        "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
+        "hold, on_control_loss: { action: hold } }\n";
+    EXPECT_EQ(
+        errors(expand(
+            {{"areas.yaml", std::string(AREAS)},
+             {"templates/meter_a.yaml", meter},
+             {"drivers/modbus/line1.yaml", one_device()},
+             {"templates/io_a.yaml",
+              "template: io_a\nprotocol: io\npoints:\n"
+              "  - { name: lamp, address: { line: 1, direction: output, "
+              "at_start: safe } }\n"
+              "  - { name: count, value_type: int64, address: { line: 2, "
+              "direction: input } }\n"},
+             {"drivers/io/local.yaml",
+              "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
+              "devices:\n  - { name: ps1.io, template: io_a }\n"},
+             {"outputs/ps1.yaml", outputs},
+             {"alarms/site.yaml", alarms}})),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"alarms/site.yaml:2:62: error CF-312: \"ps1.ok\" must be a "
+               "number tag",
+               "alarms/site.yaml:4:62: error CF-310: tag "
+               "\"ps1.pulse.failsafe\" does not exist",
+               "alarms/site.yaml:5:62: error CF-310: tag "
+               "\"ps1.trig.failsafe\" does not exist",
+               "drivers/modbus/line1.yaml:7:11: error CF-310: tag "
+               "\"site.nope\" does not exist\n  from template "
+               "templates/meter_a.yaml:14:46 (point word)"}));
 }
 
 }  // namespace

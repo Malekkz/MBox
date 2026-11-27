@@ -31,7 +31,8 @@ enum class TagOrigin : std::uint8_t {
     TAG_FILE,   // `tags/*.yaml`: internal, manual or virtual
     INTERLOCK,  // an interlock's name
     // The state tags of an alarm on a tag (`<tag>.alarm.<id>` and its
-    // `shelved_until`): two of one name are CF-812's (slice 7c).
+    // `shelved_until`): two of one name are CF-812's (slice 7c). An
+    // expression alarm is on no tag: its state tags are GENERATED.
     ALARM_STATE,
     GENERATED,  // any other tag of section 12.5
 };
@@ -74,19 +75,6 @@ public:
     // not whole, and checks that look tags up are not made.
     [[nodiscard]] bool complete() const noexcept { return complete_; }
 
-    // Gives tag `name` of a tag file its value type: a virtual tag's, from
-    // its expression (D-117). Nothing for another name. `value_type` must
-    // outlive this TagNames.
-    void set_value_type(std::string_view name, std::string_view value_type);
-
-    // Calls `visit(name, info)` for every tag whose name starts with
-    // `prefix`: the stored ones in the order of names, then those of devices
-    // and channels.
-    void each_with_prefix(
-        std::string_view prefix,
-        const std::function<void(std::string_view, const TagInfo&)>& visit)
-        const;
-
     // The points of device `device` of the expanded tree, sorted, with and
     // without a tag of their own; nothing for a name that is no device, or
     // a device given twice after its first (CF-303).
@@ -120,10 +108,6 @@ private:
 
     [[nodiscard]] std::optional<TagInfo> device_tag(
         std::string_view name) const;
-    // The device and channel half of `each_with_prefix`.
-    void each_generated(std::string_view prefix,
-                        const std::function<void(std::string_view,
-                                                 const TagInfo&)>& visit) const;
     [[nodiscard]] std::optional<TagInfo> channel_tag(
         std::string_view name) const;
 
