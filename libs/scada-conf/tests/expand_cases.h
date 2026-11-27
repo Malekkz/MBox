@@ -41,6 +41,25 @@ struct Expanded {
     ExpandCounts counts;
 };
 
+// Validates the tree of `files` with a system.yaml: the whole result, for
+// tests that read the expanded tree itself.
+inline Result<Validation> validated(const Files& files) {
+    std::optional<test::TempDirectory> temp =
+        test::TempDirectory::create("scada-conf-expand-");
+    if (!temp) {
+        return Status(StatusCode::INTERNAL, "no temporary directory");
+    }
+    Files all = files;
+    all.try_emplace("system.yaml", SYSTEM);
+    for (const auto& [path, content] : all) {
+        const fs::path full = temp->path() / path;
+        fs::create_directories(full.parent_path());
+        std::ofstream out(full, std::ios::binary);
+        out << content;
+    }
+    return validate_and_expand(temp->path(), {}, {});
+}
+
 // Validates and expands the tree of `files` with a system.yaml, under
 // `limits`: its errors in the form of contract 1.4 (with their notes), or
 // its expanded points, with each device's keys first when `with_devices`.

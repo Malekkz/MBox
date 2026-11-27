@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scada::conf {
@@ -91,12 +92,15 @@ public:
     // name, 0 for none: a device given twice is checked once (CF-303).
     [[nodiscard]] NodeId device_at(std::string_view device) const;
 
-    // Gives tag `name` its value type: a virtual tag's, from its expression
-    // (D-117). Nothing for a name that is no tag.
-    void set_value_type(std::string_view name, std::string value_type);
+    // Gives tag `name` of a tag file its value type: a virtual tag's, from
+    // its expression (D-117). Nothing for another name. `value_type` is a
+    // constant or a view into a Document of the tree.
+    void set_value_type(std::string_view name, std::string_view value_type);
 
     // Calls `visit(name, info)` for each tag whose name starts with
-    // `prefix`, in the order of names.
+    // `prefix`, in the order of names: the stored tags, and those of the
+    // devices and channels whose names can start that way. `name` is valid
+    // during the call only.
     void each_with_prefix(
         std::string_view prefix,
         const std::function<void(std::string_view, const TagInfo&)>& visit)
@@ -119,6 +123,11 @@ private:
 
     [[nodiscard]] std::optional<TagInfo> device_tag(
         std::string_view name) const;
+    // Adds to `found` the tags of devices and channels that start with
+    // `prefix`, in no order.
+    void family_with_prefix(
+        std::string_view prefix,
+        std::vector<std::pair<std::string, TagInfo>>& found) const;
     [[nodiscard]] std::optional<TagInfo> channel_tag(
         std::string_view name) const;
 

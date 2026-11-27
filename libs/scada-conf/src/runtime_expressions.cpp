@@ -72,7 +72,8 @@ TagRead read_of(std::string_view value_type) {
 
 // The value type a virtual tag derives from its expression (5.6): BOOL
 // gives bool, INT int64, REAL float64, TIME int64 milliseconds.
-std::string derived_value_type(ValueType type) {
+// A constant, as TagNames holds a view of it (D-116).
+std::string_view derived_value_type(ValueType type) {
     switch (type) {
         case ValueType::BOOL:
             return "bool";
@@ -290,8 +291,8 @@ private:
     [[nodiscard]] RunTimeContext context_of(const std::string& task) {
         RunTimeContext context;
         context.tag = [this](std::string_view name) -> std::optional<TagRead> {
-            const TagInfo* info = tags_->find(name);
-            if (info == nullptr) {
+            const std::optional<TagInfo> info = tags_->find(name);
+            if (!info) {
                 return std::nullopt;
             }
             return read_of(info->value_type);
@@ -308,16 +309,16 @@ private:
 
     // How each tag `pattern` matches is read. The tags a pattern matches do
     // not change, only the types of virtual tags as they are typed: the
-    // tags are kept, at most 65,536 patterns, and read at each use.
+    // names are kept, at most 65,536 patterns, and looked up at each use.
     std::vector<TagRead> matching(std::string_view pattern) {
         auto kept = matches_.find(pattern);
         if (kept == matches_.end()) {
-            std::vector<const TagInfo*> found;
+            std::vector<std::string> found;
             tags_->each_with_prefix(
                 pattern_prefix(pattern),
-                [&found, pattern](std::string_view name, const TagInfo& info) {
+                [&found, pattern](std::string_view name, const TagInfo&) {
                     if (matches_name_pattern(pattern, name)) {
-                        found.push_back(&info);
+                        found.emplace_back(name);
                     }
                 });
             if (matches_.size() >= MAX_KEPT_RESULTS) {
@@ -329,12 +330,14 @@ private:
         return reads_of(kept->second);
     }
 
-    static std::vector<TagRead> reads_of(
-        const std::vector<const TagInfo*>& tags) {
+    [[nodiscard]] std::vector<TagRead> reads_of(
+        const std::vector<std::string>& names) const {
         std::vector<TagRead> reads;
-        reads.reserve(tags.size());
-        for (const TagInfo* tag : tags) {
-            reads.push_back(read_of(tag->value_type));
+        reads.reserve(names.size());
+        for (const std::string& name : names) {
+            if (const std::optional<TagInfo> tag = tags_->find(name)) {
+                reads.push_back(read_of(tag->value_type));
+            }
         }
         return reads;
     }
@@ -481,14 +484,17 @@ private:
             report(tag.site, error);
             return;
         }
-        const std::string derived = derived_value_type(*type);
+        const std::string_view derived = derived_value_type(*type);
         if (tag.value_type) {
-            const std::string given(tag.file->document->text(*tag.value_type));
+            // A view into the tag file, which outlives the TagNames.
+            const std::string_view given =
+                tag.file->document->text(*tag.value_type);
             if (given != derived) {
                 diagnostics_->error(
                     CF_DERIVED_TYPE,
                     tag.file->document->location(*tag.value_type),
-                    quote_text(tag.name) + ": the expression gives " + derived);
+                    quote_text(tag.name) + ": the expression gives " +
+                        std::string(derived));
             }
             // The given type is the one its readers expect.
             tags_->set_value_type(tag.name, given);
@@ -682,8 +688,8 @@ private:
     std::map<std::string, std::int64_t, std::less<>> periods_;
     std::vector<Virtual> virtuals_;
     std::map<std::string, std::size_t, std::less<>> by_name_;
-    // The tags of each pattern; a tag stays where it is in TagNames.
-    std::map<std::string, std::vector<const TagInfo*>, std::less<>> matches_;
+    // The names of the tags of each pattern.
+    std::map<std::string, std::vector<std::string>, std::less<>> matches_;
     std::map<std::string, std::optional<TypeError>, std::less<>> results_;
 };
 

@@ -152,6 +152,35 @@ bool is_system(std::string_view tag) {
     return tag == "sys" || tag.starts_with("sys.");
 }
 
+// Calls `visit` for each record of `records` (devices or channels by name)
+// whose tags, `<family><name>.<signal>`, can start with `prefix`: all of
+// them for a prefix within `family`; else those whose name starts with the
+// rest of `prefix`, and those whose name is a dotted beginning of it.
+template <typename Records, typename Visit>
+void each_record(const Records& records, std::string_view family,
+                 std::string_view prefix, const Visit& visit) {
+    if (!prefix.starts_with(family)) {
+        if (family.starts_with(prefix)) {
+            for (const auto& entry : records) {
+                visit(entry);
+            }
+        }
+        return;
+    }
+    const std::string_view rest = prefix.substr(family.size());
+    for (auto entry = records.lower_bound(rest);
+         entry != records.end() && entry->first.starts_with(rest); ++entry) {
+        visit(*entry);
+    }
+    for (std::size_t dot = rest.find('.'); dot != std::string_view::npos;
+         dot = rest.find('.', dot + 1)) {
+        if (const auto entry = records.find(rest.substr(0, dot));
+            entry != records.end()) {
+            visit(*entry);
+        }
+    }
+}
+
 // Reads one Document: the expanded tree or a file of the tree.
 class Reader {
 public:
@@ -1504,19 +1533,56 @@ NodeId TagNames::device_at(std::string_view device) const {
     return found == devices_.end() ? 0 : found->second.name;
 }
 
-void TagNames::set_value_type(std::string_view name, std::string value_type) {
-    if (const auto found = tags_.find(name); found != tags_.end()) {
-        found->second.value_type = std::move(value_type);
+void TagNames::set_value_type(std::string_view name,
+                              std::string_view value_type) {
+    if (const auto found = tags_.find(name);
+        found != tags_.end() && found->second.origin == TagOrigin::TAG_FILE) {
+        found->second.value_type = value_type;
     }
 }
 
 void TagNames::each_with_prefix(
     std::string_view prefix,
     const std::function<void(std::string_view, const TagInfo&)>& visit) const {
+    std::vector<std::pair<std::string, TagInfo>> found;
     for (auto entry = tags_.lower_bound(prefix);
          entry != tags_.end() && entry->first.starts_with(prefix); ++entry) {
-        visit(entry->first, entry->second);
+        found.emplace_back(entry->first, entry->second);
     }
+    family_with_prefix(prefix, found);
+    std::ranges::sort(found, {}, &std::pair<std::string, TagInfo>::first);
+    for (const auto& [name, info] : found) {
+        visit(name, info);
+    }
+}
+
+void TagNames::family_with_prefix(
+    std::string_view prefix,
+    std::vector<std::pair<std::string, TagInfo>>& found) const {
+    const auto offer = [&](std::string name) {
+        if (name.starts_with(prefix)) {
+            if (std::optional<TagInfo> info = find(name)) {
+                found.emplace_back(std::move(name), *info);
+            }
+        }
+    };
+    each_record(devices_, DEVICE_PREFIX, prefix, [&](const auto& entry) {
+        for (const auto& signals :
+             {std::span<const Signal>(DEVICE_SIGNALS),
+              std::span<const Signal>(IDENTITY_SIGNALS)}) {
+            for (const Signal& signal : signals) {
+                offer(dotted({"sys.dev", entry.first, signal.name}));
+            }
+        }
+    });
+    each_record(channels_, CHANNEL_PREFIX, prefix, [&](const auto& entry) {
+        for (const Signal& signal : CHANNEL_SIGNALS) {
+            offer(dotted({"sys.drv", entry.first, signal.name}));
+        }
+        for (const std::string_view group : entry.second.groups) {
+            offer(dotted({"sys.drv", entry.first, "period", group}));
+        }
+    });
 }
 
 TagNames collect_tags(const ExpandedTree& tree,

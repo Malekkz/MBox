@@ -133,7 +133,8 @@ TEST(RunTimeExpressions, BoolResults) {
 }
 
 // A template's alarm expression is checked at each instance, and one cause
-// at many instances is one error (D-114).
+// at many instances is one error (D-114). An expression alarm's name is the
+// same at every instance, so its state tag is CF-302 at the others (D-116).
 TEST(RunTimeExpressions, ATemplatesAlarmAtItsInstances) {
     std::string devices;
     for (int unit = 1; unit <= 3; ++unit) {
@@ -151,10 +152,13 @@ TEST(RunTimeExpressions, ATemplatesAlarmAtItsInstances) {
                     "    alarms: [ { name: a.flow_hot, type: expression, "
                     "expr: \"a.nope > 1\", priority: high, area: ps1 } ]\n"},
                    {"drivers/modbus/line1.yaml", channel(devices)}}),
-        Lines{"drivers/modbus/line1.yaml:7:13: error CF-310: tag \"a.nope\" "
-              "does not "
-              "exist (and 2 more instances: ps1.m2, ps1.m3)\n  from template "
-              "templates/meter_a.yaml:6:60 (point flow)"});
+        (Lines{"drivers/modbus/line1.yaml:7:13: error CF-310: tag \"a.nope\" "
+               "does not exist (and 2 more instances: ps1.m2, ps1.m3)\n  from "
+               "template templates/meter_a.yaml:6:60 (point flow)",
+               "drivers/modbus/line1.yaml:8:13: error CF-302: tag "
+               "\"a.flow_hot.alarm.expression\" is defined twice; first at "
+               "drivers/modbus/line1.yaml:7 (and 1 more instance: ps1.m3)\n  "
+               "from template templates/meter_a.yaml:6:15 (point flow)"}));
 }
 
 // The derived type of a virtual tag is the one later checks read: a
