@@ -124,9 +124,6 @@ struct SampleCounts {
     bool sentinel = false;       // `sentinels`: a NO_VALUE sample or marker
     bool invalid = false;        // `invalid`: DEVICE_INVALID, or non-finite
     bool counter_reset = false;  // `on_decrease: reset` applied
-    // A counter's decrease read as a wrap (contract 5.4), which a restart
-    // rule `decreases` does not take for a restart (D-147).
-    bool counter_wrapped = false;
     bool became_absent = false;  // the point went ABSENT
     bool left_absent = false;    // the point was ABSENT and is no longer
 };

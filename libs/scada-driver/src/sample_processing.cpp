@@ -488,7 +488,6 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
         const std::uint64_t half = rule.limit / 2U;
         const bool wrap =
             !rule.saturate && state.counter_previous >= half && current < half;
-        work.out->counts.counter_wrapped = wrap;
         if (!wrap) {
             switch (rule.on_decrease) {
                 case CounterRule::OnDecrease::ACCEPT:

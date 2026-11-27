@@ -99,12 +99,11 @@ public:
     // its next valid sample.
     SCADA_RT void reset() noexcept;
 
-    // A valid sample `value` of point `point`; `counter_wrapped` when the
-    // point is a counter whose decrease processing read as a wrap (contract
-    // 5.4), which DECREASES does not take for a restart. True when a rule on
-    // that point holds: the device restarted (7.6).
-    SCADA_RT bool sample(std::uint32_t point, const TagValue& value,
-                         bool counter_wrapped) noexcept;
+    // A valid sample `value` of point `point`. True when a rule on that
+    // point holds: the device restarted (7.6). `decreases` fires on every
+    // decrease, a counter's wrap included (review M6). A NaN, an unordered
+    // value or a STRING over TAG_STRING_MAX_BYTES is no valid sample.
+    SCADA_RT bool sample(std::uint32_t point, const TagValue& value) noexcept;
 
 private:
     struct Last {

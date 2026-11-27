@@ -1522,7 +1522,8 @@ TEST(SampleProcessing, AWithheldCounterKeepsItsPreviousValue) {
     const ProcessedSample out = point.feed(
         RawSample{.outcome = Outcome::VALUE, .raw = raw_unsigned(3, INT16)},
         2 * SECOND);
-    EXPECT_TRUE(out.counts.counter_wrapped);
+    // A wrap, not a decrease: the new value is taken, not held.
+    EXPECT_EQ(out.tag.value.u, 3U);
     EXPECT_EQ(out.tag.quality, Quality::GOOD);
 }
 
@@ -1542,7 +1543,6 @@ TEST(SampleProcessing, TheRuleValueIsTheValueBeforeACountersHold) {
     EXPECT_EQ(held.tag.value.u, 1000U);
     EXPECT_TRUE(held.rule_valid);
     EXPECT_EQ(held.rule_value.u, 900U);
-    EXPECT_FALSE(held.counts.counter_wrapped);
 }
 
 TEST(SampleProcessing, ASampleWithoutAValidValueGivesNoRuleValue) {

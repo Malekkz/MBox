@@ -211,8 +211,15 @@ void RestartWatch::reset() noexcept {
     }
 }
 
-bool RestartWatch::sample(std::uint32_t point, const TagValue& value,
-                          bool counter_wrapped) noexcept {
+bool RestartWatch::sample(std::uint32_t point, const TagValue& value) noexcept {
+    // A value that orders against nothing, itself included (a NaN), or a
+    // STRING longer than the tag database holds, is not valid: it neither
+    // fires a rule nor moves its baseline (review S5).
+    if (compare_values(value, value) != ValueOrder::EQUAL ||
+        (value.type == TagType::STRING &&
+         value.text.size() > TAG_STRING_MAX_BYTES)) {
+        return false;
+    }
     bool restarted = false;
     for (std::size_t index = 0; index < rules_.size(); ++index) {
         const RestartRule& rule = rules_[index];
@@ -225,8 +232,11 @@ bool RestartWatch::sample(std::uint32_t point, const TagValue& value,
         const ValueOrder against_before = compare_values(value, before);
         switch (rule.kind) {
             case RestartRule::Kind::DECREASES:
-                restarted = restarted || (last.seen && !counter_wrapped &&
-                                          against_before == ValueOrder::LESS);
+                // Every decrease, a counter's wrap included: a false restart
+                // once per wrap period costs a re-check; a missed one would
+                // leave a swapped device unchecked (ruling change, review M6).
+                restarted = restarted ||
+                            (last.seen && against_before == ValueOrder::LESS);
                 break;
             case RestartRule::Kind::CHANGES:
                 restarted = restarted ||

@@ -144,21 +144,41 @@ TEST(RestartWatch, ACounterGoingBackIsARestart) {
     const std::vector<RestartRule> rules{
         RestartRule{.point = 2, .kind = RestartRule::Kind::DECREASES}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(2, uint64_value(100), false));  // the baseline
-    EXPECT_FALSE(watch.sample(2, uint64_value(100), false));
-    EXPECT_FALSE(watch.sample(2, uint64_value(160), false));
-    EXPECT_FALSE(watch.sample(1, uint64_value(0), false));  // another point
-    EXPECT_TRUE(watch.sample(2, uint64_value(3), false));
-    EXPECT_FALSE(watch.sample(2, uint64_value(5), false));
+    EXPECT_FALSE(watch.sample(2, uint64_value(100)));  // the baseline
+    EXPECT_FALSE(watch.sample(2, uint64_value(100)));
+    EXPECT_FALSE(watch.sample(2, uint64_value(160)));
+    EXPECT_FALSE(watch.sample(1, uint64_value(0)));  // another point
+    EXPECT_TRUE(watch.sample(2, uint64_value(3)));
+    EXPECT_FALSE(watch.sample(2, uint64_value(5)));
 }
 
-TEST(RestartWatch, ACountersWrapIsNoRestart) {
+TEST(RestartWatch, ACountersWrapIsARestartToo) {
+    // The ruling's change (review M6): every decrease fires, a wrap of a
+    // counter with `at_limit: wrap` included; a false restart once per wrap
+    // period costs only a re-check.
     const std::vector<RestartRule> rules{
         RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(0, uint64_value(65'530), false));
-    EXPECT_FALSE(watch.sample(0, uint64_value(4), true));  // a wrap
-    EXPECT_TRUE(watch.sample(0, uint64_value(1), false));
+    EXPECT_FALSE(watch.sample(0, uint64_value(65'530)));
+    EXPECT_TRUE(watch.sample(0, uint64_value(4)));  // a wrap
+    EXPECT_FALSE(watch.sample(0, uint64_value(9)));
+}
+
+TEST(RestartWatch, AnUnorderedValueNeitherFiresNorMovesTheBaseline) {
+    // Review S5: 100, NaN, 5 fires `decreases` against 100.
+    const std::vector<RestartRule> rules{
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES},
+        RestartRule{.point = 1, .kind = RestartRule::Kind::CHANGES}};
+    RestartWatch watch(rules);
+    EXPECT_FALSE(watch.sample(0, float64_value(100.0)));
+    EXPECT_FALSE(watch.sample(
+        0, float64_value(std::numeric_limits<double>::quiet_NaN())));
+    EXPECT_TRUE(watch.sample(0, float64_value(5.0)));
+    // A STRING longer than the tag database holds is no sample either.
+    EXPECT_FALSE(watch.sample(1, string_value("v1")));
+    const std::string long_text(TAG_STRING_MAX_BYTES + 1, 'x');
+    EXPECT_FALSE(watch.sample(1, string_value(long_text)));
+    EXPECT_FALSE(watch.sample(1, string_value("v1")));
 }
 
 TEST(RestartWatch, TheBaselineLastsUntilAReset) {
@@ -167,23 +187,23 @@ TEST(RestartWatch, TheBaselineLastsUntilAReset) {
     const std::vector<RestartRule> rules{
         RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(0, uint64_value(5000), false));
-    EXPECT_TRUE(watch.sample(0, uint64_value(12), false));
+    EXPECT_FALSE(watch.sample(0, uint64_value(5000)));
+    EXPECT_TRUE(watch.sample(0, uint64_value(12)));
     // An attach or a reload: a new baseline, even a lower one.
     watch.reset();
-    EXPECT_FALSE(watch.sample(0, uint64_value(1), false));
-    EXPECT_FALSE(watch.sample(0, uint64_value(2), false));
+    EXPECT_FALSE(watch.sample(0, uint64_value(1)));
+    EXPECT_FALSE(watch.sample(0, uint64_value(2)));
 }
 
 TEST(RestartWatch, ABootCounterThatChangesIsARestart) {
     const std::vector<RestartRule> rules{
         RestartRule{.point = 0, .kind = RestartRule::Kind::CHANGES}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(0, string_value("boot-7"), false));
-    EXPECT_FALSE(watch.sample(0, string_value("boot-7"), false));
-    EXPECT_TRUE(watch.sample(0, string_value("boot-8"), false));
-    EXPECT_FALSE(watch.sample(0, string_value("boot-8"), false));
-    EXPECT_TRUE(watch.sample(0, uint64_value(8), false));  // another type
+    EXPECT_FALSE(watch.sample(0, string_value("boot-7")));
+    EXPECT_FALSE(watch.sample(0, string_value("boot-7")));
+    EXPECT_TRUE(watch.sample(0, string_value("boot-8")));
+    EXPECT_FALSE(watch.sample(0, string_value("boot-8")));
+    EXPECT_TRUE(watch.sample(0, uint64_value(8)));  // another type
 }
 
 TEST(RestartWatch, APowerUpFlagIsARestartWhenItRises) {
@@ -193,23 +213,23 @@ TEST(RestartWatch, APowerUpFlagIsARestartWhenItRises) {
                     .value = ExpectedValue{.type = TagType::BOOL, .b = true}}};
     RestartWatch watch(rules);
     // Found set at the first sample: the baseline, no restart.
-    EXPECT_FALSE(watch.sample(1, bool_value(true), false));
-    EXPECT_FALSE(watch.sample(1, bool_value(true), false));  // left set
-    EXPECT_FALSE(watch.sample(1, bool_value(false), false));
-    EXPECT_TRUE(watch.sample(1, bool_value(true), false));  // the rise
-    EXPECT_FALSE(watch.sample(1, bool_value(true), false));
+    EXPECT_FALSE(watch.sample(1, bool_value(true)));
+    EXPECT_FALSE(watch.sample(1, bool_value(true)));  // left set
+    EXPECT_FALSE(watch.sample(1, bool_value(false)));
+    EXPECT_TRUE(watch.sample(1, bool_value(true)));  // the rise
+    EXPECT_FALSE(watch.sample(1, bool_value(true)));
     // Samples that were not valid are not given to the watch, so the edge
     // is taken across them.
-    EXPECT_FALSE(watch.sample(1, bool_value(false), false));
-    EXPECT_TRUE(watch.sample(1, bool_value(true), false));
+    EXPECT_FALSE(watch.sample(1, bool_value(false)));
+    EXPECT_TRUE(watch.sample(1, bool_value(true)));
 }
 
 TEST(RestartWatch, AnEqualsRuleComparesAcrossNumberTypes) {
     const std::vector<RestartRule> rules{RestartRule{
         .point = 0, .kind = RestartRule::Kind::EQUALS, .value = u64(0)}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(0, int64_value(3), false));
-    EXPECT_TRUE(watch.sample(0, int64_value(0), false));  // INT64 0 is 0
+    EXPECT_FALSE(watch.sample(0, int64_value(3)));
+    EXPECT_TRUE(watch.sample(0, int64_value(0)));  // INT64 0 is 0
 }
 
 TEST(RestartWatch, AnyRuleOfThePointDecides) {
@@ -218,9 +238,9 @@ TEST(RestartWatch, AnyRuleOfThePointDecides) {
         RestartRule{
             .point = 0, .kind = RestartRule::Kind::EQUALS, .value = u64(0)}};
     RestartWatch watch(rules);
-    EXPECT_FALSE(watch.sample(0, uint64_value(5), false));
-    EXPECT_TRUE(watch.sample(0, uint64_value(0), false));  // both hold
-    EXPECT_FALSE(watch.sample(0, uint64_value(1), false));
+    EXPECT_FALSE(watch.sample(0, uint64_value(5)));
+    EXPECT_TRUE(watch.sample(0, uint64_value(0)));  // both hold
+    EXPECT_FALSE(watch.sample(0, uint64_value(1)));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
