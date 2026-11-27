@@ -1,5 +1,7 @@
 #include "scada/driver/identity.h"
 
+#include "scada/common/static_string.h"
+#include "scada/common/status.h"
 #include "scada/driver/tag_value.h"
 #include "scada/driver/text_pattern.h"
 #include "scada/tag/types.h"
@@ -199,6 +201,114 @@ bool identity_matches(const IdentityCheck& check,
         default:
             return false;
     }
+}
+
+namespace {
+
+Status refused(StaticString what) noexcept {
+    return {StatusCode::INVALID_ARGUMENT, what};
+}
+
+// An expected value fit for a point of `type`: its type, no NaN, a text
+// that the cleaned text of the device could match (review S3).
+Status check_value(const ExpectedValue& value, TagType type) noexcept {
+    if (value.type != type) {
+        return refused("an expected value of another type than its point");
+    }
+    if (type == TagType::FLOAT64 && std::isnan(value.f)) {
+        return refused("an expected value that is NaN");
+    }
+    if (type == TagType::STRING) {
+        if (value.text.size() > TAG_STRING_MAX_BYTES) {
+            return refused("an expected text over 250 bytes");
+        }
+        if (!std::all_of(value.text.begin(), value.text.end(), [](char byte) {
+                return byte >= ' ' && byte <= '~';
+            })) {
+            return refused(
+                "an expected text with a byte outside 0x20 to 0x7E, which "
+                "the cleaned text never holds");
+        }
+    }
+    return {};
+}
+
+// A pattern the matcher takes as written (ruling item 5).
+Status check_pattern(std::string_view pattern) noexcept {
+    if (pattern.size() > TEXT_PATTERN_MAX_BYTES) {
+        return refused("a pattern over 250 bytes");
+    }
+    // A single `\` at the end escapes nothing: an even run of them is
+    // literal backslashes, an odd one ends in a lone one.
+    std::size_t backslashes = 0;
+    for (auto at = pattern.rbegin(); at != pattern.rend() && *at == '\\';
+         ++at) {
+        ++backslashes;
+    }
+    if (backslashes % 2 != 0) {
+        return refused("a pattern that ends in a single backslash");
+    }
+    return {};
+}
+
+}  // namespace
+
+Status validate_identity_check(const IdentityCheck& check,
+                               TagType point_type) noexcept {
+    for (const ExpectedValue& value : check.values) {
+        if (Status status = check_value(value, point_type); !status.ok()) {
+            return status;
+        }
+    }
+    switch (check.kind) {
+        case IdentityCheck::Kind::EQUALS:
+            return check.values.size() == 1
+                       ? Status{}
+                       : refused("an `equals` check without one value");
+        case IdentityCheck::Kind::IN:
+            return !check.values.empty()
+                       ? Status{}
+                       : refused("an `in` check without a value");
+        case IdentityCheck::Kind::RANGE: {
+            if (check.values.size() != 2) {
+                return refused("a `range` check without two values");
+            }
+            const ValueOrder order = compare_values(as_value(check.values[0]),
+                                                    as_value(check.values[1]));
+            return order == ValueOrder::LESS || order == ValueOrder::EQUAL
+                       ? Status{}
+                       : refused(
+                             "a `range` check whose low end is above "
+                             "its high end");
+        }
+        case IdentityCheck::Kind::PATTERN:
+            if (point_type != TagType::STRING) {
+                return refused(
+                    "a `pattern` check on a point that is no "
+                    "STRING");
+            }
+            return check_pattern(check.pattern);
+    }
+    return refused("an identity check of no known kind");
+}
+
+Status validate_restart_rule(const RestartRule& rule, TagType point_type,
+                             bool time_point) noexcept {
+    switch (rule.kind) {
+        case RestartRule::Kind::DECREASES:
+            if (point_type == TagType::BOOL || point_type == TagType::STRING ||
+                time_point) {
+                return refused(
+                    "`decreases` on a BOOL, STRING or time point (no order "
+                    "that a restart resets)");
+            }
+            return {};
+        case RestartRule::Kind::CHANGES:
+            return {};
+        case RestartRule::Kind::EQUALS:
+            return check_value(rule.value, point_type);
+    }
+    return refused("a restart rule of no known kind");
 }
 
 RestartWatch::RestartWatch(std::span<const RestartRule> rules)

@@ -3,6 +3,7 @@
 
 #include "scada/driver/identity.h"
 #include "scada/driver/tag_value.h"
+#include "scada/driver/text_pattern.h"
 #include "scada/tag/types.h"
 
 #include <gtest/gtest.h>
@@ -151,6 +152,93 @@ TEST(Identity, APatternMatchesAStringOnly) {
     EXPECT_TRUE(identity_matches(any, string_value("")));
     EXPECT_FALSE(identity_matches(any, uint64_value(1)));
     EXPECT_FALSE(identity_matches(any, bool_value(false)));
+}
+
+TEST(Identity, ACheckTheCleanedTextCouldNeverMatchIsRefused) {
+    // Review S3: the device's text is cleaned before it is compared, so an
+    // expected byte outside 0x20 to 0x7E can never match.
+    IdentityCheck text =
+        check(IdentityCheck::Kind::EQUALS,
+              {ExpectedValue{.type = TagType::STRING, .text = "A\tB"}});
+    EXPECT_FALSE(validate_identity_check(text, TagType::STRING).ok());
+    text.values[0].text = "A B~";
+    EXPECT_TRUE(validate_identity_check(text, TagType::STRING).ok());
+    text.values[0].text = std::string(TAG_STRING_MAX_BYTES + 1, 'a');
+    EXPECT_FALSE(validate_identity_check(text, TagType::STRING).ok());
+}
+
+TEST(Identity, AMalformedCheckIsRefused) {
+    const auto u64 = [](std::uint64_t value) {
+        return ExpectedValue{.type = TagType::UINT64, .u = value};
+    };
+    EXPECT_TRUE(validate_identity_check(
+                    check(IdentityCheck::Kind::RANGE, {u64(1), u64(1)}),
+                    TagType::UINT64)
+                    .ok());
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::RANGE, {u64(2), u64(1)}),
+                     TagType::UINT64)
+                     .ok());
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::EQUALS, {u64(1), u64(2)}),
+                     TagType::UINT64)
+                     .ok());
+    EXPECT_FALSE(validate_identity_check(check(IdentityCheck::Kind::IN, {}),
+                                         TagType::UINT64)
+                     .ok());
+    // Of another type than the point, or NaN.
+    EXPECT_FALSE(
+        validate_identity_check(check(IdentityCheck::Kind::EQUALS, {u64(1)}),
+                                TagType::INT64)
+            .ok());
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::EQUALS,
+                           {ExpectedValue{
+                               .type = TagType::FLOAT64,
+                               .f = std::numeric_limits<double>::quiet_NaN()}}),
+                     TagType::FLOAT64)
+                     .ok());
+}
+
+TEST(Identity, APatternIsCheckedAsTheMatcherTakesIt) {
+    // Ruling item 5: at most 250 bytes, no single backslash at the end, on a
+    // STRING point only.
+    EXPECT_TRUE(
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "SUN*"),
+                                TagType::STRING)
+            .ok());
+    EXPECT_FALSE(
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "SUN*"),
+                                TagType::UINT64)
+            .ok());
+    EXPECT_FALSE(
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "a\\"),
+                                TagType::STRING)
+            .ok());
+    EXPECT_TRUE(
+        validate_identity_check(
+            check(IdentityCheck::Kind::PATTERN, {}, "a\\\\"), TagType::STRING)
+            .ok());
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::PATTERN, {},
+                           std::string(TEXT_PATTERN_MAX_BYTES + 1, 'a')),
+                     TagType::STRING)
+                     .ok());
+}
+
+TEST(RestartWatch, ARuleIsCheckedForItsPoint) {
+    const RestartRule decreases{.point = 0,
+                                .kind = RestartRule::Kind::DECREASES};
+    EXPECT_TRUE(validate_restart_rule(decreases, TagType::UINT64, false).ok());
+    EXPECT_FALSE(validate_restart_rule(decreases, TagType::BOOL, false).ok());
+    EXPECT_FALSE(validate_restart_rule(decreases, TagType::STRING, false).ok());
+    EXPECT_FALSE(validate_restart_rule(decreases, TagType::INT64, true).ok());
+    const RestartRule equals{
+        .point = 0,
+        .kind = RestartRule::Kind::EQUALS,
+        .value = ExpectedValue{.type = TagType::FLOAT64,
+                               .f = std::numeric_limits<double>::quiet_NaN()}};
+    EXPECT_FALSE(validate_restart_rule(equals, TagType::FLOAT64, false).ok());
 }
 
 // --- Restart rules ----------------------------------------------------------

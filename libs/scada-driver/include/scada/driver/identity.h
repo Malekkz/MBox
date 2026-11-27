@@ -8,6 +8,7 @@
 // driver as a point of its own, without a tag.
 
 #include "scada/common/realtime.h"
+#include "scada/common/status.h"
 #include "scada/driver/tag_value.h"
 #include "scada/tag/types.h"
 
@@ -67,6 +68,18 @@ struct IdentityCheck {
 SCADA_RT [[nodiscard]] bool identity_matches(const IdentityCheck& check,
                                              const TagValue& read) noexcept;
 
+// What a check must be for its point of tag type `point_type`, as the
+// compile step refuses it and the engine checks it again (D-147). Each
+// expected value of the point's own type; EQUALS one value, IN at least one,
+// RANGE two with the first not above the second; a PATTERN on a STRING
+// point, at most TEXT_PATTERN_MAX_BYTES, without a single `\` at its end
+// (ruling item 5); no NaN constant; an expected text of at most
+// TAG_STRING_MAX_BYTES and only bytes 0x20 to 0x7E, since the device's text
+// is cleaned before it is compared and could never match another byte
+// (review S3). INVALID_ARGUMENT naming the first failure.
+[[nodiscard]] Status validate_identity_check(const IdentityCheck& check,
+                                             tag::TagType point_type) noexcept;
+
 // One entry of `restart_indication` (CS 4.9).
 struct RestartRule {
     enum class Kind : std::uint8_t {
@@ -80,6 +93,15 @@ struct RestartRule {
     // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
     ExpectedValue value{};
 };
+
+// What a rule must be for its point of tag type `point_type`; `time_point`:
+// the point reads a device time. `decreases` not on a BOOL, STRING or time
+// point (ruling item 6); an `equals` value of the point's own type, no NaN,
+// a text as for an identity check. INVALID_ARGUMENT naming the first
+// failure.
+[[nodiscard]] Status validate_restart_rule(const RestartRule& rule,
+                                           tag::TagType point_type,
+                                           bool time_point) noexcept;
 
 // The restart rules of one device, over the valid samples of their points
 // (ProcessedSample::rule_valid and rule_value: before a counter's hold). A
