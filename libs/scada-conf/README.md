@@ -166,7 +166,8 @@ task's range, CF-525 for virtual tags that form a cycle and CF-527 for a
 given `value_type` that is not the derived one. Matching patterns against the
 tags has a work budget of 2e10 units, 32 per name visited and 1 per step
 of the matcher (`ExpandLimits::run_time_pattern_work`): past it the tree
-is refused with CF-113, after at most about 20 s in release on x86-64.
+is refused with CF-113. The worst accepted tree takes about 29 s in release
+on x86-64 (D-117).
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
