@@ -1999,6 +1999,23 @@ TEST(Scheduling, InIdentityARetryOfARequestOutsideTheCycleIsIgnored) {
     EXPECT_EQ(scheduler.take(2 * MILLISECOND).kind, Choice::Kind::IDENTITY);
 }
 
+// Takes from `now` until `until` or a keep-alive, each request 1 ms.
+struct Driven {
+    std::int64_t now = 0;
+    bool keepalive = false;
+};
+Driven drive(Scheduler& scheduler, std::int64_t now, std::int64_t until) {
+    while (now < until) {
+        const Choice choice = scheduler.take(now);
+        if (choice.kind == Choice::Kind::KEEPALIVE) {
+            return {.now = now, .keepalive = true};
+        }
+        now = choice.kind == Choice::Kind::WAIT ? choice.wake_ns
+                                                : now + MILLISECOND;
+    }
+    return {.now = now};
+}
+
 TEST(Scheduling, InIdentityTheKeepAliveIsTheCyclesFirstRequest) {
     // S8: a device in IDENTITY is kept alive by its identity request, marked
     // as such; the cycle is not moved by it.
@@ -2015,17 +2032,9 @@ TEST(Scheduling, InIdentityTheKeepAliveIsTheCyclesFirstRequest) {
     EXPECT_TRUE(keepalive.identity_keepalive);
     EXPECT_EQ(keepalive.request, plan.identity.front());
     EXPECT_FALSE(scheduler.identity_running(0));
-    // In ALL, the plan's keep-alive, unmarked.
+    // In ALL, FAST polls keep the unit busy: no keep-alive at all.
     scheduler.set_mode(0, DeviceMode::ALL);
-    std::int64_t now = SECOND + MILLISECOND;
-    Choice next = scheduler.take(now);
-    while (next.kind != Choice::Kind::KEEPALIVE && now < 5 * SECOND) {
-        now =
-            next.kind == Choice::Kind::WAIT ? next.wake_ns : now + MILLISECOND;
-        next = scheduler.take(now);
-    }
-    // FAST polls keep the unit busy: no keep-alive at all in ALL.
-    EXPECT_NE(next.kind, Choice::Kind::KEEPALIVE);
+    EXPECT_FALSE(drive(scheduler, SECOND + MILLISECOND, 5 * SECOND).keepalive);
 }
 
 TEST(Scheduling, TheIdentityCycleKeepsThePacingAndOrdersGoFirst) {
@@ -2205,24 +2214,14 @@ TEST(Scheduling, NoGroupCycleStartsInIdentity) {
     // is not the time away.
     const CompiledChannel channel = identity_channel();
     Scheduler scheduler(channel, 4, 0);
-    std::int64_t now = 0;
-    while (now < SECOND) {
-        const Choice choice = scheduler.take(now);
-        now = choice.kind == Choice::Kind::WAIT ? choice.wake_ns
-                                                : now + MILLISECOND;
-    }
+    std::int64_t now = drive(scheduler, 0, SECOND).now;
     EXPECT_EQ(scheduler.achieved_period_ns(FAST, now), FAST_PERIOD);
     scheduler.set_mode(0, DeviceMode::IDENTITY);
     ASSERT_EQ(scheduler.take(now).kind, Choice::Kind::IDENTITY);
     EXPECT_EQ(scheduler.take(6 * SECOND).kind, Choice::Kind::IDLE);
     EXPECT_EQ(scheduler.achieved_period_ns(FAST, 6 * SECOND), 0);
     scheduler.set_mode(0, DeviceMode::ALL);
-    now = 6 * SECOND;
-    for (int step = 0; step < 40; ++step) {
-        const Choice choice = scheduler.take(now);
-        now = choice.kind == Choice::Kind::WAIT ? choice.wake_ns
-                                                : now + MILLISECOND;
-    }
+    now = drive(scheduler, 6 * SECOND, 7 * SECOND).now;
     EXPECT_LT(scheduler.achieved_period_ns(FAST, now), SECOND);
 }
 
