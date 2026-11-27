@@ -11,6 +11,9 @@
 # string-overlong and string-utf8. They came from earlier fuzzing and hand
 # edits, were long enough to run, and are kept as they were, with the two
 # header bytes the target gained in #165 inserted as 0 (no companion rules).
+#
+# Nor the three `found-*` seeds: inputs the fuzzer found when STRING tags
+# were turned on (#169), kept as they were found, as regression tests.
 import struct, sys, os
 out = sys.argv[1]
 
@@ -30,8 +33,8 @@ def sample(kind='signed', width=16, outcome='value', quality=0, number=0, flt=0.
         fbits = bits
     else:
         fbits = 0 if flt_bits is None else flt_bits
-    # Byte 1 is also the health companion's status when the header does not
-    # make it good: an odd byte reads 1.
+    # Bit 0 of the last byte (the top byte of the float field) is the health
+    # companion's status when the header does not make it good (#169).
     b = bytes([KIND[kind], WIDTH[width], OUTCOME[outcome], quality])
     b += struct.pack('<Q', pattern & (2**64 - 1))
     b += struct.pack('<Q', number & (2**64 - 1))
@@ -90,9 +93,30 @@ seeds = {
     # the outcome VALUE (10 % 5) and the companion UNCERTAIN (10 % 3).
     'uncertain-companion-with-substituted': header(features=0b10001, marker=3)
         + bytes([1, 3, 10, 0]) + sample(number=1_800_000_000 * 10**9, pattern=0x8)[4:],
+    # Header byte 0: the tag type is 1 + byte % 5, the configured raw type
+    # 1 + (byte >> 3) % 6 (#169). 34 is a STRING tag on a string raw: the
+    # samples read the text after them.
+    'string-good': header(tag=34)
+        + sample(kind='string', width=0) + sample(kind='string', width=0)
+        + 'unit 7'.encode(),
+    # 0 is a BOOL tag on a bool raw.
+    'bool-good': header(tag=0)
+        + sample(kind='bool', width=1, number=1)
+        + sample(kind='bool', width=1, number=0),
+    # A double point (features bit 5): raw 2 is CLOSED, raw 7 a bad state.
+    'double-point': header(features=0b0100000)
+        + sample(kind='unsigned', number=2) + sample(kind='unsigned', number=7),
+    # raw_range 0 to 100 (features bit 6; gain byte 0, offset byte 100): 150
+    # is outside, UNCERTAIN with OUT_OF_RANGE; 50 is inside.
+    'raw-range': header(features=0b1000000, gain=0, offset=100)
+        + sample(number=150) + sample(number=50),
+    # 10 is a BOOL tag on a configured signed raw, which CF-504 refuses: BAD
+    # with OUT_OF_RANGE, though the value itself reads well (#169).
+    'bool-tag-on-a-signed-raw': header(tag=10)
+        + sample(kind='bool', width=1, number=1),
     'health-bad-then-good': header(features=0b01010, status=0)
-        + bytes([1, 2]) + sample(number=42)[2:]   # width 8, status 0: BAD
-        + sample(number=43),                       # width 16, status 1: good
+        + sample(number=42)                      # status 0: BAD
+        + sample(number=43, flt_bits=1 << 56),   # status 1: good
 }
 for name, data in seeds.items():
     with open(os.path.join(out, name), 'wb') as f:

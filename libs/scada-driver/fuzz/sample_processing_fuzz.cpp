@@ -9,9 +9,13 @@
 // - a STRING value is at most 250 bytes of well-formed UTF-8;
 // - a GOOD or UNCERTAIN FLOAT64 value is finite;
 // - a write carries SUBSTITUTED exactly when its value is a configured
-//   substitute, given now or kept (review R1 of #157). A second state runs
-//   the same samples with another substitute value: the values written
-//   differ exactly when the value is a substitute;
+//   substitute, given now or kept (review R1 of #157), and a STRING write
+//   never does (#169). A second state runs the same samples with another
+//   substitute value: the values written differ exactly when the value is
+//   a substitute;
+// - rules that validate_point_rules refuses, or that pair the tag and raw
+//   types CF-504 refuses, give BAD with OUT_OF_RANGE, never SUBSTITUTED
+//   (#169);
 // - a write conversion that succeeds gives a pattern within its width, and
 //   on the integer path reads back as the request.
 // The features byte of the header turns each companion rule on or off and
@@ -65,7 +69,7 @@ constexpr std::size_t SAMPLE_BYTES = 28;
 constexpr std::size_t MAX_SAMPLES = 16;
 constexpr unsigned OUTCOMES = 5;
 constexpr unsigned KINDS = 6;
-constexpr unsigned TAG_TYPES = 4;
+constexpr unsigned TAG_TYPES = 5;  // BOOL to STRING (#169)
 constexpr std::array<std::uint8_t, 6> WIDTHS{0, 1, 8, 16, 32, 64};
 constexpr std::int64_t SECOND = 1'000'000'000;
 constexpr std::uint64_t COUNTER_LIMIT = 65535;
@@ -128,6 +132,8 @@ constexpr unsigned HEALTH = 1;          // a `health` rule on companion 1
 constexpr unsigned QUALITY_RULE = 2;    // a `quality_from` rule
 constexpr unsigned HEALTH_FRESH = 3;    // companion 1 is never stale
 constexpr unsigned TIME_RAW = 4;        // companion 0 holds a device time
+constexpr unsigned DOUBLE_POINT = 5;    // `kind: double_point` (#169)
+constexpr unsigned RAW_RANGE = 6;       // `raw_range` (#169)
 constexpr unsigned STATUS_GOOD = 0;     // of the status byte: always good
 constexpr unsigned SLOTS = 3;           // two companions and one past them
 constexpr unsigned ACTIONS = 3;
@@ -144,6 +150,11 @@ bool option(std::uint8_t choice, unsigned bit) noexcept {
 PointRules rules_from(std::span<const std::uint8_t> header) {
     PointRules rules;
     rules.tag_type = static_cast<TagType>(1U + (header[TYPE_BYTE] % TAG_TYPES));
+    // The configured raw type, from the byte's high bits: valid and refused
+    // pairs of tag and raw type both occur (CF-504, #169).
+    constexpr unsigned RAW_KIND_SHIFT = 3;
+    rules.raw_kind = static_cast<RawKind>(
+        1U + ((header[TYPE_BYTE] >> RAW_KIND_SHIFT) % KINDS));
     const std::uint8_t choice = header[CHOICE_BYTE];
     const auto gain = static_cast<std::int8_t>(header[GAIN_BYTE]);
     const auto offset = static_cast<std::int8_t>(header[OFFSET_BYTE]);
@@ -203,6 +214,19 @@ PointRules rules_from(std::span<const std::uint8_t> header) {
     if (option(features, HEALTH)) {
         rules.health.push_back(scada::driver::HealthRule{
             .companion = 1, .good = {1}, .comm_fail = true});
+    }
+    if (option(features, DOUBLE_POINT)) {
+        using scada::driver::DoublePoint;
+        rules.double_point = scada::driver::DoublePointRule{
+            .states = {{.raw = 0, .code = DoublePoint::INTERMEDIATE},
+                       {.raw = 1, .code = DoublePoint::OPEN},
+                       {.raw = 2, .code = DoublePoint::CLOSED},
+                       {.raw = 3, .code = DoublePoint::BAD_STATE}}};
+    }
+    if (option(features, RAW_RANGE)) {
+        const auto low = static_cast<double>(gain);
+        rules.raw_range = scada::driver::RawRange{
+            .min = low, .max = low + static_cast<double>(header[OFFSET_BYTE])};
     }
     if (option(features, TIME_COMPANION)) {
         rules.time_companion =
@@ -273,8 +297,11 @@ std::array<CompanionInput, 2> companions_for(
         first.number_i = raw.number_i;
     }
     constexpr unsigned STATUS_WIDTH = 16;
-    const bool healthy =
-        option(header[STATUS_BYTE], STATUS_GOOD) || (bytes[1] & 1U) != 0;
+    // The status bit is the low bit of the sample's last byte, not of the
+    // width byte, so that health and width vary apart (#169).
+    constexpr std::size_t STATUS_OF_SAMPLE = SAMPLE_BYTES - 1;
+    const bool healthy = option(header[STATUS_BYTE], STATUS_GOOD) ||
+                         (bytes[STATUS_OF_SAMPLE] & 1U) != 0;
     return {
         CompanionInput{
             .outcome = static_cast<Outcome>(1U + (bytes[3] % OUTCOMES)),
@@ -304,7 +331,7 @@ bool same_value(const scada::driver::TagValue& got,
             return std::bit_cast<std::uint64_t>(got.f) ==
                    std::bit_cast<std::uint64_t>(want.f);
         case TagType::STRING:
-            return true;  // never written
+            return got.text == want.text;
     }
     return false;
 }
@@ -321,7 +348,8 @@ scada::driver::TagValue other_substitute(TagType type) {
         case TagType::FLOAT64:
             return scada::driver::float64_value(1.0);
         case TagType::STRING:
-            break;
+            // Static text: a substitute borrows its text (#169).
+            return scada::driver::string_value("other");
     }
     return scada::driver::zero_value(type);
 }
@@ -337,6 +365,36 @@ void check_substituted(const TagWrite& write, const TagWrite& other) {
     if (marked(write) != substitute || marked(other) != substitute) {
         std::abort();
     }
+    // A STRING tag has no substitute: a marker never matches a string raw,
+    // and a STRING tag on any other raw is refused (CF-504, #169).
+    if (write.value.type == TagType::STRING && marked(write)) {
+        std::abort();
+    }
+}
+
+// The pairs of tag and raw type that CF-504 refuses (D-115), as the
+// target's own copy: a STRING tag on a string raw and only there, a BOOL
+// tag on a bool raw, no counter on a floating raw (#169).
+bool refused_pair(const PointRules& rules) {
+    return (rules.tag_type == TagType::STRING) !=
+               (rules.raw_kind == RawKind::STRING) ||
+           (rules.tag_type == TagType::BOOL &&
+            rules.raw_kind != RawKind::BOOL) ||
+           (rules.counter.has_value() && rules.raw_kind == RawKind::FLOAT);
+}
+
+// Rules that validate_point_rules refuses, or that pair the types CF-504
+// refuses, give BAD with OUT_OF_RANGE and never SUBSTITUTED (#169).
+void check_refused(const PointRules& rules, const TagWrite& write) {
+    if (scada::driver::validate_point_rules(rules).ok() &&
+        !refused_pair(rules)) {
+        return;
+    }
+    if (write.quality != Quality::BAD ||
+        (write.flags & scada::tag::to_raw(QualityFlag::OUT_OF_RANGE)) == 0 ||
+        (write.flags & scada::tag::to_raw(QualityFlag::SUBSTITUTED)) != 0) {
+        std::abort();
+    }
 }
 
 // What a run saw, by write (#165): each quality, and the paths that hold
@@ -349,6 +407,10 @@ struct Stats {
     std::uint64_t expired_holds = 0;  // a hold that went BAD with STALE
     std::uint64_t good_after_substitute = 0;
     std::uint64_t good_after_hold = 0;  // after a hold or its expiry
+    std::uint64_t good_strings = 0;     // a STRING tag written GOOD (#169)
+    std::uint64_t good_bools = 0;       // a BOOL tag written GOOD
+    std::uint64_t good_double_points = 0;
+    std::uint64_t outside_raw_range = 0;  // UNCERTAIN by `raw_range`
 };
 
 // The process-wide counts of the run.
@@ -370,7 +432,11 @@ void print_stats() {
         std::to_string(stats.good_after_substitute) + ", hold " +
         std::to_string(stats.holds) + ", expired hold " +
         std::to_string(stats.expired_holds) + ", good after hold " +
-        std::to_string(stats.good_after_hold) + "\n";
+        std::to_string(stats.good_after_hold) + "\nkinds: good string " +
+        std::to_string(stats.good_strings) + ", good bool " +
+        std::to_string(stats.good_bools) + ", good double point " +
+        std::to_string(stats.good_double_points) + ", outside raw_range " +
+        std::to_string(stats.outside_raw_range) + "\n";
     (void)std::fputs(text.c_str(), stderr);
 }
 
@@ -380,14 +446,18 @@ void print_stats() {
 void check_reach() {
     print_stats();
     const Stats& stats = run_stats();
-    const std::array<std::uint64_t, 7> needed{
+    const std::array<std::uint64_t, 11> needed{
         stats.by_quality.at(scada::tag::to_raw(Quality::GOOD)),
         stats.by_quality.at(scada::tag::to_raw(Quality::UNCERTAIN)),
         stats.substitutes,
         stats.good_after_substitute,
         stats.holds,
         stats.expired_holds,
-        stats.good_after_hold};
+        stats.good_after_hold,
+        stats.good_strings,
+        stats.good_bools,
+        stats.good_double_points,
+        stats.outside_raw_range};
     if (std::ranges::find(needed, std::uint64_t{0}) != needed.end()) {
         (void)std::fputs("not every quality and path was reached\n", stderr);
         std::_Exit(EXIT_FAILURE);
@@ -415,11 +485,58 @@ enum class Last : std::uint8_t { OTHER, SUBSTITUTE, HOLD, EXPIRED };
 // Counts `write` (with `other`, the second state's write) after `last`;
 // `held` says that the write can be a hold (processing, not the stale
 // check). Returns what this write was.
-Last count(const TagWrite& write, const TagWrite& other, Last last, bool held) {
+// The raw number of a numeric raw value, as `raw_range` compares it;
+// nothing for a string or a time.
+std::optional<double> raw_number(const RawValue& raw) {
+    switch (raw.kind) {
+        case RawKind::SIGNED:
+            return static_cast<double>(raw.number_i);
+        case RawKind::BOOL:
+        case RawKind::UNSIGNED:
+            return static_cast<double>(raw.number_u);
+        case RawKind::FLOAT:
+            return raw.number_f;
+        case RawKind::STRING:
+        case RawKind::TIME:
+            break;
+    }
+    return std::nullopt;
+}
+
+// Counts the kinds of #169 for a write of `sample` (null for the stale
+// check): a GOOD STRING or BOOL tag, a GOOD double point read from a
+// numeric value, and a numeric value outside `raw_range` marked so.
+void count_kinds(const PointRules& rules, const RawSample* sample,
+                 const TagWrite& write) {
+    Stats& stats = run_stats();
+    if (write.quality == Quality::GOOD) {
+        stats.good_strings += write.value.type == TagType::STRING ? 1U : 0U;
+        stats.good_bools += write.value.type == TagType::BOOL ? 1U : 0U;
+    }
+    if (sample == nullptr || sample->outcome != Outcome::VALUE) {
+        return;
+    }
+    const std::optional<double> number = raw_number(sample->raw);
+    if (!number.has_value()) {
+        return;
+    }
+    if (rules.double_point.has_value() && write.quality == Quality::GOOD) {
+        ++stats.good_double_points;
+    }
+    if (rules.raw_range.has_value() &&
+        (*number < rules.raw_range->min || *number > rules.raw_range->max) &&
+        (write.flags & scada::tag::to_raw(QualityFlag::OUT_OF_RANGE)) != 0) {
+        ++stats.outside_raw_range;
+    }
+}
+
+Last count(const PointRules& rules, const RawSample* sample,
+           const TagWrite& write, const TagWrite& other, Last last, bool held) {
     Stats& stats = run_stats();
     ++stats.by_quality.at(
         static_cast<std::size_t>(scada::tag::to_raw(write.quality)) %
         stats.by_quality.size());
+    count_kinds(rules, sample, write);
     const bool stale =
         (write.flags & scada::tag::to_raw(QualityFlag::STALE)) != 0;
     if (write.quality == Quality::GOOD) {
@@ -570,7 +687,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       companions, times, other);
         check(out.tag);
         check_substituted(out.tag, other.tag);
-        last = count(out.tag, other.tag, last, true);
+        check_refused(rules, out.tag);
+        last = count(rules, &sample, out.tag, other.tag, last, true);
         const std::int64_t later = (step * SECOND) + (SECOND / 2);
         const bool stale = scada::driver::check_stale(rules, state, later, out);
         if (scada::driver::check_stale(other_rules, other_state, later,
@@ -580,7 +698,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         if (stale) {
             check(out.tag);
             check_substituted(out.tag, other.tag);
-            last = count(out.tag, other.tag, last, false);
+            check_refused(rules, out.tag);
+            last = count(rules, nullptr, out.tag, other.tag, last, false);
         }
         // The zone table on any device time.
         (void)zone().to_utc(raw.number_i);
