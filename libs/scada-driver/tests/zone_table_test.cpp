@@ -11,9 +11,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -334,6 +339,180 @@ TEST(ZoneTable, AFooterChangeAtTheLastTransitionReplacesIt) {
     EXPECT_FALSE(late.uncertain);
 }
 
+// --- The search window against a search of every interval (#158) -------
+
+// The local times, in seconds, where a window too narrow shows: each offset
+// of `spec` (and of the footers the tests use) at each change, a second
+// either side, and halfway to the next change.
+std::vector<std::int64_t> probes(const test::TzifSpec& spec) {
+    std::vector<std::int64_t> offsets(spec.offsets.begin(), spec.offsets.end());
+    for (const std::int64_t footer :
+         std::array<std::int64_t, 4>{0, -3 * HOUR_S, 3 * HOUR_S, -5 * HOUR_S}) {
+        offsets.push_back(footer);
+    }
+    std::vector<std::int64_t> locals;
+    for (std::size_t index = 0; index < spec.transitions.size(); ++index) {
+        const std::int64_t change = spec.transitions[index];
+        const std::int64_t next = index + 1 < spec.transitions.size()
+                                      ? spec.transitions[index + 1]
+                                      : change + (2 * HOUR_S);
+        for (const std::int64_t offset : offsets) {
+            for (const std::int64_t at :
+                 {change - 1, change, change + 1, (change + next) / 2}) {
+                locals.push_back(at + offset);
+            }
+        }
+    }
+    return locals;
+}
+
+// The first of `locals_s` where `to_utc` and a search of every interval
+// disagree, if any.
+std::optional<std::int64_t> disagreement(
+    const ZoneTable& table, std::span<const std::int64_t> locals_s) {
+    for (const std::int64_t local : locals_s) {
+        const UtcTime windowed = table.to_utc(local * SECOND);
+        const UtcTime everything = table.to_utc_searching_all(local * SECOND);
+        if (windowed.utc_ns != everything.utc_ns ||
+            windowed.uncertain != everything.uncertain) {
+            return local;
+        }
+    }
+    return std::nullopt;
+}
+
+// The mirror of ChangesCloserThanTheirOffsetsAreAllSearched, west of UTC:
+// the interval that holds the answer lies after the one found, not before.
+TEST(ZoneTable, ChangesCloserThanTheirOffsetsWestOfUtcAreAllSearched) {
+    constexpr std::int64_t FIRST_S = 15'599'616;  // 1970-06-30
+    constexpr std::int32_t WEST_15_S = -54'256;
+    constexpr std::int32_t WEST_18_S = -65'303;
+    test::TzifSpec spec;
+    spec.transitions = {FIRST_S, 15'638'272, 15'638'400};
+    spec.type_of = {1, 0, 1};
+    spec.offsets = {WEST_18_S, WEST_15_S};
+    spec.footer = "CET3";
+    const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_TRUE(table.ok());
+    const std::optional<std::int64_t> wrong =
+        disagreement(table.value(), probes(spec));
+    EXPECT_FALSE(wrong.has_value()) << "local " << wrong.value_or(0);
+}
+
+// 16 changes a minute apart between +6 h and -6 h: 16 interval begins
+// within the span of 12 h, the widest window taken. One more is refused,
+// as DATA_CORRUPT like any file the table cannot be built from.
+TEST(ZoneTable, SixteenCloseChangesAreTakenAndSeventeenRefused) {
+    constexpr std::int64_t START_S = 1'700'000'000;
+    constexpr std::int64_t APART_S = 60;
+    const auto close_changes = [](std::size_t count) {
+        test::TzifSpec spec;
+        for (std::size_t index = 0; index < count; ++index) {
+            spec.transitions.push_back(
+                START_S + (static_cast<std::int64_t>(index) * APART_S));
+            // The first changes from the initial +6 h.
+            spec.type_of.push_back(static_cast<std::uint8_t>((index + 1) % 2));
+        }
+        spec.offsets = {PLUS_6_S, -PLUS_6_S};
+        spec.footer = "";
+        return spec;
+    };
+    const test::TzifSpec sixteen = close_changes(16);
+    const auto taken = ZoneTable::from_tzif(test::build_tzif(sixteen));
+    ASSERT_TRUE(taken.ok());
+    EXPECT_EQ(taken.value().interval_count(), 17U);
+    const std::optional<std::int64_t> wrong =
+        disagreement(taken.value(), probes(sixteen));
+    EXPECT_FALSE(wrong.has_value()) << "local " << wrong.value_or(0);
+    const auto refused =
+        ZoneTable::from_tzif(test::build_tzif(close_changes(17)));
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.status().code(), StatusCode::DATA_CORRUPT);
+}
+
+// The footer's change at the last transition back to the offset before it:
+// the replaced interval merges with the one before, and a local time of it
+// is certain (#158).
+TEST(ZoneTable, AFooterChangeBackToTheOffsetBeforeMerges) {
+    constexpr std::int64_t FIRST_S = 1'700'000'000;
+    constexpr std::int64_t SECOND_S = FIRST_S + 86'400;
+    constexpr std::int32_t PLUS_2_S = 2 * PLUS_ONE_S;
+    test::TzifSpec spec;
+    spec.transitions = {FIRST_S, SECOND_S};
+    spec.type_of = {1, 0};
+    spec.offsets = {PLUS_ONE_S, PLUS_2_S};
+    spec.footer = "CET-2";  // +2 h, no daylight time
+    const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_TRUE(table.ok());
+    // From 1970 at +1 h, then +2 h from the first change on.
+    EXPECT_EQ(table.value().interval_count(), 2U);
+    const std::int64_t after_s = SECOND_S + 100;
+    const UtcTime back = table.value().to_utc((after_s + PLUS_2_S) * SECOND);
+    EXPECT_EQ(back.utc_ns, after_s * SECOND);
+    EXPECT_FALSE(back.uncertain);
+}
+
+// A value in [low, high] from the generator's own output, which the
+// standard fixes, so that every library gives the same tables.
+std::int64_t pick(std::mt19937_64& random, std::int64_t low,
+                  std::int64_t high) {
+    const auto range = static_cast<std::uint64_t>(high - low) + 1;
+    return low + static_cast<std::int64_t>(random() % range);
+}
+
+// A zone file of 1 to 24 changes, most of them seconds to minutes apart,
+// with 2 to 4 offsets around one base anywhere from -20 h to +20 h.
+test::TzifSpec random_spec(std::mt19937_64& random) {
+    constexpr std::int64_t START_S = 1'600'000'000;
+    constexpr std::int64_t SPREAD_S = 6 * HOUR_S;
+    constexpr std::array<const char*, 4> FOOTERS{"", "UTC0", "CET-3", "EST5"};
+    test::TzifSpec spec;
+    const std::int64_t base = pick(random, -20 * HOUR_S, 20 * HOUR_S);
+    const auto types = static_cast<std::size_t>(pick(random, 2, 4));
+    for (std::size_t type = 0; type < types; ++type) {
+        spec.offsets.push_back(
+            static_cast<std::int32_t>(std::clamp<std::int64_t>(
+                base + pick(random, -SPREAD_S, SPREAD_S), -89'999, 93'599)));
+    }
+    std::int64_t at = START_S;
+    const std::int64_t changes = pick(random, 1, 24);
+    for (std::int64_t index = 0; index < changes; ++index) {
+        at += pick(random, 0, 9) < 9 ? pick(random, 1, 600)
+                                     : pick(random, HOUR_S, 3 * 24 * HOUR_S);
+        spec.transitions.push_back(at);
+        spec.type_of.push_back(static_cast<std::uint8_t>(
+            pick(random, 0, static_cast<std::int64_t>(types) - 1)));
+    }
+    spec.footer = FOOTERS.at(static_cast<std::size_t>(pick(random, 0, 3)));
+    return spec;
+}
+
+// A seeded property test: on generated tables, `to_utc` agrees with a
+// search of every interval wherever a window too narrow would show.
+TEST(ZoneTable, TheWindowAgreesWithASearchOfEveryInterval) {
+    constexpr std::uint64_t SEED = 158;  // fixed: the same tables every run
+    constexpr int TABLES = 4000;
+    std::mt19937_64 random(SEED);
+    int accepted = 0;
+    int refused = 0;
+    for (int index = 0; index < TABLES; ++index) {
+        const test::TzifSpec spec = random_spec(random);
+        const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+        if (!table.ok()) {
+            ++refused;
+            continue;
+        }
+        ++accepted;
+        const std::optional<std::int64_t> wrong =
+            disagreement(table.value(), probes(spec));
+        ASSERT_FALSE(wrong.has_value())
+            << "table " << index << ", local " << wrong.value_or(0);
+    }
+    // Most tables are taken; files too close for the window are refused.
+    EXPECT_GT(accepted, TABLES / 2);
+    EXPECT_GT(refused, 0);
+}
+
 // A file whose changes are so close that a local time may lie in more than
 // sixteen intervals is refused, so that a conversion stays bounded (#158).
 TEST(ZoneTable, ChangesTooCloseForTheSearchAreRefused) {
@@ -348,7 +527,9 @@ TEST(ZoneTable, ChangesTooCloseForTheSearchAreRefused) {
     }
     spec.offsets = {PLUS_6_S, -PLUS_6_S};
     spec.footer = "";
-    EXPECT_FALSE(ZoneTable::from_tzif(test::build_tzif(spec)).ok());
+    const auto refused = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.status().code(), StatusCode::DATA_CORRUPT);
     // The same changes a day apart are taken.
     constexpr std::int64_t DAY_S = 86'400;
     for (std::size_t index = 0; index < CHANGES; ++index) {

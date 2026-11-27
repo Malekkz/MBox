@@ -52,19 +52,32 @@ public:
     // named by the environment variable TZDIR, else the one the build set
     // (CMake option SCADA_ZONEINFO_DIR). Reads a file and allocates. Fails
     // with INVALID_ARGUMENT for a name that is not a zone name, NOT_FOUND
-    // for a zone without a file, DATA_CORRUPT for a file that is not valid.
+    // for a zone without a file, and as `from_tzif` for its bytes.
     [[nodiscard]] static Result<ZoneTable> build(
         std::string_view zone_name) noexcept;
 
-    // Builds the table from the bytes of a zone file. Allocates.
+    // Builds the table from the bytes of a zone file. Allocates. Fails with
+    // DATA_CORRUPT for a file that is not valid (RFC 9636), and for one
+    // whose changes of offset lie so close together that more than 16
+    // interval begins fall within less than the span of its offsets (the
+    // largest minus the smallest, with 0) of one another: its conversions
+    // could not stay bounded (#158). RESOURCE_EXHAUSTED when out of memory.
     [[nodiscard]] static Result<ZoneTable> from_tzif(
         std::span<const std::byte> file) noexcept;
 
     // Converts `local_ns`, nanoseconds since 1970-01-01 on the zone's local
     // clock, to UTC (configuration schemas contract 4.6). Any input gives a
     // result; one outside the table is marked uncertain and saturates at
-    // the limits of int64.
+    // the limits of int64. Bounded: one binary search over the intervals,
+    // then at most 33 of them (a window of up to 16 on each side of the
+    // one found, #158), looked at twice.
     SCADA_RT [[nodiscard]] UtcTime to_utc(std::int64_t local_ns) const noexcept;
+
+    // `to_utc` with every interval searched, without the binary search and
+    // the window, written apart from them: the reference they are tested
+    // against. Not real-time.
+    [[nodiscard]] UtcTime to_utc_searching_all(
+        std::int64_t local_ns) const noexcept;
 
     // The number of intervals of constant offset (for tests).
     [[nodiscard]] std::size_t interval_count() const noexcept {
@@ -97,10 +110,12 @@ private:
     // a table that needs more than the widest (#158).
     [[nodiscard]] static Result<ZoneTable> with_search_window(ZoneTable table);
 
-    // `to_utc` within the table, without the check of
-    // `certain_until_utc_ns_`.
+    // `to_utc` within the table, searching `window` intervals on each side
+    // of the one found, without the check of `certain_until_utc_ns_`.
     SCADA_RT [[nodiscard]] UtcTime convert(
-        std::int64_t local_ns) const noexcept;
+        std::int64_t local_ns, std::ptrdiff_t window) const noexcept;
+    // `time` marked uncertain past `certain_until_utc_ns_`.
+    SCADA_RT [[nodiscard]] UtcTime marked(UtcTime time) const noexcept;
 
     std::vector<Interval> intervals_;
     // How many intervals on each side of the one that holds a local time

@@ -2632,20 +2632,28 @@ Consequences:
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
 
-## D-146: The zone table searches every interval that may hold a local time
+## D-144: The zone table searches every interval that may hold a local time
 Date: 2026-11-27
 Phase / issue: 2, #158; follows D-130
 Status: accepted for review
 
-Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 26 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
+Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 51 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
 
 The same check then aborted in the fuzz job of PR 159 on a second input: changes 2 min and then 1 s apart (+2 h, +1 h, +2 h) and a footer without daylight time at -3 h. Two causes act there: (a) `from_tzif` added the footer's change at the last transition's own instant, which left an interval of length zero; (b) the window of two, as above.
 
 Decision:
-- `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets of one another, at least 2. `convert` searches that many intervals on each side.
-- A table that would need more than 16 is refused (INVALID_ARGUMENT, "the zone file's changes of offset are too close together for its offsets"), so that a conversion, which runs on a worker for each sample with a device time, stays bounded. `to_utc` does one binary search over the intervals and then looks at no more than 33 intervals (16 on each side and the one found) twice: once for the matches, once for a skipped hour.
-- A change at the instant the last interval begins replaces that interval (`ZoneTable::add_change`), so no interval is empty; if the offset before it is the same, the two merge.
-- The fuzz target's check is right and is not changed. Both inputs are in the corpus (`changes-closer-than-offsets`, `footer-at-the-last-transition`). `ZoneTable.ChangesCloserThanTheirOffsetsAreAllSearched` fails with the old window, `ZoneTable.AFooterChangeAtTheLastTransitionReplacesIt` fails without the replacement, and `ZoneTable.ChangesTooCloseForTheSearchAreRefused` tests the bound.
+- `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets (the largest minus the smallest, with 0) of one another, at least 2. `convert` searches that many intervals on each side.
+- A table that would need more than 16 is refused, so that a conversion, which runs on a worker for each sample with a device time, stays bounded. `to_utc` does one binary search over the intervals and then looks at no more than 33 intervals (16 on each side and the one found) twice: once for the matches, once for a skipped hour. The header of `ZoneTable` states the bound.
+- The refusal is DATA_CORRUPT ("the zone file's changes of offset are too close together for its offsets"), as for any other file a table cannot be built from. INVALID_ARGUMENT is documented by `build` for a name that is not a zone name; the configuration compile reports both file cases as an unusable zone file. `from_tzif` now documents its failures.
+- The span bounds the distance in both directions at once, so it can be up to twice what one direction needs. It refuses more hand-made files than it must, never a real one, and keeps the rule simple. It is left as it is.
+- A change at the instant the last interval begins replaces that interval (`ZoneTable::add_change`), so no interval is empty; if the offset before it is the same, the two merge. A change at the begin of the table's only interval takes its place; no file reaches that today, since every change lies after the table's start.
+- The fuzz target's check is right and is not changed. Both inputs are in the corpus (`changes-closer-than-offsets`, `footer-at-the-last-transition`).
+- Tests (`zone_table_test.cpp`):
+  - each input as a unit test, and its mirror west of UTC, where the answer lies after the interval found;
+  - 16 close changes taken and 17 refused;
+  - a footer change back to the offset before;
+  - a seeded property test: on 4,000 generated tables, `to_utc` agrees with `ZoneTable::to_utc_searching_all`, a search of every interval written apart from `convert`.
+  These fail for each mutant the review of PR 162 found: either side of the window fixed at 2, the span without 0 or as `highest`, a cap other than 16, `>=` for `>`, the replacement without the merge.
 
 Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
 
