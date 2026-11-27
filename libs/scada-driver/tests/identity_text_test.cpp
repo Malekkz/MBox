@@ -50,13 +50,13 @@ TEST(IdentityText, EachValueIsShownInItsOwnWay) {
         "18446744073709551615");
     EXPECT_EQ(joined({read(float64_value(0.1))}), "0.1");  // shortest exact
     EXPECT_EQ(joined({read(bool_value(true))}), "true");
-    EXPECT_EQ(joined({read(string_value("SUN2000\n"))}), "SUN2000?");
+    EXPECT_EQ(joined({read(string_value("ABC2000\n"))}), "ABC2000?");
 }
 
 TEST(IdentityText, ChecksAreJoinedAndOneNotReadIsEmpty) {
-    EXPECT_EQ(joined({read(string_value("SUN2000")), read(uint64_value(3)),
+    EXPECT_EQ(joined({read(string_value("ABC2000")), read(uint64_value(3)),
                       IdentityField{}}),
-              "SUN2000; 3; ");
+              "ABC2000; 3; ");
     EXPECT_EQ(joined({}), "");
     EXPECT_EQ(joined({IdentityField{}}), "");
 }

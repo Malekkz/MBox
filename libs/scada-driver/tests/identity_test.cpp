@@ -114,9 +114,9 @@ TEST(Identity, EqualsAndInCompareTheValues) {
     EXPECT_TRUE(identity_matches(equals, int64_value(12)));  // its value
     EXPECT_FALSE(identity_matches(equals, uint64_value(13)));
     const IdentityCheck any_of =
-        check(IdentityCheck::Kind::IN, {text("SUN2000"), text("SUN3000")});
-    EXPECT_TRUE(identity_matches(any_of, string_value("SUN3000")));
-    EXPECT_FALSE(identity_matches(any_of, string_value("SUN4000")));
+        check(IdentityCheck::Kind::IN, {text("ABC2000"), text("ABC3000")});
+    EXPECT_TRUE(identity_matches(any_of, string_value("ABC3000")));
+    EXPECT_FALSE(identity_matches(any_of, string_value("ABC4000")));
     EXPECT_FALSE(identity_matches(check(IdentityCheck::Kind::EQUALS, {}),
                                   uint64_value(0)));
 }
@@ -142,9 +142,9 @@ TEST(Identity, ARangeIncludesBothEnds) {
 
 TEST(Identity, APatternMatchesAStringOnly) {
     const IdentityCheck pattern =
-        check(IdentityCheck::Kind::PATTERN, {}, "SUN2000-*KTL*");
-    EXPECT_TRUE(identity_matches(pattern, string_value("SUN2000-10KTL-M1")));
-    EXPECT_FALSE(identity_matches(pattern, string_value("SUN5000-10KTL")));
+        check(IdentityCheck::Kind::PATTERN, {}, "ABC2000-*KW*");
+    EXPECT_TRUE(identity_matches(pattern, string_value("ABC2000-10KW-M1")));
+    EXPECT_FALSE(identity_matches(pattern, string_value("ABC5000-10KW")));
     EXPECT_FALSE(identity_matches(pattern, uint64_value(1)));
     // `*` matches the empty text, which a number would give: still no match
     // (review S7).
@@ -204,11 +204,11 @@ TEST(Identity, APatternIsCheckedAsTheMatcherTakesIt) {
     // Ruling item 5: at most 250 bytes, no single backslash at the end, on a
     // STRING point only.
     EXPECT_TRUE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "SUN*"),
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "ABC*"),
                                 TagType::STRING)
             .ok());
     EXPECT_FALSE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "SUN*"),
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "ABC*"),
                                 TagType::UINT64)
             .ok());
     EXPECT_FALSE(

@@ -1,9 +1,11 @@
 // Fuzz target for the text of `sys.dev.<device>.identity` (driver interface
 // contract 3.6, 11.1; decision D-147): the values come from the device. The
-// input is split at each NUL into fields; a field's first byte chooses its
-// type (STRING, INT64, UINT64, FLOAT64, BOOL, or not read) and the rest is
-// its value. The joined text must fit the STRING maximum and hold only
-// printable bytes, whatever the fields.
+// input is a list of fields, each a kind byte, a length byte and that many
+// bytes, so that a value may hold a NUL (PR 171 S6). The kind chooses the
+// type (STRING, INT64, UINT64, FLOAT64, BOOL, or not read). The joined text
+// must fit the STRING maximum, hold only printable bytes, and be each
+// field's shown value in turn, separated, each in its equal share, a value
+// longer than its share cut to it with the mark as its last byte.
 
 #include "scada/driver/identity_text.h"
 #include "scada/driver/tag_value.h"
@@ -34,12 +36,9 @@ std::uint64_t bits_of(std::string_view bytes) {
     return std::bit_cast<std::uint64_t>(word);
 }
 
-scada::driver::IdentityField field_of(std::string_view part) {
-    if (part.empty()) {
-        return {};
-    }
-    const std::string_view rest = part.substr(1);
-    switch (static_cast<std::uint8_t>(part.front()) % KINDS) {
+scada::driver::IdentityField field_of(std::uint8_t kind,
+                                      std::string_view rest) {
+    switch (kind % KINDS) {
         case 0:
             return {.read = true, .value = scada::driver::string_value(rest)};
         case 1:
@@ -61,6 +60,40 @@ scada::driver::IdentityField field_of(std::string_view part) {
     }
 }
 
+// The joined text by its definition: separators first, then the share of
+// each field.
+std::string expected_text(
+    std::span<const scada::driver::IdentityField> fields) {
+    if (fields.empty()) {
+        return {};
+    }
+    constexpr std::size_t MAX = scada::driver::TAG_STRING_MAX_BYTES;
+    const std::size_t separators =
+        (fields.size() - 1) * scada::driver::IDENTITY_SEPARATOR.size();
+    const std::size_t share =
+        separators >= MAX ? 0 : (MAX - separators) / fields.size();
+    std::string text;
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        if (index > 0) {
+            text += scada::driver::IDENTITY_SEPARATOR;
+        }
+        if (!fields[index].read || share == 0) {
+            continue;
+        }
+        // Larger than any shown value: a STRING is at most 255 bytes here.
+        std::array<char, 2 * MAX> whole{};
+        const std::size_t full =
+            scada::driver::identity_field(fields[index].value, whole);
+        if (full <= share) {
+            text.append(whole.data(), full);
+        } else {
+            text.append(whole.data(), share - 1);
+            text += scada::driver::IDENTITY_CUT;
+        }
+    }
+    return text.substr(0, MAX);
+}
+
 }  // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
@@ -73,11 +106,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     std::vector<scada::driver::IdentityField> fields;
     std::string_view rest = input;
-    while (!rest.empty() && fields.size() < MAX_FIELDS) {
-        const std::size_t end = rest.find('\0');
-        fields.push_back(field_of(rest.substr(0, end)));
-        rest = end == std::string_view::npos ? std::string_view{}
-                                             : rest.substr(end + 1);
+    constexpr std::size_t HEADER = 2;
+    while (rest.size() >= HEADER && fields.size() < MAX_FIELDS) {
+        const auto kind = static_cast<std::uint8_t>(rest[0]);
+        const std::size_t length = std::min<std::size_t>(
+            static_cast<unsigned char>(rest[1]), rest.size() - HEADER);
+        fields.push_back(field_of(kind, rest.substr(HEADER, length)));
+        rest = rest.substr(HEADER + length);
     }
     std::array<char, scada::driver::TAG_STRING_MAX_BYTES> out{};
     const std::size_t length = scada::driver::join_identity(fields, out);
@@ -88,6 +123,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         if (byte < FIRST_SHOWN || byte > LAST_SHOWN) {
             std::abort();
         }
+    }
+    if (std::string_view(out.data(), length) != expected_text(fields)) {
+        std::abort();
     }
     return 0;
 }
