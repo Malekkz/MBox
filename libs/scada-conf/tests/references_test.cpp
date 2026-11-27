@@ -911,8 +911,8 @@ TEST(References, TiersAndTheLoggingOfABit) {
 }
 
 // 6 and 7: a file that gives `classes` replaces the default classes, and
-// the first file that gives `priorities` defines them (a second is CF-811,
-// with slice 7c of #100).
+// the first file that gives `priorities` defines them (a second is
+// CF-811).
 TEST(References, AlarmListsOfAFile) {
     EXPECT_EQ(
         validate({{"areas.yaml", std::string(AREAS)},
@@ -927,10 +927,13 @@ TEST(References, AlarmListsOfAFile) {
                    "alarms:\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "minor, class: safety, area: ps1 }\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"alarms/a.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
                "exist",
                "alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
                "exist",
+               "alarms/b.yaml:1:13 CF-811: priorities is given in "
+               "\"alarms/a.yaml\" and \"alarms/b.yaml\"",
                "alarms/b.yaml:3:12 CF-310: tag \"ps1.fm1.flow\" does not "
                "exist",
                "alarms/b.yaml:3:57 CF-310: alarm priority \"minor\" does not "

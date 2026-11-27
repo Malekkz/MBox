@@ -1,0 +1,4 @@
+# A retain_max_age on a retained manual tag is valid, and gives CW-510
+# until the library part of the bound (#89) is merged (contract 5.2,
+# conformance test 10; D-119, slice 7c of #100). Invented.
+tags/site.yaml:2:91: CW-510

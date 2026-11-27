@@ -57,6 +57,7 @@ scada_add_library(scada-conf
     src/scalar.cpp
     src/schema.cpp
     src/tag_names.cpp
+    src/tag_rules.cpp
     src/tree_scan.cpp
     src/utf8.cpp
     src/validate.cpp

@@ -1,0 +1,8 @@
+priorities: [critical, high, medium, low]
+alarms:
+  - { tag: site.flow, type: high, limit: 8, priority: high, area: site }
+  - { tag: site.flow, type: high_high, limit: 7, priority: critical, area: site }
+  - { tag: site.flow, type: high, limit: 9, priority: high, area: site }
+  - { tag: site.note, type: bad_quality, priority: low, area: site }
+  - { tag: site.run, type: high, limit: 1, priority: low, area: site }
+  - { tag: site.run, type: state, alarm_on: true, priority: low, area: site }

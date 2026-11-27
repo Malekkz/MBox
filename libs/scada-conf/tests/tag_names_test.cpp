@@ -61,10 +61,12 @@ TEST(TagNames, PointAndBitTags) {
         with_alarms(alarm_on("ps1.m1.status")),
         Lines{"alarms/site.yaml:2:12: error CF-310: tag \"ps1.m1.status\" "
               "does not exist"});
-    EXPECT_EQ(with_alarms(alarm_on("ps1.m1.run") + "  - { tag: ps1.m1.trip, "
-                                                   "type: state, alarm_on: "
-                                                   "true, priority: high, "
-                                                   "area: ps1 }\n"),
+    EXPECT_EQ(with_alarms("alarms:\n  - { tag: ps1.m1.run, type: state, "
+                          "alarm_on: true, priority: high, area: ps1 }\n"
+                          "  - { tag: ps1.m1.trip, "
+                          "type: state, alarm_on: "
+                          "true, priority: high, "
+                          "area: ps1 }\n"),
               Lines{});
 }
 
@@ -115,21 +117,20 @@ TEST(TagNames, GeneratedTags) {
 // A user's tag of a generated tag's name is CF-302; two generated tags of
 // one name are another rule's cause and are not reported here.
 TEST(TagNames, AUserTagOfAGeneratedName) {
-    EXPECT_EQ(
-        errors(expand({{"areas.yaml", std::string(AREAS)},
-                       {"templates/meter_a.yaml", std::string(METER)},
-                       {"drivers/modbus/line1.yaml", one_device()},
-                       {"tags/site.yaml",
-                        "tags:\n  - { name: sys.area.ps1.authority, "
-                        "type: internal, value_type: int64 }\n"
-                        "  - { name: ps1.m1.alarm_on.alarm.high, type: "
-                        "internal, value_type: int64 }\n"},
-                       {"alarms/site.yaml", alarm_on("ps1.m1.alarm_on")}})),
-        (Lines{"tags/site.yaml:2:13: error CF-301: tag names starting "
-               "with sys. are reserved",
-               "tags/site.yaml:3:13: error CF-302: tag "
-               "\"ps1.m1.alarm_on.alarm.high\" is defined twice; first "
-               "at alarms/site.yaml:2"}));
+    EXPECT_EQ(errors(expand({{"areas.yaml", std::string(AREAS)},
+                             {"templates/meter_a.yaml", std::string(METER)},
+                             {"drivers/modbus/line1.yaml", one_device()},
+                             {"tags/site.yaml",
+                              "tags:\n  - { name: sys.area.ps1.authority, "
+                              "type: internal, value_type: int64 }\n"
+                              "  - { name: ps1.m1.flow.alarm.high, type: "
+                              "internal, value_type: int64 }\n"},
+                             {"alarms/site.yaml", alarm_on("ps1.m1.flow")}})),
+              (Lines{"tags/site.yaml:2:13: error CF-301: tag names starting "
+                     "with sys. are reserved",
+                     "tags/site.yaml:3:13: error CF-302: tag "
+                     "\"ps1.m1.flow.alarm.high\" is defined twice; first "
+                     "at alarms/site.yaml:2"}));
 }
 
 // An alarm's `limit` as a tag, and its `setpoint`, name number tags
@@ -220,7 +221,7 @@ TEST(TagNames, TheTagsOfAProgram) {
 }
 
 // An expression alarm's state tag is `<name>.alarm.<id>`; two alarms of
-// one id on a tag are CF-812's (slice 7c), not CF-302; a string tag is no
+// one id on a tag are CF-812 (slice 7c), not CF-302; a string tag is no
 // number for a setpoint; a feedback given as `{ tag, within, settle }`
 // names a tag.
 TEST(TagNames, AlarmStatesAndFeedbackForms) {
@@ -233,14 +234,15 @@ TEST(TagNames, AlarmStatesAndFeedbackForms) {
                           "priority: high, area: ps1 }\n"
                           "  - { tag: ps1.m1.flow, type: high, limit: 5, "
                           "priority: high, area: ps1 }\n"),
-              Lines{});
+              Lines{"alarms/site.yaml:5:5: error CF-812: tag \"ps1.m1.flow\" "
+                    "has two alarms with id \"high\""});
     EXPECT_EQ(
         errors(expand({{"areas.yaml", std::string(AREAS)},
                        {"templates/meter_a.yaml", std::string(METER)},
                        {"drivers/modbus/line1.yaml", one_device()},
                        {"tags/site.yaml",
                         "tags:\n  - { name: site.label, type: manual, "
-                        "value_type: string, area: ps1 }\n"},
+                        "value_type: string, area: ps1, retain: false }\n"},
                        {"alarms/site.yaml",
                         "alarms:\n  - { tag: ps1.m1.flow, type: deviation, "
                         "limit: 2, setpoint: site.label, priority: high, area: "
@@ -274,7 +276,7 @@ Lines three_meters(std::string_view template_text, const Files& more = {},
     files.try_emplace("drivers/modbus/line1.yaml", channel(devices));
     files.try_emplace("tags/site.yaml",
                       "tags:\n  - { name: site.label, type: manual, "
-                      "value_type: string, area: ps1 }\n");
+                      "value_type: string, area: ps1, retain: false }\n");
     return errors(expand(files));
 }
 
@@ -520,9 +522,11 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
         "  - { name: ps1.s, area: ps1, kind: setpoint, target: ps1.m1.flow, "
         "no_feedback: true, interlocks: [], safe_state: { value: 0 }, "
         "on_shutdown: safe }\n";
-    const auto setpoint = [](std::string_view tag) {
+    // One id each: an id given twice on a tag is CF-812.
+    const auto setpoint = [](std::string_view tag, std::size_t number) {
         return "  - { tag: ps1.m1.flow, type: deviation, limit: 1, setpoint: " +
-               std::string(tag) + ", priority: high, area: ps1 }\n";
+               std::string(tag) + ", priority: high, area: ps1, id: d" +
+               std::to_string(number) + " }\n";
     };
     std::string alarms = "alarms:\n";
     for (const std::string_view tag :
@@ -534,7 +538,7 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
           "sys.dev.ps1.m1.identity", "sys.dev.ps1.m1.identity_ok",
           "sys.drv.line1.period.slow", "ps1.m1.label", "ps1.m1.raw",
           "ps1.v.req_manual"}) {
-        alarms += setpoint(tag);
+        alarms += setpoint(tag, alarms.size());
     }
 
     // In the order of the report: by file and line.
@@ -609,7 +613,8 @@ TEST(TagNames, LocalOutputsAndTheIoProcess) {
         alarms +=
             "  - { tag: ps1.m1.flow, type: deviation, limit: 1, "
             "setpoint: " +
-            std::string(tag) + ", priority: high, area: ps1 }\n";
+            std::string(tag) + ", priority: high, area: ps1, id: d" +
+            std::to_string(alarms.size()) + " }\n";
     }
     EXPECT_EQ(
         errors(expand(
@@ -850,7 +855,8 @@ TEST(TagNames, MoreTypesAndPlaces) {
         alarms +=
             "  - { tag: ps1.m1.flow, type: deviation, limit: 1, "
             "setpoint: " +
-            std::string(tag) + ", priority: high, area: ps1 }\n";
+            std::string(tag) + ", priority: high, area: ps1, id: d" +
+            std::to_string(alarms.size()) + " }\n";
     }
     const std::string outputs =
         "interlocks:\n  - { name: ps1.ok, condition: \"ps1.m1.flow > 1\", "

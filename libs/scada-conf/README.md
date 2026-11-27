@@ -169,6 +169,16 @@ of the matcher (`ExpandLimits::run_time_pattern_work`): past it the tree
 is refused with CF-113. The worst accepted tree takes about 14.4 s in
 release on x86-64 (D-117).
 
+Last, stage 5 checks the keys of the tags, logging and alarms
+(`src/tag_rules.cpp`, D-119): CF-505 for a percentage deadband a tag
+writes in its own alarm or `logging`, without `range`; CF-506 to CF-509
+for the retain keys, with warning CW-510 for each `retain_max_age` until
+#89; CF-801 for aggregate tiers out of
+order; CF-802 and CF-803 for logging settings; CF-811 for an alarm list
+given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
+limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags.
+The warnings CW-804 and CW-805 are not given yet.
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
@@ -225,11 +235,11 @@ slice of #100.
 | CF-421 | `src/expand.cpp` |
 | CF-422 | `src/expand.cpp` |
 | CF-504 | `src/merged_points.cpp` |
-| CF-505 | slice 7c of #100 |
-| CF-506 | slice 7c of #100 |
-| CF-507 | slice 7c of #100 |
-| CF-508 | slice 7c of #100 |
-| CF-509 | slice 7c of #100 |
+| CF-505 | `src/tag_rules.cpp` |
+| CF-506 | `src/tag_rules.cpp` |
+| CF-507 | `src/tag_rules.cpp` |
+| CF-508 | `src/tag_rules.cpp` |
+| CF-509 | `src/tag_rules.cpp` |
 | CF-520 | `src/expression.cpp`, `src/schema.cpp` |
 | CF-521 | `src/expression_types.cpp` |
 | CF-522 | `src/expression_types.cpp` |
@@ -280,14 +290,14 @@ slice of #100.
 | CF-720 | slice 7e of #100 |
 | CF-723 | slice 7e of #100 |
 | CF-722 | slice 7e of #100 |
-| CF-801 | slice 7c of #100 |
-| CF-802 | slice 7c of #100 |
-| CF-803 | slice 7c of #100 |
-| CF-811 | slice 7c of #100 |
-| CF-812 | slice 7c of #100 |
-| CF-813 | slice 7c of #100 |
-| CF-814 | slice 7c of #100 |
-| CF-815 | slice 7c of #100 |
+| CF-801 | `src/tag_rules.cpp` |
+| CF-802 | `src/tag_rules.cpp` |
+| CF-803 | `src/tag_rules.cpp` |
+| CF-811 | `src/tag_rules.cpp` |
+| CF-812 | `src/tag_rules.cpp` |
+| CF-813 | `src/tag_rules.cpp` |
+| CF-814 | `src/tag_rules.cpp` |
+| CF-815 | `src/tag_rules.cpp` |
 | CF-901 | slice 7e of #100 |
 | CF-902 | slice 7e of #100 |
 | CF-904 | slice 7e of #100 |
@@ -518,5 +528,7 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   executable of its own) bounds the work of patterns over tens of
   thousands of tags: each pattern a vertex walked once, resolved once for
   all its uses.
+- `tests/tag_rules_test.cpp`: the retain keys, logging and alarms of the
+  tags (D-119), at instances and past the tag limit.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

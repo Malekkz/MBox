@@ -1,0 +1,7 @@
+aggregate_tiers:
+  - { name: 1m, interval: 1m }
+  - { name: 90m, interval: 90m }
+  - { name: 1h, interval: 1h }
+policies:
+  changes: { mode: on_change, deadband: 0.5%, raw_retention: 90d }
+  sampled: { mode: periodic, interval: 1m, raw_retention: 1y }
