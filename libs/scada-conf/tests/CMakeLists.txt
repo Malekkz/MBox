@@ -27,6 +27,16 @@ target_compile_definitions(scada-conf-unit-test PRIVATE
 target_include_directories(scada-conf-unit-test
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
+# The default limits of the YAML parser at their edges, a file of 8 MiB or a
+# million nodes, and the cost of the schema check of typed keys: each a time
+# limit of its own, apart from the unit tests above (#164).
+scada_add_test(scada-conf-yaml-limits-test KIND unit
+  SOURCES yaml_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-schema-limits-test KIND unit
+  SOURCES schema_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+
 # The limits of stage 4 at their edges: millions of nodes each, so each has
 # a time limit of its own, apart from the unit tests above.
 scada_add_test(scada-conf-limits-test KIND unit

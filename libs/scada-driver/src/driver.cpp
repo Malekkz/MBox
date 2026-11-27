@@ -247,7 +247,7 @@ private:
     [[nodiscard]] Status resolve(const CompiledChannel& channel,
                                  std::optional<std::uint16_t> owner,
                                  PointHandles& out) noexcept;
-    // The system tags of the channel and its devices (11.1, D-145), with
+    // The system tags of the channel and its devices (11.1, D-146), with
     // the same checks as the point tags.
     [[nodiscard]] Status resolve_system(const CompiledChannel& channel,
                                         std::optional<std::uint16_t> owner,
@@ -259,7 +259,7 @@ private:
                                      const std::string& name, std::uint8_t type,
                                      std::uint32_t& handle) noexcept;
     // The owner named like the process, the main thread's (CS 12.5): its
-    // 9.1 walk, its `sys.proc` tags resolved and written (D-145).
+    // 9.1 walk, its `sys.proc` tags resolved and written (D-146).
     [[nodiscard]] Status take_process_owner() noexcept;
     [[nodiscard]] Status begin_workers() noexcept;
     [[nodiscard]] Status await_running() noexcept;
@@ -377,7 +377,7 @@ Status Driver::Impl::owner_of(const CompiledChannel& channel,
                               std::optional<std::uint16_t>& owner) noexcept {
     owner.reset();
     // The first point tag, or, for a channel without one, its own state tag
-    // (11.1, D-145): every channel has system tags.
+    // (11.1, D-146): every channel has system tags.
     std::string name = detail::channel_tag_name(
         channel.name, detail::channel_signal(ChannelSignal::STATE).name);
     for (const CompiledDevice& device : channel.devices) {
@@ -412,7 +412,7 @@ Status Driver::Impl::every_owner_claimed(
     // An owner of this process that no channel writes would keep the
     // values of the previous life, GOOD, for as long as the driver runs:
     // the start fails, naming it (the lead's ruling, delta 3). The main
-    // thread's own owner, for the `sys.proc` tags, is the exception (D-145).
+    // thread's own owner, for the `sys.proc` tags, is the exception (D-146).
     scada_status status{};
     if (scada_tag_status(ctx_, &status) != SCADA_OK &&
         status.owner_count == 0) {

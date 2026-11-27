@@ -22,8 +22,17 @@
 namespace scada::driver::detail {
 namespace {
 
+// The flags of the 9.1 write of a tag that holds `stored`: NOT_INIT, and
+// SUBSTITUTED if the stored value carries it.
+std::uint16_t kept_flags(const scada_value& stored) noexcept {
+    return static_cast<std::uint16_t>(
+        SCADA_FLAG_NOT_INIT | (stored.quality_flags & SCADA_FLAG_SUBSTITUTED));
+}
+
 // The write of 9.1 for one tag: value as stored, BAD with NOT_INIT, source
-// time 0; a RESTORED tag is left alone. SCADA_OK or the library's code.
+// time 0; a RESTORED tag is left alone. SUBSTITUTED describes the stored
+// value and stays with it (review R1 of #157). SCADA_OK or the library's
+// code.
 int write_one_not_initialised(scada_ctx* ctx, std::uint32_t target) noexcept {
     scada_value stored{};
     int code = scada_tag_read(ctx, target, &stored);
@@ -42,14 +51,13 @@ int write_one_not_initialised(scada_ctx* ctx, std::uint32_t target) noexcept {
             return code;
         }
         return scada_tag_write_string(ctx, target, text.data(), length,
-                                      SCADA_QUALITY_BAD, SCADA_FLAG_NOT_INIT,
-                                      0);
+                                      SCADA_QUALITY_BAD, kept_flags(stored), 0);
     }
     scada_value value{};
     value.type = stored.type;
     value.value = stored.value;
     value.quality = SCADA_QUALITY_BAD;
-    value.quality_flags = SCADA_FLAG_NOT_INIT;
+    value.quality_flags = kept_flags(stored);
     value.source_time_ns = 0;
     return scada_tag_write(ctx, target, &value);
 }
@@ -213,7 +221,37 @@ void TagWriter::write_point(std::uint32_t device, std::uint32_t point,
     }
 }
 
+namespace {
+
+// The engine as the target of TagWriter::seed.
+class EngineSeeds final : public PointSeeds {
+public:
+    explicit EngineSeeds(ChannelEngine& engine) noexcept : engine_(engine) {}
+    EngineSeeds(const EngineSeeds&) = delete;
+    EngineSeeds& operator=(const EngineSeeds&) = delete;
+    EngineSeeds(EngineSeeds&&) = delete;
+    EngineSeeds& operator=(EngineSeeds&&) = delete;
+    ~EngineSeeds() override = default;
+
+    void seed_point(std::uint32_t device, std::uint32_t point,
+                    const TagValue& stored,
+                    bool substituted) noexcept override {
+        engine_.seed_point(device, point, stored, substituted);
+    }
+
+private:
+    ChannelEngine& engine_;
+};
+
+}  // namespace
+
 void TagWriter::seed(ChannelEngine& engine,
+                     const CompiledChannel& channel) noexcept {
+    EngineSeeds seeds(engine);
+    seed(seeds, channel);
+}
+
+void TagWriter::seed(PointSeeds& seeds,
                      const CompiledChannel& channel) noexcept {
     for (std::uint32_t device = 0; device < channel.devices.size(); ++device) {
         const CompiledDevice& compiled = channel.devices[device];
@@ -232,9 +270,10 @@ void TagWriter::seed(ChannelEngine& engine,
                 ++refused_;
                 continue;  // no stored value: the point starts from 0
             }
-            engine.seed_point(
+            seeds.seed_point(
                 device, point,
-                from_scada_value(stored, std::span(text).first(length)));
+                from_scada_value(stored, std::span(text).first(length)),
+                (stored.quality_flags & SCADA_FLAG_SUBSTITUTED) != 0);
         }
     }
 }

@@ -2385,6 +2385,21 @@ TEST(ChannelEngine, ASeededPointKeepsItsValueThroughACommFail) {
     EXPECT_EQ(rig.tags.point(0, 0).value, 11);
 }
 
+TEST(ChannelEngine, ASeededSubstituteKeepsSubstitutedThroughACommFail) {
+    // Review R1 of PR 157, across a restart: a stored substitute keeps its
+    // flag on the writes that keep its value; a plain value gets none.
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.engine.seed_point(0, 0, int64_value(11), true);
+    rig.engine.seed_point(1, 0, int64_value(12), false);
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 11);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::SUBSTITUTED));
+    ASSERT_TRUE(rig.tags.has_flag(1, 0, Flag::COMM_FAIL));
+    EXPECT_FALSE(rig.tags.has_flag(1, 0, Flag::SUBSTITUTED));
+}
+
 TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
     CompiledChannel channel =
         channel_of(2, quick_failure(2, 3), TransportKind::TCP);
@@ -2399,7 +2414,7 @@ TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
     EXPECT_FALSE(engine.status().ok());
 }
 
-// --- 11.1: the counts behind the system tags (D-145) -----------------------
+// --- 11.1: the counts behind the system tags (D-146) -----------------------
 
 TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
     Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);

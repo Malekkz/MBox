@@ -628,7 +628,7 @@ TEST_F(SystemTags, TheStopLeavesEveryStateNotConnected) {
 TEST_F(SystemTags, TheStopWritesTheCountersLastValues) {
     // The period holds back a counter's newest value up to a second; the
     // stop writes it, so that `requests` after the stop is every request
-    // the simulator received from the driver (D-145).
+    // the simulator received from the driver (D-146).
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     auto sim = start_sim({"--set", "1", "0", "0", "7"});
     if (!sim.has_value()) {
@@ -669,7 +669,7 @@ bool counted_one(const scada_value& value) {
 TEST_F(SystemTags, AStateIsWrittenInTheStepThatChangedIt) {
     // One device in the slow group (10 s): its state RUNNING is written in
     // the step of its first answer, with the point, not at the next second
-    // (D-145).
+    // (D-146).
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     auto sim = start_sim({"--set", "1", "0", "0", "7"});
     if (!sim.has_value()) {
@@ -694,7 +694,7 @@ TEST_F(SystemTags, ACounterIsWrittenWithinItsPeriodOfAChange) {
     // Its `requests` is written within a second of its first answer: the
     // worker wakes for it, and waits neither for the next poll, 10 s later,
     // nor for the cap of every wait, a third of the stall limit: 5 s with a
-    // connect timeout of 5 s (2.6; D-145).
+    // connect timeout of 5 s (2.6; D-146).
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     auto sim = start_sim({"--set", "1", "0", "0", "7"});
     if (!sim.has_value()) {
@@ -760,7 +760,7 @@ bool disconnected(const scada_value& value) {
 TEST_F(SystemTags, AConnectThatWaitsIsConnectingAndWakesTheReaders) {
     // A listener whose queue is full: each connect waits its 1 s time-out.
     // `state` 1 is written and the readers woken before the connect, which
-    // blocks the worker (D-145; review S4): a read right after a notify of
+    // blocks the worker (D-146; review S4): a read right after a notify of
     // the driver sees it. The first attempt may overlap the notify of
     // READY=1, so the check is on a later one: after READY, once an attempt
     // was seen and ended.
@@ -926,7 +926,7 @@ TEST_F(DriverProcess, ARefusedConnectIsCountedOnTheChannel) {
 
 TEST_F(SystemTags, OfADisabledChannelShowItWasNeverConnected) {
     // A disabled channel has no engine: its system tags are written once
-    // at its start (9.1, D-145), the channel disconnected, its device
+    // at its start (9.1, D-146), the channel disconnected, its device
     // DISABLED, every count 0 but what a scan of the plan would send.
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     std::vector<std::string> off =
@@ -951,7 +951,7 @@ TEST_F(SystemTags, OfADisabledChannelShowItWasNeverConnected) {
 
 TEST_F(DriverProcess, AChannelWithoutDevicesIsOwnedByItsSystemTags) {
     // No point tag to learn the owner from: the channel's state tag gives
-    // it (D-145).
+    // it (D-146).
     start_tagd({{.name = "line1", .tags = {}}});
     auto driver = start_driver(tcp_channel("line1", LocalPort(false).port()));
     if (!driver.has_value()) {
@@ -965,7 +965,7 @@ TEST_F(DriverProcess, AChannelWithoutDevicesIsOwnedByItsSystemTags) {
 
 TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
     // CS 12.5: a tag set lists the system tags; one that lacks one, or
-    // gives one another type, does not run the driver (D-145).
+    // gives one another type, does not run the driver (D-146).
     const std::vector<std::string> args = joined(
         tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0"));
     start_tagd({{.name = "line1", .tags = {"d1.v"}, .system_tags = false}});
@@ -994,7 +994,7 @@ TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
 
 TEST_F(SystemTags, OfTheProcessAreTheMainThreads) {
     // `sys.proc.drv-test.*`, owner `drv-test`, written by the main thread
-    // (D-145): no real-time thread, no `config_id` until the compile step,
+    // (D-146): no real-time thread, no `config_id` until the compile step,
     // APPLIED (1) once READY=1 is sent, every count 0. The owner has no
     // channel and is no unused owner.
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});

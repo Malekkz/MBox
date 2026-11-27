@@ -189,7 +189,7 @@ void Worker::serve(TagWriter& writer) noexcept {
     }
     writer.seed(*engine, *channel_);
     // 9.1: "Diagnostic tags are written with their current values", after
-    // the walk of the owner wrote them NOT_INIT (D-145).
+    // the walk of the owner wrote them NOT_INIT (D-146).
     writer.publish_system(*engine, *channel_, clock_->monotonic_ns(), true);
     writer.notify();
     // A stop gives up a read in flight and a connect (DI 10, R-14).
@@ -213,7 +213,7 @@ void Worker::serve(TagWriter& writer) noexcept {
     transport_->close(false);
     transport_->set_wake(-1);
     // The counters' last values, which the period may have held back: a
-    // reader after the stop sees every request the channel sent (D-145).
+    // reader after the stop sees every request the channel sent (D-146).
     writer.flush_system(*engine, *channel_, clock_->monotonic_ns());
     // The channel's state says so (11.1), and its devices' as for a channel
     // not connected (3.5; review M3).

@@ -8,13 +8,10 @@
 #include "scada/conf/node.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "schema_cases.h"
 
 #include <gtest/gtest.h>
 
-#include <ctime>
-
-#include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -24,6 +21,8 @@
 
 namespace scada::conf {
 namespace {
+
+using schema_cases::one_schema;
 
 using Lines = std::vector<std::string>;
 
@@ -52,20 +51,6 @@ Lines check_with(const SchemaSet& set, std::string_view schema,
     ScalarTypes types(*document);
     set.validate(*document, types, schema, "f.yaml", diagnostics);
     return report_lines(diagnostics);
-}
-
-// A set of one schema file, `t.schema.json`, of the text `json`.
-SchemaSet one_schema(std::string json) {
-    std::string problem;
-    Result<SchemaSet> set = SchemaSet::compile(
-        {SchemaSource{.name = "t.schema.json", .text = std::move(json)}},
-        problem);
-    EXPECT_TRUE(set.ok()) << problem;
-    if (!set.ok()) {
-        std::string unused;
-        return std::move(SchemaSet::compile({}, unused)).value();
-    }
-    return std::move(set).value();
 }
 
 Lines check(const std::string& json, std::string_view yaml) {
@@ -524,55 +509,6 @@ TEST(Schema, TypesBehindReferencesAndCompositions) {
     EXPECT_EQ(root_types(json, "a: 50\nb: 60\nc: 70\n"),
               (std::vector<ScalarType>{ScalarType::NONE, ScalarType::NONE,
                                        ScalarType::NONE}));
-}
-
-// The processor time of this thread, which other load does not change.
-std::chrono::nanoseconds thread_time() {
-    timespec now{};
-    static_cast<void>(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now));
-    return std::chrono::seconds(now.tv_sec) +
-           std::chrono::nanoseconds(now.tv_nsec);
-}
-
-// B2: typed keys are checked with a sorted set. From 4,096 to 65,536 keys a
-// linearithmic check takes about 17.5 times as long and a quadratic one 256
-// times; the bound sits between, in processor time of this thread.
-TEST(Schema, TypedKeysAreCheckedInLinearithmicTime) {
-    constexpr std::size_t SMALL = 4096;
-    constexpr std::size_t LARGE = 65536;
-    constexpr int RUNS = 3;
-    constexpr double MAX_RATIO = 64.0;
-    const SchemaSet set = one_schema(R"({ "type": "object",
-        "x-scada-key-type": "integer",
-        "unevaluatedProperties": { "type": "string" } })");
-    const auto fastest = [&set](std::size_t keys) {
-        std::string yaml;
-        for (std::size_t i = 0; i < keys; ++i) {
-            yaml += std::to_string(i) + ": x\n";
-        }
-        Diagnostics diagnostics;
-        const std::optional<Document> document =
-            parse_yaml(yaml, "f.yaml", diagnostics);
-        if (!document.has_value()) {
-            ADD_FAILURE() << "no document";
-            return std::chrono::nanoseconds::max();
-        }
-        auto best = std::chrono::nanoseconds::max();
-        for (int run = 0; run < RUNS; ++run) {
-            ScalarTypes types(*document);
-            const auto start = thread_time();
-            set.validate(*document, types, "t.schema.json", "f.yaml",
-                         diagnostics);
-            best = std::min(best, thread_time() - start);
-        }
-        EXPECT_EQ(diagnostics.error_count(), 0U);
-        return best;
-    };
-    const auto small = fastest(SMALL);
-    const auto large = fastest(LARGE);
-    EXPECT_LT(static_cast<double>(large.count()),
-              MAX_RATIO * static_cast<double>(small.count()))
-        << "small " << small.count() << " ns, large " << large.count() << " ns";
 }
 
 // The number of keys of `number` and its kin for which an integer of the

@@ -220,9 +220,11 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
 }
 
 void ChannelEngine::seed_point(std::uint32_t device, std::uint32_t point,
-                               const TagValue& stored) noexcept {
+                               const TagValue& stored,
+                               bool substituted) noexcept {
     if (device < devices_.size() && point < devices_[device].points.size()) {
-        seed_point_state(devices_[device].points[point].state, stored);
+        seed_point_state(devices_[device].points[point].state, stored,
+                         substituted);
     }
 }
 
@@ -888,7 +890,7 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const bool probe = choice.kind == Choice::Kind::PROBE;
     if (end == End::BROKEN) {
         ++counts_.broken;
-        ++run.diag.errors;  // a broken answer (D-145)
+        ++run.diag.errors;  // a broken answer (D-146)
     } else {
         ++counts_.timeouts;
         if (end == End::TIMEOUT) {

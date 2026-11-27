@@ -674,12 +674,18 @@ protected:
         return beyond;
     }
 
-    // With `feeder` (io) counting under `first`: stops `first`, which
-    // writes io's value, waits until io has counted beyond it and writes
-    // the tag set after the move. The value on file, or -1 on a failure.
+    // With `feeder` (io) counting under `first`: waits for io's first
+    // write, stops `first`, which writes io's value, waits until io has
+    // counted beyond it and writes the tag set after the move. The value on
+    // file, or -1 on a failure.
     [[nodiscard]] std::int64_t counted_past_the_stop(ChildProcess& feeder,
                                                      RunningTagd& first) const {
         if (!prints(feeder, "attached value=0")) {
+            return -1;
+        }
+        // io prints its attach before it writes: a stop before its first
+        // write leaves nothing of io's to save (#143).
+        if (!tag_reaches(1, WAIT_LIMIT)) {
             return -1;
         }
         stop(first);

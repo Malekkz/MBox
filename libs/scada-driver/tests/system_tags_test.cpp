@@ -1,5 +1,5 @@
 // The system tags of a channel and its devices on the fake clock (driver
-// interface contract 11.1, conformance test 34; decision D-145; PR 159
+// interface contract 11.1, conformance test 34; decision D-146; PR 159
 // review M1 to M3, S1): states at once, counters, times and averages at
 // most once a second and only when they changed, their last values at the
 // stop, and the states the stop leaves.

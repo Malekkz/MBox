@@ -2,7 +2,7 @@
 #define SCADA_DRIVER_DIAGNOSTICS_H
 
 // The counts behind the system tags of a channel and its devices (driver
-// interface contract 11.1, decision D-145). The engine keeps them; the
+// interface contract 11.1, decision D-146). The engine keeps them; the
 // worker publishes them. Nothing here allocates.
 
 #include "scada/common/realtime.h"
@@ -20,10 +20,10 @@ enum class ChannelLink : std::uint8_t {
     CONNECTED = 2,
 };
 
-// The counters of one device since attach (11.1, D-145).
+// The counters of one device since attach (11.1, D-146).
 struct DeviceCounts {
     std::uint64_t requests = 0;    // frames sent to it
-    std::uint64_t errors = 0;      // answers that are errors (D-145)
+    std::uint64_t errors = 0;      // answers that are errors (D-146)
     std::uint64_t timeouts = 0;    // attempts with no answer in time
     std::uint64_t exceptions = 0;  // error answers with a protocol code
     std::uint64_t refusals = 0;    // busy and gateway answers
@@ -58,7 +58,7 @@ private:
 // running second, which is not counted until it is complete, so that a
 // steady rate reads the same at every second of it (PR 159 review S1). The
 // rate is the count of the window over RATE_SECONDS; over the first
-// RATE_SECONDS after the start it ramps up from 0 (D-145).
+// RATE_SECONDS after the start it ramps up from 0 (D-146).
 class RateWindow {
 public:
     static constexpr std::int64_t RATE_SECONDS = 10;
