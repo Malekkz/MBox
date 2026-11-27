@@ -527,7 +527,9 @@ TEST(Plan, APointInNoPollGroupIsReadOnlyByTheIdentityCycle) {
     const Request& read = plan.requests[plan.identity[0]];
     EXPECT_EQ(read.first, 300U);
     EXPECT_EQ(read.poll_group, NO_POLL_GROUP);
-    ASSERT_TRUE(plan.keepalive.has_value());
+    if (!plan.keepalive.has_value()) {
+        FAIL() << "no keep-alive request";
+    }
     EXPECT_EQ(plan.requests[*plan.keepalive].first, 0U);
     EXPECT_EQ(requests_per_scan(plan), 1U);
     // A point in no group that is no identity point is refused.

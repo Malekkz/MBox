@@ -168,7 +168,7 @@ Status validate_points(const std::vector<PlanPoint>& points,
             return refused("point span empty or larger than one request");
         }
         if (point.poll_group >= poll_groups &&
-            !(point.poll_group == NO_POLL_GROUP && point.identity)) {
+            (point.poll_group != NO_POLL_GROUP || !point.identity)) {
             return refused("poll group out of range");
         }
         for (std::size_t index = 0; index < merged.size(); ++index) {
@@ -733,6 +733,29 @@ bool add_identity(const std::vector<std::uint32_t>& order,
     return true;
 }
 
+// ReadPlan::identity: the groups' runs, then those of the points in no
+// group (`groupless`). False when one reads a side effect.
+bool identity_cycle(const std::vector<PlanPoint>& points,
+                    const std::vector<std::uint32_t>& groupless,
+                    ReadPlan& out) {
+    std::vector<bool> identity_point;
+    for (const PlanPoint& point : points) {
+        if (!point.identity) {
+            continue;
+        }
+        if (identity_point.size() <= point.point) {
+            identity_point.resize(std::size_t{point.point} + 1, false);
+        }
+        identity_point[point.point] = true;
+    }
+    const std::vector<std::vector<std::uint32_t>> by_group = out.by_group;
+    return std::all_of(by_group.begin(), by_group.end(),
+                       [&](const std::vector<std::uint32_t>& order) {
+                           return add_identity(order, identity_point, out);
+                       }) &&
+           add_identity(groupless, identity_point, out);
+}
+
 }  // namespace
 
 std::uint32_t requests_per_scan(const ReadPlan& plan) noexcept {
@@ -786,23 +809,7 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
             return status;
         }
     }
-    std::vector<bool> identity_point;
-    for (const PlanPoint& point : points) {
-        if (point.identity) {
-            if (identity_point.size() <= point.point) {
-                identity_point.resize(std::size_t{point.point} + 1, false);
-            }
-            identity_point[point.point] = true;
-        }
-    }
-    for (const std::vector<std::uint32_t>& order : out.by_group) {
-        if (!add_identity(order, identity_point, out)) {
-            out = ReadPlan{};
-            out.by_group.resize(poll_groups);
-            return refused("an identity point is read with a side effect");
-        }
-    }
-    if (!add_identity(groupless, identity_point, out)) {
+    if (!identity_cycle(points, groupless, out)) {
         out = ReadPlan{};
         out.by_group.resize(poll_groups);
         return refused("an identity point is read with a side effect");
