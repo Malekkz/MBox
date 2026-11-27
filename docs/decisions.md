@@ -2781,7 +2781,7 @@ Decision:
 
 Reason: the code and the contracts follow tag database 1.1; nothing read the flag from a driver before. A flag that a kept value lost at the next failed poll would tell an operator the substitute was a measurement.
 
-Consequences: the writer of the driver process (`tag_writer.*`, PR 150) is on `main`, so the flag reaches the tag database; `tests/integration/tag_writer_integration_test.cpp` shows that the writes of 9.1 keep it. A test of `on_invalid: substitute` through a running driver process waits for #104 and is part of #154. The fuzz target `sample_processing_fuzz` checks both ways that a write has the flag exactly when its value is a configured substitute.
+Consequences: the writer of the driver process (`tag_writer.*`, PR 150) is on `main`, so the flag reaches the tag database; `tests/integration/tag_writer_integration_test.cpp` shows that the writes of 9.1 keep it. `DriverProcess.ASubstituteIsSubstitutedAndAValueReadEndsIt` (`tests/integration/driver_integration_test.cpp`, #154) tests `on_invalid: substitute` through a running driver process and a real tag, with `scada-drv-test --substitute`: the substitute is UNCERTAIN with SUBSTITUTED, the stored value keeps the flag after the stop, and a value read by the next driver ends it. The fuzz target `sample_processing_fuzz` checks both ways that a write has the flag exactly when its value is a configured substitute.
 
 ## D-146: The system tags of the process, of a channel and of its devices
 Date: 2026-11-26; rebased on the reviewed slice 5a (D-142) on 2026-11-27

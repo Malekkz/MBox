@@ -1,7 +1,8 @@
 // The driver process through real tags (driver interface contract 2.4,
 // 9.1, 5.2; conformance tests 1, 16, 17; decision D-142): the writes after
 // attach, a kill and a restart, retained values, the owners of the tags,
-// the wake of the consumers, lost and refused connections and staleness.
+// the wake of the consumers, lost and refused connections, staleness, and a
+// configured substitute (#154).
 // The stop, the watchdog and the service manager are in
 // driver_stop_integration_test.cpp.
 
@@ -354,6 +355,42 @@ TEST_F(DriverProcess, EveryDeliveryWakesTheConsumers) {
     // The fourth change is written before its notify: wait for the counter.
     EXPECT_TRUE(cycles_since(before, 4));
     EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+// --- SUBSTITUTED through real tags (#154; contract 5.2, D-145) -------------
+
+bool substituted_with(const scada_value& value, std::int64_t expected) {
+    return value.quality == SCADA_QUALITY_UNCERTAIN &&
+           (value.quality_flags & SCADA_FLAG_SUBSTITUTED) != 0 &&
+           std::bit_cast<std::int64_t>(value.value) == expected;
+}
+
+TEST_F(DriverProcess, ASubstituteIsSubstitutedAndAValueReadEndsIt) {
+    // The point reads 999, the marker of its `on_invalid: { substitute: 5 }`
+    // (`--substitute 999 5`): the tag holds 5, UNCERTAIN with SUBSTITUTED.
+    // The next driver reads a good 42 from another simulator: it starts from
+    // the stored substitute, and the value read ends the flag.
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto marked = start_sim({"--set", "1", "0", "0", "999"});
+    auto good = start_sim({"--set", "1", "0", "0", "42"});
+    if (!marked.has_value() || !good.has_value()) {
+        FAIL() << "no simulator";
+    }
+    std::vector<std::string> point = device("d1", 1, "0");
+    point.insert(point.end(), {"--substitute", "999", "5"});
+    ASSERT_TRUE(run_until(
+        joined(tcp_channel("line1", port_of(*marked)), point), "d1.v",
+        [](const scada_value& value) { return substituted_with(value, 5); }));
+    // The driver has stopped: the stored substitute keeps its flag.
+    const scada_value stored = read(handle("d1.v"));
+    EXPECT_NE(stored.quality_flags & SCADA_FLAG_SUBSTITUTED, 0);
+    EXPECT_EQ(std::bit_cast<std::int64_t>(stored.value), 5);
+    ASSERT_TRUE(run_until(joined(tcp_channel("line1", port_of(*good)), point),
+                          "d1.v", [](const scada_value& value) {
+                              return good_with(value, 42) &&
+                                     (value.quality_flags &
+                                      SCADA_FLAG_SUBSTITUTED) == 0;
+                          }));
 }
 
 // --- Conformance tests 16 and 17 --------------------------------------------
