@@ -41,6 +41,8 @@ constexpr std::int64_t SECOND_VALUE = 7;
 constexpr std::int64_t THIRD_VALUE = 9;
 constexpr std::int64_t STALE_VALUE = 10;
 constexpr std::int64_t KEPT_VALUE = 20;
+constexpr std::int64_t INT16_LOWEST = -32'768;
+constexpr std::uint64_t INT16_LOWEST_PATTERN = 0x8000U;
 constexpr std::int64_t MAX_AGE_S = 5;
 constexpr std::uint32_t COMPANION_INDEX = 9;
 // `field: [8, 11]` of a status word, and its value 5.
@@ -91,6 +93,10 @@ public:
 
     void seed(const TagValue& stored, bool substituted) {
         seed_point_state(state_, stored, substituted);
+    }
+
+    void reset(std::int64_t mono_ns) {
+        reset_point_state(state_, rules_.tag_type, mono_ns);
     }
 
     ProcessedSample value(std::int64_t raw, std::int64_t mono_ns,
@@ -348,6 +354,68 @@ TEST(SampleProcessing, AValueReadEndsAKeptSubstitute) {
         has(point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 4 * SECOND)
                 .tag.flags,
             QualityFlag::SUBSTITUTED));
+}
+
+// A refused answer keeps the substitute and its flag: it gives no value
+// (review of PR 157).
+TEST(SampleProcessing, ARefusedValueKeepsAKeptSubstitute) {
+    Point point(substituting_rules());
+    (void)point.value(-1, SECOND);
+    RawValue refused = raw_signed(1, INT16);
+    refused.width = 0;  // no raw value has width 0
+    EXPECT_TRUE(keeps_the_substitute(
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = refused},
+                  2 * SECOND)
+            .tag));
+}
+
+// A reset point holds no substitute (review of PR 157).
+TEST(SampleProcessing, AResetEndsASubstitute) {
+    Point point(substituting_rules());
+    (void)point.value(-1, SECOND);
+    point.reset(2 * SECOND);
+    EXPECT_FALSE(
+        has(point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 3 * SECOND)
+                .tag.flags,
+            QualityFlag::SUBSTITUTED));
+}
+
+// A point that substitutes all ones and keeps the last value for 0x8000.
+PointRules substituting_and_keeping_rules() {
+    PointRules rules = substituting_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.markers.push_back(InvalidMarker{.pattern = INT16_LOWEST_PATTERN,
+                                          .action = InvalidAction::KEEP_LAST});
+    return rules;
+}
+
+// A young hold after a substitute holds the last value read from the
+// device, which is no substitute: UNCERTAIN with STALE, without
+// SUBSTITUTED (review of PR 157). By `keep_last` and by DEVICE_INVALID.
+TEST(SampleProcessing, AHoldAfterASubstituteHoldsTheValueReadWithoutTheFlag) {
+    const auto held_value = [](const TagWrite& write) {
+        return write.value.i == FIRST_VALUE &&
+               write.quality == Quality::UNCERTAIN &&
+               has(write.flags, QualityFlag::STALE) &&
+               !has(write.flags, QualityFlag::SUBSTITUTED);
+    };
+    Point keep(substituting_and_keeping_rules());
+    (void)keep.value(FIRST_VALUE, SECOND);
+    ASSERT_TRUE(
+        has(keep.value(-1, 2 * SECOND).tag.flags, QualityFlag::SUBSTITUTED));
+    EXPECT_TRUE(held_value(keep.value(INT16_LOWEST, 3 * SECOND).tag));
+
+    Point invalid(substituting_and_keeping_rules());
+    (void)invalid.value(FIRST_VALUE, SECOND);
+    ASSERT_TRUE(
+        has(invalid.value(-1, 2 * SECOND).tag.flags, QualityFlag::SUBSTITUTED));
+    EXPECT_TRUE(
+        held_value(invalid
+                       .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                                       .mark = {.quality = Quality::UNCERTAIN}},
+                             3 * SECOND)
+                       .tag));
 }
 
 // A substitute of every type of a point with markers carries the flag.

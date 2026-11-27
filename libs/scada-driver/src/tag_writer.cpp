@@ -180,7 +180,37 @@ void TagWriter::write_point(std::uint32_t device, std::uint32_t point,
     }
 }
 
+namespace {
+
+// The engine as the target of TagWriter::seed.
+class EngineSeeds final : public PointSeeds {
+public:
+    explicit EngineSeeds(ChannelEngine& engine) noexcept : engine_(engine) {}
+    EngineSeeds(const EngineSeeds&) = delete;
+    EngineSeeds& operator=(const EngineSeeds&) = delete;
+    EngineSeeds(EngineSeeds&&) = delete;
+    EngineSeeds& operator=(EngineSeeds&&) = delete;
+    ~EngineSeeds() override = default;
+
+    void seed_point(std::uint32_t device, std::uint32_t point,
+                    const TagValue& stored,
+                    bool substituted) noexcept override {
+        engine_.seed_point(device, point, stored, substituted);
+    }
+
+private:
+    ChannelEngine& engine_;
+};
+
+}  // namespace
+
 void TagWriter::seed(ChannelEngine& engine,
+                     const CompiledChannel& channel) noexcept {
+    EngineSeeds seeds(engine);
+    seed(seeds, channel);
+}
+
+void TagWriter::seed(PointSeeds& seeds,
                      const CompiledChannel& channel) noexcept {
     for (std::uint32_t device = 0; device < channel.devices.size(); ++device) {
         const CompiledDevice& compiled = channel.devices[device];
@@ -199,7 +229,7 @@ void TagWriter::seed(ChannelEngine& engine,
                 ++refused_;
                 continue;  // no stored value: the point starts from 0
             }
-            engine.seed_point(
+            seeds.seed_point(
                 device, point,
                 from_scada_value(stored, std::span(text).first(length)),
                 (stored.quality_flags & SCADA_FLAG_SUBSTITUTED) != 0);
