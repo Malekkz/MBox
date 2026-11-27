@@ -11,9 +11,11 @@
 #include <cstdlib>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #ifndef SCADA_ZONEINFO_DIR
@@ -50,9 +52,15 @@ std::int64_t saturating_subtract(std::int64_t a_value,
 }
 
 // How many intervals on each side of the one found by a search may hold a
-// local time: offsets and their changes are under 26 h (RFC 9636), and the
-// table merges intervals of equal offset.
+// local time. Two suffice when every interval is longer than the span of
+// the table's offsets (under 26 h, RFC 9636), as in every real zone; a file
+// with changes closer together than that needs more, and `from_tzif`
+// widens the window to what the table needs (#158).
 constexpr std::ptrdiff_t SEARCH_WINDOW = 2;
+// The widest window taken. A file whose changes are so close that a local
+// time may lie in more intervals than this is refused, so that a conversion
+// stays bounded.
+constexpr std::ptrdiff_t MAX_SEARCH_WINDOW = 16;
 
 // One change of offset, at `at_s` (UT seconds).
 struct Change {
@@ -270,10 +278,56 @@ Result<ZoneTable> ZoneTable::from_tzif(
                 Interval{.begin_utc_ns = change.at_s * NS_PER_S,
                          .offset_ns = offset_ns});
         }
-        return table;
+        return with_search_window(std::move(table));
     } catch (const std::bad_alloc&) {
         return Status(StatusCode::RESOURCE_EXHAUSTED, "out of memory");
     }
+}
+
+std::optional<std::ptrdiff_t> ZoneTable::search_window_for(
+    std::span<const Interval> intervals) noexcept {
+    // A local time `l` held by interval `m` and found from interval `c`
+    // (the one that holds `l` read as UTC) has `c - m` interval begins in
+    // less than the largest offset before it, or `m - c` in less than the
+    // smallest offset after it: both are within the span of the offsets.
+    std::int64_t lowest = 0;
+    std::int64_t highest = 0;
+    for (const Interval& interval : intervals) {
+        lowest = std::min(lowest, interval.offset_ns);
+        highest = std::max(highest, interval.offset_ns);
+    }
+    // Offsets are within RFC 9636's bounds (checked by the reader), so the
+    // span is under two days and the begins lie within the table's years:
+    // no subtraction below overflows.
+    const std::int64_t span = highest - lowest;
+    std::size_t widest = 1;
+    std::size_t last = 0;
+    for (std::size_t first = 0; first < intervals.size(); ++first) {
+        last = std::max(last, first);
+        while (last + 1 < intervals.size() &&
+               intervals[last + 1].begin_utc_ns -
+                       intervals[first].begin_utc_ns <
+                   span) {
+            ++last;
+        }
+        widest = std::max(widest, last - first + 1);
+    }
+    if (widest > static_cast<std::size_t>(MAX_SEARCH_WINDOW)) {
+        return std::nullopt;
+    }
+    return std::max(SEARCH_WINDOW, static_cast<std::ptrdiff_t>(widest));
+}
+
+Result<ZoneTable> ZoneTable::with_search_window(ZoneTable table) {
+    const std::optional<std::ptrdiff_t> window =
+        search_window_for(table.intervals_);
+    if (!window.has_value()) {
+        return Status(StatusCode::INVALID_ARGUMENT,
+                      "the zone file's changes of offset are too close "
+                      "together for its offsets");
+    }
+    table.search_window_ = *window;
+    return table;
 }
 
 UtcTime ZoneTable::to_utc(std::int64_t local_ns) const noexcept {
@@ -312,9 +366,9 @@ UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
         std::max<std::ptrdiff_t>(0, (found - intervals_.begin()) - 1);
     const auto count = static_cast<std::ptrdiff_t>(intervals_.size());
     const std::ptrdiff_t from =
-        std::max<std::ptrdiff_t>(0, center - SEARCH_WINDOW);
+        std::max<std::ptrdiff_t>(0, center - search_window_);
     const std::ptrdiff_t last_index =
-        std::min(count - 1, center + SEARCH_WINDOW);
+        std::min(count - 1, center + search_window_);
 
     auto interval_at = [&](std::ptrdiff_t index) -> const Interval& {
         return intervals_[static_cast<std::size_t>(index)];

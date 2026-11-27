@@ -152,6 +152,11 @@ carry them there. They are read when a configuration is compiled.
   configuration with a local-time device is refused.
 - A file without a footer rule makes every time after its last transition
   uncertain.
+- A file whose changes of offset lie so close together that a local time
+  may fall in more than 16 intervals of constant offset is refused, so
+  that every conversion looks at a bounded number of them (#158, D-146).
+  No real zone file comes near it: in each of the 499 zone files of the
+  build machine, changes are further apart than the span of the offsets.
 
 ## Testing
 

@@ -2620,3 +2620,19 @@ Consequences:
 - Slice 5b of #104 (the `sys.proc` tags of a driver's main thread) and the tag-set generator of #101 can build on the 1.1 rule.
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
+
+## D-146: The zone table searches every interval that may hold a local time
+Date: 2026-11-27
+Phase / issue: 2, #158; follows D-130
+Status: accepted for review
+
+Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 26 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
+
+Decision:
+- `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets of one another, at least 2. `convert` searches that many intervals on each side.
+- A table that would need more than 16 is refused (INVALID_ARGUMENT, "changes of offset too close together"), so that a conversion, which runs on a worker for each sample with a device time, stays bounded.
+- The fuzz target's check is right and is not changed. The input is in the corpus (`changes-closer-than-offsets`). `ZoneTable.ChangesCloserThanTheirOffsetsAreAllSearched` fails with the old window, and `ZoneTable.ChangesTooCloseForTheSearchAreRefused` tests the bound.
+
+Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
+
+Consequences: real zone files are unaffected. On the build machine no zone file has two changes closer together than the span of its own offsets, so every table keeps the window of 2. `scada-driver-zones-test`, which compares every zone with the C library, passes unchanged. A hand-made or damaged file of that kind is either converted correctly (the repeated local time gives its earliest instant, marked uncertain) or refused, never converted wrongly.

@@ -266,5 +266,64 @@ TEST(ZoneTable, WithoutAFooterTimesAfterTheLastTransitionAreUncertain) {
     EXPECT_TRUE(none.value().to_utc(JUL01_1200 * SECOND).uncertain);
 }
 
+// Issue #158, found by tzif_fuzz: changes of offset closer together than
+// the span of the offsets (+15:04:16 and +18:08:23, 38,656 s and 128 s
+// apart, then the footer's +3 h). A local time of the first interval also
+// lies in the interval before it and in the footer's; the interval that
+// holds it was outside the search window of two, and the conversion gave
+// the footer's later instant as certain. Every interval that may hold a
+// local time is searched now: the earliest instant, marked uncertain.
+TEST(ZoneTable, ChangesCloserThanTheirOffsetsAreAllSearched) {
+    constexpr std::int64_t FIRST_S = 15'599'616;  // 1970-06-30
+    constexpr std::int32_t EAST_15_S = 54'256;
+    constexpr std::int32_t EAST_18_S = 65'303;
+    constexpr std::int64_t SECOND_S = 15'638'272;
+    constexpr std::int64_t THIRD_S = 15'638'400;
+    test::TzifSpec spec;
+    spec.transitions = {FIRST_S, SECOND_S, THIRD_S};
+    spec.type_of = {1, 0, 1};
+    spec.offsets = {EAST_18_S, EAST_15_S};
+    spec.footer = "CET-3";
+    const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_TRUE(table.ok());
+    for (const std::int64_t instant :
+         {FIRST_S, FIRST_S + 1, FIRST_S + ((SECOND_S - FIRST_S) / 2)}) {
+        const std::int64_t local = instant + EAST_15_S;
+        const UtcTime back = table.value().to_utc(local * SECOND);
+        // Repeated: held by the first interval and by the footer's, and
+        // near the first change also by the interval before it, which
+        // gives the earliest instant.
+        EXPECT_TRUE(back.uncertain) << instant;
+        EXPECT_LE(back.utc_ns, instant * SECOND) << instant;
+        const std::int64_t before = local - EAST_18_S;
+        EXPECT_EQ(back.utc_ns, (before < FIRST_S ? before : instant) * SECOND)
+            << instant;
+    }
+}
+
+// A file whose changes are so close that a local time may lie in more than
+// sixteen intervals is refused, so that a conversion stays bounded (#158).
+TEST(ZoneTable, ChangesTooCloseForTheSearchAreRefused) {
+    constexpr std::int64_t START_S = 1'700'000'000;
+    constexpr std::int64_t APART_S = 60;
+    constexpr std::size_t CHANGES = 40;
+    test::TzifSpec spec;
+    for (std::size_t index = 0; index < CHANGES; ++index) {
+        spec.transitions.push_back(
+            START_S + (static_cast<std::int64_t>(index) * APART_S));
+        spec.type_of.push_back(static_cast<std::uint8_t>(index % 2));
+    }
+    spec.offsets = {PLUS_6_S, -PLUS_6_S};
+    spec.footer = "";
+    EXPECT_FALSE(ZoneTable::from_tzif(test::build_tzif(spec)).ok());
+    // The same changes a day apart are taken.
+    constexpr std::int64_t DAY_S = 86'400;
+    for (std::size_t index = 0; index < CHANGES; ++index) {
+        spec.transitions.at(index) =
+            START_S + (static_cast<std::int64_t>(index) * DAY_S);
+    }
+    EXPECT_TRUE(ZoneTable::from_tzif(test::build_tzif(spec)).ok());
+}
+
 }  // namespace
 }  // namespace scada::driver

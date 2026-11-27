@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -78,12 +79,26 @@ private:
         std::int64_t offset_ns = 0;
     };
 
+    // The search window `intervals` need: at least 2, and the largest number
+    // of interval begins that lie within less than the span of the table's
+    // offsets (with 0) of one another. Nothing if that is more than the
+    // widest window taken (#158).
+    [[nodiscard]] static std::optional<std::ptrdiff_t> search_window_for(
+        std::span<const Interval> intervals) noexcept;
+    // `table` with the search window its intervals need, or the refusal of
+    // a table that needs more than the widest (#158).
+    [[nodiscard]] static Result<ZoneTable> with_search_window(ZoneTable table);
+
     // `to_utc` within the table, without the check of
     // `certain_until_utc_ns_`.
     SCADA_RT [[nodiscard]] UtcTime convert(
         std::int64_t local_ns) const noexcept;
 
     std::vector<Interval> intervals_;
+    // How many intervals on each side of the one that holds a local time
+    // read as UTC may hold it; set by `from_tzif` from the table's own
+    // offsets and spacing (#158).
+    std::ptrdiff_t search_window_ = 2;
     // The end of the table's last year (UTC).
     std::int64_t end_utc_ns_ = 0;
     // From this instant on the file states no offset: its last transition
