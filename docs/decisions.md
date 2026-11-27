@@ -2839,7 +2839,7 @@ Consequences:
 
 ## D-147: Identity checks and restart indications, the pure logic (slice 5b-2a)
 
-Context: driver interface contract 3.6 says a device's `identify` checks run after a connect and before any point is published, and that a device that fails them is MISMATCH with `refuse`, or runs with `warn`. 7.6 says a `restart_indication` rule that holds is a restart, after which the device is initialised again. CS 4.8 and 4.9 give the keys. The contracts leave open how a check reads its address, what the scheduler sends while a check is pending, how the reads are counted, how a pattern is matched and within what bound, how values of different types compare, how the identity text is built, and when a restart rule fires. The lead ruled on these after a review by three (2026-11-27). Slice 5b-2 is split into two pull requests: 5b-2a, the pure logic and its unit tests, recorded here, and 5b-2b, the engine wiring, system tags, log records, test tools and process tests, which adds to this entry.
+Context: driver interface contract 3.6 says a device's `identify` checks run after a connect and before any point is published, and that a device that fails them is MISMATCH with `refuse`, or runs with `warn`. 7.6 says a `restart_indication` rule that holds is a restart, after which the device is initialised again. CS 4.8 and 4.9 give the keys. The contracts leave open how a check reads its address, what the scheduler sends while a check is pending, how the reads are counted, how a pattern is matched and within what bound, how values of different types compare, how the identity text is built, and when a restart rule fires. The lead ruled on these after a review by three (2026-11-27), and a committee review of PR 171 (M1 to M6, S1 to S9 below) completed the rules. Slice 5b-2 is split into two pull requests: 5b-2a, the pure logic and its unit tests, recorded here, and 5b-2b, the engine wiring, system tags, log records, test tools and process tests, which adds to this entry.
 
 Decision:
 - The plan (ruling item 1):
@@ -2848,22 +2848,39 @@ Decision:
   - `ReadPlan::identity` lists the planned requests that read an identity point, each with its whole chain, in the order of their groups. Then come the requests of points in no poll group, which are planned after the groups, are in no list of `by_group`, are never the keep-alive and are not counted in `requests_per_scan`.
   - `Scheduler::check` refuses a plan whose identity list names a request it does not hold, or one that reads a side effect or an exclusive range. It also refuses a request in no poll group that the identity list does not name.
 - The scheduler (item 2):
-  - Each device has a mode, OFF, ALL or IDENTITY, in place of the earlier `polled`. In IDENTITY only requests of the identity cycle are sent, as `Choice::Kind::IDENTITY`: no group cycle starts and no keep-alive of another request is sent.
-  - The cycle runs once. It ends when its last request is taken, so that `identity_again(device, due)` can ask for the next one at once, for the re-check of a MISMATCH device at `backoff`.
-  - A retry of an identity read is an IDENTITY choice.
-  - A chain in the cycle holds its unit as a poll's chain does (D2), and an order of another device of the unit between its parts restarts the cycle from its start.
-  - A device without a probe request is probed by its identity cycle.
+  - Each device has a mode, OFF, ALL or IDENTITY, in place of the earlier `polled`. In IDENTITY only requests of the identity cycle are sent, as `Choice::Kind::IDENTITY`, and the keep-alive, which is the cycle's first request, marked `Choice::identity_keepalive` (S8). No group cycle starts.
+  - The cycle runs once. It ends when its last request is taken, so that `identity_again(device, due)` can ask for the next one, for the re-check of a MISMATCH device at `backoff` or for a check without a verdict yet.
+  - The cycle takes its turn among the polls of the channel (DI 6.2 step 3): by its due time and the priority of its next request's group, 255 for a request in no group. Its later requests keep the cycle's due time, as a group's do (M3).
+  - `identity_again`, and entering IDENTITY, make the next cycle due no earlier than the start of the last one plus the identity period (`identity_period_ns`): the shortest period of the groups of the identity requests, or of all the device's groups when none of them is in a group, and no floor for a device with no group at all (M3). Before the review the cycle went ahead of every poll and could be due at once after each answer: a device that answered busy for ever stopped every other device's polls, and a restart flag seen in every poll gave 20,000 requests in 20 s in place of about 100.
+  - Between ALL and IDENTITY each group keeps its due time and its place in its cycle, and the time away is no achieved period. Only leaving OFF makes every group due at once (M3).
+  - The cycle reads a request that was refused as absent, and a resting one: a refusal is the check's verdict, and a re-check must read the request again rather than skip it until the next connect (M2).
+  - A retry of an identity read is an IDENTITY choice. In IDENTITY a retry of a request that is neither in `plan.identity` nor a part of the split form of one is ignored (S2).
+  - A chain in the cycle holds its unit as a poll's chain does (D2), and an order of another device of the unit between its parts restarts the cycle from its start. No floor probe of another unit goes between its parts either (S1).
+  - A device without a probe request is probed by its identity cycle. The probe is marked `Choice::identity_probe`, never `cycle`, so its samples are never published as a poll's (S4).
   - Identity reads count toward neither the achieved period nor `pacing_limited`.
-  - A randomized test checks the ruling's invariant: for a device in IDENTITY, no request outside `plan.identity` is chosen. It runs one fixed seed for 20,000 steps in about 20 ms, so it stays with the scheduler's unit tests rather than with the heavy property tests that #164 moved to executables of their own.
+  - `set_mode` and `identity_again` are `SCADA_RT` (S9).
+  - A randomized test checks the ruling's invariant: for a device in IDENTITY, no request outside `plan.identity` and its split forms is chosen, over mode changes, re-checks, retries of any request, probes, orders, choices not sent, refusals and reconnects (S2). It runs one fixed seed for 20,000 steps in about 20 ms, so it stays with the scheduler's unit tests rather than with the heavy property tests that #164 moved to executables of their own.
 - The failure tracker (items 2, 3 and 6):
-  - A device with checks (`Device::identify`) has its check pending (`identity_pending`) after every connect and after a probe recovers it from DEMOTED. A demoted device is checked when it recovers, not at the connect. `resumed()` (the driver's own close, DI 7.3) starts no check and keeps a pending one pending.
+  - A device with checks (`Device::identify`) has its check pending (`identity_pending`) after every connect and after a probe recovers it from DEMOTED. A demoted device is checked when it recovers, not at the connect. `resumed()` (the driver's own close, DI 7.3) starts no check, keeps a pending one pending and keeps MISMATCH (S9).
+  - The tracker keeps when the pending check began (`identity_since_ns`: the connect, the recovery, the restart, or the time a MISMATCH re-check falls due) and its deadline, that time plus `Device::identity_wait_ns`, which is max(`startup_grace`, 3 periods of the identity points' group) (M1).
+  - A poll that answers makes no device RUNNING while its check is pending, after a connect and after a restart seen in that poll's own answer alike: it stays INITIALISING (M4).
+  - A device with its check pending is not eligible for the run of time-outs of DI 7.3 (S8): its reads are identity reads, which the run leaves alone.
   - The end of an identity read goes to `identity_ended`, never to `read_timed_out`: it neither adds to the run of consecutive time-outs nor empties it (DI 7.3).
   - A failed identity read outside the grace counts toward the unit's demotion as a polled read's does, so a dead device is DEMOTED, never MISMATCH.
   - An answered identity read empties the unit's count, since the unit answered. It does not make the device RUNNING, does not reset the back-off and keeps `probe_recovered` (review G6), so a unit that answers its identity and nothing else backs off to `backoff_max`. Emptying the count is our choice; the ruling names only the other two effects.
-  - `identity_mismatched` moves an INITIALISING device to MISMATCH, its next check due after `backoff`, which does not grow (DI 3.6).
+  - `identity_mismatched` moves an INITIALISING device to MISMATCH, and keeps a MISMATCH device whose re-check failed there, its next check due after `backoff` in both cases, which does not grow (DI 3.6, M5).
   - `identity_passed` ends the pending check. It moves a MISMATCH device to INITIALISING, which becomes RUNNING only when a poll answers.
   - A MISMATCH device's failures count, and it is demoted with its unit.
-  - `restarted(device, now, rearm_grace)` makes every RUNNING device of the unit INITIALISING, with its check pending and, when `rearm_grace`, its grace started again. A device INITIALISING, MISMATCH or DEMOTED is left as it is. The engine (5b-2b) decides `rearm_grace` by the ruling's bound: once, until the device has run one full period of every group without a restart.
+  - `restarted(device, now)` makes every RUNNING device of the unit INITIALISING, with its check pending. The grace starts again once, and not again until `Device::full_period_ns`, the longest period of the channel's groups, passes without a restart of the unit (M1).
+  - The rule for a unit that devices share (S9): a restart is the unit's, so every RUNNING device of it is checked again. A device INITIALISING, MISMATCH or DEMOTED is left as it is; it is either being checked or not read, and the engine (5b-2b) only counts the restart.
+- The verdict (items 2 and 3, M1): `IdentityRun` holds one round of a device's checks.
+  - A sample whose outcome is COMM_FAIL (a time-out, a broken frame, a gateway failure) is no verdict: the check stays not read and the cycle is read again, whatever the deadline.
+  - ABSENT is a mismatch at once (reason `absent`), and so is a valid value that fails its check (`value`).
+  - NO_VALUE, DEVICE_INVALID, or a value processing refused, is no verdict until the deadline, then a mismatch (`unreadable`).
+  - Every check matched is a match. The log names the first failing check in configuration order.
+  - A busy answer never reaches `IdentityRun`: the engine reads the request again (5b-2b).
+  - `IdentityRun::text` gives the identity text of the round, `check_text` one check's value for the log record.
+- The checks of the keys (S3): `validate_identity_check` refuses a value of another type than the point's, a NaN constant, a count of values wrong for the kind (EQUALS one, IN at least one, RANGE two, low not above high), a PATTERN on a point that is not a STRING, a pattern over 250 bytes or ending in a single `\`, and an expected text over 250 bytes or with a byte outside 0x20 to 0x7E, which the cleaned text of the device could never match. `validate_restart_rule` refuses `decreases` on a BOOL, STRING or time point and checks an `equals` value the same way. The compile step that reads these keys for the driver calls them, and the engine of 5b-2b calls them again on what it is given.
 - Withholding a point (item 3): `withhold_point` writes the point BAD with exactly the given flags, keeping the value, with the given source time. It clears `has_value`, `has_valid` and the hold, so that neither `keep_last` nor a held DEVICE_INVALID brings back a value read before. A counter's previous value and the bits' values are kept. It is used for MISMATCH (no flags), and for the writes of 9.1 after a restart (NOT_INIT, source time 0). It is not the ABSENT outcome.
 - The comparison (items 3 and 6): `compare_values` is the one comparison of checks and rules.
   - INT64, UINT64 and FLOAT64 compare by their mathematical values, with no conversion that could round: a signed against an unsigned integer, an integer against a FLOAT64.
@@ -2873,32 +2890,41 @@ Decision:
   - `clean_identity_text` replaces every byte outside 0x20 to 0x7E with `?`. A pattern is matched against the cleaned text.
   - A number is printed in decimal by `to_chars`, a FLOAT64 in its shortest exact form; a BOOL is `true` or `false`.
   - `join_identity` joins the checks' values with `; ` into the 250 bytes of the tag database's STRING. Each value gets an equal share of the bytes left after the separators. A value longer than its share is cut to it, its last byte `~`. A check not read is an empty field.
-  - The join uses fixed buffers and allocates nothing. A fuzz target (`identity_text_fuzz`) checks that the text fits and is printable whatever the values.
+  - The join uses fixed buffers and allocates nothing. A fuzz target (`identity_text_fuzz`) checks that the text fits, is printable, and is the join by its definition, equal shares and the cut mark included, whatever the values; its fields are length-prefixed, so a value may hold a NUL (S6).
 - The pattern (item 5):
   - `text_matches` is the two-cursor matcher: it remembers the last `*` and its text position, with no allocation and no recursion. It matches the whole text, by byte, case-sensitively.
-  - `\` makes the next byte literal. An empty pattern matches only the empty text. A pattern is at most 250 bytes (`TEXT_PATTERN_MAX_BYTES`). A trailing single `\` is for the compile step to refuse (ruling item 5), together with the length and the NaN constants and the `decreases` types of item 6; the slice that compiles these keys for the driver does it. Until then the matcher takes a trailing `\` as itself.
+  - `\` makes the next byte literal. An empty pattern matches only the empty text. A pattern is at most 250 bytes (`TEXT_PATTERN_MAX_BYTES`). A trailing single `\` is refused by `validate_identity_check` (ruling item 5); the matcher takes one as itself.
   - The bound is at most (n+1)(m+1) byte comparisons for a pattern of n bytes and a text of m, not "linear" as CS 2.5 says (#136). `text_matches_counted` counts them.
-  - A unit test checks the bound on the worst case (`*` and 100 `a` then `b`, against 250 `a`). An exhaustive differential test compares the matcher with a table-filling one over every pattern and text of a small alphabet up to a few bytes, and a fuzz target (`text_pattern_fuzz`) compares the two on any input.
+  - A unit test checks the bound on the worst case (`*` and 100 `a` then `b`, against 250 `a`). An exhaustive differential test compares the matcher with a table-filling one over every pattern and text of a small alphabet up to a few bytes, and a fuzz target (`text_pattern_fuzz`) compares the two on any input, a pattern or text with a NUL included, and aborts when a match takes more than (n+1)(m+1) comparisons (S6).
 - Restart rules (item 6): `RestartWatch` takes the valid samples of the rules' points, as computed before a counter's hold (`ProcessedSample::rule_valid`, `rule_value`).
-  - A sample that is not valid neither fires a rule nor moves its baseline. An `equals` edge is taken across it.
+  - A sample that is not valid neither fires a rule nor moves its baseline. An `equals` edge is taken across it. A value that does not compare equal to itself (a NaN) and a STRING over 250 bytes are not valid either (S5).
   - The baseline is the first valid sample after the watch is made or `reset`. The engine resets it at an attach and a reload of the device only, so it survives a lost connection and the driver's own close: a device that restarts and drops its connection is counted.
-  - `decreases` fires when a value is below the one before it, except a counter's wrap that the processing of DI 5.4 read as a wrap (`SampleCounts::counter_wrapped`). Any other wrap is a false restart; the README of 5b-2b lists, for each rule, when it gives a false restart and when it misses one.
+  - `decreases` fires when a value is below the one before it, a counter's wrap included. The ruling first left out a wrap that the processing of DI 5.4 read as one; the lead withdrew that exemption (M6), because a device that restarts with its counter near the limit looks like a wrap and the restart would be missed. The cost is one false restart per wrap period, for example every 18.2 h for a 16-bit counter of one count per second: one more identity check, and a re-armed grace at most once per full period. The README of 5b-2b lists, for each rule, when it gives a false restart and when it misses one.
   - `equals` fires on its rising edge only, so a flag the device leaves set is one restart.
 
 Reason: each is the ruling's, or the simplest choice that keeps it. Every function the real-time path calls is `SCADA_RT`, allocates nothing, has no recursion and works on fixed buffers, so the engine of 5b-2b can call it from `step()`.
 
 Consequences:
-- Until 5b-2b, the engine passes no checks to the tracker and puts no device in IDENTITY. It answers an IDENTITY choice with `not_sent`, which cannot happen yet.
+- Until 5b-2b, the engine passes no checks to the tracker and puts no device in IDENTITY. It answers an IDENTITY choice with `not_sent`, which cannot happen yet, and never sees an identity probe or keep-alive.
+- Parts that need the engine, each with its 5b-2b test:
+  - setting `identity_wait_ns` and `full_period_ns` from the compiled groups, which only the engine holds with the device (an unreadable check is a mismatch at its deadline and not before);
+  - routing each identity sample to `IdentityRun` and its verdict to the tracker (each outcome of the list above gives its verdict);
+  - reading a busy identity request again, which needs the decoded answer (a busy answer is read again and is no verdict);
+  - mapping each device state to the scheduler's mode, OFF, ALL or IDENTITY, in place of `set_polled`, so that a failed identity probe leaves the device OFF and a recovered one starts in IDENTITY (S4);
+  - giving the samples of an identity probe or keep-alive to the check, never to the tag database.
+- Accepted side effect of emptying the unit's count on an answered identity read: a device that shares its unit with a device in IDENTITY, and has only a slow group, may never be demoted while its sibling's identity reads answer; its points still go COMM_FAIL on each failed read.
 - For #136:
   - the (n+1)(m+1) bound in place of CS 2.5's "linear", and the pattern's 250-byte limit;
   - with every device of a `tcp` channel pending, no read adds to the run of time-outs, so a connection that is accepted and never answers is ended only by demotion and the user's time-out;
   - an answered identity read empties the unit's count.
+  - the withdrawn wrap exemption of `decreases` (M6), and the expected text limited to the bytes the cleaned text can hold (S3), which the lead raises.
 - Tests:
   - `text_pattern_test.cpp` covers the matcher: the differential test, the bound, the escapes and the edge cases.
   - `identity_test.cpp` covers `compare_values` across types, the checks and `RestartWatch`.
   - `identity_text_test.cpp` covers cleaning and the join.
   - `sample_processing_test.cpp` covers `withhold_point`.
-  - `plan_test.cpp` covers the identity flag, the refusals and points in no poll group.
-  - `scheduling_test.cpp` covers the mode, the cycle, its retry, its chain, the identity probe and the plan check, and the randomized invariant.
-  - `failure_test.cpp` covers the pending check, the accounting, MISMATCH, the back-off of a unit that answers only its identity, and restarts.
+  - `plan_test.cpp` covers the identity flag, the refusals in each kind of range, points in no poll group, and that a request in no group is never the keep-alive.
+  - `scheduling_test.cpp` covers the mode, the cycle, its retry, its chain, the identity probe and keep-alive, the plan check, the randomized invariant, and the review's rules: the absent request read again, the turn among the polls, the floor, the due times kept, the achieved period of another device with a device busy for ever and with a restart in every poll, the floor probe and a chain, pacing and orders, due work, a reconnect and a refused request's split form.
+  - `identity_run_test.cpp` covers the verdicts and the texts.
+  - `failure_test.cpp` covers the pending check and its deadline, the accounting, MISMATCH and its re-check, a poll answered while the check is pending, the back-off of a unit that answers only its identity, restarts and the grace re-armed once, and eligibility for the run.
   - The two fuzz targets have seed corpora.
