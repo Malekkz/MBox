@@ -16,9 +16,11 @@ scada_add_test(scada-driver-unit-test KIND unit
     drv_test_support.cpp
     drv_test_support_test.cpp
     engine_random_test.cpp
+    identity_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
     stall_watch_test.cpp
+    text_pattern_test.cpp
     test_protocol.cpp
     timing_test.cpp
     tzif_test.cpp

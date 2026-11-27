@@ -13,6 +13,7 @@ scada_add_library(scada-driver
     src/driver.cpp
     src/failure.cpp
     src/fd_io.cpp
+    src/identity.cpp
     src/plan.cpp
     src/point_rules.cpp
     src/raw_value.cpp
@@ -22,6 +23,7 @@ scada_add_library(scada-driver
     src/stall_watch.cpp
     src/system_clock.cpp
     src/system_tags.cpp
+    src/text_pattern.cpp
     src/tag_writer.cpp
     src/tcp_transport.cpp
     src/tzif.cpp
