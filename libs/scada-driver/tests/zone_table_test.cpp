@@ -357,9 +357,9 @@ std::vector<std::int64_t> probes(const test::TzifSpec& spec) {
                                       ? spec.transitions[index + 1]
                                       : change + (2 * HOUR_S);
         for (const std::int64_t offset : offsets) {
-            for (const std::int64_t at :
+            for (const std::int64_t instant :
                  {change - 1, change, change + 1, (change + next) / 2}) {
-                locals.push_back(at + offset);
+                locals.push_back(instant + offset);
             }
         }
     }
@@ -387,8 +387,10 @@ TEST(ZoneTable, ChangesCloserThanTheirOffsetsWestOfUtcAreAllSearched) {
     constexpr std::int64_t FIRST_S = 15'599'616;  // 1970-06-30
     constexpr std::int32_t WEST_15_S = -54'256;
     constexpr std::int32_t WEST_18_S = -65'303;
+    constexpr std::int64_t SECOND_S = 15'638'272;
+    constexpr std::int64_t THIRD_S = 15'638'400;
     test::TzifSpec spec;
-    spec.transitions = {FIRST_S, 15'638'272, 15'638'400};
+    spec.transitions = {FIRST_S, SECOND_S, THIRD_S};
     spec.type_of = {1, 0, 1};
     spec.offsets = {WEST_18_S, WEST_15_S};
     spec.footer = "CET3";
@@ -465,21 +467,28 @@ std::int64_t pick(std::mt19937_64& random, std::int64_t low,
 test::TzifSpec random_spec(std::mt19937_64& random) {
     constexpr std::int64_t START_S = 1'600'000'000;
     constexpr std::int64_t SPREAD_S = 6 * HOUR_S;
+    constexpr std::int64_t LOWEST_S = -89'999;  // RFC 9636's bounds
+    constexpr std::int64_t HIGHEST_S = 93'599;
+    constexpr std::int64_t TENTHS = 10;
+    constexpr std::int64_t CLOSE_TENTHS = 9;  // nine changes in ten are close
+    constexpr std::int64_t CLOSE_S = 600;
+    constexpr std::int64_t FAR_S = 72 * HOUR_S;
     constexpr std::array<const char*, 4> FOOTERS{"", "UTC0", "CET-3", "EST5"};
     test::TzifSpec spec;
     const std::int64_t base = pick(random, -20 * HOUR_S, 20 * HOUR_S);
     const auto types = static_cast<std::size_t>(pick(random, 2, 4));
     for (std::size_t type = 0; type < types; ++type) {
-        spec.offsets.push_back(
-            static_cast<std::int32_t>(std::clamp<std::int64_t>(
-                base + pick(random, -SPREAD_S, SPREAD_S), -89'999, 93'599)));
+        spec.offsets.push_back(static_cast<std::int32_t>(
+            std::clamp<std::int64_t>(base + pick(random, -SPREAD_S, SPREAD_S),
+                                     LOWEST_S, HIGHEST_S)));
     }
-    std::int64_t at = START_S;
+    std::int64_t when = START_S;
     const std::int64_t changes = pick(random, 1, 24);
     for (std::int64_t index = 0; index < changes; ++index) {
-        at += pick(random, 0, 9) < 9 ? pick(random, 1, 600)
-                                     : pick(random, HOUR_S, 3 * 24 * HOUR_S);
-        spec.transitions.push_back(at);
+        when += pick(random, 1, TENTHS) <= CLOSE_TENTHS
+                    ? pick(random, 1, CLOSE_S)
+                    : pick(random, HOUR_S, FAR_S);
+        spec.transitions.push_back(when);
         spec.type_of.push_back(static_cast<std::uint8_t>(
             pick(random, 0, static_cast<std::int64_t>(types) - 1)));
     }
@@ -492,6 +501,7 @@ test::TzifSpec random_spec(std::mt19937_64& random) {
 TEST(ZoneTable, TheWindowAgreesWithASearchOfEveryInterval) {
     constexpr std::uint64_t SEED = 158;  // fixed: the same tables every run
     constexpr int TABLES = 4000;
+    // NOLINTNEXTLINE(cert-msc32-c,cert-msc51-cpp): a fixed seed, so that every run tests the same tables
     std::mt19937_64 random(SEED);
     int accepted = 0;
     int refused = 0;
