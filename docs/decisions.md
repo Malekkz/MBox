@@ -2363,7 +2363,7 @@ Reason: apt then reads only what the pipeline installs from, so a source the pro
 Consequences: the herd7 cache key hashes `action.yml`, so the model check builds herd7 again once (version 7.58, checked against its commit). Tool versions still come with the runner image: LLVM 18 is preinstalled there and apt finds it the newest version; CMake (3.31.6), GCC (13.3.0) and Python (3.12.3) are the image's own. Pinning them is #141, not this decision.
 
 ## D-117: Run-time expressions checked against the tags (stage 5)
-Date: 2026-11-26
+Date: 2026-11-27
 Phase / issue: 2, #100 (P2-03), slice 7b
 Status: proposed
 
@@ -2392,13 +2392,13 @@ Decision: `check_run_time_expressions` (`src/runtime_expressions.cpp`) runs afte
   - Every other virtual tag is typed after its inputs: BOOL gives `bool`, INT `int64`, REAL `float64`, TIME `int64` (milliseconds, 5.6). A given `value_type` that is not the derived one is CF-527 `{name}: the expression gives {value type}`, at the given `value_type`, named as `value_type` is written. The given type stays the tag's, as its readers expect it.
   - An expression that reads a tag of unknown type (in a cycle, or whose own expression is refused) is not checked further and gives no error of its own: the cause is reported where it stands.
 - **Cost:**
-  - A pattern's tags are found from its prefix before the first wildcard, in the ordered tag names. The tags a pattern matches are kept (at most 65,536 patterns) and their types read at each use, since a virtual tag's type changes only as it is typed.
+  - A pattern's tags are found from its prefix before the first wildcard (`TagNames::each_with_prefix`, D-116): the stored names in order, and the tags of the devices and channels whose names can start with it. What a pattern matches is kept (at most 65,536 patterns): the reads of tags whose type is fixed, and the tags of tag files, which TagNames holds, read at each use, since a virtual tag's type changes only as it is typed.
   - Once every virtual tag is typed, the result of an expression text (with its task) is kept for the next site that has the same (at most 65,536), so one template line at every instance is checked once.
   - Measured (release build, x86-64, the whole of `validate_and_expand`):
-    - 2 instances of a 65,536-point `repeat` whose points each have an alarm with a `suppress_when` over a pattern: 2.30 s, against 2.21 s without the check;
-    - 10,000 virtual tags in one chain, written in reverse order: 0.07 s;
-    - 2,000 virtual tags that each sum one pattern over 60,000 tags: 1.35 s, against 0.28 s without the check;
-    - 2,000 virtual tags of 2,000 different patterns with no literal prefix over 60,000 tags: 2.73 s.
+    - 2 instances of a 65,536-point `repeat` whose points each have an alarm with a `suppress_when` over a pattern: 2.12 s, against 2.21 s on main, without the check;
+    - 10,000 virtual tags in one chain, written in reverse order: 0.09 s;
+    - 2,000 virtual tags that each sum one pattern over 60,000 tags: 1.35 s, against 0.51 s on main;
+    - 2,000 virtual tags of 2,000 different patterns with no literal prefix over 60,000 tags: 2.93 s, against 0.35 s on main.
   - The work of resolving patterns grows with the number of distinct patterns times the tags they are compared with, and no limit of 1.3 bounds that product. A work limit for it would refuse a tree that the contract accepts, so none is added here; the question is with the lead and on #136.
 Reason: this is 5.6 as written. Where it does not decide (the windows of an alarm, a given `value_type` that differs from the derived one only in width), the narrower reading is taken and asked on #136, so that nothing is accepted that a ruling might refuse later, except the alarm's window, which is not checked rather than guessed.
 Consequences: tests whose run-time expressions named tags that do not exist now list their CF-310, or define the tags where the test is about something else; the corpus case `s3-valid-expressions` defines the tags it reads. Corpus case `s5-run-time-expressions`. The README's code table names the source of each code.

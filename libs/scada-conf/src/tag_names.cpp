@@ -1544,15 +1544,21 @@ void TagNames::set_value_type(std::string_view name,
 void TagNames::each_with_prefix(
     std::string_view prefix,
     const std::function<void(std::string_view, const TagInfo&)>& visit) const {
-    std::vector<std::pair<std::string, TagInfo>> found;
+    // The tags of devices and channels are made and sorted; the stored ones
+    // are walked in place, and the two merged by name.
+    std::vector<std::pair<std::string, TagInfo>> made;
+    family_with_prefix(prefix, made);
+    std::ranges::sort(made, {}, &std::pair<std::string, TagInfo>::first);
+    auto next = made.begin();
     for (auto entry = tags_.lower_bound(prefix);
          entry != tags_.end() && entry->first.starts_with(prefix); ++entry) {
-        found.emplace_back(entry->first, entry->second);
+        for (; next != made.end() && next->first < entry->first; ++next) {
+            visit(next->first, next->second);
+        }
+        visit(entry->first, entry->second);
     }
-    family_with_prefix(prefix, found);
-    std::ranges::sort(found, {}, &std::pair<std::string, TagInfo>::first);
-    for (const auto& [name, info] : found) {
-        visit(name, info);
+    for (; next != made.end(); ++next) {
+        visit(next->first, next->second);
     }
 }
 
