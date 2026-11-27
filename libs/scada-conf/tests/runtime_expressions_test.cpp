@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -187,6 +188,19 @@ Lines with_interlocks(std::string_view interlocks, std::string_view tags = {}) {
                              "interlocks:\n" + std::string(interlocks)}});
 }
 
+// N16 of the delta check: a pattern's walk goes past a name it does not
+// match, so a later one closes the cycle; a pattern of an interlock's
+// condition that matches the interlock itself is a cycle too.
+TEST(RunTimeExpressions, CyclesThroughPatterns) {
+    EXPECT_EQ(with_tags(virtual_tag("v.a", R"(sum(\"v.*z\") + 1)") +
+                        virtual_tag("v.bz", "v.a + 1")),
+              Lines{"tags/site.yaml:5:13: error CF-525: virtual tags form a "
+                    "cycle: v.a, v.bz"});
+    EXPECT_EQ(with_interlocks(interlock("il.p", R"(count_good(\"il.*\") > 0)")),
+              Lines{"outputs/ps1.yaml:2:13: error CF-525: virtual tags form a "
+                    "cycle: il.p"});
+}
+
 // R1 of the review of #163: an interlock is evaluated like a virtual tag
 // (7.3), so a cycle through interlocks, or through interlocks and virtual
 // tags, is CF-525 as for virtual tags.
@@ -222,9 +236,16 @@ TEST(RunTimeExpressions, ACycleOfThree) {
 // M4: past `limits.max_tags` the tags are not whole, and no run-time
 // expression is checked against them: CF-1001 alone.
 TEST(RunTimeExpressions, NothingIsCheckedPastTheTagLimit) {
+    // An alarm's expression and an interlock's condition name a tag that
+    // is not stored past the limit (item 2 of the delta check): with the
+    // check made, each would be a false CF-310.
     const Lines lines = with_tags(
         virtual_tag("v.e", "z.e + 1") + virtual_tag("v.p", R"(sum(\"z.*\"))"),
-        {{"system.yaml", std::string(SYSTEM) + "limits: { max_tags: 3 }\n"}});
+        {{"system.yaml", std::string(SYSTEM) + "limits: { max_tags: 3 }\n"},
+         {"alarms/site.yaml",
+          "alarms:\n  - { name: site.hot, type: expression, expr: \"a.i > "
+          "3\", priority: high, area: ps1 }\n"},
+         {"outputs/ps1.yaml", "interlocks:\n" + interlock("il.z", "a.i > 2")}});
     ASSERT_EQ(lines.size(), 1U);
     EXPECT_NE(lines.front().find("CF-1001"), std::string::npos)
         << lines.front();
@@ -241,10 +262,9 @@ TEST(RunTimeExpressions, ATagGivenTwiceKeepsItsFirstType) {
                     "twice; first at tags/site.yaml:5"});
 }
 
-// S4: a tasks file without `normal` leaves a virtual tag or an interlock
-// without `task` with no task (CF-310); a shift count written as a number
-// is 0 to 63 (5.6).
-TEST(RunTimeExpressions, TheDefaultTaskAndTheShiftCount) {
+// S4: a tasks file without `normal` leaves a virtual tag without `task`
+// with no task (CF-310).
+TEST(RunTimeExpressions, TheDefaultTask) {
     const Files tasks{
         {"control/tasks.yaml", "tasks:\n  fast: { period: 10ms }\n"}};
     EXPECT_EQ(with_tags(virtual_tag("v.t", "a.i + 1") +
@@ -252,10 +272,41 @@ TEST(RunTimeExpressions, TheDefaultTaskAndTheShiftCount) {
                         tasks),
               Lines{"tags/site.yaml:5:13: error CF-310: task \"normal\" does "
                     "not exist"});
+}
+
+// S4 and the delta check: a shift count written as a number is 0 to 63
+// (5.6), also a negative one.
+TEST(RunTimeExpressions, TheShiftCount) {
     EXPECT_EQ(with_tags(virtual_tag("v.s", "shl(a.i, 64)")),
               Lines{"tags/site.yaml:5:49: error CF-523: expression: shl: the "
                     "count must be from 0 to 63"});
     EXPECT_EQ(with_tags(virtual_tag("v.s", "shr(a.i, 63)")), Lines{});
+    // A negative count written as a number is `-` of a literal; a count
+    // that is not a number is checked at run time.
+    for (const std::string_view call :
+         {"shl(a.i, -1)", "shr(a.i, -64)", "shr(a.i, 64)"}) {
+        EXPECT_EQ(with_tags(virtual_tag("v.s", call)),
+                  Lines{"tags/site.yaml:5:49: error CF-523: expression: " +
+                        std::string(call.substr(0, 3)) +
+                        ": the count must be from 0 to 63"})
+            << call;
+    }
+    EXPECT_EQ(with_tags(virtual_tag("v.s", "shl(a.i, -0) + shr(a.i, a.i)")),
+              Lines{});
+}
+
+// N17 of the delta check: an interlock without `task` has no task either
+// in a tasks file without `normal`.
+TEST(RunTimeExpressions, AnInterlocksDefaultTask) {
+    Files interlock{
+        {"control/tasks.yaml", "tasks:\n  fast: { period: 10ms }\n"}};
+    interlock.emplace("outputs/site.yaml",
+                      "interlocks:\n  - { name: il.a, task: fast, condition: "
+                      "\"a.i > 1\", message: m }\n  - { name: il.b, "
+                      "condition: \"a.i > 2\", message: m }\n");
+    EXPECT_EQ(with_tags({}, interlock),
+              Lines{"outputs/site.yaml:3:13: error CF-310: task \"normal\" "
+                    "does not exist"});
 }
 
 // S2: one text in two tasks is checked in each (the task is part of the
@@ -271,6 +322,14 @@ TEST(RunTimeExpressions, TasksWindowsAndGivenTypes) {
     EXPECT_EQ(with_interlocks(interlock("il.r", "rate(a.r, T#1ms) > 1")),
               Lines{"outputs/ps1.yaml:2:41: error CF-524: rate: the window "
                     "must be 1 to 10000 cycles of task \"normal\""});
+    // The kept result of a text is the task's (M10 of the delta check): an
+    // interlock's text in `fast`, then in `slow`, is checked in each.
+    EXPECT_EQ(
+        with_interlocks(
+            interlock("il.f", "rate(a.r, T#500ms) > 1", ", task: fast") +
+            interlock("il.s", "rate(a.r, T#500ms) > 1", ", task: slow")),
+        Lines{"outputs/ps1.yaml:3:41: error CF-524: rate: the window must be "
+              "1 to 10000 cycles of task \"slow\""});
     EXPECT_EQ(with_tags(virtual_tag("v.l", "rate(a.r, T#100d)")),
               Lines{"tags/site.yaml:5:50: error CF-524: rate: the window must "
                     "be 1 to 10000 cycles of task \"normal\""});
@@ -306,6 +365,71 @@ TEST(RunTimeExpressions, WhatIsKeptIsCapped) {
     EXPECT_EQ(expanded.error_count, MORE);
     EXPECT_EQ(expanded.run_time.kept_patterns, KEPT);
     EXPECT_EQ(expanded.run_time.kept_results, KEPT);
+}
+
+constexpr std::size_t BUDGET_TAGS = 100;
+
+// The tree of the budget's tests: BUDGET_TAGS INT tags `w.iN`, `uses`, and
+// an interlock whose condition is CF-523.
+Expanded with_budget(std::string_view uses, const ExpandLimits& limits) {
+    std::string tags;
+    for (std::size_t i = 0; i < BUDGET_TAGS; ++i) {
+        tags += "  - { name: w.i" + std::to_string(i) +
+                ", type: internal, value_type: int64 }\n";
+    }
+    return expand_limited(
+        {{"areas.yaml", std::string(AREAS)},
+         {"tags/site.yaml",
+          "tags:\n" + std::string(BASE_TAGS) + tags + std::string(uses)},
+         {"outputs/ps1.yaml",
+          "interlocks:\n" + interlock("il.x", "a.i AND a.b")}},
+        limits);
+}
+
+// One virtual tag over the pattern `w.*`.
+std::string one_use() {
+    return virtual_tag("v.s", R"(sum(\"w.*\"))");
+}
+
+// The work of `one_use()` with the contract's limits.
+std::uint64_t work_of_one_use() {
+    const Expanded whole = with_budget(one_use(), {});
+    EXPECT_EQ(whole.error_count, 1U);  // the interlock's CF-523
+    return whole.run_time.pattern_work;
+}
+
+// Item 1 of the delta check: the work of matching patterns is counted, 32
+// units per name visited and one per step of the matcher. Resolving a
+// pattern again past the kept summaries counts again.
+TEST(RunTimeExpressions, TheWorkOfPatternsIsCounted) {
+    const std::uint64_t work = work_of_one_use();
+    EXPECT_GT(work, RUN_TIME_NAME_WORK * BUDGET_TAGS);
+    EXPECT_LT(work, (RUN_TIME_NAME_WORK + 8) * BUDGET_TAGS);
+    const std::string two =
+        one_use() + virtual_tag("v.t", R"(sum(\"w.*\") + 1)");
+    // Kept, a second use costs nothing; not kept, as much again.
+    EXPECT_EQ(with_budget(two, {}).run_time.pattern_work, work);
+    ExpandLimits none;
+    none.kept_run_time = 0;
+    EXPECT_EQ(with_budget(two, none).run_time.pattern_work, 2 * work);
+}
+
+// Item 1: past the budget, one CF-113 at the expression being checked,
+// and nothing else: neither a CF-311 of its own nor the interlock's
+// CF-523, which is checked after it.
+TEST(RunTimeExpressions, TheWorkOfPatternsHasABudget) {
+    const std::uint64_t work = work_of_one_use();
+    ExpandLimits short_of;
+    short_of.run_time_pattern_work = work - 1;
+    const Expanded stopped = with_budget(one_use(), short_of);
+    EXPECT_EQ(stopped.error_count, 1U);
+    EXPECT_EQ(stopped.lines,
+              Lines{"tags/site.yaml:105:39: error CF-113: the pattern matching "
+                    "of run-time expressions exceeds its limit of " +
+                    std::to_string(work - 1) + " units"});
+    ExpandLimits exact;
+    exact.run_time_pattern_work = work;
+    EXPECT_EQ(with_budget(one_use(), exact).error_count, 1U);
 }
 
 }  // namespace

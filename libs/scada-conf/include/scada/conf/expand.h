@@ -91,6 +91,13 @@ inline constexpr std::size_t EXPRESSION_WORK_FACTOR = 32;
 inline constexpr std::size_t MAX_EXPRESSION_WORK =
     EXPRESSION_WORK_FACTOR * MAX_EXPANDED_NODES;
 
+// The work of matching the patterns of run-time expressions at stage 5
+// (D-117, item 1 of the delta check of #163): 32 units per name visited and
+// 1 per step of the matcher, at most 2e10 units, about 13 s as the
+// expression budget of stage 4.
+inline constexpr std::uint64_t RUN_TIME_NAME_WORK = 32;
+inline constexpr std::uint64_t MAX_RUN_TIME_PATTERN_WORK = 20'000'000'000;
+
 struct ExpandLimits {
     std::size_t nodes = MAX_EXPANDED_NODES;
     std::size_t text_bytes = MAX_EXPANDED_TEXT;
@@ -106,6 +113,8 @@ struct ExpandLimits {
     // run-time expression texts kept, each; past it a pattern is resolved,
     // and a text checked, at each use (D-117).
     std::size_t kept_run_time = MAX_KEPT_RUN_TIME;
+    // At stage 5, the work of matching run-time patterns (CF-113).
+    std::uint64_t run_time_pattern_work = MAX_RUN_TIME_PATTERN_WORK;
 };
 
 // What the expansion held to report its errors, at its end: the texts that

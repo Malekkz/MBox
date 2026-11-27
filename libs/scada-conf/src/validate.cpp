@@ -305,6 +305,7 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 // any reference reads them (D-117, slice 7b of #100).
                 check_run_time_expressions(tags, *validation.expanded, checked,
                                            stage5, expand_limits.kept_run_time,
+                                           expand_limits.run_time_pattern_work,
                                            &validation.run_time);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);

@@ -38,6 +38,7 @@ namespace scada::conf {
 
 namespace {
 
+constexpr std::uint16_t CF_SIZE_LIMIT = 113;
 constexpr std::uint16_t CF_NO_SUCH_NAME = 310;
 constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
 constexpr std::uint16_t CF_CYCLE = 525;
@@ -50,6 +51,11 @@ constexpr std::int64_t SLOW_MS = 1000;
 
 // The task of a virtual tag or an interlock without `task` (5.1, 7.3).
 constexpr std::string_view DEFAULT_TASK = "normal";
+
+// The bytes of text the kept summaries and results hold at most (S-1 of the
+// delta check of #163): the pattern texts and the names and messages they
+// keep. Past it, a pattern is resolved, and a text checked, at each use.
+constexpr std::size_t MAX_KEPT_BYTES = std::size_t{16} << 20U;
 
 // How a tag of `value_type` (4.7) is read: UINT64 as INT (5.6); a virtual
 // tag not typed yet has none.
@@ -108,6 +114,13 @@ std::string text_at(const Document& document, NodeId map,
     return node ? std::string(document.text(*node)) : std::string();
 }
 
+// As `text_at`, a view into `document`.
+std::string_view view_at(const Document& document, NodeId map,
+                         std::string_view key) {
+    const std::optional<NodeId> node = scalar_at(document, map, key);
+    return node ? document.text(*node) : std::string_view();
+}
+
 // The items of the sequence at `key` of `map`; none if it is not one.
 std::span<const NodeId> items_at(const Document& document, NodeId map,
                                  std::string_view key) {
@@ -125,8 +138,9 @@ std::span<const NodeId> items_at(const Document& document, NodeId map,
 struct Site {
     const Document* document = nullptr;
     NodeId scalar = 0;
-    // The task that runs it, empty where none does (an alarm).
-    std::string task;
+    // The task that runs it, empty where none does (an alarm): a view into
+    // the document, or DEFAULT_TASK.
+    std::string_view task;
     // Its result must be BOOL: an alarm's `expr`, `suppress_when`, an
     // interlock's `condition`.
     bool needs_bool = false;
@@ -253,12 +267,13 @@ class Checker {
 public:
     Checker(TagNames& tags, const ExpandedTree& tree,
             std::span<const CheckedFile> files, Diagnostics& diagnostics,
-            std::size_t kept, RunTimeCounts* counts)
+            std::size_t kept, std::uint64_t pattern_work, RunTimeCounts* counts)
         : tags_(&tags),
           tree_(&tree),
           files_(files),
           diagnostics_(&diagnostics),
           kept_(kept),
+          pattern_budget_(pattern_work),
           counts_out_(counts),
           grouped_(MAX_KEPT_ERRORS) {}
 
@@ -316,7 +331,7 @@ private:
 
     // --- What a run-time expression is checked against --------------------
 
-    [[nodiscard]] RunTimeContext context_of(const std::string& task) {
+    [[nodiscard]] RunTimeContext context_of(std::string_view task) {
         RunTimeContext context;
         context.tag = [this](std::string_view name) -> std::optional<TagRead> {
             const std::optional<TagInfo> info = tags_->find(name);
@@ -329,7 +344,7 @@ private:
             return matching(pattern);
         };
         if (const auto found = periods_.find(task); found != periods_.end()) {
-            context.task = task;
+            context.task = std::string(task);
             context.period_ms = found->second;
         }
         return context;
@@ -346,20 +361,72 @@ private:
             return kept->second;
         }
         PatternReads reads;
-        tags_->each_with_prefix(pattern.substr(0, prefix_of(pattern)),
-                                [this, &reads, pattern](std::string_view name,
-                                                        const TagInfo& info) {
-                                    ++counts_.comparisons;
-                                    if (matches_name_pattern(pattern, name)) {
-                                        add_read(reads, name,
-                                                 read_of(info.value_type));
-                                    }
-                                });
-        if (matches_.size() < kept_) {
+        tags_->each_with_prefix(
+            pattern.substr(0, prefix_of(pattern)),
+            [this, &reads, pattern](std::string_view name,
+                                    const TagInfo& info) {
+                if (over_budget_) {
+                    return;
+                }
+                ++counts_.comparisons;
+                std::uint64_t steps = 0;
+                const bool matched = matches_name_pattern(pattern, name, steps);
+                if (spend(RUN_TIME_NAME_WORK + steps) && matched) {
+                    add_read(reads, name, read_of(info.value_type));
+                }
+            });
+        if (over_budget_) {
+            return reads;  // not read: what checks it reports nothing
+        }
+        const std::size_t bytes =
+            pattern.size() + reads.first_odd.size() + reads.first_bool.size();
+        if (matches_.size() < kept_ && keep_bytes(bytes)) {
             matches_.emplace(std::string(pattern), reads);
             counts_.kept_patterns = matches_.size();
         }
         return reads;
+    }
+
+    // True if `bytes` more of text may be kept (MAX_KEPT_BYTES), and counts
+    // them.
+    bool keep_bytes(std::size_t bytes) {
+        if (bytes > MAX_KEPT_BYTES - counts_.kept_bytes) {
+            return false;
+        }
+        counts_.kept_bytes += bytes;
+        return true;
+    }
+
+    // Counts `units` of the work of matching patterns; false past the
+    // budget, which is CF-113 once, at the place being checked (item 1 of
+    // the delta check of #163).
+    bool spend(std::uint64_t units) {
+        if (over_budget_) {
+            return false;
+        }
+        counts_.pattern_work =
+            units > std::numeric_limits<std::uint64_t>::max() -
+                        counts_.pattern_work
+                ? std::numeric_limits<std::uint64_t>::max()
+                : counts_.pattern_work + units;
+        if (counts_.pattern_work <= pattern_budget_) {
+            return true;
+        }
+        over_budget_ = true;
+        diagnostics_->error(
+            CF_SIZE_LIMIT,
+            place_document_ == nullptr ? Location{}
+                                       : place_document_->location(place_node_),
+            "the pattern matching of run-time expressions exceeds its limit "
+            "of " +
+                std::to_string(pattern_budget_) + " units");
+        return false;
+    }
+
+    // Where CF-113 goes: what is being checked.
+    void place_at(const Document& document, NodeId node) {
+        place_document_ = &document;
+        place_node_ = node;
     }
 
     // --- Virtual tags and interlocks ---------------------------------------
@@ -452,8 +519,9 @@ private:
     // The task of a virtual tag or an interlock: its `task`, else `normal`
     // (5.1, 7.3), which a tasks file without it does not have: CF-310 at
     // the name (S4 of the review of #163).
-    std::string task_of(const Document& document, NodeId map, NodeId name) {
-        std::string task = text_at(document, map, "task");
+    std::string_view task_of(const Document& document, NodeId map,
+                             NodeId name) {
+        const std::string_view task = view_at(document, map, "task");
         if (!task.empty()) {
             return task;
         }
@@ -462,7 +530,7 @@ private:
                 CF_NO_SUCH_NAME, document.location(name),
                 "task " + quote_text(DEFAULT_TASK) + " does not exist");
         }
-        return std::string(DEFAULT_TASK);
+        return DEFAULT_TASK;
     }
 
     static std::optional<Expression> parse(const Document& document,
@@ -523,6 +591,7 @@ private:
     std::optional<std::size_t> next_input(std::size_t vertex,
                                           std::size_t& cursor) {
         if (vertex < named_.size()) {
+            place_at(*named_[vertex].file->document, named_[vertex].name_node);
             const std::vector<std::size_t>& inputs = named_[vertex].inputs;
             if (cursor < inputs.size()) {
                 return inputs[cursor++];
@@ -541,12 +610,15 @@ private:
                             &std::pair<std::string_view, std::size_t>::first) -
                         names_.begin());
         }
-        while (cursor - 1 < names_.size() &&
+        while (!over_budget_ && cursor - 1 < names_.size() &&
                names_[cursor - 1].first.starts_with(prefix)) {
             const auto [name, index] = names_[cursor - 1];
             ++cursor;
             ++counts_.comparisons;
-            if (matches_name_pattern(pattern.text, name)) {
+            std::uint64_t steps = 0;
+            const bool matched =
+                matches_name_pattern(pattern.text, name, steps);
+            if (spend(RUN_TIME_NAME_WORK + steps) && matched) {
                 return index;
             }
         }
@@ -565,7 +637,13 @@ private:
     }
 
     void type_virtuals() {
-        for (const std::vector<std::size_t>& component : components()) {
+        const std::vector<std::vector<std::size_t>> walked = components();
+        for (const std::vector<std::size_t>& component : walked) {
+            // Past the budget the graph is not whole: no cycle and no type
+            // is told from it.
+            if (over_budget_) {
+                return;
+            }
             // A component's virtual tags and interlocks, without patterns:
             // a component is sorted, so they come first.
             const auto end = std::ranges::lower_bound(component, named_.size());
@@ -590,8 +668,13 @@ private:
     // for a cycle through interlocks (R1 of the review of #163); its
     // virtual tags stay of unknown type.
     void report_cycle(std::span<const std::size_t> members) {
+        // The message is cut at MAX_DIAGNOSTIC_TEXT_BYTES: no name past the
+        // cut is written.
         std::string names;
         for (const std::size_t member : members) {
+            if (names.size() > MAX_DIAGNOSTIC_TEXT_BYTES) {
+                break;
+            }
             names += (names.empty() ? "" : ", ") + named_[member].name;
         }
         const Named& first = named_[members.front()];
@@ -605,8 +688,12 @@ private:
             return;
         }
         TypeError error;
+        place_at(*tag.site.document, tag.site.scalar);
         const std::optional<ValueType> type =
             run_time_type(*tag.tree, context_of(tag.site.task), error);
+        if (over_budget_) {
+            return;
+        }
         if (!type) {
             report(tag.site, error);
             return;
@@ -657,11 +744,11 @@ private:
                     if (!condition) {
                         continue;
                     }
-                    std::string task = text_at(document, interlock, "task");
+                    const std::string_view task =
+                        view_at(document, interlock, "task");
                     check(Site{.document = &document,
                                .scalar = *condition,
-                               .task = task.empty() ? std::string(DEFAULT_TASK)
-                                                    : std::move(task),
+                               .task = task.empty() ? DEFAULT_TASK : task,
                                .needs_bool = true,
                                .expanded = false,
                                .device = {},
@@ -728,10 +815,16 @@ private:
     }
 
     void check(const Site& site) {
+        if (over_budget_) {
+            return;
+        }
         const std::string_view text = site.document->text(site.scalar);
         // One template line comes back at every instance with the same
         // text, and every tag has its type: the result is kept.
-        const std::string key = site.task + '\0' + std::string(text);
+        // Views into the documents, which outlive the check: a kept result
+        // copies no text but its error's message.
+        const std::pair<std::string_view, std::string_view> key(site.task,
+                                                                text);
         if (const auto kept = results_.find(key); kept != results_.end()) {
             const std::optional<TypeError>& kept_error = kept->second;
             if (kept_error.has_value()) {
@@ -739,8 +832,13 @@ private:
             }
             return;
         }
+        place_at(*site.document, site.scalar);
         std::optional<TypeError> failed = type_of(site);
-        if (results_.size() < kept_) {
+        if (over_budget_) {
+            return;
+        }
+        if (results_.size() < kept_ &&
+            keep_bytes(failed ? failed->message.size() : 0)) {
             results_.emplace(key, failed);
             counts_.kept_results = results_.size();
         }
@@ -814,6 +912,11 @@ private:
     Diagnostics* diagnostics_;
     // The summaries of patterns and the results of texts kept, at most.
     std::size_t kept_;
+    // The work of matching patterns allowed, and whether it is spent.
+    std::uint64_t pattern_budget_;
+    bool over_budget_ = false;
+    const Document* place_document_ = nullptr;
+    NodeId place_node_ = 0;
     RunTimeCounts* counts_out_;
     GroupedErrors grouped_;
     std::map<std::string, std::int64_t, std::less<>> periods_;
@@ -826,7 +929,9 @@ private:
     std::map<std::string, std::size_t, std::less<>> pattern_index_;
     // What the tags of each pattern are read as.
     std::map<std::string, PatternReads, std::less<>> matches_;
-    std::map<std::string, std::optional<TypeError>, std::less<>> results_;
+    std::map<std::pair<std::string_view, std::string_view>,
+             std::optional<TypeError>>
+        results_;
     RunTimeCounts counts_;
 };
 
@@ -835,8 +940,9 @@ private:
 void check_run_time_expressions(TagNames& tags, const ExpandedTree& tree,
                                 std::span<const CheckedFile> files,
                                 Diagnostics& diagnostics, std::size_t kept,
+                                std::uint64_t pattern_work,
                                 RunTimeCounts* counts) {
-    Checker(tags, tree, files, diagnostics, kept, counts).run();
+    Checker(tags, tree, files, diagnostics, kept, pattern_work, counts).run();
 }
 
 }  // namespace scada::conf

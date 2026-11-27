@@ -57,6 +57,33 @@ std::vector<std::string> names_under(std::string_view prefix) {
     return names;
 }
 
+// N5 of the delta check of #163: a device in `sys` (CF-301 at its name)
+// stores the tags of its points, and one of them may have the name of
+// another device's tag. The name is visited once, as stored: a pattern
+// that matches only it is compared once.
+TEST(TagNamesPrefix, AStoredNameOfADeviceTagIsVisitedOnce) {
+    const std::string meter =
+        "template: meter_s\nprotocol: modbus\npoints:\n"
+        "  - { name: state, address: { table: holding, register: 1, type: "
+        "uint16 } }\n";
+    const Result<Validation> validation = validated(
+        {{"templates/meter_s.yaml", meter},
+         {"drivers/modbus/line1.yaml",
+          channel("  - { name: ps1.m1, template: meter_s, unit_id: 1 }\n"
+                  "  - { name: sys.dev.ps1.m1, template: meter_s, unit_id: 2 "
+                  "}\n")},
+         {"tags/site.yaml",
+          "tags:\n  - { name: v.n, type: virtual, expr: "
+          "\"count_good(\\\"sys.dev.ps1.m1.st*\\\")\" }\n"}});
+    ASSERT_TRUE(validation.ok());
+    const Report& report = validation.value().report;
+    ASSERT_EQ(report.errors.size(), 1U);
+    EXPECT_EQ(format(report.errors.front()),
+              "drivers/modbus/line1.yaml:8:13: error CF-301: tag names "
+              "starting with sys. are reserved");
+    EXPECT_EQ(validation.value().run_time.comparisons, 1U);
+}
+
 // A prefix within one device's tags gives its tags only, in name order.
 TEST(TagNamesPrefix, ADevicesTags) {
     EXPECT_EQ(names_under("sys.dev.ps1.m1.re"),
@@ -106,6 +133,9 @@ TEST(TagNamesPrefix, OnlyATagFilesTagTakesAType) {
                     channel("  - { name: ps1.m1, template: meter_a, "
                             "unit_id: 1 }\n")}});
     ASSERT_TRUE(validation.ok());
+    for (const Diagnostic& error : validation.value().report.errors) {
+        ADD_FAILURE() << format(error);
+    }
     const std::optional<ExpandedTree>& expanded = validation.value().expanded;
     ASSERT_TRUE(expanded.has_value());
     Diagnostics diagnostics;

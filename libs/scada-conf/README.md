@@ -163,7 +163,10 @@ CF-311 for a pattern that matches none, CF-521 for an ambiguous `.quality`
 or `.age`, CF-522 for a STRING tag, CF-523 for a type that does not fit or
 a result that must be BOOL, CF-524 for a time function's window out of its
 task's range, CF-525 for virtual tags that form a cycle and CF-527 for a
-given `value_type` that is not the derived one.
+given `value_type` that is not the derived one. Matching patterns against the
+tags has a work budget of 2e10 units, 32 per name visited and 1 per step
+of the matcher (`ExpandLimits::run_time_pattern_work`): past it the tree
+is refused with CF-113, after at most about 20 s in release on x86-64.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
@@ -184,7 +187,7 @@ slice of #100.
 | CF-110 | `src/yaml_parser.cpp` |
 | CF-111 | `src/schema.cpp`, `src/yaml_parser.cpp` |
 | CF-112 | `src/yaml_parser.cpp` |
-| CF-113 | `src/expand.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
+| CF-113 | `src/expand.cpp`, `src/runtime_expressions.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
 | CF-114 | `src/yaml_parser.cpp` |
 | CF-201 | `src/rules.cpp`, `src/schema.cpp` |
 | CF-202 | `src/expand.cpp`, `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp`, `src/validate.cpp` |

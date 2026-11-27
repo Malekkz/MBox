@@ -118,5 +118,32 @@ TEST(RunTimeLimits, DistinctPatternsAreEachResolvedOnce) {
     EXPECT_EQ(work.kept_patterns, PATTERNS);
 }
 
+// The kept results hold no copy of their texts (S-1 of the delta check of
+// #163): 2,000 distinct conditions of about 1 KB keep 2,000 results and no
+// byte of text; a kept pattern summary holds its pattern only.
+TEST(RunTimeLimits, WhatIsKeptCopiesNoText) {
+    constexpr std::size_t INTERLOCKS = 2000;
+    Files files;
+    files["tags/site.yaml"] =
+        "tags:\n" + internal("a.i") + internal("r.i1") + internal("r.i2");
+    std::string interlocks = "interlocks:\n";
+    const std::string padding(1000, ' ');
+    for (std::size_t index = 0; index < INTERLOCKS; ++index) {
+        interlocks += "  - { name: il.k" + std::to_string(index) +
+                      ", condition: \"a.i >" + padding + std::to_string(index) +
+                      "\", message: m }\n";
+    }
+    files["outputs/site.yaml"] = interlocks;
+    const RunTimeCounts texts = work_of(files);
+    EXPECT_EQ(texts.kept_results, INTERLOCKS);
+    EXPECT_EQ(texts.kept_bytes, 0U);
+    files["outputs/site.yaml"] =
+        "interlocks:\n  - { name: il.p, condition: \"count_good(\\\"r.*\\\") "
+        "> 0\", message: m }\n";
+    const RunTimeCounts pattern = work_of(files);
+    EXPECT_EQ(pattern.kept_patterns, 1U);
+    EXPECT_EQ(pattern.kept_bytes, std::string_view("r.*").size());
+}
+
 }  // namespace
 }  // namespace scada::conf

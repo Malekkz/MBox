@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -587,8 +588,8 @@ private:
         if (run_time_ != nullptr && (name == "shl" || name == "shr") &&
             node.children.size() == 2) {
             const ExprNode& count = tree_->nodes.at(node.children[1]);
-            if (count.op == ExprOp::INTEGER &&
-                (count.integer < 0 || count.integer > MAX_SHIFT)) {
+            const std::optional<std::int64_t> constant = constant_count(count);
+            if (constant && (*constant < 0 || *constant > MAX_SHIFT)) {
                 return fail(
                     CF_TYPE_MISMATCH, count,
                     "expression: " + name + ": the count must be from 0 to 63");
@@ -596,6 +597,26 @@ private:
         }
         return typed_call(node, name == "bnot" ? 1 : 2, ValueType::INT,
                           ValueType::INT);
+    }
+
+    // The value of a shift count written as a number: a literal, or the
+    // negation of one (`-1` parses as NEGATE of 1); nothing for any other
+    // operand, which is checked at run time.
+    [[nodiscard]] std::optional<std::int64_t> constant_count(
+        const ExprNode& count) const {
+        if (count.op == ExprOp::INTEGER) {
+            return count.integer;
+        }
+        if (count.op == ExprOp::NEGATE && count.children.size() == 1) {
+            const ExprNode& operand = tree_->nodes.at(count.children[0]);
+            if (operand.op == ExprOp::INTEGER) {
+                return operand.integer ==
+                               std::numeric_limits<std::int64_t>::min()
+                           ? operand.integer
+                           : -operand.integer;
+            }
+        }
+        return std::nullopt;
     }
 
     bool count_is(const ExprNode& node, std::size_t count, bool or_more) {

@@ -13,6 +13,7 @@
 #include "tag_names.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 
 namespace scada::conf {
@@ -34,11 +35,15 @@ namespace scada::conf {
 // Nothing when `tags` is not complete (CF-1001). `counts`, when given,
 // receives the work done, for tests of its bound.
 // `kept` bounds the pattern summaries and the expression results kept.
-void check_run_time_expressions(TagNames& tags, const ExpandedTree& tree,
-                                std::span<const CheckedFile> files,
-                                Diagnostics& diagnostics,
-                                std::size_t kept = MAX_KEPT_RUN_TIME,
-                                RunTimeCounts* counts = nullptr);
+// `pattern_work` bounds the work of matching patterns: past it, CF-113, and
+// nothing more is checked, nor anything reported of the expression being
+// checked.
+void check_run_time_expressions(
+    TagNames& tags, const ExpandedTree& tree,
+    std::span<const CheckedFile> files, Diagnostics& diagnostics,
+    std::size_t kept = MAX_KEPT_RUN_TIME,
+    std::uint64_t pattern_work = MAX_RUN_TIME_PATTERN_WORK,
+    RunTimeCounts* counts = nullptr);
 
 }  // namespace scada::conf
 

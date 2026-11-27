@@ -10,6 +10,7 @@
 #include "scada/conf/tree.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 
@@ -57,6 +58,11 @@ struct RunTimeCounts {
     std::size_t comparisons = 0;
     std::size_t kept_patterns = 0;
     std::size_t kept_results = 0;
+    // The bytes of text those summaries and results hold.
+    std::size_t kept_bytes = 0;
+    // The work of matching patterns, in the units of
+    // `ExpandLimits::run_time_pattern_work`.
+    std::uint64_t pattern_work = 0;
 };
 
 struct Validation {
