@@ -276,7 +276,8 @@ private:
     void report(Diagnostic diagnostic, NodeId placed) {
         // The instance is named as `"<device>.<point>"`, or as `"<device>"`
         // for its own keys (item 3 of the delta review of #149).
-        std::string key = instance_free_key(diagnostic.message, device_name_);
+        const std::string key =
+            instance_free_key(diagnostic.message, device_name_);
         grouped_.add(std::move(diagnostic), key, device_name_, *diagnostics_,
                      !has_own_part(placed));
     }
