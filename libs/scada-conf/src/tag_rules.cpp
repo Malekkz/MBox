@@ -396,10 +396,7 @@ private:
                             : reader.scalar(site.keys, "value_type")
                                   .value_or(site.name_node);
             error(site.source, retained_at, CF_STRING_RETAINED,
-                  retain_node ? std::string("string tags cannot be retained")
-                              : std::string("string tags cannot be retained "
-                                            "(a manual tag is retained by "
-                                            "default)"));
+                  "string tags cannot be retained");
         }
     }
 

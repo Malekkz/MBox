@@ -94,7 +94,7 @@ TEST(TagRules, AStringTagIsNotRetained) {
               (Lines{"tags/site.yaml:2:60: error CF-507: string tags cannot "
                      "be retained",
                      "tags/site.yaml:3:42: error CF-507: string tags cannot "
-                     "be retained (a manual tag is retained by default)"}));
+                     "be retained"}));
     // A point's string tag, at the instance.
     const std::string meter =
         std::string(METER) +
@@ -405,6 +405,11 @@ TEST(TagRules, LimitsInOrder) {
               Lines{});
     EXPECT_EQ(
         errors_of({{"alarms/site.yaml",
+                    "alarms:\n" + alarm("h", "high", "18446744073709551614") +
+                        alarm("hh", "high_high", "18446744073709551615")}}),
+        Lines{});
+    EXPECT_EQ(
+        errors_of({{"alarms/site.yaml",
                     "alarms:\n" + alarm("h", "high", "18446744073709551615") +
                         alarm("hh", "high_high", "18446744073709551614") +
                         alarm("ll", "low_low", "9223372036854775807") +
@@ -540,11 +545,46 @@ TEST(TagRules, TheSecondOfTwoDefinitionsIsNotChecked) {
                     "twice; first at tags/site.yaml:2"});
 }
 
-// S2 and S4: past CF-1001, a device the tags did not record is still
-// checked once; no CF-505 is told of an alarm, whose tag may be one that
-// does not exist; and no rule reads a type, also of a tag stored before
-// the limit (the string point `label`, retained).
+// S2 and S4: past CF-1001, a device the tags did not record (the limit
+// stops the collector within ps1.m1) is still checked once; no CF-505 is
+// told of an alarm, whose tag may be one that does not exist; and no rule
+// reads a type, also of a tag stored before the limit (the string point
+// `label`, retained, in the next test).
 TEST(TagRules, PastTheTagLimitEveryDeviceIsChecked) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - { name: flow, range: [0, 10], address: { table: holding, "
+        "register: 1, type: uint16 } }\n"
+        "  - { name: label, retain: true, address: { table: holding, "
+        "register: 3, type: string, length: 4 } }\n"
+        "  - { name: total, retain_max_age: 1h, address: { table: holding, "
+        "register: 5, type: uint32 } }\n";
+    const Files files{
+        {"areas.yaml", std::string(AREAS)},
+        {"templates/meter_a.yaml", meter},
+        {"drivers/modbus/line1.yaml",
+         channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                 "  - { name: ps1.m2, template: meter_a, unit_id: 2 }\n")},
+        {"system.yaml", std::string(SYSTEM) + "limits: { max_tags: 40 }\n"},
+        {"alarms/site.yaml",
+         "alarms:\n  - { tag: ps1.m2.flow, type: high, limit: 4, deadband: "
+         "1%, priority: high, area: ps1 }\n  - { tag: ps1.m9.flow, type: high, "
+         "limit: 4, deadband: 1%, priority: high, area: ps1 }\n"}};
+    Lines found;
+    for (const std::string& line : expand(files)) {
+        if (line.find(": error ") != std::string::npos &&
+            line.find("CF-1001") == std::string::npos) {
+            found.push_back(line);
+        }
+    }
+    EXPECT_EQ(found,
+              Lines{"drivers/modbus/line1.yaml:7:13: error CF-506: "
+                    "retain_max_age needs retain: true (and 1 more instance: "
+                    "ps1.m2)\n  from template templates/meter_a.yaml:6:36 "
+                    "(point total)"});
+}
+
+TEST(TagRules, PastTheTagLimitNoTypeIsRead) {
     const std::string meter =
         "template: meter_a\nprotocol: modbus\npoints:\n"
         "  - { name: flow, range: [0, 10], address: { table: holding, "
@@ -571,11 +611,11 @@ TEST(TagRules, PastTheTagLimitEveryDeviceIsChecked) {
             found.push_back(line);
         }
     }
-    EXPECT_EQ(found,
-              Lines{"drivers/modbus/line1.yaml:7:13: error CF-506: "
-                    "retain_max_age needs retain: true (and 1 more instance: "
-                    "ps1.m2)\n  from template templates/meter_a.yaml:6:36 "
-                    "(point total)"});
+    // At 50 tags `ps1.m1.label` is stored before the limit: its CF-507
+    // must still not be told (the `complete()` guard of `value_type`).
+    for (const std::string& line : found) {
+        EXPECT_EQ(line.find("CF-507"), std::string::npos) << line;
+    }
 }
 
 // S4: a tier whose interval stage 3 refused is not compared, nor the one
