@@ -81,20 +81,17 @@ Status check_extras(const ReadPlan& plan) noexcept {
     return {};
 }
 
-Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
+// Each request's poll group and split form.
+Status check_requests(const ReadPlan& plan, std::size_t groups) noexcept {
     const std::size_t size = plan.requests.size();
-    if (plan.by_group.size() != groups) {
-        return invalid("plan without one request list per poll group");
-    }
-    for (std::size_t group = 0; group < groups; ++group) {
-        for (const std::uint32_t index : plan.by_group[group]) {
-            if (index >= size || plan.requests[index].poll_group != group) {
-                return invalid("plan names a request it does not hold");
-            }
-        }
-    }
-    for (const Request& request : plan.requests) {
-        if (request.poll_group >= groups) {
+    for (std::size_t index = 0; index < size; ++index) {
+        const Request& request = plan.requests[index];
+        // A point in no poll group is read by the identity cycle only.
+        const bool identity_only =
+            request.poll_group == NO_POLL_GROUP &&
+            std::find(plan.identity.begin(), plan.identity.end(), index) !=
+                plan.identity.end();
+        if (request.poll_group >= groups && !identity_only) {
             return invalid("request of a poll group the channel does not have");
         }
         for (const std::uint32_t part : request.split) {
@@ -107,9 +104,37 @@ Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
             }
         }
     }
+    return {};
+}
+
+Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
+    const std::size_t size = plan.requests.size();
+    if (plan.by_group.size() != groups) {
+        return invalid("plan without one request list per poll group");
+    }
+    for (std::size_t group = 0; group < groups; ++group) {
+        for (const std::uint32_t index : plan.by_group[group]) {
+            if (index >= size || plan.requests[index].poll_group != group) {
+                return invalid("plan names a request it does not hold");
+            }
+        }
+    }
+    if (Status status = check_requests(plan, groups); !status.ok()) {
+        return status;
+    }
     if ((plan.keepalive.has_value() && *plan.keepalive >= size) ||
         (plan.probe.has_value() && *plan.probe >= size)) {
         return invalid("keep-alive or probe the plan does not hold");
+    }
+    // D-147: the identity cycle never reads a side effect (6.6).
+    for (const std::uint32_t index : plan.identity) {
+        if (index >= size) {
+            return invalid("identity cycle names a request it does not hold");
+        }
+        if (plan.requests[index].side_effect ||
+            plan.requests[index].exclusive) {
+            return invalid("identity cycle reads a side effect");
+        }
     }
     return check_extras(plan);
 }
@@ -153,6 +178,43 @@ bool find_next(const std::vector<std::uint32_t>& list, const ReadPlan& plan,
         }
     }
     return false;
+}
+
+// Whether `request` is in `plan.identity` or in the split form of one.
+bool in_identity(const ReadPlan& plan, std::uint32_t request) noexcept {
+    return std::any_of(
+        plan.identity.begin(), plan.identity.end(), [&](std::uint32_t listed) {
+            const std::vector<std::uint32_t>& parts =
+                plan.requests[listed].split;
+            return listed == request || std::find(parts.begin(), parts.end(),
+                                                  request) != parts.end();
+        });
+}
+
+// The identity period of a device (`identity_period_ns`).
+std::int64_t identity_period(const CompiledChannel& channel,
+                             const ReadPlan& plan) noexcept {
+    const auto shortest = [&](bool identity_only) {
+        std::int64_t period = 0;
+        for (std::uint32_t group = 0; group < plan.by_group.size(); ++group) {
+            if (plan.by_group[group].empty()) {
+                continue;
+            }
+            const bool reads_identity = std::any_of(
+                plan.identity.begin(), plan.identity.end(),
+                [&](std::uint32_t request) {
+                    return plan.requests[request].poll_group == group;
+                });
+            if (identity_only && !reads_identity) {
+                continue;
+            }
+            const std::int64_t value = channel.poll_groups[group].period_ns;
+            period = period == 0 ? value : std::min(period, value);
+        }
+        return period;
+    };
+    const std::int64_t own = shortest(true);
+    return own != 0 ? own : shortest(false);
 }
 
 }  // namespace
@@ -203,6 +265,9 @@ Scheduler::Scheduler(const CompiledChannel& channel,
         run.split.assign(device.plan.requests.size(), false);
         run.absent.assign(device.plan.requests.size(), false);
         run.resting.assign(device.plan.requests.size(), false);
+        run.never_rests.assign(device.plan.requests.size(), false);
+        run.identity_start_ns = EARLIEST;
+        run.identity_period_ns = identity_period(channel, device.plan);
         // OWN_UNIT is never shared: each such device is a unit of its own.
         const auto found =
             device.unit == CompiledDevice::OWN_UNIT
@@ -279,6 +344,8 @@ void Scheduler::save_undo(const Choice& choice, std::uint32_t group) noexcept {
                  .last_write_ns = last_write_ns_,
                  .chain_next = run.chain_next,
                  .chain_next_split = run.chain_next_split,
+                 .identity_next = run.identity_next,
+                 .identity_next_split = run.identity_next_split,
                  .choice = choice,
                  .unit = units_[run.unit],
                  .group_state = group < run.groups.size() ? run.groups[group]
@@ -291,7 +358,12 @@ void Scheduler::save_undo(const Choice& choice, std::uint32_t group) noexcept {
                  .has_write = has_write_,
                  .chain = run.chain,
                  .retry = run.retry,
-                 .probe_in_flight = probe_in_flight_};
+                 .probe_in_flight = probe_in_flight_,
+                 .identity_cycle = run.identity_cycle,
+                 .identity_due = run.identity_due,
+                 .mode = run.mode};
+    undo_.identity_start_ns = run.identity_start_ns;
+    undo_.identity_cycle_due_ns = run.identity_cycle_due_ns;
 }
 
 bool Scheduler::peek(std::uint32_t device, std::uint32_t group,
@@ -414,7 +486,7 @@ void Scheduler::start_due(std::int64_t now_ns) noexcept {
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const CompiledDevice& compiled = channel_->devices[device];
         DeviceRun& run = devices_[device];
-        if (!compiled.enabled || !run.polled) {
+        if (!compiled.enabled || run.mode != DeviceMode::ALL) {
             continue;
         }
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
@@ -472,8 +544,10 @@ Choice Scheduler::take_order_step(std::uint32_t device,
                   .device = device,
                   .order = run.order.id,
                   .step = run.order_step};
-    // D2: no order step between the requests of a chain.
-    choice.chain_dropped = drop_unit_chain(device, choice.chain_device);
+    // D2: no order step between the requests of a chain, an identity
+    // cycle's included (D-147).
+    choice.chain_dropped = drop_unit_chain(device, choice.chain_device) ||
+                           drop_unit_identity(device, choice.chain_device);
     update_holder(units_[run.unit].holder, device, run.order.exclusive);
     save_undo(choice, 0);
     record(device, run.order.kind != OrderKind::READ_NOW, now_ns);
@@ -559,7 +633,8 @@ bool Scheduler::choose_order(std::int64_t now_ns, Choice& out,
 }
 
 bool Scheduler::polls_allowed(std::uint32_t device) const noexcept {
-    return channel_->devices[device].enabled && devices_[device].polled &&
+    return channel_->devices[device].enabled &&
+           devices_[device].mode == DeviceMode::ALL &&
            !unit_exclusive(device) && !unit_held_by_other(device);
 }
 
@@ -584,11 +659,13 @@ Choice Scheduler::take_retry(std::uint32_t device,
 void Scheduler::consider(const PollPick& pick, PollKey& best_key,
                          PollPick& best, bool& found) const noexcept {
     const DeviceRun& run = devices_[pick.device];
-    const std::int64_t due =
-        pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
-    const PollKey key{!chain_open(pick),
-                      channel_->poll_groups[pick.group].priority, due,
-                      pick.device};
+    std::int64_t due = pick.due_ns;
+    std::uint8_t priority = pick.priority;
+    if (!pick.identity) {
+        due = pick.retry ? run.retry_due_ns : run.groups[pick.group].due_ns;
+        priority = channel_->poll_groups[pick.group].priority;
+    }
+    const PollKey key{!chain_open(pick), priority, due, pick.device};
     if (!found || key < best_key) {
         best = pick;
         best_key = key;
@@ -630,6 +707,12 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
     PollKey best_key{};
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
+        if (run.mode == DeviceMode::IDENTITY) {
+            // Among the polls, so that neither starves the other (PR 171
+            // M3).
+            consider_identity(device, now_ns, wake, best_key, best, found);
+            continue;
+        }
         if (!polls_allowed(device)) {
             continue;
         }
@@ -651,8 +734,12 @@ bool Scheduler::choose_poll(std::int64_t now_ns, Choice& out,
     if (!found) {
         return false;
     }
-    out = best.retry ? take_retry(best.device, now_ns)
-                     : take_poll(best.device, best.group, now_ns);
+    if (best.identity) {
+        out = take_identity(best.device, now_ns);
+    } else {
+        out = best.retry ? take_retry(best.device, now_ns)
+                         : take_poll(best.device, best.group, now_ns);
+    }
     return true;
 }
 
@@ -662,11 +749,26 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
         const CompiledDevice& compiled = channel_->devices[device];
         const DeviceRun& run = devices_[device];
         std::uint32_t form = 0;
-        if (!compiled.enabled || compiled.keepalive_ns <= 0 ||
-            !compiled.plan.keepalive.has_value() || !run.polled || run.retry ||
-            units_[run.unit].holder != NOBODY || run.order_active ||
-            !current_form(device, *compiled.plan.keepalive, form) ||
-            run.resting[*compiled.plan.keepalive] || run.resting[form]) {
+        bool identity = false;
+        if (run.mode == DeviceMode::IDENTITY) {
+            // The first identity request outside every chain is the
+            // keep-alive (PR 171 S8, the lead's ruling on the delta check):
+            // no other request goes to a device in IDENTITY, and none that
+            // would read part of a chain on its own (6.5). Without one the
+            // identity cycle keeps the link alive.
+            if (!compiled.enabled || compiled.keepalive_ns <= 0 || run.retry ||
+                run.identity_cycle || run.order_active ||
+                units_[run.unit].holder != NOBODY ||
+                !identity_keepalive(device, form)) {
+                continue;
+            }
+            identity = true;
+        } else if (!compiled.enabled || compiled.keepalive_ns <= 0 ||
+                   !compiled.plan.keepalive.has_value() ||
+                   run.mode != DeviceMode::ALL || run.retry ||
+                   units_[run.unit].holder != NOBODY || run.order_active ||
+                   !current_form(device, *compiled.plan.keepalive, form) ||
+                   run.resting[*compiled.plan.keepalive] || run.resting[form]) {
             // A resting request is a dead block: no keep-alive of it (K5).
             continue;
         }
@@ -680,13 +782,195 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
             wake = std::min(wake, from);
             continue;
         }
-        out = Choice{
-            .kind = Choice::Kind::KEEPALIVE, .device = device, .request = form};
+        out = Choice{.kind = Choice::Kind::KEEPALIVE,
+                     .device = device,
+                     .request = form,
+                     .identity_keepalive = identity};
         save_undo(out, 0);
         record(device, false, now_ns);
         return true;
     }
     return false;
+}
+
+bool Scheduler::identity_position(std::uint32_t device, std::size_t& index,
+                                  std::size_t& part, bool& in_split,
+                                  std::uint32_t& request) const noexcept {
+    const DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    Position position;
+    // The cycle reads an absent or resting request too: a refusal is the
+    // check's verdict, and a re-check reads it again (PR 171 M2).
+    if (!find_next(plan.identity, plan, run.split, run.never_rests,
+                   run.never_rests, run.identity_cycle ? run.identity_next : 0,
+                   run.identity_cycle ? run.identity_next_split : 0,
+                   position)) {
+        return false;
+    }
+    index = position.index;
+    part = position.part;
+    in_split = position.in_split;
+    request = position.request;
+    return true;
+}
+
+bool Scheduler::identity_keepalive(std::uint32_t device,
+                                   std::uint32_t& request) const noexcept {
+    const DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    for (std::size_t index = 0; index < plan.identity.size(); ++index) {
+        const std::uint32_t listed = plan.identity[index];
+        // In the cycle, a request after a chained one ends its chain.
+        const bool ends_chain =
+            index > 0 && plan.requests[plan.identity[index - 1]].chained;
+        if (ends_chain || in_chain(device, listed)) {
+            continue;
+        }
+        const std::vector<std::uint32_t>& parts = plan.requests[listed].split;
+        if (run.split[listed] && !parts.empty()) {
+            request = parts.front();
+        } else {
+            request = listed;
+        }
+        return true;
+    }
+    return false;
+}
+
+std::uint8_t Scheduler::identity_priority(
+    std::uint32_t device, std::uint32_t request) const noexcept {
+    constexpr std::uint8_t IN_NO_GROUP = 255;
+    const std::uint32_t group =
+        channel_->devices[device].plan.requests[request].poll_group;
+    return group < channel_->poll_groups.size()
+               ? channel_->poll_groups[group].priority
+               : IN_NO_GROUP;
+}
+
+bool Scheduler::identity_chain_open(std::uint32_t device) const noexcept {
+    const DeviceRun& run = devices_[device];
+    return run.mode == DeviceMode::IDENTITY && run.identity_cycle &&
+           !run.order_active && units_[run.unit].holder == device;
+}
+
+void Scheduler::consider_identity(std::uint32_t device, std::int64_t now_ns,
+                                  std::int64_t& wake, PollKey& best_key,
+                                  PollPick& best, bool& found) noexcept {
+    DeviceRun& run = devices_[device];
+    if (!channel_->devices[device].enabled || run.order_active ||
+        unit_exclusive(device) || unit_held_by_other(device)) {
+        return;
+    }
+    std::uint32_t request = run.retry_request;
+    std::int64_t due = run.retry_due_ns;
+    if (!run.retry) {
+        if (!run.identity_cycle) {
+            if (!run.identity_due) {
+                return;
+            }
+            if (run.identity_due_ns > now_ns) {
+                wake = std::min(wake, run.identity_due_ns);
+                return;
+            }
+        }
+        std::size_t index = 0;
+        std::size_t part = 0;
+        bool in_split = false;
+        if (!identity_position(device, index, part, in_split, request)) {
+            // Nothing to read: the engine asks for the next cycle with
+            // `identity_again`.
+            run.identity_cycle = false;
+            run.identity_due = false;
+            update_holder(units_[run.unit].holder, device, false);
+            return;
+        }
+        due = run.identity_cycle ? run.identity_cycle_due_ns
+                                 : run.identity_due_ns;
+    }
+    const std::int64_t from = allowed_from(device, false);
+    if (from > now_ns) {
+        wake = std::min(wake, from);
+        return;
+    }
+    consider(PollPick{.device = device,
+                      .retry = run.retry,
+                      .identity = true,
+                      .due_ns = due,
+                      .priority = identity_priority(device, request)},
+             best_key, best, found);
+}
+
+Choice Scheduler::take_identity(std::uint32_t device,
+                                std::int64_t now_ns) noexcept {
+    DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    if (run.retry) {
+        const Choice out{.kind = Choice::Kind::IDENTITY,
+                         .device = device,
+                         .request = run.retry_request};
+        save_undo(out, 0);
+        record(device, false, now_ns);
+        run.retry = false;
+        update_holder(units_[run.unit].holder, device,
+                      plan.requests[run.retry_request].chained);
+        return out;
+    }
+    std::size_t index = 0;
+    std::size_t part = 0;
+    bool in_split = false;
+    std::uint32_t request = 0;
+    // `consider_identity` found it.
+    (void)identity_position(device, index, part, in_split, request);
+    const Choice out{
+        .kind = Choice::Kind::IDENTITY, .device = device, .request = request};
+    save_undo(out, 0);
+    if (!run.identity_cycle) {
+        run.identity_cycle_due_ns = run.identity_due_ns;
+        run.identity_start_ns = now_ns;
+    }
+    advance_identity(device, index, part, in_split, request);
+    record(device, false, now_ns);
+    return out;
+}
+
+void Scheduler::advance_identity(std::uint32_t device, std::size_t index,
+                                 std::size_t part, bool in_split,
+                                 std::uint32_t sent) noexcept {
+    DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    run.identity_due = false;
+    run.identity_next = in_split ? index : index + 1;
+    run.identity_next_split = in_split ? part + 1 : 0;
+    // The cycle ends with its last request, so that `identity_again` may
+    // ask for the next at once.
+    Position after;
+    run.identity_cycle = find_next(
+        plan.identity, plan, run.split, run.never_rests, run.never_rests,
+        run.identity_next, run.identity_next_split, after);
+    // A chain holds its unit to its end: nothing between its parts.
+    update_holder(units_[run.unit].holder, device,
+                  run.identity_cycle && plan.requests[sent].chained);
+}
+
+bool Scheduler::drop_unit_identity(std::uint32_t device,
+                                   std::uint32_t& chain_device) noexcept {
+    const std::uint32_t unit = devices_[device].unit;
+    const std::uint32_t holder = units_[unit].holder;
+    if (holder == NOBODY || holder == device) {
+        return false;
+    }
+    DeviceRun& run = devices_[holder];
+    if (run.mode != DeviceMode::IDENTITY || !run.identity_cycle ||
+        run.order_active) {
+        return false;
+    }
+    // In a chain of the identity cycle: read again from its start.
+    run.identity_next = 0;
+    run.identity_next_split = 0;
+    run.retry = false;
+    update_holder(units_[unit].holder, holder, false);
+    chain_device = holder;
+    return true;
 }
 
 bool Scheduler::due_work_pending() const noexcept {
@@ -698,7 +982,12 @@ bool Scheduler::due_work_pending() const noexcept {
         if (run.order_active) {
             return true;
         }
-        if (!run.polled || !channel_->devices[device].enabled) {
+        if (run.mode == DeviceMode::IDENTITY &&
+            channel_->devices[device].enabled &&
+            (run.retry || run.identity_cycle)) {
+            return true;
+        }
+        if (run.mode != DeviceMode::ALL || !channel_->devices[device].enabled) {
             continue;
         }
         if (run.retry || run.chain) {
@@ -718,7 +1007,11 @@ std::int64_t Scheduler::next_poll_due_ns() const noexcept {
     std::int64_t next = NEVER;
     for (std::uint32_t device = 0; device < devices_.size(); ++device) {
         const DeviceRun& run = devices_[device];
-        if (!run.polled || !channel_->devices[device].enabled) {
+        if (run.mode == DeviceMode::IDENTITY && run.identity_due &&
+            channel_->devices[device].enabled) {
+            next = std::min(next, run.identity_due_ns);
+        }
+        if (run.mode != DeviceMode::ALL || !channel_->devices[device].enabled) {
             continue;
         }
         for (std::uint32_t group = 0; group < run.groups.size(); ++group) {
@@ -738,8 +1031,9 @@ bool Scheduler::choose_floor_probe(std::int64_t now_ns, Choice& out,
     // A chain of companions in progress anywhere on the channel goes first
     // (DI 6.2 step 3): a floor probe between its parts would read the value
     // and its companion a probe time-out apart (review Q1).
-    for (const DeviceRun& run : devices_) {
-        if (run.chain) {
+    // So does a chain of an identity cycle (PR 171 S1).
+    for (std::uint32_t device = 0; device < devices_.size(); ++device) {
+        if (devices_[device].chain || identity_chain_open(device)) {
             return false;
         }
     }
@@ -846,6 +1140,30 @@ bool Scheduler::take_probe(std::uint32_t device, std::int64_t now_ns,
                            Choice& out) noexcept {
     DeviceRun& run = devices_[device];
     const CompiledDevice& compiled = channel_->devices[device];
+    if (!compiled.plan.probe.has_value() && !compiled.plan.identity.empty()) {
+        // D-147: a device with an identity cycle and no probe request is
+        // probed by that cycle; it goes on only if the device recovers.
+        const ReadPlan& plan = compiled.plan;
+        Position position;
+        if (!find_next(plan.identity, plan, run.split, run.never_rests,
+                       run.never_rests, 0, 0, position)) {
+            return false;
+        }
+        out = Choice{.kind = Choice::Kind::PROBE,
+                     .device = device,
+                     .request = position.request,
+                     .timeout_ns = wait_ns,
+                     .identity_probe = true};
+        save_undo(out, 0);
+        set_mode(device, DeviceMode::IDENTITY);
+        run.identity_cycle_due_ns = now_ns;
+        run.identity_start_ns = now_ns;
+        advance_identity(device, position.index, position.part,
+                         position.in_split, position.request);
+        record(device, false, now_ns);
+        probe_in_flight_ = true;
+        return true;
+    }
     if (!compiled.plan.probe.has_value()) {
         // R8: no request may serve as a probe (all side-effect or
         // chained): one whole normal poll cycle of the device is.
@@ -897,7 +1215,7 @@ bool Scheduler::start_probe_cycle(std::uint32_t device, std::int64_t now_ns,
     if (!first.has_value()) {
         return false;
     }
-    run.polled = true;
+    run.mode = DeviceMode::ALL;
     for (GroupState& state : run.groups) {
         state = GroupState{.due_ns = now_ns};
     }
@@ -949,6 +1267,20 @@ std::optional<std::uint64_t> Scheduler::not_sent() noexcept {
         return choice.order;
     }
     probe_in_flight_ = undo_.probe_in_flight;
+    if (choice.kind == Choice::Kind::IDENTITY ||
+        (choice.kind == Choice::Kind::PROBE && undo_.mode != run.mode)) {
+        run.mode = undo_.mode;
+        run.retry = undo_.retry;
+        run.retry_request = undo_.retry_request;
+        run.identity_cycle = undo_.identity_cycle;
+        run.identity_due = undo_.identity_due;
+        run.identity_next = undo_.identity_next;
+        run.identity_next_split = undo_.identity_next_split;
+        run.identity_start_ns = undo_.identity_start_ns;
+        run.identity_cycle_due_ns = undo_.identity_cycle_due_ns;
+        units_[run.unit].holder = undo_.unit.holder;
+        return std::nullopt;
+    }
     if (choice.kind == Choice::Kind::POLL) {
         run.retry = undo_.retry;
         run.retry_request = undo_.retry_request;
@@ -1016,6 +1348,20 @@ bool Scheduler::refused(std::uint32_t device, std::uint32_t request) noexcept {
         undo_.choice.device == device) {
         return true;  // a keep-alive leaves the cycle as it is (K1)
     }
+    if ((undo_.valid && undo_.choice.kind == Choice::Kind::IDENTITY &&
+         undo_.choice.device == device) ||
+        refused_request.poll_group >= run.groups.size()) {
+        // Taken by the identity cycle (D-147): its split form next in it.
+        const auto found =
+            std::find(plan.identity.begin(), plan.identity.end(), request);
+        if (found != plan.identity.end()) {
+            run.identity_next =
+                static_cast<std::size_t>(found - plan.identity.begin());
+            run.identity_next_split = 0;
+            run.identity_cycle = true;
+        }
+        return true;
+    }
     // Send the split form next, in this cycle: rewind to the request.
     GroupState& state = run.groups[refused_request.poll_group];
     const std::vector<std::uint32_t>& list =
@@ -1048,25 +1394,64 @@ std::size_t Scheduler::reconnect(std::span<std::uint64_t> ended) noexcept {
         for (GroupState& state : run.groups) {
             state.next_split = 0;
         }
+        // An identity cycle in progress is read again from its start.
+        if (run.identity_cycle) {
+            run.identity_cycle = false;
+            run.identity_due = run.mode == DeviceMode::IDENTITY;
+            run.identity_due_ns = EARLIEST;
+            run.identity_next = 0;
+            run.identity_next_split = 0;
+            update_holder(units_[run.unit].holder, device,
+                          run.order_active && run.order.exclusive);
+        }
     }
     probe_in_flight_ = false;
     undo_.valid = false;
     return count;
 }
 
-void Scheduler::set_polled(std::uint32_t device, bool polled) noexcept {
-    if (device >= devices_.size() || devices_[device].polled == polled) {
+void Scheduler::set_mode(std::uint32_t device, DeviceMode mode) noexcept {
+    if (device >= devices_.size() || devices_[device].mode == mode) {
         return;
     }
     DeviceRun& run = devices_[device];
+    const DeviceMode before = run.mode;
     drop_chain(device);
-    run.polled = polled;
+    run.mode = mode;
     run.retry = false;
+    run.identity_cycle = false;
+    run.identity_next = 0;
+    run.identity_next_split = 0;
+    // An identity cycle due in IDENTITY, none otherwise: at once, or a
+    // period after the last one started (PR 171 M3).
+    run.identity_due = mode == DeviceMode::IDENTITY;
+    run.identity_due_ns = later(run.identity_start_ns, run.identity_period_ns);
+    update_holder(units_[run.unit].holder, device,
+                  run.order_active && run.order.exclusive);
     for (GroupState& state : run.groups) {
-        // Polled again: every group is due at once, and the outage is not
-        // published as an achieved period.
-        state = GroupState{.due_ns = EARLIEST};
+        if (before == DeviceMode::OFF) {
+            // Polled again: every group is due at once, and the outage is
+            // not published as an achieved period.
+            state = GroupState{.due_ns = EARLIEST};
+        } else if (before == DeviceMode::ALL) {
+            // Each group keeps its due time and its place in its cycle
+            // (PR 171 M3); the time away is not an achieved period.
+            state.started = false;
+        }
     }
+}
+
+void Scheduler::identity_again(std::uint32_t device,
+                               std::int64_t due_ns) noexcept {
+    if (device >= devices_.size() ||
+        devices_[device].mode != DeviceMode::IDENTITY ||
+        devices_[device].identity_cycle) {
+        return;
+    }
+    DeviceRun& run = devices_[device];
+    run.identity_due = true;
+    run.identity_due_ns =
+        std::max(due_ns, later(run.identity_start_ns, run.identity_period_ns));
 }
 
 void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
@@ -1127,10 +1512,14 @@ void Scheduler::clear_probe(std::uint32_t device) noexcept {
 
 void Scheduler::retry(std::uint32_t device, std::uint32_t request,
                       std::int64_t now_ns) noexcept {
-    if (device >= devices_.size() || !devices_[device].polled ||
+    if (device >= devices_.size() || devices_[device].mode == DeviceMode::OFF ||
         request >= channel_->devices[device].plan.requests.size() ||
         channel_->devices[device].plan.requests[request].side_effect) {
         return;  // a side-effect read is never sent twice (6.6)
+    }
+    if (devices_[device].mode == DeviceMode::IDENTITY &&
+        !in_identity(channel_->devices[device].plan, request)) {
+        return;  // in IDENTITY only the identity cycle is sent (PR 171 S2)
     }
     devices_[device].retry = true;
     devices_[device].retry_request = request;

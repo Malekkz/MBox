@@ -268,7 +268,10 @@ std::int64_t ChannelEngine::step() noexcept {
         case Choice::Kind::WAIT:
             return std::min(choice.wake_ns, stale_due);
         case Choice::Kind::ORDER:
-            // Orders come with the command slices; none is added yet.
+        case Choice::Kind::IDENTITY:
+            // Orders come with the command slices; none is added yet. The
+            // identity cycle is wired in slice 5b-2b; until then the engine
+            // puts no device in DeviceMode::IDENTITY (D-147).
             (void)scheduler_.not_sent();
             return now;
         case Choice::Kind::POLL:

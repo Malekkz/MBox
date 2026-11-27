@@ -83,6 +83,14 @@ public:
         return check_stale(rules_, state_, now_mono_ns, out);
     }
 
+    [[nodiscard]] const PointState& state() const { return state_; }
+
+    ProcessedSample withhold(std::uint16_t flags, std::int64_t source_ns) {
+        ProcessedSample out;
+        withhold_point(rules_, state_, flags, source_ns, out);
+        return out;
+    }
+
     ProcessedSample feed(const RawSample& sample, std::int64_t mono_ns,
                          std::span<const CompanionInput> companions = {}) {
         return test::processed(
@@ -1066,6 +1074,18 @@ TEST(SampleProcessing, HealthRuleAppliesToAValue) {
               Quality::UNCERTAIN);
 }
 
+TEST(SampleProcessing, AValueAHealthRuleMakesBadGivesNoRuleValue) {
+    // Review V2: read from the device and confirmed, but BAD by its health
+    // rule: the restart rules do not see it. Online, they do.
+    Point point(gateway_rules(InvalidAction::SUBSTITUTE));
+    const auto offline = link(0);
+    const ProcessedSample bad = point.feed(POWER_SAMPLE, SECOND, offline);
+    ASSERT_EQ(bad.tag.quality, Quality::BAD);
+    EXPECT_FALSE(bad.rule_valid);
+    const auto online = link(1);
+    EXPECT_TRUE(point.feed(POWER_SAMPLE, 2 * SECOND, online).rule_valid);
+}
+
 TEST(SampleProcessing, HealthRuleAppliesToASubstitute) {
     Point point(gateway_rules(InvalidAction::SUBSTITUTE));
     const auto offline = link(0);
@@ -1669,6 +1689,106 @@ TEST(SampleProcessing, TimeRawOnAFloatTagIsBad) {
             .tag.quality,
         Quality::BAD);
 }
+
+// --- Withheld points and the restart rules' inputs (D-147) ---------------
+
+// NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers): the values are the test data
+
+TEST(SampleProcessing, AWithheldPointIsBadWithItsFlagsAndKeepsItsValue) {
+    Point point(int_rules());
+    (void)point.value(7, SECOND);
+    const ProcessedSample out = point.withhold(0, 0);
+    ASSERT_TRUE(out.write_tag);
+    EXPECT_EQ(out.tag.quality, Quality::BAD);
+    EXPECT_EQ(out.tag.flags, 0);  // no COMM_FAIL, no STALE
+    EXPECT_EQ(out.tag.value.i, 7);
+    EXPECT_EQ(out.tag.source_time_ns, 0);
+    // The 9.1 form after a restart: NOT_INIT, source time 0.
+    const ProcessedSample again =
+        point.withhold(flags({QualityFlag::NOT_INIT}), 0);
+    EXPECT_EQ(again.tag.flags, flags({QualityFlag::NOT_INIT}));
+    EXPECT_EQ(again.tag.value.i, 7);
+}
+
+TEST(SampleProcessing, AWithheldPointBringsNoValueFromBeforeBack) {
+    // keep_last after a withhold has no valid value to keep: BAD, not the
+    // value read before the device turned out not to be the one configured.
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                          .action = InvalidAction::KEEP_LAST});
+    Point point(rules);
+    (void)point.value(KEPT_VALUE, SECOND);
+    (void)point.withhold(0, 0);
+    const TagWrite kept = point.value(-1, 2 * SECOND).tag;
+    EXPECT_EQ(kept.quality, Quality::BAD);
+    EXPECT_TRUE(has(kept.flags, QualityFlag::NOT_INIT));
+    // A value held when the withhold comes is held no more (review S7).
+    (void)point.value(KEPT_VALUE, 3 * SECOND);
+    (void)point.value(-1, 4 * SECOND);
+    ASSERT_TRUE(point.state().holding);
+    (void)point.withhold(0, 0);
+    EXPECT_FALSE(point.state().holding);
+    // A read gives a value again.
+    EXPECT_EQ(point.value(21, 3 * SECOND).tag.quality, Quality::GOOD);
+}
+
+TEST(SampleProcessing, AWithheldCounterKeepsItsPreviousValue) {
+    // The counter's previous raw value survives a withhold: the next read
+    // is compared with it, so a wrap is still a wrap.
+    constexpr std::uint64_t LIMIT = UINT16_ALL_ONES;
+    Point point(counter_rules(CounterRule{
+        .limit = LIMIT, .on_decrease = CounterRule::OnDecrease::HOLD}));
+    (void)counter_value(point, LIMIT - 5, INT16);
+    (void)point.withhold(0, 0);
+    const ProcessedSample out = point.feed(
+        RawSample{.outcome = Outcome::VALUE, .raw = raw_unsigned(3, INT16)},
+        2 * SECOND);
+    // A wrap, not a decrease: the new value is taken, not held.
+    EXPECT_EQ(out.tag.value.u, 3U);
+    EXPECT_EQ(out.tag.quality, Quality::GOOD);
+}
+
+TEST(SampleProcessing, TheRuleValueIsTheValueBeforeACountersHold) {
+    Point point(counter_rules(
+        CounterRule{.limit = UINT16_ALL_ONES,
+                    .on_decrease = CounterRule::OnDecrease::HOLD}));
+    const ProcessedSample first = point.feed(
+        RawSample{.outcome = Outcome::VALUE, .raw = raw_unsigned(1000, INT16)},
+        SECOND);
+    EXPECT_TRUE(first.rule_valid);
+    EXPECT_EQ(first.rule_value.u, 1000U);
+    // A decrease that is no wrap: the tag holds 1000, the rules see 900.
+    const ProcessedSample held = point.feed(
+        RawSample{.outcome = Outcome::VALUE, .raw = raw_unsigned(900, INT16)},
+        2 * SECOND);
+    EXPECT_EQ(held.tag.value.u, 1000U);
+    EXPECT_TRUE(held.rule_valid);
+    EXPECT_EQ(held.rule_value.u, 900U);
+}
+
+TEST(SampleProcessing, ASampleWithoutAValidValueGivesNoRuleValue) {
+    PointRules rules = int_rules();
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                          .action = InvalidAction::KEEP_LAST});
+    Point point(rules);
+    EXPECT_TRUE(point.value(5, SECOND).rule_valid);
+    EXPECT_FALSE(point.value(-1, 2 * SECOND).rule_valid);  // kept, not read
+    EXPECT_FALSE(
+        point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 3 * SECOND)
+            .rule_valid);
+    EXPECT_FALSE(point.feed(RawSample{.outcome = Outcome::NO_VALUE}, 4 * SECOND)
+                     .rule_valid);
+    // A value a marker makes BAD is no valid value either (review S7).
+    PointRules bad = int_rules();
+    bad.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                        .action = InvalidAction::BAD});
+    Point marked(bad);
+    EXPECT_FALSE(marked.value(-1, SECOND).rule_valid);
+    EXPECT_TRUE(marked.value(4, 2 * SECOND).rule_valid);
+}
+
+// NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
 }  // namespace
 }  // namespace scada::driver
