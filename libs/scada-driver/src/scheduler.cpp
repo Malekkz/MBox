@@ -751,15 +751,15 @@ bool Scheduler::choose_keepalive(std::int64_t now_ns, Choice& out,
         std::uint32_t form = 0;
         bool identity = false;
         if (run.mode == DeviceMode::IDENTITY) {
-            // The identity cycle's first request is the keep-alive (PR 171
-            // S8): no other request goes to a device in IDENTITY.
-            std::size_t index = 0;
-            std::size_t part = 0;
-            bool in_split = false;
+            // The first identity request outside every chain is the
+            // keep-alive (PR 171 S8, the lead's ruling on the delta check):
+            // no other request goes to a device in IDENTITY, and none that
+            // would read part of a chain on its own (6.5). Without one the
+            // identity cycle keeps the link alive.
             if (!compiled.enabled || compiled.keepalive_ns <= 0 || run.retry ||
                 run.identity_cycle || run.order_active ||
                 units_[run.unit].holder != NOBODY ||
-                !identity_position(device, index, part, in_split, form)) {
+                !identity_keepalive(device, form)) {
                 continue;
             }
             identity = true;
@@ -812,6 +812,29 @@ bool Scheduler::identity_position(std::uint32_t device, std::size_t& index,
     in_split = position.in_split;
     request = position.request;
     return true;
+}
+
+bool Scheduler::identity_keepalive(std::uint32_t device,
+                                   std::uint32_t& request) const noexcept {
+    const DeviceRun& run = devices_[device];
+    const ReadPlan& plan = channel_->devices[device].plan;
+    for (std::size_t index = 0; index < plan.identity.size(); ++index) {
+        const std::uint32_t listed = plan.identity[index];
+        // In the cycle, a request after a chained one ends its chain.
+        const bool ends_chain =
+            index > 0 && plan.requests[plan.identity[index - 1]].chained;
+        if (ends_chain || in_chain(device, listed)) {
+            continue;
+        }
+        const std::vector<std::uint32_t>& parts = plan.requests[listed].split;
+        if (run.split[listed] && !parts.empty()) {
+            request = parts.front();
+        } else {
+            request = listed;
+        }
+        return true;
+    }
+    return false;
 }
 
 std::uint8_t Scheduler::identity_priority(

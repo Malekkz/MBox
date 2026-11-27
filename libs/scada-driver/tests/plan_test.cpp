@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -555,6 +556,18 @@ TEST(Plan, AnIdentityPointIsNeverReadWithASideEffect) {
     ReadRules chained{.max_units = 4};
     chained.ranges = {range(Kind::SIDE_EFFECT, 0, 0)};
     expect_refused({at(0, 0), companion}, chained);
+}
+
+TEST(Plan, AnIdentityPointInASideEffectRangeIsRefusedAsSuch) {
+    // Review P2: refused by the identity rule itself, before the later
+    // check of the identity cycle, which would refuse the plan too.
+    ReadRules rules{.max_units = 8};
+    rules.ranges = {range(Kind::SIDE_EFFECT, 5, 6)};
+    ReadPlan plan;
+    const Status status = plan_blocks({identity_at(0, 5)}, rules, 1, plan);
+    EXPECT_EQ(status.code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(std::string_view(status.message()),
+              "an identity point in a side-effect range");
 }
 
 TEST(Plan, AnIdentityPointInAnyRangeButAnAtomicOneIsRefused) {

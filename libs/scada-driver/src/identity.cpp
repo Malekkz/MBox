@@ -248,6 +248,14 @@ Status check_pattern(std::string_view pattern) noexcept {
     if (backslashes % 2 != 0) {
         return refused("a pattern that ends in a single backslash");
     }
+    // The text it is matched against is cleaned: a literal byte outside
+    // 0x20 to 0x7E never matches (review S3).
+    if (!std::all_of(pattern.begin(), pattern.end(),
+                     [](char byte) { return byte >= ' ' && byte <= '~'; })) {
+        return refused(
+            "a pattern with a byte outside 0x20 to 0x7E, which the cleaned "
+            "text never holds");
+    }
     return {};
 }
 

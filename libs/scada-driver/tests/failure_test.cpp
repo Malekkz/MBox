@@ -513,6 +513,54 @@ TEST(Failure, ARestartReArmsTheGraceOnceUntilAFullPeriodPasses) {
     EXPECT_EQ(tracked.failures(FIRST), 0U);
 }
 
+TEST(Failure, ARestartWhileInitialisingStillCountsForTheReArm) {
+    // Review D8: the bound on a restart storm. A restart seen while the
+    // device is INITIALISING changes no state but starts the full period
+    // again, so a third restart 4 s after it re-arms nothing.
+    FailureTracker tracked = running_three();
+    tracked.restarted(FIRST, 10 * SECOND);  // re-armed: until 15 s
+    tracked.restarted(FIRST, 18 * SECOND);  // while INITIALISING
+    EXPECT_EQ(tracked.state(FIRST), DeviceStatus::INITIALISING);
+    tracked.identity_passed(FIRST);
+    (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, 19 * SECOND);
+    ASSERT_EQ(tracked.state(FIRST), DeviceStatus::RUNNING);
+    tracked.restarted(FIRST, 22 * SECOND);  // 12 s after the first
+    fail(tracked, FIRST, 1, 23 * SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 1U);
+}
+
+TEST(Failure, AnAnsweredIdentityReadLeavesTheRunOfTimeOuts) {
+    // Review F4: an identity read neither adds to the run nor empties it
+    // (DI 7.3), even when it is answered.
+    FailureTracker tracked({identified(1), {.unit_id = 2, .rules = rules()}},
+                           3);
+    tracked.connected(0);
+    (void)tracked.read_timed_out(SECOND_DEVICE, SECOND);
+    ASSERT_EQ(tracked.timeout_run(), 1U);
+    EXPECT_FALSE(
+        tracked.identity_ended(FIRST, RequestEnd::ANSWERED, 2 * SECOND));
+    EXPECT_EQ(tracked.timeout_run(), 1U);
+}
+
+TEST(Failure, UnsetBoundsNeverMismatchByTheClockAndReArmOnce) {
+    // Review of PR 171: a device given no deadline and no full period.
+    FailureTracker::Device device = identified(1, 5 * SECOND);
+    device.identity_wait_ns = FailureTracker::Device{}.identity_wait_ns;
+    device.full_period_ns = FailureTracker::Device{}.full_period_ns;
+    FailureTracker tracked = tracker({device});
+    EXPECT_EQ(tracked.identity_deadline_ns(FIRST), NEVER_NS);
+    tracked.identity_passed(FIRST);
+    (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, 6 * SECOND);
+    tracked.restarted(FIRST, 100 * SECOND);  // the first: re-armed
+    fail(tracked, FIRST, 1, 101 * SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 0U);
+    tracked.identity_passed(FIRST);
+    (void)tracked.request_ended(FIRST, RequestEnd::ANSWERED, 200 * SECOND);
+    tracked.restarted(FIRST, 1'000 * SECOND);  // never again
+    fail(tracked, FIRST, 1, 1'001 * SECOND);
+    EXPECT_EQ(tracked.failures(FIRST), 1U);
+}
+
 TEST(Failure, APendingCheckHasItsDeadline) {
     // Pending from the connect, until 4 s later (ruling item 2).
     FailureTracker tracked(std::vector<FailureTracker::Device>{identified(1)});

@@ -117,11 +117,28 @@ IdentityVerdict IdentityRun::verdict(std::int64_t now_ns) const noexcept {
     return {};
 }
 
+namespace {
+
+// The largest n for which n fields and n - 1 separators leave each field at
+// least one byte of the text.
+constexpr std::size_t shown_fields() noexcept {
+    std::size_t fields = 1;
+    while ((fields + 1) + fields * IDENTITY_SEPARATOR.size() <=
+           TAG_STRING_MAX_BYTES) {
+        ++fields;
+    }
+    return fields;
+}
+
+}  // namespace
+
 std::size_t IdentityRun::text(
     std::span<char, TAG_STRING_MAX_BYTES> out) const noexcept {
-    // One field per check, at most as many as the text can show: past
-    // TAG_STRING_MAX_BYTES / 2 fields the separators fill it.
-    constexpr std::size_t MAX_FIELDS = TAG_STRING_MAX_BYTES / 2;
+    // One field per check, at most as many as can each get a byte of the
+    // text after the separators: 84 for 250 bytes, 4.7 KB of stack in place
+    // of 7 KB (review of PR 171). A check past them shows nothing; it would
+    // get no byte of the text anyway.
+    constexpr std::size_t MAX_FIELDS = shown_fields();
     std::array<IdentityField, MAX_FIELDS> fields{};
     const std::size_t count = std::min(reads_.size(), fields.size());
     const std::span<IdentityField> used = std::span(fields).first(count);

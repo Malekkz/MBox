@@ -1074,6 +1074,18 @@ TEST(SampleProcessing, HealthRuleAppliesToAValue) {
               Quality::UNCERTAIN);
 }
 
+TEST(SampleProcessing, AValueAHealthRuleMakesBadGivesNoRuleValue) {
+    // Review V2: read from the device and confirmed, but BAD by its health
+    // rule: the restart rules do not see it. Online, they do.
+    Point point(gateway_rules(InvalidAction::SUBSTITUTE));
+    const auto offline = link(0);
+    const ProcessedSample bad = point.feed(POWER_SAMPLE, SECOND, offline);
+    ASSERT_EQ(bad.tag.quality, Quality::BAD);
+    EXPECT_FALSE(bad.rule_valid);
+    const auto online = link(1);
+    EXPECT_TRUE(point.feed(POWER_SAMPLE, 2 * SECOND, online).rule_valid);
+}
+
 TEST(SampleProcessing, HealthRuleAppliesToASubstitute) {
     Point point(gateway_rules(InvalidAction::SUBSTITUTE));
     const auto offline = link(0);

@@ -224,6 +224,30 @@ TEST(Identity, APatternIsCheckedAsTheMatcherTakesIt) {
                            std::string(TEXT_PATTERN_MAX_BYTES + 1, 'a')),
                      TagType::STRING)
                      .ok());
+    // Review S3: a literal the cleaned text never holds.
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::PATTERN, {}, "Z\xC3\xA4hler*"),
+                     TagType::STRING)
+                     .ok());
+    EXPECT_FALSE(
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "A\tB"),
+                                TagType::STRING)
+            .ok());
+}
+
+TEST(Identity, ARangeWhoseEndsDoNotCompareIsRefused) {
+    // Two different STRINGs are unordered (compare_values): no range.
+    const auto text = [](const char* value) {
+        return ExpectedValue{.type = TagType::STRING, .text = value};
+    };
+    EXPECT_FALSE(validate_identity_check(
+                     check(IdentityCheck::Kind::RANGE, {text("A"), text("B")}),
+                     TagType::STRING)
+                     .ok());
+    EXPECT_TRUE(validate_identity_check(
+                    check(IdentityCheck::Kind::RANGE, {text("A"), text("A")}),
+                    TagType::STRING)
+                    .ok());
 }
 
 TEST(RestartWatch, ARuleIsCheckedForItsPoint) {

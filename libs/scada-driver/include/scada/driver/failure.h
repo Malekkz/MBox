@@ -30,6 +30,9 @@ enum class DeviceStatus : std::uint8_t {
     REFUSING = 6,
 };
 
+// A time that never comes, for a bound left unset.
+inline constexpr std::int64_t NEVER_NS =
+    std::numeric_limits<std::int64_t>::max();
 inline constexpr std::int64_t DEFAULT_TIMEOUT_NS = 1'000'000'000;   // 1 s
 inline constexpr std::int64_t DEFAULT_BACKOFF_NS = 10'000'000'000;  // 10 s
 inline constexpr std::int64_t DEFAULT_BACKOFF_MAX_NS =
@@ -70,12 +73,15 @@ public:
         bool has_poll_group = true;  // at least one point in a poll group
         bool identify = false;       // has identity checks (3.6; D-147)
         // With `identify`: how long a pending check may take before a value
-        // it cannot read is a mismatch, max(startup_grace, 3 periods of the
-        // identity points' group) (ruling item 2).
-        std::int64_t identity_wait_ns = 0;
-        // The longest period of the channel's groups: a restart re-arms the
-        // grace once until that long passes without another (item 6).
-        std::int64_t full_period_ns = 0;
+        // it cannot read is a mismatch (ruling item 2), from
+        // `identity_wait_ns()` (identity_setup.h). Unset, never: the check
+        // stays pending and nothing of the device is published, rather than
+        // a mismatch at once (review of PR 171).
+        std::int64_t identity_wait_ns = NEVER_NS;
+        // A restart re-arms the grace once until this long passes without
+        // another (item 6), from `full_period_ns()`. Unset, never: the grace
+        // is re-armed by the first restart only, never by every one.
+        std::int64_t full_period_ns = NEVER_NS;
     };
     // `lost_after_timeouts` is the channel's key (CS) on `tcp`, and 0 where
     // read timeouts never close the connection (serial, `rtu_over_tcp`).

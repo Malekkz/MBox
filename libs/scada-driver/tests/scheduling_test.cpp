@@ -2208,6 +2208,247 @@ TEST(Scheduling, AnIdentityReadNotSentStartsNoPeriod) {
     EXPECT_EQ(scheduler.take(2 * SECOND).kind, Choice::Kind::IDENTITY);
 }
 
+// d1 with three slow requests at 0, 20 and 60; the first two a chain, all
+// three its identity cycle when `with_third`; the keep-alive 1 s.
+CompiledChannel chained_identity(bool with_third) {
+    const std::vector<PointSpec> points{PointSpec{.first = 0, .group = SLOW},
+                                        PointSpec{.first = 20, .group = SLOW},
+                                        PointSpec{.first = 60, .group = SLOW}};
+    CompiledChannel channel =
+        make_channel({{.name = "d1", .points = points, .keepalive_ns = SECOND}},
+                     ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    const std::uint32_t head = plan.by_group[SLOW][0];
+    const std::uint32_t tail = plan.by_group[SLOW][1];
+    plan.requests[head].chained = true;
+    plan.identity = {head, tail};
+    if (with_third) {
+        plan.identity.push_back(plan.by_group[SLOW][2]);
+    }
+    plan.probe = plan.by_group[SLOW][2];
+    plan.keepalive = plan.probe;
+    return channel;
+}
+
+TEST(Scheduling, InIdentityNoKeepAliveReadsPartOfAChain) {
+    // The lead's ruling on the delta check: the keep-alive is the first
+    // identity request outside every chain; with none, there is none.
+    const CompiledChannel only_chain = chained_identity(false);
+    Scheduler chain(only_chain, 4, 0);
+    chain.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(chain.take(0).kind, Choice::Kind::IDENTITY);
+    ASSERT_EQ(chain.take(MILLISECOND).kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(chain.take(SECOND + MILLISECOND).kind, Choice::Kind::IDLE);
+    EXPECT_EQ(chain.take(3 * SECOND).kind, Choice::Kind::IDLE);
+}
+
+TEST(Scheduling, InIdentityTheKeepAliveIsTheFirstRequestOutsideAChain) {
+    // With a third request outside the chain: it is the keep-alive.
+    const CompiledChannel three = chained_identity(true);
+    Scheduler third(three, 4, 0);
+    third.set_mode(0, DeviceMode::IDENTITY);
+    for (int request = 0; request < 3; ++request) {
+        ASSERT_EQ(third.take(request * MILLISECOND).kind,
+                  Choice::Kind::IDENTITY);
+    }
+    const Choice keepalive = third.take(SECOND + 2 * MILLISECOND);
+    EXPECT_EQ(keepalive.kind, Choice::Kind::KEEPALIVE);
+    EXPECT_TRUE(keepalive.identity_keepalive);
+    EXPECT_EQ(keepalive.request, three.devices[0].plan.identity[2]);
+}
+
+TEST(Scheduling, InIdentityAChainInNoGroupIsNoKeepAlive) {
+    // The chain's requests read points in no poll group: the identity list
+    // alone shows the tail ends a chain.
+    CompiledChannel channel = chained_identity(true);
+    ReadPlan& plan = channel.devices[0].plan;
+    for (std::size_t index = 0; index < 2; ++index) {
+        plan.requests[plan.identity[index]].poll_group = NO_POLL_GROUP;
+    }
+    plan.by_group[SLOW] = {plan.identity[2]};
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.status().ok());
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    for (int request = 0; request < 3; ++request) {
+        ASSERT_EQ(scheduler.take(request * MILLISECOND).kind,
+                  Choice::Kind::IDENTITY);
+    }
+    const Choice keepalive = scheduler.take(SECOND + 2 * MILLISECOND);
+    EXPECT_EQ(keepalive.kind, Choice::Kind::KEEPALIVE);
+    EXPECT_EQ(keepalive.request, plan.identity[2]);
+}
+
+TEST(Scheduling, InIdentityASplitKeepAliveIsItsFirstPart) {
+    // [0..1], two clusters, is the identity request and the keep-alive;
+    // refused once, the keep-alive is its split form's first part.
+    CompiledChannel channel = make_channel(
+        {{.name = "d1",
+          .points = {{.first = 0, .group = SLOW}, {.first = 1, .group = SLOW}},
+          .keepalive_ns = SECOND}},
+        ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    const std::uint32_t merged = plan.by_group[SLOW].front();
+    plan.identity = {merged};
+    const std::vector<std::uint32_t> parts = plan.requests[merged].split;
+    ASSERT_EQ(parts.size(), 2U);
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).request, merged);
+    ASSERT_TRUE(scheduler.refused(0, merged));
+    ASSERT_EQ(scheduler.take(MILLISECOND).request, parts[0]);
+    ASSERT_EQ(scheduler.take(2 * MILLISECOND).request, parts[1]);
+    const Choice keepalive = scheduler.take(SECOND + 2 * MILLISECOND);
+    EXPECT_EQ(keepalive.kind, Choice::Kind::KEEPALIVE);
+    EXPECT_EQ(keepalive.request, parts[0]);
+}
+
+TEST(Scheduling, NoKeepAliveWhileAnIdentityCycleRuns) {
+    // The cycle's second request waits 2 s for the pacing; the keep-alive
+    // (1 s) does not go meanwhile: the cycle's request goes.
+    const std::vector<PointSpec> points{PointSpec{.first = 0, .group = SLOW},
+                                        PointSpec{.first = 20, .group = SLOW}};
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = points,
+                       .pacing = Pacing{.min_request_interval_ns = 2 * SECOND},
+                       .keepalive_ns = SECOND}},
+                     ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    plan.identity = {plan.by_group[SLOW][0], plan.by_group[SLOW][1]};
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    const Choice wait = scheduler.take(SECOND + MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, 2 * SECOND);
+    const Choice second = scheduler.take(2 * SECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(second.request, plan.identity[1]);
+}
+
+TEST(Scheduling, ARefusedLaterIdentityRequestRewindsToItsSplitForm) {
+    // Review S17: the cycle is [5] then [0..1] (two clusters); [0..1] is
+    // refused: its split form's parts come next, then the cycle ends. And
+    // refused first, the parts come before the request after it.
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .points = {{.first = 0, .group = SLOW},
+                                  {.first = 1, .group = SLOW},
+                                  {.first = 5, .group = NORMAL}}}},
+                     ReadRules{.max_units = 2});
+    ReadPlan& plan = channel.devices[0].plan;
+    const std::uint32_t merged = plan.by_group[SLOW].front();
+    const std::uint32_t other = plan.by_group[NORMAL].front();
+    const std::vector<std::uint32_t> parts = plan.requests[merged].split;
+    ASSERT_EQ(parts.size(), 2U);
+    plan.identity = {other, merged};
+    Scheduler later(channel, 4, 0);
+    later.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(later.take(0).request, other);
+    ASSERT_EQ(later.take(MILLISECOND).request, merged);
+    EXPECT_TRUE(later.refused(0, merged));
+    EXPECT_EQ(later.take(2 * MILLISECOND).request, parts[0]);
+    EXPECT_EQ(later.take(3 * MILLISECOND).request, parts[1]);
+    EXPECT_FALSE(later.identity_running(0));
+    plan.identity = {merged, other};
+    Scheduler first(channel, 4, 0);
+    first.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(first.take(0).request, merged);
+    EXPECT_TRUE(first.refused(0, merged));
+    EXPECT_EQ(first.take(MILLISECOND).request, parts[0]);
+    EXPECT_EQ(first.take(2 * MILLISECOND).request, parts[1]);
+    EXPECT_EQ(first.take(3 * MILLISECOND).request, other);
+}
+
+TEST(Scheduling, AnAbsentSecondIdentityRequestIsStillRead) {
+    // Review N_M2_advance_absent: after its refusal, the next cycle reads
+    // the first request and then the absent second one.
+    const std::vector<PointSpec> points{PointSpec{.first = 0, .group = SLOW},
+                                        PointSpec{.first = 20, .group = SLOW}};
+    CompiledChannel channel =
+        make_channel({{.name = "d1", .points = points}}, ReadRules{});
+    ReadPlan& plan = channel.devices[0].plan;
+    plan.identity = {plan.by_group[SLOW][0], plan.by_group[SLOW][1]};
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).request, plan.identity[0]);
+    ASSERT_EQ(scheduler.take(MILLISECOND).request, plan.identity[1]);
+    EXPECT_FALSE(scheduler.refused(0, plan.identity[1]));  // absent
+    scheduler.identity_again(0, 0);
+    ASSERT_EQ(scheduler.take(SLOW_PERIOD).request, plan.identity[0]);
+    EXPECT_TRUE(scheduler.identity_running(0));
+    const Choice second = scheduler.take(SLOW_PERIOD + MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(second.request, plan.identity[1]);
+}
+
+// d1 and d2 on one unit (writes 1 s apart); d1 in IDENTITY with one slow
+// request; d2 polled.
+CompiledChannel identity_on_shared_unit() {
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = adjacent(0, 1, SLOW),
+                       .pacing = Pacing{.min_write_interval_ns = SECOND}},
+                      {.name = "d2",
+                       .unit_id = 1,
+                       .points = {{.first = 40, .group = SLOW},
+                                  {.first = 60, .group = SLOW}},
+                       .pacing = Pacing{.min_write_interval_ns = SECOND}}},
+                     ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    plan.identity = {plan.by_group[SLOW].front()};
+    return channel;
+}
+
+// A list of two writes of device `owner`, d1 itself or d2 on the same
+// unit, with d1 in IDENTITY: the steps are 1 s apart by the write interval,
+// and no identity read goes between them.
+void expect_no_identity_between_steps(std::uint32_t owner) {
+    const CompiledChannel channel = identity_on_shared_unit();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_polled(1, false);  // only the order of d2 is sent
+    ASSERT_TRUE(scheduler.add_order(OrderTicket{
+        .id = 1, .device = owner, .kind = OrderKind::WRITE_LIST, .steps = 2}));
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::ORDER);
+    const Choice between = scheduler.take(MILLISECOND);
+    EXPECT_EQ(between.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(between.wake_ns, SECOND);
+    EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::ORDER);
+    EXPECT_EQ(scheduler.take(SECOND + MILLISECOND).kind,
+              Choice::Kind::IDENTITY);
+}
+
+TEST(Scheduling, TheIdentityCycleWaitsForAnOrderInProgress) {
+    // Review S18: an order of d1 itself, and one of d2 on the same unit.
+    expect_no_identity_between_steps(0);
+    expect_no_identity_between_steps(1);
+}
+
+TEST(Scheduling, TheIdentityCycleWaitsForAnotherDevicesChain) {
+    // Review S18: d2's chain of two holds the unit; d1's identity read
+    // comes after its tail.
+    CompiledChannel channel = identity_on_shared_unit();
+    ReadPlan& other = channel.devices[1].plan;
+    other.requests[other.by_group[SLOW][0]].chained = true;
+    other.probe.reset();
+    other.keepalive.reset();
+    Scheduler scheduler(channel, 4, 0);
+    ASSERT_TRUE(scheduler.status().ok());
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    // d2's slow group is due at 0, d1's cycle at once: d1 first.
+    ASSERT_EQ(scheduler.take(0).device, 0U);
+    scheduler.identity_again(0, 0);  // floored at 10 s
+    const Choice head = scheduler.take(SLOW_PERIOD - MILLISECOND);
+    ASSERT_EQ(head.device, 1U);
+    ASSERT_EQ(head.request, other.by_group[SLOW][0]);
+    const Choice tail = scheduler.take(SLOW_PERIOD);
+    EXPECT_EQ(tail.device, 1U);
+    EXPECT_EQ(tail.request, other.by_group[SLOW][1]);
+    EXPECT_EQ(scheduler.take(SLOW_PERIOD + MILLISECOND).device, 0U);
+}
+
 TEST(Scheduling, NoGroupCycleStartsInIdentity) {
     // S7: polled for a second, then five seconds in IDENTITY start no FAST
     // cycle: no achieved period meanwhile, and the first period back in ALL

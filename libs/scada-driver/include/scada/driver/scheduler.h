@@ -106,9 +106,9 @@ struct Choice {
     // a device whose plan has no probe request (D-147): its samples are the
     // identity check's, never published as a poll's.
     bool identity_probe = false;
-    // A KEEPALIVE that is the first request of its device's identity cycle,
-    // for a device in IDENTITY (D-147, PR 171 S8): its samples are the
-    // identity check's.
+    // A KEEPALIVE of a device in IDENTITY, its first identity request
+    // outside every chain (D-147, PR 171 S8): its samples are the identity
+    // check's.
     bool identity_keepalive = false;
 };
 
@@ -209,15 +209,18 @@ public:
     // cycle, and the time the device spent in IDENTITY is not an achieved
     // period. In IDENTITY the device sends only its identity cycle, the
     // requests of `plan.identity` in order within its unit's pacing: no
-    // group cycle starts; the keep-alive is the cycle's first request; a
+    // group cycle starts; the keep-alive is the first identity request
+    // outside every chain, and there is none when all are in one; a
     // request of a chain holds the unit until the chain ends; a retry of an
     // identity request is an IDENTITY choice. The cycle takes its turn
     // among the polls of the channel by its due time and the priority of
     // its request's group (255 for a request in no group), and is no
     // achieved period and no pacing limit. Entering IDENTITY makes a cycle
     // due, at once or one identity period after the last cycle started
-    // (`identity_period_ns`); `identity_again` makes the next. Never
-    // allocates.
+    // (`identity_period_ns`); `identity_again` makes the next. A call with
+    // the mode the device already has does nothing: to ask for another
+    // cycle of a device in IDENTITY, the engine calls `identity_again`.
+    // Never allocates.
     SCADA_RT void set_mode(std::uint32_t device, DeviceMode mode) noexcept;
     [[nodiscard]] DeviceMode mode(std::uint32_t device) const noexcept {
         return device < devices_.size() ? devices_[device].mode
@@ -498,6 +501,11 @@ private:
                                          std::size_t& index, std::size_t& part,
                                          bool& in_split,
                                          std::uint32_t& request) const noexcept;
+    // The keep-alive of `device` in IDENTITY: its first identity request
+    // outside every chain (its split form's first part when split); false
+    // when every one is part of a chain.
+    [[nodiscard]] bool identity_keepalive(
+        std::uint32_t device, std::uint32_t& request) const noexcept;
     // An identity cycle holds a unit for a chain of `device`.
     [[nodiscard]] bool identity_chain_open(std::uint32_t device) const noexcept;
     // Moves `device`'s identity cycle past the request `sent`, at `index`

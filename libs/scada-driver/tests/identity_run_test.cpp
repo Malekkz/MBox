@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -86,6 +87,36 @@ TEST(IdentityRun, AnUnreadableValueWaitsForTheDeadline) {
     EXPECT_EQ(run.verdict(200).reason, MismatchReason::UNREADABLE);
 }
 
+TEST(IdentityRun, TheFirstUnreadableCheckIsTheOneNamed) {
+    // Three checks: the first matches, the second and third are unreadable;
+    // past the deadline the second is named.
+    std::vector<IdentityCheck> checks = two_checks();
+    checks.push_back(checks[1]);
+    checks[2].point = 2;
+    IdentityRun run(checks);
+    run.start(100);
+    run.sample(0, Outcome::VALUE, true, string_value("MODEL-A"));
+    run.sample(1, Outcome::NO_VALUE, false, TagValue{});
+    run.sample(2, Outcome::DEVICE_INVALID, false, TagValue{});
+    const IdentityVerdict late = run.verdict(100);
+    EXPECT_EQ(late.kind, Kind::MISMATCH);
+    EXPECT_EQ(late.reason, MismatchReason::UNREADABLE);
+    EXPECT_EQ(late.check, 1U);
+}
+
+TEST(IdentityRun, PastTheDeadlineATimeOutBesideAnUnreadableCheckIsAMismatch) {
+    // The time-out leaves its check not read; the other is unreadable.
+    const std::vector<IdentityCheck> checks = two_checks();
+    IdentityRun run(checks);
+    run.start(100);
+    run.sample(0, Outcome::COMM_FAIL, false, TagValue{});
+    run.sample(1, Outcome::NO_VALUE, false, TagValue{});
+    EXPECT_EQ(run.verdict(99).kind, Kind::NONE);
+    const IdentityVerdict late = run.verdict(100);
+    EXPECT_EQ(late.kind, Kind::MISMATCH);
+    EXPECT_EQ(late.check, 1U);
+}
+
 TEST(IdentityRun, ACommunicationFailureIsNoVerdict) {
     // A time-out, a broken frame or a gateway failure gives COMM_FAIL: the
     // check is read again, whatever the deadline (ruling items 2, 3).
@@ -115,6 +146,26 @@ TEST(IdentityRun, APatternSeesTheCleanedTextAndTheTextShowsIt) {
     EXPECT_EQ(text_of(run), "A?B");
     std::array<char, 16> field{};
     EXPECT_EQ(std::string_view(field.data(), run.check_text(0, field)), "A?B");
+}
+
+TEST(IdentityRun, PastEightyFourChecksTheTextShowsTheFirstEightyFour) {
+    // 84 fields of one byte and 83 separators fill the 250 bytes.
+    std::vector<IdentityCheck> checks(100);
+    for (std::uint32_t index = 0; index < checks.size(); ++index) {
+        checks[index].point = index;
+        checks[index].kind = IdentityCheck::Kind::EQUALS;
+        checks[index].values = {
+            ExpectedValue{.type = tag::TagType::UINT64, .u = 7}};
+    }
+    IdentityRun run(checks);
+    run.start(100);
+    for (std::uint32_t index = 0; index < checks.size(); ++index) {
+        run.sample(index, Outcome::VALUE, true, uint64_value(7));
+    }
+    const std::string text = text_of(run);
+    EXPECT_EQ(text.size(), TAG_STRING_MAX_BYTES);
+    EXPECT_EQ(text.substr(0, 6), "7; 7; ");
+    EXPECT_EQ(text.back(), '7');
 }
 
 TEST(IdentityRun, AMovedRunKeepsItsTexts) {
