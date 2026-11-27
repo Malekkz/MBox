@@ -14,6 +14,7 @@ scada_add_library(scada-driver
     src/failure.cpp
     src/fd_io.cpp
     src/identity.cpp
+    src/identity_run.cpp
     src/identity_text.cpp
     src/plan.cpp
     src/point_rules.cpp
