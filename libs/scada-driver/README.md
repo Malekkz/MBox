@@ -212,8 +212,10 @@ until reload; every other signal has its default.
   RFC 9636's bounds, an instant converts back to itself).
   `fuzz/sample_processing_seeds.py` writes the seeds of the paths
   `sample_processing_fuzz` must reach. `SCADA_FUZZ_STATS=1` makes a run
-  print its writes by quality and the paths it hit; a replay of the corpus
-  (`-runs=0`) shows each of them (#165).
+  print its writes by quality and the paths it hit. The test
+  `sample_processing_fuzz-reach` replays the corpus with
+  `SCADA_FUZZ_REACH=1` and fails unless it gives GOOD and UNCERTAIN writes,
+  substitutes, holds and a good value after each (#165).
 - `zone_file_test.cpp` builds a zone directory in the temporary directory,
   with links inside and out of it, a FIFO and a subdirectory, and reads it
   with `openat2` and with the fallback.

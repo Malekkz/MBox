@@ -5,6 +5,12 @@
 # sample_processing_fuzz.cpp reads: a 10-byte header and 28-byte samples.
 #
 #   python3 -I sample_processing_seeds.py corpus/sample_processing_fuzz
+#
+# It does not make the nine older seeds of the corpus: float-raw-on-integer-tag,
+# negative-zero-written, sequence-a to sequence-d, string-invalid,
+# string-overlong and string-utf8. They came from earlier fuzzing and hand
+# edits, were long enough to run, and are kept as they were, with the two
+# header bytes the target gained in #165 inserted as 0 (no companion rules).
 import struct, sys, os
 out = sys.argv[1]
 
@@ -70,6 +76,20 @@ seeds = {
         + sample(number=1_800_000_000 * 10**9) + sample(number=1_800_000_002 * 10**9),
     'quality-rule-uncertain': header(features=0b00100, gain=1, offset=0, exponent=3)
         + sample(number=0x30) + sample(number=0x31),
+    # A value, a substitute, then a young DEVICE_INVALID hold of the value
+    # read: held without SUBSTITUTED (max_age 3 s: choice % 4 == 2).
+    'substitute-then-device-invalid-hold': header(marker=SUBSTITUTE, choice=MARKER | 2)
+        + sample(number=42) + sample(number=SUBSTITUTE)
+        + sample(outcome='device_invalid', quality=1),
+    # A substitute, then a refused raw value of width 0: the substitute and
+    # its flag are kept.
+    'substitute-then-refused': header(marker=SUBSTITUTE, choice=MARKER)
+        + sample(number=SUBSTITUTE) + sample(width=0, number=7, pattern=0),
+    # An UNCERTAIN time companion whose flags (the raw pattern) hold
+    # SUBSTITUTED: the point takes UNCERTAIN, never the flag. Byte 2 is 10:
+    # the outcome VALUE (10 % 5) and the companion UNCERTAIN (10 % 3).
+    'uncertain-companion-with-substituted': header(features=0b10001, marker=3)
+        + bytes([1, 3, 10, 0]) + sample(number=1_800_000_000 * 10**9, pattern=0x8)[4:],
     'health-bad-then-good': header(features=0b01010, status=0)
         + bytes([1, 2]) + sample(number=42)[2:]   # width 8, status 0: BAD
         + sample(number=43),                       # width 16, status 1: good

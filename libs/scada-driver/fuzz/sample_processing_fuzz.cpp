@@ -17,7 +17,8 @@
 // The features byte of the header turns each companion rule on or off and
 // the companions take raw values of their own, so that GOOD, UNCERTAIN and
 // BAD writes, substitutes and holds all occur (#165). With SCADA_FUZZ_STATS
-// set, a run prints how many writes of each quality and each path it saw.
+// set, a run prints how many writes of each quality and each path it saw;
+// with SCADA_FUZZ_REACH set, it also fails unless it saw each of them.
 
 #include "../src/utf8.h"
 #include "../tests/tzif_builder.h"
@@ -373,6 +374,41 @@ void print_stats() {
     (void)std::fputs(text.c_str(), stderr);
 }
 
+// With SCADA_FUZZ_REACH set: the run fails unless it wrote GOOD and
+// UNCERTAIN values and hit every path of Stats, so that a corpus that no
+// longer reaches them fails its replay (#165).
+void check_reach() {
+    print_stats();
+    const Stats& stats = run_stats();
+    const std::array<std::uint64_t, 7> needed{
+        stats.by_quality.at(scada::tag::to_raw(Quality::GOOD)),
+        stats.by_quality.at(scada::tag::to_raw(Quality::UNCERTAIN)),
+        stats.substitutes,
+        stats.good_after_substitute,
+        stats.holds,
+        stats.expired_holds,
+        stats.good_after_hold};
+    if (std::ranges::find(needed, std::uint64_t{0}) != needed.end()) {
+        (void)std::fputs("not every quality and path was reached\n", stderr);
+        std::_Exit(EXIT_FAILURE);
+    }
+}
+
+// Registers what the environment asks for at exit, once. Called from the
+// first input, so that libFuzzer and the replay driver of the other builds
+// both do it.
+bool register_at_exit() {
+    // NOLINTBEGIN(concurrency-mt-unsafe): read once, by the one thread that
+    // runs the inputs
+    if (std::getenv("SCADA_FUZZ_REACH") != nullptr) {
+        (void)std::atexit(check_reach);
+    } else if (std::getenv("SCADA_FUZZ_STATS") != nullptr) {
+        (void)std::atexit(print_stats);
+    }
+    // NOLINTEND(concurrency-mt-unsafe)
+    return true;
+}
+
 // What the last write of one input was, for the paths that follow it.
 enum class Last : std::uint8_t { OTHER, SUBSTITUTE, HOLD, EXPIRED };
 
@@ -483,17 +519,10 @@ void check_conversions(const RawValue& raw,
 }  // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
-extern "C" int LLVMFuzzerInitialize(int* /*argc*/, char*** /*argv*/) {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any input
-    if (std::getenv("SCADA_FUZZ_STATS") != nullptr) {
-        (void)std::atexit(print_stats);
-    }
-    return 0;
-}
-
-// NOLINTNEXTLINE(readability-identifier-naming): the name is set by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) {
+    static const bool REGISTERED = register_at_exit();
+    (void)REGISTERED;
     if (size < HEADER_BYTES + SAMPLE_BYTES) {
         return 0;
     }
