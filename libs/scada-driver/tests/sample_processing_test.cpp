@@ -327,6 +327,198 @@ PointRules substituting_rules() {
     return rules;
 }
 
+// --- Rules that validate_point_rules refuses give BAD (#169) -------------
+
+// One refusal of validate_point_rules: `refuse` breaks rules that are valid
+// otherwise and substitute KEPT_VALUE for all ones.
+struct RefusedKind {
+    const char* name;
+    void (*refuse)(PointRules&);
+};
+
+constexpr std::uint8_t NO_SUCH_SLOT = 5;
+constexpr std::uint8_t BIT_64 = 64;
+constexpr double HALF = 0.5;
+
+constexpr std::array<RefusedKind, 17> REFUSED_KINDS{{
+    {"exponent companion slot",
+     [](PointRules& rules) {
+         rules.exponent = ExponentRule{.companion = NO_SUCH_SLOT};
+     }},
+    {"time companion slot",
+     [](PointRules& rules) { rules.time_companion = NO_SUCH_SLOT; }},
+    {"quality rule slot",
+     [](PointRules& rules) {
+         rules.quality_rules = {
+             QualityRule{.companion = NO_SUCH_SLOT, .entries = {}}};
+     }},
+    {"health rule slot",
+     [](PointRules& rules) {
+         rules.health = {HealthRule{.companion = NO_SUCH_SLOT, .good = {}}};
+     }},
+    {"bit number",
+     [](PointRules& rules) { rules.bits = {BitRule{.bit = BIT_64}}; }},
+    {"double point states not sorted",
+     [](PointRules& rules) {
+         rules.double_point =
+             DoublePointRule{.states = {{.raw = 2}, {.raw = 1}}};
+     }},
+    {"enumeration with a scale",
+     [](PointRules& rules) {
+         rules.has_enum = true;
+         rules.scale = ScaleRule{.integer = true};
+     }},
+    {"divide_by 0",
+     [](PointRules& rules) {
+         rules.scale = ScaleRule{.form = ScaleRule::Form::DIVIDE_BY,
+                                 .integer = true,
+                                 .divide_by = 0};
+     }},
+    {"integer tag with a binary64 scale",
+     [](PointRules& rules) { rules.scale = ScaleRule{.gain = HALF}; }},
+    {"integer tag on a floating raw type",
+     [](PointRules& rules) { rules.raw_kind = RawKind::FLOAT; }},
+    {"local device time without a zone",
+     [](PointRules& rules) { rules.device_time.local = true; }},
+    {"companion local time without a zone",
+     [](PointRules& rules) { rules.companion_time.local = true; }},
+    {"counter on a floating raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::FLOAT64;
+         rules.raw_kind = RawKind::FLOAT;
+         rules.counter = CounterRule{.limit = UINT16_ALL_ONES};
+         rules.markers.front().substitute = float64_value(-1.0);
+     }},
+    // CF-504 as the compile step gives it (D-115): what sample_processing_fuzz
+    // found with STRING tags on, a STRING tag on a numeric raw that loses
+    // its substitute's text (#169).
+    {"STRING tag on a numeric raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::STRING;
+         rules.markers.front().substitute = string_value({});
+     }},
+    {"string raw on an INT64 tag",
+     [](PointRules& rules) { rules.raw_kind = RawKind::STRING; }},
+    {"BOOL tag on a numeric raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::BOOL;
+         rules.markers.front().substitute = bool_value(true);
+     }},
+    // What sample_processing_fuzz found with STRING tags on (#169): an
+    // enumeration on a STRING tag with an unsigned raw.
+    {"enumeration on a STRING tag",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::STRING;
+         rules.has_enum = true;
+         rules.markers.front().substitute = string_value({});
+     }},
+}};
+
+// sample_processing_fuzz with STRING tags on (#169): a STRING tag on a
+// string raw, with a substitute marker, given a sample of another kind (a
+// signed 8-bit raw whose pattern is the marker's). A marker never applies
+// to a STRING tag: the sample is no string, so BAD with OUT_OF_RANGE, and
+// never a substitute.
+TEST(SampleProcessing, AMarkerNeverAppliesToAStringTag) {
+    constexpr std::uint64_t MARKER = 5;
+    constexpr unsigned INT8 = 8;
+    PointRules rules;
+    rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
+    rules.markers.push_back(InvalidMarker{.pattern = MARKER,
+                                          .action = InvalidAction::SUBSTITUTE,
+                                          .substitute = string_value({})});
+    ASSERT_TRUE(validate_point_rules(rules).ok());
+    Point point(rules);
+    const TagWrite write = point
+                               .feed(RawSample{.outcome = Outcome::VALUE,
+                                               .raw = raw_signed(MARKER, INT8)},
+                                     SECOND)
+                               .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::OUT_OF_RANGE));
+    EXPECT_FALSE(has(write.flags, QualityFlag::SUBSTITUTED));
+}
+
+// The control: the rules are valid, and all ones gives the substitute.
+TEST(SampleProcessing, TheRulesOfTheRefusedKindsSubstituteWhenValid) {
+    const PointRules rules = substituting_rules();
+    ASSERT_TRUE(validate_point_rules(rules).ok());
+    Point point(rules);
+    const TagWrite write = point.value(-1, SECOND).tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(write.flags, QualityFlag::SUBSTITUTED));
+}
+
+// A write of refused rules: BAD with OUT_OF_RANGE, never SUBSTITUTED, no
+// companion's COMM_FAIL, and the driver's time (LOCAL_TIME).
+::testing::AssertionResult refused_write(const TagWrite& write) {
+    if (write.quality == Quality::BAD &&
+        has(write.flags, QualityFlag::OUT_OF_RANGE) &&
+        !has(write.flags, QualityFlag::SUBSTITUTED) &&
+        !has(write.flags, QualityFlag::COMM_FAIL) &&
+        has(write.flags, QualityFlag::LOCAL_TIME) &&
+        !has(write.flags, QualityFlag::TIME_UNCERTAIN)) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "quality " << static_cast<int>(write.quality) << ", flags "
+           << write.flags;
+}
+
+// Whatever path a sample takes, refused rules give BAD with OUT_OF_RANGE:
+// no substitute, no value read.
+TEST(SampleProcessing, RefusedRulesGiveBadOnEveryPath) {
+    for (const RefusedKind& kind : REFUSED_KINDS) {
+        PointRules rules = substituting_rules();
+        kind.refuse(rules);
+        ASSERT_FALSE(validate_point_rules(rules).ok()) << kind.name;
+        Point point(rules);
+        // All ones would be the substitute; FIRST_VALUE a value read.
+        EXPECT_TRUE(refused_write(point.value(-1, SECOND).tag)) << kind.name;
+        EXPECT_TRUE(refused_write(point.value(FIRST_VALUE, 2 * SECOND).tag))
+            << kind.name;
+    }
+}
+
+// Refused rules take no time from a companion: a device time is not used,
+// and a failed companion adds no COMM_FAIL (#169).
+TEST(SampleProcessing, RefusedRulesKeepTheDriversTime) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.time_companion = 0;
+    rules.bits = {BitRule{.bit = BIT_64}};
+    ASSERT_FALSE(validate_point_rules(rules).ok());
+    Point point(rules);
+    const CompanionInput time{.outcome = Outcome::VALUE,
+                              .raw = raw_time(SECOND)};
+    const TagWrite timed = point.value(FIRST_VALUE, SECOND, {&time, 1}).tag;
+    EXPECT_TRUE(refused_write(timed));
+    EXPECT_EQ(timed.source_time_ns, RECEIVE_NS + SECOND);
+    const CompanionInput lost{.outcome = Outcome::COMM_FAIL};
+    EXPECT_TRUE(
+        refused_write(point.value(FIRST_VALUE, 2 * SECOND, {&lost, 1}).tag));
+}
+
+// A young DEVICE_INVALID hold under refused rules is BAD too: the rules
+// are refused before any value is held.
+TEST(SampleProcessing, RefusedRulesHoldNothing) {
+    PointRules rules = int_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.time_companion = NO_SUCH_SLOT;
+    ASSERT_FALSE(validate_point_rules(rules).ok());
+    Point point(rules);
+    (void)point.value(FIRST_VALUE, SECOND);
+    const TagWrite held =
+        point
+            .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                            .mark = {.quality = Quality::UNCERTAIN}},
+                  2 * SECOND)
+            .tag;
+    EXPECT_EQ(held.quality, Quality::BAD);
+    EXPECT_TRUE(has(held.flags, QualityFlag::OUT_OF_RANGE));
+}
+
 TEST(SampleProcessing, AKeptSubstituteKeepsSubstituted) {
     Point point(substituting_rules());
     const TagWrite substitute = point.value(-1, SECOND).tag;
@@ -426,6 +618,9 @@ TEST(SampleProcessing, ASubstituteOfEveryTypeIsSubstituted) {
           float64_value(-1.0)}) {
         PointRules rules;
         rules.tag_type = substitute.type;
+        if (substitute.type == TagType::BOOL) {
+            rules.raw_kind = RawKind::BOOL;  // CF-504 (#169)
+        }
         rules.markers.push_back(
             InvalidMarker{.pattern = UINT16_ALL_ONES,
                           .action = InvalidAction::SUBSTITUTE,
@@ -693,6 +888,7 @@ std::span<const std::byte> bytes_of(std::string_view text) {
 TEST(SampleProcessing, StringIsKeptAndWrittenAgainOnALostAnswer) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     std::string text = "unit 7";
     const ProcessedSample out = point.feed(
@@ -708,6 +904,7 @@ TEST(SampleProcessing, StringIsKeptAndWrittenAgainOnALostAnswer) {
 TEST(SampleProcessing, LongStringIsCutAtACharacterBoundaryWithOverflow) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     // 249 ASCII bytes, then a 2-byte character that would end at byte 251.
     const std::string text = std::string(249, 'a') + "\xC3\xA9" + "bc";
@@ -725,6 +922,7 @@ TEST(SampleProcessing, LongStringIsCutAtACharacterBoundaryWithOverflow) {
 TEST(SampleProcessing, InvalidUtf8IsBad) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     const std::string text = "ab\xC0\x80";  // an overlong NUL
     const TagWrite write =
@@ -1056,7 +1254,8 @@ TEST(SampleProcessing, OutOfRangeRuleFieldsGiveBad) {
                     .entries = {},
                     .otherwise = {.quality = Quality::UNCERTAIN}});
     Point field_point(field);
-    EXPECT_EQ(field_point.value(1, SECOND).tag.quality, Quality::UNCERTAIN);
+    // Refused rules are BAD, not the map's `otherwise` (#169).
+    EXPECT_EQ(field_point.value(1, SECOND).tag.quality, Quality::BAD);
     PointRules slot = int_rules();
     slot.exponent = ExponentRule{.companion = 3};
     slot.tag_type = TagType::FLOAT64;
@@ -1351,6 +1550,7 @@ TEST(SampleProcessing, SubstituteBeforeAnyReadThenStale) {
 TEST(SampleProcessing, StringEdges) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     const std::string exact(TAG_STRING_MAX_BYTES, 'x');
     const TagWrite whole =
@@ -1446,16 +1646,18 @@ TEST(SampleProcessing, TimeValueInTheRepeatedAndSkippedHour) {
             QualityFlag::TIME_UNCERTAIN));
 }
 
-TEST(SampleProcessing, LocalTimeWithoutAZoneIsNeverCertain) {
+// Refused rules (#169): never a certain time, and never a value at all.
+TEST(SampleProcessing, LocalTimeWithoutAZoneIsBad) {
     PointRules rules = int_rules();
     rules.device_time = DeviceTimeRule{.local = true, .synced = true};
     Point point(rules);
-    EXPECT_TRUE(has(
+    const TagWrite write =
         point
             .feed(RawSample{.outcome = Outcome::VALUE, .raw = raw_time(SECOND)},
                   SECOND)
-            .tag.flags,
-        QualityFlag::TIME_UNCERTAIN));
+            .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::OUT_OF_RANGE));
 }
 
 TEST(SampleProcessing, TimeRawOnAFloatTagIsBad) {

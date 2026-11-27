@@ -386,6 +386,11 @@ bool other_key(const std::string& key, const std::string& value,
         const auto type = tag_type_named(value);
         has_tag = type.has_value();
         rules.tag_type = type.value_or(TagType::INT64);
+        // A `rules` line names no raw type; a BOOL tag reads a bool raw
+        // only (CF-504, validate_point_rules; #169).
+        if (rules.tag_type == TagType::BOOL) {
+            rules.raw_kind = RawKind::BOOL;
+        }
         return has_tag;
     }
     if (key == "marker") {

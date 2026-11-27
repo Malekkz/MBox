@@ -1,5 +1,6 @@
-// The types of configuration expressions: each row of the operator and
-// function tables of contract 5.6, and the refusals (D-113).
+// The types of expressions: each row of the operator and function tables of
+// contract 5.6, and the refusals, of configuration expressions (D-113) and
+// of run-time expressions over tags (D-117).
 
 #include "expression_types.h"
 
@@ -7,9 +8,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace scada::conf {
 namespace {
@@ -243,6 +247,156 @@ TEST(ExpressionTypes, NamesAndTags) {
                                      "expression has none")
             << call;
     }
+}
+
+// The type of `text`, a run-time expression over the tags `a.b` (BOOL),
+// `a.i` (INT), `a.r` (REAL), `a.s` (STRING), `v.x` (a virtual tag of unknown
+// type), `q` and `q.quality` (two INT tags), `inv1.power` (REAL) and
+// `inv2.power` (INT), `f1` and `f2` (BOOL), in task `normal` of 100 ms; or
+// its error as "CF-<code> at <column>: <message>" ("silent" for an error of
+// code 0).
+std::string run_time_of(std::string_view text) {
+    ExpressionError syntax;
+    const std::optional<Expression> tree =
+        parse_expression(text, ExpressionKind::RUN_TIME, syntax);
+    if (!tree) {
+        return "syntax: " + syntax.message;
+    }
+    const std::vector<std::pair<std::string_view, TagRead>> tags = {
+        {"a.b", TagRead::BOOL},       {"a.i", TagRead::INT},
+        {"a.r", TagRead::REAL},       {"a.s", TagRead::STRING},
+        {"v.x", TagRead::UNKNOWN},    {"q", TagRead::INT},
+        {"q.quality", TagRead::INT},  {"inv1.power", TagRead::REAL},
+        {"inv2.power", TagRead::INT}, {"f1", TagRead::BOOL},
+        {"f2", TagRead::BOOL}};
+    RunTimeContext context;
+    context.tag = [&tags](std::string_view name) -> std::optional<TagRead> {
+        for (const auto& [tag, read] : tags) {
+            if (tag == name) {
+                return read;
+            }
+        }
+        return std::nullopt;
+    };
+    context.matching = [&tags](std::string_view pattern) {
+        PatternReads found;
+        // The few patterns of these cases, by their text.
+        for (const auto& [tag, read] : tags) {
+            const bool hit =
+                (pattern == "inv*.power" && tag.starts_with("inv")) ||
+                (pattern == "f?" && tag.starts_with("f")) ||
+                (pattern == "a.*" && tag.starts_with("a.")) ||
+                (pattern == "v.*" && tag.starts_with("v."));
+            if (hit) {
+                add_read(found, tag, read);
+            }
+        }
+        return found;
+    };
+    constexpr std::int64_t NORMAL_PERIOD_MS = 100;
+    context.task = "normal";
+    context.period_ms = NORMAL_PERIOD_MS;
+    TypeError error;
+    const std::optional<ValueType> type = run_time_type(*tree, context, error);
+    if (!type) {
+        if (error.code == 0) {
+            return "silent";
+        }
+        return "CF-" + std::to_string(error.code) + " at " +
+               std::to_string(error.column) + ": " + error.message;
+    }
+    return std::string(value_type_name(*type));
+}
+
+// A tag reads as its type, its `.quality` as INT and its `.age` as TIME
+// (5.6); a name that is a tag and an attribute is CF-521.
+TEST(RunTimeTypes, TagsAndAttributes) {
+    EXPECT_EQ(run_time_of("a.b AND f1"), "BOOL");
+    EXPECT_EQ(run_time_of("a.i + 1"), "INT");
+    EXPECT_EQ(run_time_of("a.r * 2"), "REAL");
+    EXPECT_EQ(run_time_of("a.r.quality = GOOD"), "BOOL");
+    EXPECT_EQ(run_time_of("a.r.quality"), "INT");
+    EXPECT_EQ(run_time_of("a.r.age"), "TIME");
+    EXPECT_EQ(run_time_of("a.r.age > T#5s"), "BOOL");
+    EXPECT_EQ(run_time_of("q.quality"),
+              "CF-521 at 1: \"q.quality\" is both a tag and an attribute; "
+              "use quality() or age()");
+    EXPECT_EQ(run_time_of("quality(q)"), "INT");
+    EXPECT_EQ(run_time_of("a.nothing > 1"),
+              "CF-310 at 1: tag \"a.nothing\" does not exist");
+    EXPECT_EQ(run_time_of("a.nothing.quality"),
+              "CF-310 at 1: tag \"a.nothing.quality\" does not exist");
+    EXPECT_EQ(run_time_of("a.s = 1"),
+              "CF-522 at 1: string tag \"a.s\" cannot be used in an "
+              "expression");
+    EXPECT_EQ(run_time_of("a.s.quality"),
+              "CF-522 at 1: string tag \"a.s\" cannot be used in an "
+              "expression");
+    EXPECT_EQ(run_time_of("v.x + 1"), "silent");
+    EXPECT_EQ(run_time_of("v.x.quality"), "INT");
+    EXPECT_EQ(run_time_of("tag(\"a.i\") + 1"), "INT");
+    EXPECT_EQ(run_time_of("tag(\"a.none\")"),
+              "CF-310 at 1: tag \"a.none\" does not exist");
+    EXPECT_EQ(run_time_of("tag(\"a.*\")"),
+              "CF-523 at 1: expression: tag names one tag, not the pattern "
+              "\"a.*\"");
+    EXPECT_EQ(run_time_of("NOT a.i"),
+              "CF-523 at 1: expression: NOT needs BOOL, not INT");
+}
+
+// The functions that read tags (5.6).
+TEST(RunTimeTypes, FunctionsOfTags) {
+    EXPECT_EQ(run_time_of("quality(a.r)"), "INT");
+    EXPECT_EQ(run_time_of("age(tag(\"a.r\"))"), "TIME");
+    EXPECT_EQ(run_time_of("is_good(a.b)"), "BOOL");
+    EXPECT_EQ(run_time_of("is_good(1)"),
+              "CF-523 at 1: expression: is_good needs a tag reference");
+    EXPECT_EQ(run_time_of("is_good(a.r.quality)"),
+              "CF-523 at 1: expression: is_good needs a tag reference");
+    EXPECT_EQ(run_time_of("sum(\"inv*.power\")"), "REAL");
+    EXPECT_EQ(run_time_of("sum(a.i, inv2.power)"), "INT");
+    EXPECT_EQ(run_time_of("min_of(a.i, a.r)"), "REAL");
+    EXPECT_EQ(run_time_of("avg(a.i, inv2.power)"), "REAL");
+    EXPECT_EQ(run_time_of("count_good(\"f?\")"), "INT");
+    // A pattern's error names the tag of the wrong type (S1 of the review
+    // of #163), in the text of section 10 for CF-522.
+    EXPECT_EQ(run_time_of("sum(\"f?\")"),
+              "CF-523 at 1: expression: sum needs numbers, not BOOL: tag "
+              "\"f1\" of pattern \"f?\"");
+    EXPECT_EQ(run_time_of("max_of(\"none.*\")"),
+              "CF-311 at 8: pattern \"none.*\" matches no tag");
+    EXPECT_EQ(run_time_of("count_good(\"a.*\")"),
+              "CF-522 at 12: string tag \"a.s\" cannot be used in an "
+              "expression");
+    EXPECT_EQ(run_time_of("avg(\"v.*\")"), "silent");
+    EXPECT_EQ(run_time_of("sum(a.i)"),
+              "CF-523 at 1: expression: sum takes one pattern or two or more "
+              "tag references");
+    EXPECT_EQ(run_time_of("sum(a.i, 1)"),
+              "CF-523 at 1: expression: sum takes one pattern or two or more "
+              "tag references");
+}
+
+// A time function's window is 1 to 10,000 cycles of its task (CF-524).
+TEST(RunTimeTypes, TheWindowOfATimeFunction) {
+    EXPECT_EQ(run_time_of("moving_avg(a.r, T#5m)"), "REAL");
+    EXPECT_EQ(run_time_of("rate(a.i, T#100ms)"), "REAL");
+    EXPECT_EQ(run_time_of("totalise(a.r, T#1000s)"), "REAL");
+    EXPECT_EQ(run_time_of("rate(a.r, T#99ms)"),
+              "CF-524 at 11: rate: the window must be 1 to 10000 cycles of "
+              "task \"normal\"");
+    EXPECT_EQ(run_time_of("rate(a.r, T#1000001ms)"),
+              "CF-524 at 11: rate: the window must be 1 to 10000 cycles of "
+              "task \"normal\"");
+    EXPECT_EQ(run_time_of("rate(a.b, T#1s)"),
+              "CF-523 at 1: expression: rate needs a tag reference that is a "
+              "number as argument 1");
+    EXPECT_EQ(run_time_of("rate(a.r + 1, T#1s)"),
+              "CF-523 at 1: expression: rate needs a tag reference that is a "
+              "number as argument 1");
+    EXPECT_EQ(run_time_of("rate(a.r, a.i)"),
+              "CF-523 at 1: expression: rate needs a TIME literal as "
+              "argument 2");
 }
 
 }  // namespace

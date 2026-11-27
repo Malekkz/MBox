@@ -1,0 +1,4 @@
+alarms:
+  - { name: site.dry, type: expression, expr: "site.run AND site.pump.flow < 1.0", priority: high, area: site }
+  - { tag: site.flow, type: high, limit: 4, priority: high, area: site, suppress_when: "site.count" }
+  - { tag: site.flow, type: low, limit: 1, priority: high, area: site, suppress_when: "NOT site.ok" }

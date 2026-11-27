@@ -9,6 +9,8 @@
 #include "scada/conf/expand.h"
 #include "scada/conf/tree.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 
@@ -34,8 +36,10 @@ namespace scada::conf {
 //   each computed value against its key's rules (CF-204 and others), one
 //   error for one cause at many instances (D-115); the tags of the expanded
 //   tree and every reference to a tag outside an expression, a point within
-//   a device or a poll group (CF-301, CF-302, CF-310, CF-312, CF-604; D-116).
-// The rest of stage 5 comes with slices 7b to 7e of #100.
+//   a device or a poll group (CF-301, CF-302, CF-310, CF-312, CF-604; D-116);
+//   every run-time expression against those tags, virtual tags typed first
+//   (CF-310, CF-311, CF-521 to CF-525, CF-527; D-117).
+// The rest of stage 5 comes with slices 7c to 7e of #100.
 //
 // Fails when the tree cannot be read (see `scan_tree`), and with INTERNAL
 // when a computed value's key has no rule in its schema, or a `oneOf` gives
@@ -46,11 +50,28 @@ namespace scada::conf {
 
 // What `validate_and_expand` gives: the report, and the expanded tree of
 // stage 4 when the report has no error.
+// The work of stage 5 on run-time expressions (D-117), for tests of its
+// bound: a pattern compared with a name, in the graph of virtual tags and
+// interlocks and when a pattern is resolved; the patterns whose summary is
+// kept; and the results of expression texts kept.
+struct RunTimeCounts {
+    std::size_t comparisons = 0;
+    std::size_t kept_patterns = 0;
+    std::size_t kept_results = 0;
+    // The bytes of text those summaries and results hold.
+    std::size_t kept_bytes = 0;
+    // The work of matching patterns, in the units of
+    // `ExpandLimits::run_time_pattern_work`.
+    std::uint64_t pattern_work = 0;
+};
+
 struct Validation {
     Report report;
     std::optional<ExpandedTree> expanded;
     // What stage 4 held to report its errors (expand.h).
     ExpandCounts expansion;
+    // The work of stage 5 on run-time expressions.
+    RunTimeCounts run_time;
 };
 
 // As `validate_tree`, and keeps the expanded tree, which the expanded files

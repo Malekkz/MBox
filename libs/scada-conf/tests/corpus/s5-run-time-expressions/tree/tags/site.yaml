@@ -1,0 +1,20 @@
+tags:
+  - { name: site.flow, type: internal, value_type: float64 }
+  - { name: site.count, type: internal, value_type: int64 }
+  - { name: site.run, type: internal, value_type: bool }
+  - { name: site.label, type: internal, value_type: string }
+  - { name: site.lvl, type: internal, value_type: float64 }
+  - { name: site.lvl.quality, type: internal, value_type: int64 }
+  - { name: site.inv1.power, type: internal, value_type: float64 }
+  - { name: site.inv2.power, type: internal, value_type: float64 }
+  - { name: site.total, type: virtual, expr: "sum(\"site.inv*.power\")" }
+  - { name: site.mean, type: virtual, expr: "avg(\"site.pv*.power\")" }
+  - { name: site.ok, type: virtual, expr: "site.total > 1 AND site.run", value_type: bool }
+  - { name: site.half, type: virtual, expr: "site.count / 2", value_type: int64 }
+  - { name: site.loop1, type: virtual, expr: "site.loop2 + 1" }
+  - { name: site.loop2, type: virtual, expr: "site.loop1 * 2" }
+  - { name: site.after, type: virtual, expr: "site.loop1 + site.total" }
+  - { name: site.rate, type: virtual, expr: "rate(site.flow, T#10ms)" }
+  - { name: site.slow_rate, type: virtual, expr: "rate(site.flow, T#10s)", task: slow }
+  - { name: site.text, type: virtual, expr: "site.label = 1" }
+  - { name: site.ambig, type: virtual, expr: "site.lvl.quality + 1" }

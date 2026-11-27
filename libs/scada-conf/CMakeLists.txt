@@ -53,6 +53,7 @@ scada_add_library(scada-conf
     src/read.cpp
     src/references.cpp
     src/rules.cpp
+    src/runtime_expressions.cpp
     src/scalar.cpp
     src/schema.cpp
     src/tag_names.cpp

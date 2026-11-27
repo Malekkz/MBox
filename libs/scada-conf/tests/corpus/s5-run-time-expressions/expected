@@ -1,0 +1,19 @@
+# Run-time expressions against the tags of the tree (contract 5.6, 2.5;
+# D-117, slice 7b of #100). In order: an alarm's expression names no tag
+# (CF-310); a suppress_when and an interlock condition that are INT, not
+# BOOL (CF-523); a pattern that matches no tag (CF-311); a virtual tag whose
+# given value_type is not the REAL its expression gives (CF-527); two virtual
+# tags that read each other (CF-525, once; site.after, which reads them,
+# gives no error of its own); a rate whose window is under one cycle of
+# normal (CF-524; the same in slow passes); a STRING tag (CF-522); a name
+# that is a tag and an attribute (CF-521). site.total, site.ok, the low
+# alarm's suppress_when and site.permit pass. Invented.
+alarms/site.yaml:2:61: CF-310
+alarms/site.yaml:3:89: CF-523
+outputs/site.yaml:3:50: CF-523
+tags/site.yaml:11:45: CF-311
+tags/site.yaml:13:75: CF-527
+tags/site.yaml:14:13: CF-525
+tags/site.yaml:17:62: CF-524
+tags/site.yaml:19:46: CF-522
+tags/site.yaml:20:47: CF-521

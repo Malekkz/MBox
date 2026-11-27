@@ -8,3 +8,12 @@ tags:
   - name: site.limit
     type: virtual
     expr: "if(site.ok, limit(0, site.sum, 100), -1.5e2)"
+  - { name: ps1.power.avg, type: internal, value_type: float64 }
+  - { name: ps1.inv1.power, type: internal, value_type: float64 }
+  - { name: ps1.inv2.power, type: internal, value_type: int64 }
+  - { name: in.flow, type: internal, value_type: float64 }
+  - { name: mod.x, type: internal, value_type: int64 }
+  - { name: site.a, type: internal, value_type: int64 }
+  - { name: site.b, type: internal, value_type: float64 }
+  - { name: site.pump-1.ok, type: internal, value_type: bool }
+  - { name: site.trip, type: internal, value_type: bool }
