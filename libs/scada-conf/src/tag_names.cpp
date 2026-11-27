@@ -1543,28 +1543,41 @@ void TagNames::set_value_type(std::string_view name,
 
 void TagNames::each_with_prefix(
     std::string_view prefix,
-    const std::function<void(std::string_view, const TagInfo&)>& visit) const {
-    // The tags of devices and channels are made and sorted; the stored ones
-    // are walked in place, and the two merged by name.
-    std::vector<std::pair<std::string, TagInfo>> made;
-    family_with_prefix(prefix, made);
-    std::ranges::sort(made, {}, &std::pair<std::string, TagInfo>::first);
-    auto next = made.begin();
+    const std::function<bool(std::string_view, const TagInfo&)>& visit) const {
+    if (!family_made_) {
+        family_with_prefix({}, family_);
+        std::ranges::sort(family_, {}, &std::pair<std::string, TagInfo>::first);
+        family_made_ = true;
+    }
+    // The tags of devices and channels under `prefix`, merged by name with
+    // the stored ones, which are walked in place.
+    auto next = std::ranges::lower_bound(
+        family_, prefix, {}, &std::pair<std::string, TagInfo>::first);
+    const auto made_end = family_.end();
+    const auto in_prefix = [prefix, made_end](auto made) {
+        return made != made_end && made->first.starts_with(prefix);
+    };
     for (auto entry = tags_.lower_bound(prefix);
          entry != tags_.end() && entry->first.starts_with(prefix); ++entry) {
-        for (; next != made.end() && next->first < entry->first; ++next) {
-            visit(next->first, next->second);
+        for (; in_prefix(next) && next->first < entry->first; ++next) {
+            if (!visit(next->first, next->second)) {
+                return;
+            }
         }
         // A stored name that is also a device's or a channel's tag is
         // CF-302 (D-116); it is visited once, as stored (S3 of the review
         // of #163).
-        while (next != made.end() && next->first == entry->first) {
+        while (in_prefix(next) && next->first == entry->first) {
             ++next;
         }
-        visit(entry->first, entry->second);
+        if (!visit(entry->first, entry->second)) {
+            return;
+        }
     }
-    for (; next != made.end(); ++next) {
-        visit(next->first, next->second);
+    for (; in_prefix(next); ++next) {
+        if (!visit(next->first, next->second)) {
+            return;
+        }
     }
 }
 

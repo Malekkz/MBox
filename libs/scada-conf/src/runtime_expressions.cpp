@@ -361,19 +361,23 @@ private:
             return kept->second;
         }
         PatternReads reads;
+        if (over_budget_) {
+            return reads;  // not read: what checks it reports nothing
+        }
         tags_->each_with_prefix(
             pattern.substr(0, prefix_of(pattern)),
             [this, &reads, pattern](std::string_view name,
                                     const TagInfo& info) {
-                if (over_budget_) {
-                    return;
-                }
                 ++counts_.comparisons;
                 std::uint64_t steps = 0;
                 const bool matched = matches_name_pattern(pattern, name, steps);
-                if (spend(RUN_TIME_NAME_WORK + steps) && matched) {
+                if (!spend(RUN_TIME_NAME_WORK + steps)) {
+                    return false;  // past the budget: stop at once
+                }
+                if (matched) {
                     add_read(reads, name, read_of(info.value_type));
                 }
+                return true;
             });
         if (over_budget_) {
             return reads;  // not read: what checks it reports nothing

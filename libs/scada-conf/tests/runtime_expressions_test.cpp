@@ -432,5 +432,51 @@ TEST(RunTimeExpressions, TheWorkOfPatternsHasABudget) {
     EXPECT_EQ(with_budget(one_use(), exact).error_count, 1U);
 }
 
+// Item 3 of the budget check: a budget below one name stops the first
+// pattern at its first name. Neither it nor a later use of the pattern
+// reports a CF-311 of a pattern resolved in part, and nothing after it is
+// checked.
+TEST(RunTimeExpressions, BelowOneNameNothingIsReportedButCF113) {
+    ExpandLimits tiny;
+    tiny.run_time_pattern_work = RUN_TIME_NAME_WORK - 1;
+    const Expanded stopped = with_budget(
+        one_use() + virtual_tag("v.t", R"(sum(\"w.*\") + 1)"), tiny);
+    EXPECT_EQ(stopped.error_count, 1U);
+    EXPECT_EQ(stopped.lines,
+              Lines{"tags/site.yaml:105:39: error CF-113: the pattern matching "
+                    "of run-time expressions exceeds its limit of " +
+                    std::to_string(RUN_TIME_NAME_WORK - 1) + " units"});
+}
+
+// Item 3: the walk of the graph counts too. A pattern over 100 virtual
+// tags passes the budget while its vertex is walked: CF-113 at the virtual
+// tag whose inputs were being walked, and nothing is told from the graph:
+// neither the later virtual tag's CF-523 nor the cycle of v.c1 and v.c2.
+TEST(RunTimeExpressions, TheGraphWalkCountsAgainstTheBudget) {
+    std::string tags = "tags:\n" + std::string(BASE_TAGS);
+    for (std::size_t i = 0; i < BUDGET_TAGS; ++i) {
+        tags += virtual_tag("v.w" + std::to_string(i), "1");
+    }
+    tags += virtual_tag("v.s", R"(sum(\"v.w*\"))") +
+            virtual_tag("v.bad", "a.i AND a.b") +
+            virtual_tag("v.c1", "v.c2 + 1") + virtual_tag("v.c2", "v.c1 + 1");
+    const Files files{{"areas.yaml", std::string(AREAS)},
+                      {"tags/site.yaml", tags}};
+    const Expanded whole = expand_limited(files, {});
+    ASSERT_EQ(whole.lines,
+              (Lines{"tags/site.yaml:106:46: error CF-523: expression: AND "
+                     "needs BOOL, not INT",
+                     "tags/site.yaml:107:13: error CF-525: virtual tags form "
+                     "a cycle: v.c1, v.c2"}));
+    ExpandLimits short_of;
+    short_of.run_time_pattern_work = RUN_TIME_NAME_WORK * BUDGET_TAGS / 2;
+    const Expanded stopped = expand_limited(files, short_of);
+    EXPECT_EQ(stopped.error_count, 1U);
+    EXPECT_EQ(stopped.lines,
+              Lines{"tags/site.yaml:105:13: error CF-113: the pattern matching "
+                    "of run-time expressions exceeds its limit of " +
+                    std::to_string(short_of.run_time_pattern_work) + " units"});
+}
+
 }  // namespace
 }  // namespace scada::conf

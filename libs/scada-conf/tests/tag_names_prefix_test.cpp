@@ -53,6 +53,7 @@ std::vector<std::string> names_under(std::string_view prefix) {
                           [&names](std::string_view name, const TagInfo& info) {
                               EXPECT_FALSE(info.value_type.empty()) << name;
                               names.emplace_back(name);
+                              return true;
                           });
     return names;
 }
@@ -82,6 +83,29 @@ TEST(TagNamesPrefix, AStoredNameOfADeviceTagIsVisitedOnce) {
               "drivers/modbus/line1.yaml:8:13: error CF-301: tag names "
               "starting with sys. are reserved");
     EXPECT_EQ(validation.value().run_time.comparisons, 1U);
+}
+
+// A visit that returns false ends the walk (item 2 of the budget check).
+TEST(TagNamesPrefix, AVisitEndsTheWalk) {
+    const Result<Validation> validation = validated(
+        {{"templates/meter_a.yaml", std::string(METER)},
+         {"drivers/modbus/line1.yaml",
+          channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n")}});
+    ASSERT_TRUE(validation.ok());
+    const std::optional<ExpandedTree>& expanded = validation.value().expanded;
+    if (!expanded) {
+        FAIL() << "not expanded";
+    }
+    Diagnostics diagnostics;
+    const TagNames tags = collect_tags(*expanded, {}, diagnostics);
+    std::vector<std::string> names;
+    tags.each_with_prefix("sys.dev.ps1.m1.re",
+                          [&names](std::string_view name, const TagInfo&) {
+                              names.emplace_back(name);
+                              return names.size() < 2;
+                          });
+    EXPECT_EQ(names, (std::vector<std::string>{"sys.dev.ps1.m1.refusals",
+                                               "sys.dev.ps1.m1.requests"}));
 }
 
 // A prefix within one device's tags gives its tags only, in name order.
