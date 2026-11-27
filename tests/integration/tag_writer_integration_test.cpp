@@ -2,7 +2,8 @@
 // scada-tagd, in this process attached as `drv-test` (driver interface
 // contract 9.1; decision D-142; delta 5 of the review of PR 150): a STRING
 // write waits for the notify, a point without a tag is skipped, a refused
-// write is counted, and 9.1 by owner slot keeps every value as stored.
+// write is counted, and 9.1 by owner slot keeps every value as stored, with
+// SUBSTITUTED on a kept substitute (D-145).
 
 #include "tagd_fixture.h"
 
@@ -210,6 +211,27 @@ TEST_F(TagWriterTest, NineOneByOwnerSlotKeepsEveryValueAsStored) {
     EXPECT_NE(text_value().quality_flags & SCADA_FLAG_NOT_INIT, 0);
     // Another process's owner is refused: the start would fail.
     EXPECT_FALSE(not_initialise_theirs().ok());
+}
+
+// The writes of 9.1 keep SUBSTITUTED with a kept substitute value, and
+// only with one (D-145; review R1 of PR 157).
+TEST_F(TagWriterTest, NineOneKeepsSubstitutedWithTheValue) {
+    TagWriter tags = writer();
+    ProcessedSample substitute = good(scada::driver::int64_value(4));
+    substitute.tag.quality = tag::Quality::UNCERTAIN;
+    substitute.tag.flags = tag::to_raw(tag::QualityFlag::SUBSTITUTED);
+    tags.write_point(0, 0, substitute);
+    tags.write_point(
+        0, 2, good(TagValue{.type = tag::TagType::STRING, .text = "read"}));
+    tags.notify();
+    ASSERT_TRUE(not_initialise_ours().ok());
+    const scada_value number = this->number();
+    EXPECT_EQ(number.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(std::bit_cast<std::int64_t>(number.value), 4);
+    // LOCAL_TIME is the library's: the write gave no source time.
+    EXPECT_EQ(number.quality_flags & ~SCADA_FLAG_LOCAL_TIME,
+              SCADA_FLAG_NOT_INIT | SCADA_FLAG_SUBSTITUTED);
+    EXPECT_EQ(text_value().quality_flags & SCADA_FLAG_SUBSTITUTED, 0);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

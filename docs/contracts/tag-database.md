@@ -2583,7 +2583,9 @@ under 1.1 with the same `config_hash`.
 - SUBSTITUTED (section 6). Same bit, same encoding; only the meaning is
   wider. A consumer that reads SUBSTITUTED as "entered by a person" uses
   the journal record instead. No code read the narrower meaning at 1.0.
-  Drivers set SUBSTITUTED for the two new cases with #154, not yet.
+  Drivers set SUBSTITUTED for a configured substitute since driver
+  interface contract 0.7 (#154). A value forced at the device is room
+  only, until a protocol carries a value with a mark (#136).
 - The age bound and the kept record (sections 12 and 13). The bound is an
   addition: a process that does not call `scada_tag_attach_retain`
   restores UNCERTAIN, as under 1.0. The kept record is not limited to

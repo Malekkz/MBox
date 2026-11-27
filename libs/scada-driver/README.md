@@ -125,8 +125,11 @@ D-142 record the choices the contracts left open.
   reads 12.3; `to_raw_value` returns 12.3 as the value written.
 - **A late poll group does not catch up.** When a cycle ends after the next
   one was due, the next starts at once, and missed cycles are not sent.
-- **SUBSTITUTED** is not written until tag database contract 1.1 (#89): a
-  configured substitute is UNCERTAIN, and incoming flags are masked.
+- **SUBSTITUTED comes only from a configured substitute** (D-145): the
+  `substitute` action writes its value UNCERTAIN with SUBSTITUTED, and every
+  write that keeps that value, across a restart too, keeps the flag. A
+  companion does not pass it on. A value forced at the device is not marked
+  yet: no protocol carries a value with a mark (#136).
 - **No integer tag on a floating raw type** (CF-504, D-134), other than an
   enumeration or a double point: the rules are refused, a read is BAD with
   OUT_OF_RANGE and a write is refused. Use `value_type: float64`.

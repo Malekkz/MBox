@@ -33,28 +33,38 @@ struct QualityMark {
     std::uint16_t flags = 0;
 };
 
-// The flags a device may give a value, through a protocol's mapping of a
-// NO_VALUE or DEVICE_INVALID answer, an invalid marker or a `quality_from`
-// map (driver interface contract 5.2, table of outcomes; CS 4.7). Every
-// incoming mark is masked to these. SUBSTITUTED is a value the device
-// reports as forced (contract 5.2, R-6; tag database contract 1.1, section
-// 6); STALE, COMM_FAIL, NOT_INIT, LOCAL_TIME and TIME_UNCERTAIN are set by
-// the framework itself,
-// OWNER_DOWN is never stored and RESTORED is the library's (tag database
-// contract 6, 6.2, 6.3).
+// The flags the configuration may give a value: the flags of an invalid
+// marker with action `bad` and of a `quality_from` entry (CS 4.7). Every
+// configured mark is masked to these. SUBSTITUTED is not among them: the
+// configuration gives it only through the `substitute` action (contract
+// 5.2, R-6; review R2 of #157).
+inline constexpr std::uint16_t CONFIG_FLAGS_MASK =
+    tag::to_raw(tag::QualityFlag::OUT_OF_RANGE) |
+    tag::to_raw(tag::QualityFlag::OVERFLOW) |
+    tag::to_raw(tag::QualityFlag::BLOCKED) |
+    tag::to_raw(tag::QualityFlag::TEST);
+
+// The flags a protocol's mark may give a value: its mapping of a NO_VALUE
+// or DEVICE_INVALID answer (driver interface contract 5.2, table of
+// outcomes). Every protocol mark is masked to these. SUBSTITUTED for a
+// value the device reports as forced is room only: no protocol carries a
+// value with a mark yet, and through NO_VALUE or DEVICE_INVALID the flag
+// would land on a value the device did not give (review R3 of #157). STALE,
+// COMM_FAIL, NOT_INIT, LOCAL_TIME and TIME_UNCERTAIN are set by the
+// framework itself, OWNER_DOWN is never stored and RESTORED is the
+// library's (tag database contract 6, 6.2, 6.3).
 inline constexpr std::uint16_t DEVICE_FLAGS_MASK =
     tag::to_raw(tag::QualityFlag::OUT_OF_RANGE) |
     tag::to_raw(tag::QualityFlag::OVERFLOW) |
     tag::to_raw(tag::QualityFlag::BLOCKED) |
-    tag::to_raw(tag::QualityFlag::TEST) |
-    tag::to_raw(tag::QualityFlag::SUBSTITUTED);
+    tag::to_raw(tag::QualityFlag::TEST);
 
 // What a matching invalid marker, or `on_invalid`, does (CS 4.7).
 enum class InvalidAction : std::uint8_t {
     BAD = 1,         // BAD with the marker's flags
     KEEP_LAST = 2,   // the last valid value, UNCERTAIN and STALE, BAD after
                      // `max_age`
-    SUBSTITUTE = 3,  // the configured value, UNCERTAIN
+    SUBSTITUTE = 3,  // the configured value, UNCERTAIN with SUBSTITUTED
 };
 
 // One entry of `invalid_values` (CS 4.7), with its action resolved.
@@ -62,7 +72,7 @@ struct InvalidMarker {
     std::uint64_t pattern = 0;  // in the raw width; ignored when `any_nan`
     bool any_nan = false;       // `nan`: any NaN of a floating raw type
     InvalidAction action = InvalidAction::BAD;
-    std::uint16_t flags = 0;  // masked to DEVICE_FLAGS_MASK
+    std::uint16_t flags = 0;  // masked to CONFIG_FLAGS_MASK
     // For SUBSTITUTE, in the tag's type; never a STRING (a marker never
     // matches a string), so it borrows nothing.
     TagValue substitute{};
@@ -138,7 +148,7 @@ inline constexpr std::uint8_t MAX_BIT_NUMBER = 63;
 struct QualityRule {
     struct Entry {
         std::int64_t key = 0;
-        QualityMark mark;  // flags masked to DEVICE_FLAGS_MASK
+        QualityMark mark;  // flags masked to CONFIG_FLAGS_MASK
     };
     std::uint8_t companion = 0;  // slot; ignored when `self`
     bool self = false;           // the point's own raw word

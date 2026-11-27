@@ -20,8 +20,17 @@
 namespace scada::driver::detail {
 namespace {
 
+// The flags of the 9.1 write of a tag that holds `stored`: NOT_INIT, and
+// SUBSTITUTED if the stored value carries it.
+std::uint16_t kept_flags(const scada_value& stored) noexcept {
+    return static_cast<std::uint16_t>(
+        SCADA_FLAG_NOT_INIT | (stored.quality_flags & SCADA_FLAG_SUBSTITUTED));
+}
+
 // The write of 9.1 for one tag: value as stored, BAD with NOT_INIT, source
-// time 0; a RESTORED tag is left alone. SCADA_OK or the library's code.
+// time 0; a RESTORED tag is left alone. SUBSTITUTED describes the stored
+// value and stays with it (review R1 of #157). SCADA_OK or the library's
+// code.
 int write_one_not_initialised(scada_ctx* ctx, std::uint32_t target) noexcept {
     scada_value stored{};
     int code = scada_tag_read(ctx, target, &stored);
@@ -40,14 +49,13 @@ int write_one_not_initialised(scada_ctx* ctx, std::uint32_t target) noexcept {
             return code;
         }
         return scada_tag_write_string(ctx, target, text.data(), length,
-                                      SCADA_QUALITY_BAD, SCADA_FLAG_NOT_INIT,
-                                      0);
+                                      SCADA_QUALITY_BAD, kept_flags(stored), 0);
     }
     scada_value value{};
     value.type = stored.type;
     value.value = stored.value;
     value.quality = SCADA_QUALITY_BAD;
-    value.quality_flags = SCADA_FLAG_NOT_INIT;
+    value.quality_flags = kept_flags(stored);
     value.source_time_ns = 0;
     return scada_tag_write(ctx, target, &value);
 }
@@ -193,7 +201,8 @@ void TagWriter::seed(ChannelEngine& engine,
             }
             engine.seed_point(
                 device, point,
-                from_scada_value(stored, std::span(text).first(length)));
+                from_scada_value(stored, std::span(text).first(length)),
+                (stored.quality_flags & SCADA_FLAG_SUBSTITUTED) != 0);
         }
     }
 }

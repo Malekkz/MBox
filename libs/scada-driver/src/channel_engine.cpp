@@ -219,9 +219,11 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
 }
 
 void ChannelEngine::seed_point(std::uint32_t device, std::uint32_t point,
-                               const TagValue& stored) noexcept {
+                               const TagValue& stored,
+                               bool substituted) noexcept {
     if (device < devices_.size() && point < devices_[device].points.size()) {
-        seed_point_state(devices_[device].points[point].state, stored);
+        seed_point_state(devices_[device].points[point].state, stored,
+                         substituted);
     }
 }
 

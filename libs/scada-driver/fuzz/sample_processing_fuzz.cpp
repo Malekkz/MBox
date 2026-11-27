@@ -8,6 +8,10 @@
 //   contract 6), never OWNER_DOWN or RESTORED (contract 5.2);
 // - a STRING value is at most 250 bytes of well-formed UTF-8;
 // - a GOOD or UNCERTAIN FLOAT64 value is finite;
+// - a write carries SUBSTITUTED exactly when its value is a configured
+//   substitute, given now or kept (review R1 of #157). A second state runs
+//   the same samples with another substitute value: the values written
+//   differ exactly when the value is a substitute;
 // - a write conversion that succeeds gives a pattern within its width, and
 //   on the integer path reads back as the request.
 
@@ -254,6 +258,36 @@ bool same_value(const scada::driver::TagValue& got,
     return false;
 }
 
+// A value of `type` that is not zero_value(type), for the second state.
+scada::driver::TagValue other_substitute(TagType type) {
+    switch (type) {
+        case TagType::BOOL:
+            return scada::driver::bool_value(true);
+        case TagType::INT64:
+            return scada::driver::int64_value(1);
+        case TagType::UINT64:
+            return scada::driver::uint64_value(1);
+        case TagType::FLOAT64:
+            return scada::driver::float64_value(1.0);
+        case TagType::STRING:
+            break;
+    }
+    return scada::driver::zero_value(type);
+}
+
+// SUBSTITUTED both ways: `write` and `other` are the writes of the two
+// states. A value that differs is a substitute and has the flag; a value
+// that does not is none and has not.
+void check_substituted(const TagWrite& write, const TagWrite& other) {
+    const bool substitute = !same_value(write.value, other.value);
+    const auto marked = [](const TagWrite& one) {
+        return (one.flags & scada::tag::to_raw(QualityFlag::SUBSTITUTED)) != 0;
+    };
+    if (marked(write) != substitute || marked(other) != substitute) {
+        std::abort();
+    }
+}
+
 // The raw value of a write, read back by the processing with the same
 // rules, gives the value the write reports as written (contract 8.4; CS 4.7:
 // read and write of an integer value type are exact inverses).
@@ -340,10 +374,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         std::as_bytes(input.subspan(HEADER_BYTES + (samples * SAMPLE_BYTES)));
 
     const PointRules rules = rules_from(header);
+    PointRules other_rules = rules;
+    for (scada::driver::InvalidMarker& marker : other_rules.markers) {
+        if (marker.action == scada::driver::InvalidAction::SUBSTITUTE) {
+            marker.substitute = other_substitute(rules.tag_type);
+        }
+    }
     PointState state;
     scada::driver::init_point_state(state, rules.tag_type);
     scada::driver::reset_point_state(state, rules.tag_type, 0);
+    PointState other_state;
+    scada::driver::init_point_state(other_state, rules.tag_type);
+    scada::driver::reset_point_state(other_state, rules.tag_type, 0);
     ProcessedSample out;
+    ProcessedSample other;
     for (std::size_t index = 0; index < samples; ++index) {
         const std::span<const std::uint8_t> bytes =
             input.subspan(HEADER_BYTES + (index * SAMPLE_BYTES), SAMPLE_BYTES);
@@ -364,15 +408,23 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                            .raw = raw,
                            .stale = (bytes[0] & 1U) != 0}};
         const auto step = static_cast<std::int64_t>(index + 1);
-        scada::driver::process_sample(
-            rules, state, sample, companions,
-            SampleTimes{.receive_time_ns = step * SECOND,
-                        .receive_mono_ns = step * SECOND},
-            out);
+        const SampleTimes times{.receive_time_ns = step * SECOND,
+                                .receive_mono_ns = step * SECOND};
+        scada::driver::process_sample(rules, state, sample, companions, times,
+                                      out);
+        scada::driver::process_sample(other_rules, other_state, sample,
+                                      companions, times, other);
         check(out.tag);
-        if (scada::driver::check_stale(rules, state,
-                                       (step * SECOND) + (SECOND / 2), out)) {
+        check_substituted(out.tag, other.tag);
+        const std::int64_t later = (step * SECOND) + (SECOND / 2);
+        const bool stale = scada::driver::check_stale(rules, state, later, out);
+        if (scada::driver::check_stale(other_rules, other_state, later,
+                                       other) != stale) {
+            std::abort();
+        }
+        if (stale) {
             check(out.tag);
+            check_substituted(out.tag, other.tag);
         }
         // The zone table on any device time.
         (void)zone().to_utc(raw.number_i);
