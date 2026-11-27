@@ -907,6 +907,23 @@ void seed_point_state(PointState& state, const TagValue& stored,
     state.value = stored;
 }
 
+namespace {
+
+// ABSENT is counted while it lasts; a lost answer says nothing either way.
+void track_absent(Outcome outcome, PointState& state,
+                  SampleCounts& counts) noexcept {
+    if (outcome == Outcome::ABSENT && !state.absent) {
+        state.absent = true;
+        counts.became_absent = true;
+    } else if (outcome != Outcome::ABSENT && outcome != Outcome::COMM_FAIL &&
+               state.absent) {
+        state.absent = false;
+        counts.left_absent = true;
+    }
+}
+
+}  // namespace
+
 void process_sample(const PointRules& rules, PointState& state,
                     const RawSample& sample,
                     std::span<const CompanionInput> companions,
@@ -934,16 +951,7 @@ void process_sample(const PointRules& rules, PointState& state,
         out.counts.sentinel = true;
     }
 
-    // ABSENT is counted while it lasts; a lost answer says nothing either
-    // way.
-    if (sample.outcome == Outcome::ABSENT && !state.absent) {
-        state.absent = true;
-        out.counts.became_absent = true;
-    } else if (sample.outcome != Outcome::ABSENT &&
-               sample.outcome != Outcome::COMM_FAIL && state.absent) {
-        state.absent = false;
-        out.counts.left_absent = true;
-    }
+    track_absent(sample.outcome, state, out.counts);
 
     if (sample.outcome == Outcome::VALUE && !refused) {
         sample_time(work);
