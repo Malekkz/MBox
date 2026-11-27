@@ -89,6 +89,14 @@ std::size_t requests_of(const SimBus& bus, std::uint8_t unit) {
         [&](const LoggedRequest& request) { return request.unit_id == unit; }));
 }
 
+// The requests of every unit sent before `time_ns`.
+std::size_t requests_before(const SimBus& bus, std::int64_t time_ns) {
+    return static_cast<std::size_t>(std::count_if(
+        bus.log().begin(), bus.log().end(), [&](const LoggedRequest& request) {
+            return request.time_ns < time_ns;
+        }));
+}
+
 std::vector<std::int64_t> times_of(const SimBus& bus, std::uint8_t unit) {
     std::vector<std::int64_t> out;
     for (const LoggedRequest& request : bus.log()) {
@@ -2405,11 +2413,13 @@ TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
     EXPECT_GT(counts.last_ok_time_ns, 0);
     // The loopback answers each request whole after LATENCY.
     EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 1.0);
-    // Both devices' requests of the last 10 s, over 10 s.
-    const double expected =
-        static_cast<double>(rig.engine.counts().requests) / 10.0;
-    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(rig.clock.monotonic_ns()),
-                     expected);
+    // Both devices' requests of the complete seconds, over 10 s: not those
+    // of the running second (review S1).
+    const std::int64_t now = rig.clock.monotonic_ns();
+    const std::size_t complete = requests_before(rig.bus, now - (now % SECOND));
+    ASSERT_GT(complete, 0U);
+    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(now),
+                     static_cast<double>(complete) / 10.0);
     EXPECT_EQ(rig.engine.points_absent(0), 0U);
 }
 

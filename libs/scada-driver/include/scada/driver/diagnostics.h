@@ -53,23 +53,28 @@ private:
     std::size_t count_ = 0;
 };
 
-// Events over the last RATE_SECONDS whole seconds of the monotonic clock
-// (`requests_per_s`, 11.1): one bucket per second, the current one
-// included, so the rate is the count of the window over RATE_SECONDS.
+// Events over the last RATE_SECONDS complete seconds of the monotonic clock
+// (`requests_per_s`, 11.1): one bucket per second, and one more for the
+// running second, which is not counted until it is complete, so that a
+// steady rate reads the same at every second of it (PR 159 review S1). The
+// rate is the count of the window over RATE_SECONDS; over the first
+// RATE_SECONDS after the start it ramps up from 0 (D-145).
 class RateWindow {
 public:
     static constexpr std::int64_t RATE_SECONDS = 10;
 
     SCADA_RT void add(std::int64_t now_ns) noexcept;
 
-    // Events per second over the window that ends at `now_ns`.
+    // Events per second over the RATE_SECONDS complete seconds before the
+    // one of `now_ns`.
     [[nodiscard]] SCADA_RT double per_second(std::int64_t now_ns) noexcept;
 
 private:
     // Empties the buckets of the seconds that passed since the last call.
     SCADA_RT void advance(std::int64_t now_ns) noexcept;
 
-    std::array<std::uint64_t, RATE_SECONDS> buckets_{};
+    static constexpr std::int64_t BUCKETS = RATE_SECONDS + 1;
+    std::array<std::uint64_t, BUCKETS> buckets_{};
     std::int64_t second_ = 0;  // the second of the newest bucket
     bool started_ = false;
 };

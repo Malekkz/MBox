@@ -19,6 +19,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     scheduling_test.cpp
     sim_transport.cpp
     stall_watch_test.cpp
+    system_tags_test.cpp
     test_protocol.cpp
     timing_test.cpp
     tzif_test.cpp

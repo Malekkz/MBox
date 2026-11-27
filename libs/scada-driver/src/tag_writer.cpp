@@ -153,6 +153,12 @@ void TagWriter::flush_system(ChannelEngine& engine,
     }
 }
 
+void TagWriter::stopped_system(const CompiledChannel& channel) noexcept {
+    if (system_.stopped(channel)) {
+        written_ = true;
+    }
+}
+
 void TagWriter::publish_idle(const CompiledChannel& channel) noexcept {
     if (system_.publish_idle(channel)) {
         written_ = true;

@@ -4,7 +4,6 @@
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
-#include "scada/driver/diagnostics.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
@@ -216,9 +215,11 @@ void Worker::serve(TagWriter& writer) noexcept {
     // The counters' last values, which the period may have held back: a
     // reader after the stop sees every request the channel sent (D-145).
     writer.flush_system(*engine, *channel_, clock_->monotonic_ns());
-    // The channel's state says so (11.1).
-    writer.channel_link(ChannelLink::DISCONNECTED);
+    // The channel's state says so (11.1), and its devices' as for a channel
+    // not connected (3.5; review M3).
+    writer.stopped_system(*channel_);
     writer.notify();
+    refused_.store(writer.refused(), std::memory_order_relaxed);
 }
 
 void Worker::run() noexcept {
@@ -251,6 +252,8 @@ void Worker::run() noexcept {
         // waits for the stop.
         writer.publish_idle(*channel_);
         writer.notify();
+        // Counted and logged as a running channel's (review M4).
+        refused_.store(writer.refused(), std::memory_order_relaxed);
         phase_.store(Phase::RUNNING, std::memory_order_release);
         while (!stopping()) {
             wait_until(NEVER, -1);

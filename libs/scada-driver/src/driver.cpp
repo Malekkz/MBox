@@ -276,6 +276,12 @@ private:
     void stop_all() noexcept;
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
+    // Logs the refused writes of the process's own tags if their count
+    // changed since it was last logged (review M4).
+    void log_process_refused() noexcept;
+    // At the stop, once every worker returned: `config_state` LOADING
+    // again (review M3), and the refused writes of the stop logged.
+    void process_stopped() noexcept;
 
     const CompiledConfig* config_;
     const FrameProtocol* protocol_;
@@ -308,6 +314,7 @@ private:
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
+    std::uint64_t logged_process_refused_ = 0;  // the main thread's tags
     std::int64_t next_refused_log_ns_ = 0;
     std::string detail_;  // what failed, with names, for the log
 };
@@ -615,7 +622,16 @@ Status Driver::Impl::take_process_owner() noexcept {
         }
     }
     process_tags_.emplace(ctx_, slots);
-    if (process_tags_->publish_start()) {
+    const bool wrote = process_tags_->publish_start();
+    // As a refused write of 9.1 (D-142): the tags would keep the previous
+    // life's values (review M4).
+    if (process_tags_->refused() != 0) {
+        return fail_start(
+            {StatusCode::IO_ERROR, "a write of the process's tags was refused"},
+            "the writes of the sys.proc tags of " + settings_.process +
+                " were refused");
+    }
+    if (wrote) {
         // A refused notify only delays the readers to their next wake.
         (void)scada_tag_notify(ctx_);
     }
@@ -837,6 +853,7 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
     const std::int64_t until = add(scada::monotonic_ns(), STOP_BUDGET_NS);
     for (;;) {
         if (all_joined()) {
+            process_stopped();
             return end;
         }
         const std::int64_t now = scada::monotonic_ns();
@@ -922,6 +939,33 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
             logged_refused_[index] = refused;
         }
     }
+    log_process_refused();
+}
+
+void Driver::Impl::log_process_refused() noexcept {
+    if (!process_tags_.has_value() ||
+        process_tags_->refused() == logged_process_refused_) {
+        return;
+    }
+    logged_process_refused_ = process_tags_->refused();
+    log(LogLevel::WARNING, "tag writes refused",
+        {{"MESSAGE_ID", "driver-writes-refused"},
+         {"OWNER", settings_.process},
+         {"COUNT", std::to_string(logged_process_refused_)}});
+}
+
+void Driver::Impl::process_stopped() noexcept {
+    if (!process_tags_.has_value()) {
+        return;
+    }
+    if (process_tags_->stopped()) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
+    // The workers' refused writes of their stop, and this one's, at once:
+    // no heartbeat follows (review M4).
+    next_refused_log_ns_ = 0;
+    log_refused(scada::monotonic_ns());
 }
 
 Status Driver::Impl::start() noexcept {

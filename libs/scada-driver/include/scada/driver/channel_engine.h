@@ -140,17 +140,14 @@ public:
     [[nodiscard]] bool connected() const noexcept { return connected_; }
     [[nodiscard]] ChannelLink link() const noexcept { return link_; }
 
-    // The system tag counts of device `device` (11.1, D-145); `device` is
-    // an index of the channel's devices.
+    // The system tag counts of device `device` (11.1, D-145), an index of
+    // the channel's devices; every count 0 for an index out of range.
     [[nodiscard]] const DeviceCounts& device_counts(
-        std::uint32_t device) const noexcept {
-        return devices_[device].diag;
-    }
-    // `sys.dev.<device>.response_ms`.
-    [[nodiscard]] double response_ms(std::uint32_t device) const noexcept {
-        return devices_[device].response.average_ms();
-    }
-    // `sys.dev.<device>.points_absent`: its points ABSENT now.
+        std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.response_ms`; 0 for an index out of range.
+    [[nodiscard]] double response_ms(std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.points_absent`: its points ABSENT now; 0 for an
+    // index out of range.
     [[nodiscard]] std::uint64_t points_absent(
         std::uint32_t device) const noexcept;
     // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.

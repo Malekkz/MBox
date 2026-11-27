@@ -72,6 +72,9 @@ public:
     void publish_system(ChannelEngine& engine, const CompiledChannel& channel,
                         std::int64_t now_ns, bool all) noexcept;
 
+    // The states after the stop (SystemTags::stopped).
+    void stopped_system(const CompiledChannel& channel) noexcept;
+
     // The last values of the counters, at the stop (SystemTags::flush).
     void flush_system(ChannelEngine& engine, const CompiledChannel& channel,
                       std::int64_t now_ns) noexcept;
