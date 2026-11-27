@@ -34,6 +34,9 @@ namespace scada::conf {
 
 namespace {
 
+using detail::Reader;
+using detail::Reporter;
+
 constexpr std::uint16_t CF_SYSTEM_TAG = 301;
 constexpr std::uint16_t CF_TAG_TWICE = 302;
 constexpr std::uint16_t CF_NO_SUCH = 310;

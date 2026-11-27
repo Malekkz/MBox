@@ -1,15 +1,25 @@
 // Stage 5: retained values, logging and alarms of the tags (configuration
 // schemas contract 5.2, 6 and 8; decision D-119; slice 7c of #100).
 
+#include "tag_rules.h"
 #include "expand_cases.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
+#include "scada/conf/node.h"
+#include "scada/conf/references.h"
+#include "scada/conf/tree.h"
+#include "scada/conf/types.h"
 #include "scada/conf/validate.h"
+#include "scada/conf/yaml.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace scada::conf {
 namespace {
@@ -84,7 +94,7 @@ TEST(TagRules, AStringTagIsNotRetained) {
               (Lines{"tags/site.yaml:2:60: error CF-507: string tags cannot "
                      "be retained",
                      "tags/site.yaml:3:42: error CF-507: string tags cannot "
-                     "be retained"}));
+                     "be retained (a manual tag is retained by default)"}));
     // A point's string tag, at the instance.
     const std::string meter =
         std::string(METER) +
@@ -116,7 +126,8 @@ TEST(TagRules, TheRetainKeys) {
             "  - { name: g, type: internal, value_type: uint64, kind: "
             "counter, retain: true, retain_max_age: 1h }\n"
             "  - { name: h, type: manual, value_type: int64, area: ps1, "
-            "retain_max_age: 1h }\n")),
+            "retain_max_age: 1h }\n"
+            "  - { name: i, type: virtual, expr: \"1\", retain_now: true }\n")),
         // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"tags/site.yaml:2:63: error CF-506: retain_now needs retain: "
                "true",
@@ -127,7 +138,9 @@ TEST(TagRules, TheRetainKeys) {
                "tags/site.yaml:7:67: error CF-506: retain_max_age needs "
                "retain: true",
                "tags/site.yaml:8:97: error CF-508: retain_max_age is not "
-               "allowed on counter tags"}));
+               "allowed on counter tags",
+               "tags/site.yaml:10:54: error CF-509: retain_now is allowed on "
+               "internal and manual tags only"}));
     // A counter point of a template, at its instance.
     const std::string meter =
         std::string(METER) +
@@ -216,7 +229,8 @@ constexpr std::string_view LOGGING =
 
 // Settings without `policy` are complete (CF-802); a STRING tag is logged
 // on change only (CF-803), by its policy or by what it overrides; the
-// percentage deadband of its policy needs a range like any other (CF-505).
+// percentage deadband of its policy gives no CF-505 (M1 of the review of
+// #172).
 TEST(TagRules, LoggingSettings) {
     Files files = tags(
         "  - { name: a, type: internal, value_type: int64, logging: { "
@@ -243,8 +257,6 @@ TEST(TagRules, LoggingSettings) {
                "needs raw_retention",
                "tags/site.yaml:4:62: error CF-803: string tag \"s1\" can "
                "be logged on change only",
-               "tags/site.yaml:6:62: error CF-505: \"s3\": a percentage "
-               "needs range",
                "tags/site.yaml:6:62: error CF-803: string tag \"s3\" can "
                "be logged on change only"}));
 }
@@ -266,8 +278,9 @@ TEST(TagRules, TheDefaultPolicy) {
                      "be logged on change only"}));
 }
 
-// A percentage deadband needs the tag's `range` (CF-505): at the tag's own
-// deadband, or at the `logging` that takes it from a policy.
+// A percentage deadband written in the tag's own alarm or `logging` map
+// needs the tag's `range` (CF-505), at the deadband; one from a policy does
+// not (M1 of the review of #172), nor a deadband that is a number.
 TEST(TagRules, APercentageNeedsRange) {
     Files files = tags(
         "  - { name: a, type: internal, value_type: float64, logging: changes "
@@ -284,6 +297,9 @@ TEST(TagRules, APercentageNeedsRange) {
         "  - name: f\n    type: internal\n    value_type: float64\n"
         "    range: [0, 100]\n"
         "    alarms: [ { type: high, limit: 4, deadband: 2%, priority: high, "
+        "area: ps1 } ]\n"
+        "  - name: g\n    type: internal\n    value_type: float64\n"
+        "    alarms: [ { type: high, limit: 4, deadband: 0.5, priority: high, "
         "area: ps1 } ]\n");
     files.emplace("logging.yaml", std::string(LOGGING));
     files.emplace("alarms/site.yaml",
@@ -293,8 +309,6 @@ TEST(TagRules, APercentageNeedsRange) {
         errors_of(files),
         (Lines{"alarms/site.yaml:2:57: error CF-505: \"ps1.m1.flow\": a "
                "percentage needs range",
-               "tags/site.yaml:2:62: error CF-505: \"a\": a percentage needs "
-               "range",
                "tags/site.yaml:4:91: error CF-505: \"c\": a percentage needs "
                "range",
                "tags/site.yaml:9:49: error CF-505: \"e\": a percentage needs "
@@ -367,8 +381,8 @@ TEST(TagRules, LimitsInOrder) {
     EXPECT_EQ(
         errors_of(
             {{"alarms/site.yaml",
-              "alarms:\n" + alarm("h1", "high", "5") +
-                  alarm("h2", "high", "7") + alarm("hh1", "high_high", "8") +
+              "alarms:\n" + alarm("h2", "high", "7") +
+                  alarm("h1", "high", "5") + alarm("hh1", "high_high", "8") +
                   alarm("hh2", "high_high", "7") +
                   alarm("hh3", "high_high", "6.5") +
                   alarm("hh4", "high_high", "ps1.m1.flow") +
@@ -380,6 +394,25 @@ TEST(TagRules, LimitsInOrder) {
                "\"hh3\" must be above \"h2\"",
                "alarms/site.yaml:10:51: error CF-813: tag "
                "\"ps1.m1.flow\": \"l2\" must be above \"ll1\""}));
+    // Two integer limits are compared exactly, as int64 or uint64 (M2 of
+    // the review of #172): 2^53 + 1 is above 2^53, which binary64 does not
+    // tell apart.
+    EXPECT_EQ(errors_of({{"alarms/site.yaml",
+                          "alarms:\n" + alarm("h", "high", "9007199254740992") +
+                              alarm("hh", "high_high", "9007199254740993") +
+                              alarm("ll", "low_low", "-9223372036854775808") +
+                              alarm("l", "low", "-9223372036854775807")}}),
+              Lines{});
+    EXPECT_EQ(
+        errors_of({{"alarms/site.yaml",
+                    "alarms:\n" + alarm("h", "high", "18446744073709551615") +
+                        alarm("hh", "high_high", "18446744073709551614") +
+                        alarm("ll", "low_low", "9223372036854775807") +
+                        alarm("l", "low", "-1")}}),
+        (Lines{"alarms/site.yaml:3:57: error CF-813: tag \"ps1.m1.flow\": "
+               "\"hh\" must be above \"h\"",
+               "alarms/site.yaml:5:50: error CF-813: tag \"ps1.m1.flow\": "
+               "\"l\" must be above \"ll\""}));
 }
 
 // An alarm on a STRING tag is CF-814; a limit alarm on a BOOL tag is
@@ -435,6 +468,147 @@ TEST(TagRules, DerivedTypesAndInstances) {
                      "templates/meter_a.yaml:9:23 (point on)",
                      "tags/site.yaml:5:23: error CF-815: BOOL tag \"v\" "
                      "cannot have a high alarm"}));
+}
+
+// --- The review of #172 ------------------------------------------------
+
+// S4: the alarms and keys of a bit given as a map are checked; a `tag:
+// false` point has no keys of its own to check, but its alarms that name a
+// tag are.
+TEST(TagRules, BitsAndPointsWithoutATag) {
+    const std::string meter =
+        std::string(METER) +
+        "  - name: status\n"
+        "    address: { table: holding, register: 5, type: uint16 }\n"
+        "    tag: false\n"
+        "    retain_max_age: 1h\n"
+        "    bits: { 0: { name: hot, alarms: [ { type: high, limit: 1, "
+        "priority: high, area: ps1 } ] } }\n"
+        "    alarms: [ { tag: ps1.m1.run, type: low, limit: 0, priority: high, "
+        "area: ps1 } ]\n";
+    EXPECT_EQ(errors_of({}, meter),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-815: BOOL tag "
+                     "\"ps1.m1.run\" cannot have a low alarm\n  from template "
+                     "templates/meter_a.yaml:12:40 (point status)",
+                     "drivers/modbus/line1.yaml:7:11: error CF-815: BOOL tag "
+                     "\"ps1.m1.hot\" cannot have a high alarm\n  from "
+                     "template templates/meter_a.yaml:11:47 (point status)"}));
+}
+
+// S4: a device given twice (CF-303) is checked once: the alarms of its
+// `tag: false` point are not two alarms of one id on a tag (CF-812). Its
+// tags' own keys are skipped by S1 already.
+TEST(TagRules, ADeviceGivenTwiceIsCheckedOnce) {
+    const std::string meter =
+        std::string(METER) +
+        "  - { name: total, retain_max_age: 1h, address: { table: holding, "
+        "register: 5, type: uint32 } }\n"
+        "  - { name: word, tag: false, address: { table: holding, register: "
+        "7, type: uint16 }, alarms: [ { tag: ps1.m1.flow, type: high, limit: "
+        "4, priority: high, area: ps1 } ] }\n";
+    const Files files{
+        {"areas.yaml", std::string(AREAS)},
+        {"templates/meter_a.yaml", meter},
+        {"drivers/modbus/line1.yaml",
+         channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                 "  - { name: ps1.m1, template: meter_a, unit_id: 2 }\n")}};
+    Lines found;
+    for (const std::string& line : expand(files)) {
+        if (line.find(": error ") != std::string::npos) {
+            found.push_back(line);
+        }
+    }
+    EXPECT_EQ(found,
+              (Lines{"drivers/modbus/line1.yaml:7:13: error CF-506: "
+                     "retain_max_age needs retain: true\n  from template "
+                     "templates/meter_a.yaml:7:36 (point total)",
+                     "drivers/modbus/line1.yaml:8:13: error CF-303: device "
+                     "\"ps1.m1\" is defined twice; first at "
+                     "drivers/modbus/line1.yaml:7"}));
+}
+
+// S1: the second definition of a name (CF-302) is not checked against the
+// first one's type: a float64 with a high alarm after a bool of its name
+// gives no CF-815.
+TEST(TagRules, TheSecondOfTwoDefinitionsIsNotChecked) {
+    EXPECT_EQ(errors_of(tags(
+                  "  - { name: t, type: internal, value_type: bool }\n"
+                  "  - name: t\n    type: internal\n    value_type: float64\n"
+                  "    alarms: [ { type: high, limit: 1, priority: high, "
+                  "area: ps1 } ]\n")),
+              Lines{"tags/site.yaml:3:11: error CF-302: tag \"t\" is defined "
+                    "twice; first at tags/site.yaml:2"});
+}
+
+// S2 and S4: past CF-1001, a device the tags did not record is still
+// checked once; no CF-505 is told of an alarm, whose tag may be one that
+// does not exist; and no rule reads a type, also of a tag stored before
+// the limit (the string point `label`, retained).
+TEST(TagRules, PastTheTagLimitEveryDeviceIsChecked) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - { name: flow, range: [0, 10], address: { table: holding, "
+        "register: 1, type: uint16 } }\n"
+        "  - { name: label, retain: true, address: { table: holding, "
+        "register: 3, type: string, length: 4 } }\n"
+        "  - { name: total, retain_max_age: 1h, address: { table: holding, "
+        "register: 5, type: uint32 } }\n";
+    const Files files{
+        {"areas.yaml", std::string(AREAS)},
+        {"templates/meter_a.yaml", meter},
+        {"drivers/modbus/line1.yaml",
+         channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                 "  - { name: ps1.m2, template: meter_a, unit_id: 2 }\n")},
+        {"system.yaml", std::string(SYSTEM) + "limits: { max_tags: 50 }\n"},
+        {"alarms/site.yaml",
+         "alarms:\n  - { tag: ps1.m2.flow, type: high, limit: 4, deadband: "
+         "1%, priority: high, area: ps1 }\n  - { tag: ps1.m9.flow, type: high, "
+         "limit: 4, deadband: 1%, priority: high, area: ps1 }\n"}};
+    Lines found;
+    for (const std::string& line : expand(files)) {
+        if (line.find(": error ") != std::string::npos &&
+            line.find("CF-1001") == std::string::npos) {
+            found.push_back(line);
+        }
+    }
+    EXPECT_EQ(found,
+              Lines{"drivers/modbus/line1.yaml:7:13: error CF-506: "
+                    "retain_max_age needs retain: true (and 1 more instance: "
+                    "ps1.m2)\n  from template templates/meter_a.yaml:6:36 "
+                    "(point total)"});
+}
+
+// S4: a tier whose interval stage 3 refused is not compared, nor the one
+// after it with it. Validation never reaches stage 5 with one, so the
+// check is called on its own here.
+TEST(TagRules, ARefusedTierIsNotCompared) {
+    Diagnostics parsed;
+    std::optional<Document> logging = parse_yaml(
+        "aggregate_tiers:\n  - { name: a, interval: 1m }\n"
+        "  - { name: b, interval: soon }\n  - { name: c, interval: 90s }\n",
+        "logging.yaml", parsed);
+    std::optional<Document> empty = parse_yaml("{}\n", "", parsed);
+    if (!logging || !empty) {
+        FAIL() << "not parsed";
+    }
+    const ScalarTypes types(*logging);
+    const TreeFile source{.path = "logging.yaml",
+                          .path_class = PathClass{.kind = PathClass::Kind::FILE,
+                                                  .type = FileType::LOGGING,
+                                                  .protocol = {},
+                                                  .stem = "logging"},
+                          .content = {}};
+    const std::array<CheckedFile, 1> files{
+        CheckedFile{.source = &source, .document = &*logging, .types = &types}};
+    const ExpandedTree tree{.document = std::move(*empty),
+                            .types = {},
+                            .instance_of = {},
+                            .instances = {},
+                            .computed = {},
+                            .max_tags = ExpandedTree::DEFAULT_MAX_TAGS};
+    Diagnostics diagnostics;
+    check_tag_rules(TagNames{}, tree, files, diagnostics);
+    EXPECT_EQ(diagnostics.error_count(), 0U);
 }
 
 }  // namespace

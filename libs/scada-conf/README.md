@@ -170,9 +170,10 @@ is refused with CF-113. The worst accepted tree takes about 14.4 s in
 release on x86-64 (D-117).
 
 Last, stage 5 checks the keys of the tags, logging and alarms
-(`src/tag_rules.cpp`, D-119): CF-505 for a percentage deadband on a tag
-without `range`; CF-506 to CF-509 for the retain keys, with warning CW-510
-for each `retain_max_age` until #89; CF-801 for aggregate tiers out of
+(`src/tag_rules.cpp`, D-119): CF-505 for a percentage deadband a tag
+writes in its own alarm or `logging`, without `range`; CF-506 to CF-509
+for the retain keys, with warning CW-510 for each `retain_max_age` until
+#89; CF-801 for aggregate tiers out of
 order; CF-802 and CF-803 for logging settings; CF-811 for an alarm list
 given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
 limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags.

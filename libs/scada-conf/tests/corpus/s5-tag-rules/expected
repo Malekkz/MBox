@@ -3,8 +3,9 @@
 # highest high one (CF-813); a second alarm of id high on site.flow
 # (CF-812); an alarm on a STRING tag (CF-814); a high alarm on a BOOL tag
 # (CF-815; its state alarm passes); priorities in a second alarms file
-# (CF-811); a tier of 1h after one of 90m (CF-801); a policy's percentage
-# deadband on a tag without range (CF-505; site.flow has one); a manual
+# (CF-811); a tier of 1h after one of 90m (CF-801); a percentage deadband
+# the tag gives itself, without range (CF-505; a policy's gives none, and
+# site.flow has a range); a manual
 # STRING tag, retained by default (CF-507); a STRING tag logged
 # periodically (CF-803); retain_now without retain (CF-506); retain_now on
 # a virtual tag (CF-509); retain_max_age on a counter (CF-508); logging
@@ -15,7 +16,7 @@ alarms/site.yaml:6:5: CF-814
 alarms/site.yaml:7:28: CF-815
 alarms/station.yaml:1:13: CF-811
 logging.yaml:4:27: CF-801
-tags/site.yaml:3:71: CF-505
+tags/site.yaml:3:100: CF-505
 tags/site.yaml:4:50: CF-507
 tags/site.yaml:5:69: CF-803
 tags/site.yaml:6:71: CF-506

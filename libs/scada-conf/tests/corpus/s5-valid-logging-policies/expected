@@ -1,0 +1,6 @@
+# The examples of contract 4 (flow_meter_x, as in reference 12.3), 5.1 and
+# 6 together, valid (conformance test 1): a policy's percentage deadband
+# gives no CF-505 on a tag without range, nor does default_policy on a
+# BOOL point or a STRING tag (the lead's ruling M1 on #172; D-119). The
+# tags the expressions read are defined; the flow alarm names its area.
+# Invented beyond the contract's examples.

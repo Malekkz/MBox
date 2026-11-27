@@ -34,6 +34,9 @@ namespace scada::conf {
 
 namespace {
 
+using detail::Reader;
+using detail::Reporter;
+
 constexpr std::uint16_t CF_PERCENTAGE_WITHOUT_RANGE = 505;
 constexpr std::uint16_t CF_NEEDS_RETAIN = 506;
 constexpr std::uint16_t CF_STRING_RETAINED = 507;
@@ -63,11 +66,13 @@ bool is_limit_type(std::string_view type) {
 
 // Where a node is read: its document and the types stage 3 gave it.
 struct Source {
+    // Into the Checker's `expanded_` or `readers_`, which outlive it.
     const Reader* reader = nullptr;
     const ScalarTypes* types = nullptr;
     bool expanded = false;
     // A point of the expanded tree: the point and its device, for the
-    // template note and the grouping of D-114.
+    // template note and the grouping of D-114. `device` is a view into the
+    // expanded tree's Document.
     NodeId point = 0;
     std::string_view device;
 };
@@ -77,7 +82,7 @@ struct Site {
     Source source;
     std::string name;
     NodeId name_node = 0;  // where an error that has no key of its own goes
-    NodeId keys = 0;       // its map; 0 for a bit given by its name only
+    NodeId keys = 0;       // its map
     bool tag_file = false;
 };
 
@@ -90,6 +95,7 @@ struct AlarmRef {
 
 // One logging policy of logging.yaml: its settings.
 struct Policy {
+    // Into the Checker's `readers_`.
     const Reader* reader = nullptr;
     const ScalarTypes* types = nullptr;
     NodeId settings = 0;
@@ -104,6 +110,13 @@ public:
           files_(files),
           expanded_(tree.document),
           reporter_(tree, diagnostics) {}
+
+    // A Source points into `expanded_`: not copied, not moved.
+    Checker(const Checker&) = delete;
+    Checker& operator=(const Checker&) = delete;
+    Checker(Checker&&) = delete;
+    Checker& operator=(Checker&&) = delete;
+    ~Checker() = default;
 
     void run() {
         readers_.reserve(files_.size());
@@ -228,13 +241,17 @@ private:
 
     void walk_tree() {
         const NodeId root = expanded_.document().root();
+        // The names of the devices met: a device given twice (CF-303) is
+        // checked once, also past CF-1001, where the tags do not record
+        // every device (S2 of the review of #172).
+        std::set<std::string_view> devices;
         for (const NodeId channel : expanded_.items(root, "channels")) {
             for (const NodeId device : expanded_.items(channel, "devices")) {
                 const std::optional<NodeId> name =
                     expanded_.scalar(device, "name");
-                if (!name || tags_->device_at(
-                                 expanded_.document().text(*name)) != *name) {
-                    continue;  // a device given twice is checked once
+                if (!name ||
+                    !devices.insert(expanded_.document().text(*name)).second) {
+                    continue;
                 }
                 const std::string_view device_name =
                     expanded_.document().text(*name);
@@ -271,19 +288,22 @@ private:
             // No tag of its own (D-116): only alarms that name a tag.
             collect_alarms(source, point, {});
         }
+        // A bit given by its name only has no key these rules read: its
+        // logging is the default policy's, which gives no error here (M1 of
+        // the review of #172).
         for (const Entry& entry : expanded_.entries(point, "bits")) {
-            const bool by_name =
-                expanded_.document().kind(entry.value) == NodeKind::SCALAR;
+            if (expanded_.document().kind(entry.value) != NodeKind::MAP) {
+                continue;
+            }
             const std::optional<NodeId> bit =
-                by_name ? std::optional<NodeId>(entry.value)
-                        : expanded_.scalar(entry.value, "name");
+                expanded_.scalar(entry.value, "name");
             if (!bit) {
                 continue;
             }
             check_site(Site{.source = source,
                             .name = tag_of(expanded_.document().text(*bit)),
                             .name_node = *bit,
-                            .keys = by_name ? 0 : entry.value,
+                            .keys = entry.value,
                             .tag_file = false});
         }
     }
@@ -309,9 +329,20 @@ private:
         }
     }
 
+    // False for a definition of a name that is not the one the tags hold:
+    // the second of two is CF-302 (D-116), and is not checked against the
+    // first's type (S1 of the review of #172).
+    [[nodiscard]] bool defines(const Site& site) const {
+        if (!tags_->complete()) {
+            return true;
+        }
+        const std::optional<TagInfo> info = tags_->find(site.name);
+        return !info || (info->document == &site.source.reader->document() &&
+                         info->node == site.name_node);
+    }
+
     void check_site(const Site& site) {
-        if (site.keys == 0) {
-            check_logging(site, value_type(site.name));
+        if (!defines(site)) {
             return;
         }
         const Reader& reader = *site.source.reader;
@@ -365,7 +396,10 @@ private:
                             : reader.scalar(site.keys, "value_type")
                                   .value_or(site.name_node);
             error(site.source, retained_at, CF_STRING_RETAINED,
-                  "string tags cannot be retained");
+                  retain_node ? std::string("string tags cannot be retained")
+                              : std::string("string tags cannot be retained "
+                                            "(a manual tag is retained by "
+                                            "default)"));
         }
     }
 
@@ -373,6 +407,7 @@ private:
 
     // The settings a tag is logged with, as far as these rules read them.
     struct Logged {
+        // Views into the tag's Document or logging.yaml's.
         std::string_view mode;
         const Reader* deadband_reader = nullptr;
         const ScalarTypes* deadband_types = nullptr;
@@ -443,7 +478,7 @@ private:
     void check_logging(const Site& site, std::string_view type) {
         const Reader& reader = *site.source.reader;
         const std::optional<NodeId> logging =
-            site.keys == 0 ? std::nullopt : reader.child(site.keys, "logging");
+            reader.child(site.keys, "logging");
         Logged logged;
         if (!resolve_logging(site, logging, logged)) {
             return;
@@ -455,20 +490,20 @@ private:
                   "string tag " + quote_text(site.name) +
                       " can be logged on change only");
         }
-        if (logged.deadband_types != nullptr &&
+        // Only a percentage written in the tag's own `logging` map: one
+        // from a policy, named or `default_policy`, gives none (the lead's
+        // ruling M1 of the review of #172; on #136).
+        if (logged.deadband_reader == &reader &&
             logged.deadband_types->of(logged.deadband) ==
                 ScalarType::PERCENTAGE &&
             !has_range(site)) {
-            // At the tag's own deadband, else at what names the policy.
-            const NodeId deadband_place =
-                logged.deadband_reader == &reader ? logged.deadband : place;
-            error(site.source, deadband_place, CF_PERCENTAGE_WITHOUT_RANGE,
+            error(site.source, logged.deadband, CF_PERCENTAGE_WITHOUT_RANGE,
                   quote_text(site.name) + ": a percentage needs range");
         }
     }
 
     [[nodiscard]] static bool has_range(const Site& site) {
-        return site.keys != 0 && site.source.reader->child(site.keys, "range");
+        return site.source.reader->child(site.keys, "range").has_value();
     }
 
     // --- Alarms (8) ------------------------------------------------------
@@ -553,9 +588,11 @@ private:
     // The rules of one alarm that read its tag: CF-505, CF-814, CF-815.
     void check_alarm(const AlarmRef& ref) {
         const Reader& reader = *ref.source.reader;
+        // Past CF-1001 a tag may be one that does not exist: no CF-505 is
+        // told then (S2 of the review of #172).
         if (const std::optional<NodeId> deadband =
                 reader.scalar(ref.alarm, "deadband");
-            deadband &&
+            deadband && tags_->complete() &&
             ref.source.types->of(*deadband) == ScalarType::PERCENTAGE &&
             !ranged_.contains(ref.tag)) {
             error(ref.source, *deadband, CF_PERCENTAGE_WITHOUT_RANGE,
@@ -574,9 +611,31 @@ private:
         }
     }
 
+    // A limit written as a number: exact when it is an integer (an int64
+    // or a uint64), else its nearest binary64 (M2 of the review of #172).
+    struct Number {
+        bool integer = false;
+        bool negative = false;
+        std::uint64_t magnitude = 0;  // of an integer
+        double real = 0;              // of any
+    };
+
+    // True if `lhs` is above `rhs`: exactly for two integers, as binary64
+    // when either is a decimal.
+    [[nodiscard]] static bool above(const Number& lhs, const Number& rhs) {
+        if (!lhs.integer || !rhs.integer) {
+            return lhs.real > rhs.real;
+        }
+        if (lhs.negative != rhs.negative) {
+            return rhs.negative;
+        }
+        return lhs.negative ? lhs.magnitude < rhs.magnitude
+                            : lhs.magnitude > rhs.magnitude;
+    }
+
     // A numeric limit of an alarm: its value, its node and the alarm.
     struct Limit {
-        double value = 0;
+        Number value;
         NodeId node = 0;
         std::size_t alarm = 0;  // in `alarms_`
     };
@@ -590,16 +649,39 @@ private:
         if (!limit) {
             return std::nullopt;
         }
+        const Document& document = ref.source.reader->document();
         const ScalarType type = ref.source.types->of(*limit);
         if (type != ScalarType::INTEGER && type != ScalarType::DECIMAL) {
             return std::nullopt;
         }
-        const Result<double> value =
-            to_decimal(ref.source.reader->document(), *limit);
-        if (!value.ok()) {
+        const Result<double> real = to_decimal(document, *limit);
+        if (!real.ok()) {
             return std::nullopt;
         }
-        return Limit{.value = value.value(), .node = *limit, .alarm = alarm};
+        Number number{.integer = false,
+                      .negative = false,
+                      .magnitude = 0,
+                      .real = real.value()};
+        if (type == ScalarType::INTEGER) {
+            if (const Result<std::int64_t> signed_value =
+                    to_int64(document, *limit);
+                signed_value.ok()) {
+                const std::int64_t value = signed_value.value();
+                number.integer = true;
+                number.negative = value < 0;
+                // The magnitude of INT64_MIN fits a uint64.
+                number.magnitude =
+                    value < 0
+                        ? std::uint64_t{0} - static_cast<std::uint64_t>(value)
+                        : static_cast<std::uint64_t>(value);
+            } else if (const Result<std::uint64_t> unsigned_value =
+                           to_uint64(document, *limit);
+                       unsigned_value.ok()) {
+                number.integer = true;
+                number.magnitude = unsigned_value.value();
+            }
+        }
+        return Limit{.value = number, .node = *limit, .alarm = alarm};
     }
 
     // The id of `ref`, its type by default.
@@ -653,7 +735,7 @@ private:
                 continue;
             }
             const std::optional<Limit> limit = limit_of(ref, index);
-            if (limit && (!*kept || limit->value > (*kept)->value)) {
+            if (limit && (!*kept || above(limit->value, (*kept)->value))) {
                 *kept = limit;
             }
         }
@@ -667,7 +749,7 @@ private:
                 continue;
             }
             const std::optional<Limit> limit = limit_of(ref, index);
-            if (limit && limit->value <= below->value) {
+            if (limit && !above(limit->value, below->value)) {
                 error(ref.source, limit->node, CF_LIMIT_ORDER,
                       "tag " + quote_text(ref.tag) + ": " +
                           quote_text(id_of(ref)) + " must be above " +
@@ -678,15 +760,19 @@ private:
 
     const TagNames* tags_;
     const ExpandedTree* tree_;
+    // The files of the tree, which outlive the check.
     std::span<const CheckedFile> files_;
     Reader expanded_;
     Reporter reporter_;
     std::vector<Reader> readers_;  // one per file of `files_`
+    // Keyed by views into logging.yaml's Document.
     std::map<std::string_view, Policy, std::less<>> policies_;
+    // A view into logging.yaml's Document; empty for none.
     std::string_view default_policy_;
     std::set<std::string, std::less<>> ranged_;  // the tags with `range`
     std::vector<AlarmRef> alarms_;
-    // The first alarms file of each of ALARM_LISTS.
+    // The first alarms file of each of ALARM_LISTS: views into the paths
+    // of `files_`.
     std::array<std::string_view, ALARM_LISTS.size()> list_files_{};
 };
 

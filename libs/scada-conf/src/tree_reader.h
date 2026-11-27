@@ -2,7 +2,8 @@
 #define SCADA_CONF_SRC_TREE_READER_H
 
 // Reading the expanded tree and the files of a tree, and placing the errors
-// of stage 5 on them (D-114, D-116), for the checks that look tags up.
+// of stage 5 on them (D-114, D-116), for the checks that look tags up. In
+// `detail`, so that no other translation unit's `Reader` collides with them.
 
 #include "grouped_errors.h"
 #include "scada/conf/diagnostic.h"
@@ -17,7 +18,7 @@
 #include <string_view>
 #include <utility>
 
-namespace scada::conf {
+namespace scada::conf::detail {
 
 // Reads one Document: the expanded tree or a file of the tree.
 class Reader {
@@ -174,6 +175,6 @@ private:
     std::set<std::string> warned_;  // the template sites warned at
 };
 
-}  // namespace scada::conf
+}  // namespace scada::conf::detail
 
 #endif  // SCADA_CONF_SRC_TREE_READER_H
