@@ -108,9 +108,10 @@ std::string process_tag_name(std::string_view process,
 }
 
 double rounded_ms(double average_ms) noexcept {
-    // Averages are finite and far below 2^53 tenths of a ms.
-    return std::round(average_ms / AVERAGE_RESOLUTION_MS) *
-           AVERAGE_RESOLUTION_MS;
+    // Averages are finite and far below 2^53 tenths of a ms. A division by
+    // 10 rounds once, to the double nearest the tenth; a product with 0.1
+    // would round twice (review, the delta check).
+    return std::round(average_ms * TENTHS_PER_MS) / TENTHS_PER_MS;
 }
 
 bool write_slot(TagWriteFn write, scada_ctx* ctx, SystemSlot& slot,
@@ -166,9 +167,8 @@ bool ProcessTags::stopped() noexcept {
                       false, refused_);
 }
 
-SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles,
-                       TagWriteFn write) noexcept
-    : ctx_(ctx), write_(write), handles_(std::move(handles)) {}
+SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept
+    : ctx_(ctx), write_(handles.write), handles_(std::move(handles)) {}
 
 std::size_t SystemTags::device_slot(std::size_t device,
                                     DeviceSignal signal) const noexcept {

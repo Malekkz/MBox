@@ -21,9 +21,12 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace scada::driver::test {
@@ -101,11 +104,15 @@ std::vector<Recorded> writes_of(std::uint32_t slot) {
 // NOLINTBEGIN(misc-non-private-member-variables-in-classes): a test rig whose parts are its interface
 struct Rig {
     explicit Rig(std::uint8_t devices = 1, bool disabled_last = false)
-        : channel(make(devices, disabled_last)),
+        : Rig(make(devices, disabled_last), devices) {}
+
+    // `compiled`, its devices on units 1 to `units`.
+    Rig(CompiledChannel compiled, std::uint8_t units)
+        : channel(std::move(compiled)),
           transport(bus, clock, LATENCY),
           engine(channel, protocol, transport, clock, sink),
-          system(nullptr, handles(channel), &record) {
-        for (std::uint8_t unit = 1; unit <= devices; ++unit) {
+          system(nullptr, handles(channel)) {
+        for (std::uint8_t unit = 1; unit <= units; ++unit) {
             bus.map(unit, 0, 0, 9);
         }
         recorder() = Recorder{};
@@ -128,6 +135,7 @@ struct Rig {
 
     static SystemTagHandles handles(const CompiledChannel& compiled) {
         SystemTagHandles out;
+        out.write = &record;
         out.groups = compiled.poll_groups.size();
         out.devices = compiled.devices.size();
         const std::size_t slots =
@@ -270,6 +278,81 @@ TEST(SystemTags, TheStopLeavesEveryStateNotConnected) {
               static_cast<std::int64_t>(DeviceStatus::CONNECTING));
     // The disabled device was DISABLED already: not written again.
     EXPECT_EQ(last(rig.slot(DeviceSignal::STATE, 1)), -1);
+}
+
+// One device of seven requests in the fast group (200 ms), at most one
+// request every 33.3 ms: a cycle takes 233.3 ms, so the group is pacing
+// limited and its achieved period is no whole tenth of a ms (6.4).
+CompiledChannel paced_channel() {
+    CompiledChannel out = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 7, 0)}},
+        ReadRules{.max_units = 1},
+        Pacing{.min_request_interval_ns = SECOND / 30});
+    out.transport = TransportKind::TCP;
+    return out;
+}
+
+// The double of the slot's last write; NaN if none.
+double last_double(std::uint32_t slot) {
+    const std::vector<Recorded> written = writes_of(slot);
+    return written.empty() ? std::numeric_limits<double>::quiet_NaN()
+                           : std::bit_cast<double>(written.back().bits);
+}
+
+TEST(SystemTags, ThePeriodIsWrittenInTenthsAndTheStopEndsAPacingLimit) {
+    Rig rig(paced_channel(), 1);
+    rig.publish(true);
+    rig.run_until(3 * SECOND);
+    const std::int64_t now = rig.clock.monotonic_ns();
+    ASSERT_TRUE(rig.engine.scheduler().pacing_limited(0, now));
+    const std::uint32_t limited = rig.slot(DeviceSignal::PACING_LIMITED);
+    ASSERT_FALSE(writes_of(limited).empty());
+    EXPECT_EQ(writes_of(limited).back().bits, 1U);
+    // The achieved period is no whole tenth; what was written is one.
+    const double raw =
+        static_cast<double>(rig.engine.scheduler().achieved_period_ns(0, now)) /
+        1e6;
+    ASSERT_NE(raw * 10.0, std::round(raw * 10.0)) << raw;
+    const double period =
+        last_double(static_cast<std::uint32_t>(CHANNEL_SIGNALS));
+    EXPECT_GT(period, 200.0);
+    EXPECT_EQ(period, std::round(period * 10.0) / 10.0) << period;
+    // M3: the stop writes `pacing_limited` false.
+    recorder().writes.clear();
+    EXPECT_TRUE(rig.system.stopped(rig.channel));
+    ASSERT_FALSE(writes_of(limited).empty());
+    EXPECT_EQ(writes_of(limited).back().bits, 0U);
+}
+
+TEST(SystemTags, ATenthIsTheDoubleNearestIt) {
+    // round(x * 10) / 10 rounds once: seven tenths is 0.7, not
+    // 0.7000000000000001 as round(x / 0.1) * 0.1 gives (the delta check).
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(detail::rounded_ms(0.7)),
+              std::bit_cast<std::uint64_t>(0.7));
+    for (int tenths = 0; tenths <= 100'000; ++tenths) {
+        const double exact = static_cast<double>(tenths) / 10.0;
+        ASSERT_EQ(
+            std::bit_cast<std::uint64_t>(detail::rounded_ms(exact + 0.02)),
+            std::bit_cast<std::uint64_t>(exact))
+            << tenths;
+    }
+}
+
+TEST(SystemTags, ARefusedWriteIsCountedAndTriedAgain) {
+    // A refused write is counted (the worker stores the count and the main
+    // thread logs it, review M4) and not taken as written: the next publish
+    // that is due writes it again.
+    Rig rig;
+    const std::uint32_t slot = rig.slot(DeviceSignal::REQUESTS_PER_SCAN);
+    recorder().refuse = slot;
+    rig.publish(true);
+    EXPECT_EQ(rig.system.refused(), 1U);
+    EXPECT_TRUE(writes_of(slot).empty());
+    recorder().refuse = SCADA_INVALID_HANDLE;
+    rig.clock.advance_to(rig.system.next_due_ns());
+    rig.publish(false);
+    ASSERT_EQ(writes_of(slot).size(), 1U);
+    EXPECT_EQ(rig.system.refused(), 1U);
 }
 
 TEST(SystemTags, AnAverageIsRoundedToATenthOfAMillisecond) {

@@ -472,6 +472,34 @@ protected:
     void retype_tag(const std::string& name, const std::string& type) {
         retyped_.emplace_back(name, type);
     }
+    // The next tag sets give the owner `drv-test` the INT64 tag `name` too,
+    // which no code of the driver writes (review M8).
+    void add_process_tag(const std::string& name) {
+        process_extra_tags_.push_back(name);
+    }
+    // Writes `value` GOOD to the tag `name` of process drv-test, attached as
+    // that process, then detaches: what a previous life of the driver
+    // would have left. False if any call is refused.
+    bool write_as_driver(const std::string& name, std::int64_t value) {
+        const scada_attach_opts options{.base_dir = base_.c_str(),
+                                        .retain_dir = nullptr,
+                                        .tagd_uid = std::int64_t{::geteuid()}};
+        scada_ctx* ctx = nullptr;
+        if (scada_tag_attach_opts("drv-test", &options, &ctx) != SCADA_OK) {
+            return false;
+        }
+        std::uint32_t tag = SCADA_INVALID_HANDLE;
+        scada_value written{};
+        written.type = SCADA_TYPE_INT64;
+        written.value = std::bit_cast<std::uint64_t>(value);
+        written.quality = SCADA_QUALITY_GOOD;
+        const bool done =
+            scada_tag_resolve(ctx, name.c_str(), &tag) == SCADA_OK &&
+            scada_tag_write(ctx, tag, &written) == SCADA_OK &&
+            scada_tag_notify(ctx) == SCADA_OK;
+        scada_tag_detach(ctx);
+        return done;
+    }
     // The next tag sets are whole again.
     void whole_tag_sets() {
         omitted_.clear();
@@ -791,6 +819,9 @@ private:
         // and its tags (11.1).
         if (process_tags_) {
             add_owner(owners, "drv-test", false);
+            for (const std::string& extra : process_extra_tags_) {
+                add_tag(tags, extra, "drv-test", "int64", false);
+            }
             for (const SystemTag& tag : PROCESS_SYSTEM_TAGS) {
                 add_tag(tags, "sys.proc.drv-test." + std::string(tag.signal),
                         "drv-test", tag.type, false);
@@ -842,6 +873,7 @@ private:
     std::filesystem::path base_;
     std::vector<std::string> owners_;
     std::vector<std::string> omitted_;
+    std::vector<std::string> process_extra_tags_;
     std::vector<std::pair<std::string, std::string>> retyped_;
     bool process_tags_ = true;  // the owner `drv-test` and its tags
     std::optional<RunningTagd> tagd_;

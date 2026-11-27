@@ -116,13 +116,15 @@ struct SystemTagHandles {
     std::vector<SystemSlot> slots;
     std::size_t groups = 0;
     std::size_t devices = 0;
+    // How they are written: the library's, or a test's (review M4).
+    TagWriteFn write = &scada_tag_write;
 };
 
-// An average in ms (`response_ms`, `period.<group>`) rounded to
-// AVERAGE_RESOLUTION_MS before it is compared with the value last written,
-// so that noise below the resolution writes nothing (PR 159 review S1;
-// D-146).
-inline constexpr double AVERAGE_RESOLUTION_MS = 0.1;
+// An average in ms (`response_ms`, `period.<group>`) rounded to a tenth of
+// a ms before it is compared with the value last written, so that noise
+// below the resolution writes nothing (PR 159 review S1; D-146). The value
+// is the double nearest the tenth: 0.7, not 0.7000000000000001.
+inline constexpr double TENTHS_PER_MS = 10.0;
 [[nodiscard]] double rounded_ms(double average_ms) noexcept;
 
 class SystemTags {
@@ -130,10 +132,9 @@ public:
     // How often counters, times and averages are written at most (11.1).
     static constexpr std::int64_t PERIOD_NS = 1'000'000'000;
 
-    // `ctx` is borrowed and used only from the worker's thread; `write` is
-    // the library's, or a test's.
-    SystemTags(scada_ctx* ctx, SystemTagHandles handles,
-               TagWriteFn write = &scada_tag_write) noexcept;
+    // `ctx` is borrowed and used only from the worker's thread; the tags
+    // are written by `handles.write`.
+    SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept;
 
     // Writes what changed: the states at every call, the other signals at
     // most once every PERIOD_NS of `now_ns`; with `all`, every signal at

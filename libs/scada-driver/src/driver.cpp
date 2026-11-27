@@ -276,6 +276,11 @@ private:
     void stop_all() noexcept;
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
+    // The settings' write of the system tags, or the library's.
+    [[nodiscard]] detail::TagWriteFn system_write() const noexcept {
+        return settings_.system_write != nullptr ? settings_.system_write
+                                                 : &scada_tag_write;
+    }
     // Logs the refused writes of the process's own tags if their count
     // changed since it was last logged (review M4).
     void log_process_refused() noexcept;
@@ -621,7 +626,7 @@ Status Driver::Impl::take_process_owner() noexcept {
             return resolved;
         }
     }
-    process_tags_.emplace(ctx_, slots);
+    process_tags_.emplace(ctx_, slots, system_write());
     const bool wrote = process_tags_->publish_start();
     // As a refused write of 9.1 (D-142): the tags would keep the previous
     // life's values (review M4).
@@ -643,6 +648,7 @@ Status Driver::Impl::resolve_system(const CompiledChannel& channel,
                                     SystemTagHandles& out) noexcept {
     out.groups = channel.poll_groups.size();
     out.devices = channel.devices.size();
+    out.write = system_write();
     const auto add = [&](const std::string& name, std::uint8_t type) {
         SystemSlot slot{.type = type};
         Status status = resolve_one("channel " + channel.name, owner, name,
