@@ -16,12 +16,19 @@
 // Output lines: `tcp PORT` or `pty PATH` once ready; `request TIME UNIT
 // FIRST` when a request's last byte was read; `answer TIME` just before its
 // answer was written; `closed` when it closed a connection after
-// `--close-after` answers (it then accepts the next one).
+// `--close-after` answers (it then accepts the next one); `peer closed`
+// or `peer reset` when the driver ended a TCP connection with a FIN or a
+// reset (the stop's orderly close, DI 10). A connection the driver resets
+// while an answer is being written ends as any other (`peer reset` or `peer
+// closed`): SIGPIPE is blocked, so the write fails instead of ending the
+// simulator.
 
 #include "loopback.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "test_protocol.h"
+
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): pthread_sigmask is declared here, not in <csignal>
 
 #include <array>
 #include <cerrno>
@@ -200,19 +207,25 @@ std::size_t serve(std::vector<std::byte>& pending, SimBus& bus,
     return answered;
 }
 
-// Reads what `descriptor` has; false at an end of file or an error.
-bool take_input(int descriptor, std::vector<std::byte>& pending) {
+// How the peer ended a connection.
+enum class Input : std::uint8_t { MORE = 1, END, RESET };
+
+// Reads what `descriptor` has: MORE, or how the connection ended.
+Input take_input(int descriptor, std::vector<std::byte>& pending) {
     std::array<std::byte, READ_CHUNK> chunk{};
     const ssize_t got = ::read(descriptor, chunk.data(), chunk.size());
     if (got < 0 && (errno == EINTR || errno == EAGAIN)) {
-        return true;
+        return Input::MORE;
     }
-    if (got <= 0) {
-        return false;
+    if (got < 0) {
+        return errno == ECONNRESET ? Input::RESET : Input::END;
+    }
+    if (got == 0) {
+        return Input::END;
     }
     pending.insert(pending.end(), chunk.begin(),
                    chunk.begin() + static_cast<std::ptrdiff_t>(got));
-    return true;
+    return Input::MORE;
 }
 
 int run_tcp(SimBus& bus, const Options& options) {
@@ -244,14 +257,19 @@ int run_tcp(SimBus& bus, const Options& options) {
         }
         std::vector<std::byte> pending;
         std::size_t answered = 0;
-        while (take_input(client.get(), pending)) {
+        Input input = Input::MORE;
+        while ((input = take_input(client.get(), pending)) == Input::MORE) {
             answered += serve(pending, bus, client.get());
             if (options.close_after && answered >= *options.close_after) {
                 break;
             }
         }
         client.reset();  // closed before it says so
-        if (options.close_after) {
+        if (input == Input::END) {
+            say("peer closed");
+        } else if (input == Input::RESET) {
+            say("peer reset");
+        } else {
             say("closed");
         }
     }
@@ -275,7 +293,7 @@ int run_pty(SimBus& bus) {
     }
     say(std::string("pty ") + path.data());
     std::vector<std::byte> pending;
-    while (take_input(master.get(), pending)) {
+    while (take_input(master.get(), pending) == Input::MORE) {
         (void)serve(pending, bus, master.get());
     }
     return 1;
@@ -284,6 +302,15 @@ int run_pty(SimBus& bus) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // A driver that gives up a read resets the connection, at any time
+    // (DI 10): the write of an answer then fails with EPIPE, and the
+    // simulator goes on to the next connection. Blocked, as the driver
+    // blocks it (D-142): the simulator has one thread.
+    sigset_t pipe{};
+    if (::sigemptyset(&pipe) != 0 || ::sigaddset(&pipe, SIGPIPE) != 0 ||
+        ::pthread_sigmask(SIG_BLOCK, &pipe, nullptr) != 0) {
+        return 1;
+    }
     SimBus bus;
     Options options;
     const std::span<char*> args(argv, static_cast<std::size_t>(argc));

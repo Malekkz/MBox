@@ -43,14 +43,22 @@ ssize_t read_call(int descriptor, bool socket,
 
 }  // namespace
 
-Readiness wait_for(int descriptor, short events, std::int64_t deadline_ns,
-                   const Clock& clock, short& revents, int& error) noexcept {
-    pollfd entry{.fd = descriptor, .events = events, .revents = 0};
+Readiness wait_for(int descriptor, short events, int wake,
+                   std::int64_t deadline_ns, const Clock& clock, short& revents,
+                   int& error) noexcept {
+    // A negative descriptor is ignored by `ppoll`: no wake, one entry.
+    std::array<pollfd, 2> entries{
+        pollfd{.fd = descriptor, .events = events, .revents = 0},
+        pollfd{.fd = wake, .events = POLLIN, .revents = 0}};
     for (;;) {
         const timespec left = to_timespec(time_left(deadline_ns, clock));
-        const int ready = ::ppoll(&entry, 1, &left, nullptr);
+        const int ready =
+            ::ppoll(entries.data(), entries.size(), &left, nullptr);
         if (ready > 0) {
-            revents = entry.revents;
+            if ((entries[1].revents & POLLIN) != 0) {
+                return Readiness::WOKEN;
+            }
+            revents = entries[0].revents;
             return Readiness::READY;
         }
         if (ready == 0) {
@@ -106,14 +114,15 @@ std::int64_t time_left(std::int64_t deadline_ns, const Clock& clock) noexcept {
     return deadline_ns <= now ? 0 : deadline_ns - now;
 }
 
-IoStatus receive_by(int descriptor, bool socket, std::span<std::byte> into,
-                    std::int64_t deadline_ns, const Clock& clock,
-                    std::size_t& received, int& error) noexcept {
+IoStatus receive_by(int descriptor, int wake, bool socket,
+                    std::span<std::byte> into, std::int64_t deadline_ns,
+                    const Clock& clock, std::size_t& received,
+                    int& error) noexcept {
     return receive_loop(
         [&] {
             short revents = 0;
-            return wait_for(descriptor, POLLIN, deadline_ns, clock, revents,
-                            error);
+            return wait_for(descriptor, POLLIN, wake, deadline_ns, clock,
+                            revents, error);
         },
         [&](std::size_t& got) {
             return read_once(descriptor, socket, into, got, error);

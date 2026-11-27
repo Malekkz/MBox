@@ -15,6 +15,10 @@
 namespace scada::driver::test {
 
 IoStatus SimTransport::connect(std::int64_t deadline_ns) noexcept {
+    if (abandon_) {
+        open_ = false;
+        return IoStatus::ABANDONED;
+    }
     ++connects_;
     connect_times_.push_back(clock_->monotonic_ns());
     if (refusals_ > 0) {
@@ -100,6 +104,9 @@ IoStatus SimTransport::receive(std::span<std::byte> into,
     received = 0;
     if (!open_ || peer_closed_) {
         return IoStatus::CLOSED;
+    }
+    if (abandon_) {
+        return IoStatus::ABANDONED;
     }
     if (empty_read_) {
         empty_read_ = false;

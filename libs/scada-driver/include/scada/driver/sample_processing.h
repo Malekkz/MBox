@@ -95,6 +95,16 @@ void init_point_state(PointState& state, tag::TagType type);
 SCADA_RT void reset_point_state(PointState& state, tag::TagType type,
                                 std::int64_t now_mono_ns) noexcept;
 
+// Takes `stored`, the value the point's tag holds after the writes of 9.1,
+// as the state's last value, so that a sample before the first read (a
+// COMM_FAIL) writes the value as stored and not 0 (contract 9.1 "value as
+// stored", 5.2 "keeps its last value"; review M4). Quality, flags and
+// `has_value` stay those of the reset. A value of another type than the
+// state's is ignored; a STRING's text is copied within the reserved
+// capacity.
+SCADA_RT void seed_point_state(PointState& state,
+                               const TagValue& stored) noexcept;
+
 // One tag write that processing asks for.
 struct TagWrite {
     TagValue value{};

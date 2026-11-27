@@ -10,6 +10,8 @@
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
+#include "scada/driver/protocol.h"
+#include "scada/driver/tag_value.h"
 #include "scada/driver/timing.h"
 #include "scada/tag/types.h"
 #include "sim_transport.h"
@@ -2329,6 +2331,63 @@ TEST(ChannelEngine, AProbeTimeOutAbove1sIsBoundedTo1sInTheBudget) {
     const std::size_t before = requests_of(rig.bus, 2);
     rig.run_until(20 * SECOND);
     EXPECT_GE(requests_of(rig.bus, 2), before + 3);
+}
+
+// --- DI 10: a stop gives up a read in flight and a connect -------------------
+
+TEST(ChannelEngine, AnAbandonedReadCountsNothingAndKeepsTheValues) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    const int writes = rig.tags.point(0, 0).writes;
+    const EngineCounts before = rig.engine.counts();
+    rig.transport.abandon();
+    rig.run_until(5 * FAST_PERIOD);
+    // Requests were sent and given up: no time-out, no retry, no loss, no
+    // tag write, and the device is still RUNNING (R-14).
+    EXPECT_GT(rig.engine.counts().requests, before.requests);
+    EXPECT_EQ(rig.engine.counts().timeouts, before.timeouts);
+    EXPECT_EQ(rig.engine.counts().retries, before.retries);
+    EXPECT_EQ(rig.engine.counts().losses, before.losses);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, writes);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+}
+
+TEST(ChannelEngine, AnAbandonedConnectIsNoFailure) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.transport.abandon();
+    rig.run_until(3 * SECOND);
+    EXPECT_EQ(rig.engine.counts().refused, 0U);
+    EXPECT_EQ(rig.engine.counts().connects, 0U);
+    // Not written COMM_FAIL by a connect that failed: never connected.
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, ASeededPointKeepsItsValueThroughACommFail) {
+    // Review M4: the value the tag held after 9.1 is the point's last
+    // value, so a COMM_FAIL before the first read writes it, not 0.
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.engine.seed_point(0, 0, int64_value(11));
+    rig.engine.seed_point(9, 9, int64_value(5));  // out of range: ignored
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 11);
+}
+
+TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
+    CompiledChannel channel =
+        channel_of(2, quick_failure(2, 3), TransportKind::TCP);
+    SimBus bus = bus_of_units(2);
+    SimClock clock;
+    SimTransport transport(bus, clock, LATENCY);
+    RecordingTags tags;
+    const TestProtocol protocol;
+    const std::array<DeviceCaps, 1> caps{
+        protocol.device_caps(channel.devices[0])};
+    const ChannelEngine engine(channel, protocol, transport, clock, tags, caps);
+    EXPECT_FALSE(engine.status().ok());
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
