@@ -79,6 +79,14 @@ private:
         std::int64_t offset_ns = 0;
     };
 
+    // Adds a change to `offset_ns` at `begin_ns` to `intervals`, which
+    // hold at least one and end before or at `begin_ns`. A change at the
+    // instant the last interval begins replaces it, so that no interval is
+    // empty (the footer's change at the last transition, #158); a change
+    // to the offset in force adds nothing.
+    static void add_change(std::vector<Interval>& intervals,
+                           std::int64_t begin_ns,
+                           std::int64_t offset_ns) noexcept;
     // The search window `intervals` need: at least 2, and the largest number
     // of interval begins that lie within less than the span of the table's
     // offsets (with 0) of one another. Nothing if that is more than the

@@ -2639,10 +2639,13 @@ Status: accepted for review
 
 Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 26 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
 
+The same check then aborted in the fuzz job of PR 159 on a second input: changes 2 min and then 1 s apart (+2 h, +1 h, +2 h) and a footer without daylight time at -3 h. Two causes act there: (a) `from_tzif` added the footer's change at the last transition's own instant, which left an interval of length zero; (b) the window of two, as above.
+
 Decision:
 - `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets of one another, at least 2. `convert` searches that many intervals on each side.
-- A table that would need more than 16 is refused (INVALID_ARGUMENT, "changes of offset too close together"), so that a conversion, which runs on a worker for each sample with a device time, stays bounded.
-- The fuzz target's check is right and is not changed. The input is in the corpus (`changes-closer-than-offsets`). `ZoneTable.ChangesCloserThanTheirOffsetsAreAllSearched` fails with the old window, and `ZoneTable.ChangesTooCloseForTheSearchAreRefused` tests the bound.
+- A table that would need more than 16 is refused (INVALID_ARGUMENT, "the zone file's changes of offset are too close together for its offsets"), so that a conversion, which runs on a worker for each sample with a device time, stays bounded. `to_utc` does one binary search over the intervals and then looks at no more than 33 intervals (16 on each side and the one found) twice: once for the matches, once for a skipped hour.
+- A change at the instant the last interval begins replaces that interval (`ZoneTable::add_change`), so no interval is empty; if the offset before it is the same, the two merge.
+- The fuzz target's check is right and is not changed. Both inputs are in the corpus (`changes-closer-than-offsets`, `footer-at-the-last-transition`). `ZoneTable.ChangesCloserThanTheirOffsetsAreAllSearched` fails with the old window, `ZoneTable.AFooterChangeAtTheLastTransitionReplacesIt` fails without the replacement, and `ZoneTable.ChangesTooCloseForTheSearchAreRefused` tests the bound.
 
 Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
 

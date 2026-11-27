@@ -301,6 +301,39 @@ TEST(ZoneTable, ChangesCloserThanTheirOffsetsAreAllSearched) {
     }
 }
 
+// Issue #158, the input of PR 159's fuzz job: changes 2 min and then 1 s
+// apart (+2 h, +1 h, +2 h) and a footer without daylight time at -3 h.
+// The footer's change falls on the last transition's instant and replaces
+// it, so that no interval is empty: the +1 h interval, then -3 h.
+TEST(ZoneTable, AFooterChangeAtTheLastTransitionReplacesIt) {
+    constexpr std::int64_t FIRST_S = 1'700'000'000;
+    constexpr std::int64_t SECOND_S = FIRST_S + 120;
+    constexpr std::int64_t THIRD_S = SECOND_S + 1;
+    constexpr std::int32_t PLUS_1_S = 3'600;
+    constexpr std::int32_t PLUS_2_S = 7'200;
+    constexpr std::int64_t MINUS_3_S = -10'800;
+    test::TzifSpec spec;
+    spec.transitions = {FIRST_S, SECOND_S, THIRD_S};
+    spec.type_of = {0, 1, 0};
+    spec.offsets = {PLUS_2_S, PLUS_1_S};
+    spec.footer = "CET3";
+    const auto table = ZoneTable::from_tzif(test::build_tzif(spec));
+    ASSERT_TRUE(table.ok());
+    // From 1970 at +2 h, +1 h from the second change, -3 h from the third.
+    EXPECT_EQ(table.value().interval_count(), 3U);
+    // A local time of the +2 h interval: it also lies in the -3 h one, a
+    // repeated time, given its first occurrence.
+    const UtcTime early =
+        table.value().to_utc((FIRST_S + 60 + PLUS_2_S) * SECOND);
+    EXPECT_EQ(early.utc_ns, (FIRST_S + 60) * SECOND);
+    EXPECT_TRUE(early.uncertain);
+    // A local time only the -3 h interval holds.
+    const std::int64_t late_s = THIRD_S + 86'400;
+    const UtcTime late = table.value().to_utc((late_s + MINUS_3_S) * SECOND);
+    EXPECT_EQ(late.utc_ns, late_s * SECOND);
+    EXPECT_FALSE(late.uncertain);
+}
+
 // A file whose changes are so close that a local time may lie in more than
 // sixteen intervals is refused, so that a conversion stays bounded (#158).
 TEST(ZoneTable, ChangesTooCloseForTheSearchAreRefused) {

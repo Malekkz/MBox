@@ -269,19 +269,26 @@ Result<ZoneTable> ZoneTable::from_tzif(
             .begin_utc_ns = first_s * NS_PER_S,
             .offset_ns = static_cast<std::int64_t>(offset) * NS_PER_S});
         for (const Change& change : changes) {
-            const std::int64_t offset_ns =
-                static_cast<std::int64_t>(change.offset_s) * NS_PER_S;
-            if (offset_ns == table.intervals_.back().offset_ns) {
-                continue;  // merged: no change of offset
-            }
-            table.intervals_.push_back(
-                Interval{.begin_utc_ns = change.at_s * NS_PER_S,
-                         .offset_ns = offset_ns});
+            add_change(table.intervals_, change.at_s * NS_PER_S,
+                       static_cast<std::int64_t>(change.offset_s) * NS_PER_S);
         }
         return with_search_window(std::move(table));
     } catch (const std::bad_alloc&) {
         return Status(StatusCode::RESOURCE_EXHAUSTED, "out of memory");
     }
+}
+
+void ZoneTable::add_change(std::vector<Interval>& intervals,
+                           std::int64_t begin_ns,
+                           std::int64_t offset_ns) noexcept {
+    if (intervals.size() > 1 && intervals.back().begin_utc_ns == begin_ns) {
+        intervals.pop_back();  // replaced: the interval would be empty
+    }
+    if (offset_ns == intervals.back().offset_ns) {
+        return;  // merged: no change of offset
+    }
+    intervals.push_back(
+        Interval{.begin_utc_ns = begin_ns, .offset_ns = offset_ns});
 }
 
 std::optional<std::ptrdiff_t> ZoneTable::search_window_for(
