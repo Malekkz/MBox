@@ -83,6 +83,8 @@ public:
         return check_stale(rules_, state_, now_mono_ns, out);
     }
 
+    [[nodiscard]] const PointState& state() const { return state_; }
+
     ProcessedSample withhold(std::uint16_t flags, std::int64_t source_ns) {
         ProcessedSample out;
         withhold_point(rules_, state_, flags, source_ns, out);
@@ -1507,6 +1509,12 @@ TEST(SampleProcessing, AWithheldPointBringsNoValueFromBeforeBack) {
     const TagWrite kept = point.value(-1, 2 * SECOND).tag;
     EXPECT_EQ(kept.quality, Quality::BAD);
     EXPECT_TRUE(has(kept.flags, QualityFlag::NOT_INIT));
+    // A value held when the withhold comes is held no more (review S7).
+    (void)point.value(KEPT_VALUE, 3 * SECOND);
+    (void)point.value(-1, 4 * SECOND);
+    ASSERT_TRUE(point.state().holding);
+    (void)point.withhold(0, 0);
+    EXPECT_FALSE(point.state().holding);
     // A read gives a value again.
     EXPECT_EQ(point.value(21, 3 * SECOND).tag.quality, Quality::GOOD);
 }
@@ -1557,6 +1565,13 @@ TEST(SampleProcessing, ASampleWithoutAValidValueGivesNoRuleValue) {
             .rule_valid);
     EXPECT_FALSE(point.feed(RawSample{.outcome = Outcome::NO_VALUE}, 4 * SECOND)
                      .rule_valid);
+    // A value a marker makes BAD is no valid value either (review S7).
+    PointRules bad = int_rules();
+    bad.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                        .action = InvalidAction::BAD});
+    Point marked(bad);
+    EXPECT_FALSE(marked.value(-1, SECOND).rule_valid);
+    EXPECT_TRUE(marked.value(4, 2 * SECOND).rule_valid);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

@@ -81,6 +81,15 @@ TEST(CompareValues, AnIntegerAndADoubleCompareExactly) {
         compare_values(int64_value(1),
                        float64_value(std::numeric_limits<double>::quiet_NaN())),
         ValueOrder::UNORDERED);
+    // The edges (review S7): INT64_MIN is -2^63 exactly, and 0 is -0.0.
+    EXPECT_EQ(
+        compare_values(int64_value(std::numeric_limits<std::int64_t>::min()),
+                       float64_value(-9'223'372'036'854'775'808.0)),
+        ValueOrder::EQUAL);
+    EXPECT_EQ(compare_values(uint64_value(0), float64_value(-0.0)),
+              ValueOrder::EQUAL);
+    EXPECT_EQ(compare_values(float64_value(-0.0), uint64_value(0)),
+              ValueOrder::EQUAL);
 }
 
 TEST(CompareValues, OtherTypesCompareOnlyWithTheirOwn) {
@@ -136,6 +145,12 @@ TEST(Identity, APatternMatchesAStringOnly) {
     EXPECT_TRUE(identity_matches(pattern, string_value("SUN2000-10KTL-M1")));
     EXPECT_FALSE(identity_matches(pattern, string_value("SUN5000-10KTL")));
     EXPECT_FALSE(identity_matches(pattern, uint64_value(1)));
+    // `*` matches the empty text, which a number would give: still no match
+    // (review S7).
+    const IdentityCheck any = check(IdentityCheck::Kind::PATTERN, {}, "*");
+    EXPECT_TRUE(identity_matches(any, string_value("")));
+    EXPECT_FALSE(identity_matches(any, uint64_value(1)));
+    EXPECT_FALSE(identity_matches(any, bool_value(false)));
 }
 
 // --- Restart rules ----------------------------------------------------------
