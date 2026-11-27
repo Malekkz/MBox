@@ -93,10 +93,10 @@ inline constexpr std::size_t MAX_EXPRESSION_WORK =
 
 // The work of matching the patterns of run-time expressions at stage 5
 // (D-117, item 1 of the delta check of #163): 32 units per name visited and
-// 1 per step of the matcher, at most 2e10 units, about 13 s as the
-// expression budget of stage 4.
+// 1 per step of the matcher, at most 1e10 units: the worst accepted tree
+// takes about 14.5 s at 1.45 ns a unit, as the expression budget of stage 4.
 inline constexpr std::uint64_t RUN_TIME_NAME_WORK = 32;
-inline constexpr std::uint64_t MAX_RUN_TIME_PATTERN_WORK = 20'000'000'000;
+inline constexpr std::uint64_t MAX_RUN_TIME_PATTERN_WORK = 10'000'000'000;
 
 struct ExpandLimits {
     std::size_t nodes = MAX_EXPANDED_NODES;
