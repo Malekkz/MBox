@@ -156,8 +156,9 @@ carry them there. They are read when a configuration is compiled.
 ## Testing
 
 ```
-cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test \
-  scada-driver-transport-test scada-driver-test-sim scada-drv-test \
+cmake --build --preset dev --target scada-driver-unit-test \
+  scada-driver-engine-property-test scada-driver-plan-property-test \
+  scada-driver-zones-test scada-driver-transport-test scada-driver-test-sim scada-drv-test \
   scada-driver-process-integration-test scada-tagd
 ctest --preset unit -R 'scada-driver|sample_processing|tzif'
 ctest --preset integration -R 'scada-driver-(zones|transport|process)'
@@ -209,7 +210,10 @@ until reload; every other signal has its default.
   injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
   time. `plan_test.cpp` checks the planner against plans worked out by
   hand, and `plan_property_test.cpp` checks every rule on 10,000 random
-  plans from a fixed seed.
+  plans from a fixed seed. It and `engine_random_test.cpp` (the channel
+  engine's invariants for many seeds) are executables of their own, with
+  their own time limits (`scada-driver-plan-property-test`,
+  `scada-driver-engine-property-test`, #164).
 - The conformance tests of failure handling (15, 16, 17, the dead-device
   part of 12 and the gateway and busy parts of 19) run the channel engine
   over a simulated transport (`tests/sim_transport.h`) on the same bus:
