@@ -1,5 +1,5 @@
 // Fuzz target for the text pattern of identity checks (configuration schemas
-// contract 2.5, 4.8; decision D-145): the text comes from the device. The
+// contract 2.5, 4.8; decision D-147): the text comes from the device. The
 // input is a pattern, a NUL, and the text; the match must agree with the
 // plain definition of the pattern, computed by the textbook table.
 

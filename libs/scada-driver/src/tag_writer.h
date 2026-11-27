@@ -4,7 +4,7 @@
 // The TagSink of a channel worker over the tag library (driver.h, D-142):
 // each point's resolved handle, written on the worker's own thread, which
 // owns the channel's tags (DI 2.4, CS 12.3), the writes of 9.1, and the
-// system tags of the channel and its devices (11.1, D-144).
+// system tags of the channel and its devices (11.1, D-146).
 
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
@@ -29,6 +29,24 @@ namespace scada::driver::detail {
 struct PointHandles {
     std::vector<std::uint32_t> handles;
     std::vector<std::size_t> first;  // one per device of the channel
+};
+
+// What TagWriter::seed hands each point's stored value to: the channel
+// engine, or a test's recorder.
+class PointSeeds {
+public:
+    PointSeeds() = default;
+    PointSeeds(const PointSeeds&) = delete;
+    PointSeeds& operator=(const PointSeeds&) = delete;
+    PointSeeds(PointSeeds&&) = delete;
+    PointSeeds& operator=(PointSeeds&&) = delete;
+    virtual ~PointSeeds() = default;
+
+    // As ChannelEngine::seed_point: `stored` is the value point `point` of
+    // `device` holds; `substituted`, that it carries SUBSTITUTED.
+    virtual void seed_point(std::uint32_t device, std::uint32_t point,
+                            const TagValue& stored,
+                            bool substituted) noexcept = 0;
 };
 
 // 9.1, by owner slot: every tag of owner `owner` is written with its value
@@ -59,18 +77,25 @@ public:
                               const ProcessedSample& sample) noexcept override;
 
     // `sys.dev.<device>.state` is written by `publish_system` after the
-    // step that changed it (D-144).
+    // step that changed it (D-146).
     SCADA_RT void device_state(std::uint32_t /*device*/,
                                DeviceStatus /*state*/) noexcept override {}
 
     // `sys.drv.<channel>.state` at once; CONNECTING also wakes the readers
     // at once, since the connect that follows blocks the worker up to its
-    // `connect_timeout` (D-144). Not real-time: the notify is a system call.
+    // `connect_timeout` (D-146). Not real-time: the notify is a system call.
     void channel_link(ChannelLink link) noexcept override;
 
     // The system tags of the channel and its devices (SystemTags::publish).
     void publish_system(ChannelEngine& engine, const CompiledChannel& channel,
                         std::int64_t now_ns, bool all) noexcept;
+
+    // The states after the stop (SystemTags::stopped).
+    void stopped_system(const CompiledChannel& channel) noexcept;
+
+    // The last values of the counters, at the stop (SystemTags::flush).
+    void flush_system(ChannelEngine& engine, const CompiledChannel& channel,
+                      std::int64_t now_ns) noexcept;
 
     // The system tags of a channel that has no engine, a disabled one
     // (SystemTags::publish_idle).
@@ -84,6 +109,8 @@ public:
     // Gives `engine` the value each point's tag holds now, after 9.1, as
     // its last value (review M4). Not real-time.
     void seed(ChannelEngine& engine, const CompiledChannel& channel) noexcept;
+    // The same, into `seeds` (for the tests).
+    void seed(PointSeeds& seeds, const CompiledChannel& channel) noexcept;
 
     // Writes the pending STRING values, then wakes the consumers once if
     // anything was written since the last call: one `scada_tag_notify` per

@@ -165,10 +165,15 @@ TEST(References, AlarmPrioritiesClassesAndAreas) {
                    "high, area: ps1 }\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "normal, class: safety, area: ps9 }\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"alarms/site.yaml:2:27 CF-310: alarm priority \"high\" does "
                "not exist",
+               "alarms/site.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
                "alarms/site.yaml:4:58 CF-310: alarm priority \"high\" does "
                "not exist",
+               "alarms/site.yaml:5:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
                "alarms/site.yaml:5:72 CF-310: alarm class \"safety\" does not "
                "exist",
                "alarms/site.yaml:5:86 CF-310: area \"ps9\" does not exist"}));
@@ -211,8 +216,12 @@ TEST(References, OutputsInterlocksAndPrograms) {
                "control/tasks.yaml:2:46 CF-310: program \"ps1_fan\" does not "
                "exist",
                "outputs/ps1.yaml:2:72 CF-310: task \"slow\" does not exist",
+               "outputs/ps1.yaml:7:13 CF-310: tag \"ps1.pump1.run_cmd\" does "
+               "not exist",
                "outputs/ps1.yaml:9:26 CF-310: interlock \"ps1.dry\" does not "
                "exist",
+               "outputs/ps1.yaml:14:13 CF-310: tag \"ps1.valve.run_cmd\" does "
+               "not exist",
                "outputs/ps1.yaml:16:39 CF-310: interlock \"ps1.wet\" does not "
                "exist"}));
 }
@@ -354,9 +363,10 @@ TEST(References, TagsInSysAndTagsGivenTwice) {
                "at tags/a.yaml:3"}));
 }
 
-// A reference to a tag waits for the expander (#103), which makes the point
-// tags: no error yet, however wrong it is.
-TEST(References, AReferenceToATagGivesNoErrorYet) {
+// Slice 7a of #100 (D-116): a reference to a tag outside an expression names
+// a tag of the expanded tree, or is CF-310. The names in a run-time
+// expression (the virtual tag's) are slice 7b's, so they give no error yet.
+TEST(References, AReferenceToATagNamesATag) {
     EXPECT_EQ(
         validate(
             {{"areas.yaml",
@@ -377,7 +387,15 @@ TEST(References, AReferenceToATagGivesNoErrorYet) {
               "    feedback: ps1.nothing.either\n"
               "    interlocks: []\n"
               "    safe_state: off\n"}}),
-        Lines{});
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"alarms/site.yaml:2:12 CF-310: tag \"ps1.fm9.flow\" does not "
+               "exist",
+               "alarms/site.yaml:2:63 CF-310: tag \"ps1.sp9\" does not exist",
+               "areas.yaml:4:29 CF-310: tag \"ps1.panel.local\" does not exist",
+               "outputs/ps1.yaml:5:13 CF-310: tag \"ps1.nothing.here\" does "
+               "not exist",
+               "outputs/ps1.yaml:6:15 CF-310: tag \"ps1.nothing.either\" does "
+               "not exist"}));
 }
 
 TEST(References, ProtocolRulesOfAModbusChannel) {
@@ -882,7 +900,7 @@ TEST(References, TiersAndTheLoggingOfABit) {
 
 // 6 and 7: a file that gives `classes` replaces the default classes, and
 // the first file that gives `priorities` defines them (a second is CF-811,
-// with slice 7 of #100).
+// with slice 7c of #100).
 TEST(References, AlarmListsOfAFile) {
     EXPECT_EQ(
         validate({{"areas.yaml", std::string(AREAS)},
@@ -897,7 +915,11 @@ TEST(References, AlarmListsOfAFile) {
                    "alarms:\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "minor, class: safety, area: ps1 }\n"}}),
-        (Lines{"alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
+        (Lines{"alarms/a.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
+               "alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
+               "exist",
+               "alarms/b.yaml:3:12 CF-310: tag \"ps1.fm1.flow\" does not "
                "exist",
                "alarms/b.yaml:3:57 CF-310: alarm priority \"minor\" does not "
                "exist"}));

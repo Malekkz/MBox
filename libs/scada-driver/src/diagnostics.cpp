@@ -45,11 +45,11 @@ void RateWindow::advance(std::int64_t now_ns) noexcept {
     if (second <= second_) {
         return;  // the same second, or a clock that did not move forward
     }
-    const std::int64_t passed = std::min(second - second_, RATE_SECONDS);
-    // Every index is below RATE_SECONDS: `second_` is never negative.
+    const std::int64_t passed = std::min(second - second_, BUCKETS);
+    // Every index is below BUCKETS: `second_` is never negative.
     const std::span<std::uint64_t> buckets(buckets_);
     for (std::int64_t step = 1; step <= passed; ++step) {
-        buckets[static_cast<std::size_t>((second_ + step) % RATE_SECONDS)] = 0;
+        buckets[static_cast<std::size_t>((second_ + step) % BUCKETS)] = 0;
     }
     second_ = second;
 }
@@ -57,14 +57,18 @@ void RateWindow::advance(std::int64_t now_ns) noexcept {
 void RateWindow::add(std::int64_t now_ns) noexcept {
     advance(now_ns);
     const std::span<std::uint64_t> buckets(buckets_);
-    ++buckets[static_cast<std::size_t>(second_ % RATE_SECONDS)];
+    ++buckets[static_cast<std::size_t>(second_ % BUCKETS)];
 }
 
 double RateWindow::per_second(std::int64_t now_ns) noexcept {
     advance(now_ns);
+    // Every bucket but the running second's.
+    const auto running = static_cast<std::size_t>(second_ % BUCKETS);
     std::uint64_t total = 0;
-    for (const std::uint64_t count : buckets_) {
-        total += count;
+    for (std::size_t index = 0; index < buckets_.size(); ++index) {
+        if (index != running) {
+            total += std::span(buckets_)[index];
+        }
     }
     return static_cast<double>(total) / static_cast<double>(RATE_SECONDS);
 }

@@ -67,7 +67,7 @@ public:
         FailureRules rules;
         bool enabled = true;
         bool has_poll_group = true;  // at least one point in a poll group
-        bool identify = false;       // has identity checks (3.6; D-145)
+        bool identify = false;       // has identity checks (3.6; D-147)
     };
     // `lost_after_timeouts` is the channel's key (CS) on `tcp`, and 0 where
     // read timeouts never close the connection (serial, `rtu_over_tcp`).
@@ -77,7 +77,7 @@ public:
     // A connection was made at `now_ns`: every enabled device starts its
     // grace and is INITIALISING, but a demoted one is DEMOTED again with its
     // probe schedule; failure counts are kept (7.3, 7.4). An INITIALISING
-    // device with identity checks has its check pending (D-145).
+    // device with identity checks has its check pending (D-147).
     void connected(std::int64_t now_ns) noexcept;
 
     // The connection is lost: every enabled device is CONNECTING (7.3); a
@@ -87,7 +87,7 @@ public:
     // A close the driver made itself was followed by a reconnect within
     // `connect_timeout` (7.3): states, counts and grace are kept; only the
     // run of consecutive timeouts is emptied. A pending identity check stays
-    // pending, and none is started (D-145).
+    // pending, and none is started (D-147).
     void resumed() noexcept;
 
     // What a read time-out after its retries did.
@@ -138,7 +138,7 @@ public:
                               std::int64_t now_ns) noexcept;
 
     // The end of an identity read of `device` at `now_ns`, after its
-    // retries (D-145; DI 7.3). It neither adds to the run of consecutive
+    // retries (D-147; DI 7.3). It neither adds to the run of consecutive
     // time-outs nor empties it. A failure outside the grace counts toward
     // the unit's demotion as a polled read's does (`request_ended`), so a
     // dead device is DEMOTED, never MISMATCH. An answer empties the unit's
@@ -151,7 +151,7 @@ public:
 
     // The identity check of `device` matched (or failed with `warn`): it is
     // no longer pending; a device in MISMATCH is INITIALISING again, and
-    // RUNNING only once a poll answers (D-145).
+    // RUNNING only once a poll answers (D-147).
     SCADA_RT void identity_passed(std::uint32_t device) noexcept;
 
     // The identity check of an INITIALISING `device` failed with `refuse` at
@@ -160,7 +160,7 @@ public:
     SCADA_RT void identity_mismatched(std::uint32_t device,
                                       std::int64_t now_ns) noexcept;
 
-    // A restart of `device` was detected at `now_ns` (D-145): every RUNNING
+    // A restart of `device` was detected at `now_ns` (D-147): every RUNNING
     // device of its unit is INITIALISING again, with its identity check
     // pending and, when `rearm_grace`, its grace started again. A device
     // already INITIALISING, or in any other state, is left as it is.
@@ -193,7 +193,7 @@ private:
         bool demoted = false;  // kept across a lost connection
         // Recovered by a probe, and no poll answered since (review G6).
         bool probe_recovered = false;
-        bool identity_pending = false;  // D-145
+        bool identity_pending = false;  // D-147
     };
 
     // Adds a failure of `device` outside its grace to its unit's count and

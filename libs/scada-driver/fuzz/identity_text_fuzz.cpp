@@ -1,5 +1,5 @@
 // Fuzz target for the text of `sys.dev.<device>.identity` (driver interface
-// contract 3.6, 11.1; decision D-145): the values come from the device. The
+// contract 3.6, 11.1; decision D-147): the values come from the device. The
 // input is split at each NUL into fields; a field's first byte chooses its
 // type (STRING, INT64, UINT64, FLOAT64, BOOL, or not read) and the rest is
 // its value. The joined text must fit the STRING maximum and hold only

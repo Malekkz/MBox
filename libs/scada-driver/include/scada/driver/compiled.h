@@ -91,7 +91,7 @@ struct CompiledDevice {
     // `keepalive` (6.5); 0: off.
     std::int64_t keepalive_ns = 0;
     // `identify` and `on_mismatch` (CS 4.8; 3.6), and `restart_indication`
-    // (CS 4.9; 7.6), each naming a point of `points` by index (D-145).
+    // (CS 4.9; 7.6), each naming a point of `points` by index (D-147).
     // NOLINTBEGIN(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs them where a designated initializer leaves the member out
     std::vector<IdentityCheck> identify{};
     bool refuse_on_mismatch = true;

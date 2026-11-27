@@ -20,7 +20,7 @@
 // wait at most a third of the channel's stall limit; the stop eventfd also
 // ends the transport's own waits (DI 10). Each worker also writes the
 // system tags of its channel and devices, the main thread those of the
-// process (11.1, D-144). The command thread
+// process (11.1, D-146). The command thread
 // comes with the command slices (6, 7), the workers' log queues with slice
 // 5b-3.
 

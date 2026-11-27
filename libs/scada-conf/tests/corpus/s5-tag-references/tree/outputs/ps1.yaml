@@ -1,0 +1,8 @@
+outputs:
+  - name: ps1.p1.speed_cmd
+    area: ps1
+    kind: setpoint
+    target: ps1.p1.speed
+    feedback: ps1.p1.speed_fb
+    interlocks: []
+    safe_state: hold

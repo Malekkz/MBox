@@ -6,7 +6,7 @@
 | Tree format | 1 (section 11) |
 | Status | Accepted for phase 2 implementation; becomes 1.0 when phase 2 passes its acceptance tests (issue #98, P2-01). Its rulings were made by the product owner on 2026-11-23 (section 15). |
 | Implements | Reference architecture 1.2, sections 12, 7.3, 7.4, 7.6, 8, 9.1, 10.1, and the configuration lines of 4.3, 6, 14.4 and 17.7 |
-| Agrees with | Tag database contract 1.1 (sections 2, 3, 5, 8, 12, 13.2, 14 and 14.1); driver interface contract 0.6 (`driver-interface.md`, #99) |
+| Agrees with | Tag database contract 1.1 (sections 2, 3, 5, 8, 12, 13.2, 14 and 14.1); driver interface contract 0.7 (`driver-interface.md`, #99) |
 | Owners of this contract | `scada-conf`, `libscada-conf` |
 
 This contract fixes the configuration tree that people write by hand. It has

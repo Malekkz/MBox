@@ -1,5 +1,5 @@
 // Identity checks and restart indications (driver interface contract 3.6,
-// 7.6; configuration schemas contract 4.8, 4.9; decision D-145).
+// 7.6; configuration schemas contract 4.8, 4.9; decision D-147).
 
 #include "scada/driver/identity.h"
 #include "scada/driver/tag_value.h"
@@ -163,7 +163,7 @@ TEST(RestartWatch, ACountersWrapIsNoRestart) {
 
 TEST(RestartWatch, TheBaselineLastsUntilAReset) {
     // No reset at a lost connection: a device that restarted while the
-    // connection was down is seen by its first sample after (D-145).
+    // connection was down is seen by its first sample after (D-147).
     const std::vector<RestartRule> rules{
         RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
     RestartWatch watch(rules);

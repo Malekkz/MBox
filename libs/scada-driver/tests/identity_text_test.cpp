@@ -1,5 +1,5 @@
 // The text of `sys.dev.<device>.identity` (driver interface contract 3.6,
-// 11.1; decision D-145).
+// 11.1; decision D-147).
 
 #include "scada/driver/identity_text.h"
 #include "scada/driver/tag_value.h"

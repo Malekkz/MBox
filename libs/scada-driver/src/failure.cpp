@@ -281,7 +281,7 @@ void FailureTracker::restarted(std::uint32_t device, std::int64_t now_ns,
     if (device >= devices_.size()) {
         return;
     }
-    // The unit restarted: every device of it (D-145, ruling item 6).
+    // The unit restarted: every device of it (D-147, ruling item 6).
     for (std::uint32_t other = 0; other < devices_.size(); ++other) {
         Run& run = runs_[other];
         if (unit_index_[other] != unit_index_[device] ||

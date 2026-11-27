@@ -480,7 +480,7 @@ TEST(Plan, AClusterOfExactlyMaxUnitsIsOneRequest) {
     EXPECT_TRUE(chain.requests[chain.by_group[0][0]].chained);
 }
 
-// --- The identity cycle (3.6, 7.6; D-145) --------------------------------
+// --- The identity cycle (3.6, 7.6; D-147) --------------------------------
 
 PlanPoint identity_at(std::uint32_t point, std::uint64_t first,
                       std::uint32_t group = 0) {

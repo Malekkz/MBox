@@ -329,7 +329,7 @@ TEST(FailureTracker, AUnitThatAnswersOnlyProbesBacksOffFurtherEachTime) {
     EXPECT_EQ(tracker.probe_due_ns(0), now + SECOND);
 }
 
-// --- The identity check (D-145; DI 3.6, 7.3) ------------------------------
+// --- The identity check (D-147; DI 3.6, 7.3) ------------------------------
 
 FailureTracker::Device identified(std::uint32_t unit_id,
                                   std::int64_t grace_ns = 0) {

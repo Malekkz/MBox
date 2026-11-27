@@ -1,0 +1,3 @@
+tags:
+  - { name: ps1.p1.flow, type: internal, value_type: float64 }
+  - { name: ps1.flow_sp, type: manual, value_type: float64, area: ps1 }

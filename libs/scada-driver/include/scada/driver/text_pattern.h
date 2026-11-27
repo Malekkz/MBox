@@ -5,7 +5,7 @@
 // check (4.8) compares with a text the device gives, cleaned first
 // (identity.h): `*` matches any bytes, `?` exactly one, `\` makes the next
 // byte literal, and the whole text must match, case-sensitive, byte by
-// byte. No other operator, so no regular expression (decision D-145).
+// byte. No other operator, so no regular expression (decision D-147).
 
 #include "scada/common/realtime.h"
 
@@ -14,7 +14,7 @@
 
 namespace scada::driver {
 
-// The longest pattern the compile step accepts, in bytes (D-145).
+// The longest pattern the compile step accepts, in bytes (D-147).
 inline constexpr std::size_t TEXT_PATTERN_MAX_BYTES = 250;
 
 // True when `text` matches `pattern` as a whole; the empty pattern matches

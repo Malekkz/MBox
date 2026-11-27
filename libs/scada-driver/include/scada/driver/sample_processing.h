@@ -73,6 +73,11 @@ struct PointState {
     bool holding = false;
     // The point is ABSENT (contract 5.2), for `points_absent`.
     bool absent = false;
+    // `value` is a substitute from configuration (`on_invalid: substitute`):
+    // every write that keeps it carries SUBSTITUTED, which describes the
+    // value (contract 5.2, R-6; tag database contract 1.1, 6 and 12). A new
+    // value from the device ends it.
+    bool substituted = false;
     // Counters (contract 5.4): the previous raw value, and the value `hold`
     // keeps until the counter passes it.
     bool counter_has_previous = false;
@@ -101,9 +106,10 @@ SCADA_RT void reset_point_state(PointState& state, tag::TagType type,
 // stored", 5.2 "keeps its last value"; review M4). Quality, flags and
 // `has_value` stay those of the reset. A value of another type than the
 // state's is ignored; a STRING's text is copied within the reserved
-// capacity.
-SCADA_RT void seed_point_state(PointState& state,
-                               const TagValue& stored) noexcept;
+// capacity. `substituted`: the stored value carries SUBSTITUTED, so the
+// writes that keep it carry it too.
+SCADA_RT void seed_point_state(PointState& state, const TagValue& stored,
+                               bool substituted = false) noexcept;
 
 // One tag write that processing asks for.
 struct TagWrite {
@@ -119,7 +125,7 @@ struct SampleCounts {
     bool invalid = false;        // `invalid`: DEVICE_INVALID, or non-finite
     bool counter_reset = false;  // `on_decrease: reset` applied
     // A counter's decrease read as a wrap (contract 5.4), which a restart
-    // rule `decreases` does not take for a restart (D-145).
+    // rule `decreases` does not take for a restart (D-147).
     bool counter_wrapped = false;
     bool became_absent = false;  // the point went ABSENT
     bool left_absent = false;    // the point was ABSENT and is no longer
@@ -136,7 +142,7 @@ struct ProcessedSample {
     std::size_t bit_count = 0;
     std::uint64_t bit_values = 0;
     SampleCounts counts{};
-    // For the restart rules (contract 7.6; D-145): the sample gave a value
+    // For the restart rules (contract 7.6; D-147): the sample gave a value
     // read from the device that is not BAD, and `rule_value` is that value
     // as processing computed it before a counter's `on_decrease: hold`. A
     // STRING's text points into the state, as `tag`'s does.
@@ -168,7 +174,7 @@ SCADA_RT void process_sample(const PointRules& rules, PointState& state,
                              const SampleTimes& times,
                              ProcessedSample& out) noexcept;
 
-// Writes the point withheld (D-145): BAD with exactly `flags`, the value
+// Writes the point withheld (D-147): BAD with exactly `flags`, the value
 // kept, `source_time_ns` as given (0: the library's own time). The state
 // forgets every value read before, so that neither `keep_last` nor a held
 // DEVICE_INVALID can bring one back (`has_value`, `has_valid` and holding

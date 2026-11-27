@@ -2308,6 +2308,49 @@ Decision: `check_merged_points` reads each point of the expanded tree (D-114), w
 Reason: each check reads the point as the driver will, after every merge, so a template that a base, a default or an override completes is valid, and one that none completes is refused at the instance that uses it.
 Consequences: the corpus case `s5-integer-on-floating-raw` is the one saved in the slice that moved CF-504 to stage 5, with instances added, since only expanded points are checked. The cases `s5-computed-values-by-parameter` and `s5-computed-values-by-repeat` give `register` 70000, `bit` 16 and `divide_by` 0 through a parameter and through a `repeat` variable, beside each key's edge, which passes. `s5-integer-scaling-range` (CF-516), `s5-integer-scaling-merged` (CF-517) and `s5-incomplete-merged-maps` (CF-202) are conformance test 2 at stage 5. The references that need point tags come with slice 7 of #100.
 
+
+## D-116: The tag names of the expanded tree and the references to them (stage 5)
+Date: 2026-11-27
+Phase / issue: 2, #100 (P2-03), slice 7a; review of PR 153
+Status: accepted (the lead, review of PR 153 and its delta check), with the stated choices below on #136
+
+Context: contract 2.6 resolves a tag reference against "every tag of the expanded tree, generated tags included (section 12.5)", and 12.4 and 12.5 list those tags. The tag set itself, with owners, queues and the hash, is #101; the owner has since approved the owner-name rule (#151), which #101 builds on and slice 7a does not use. Slice 7a needs only names and types.
+Options: build the tag set of #101 first; build names and types only for stage 5.
+Decision: stage 5 builds the tags by name with their value types (`src/tag_names.cpp`, `TagNames`), with no owner, queue or flag, so #101 may reuse it without taking a naming rule from it.
+- **The tags.**
+  - A point's tag `<device>.<point>`, unless `tag: false`; its type is the given `value_type`, else derived as in 4.7 (shared with the merged-point checks, `src/point_types.cpp`): `string` for the raw types `string` and `bytes`. An `io` point without `value_type` is `bool` on a `gpio` channel and `float64` on another backend, the simulator's included (B.2: a line is digital, an IIO channel analog; stated choice, on #136).
+  - A bit's tag `<device>.<bit>`, BOOL (5.4).
+  - The tags of tag files, with their `value_type`; a virtual tag's type is given by slice 7b (D-117).
+  - An interlock's name, BOOL.
+  - The generated tags of 12.5:
+    - of an output: `.mode`, `.status`; `.req_manual` and `.req_auto` of its target's type, for a target that is a tag; `.refresh` with `refresh`; `.failsafe` when a fail-safe key, given or by its default (7.2, 7.4), is `safe` or `release`, so a local output has one by default; a `step`, `pulse` or `trigger` has none, as it has no safe action (7.2, CF-719). Driver interface 8.13.3 gives every output a fail-safe state; the tag follows CS 12.5, the contract of the names (stated choice, on #136). `.device_selected` never in phase 2 (no protocol declares a native select);
+    - `sys.area.<area>.authority` for each area;
+    - `<tag>.alarm.<id>` and its `.shelved_until` for each alarm, wherever it stands; `<tag>` is the alarm's own `tag`, else the tag it is listed at, and the `name` of an expression alarm; `id` defaults to the `type`. An alarm on a tag that no rule makes has no state tags (its CF-310 is reported). An alarm listed at a `tag: false` point that names no `tag` has none either: it is CF-310 for the point's tag (stated choice, on #136). An expression alarm is on no tag: its state tags against any other of their name are CF-302 (item 3 of the delta check), not CF-812;
+    - `sys.proc.<process>.config_id` and `.config_state` for the processes of 12.2 always in the tag set, and every driver signal of the driver interface contract (11.1) for `io` and `drv-<protocol>` when the tree has a channel of it. These are process names of 12.2, not owner names;
+    - `sys.drv.<channel>.<signal>`, with `period.<group>` (`float64`) for each poll group of the channel, and `sys.dev.<device>.<signal>`, with `identity` and `identity_ok` only for a device with `identify`, and `refresh_failures` only for a device a `refresh` output writes (11.1: "Phase 5, devices with a refreshed output (8.12)"; stated choice, on #136).
+  - Not built: `ctl.<program>.<block>.<param>`. The block library declares no block type in phase 2, so no tunable parameter exists.
+- **How they are held** (M7 of the review). The tags of a device and of a channel are not stored: `TagNames::find` makes them from the device's and channel's names and the signal tables of 11.1. A stored tag is one map entry: its name and a `TagInfo` of views into the Documents of the tree (value type, origin, defining node, point, device, protocol), so a `TagNames` lives no longer than the call that made it. A device keeps the sorted names of its points, a channel its poll groups. Measured (release build, x86-64, peak of the whole validation against main): 55,000 one-point devices (990,000 tags) +4 MB (349 MB before the review); 199,000 devices stop at CF-1001 with a peak of 229 MB (1,259 MB before); 300,000 alarms (600,000 state tags) +93 MB; 300,000 point tags +9 MB. The peak of 858 MB of D-114 is unchanged.
+- **CF-1001.** `limits.max_tags` counts the tags of the tag set, generated tags included (4.1). The count is `TagNames::size()`, the number of tags #101's tag set has. Stage 4 counts the point and bit tags as it expands; stage 5 counts all of them, the process tags first, and gives `{n} tags, the limit is {limit}` at what made the tag that passes it; a process tag is made from nothing a user wrote, so its CF-1001 is at `limits.max_tags` in system.yaml. The tags after it are not collected, and the references are not checked. Stage 5 gives CF-1001 and CF-403 for generated tags, while the stage table of 1.4 lists both at stage 4 only (on #136). A `max_tags` below 21, the process tags of a tree with one protocol, can never pass.
+- **CF-301, CF-302 and CF-403.**
+  - CF-301 for a name a user writes in `sys`: a tag, a device (once, at the device's name; its points are then not refused one by one), an output, an expression alarm's name. A refused output or alarm makes no tags.
+  - The tags are collected in phases, so the tags an output or an alarm needs are known when it is met: the process tags; areas, channels, devices with their points and bits, the tags of tag files and interlocks; the alarms; the outputs. An alarm whose tag comes later (an output's tag, another alarm's state tag) waits for it.
+  - CF-302 for a name made twice: two user tags at the second; a user tag and a generated tag at the user's tag, the name to change, with "first at" naming what made the other; two generated tags from different causes at the second (stated choice, on #136). A stored name that is a device's or a channel's tag is CF-302 too, although those tags are not stored (item 4 of the delta check). An alarm whose state tag is not made makes no `shelved_until`, so it is one error. A user tag against two alarms of one id on its name is CF-302 twice at one place, with two "first at".
+  - Not CF-302: the state tags of two alarms of one id on one tag (CF-812, slice 7c), and the tags of a device or channel given twice, which are collected once (CF-303). CF-303 does not name outputs: an output given twice is CF-302 once, at its `.mode`, and its other tags are made once (on #136).
+  - CF-403 `generated tag {name} is {n} bytes, the limit is 127` for a generated name over 127 bytes: an alarm's state tags and an output's. A device's name is at most 100 bytes and a channel's and a poll group's at most 31 (2.1), so their tags never pass 127 bytes.
+- **Placement and grouping.** An error on the expanded tree is placed by `expanded_diagnostic`: at the node when the instance's own file wrote it, else at the instance with the template note and the point. Every such error of stage 5 goes through `GroupedErrors` (D-114), and only those: an error of another file goes to the Diagnostics at once, which keep the first of the sorted order of 1.4 however many the expanded tree has (item 2 of the delta check). one cause, by its code, its template line and its message without the instance's name (`instance_free_key`, and "first at" the instance's own place read as `<instance>`), met at many instances is one error naming the others; an error the instance's own file contributes to is never grouped. A template line that names one instance's tag gives an error at each other instance and none at that one: two errors where the cause is one. A generated name's CF-403 is keyed without its byte count, which differs between instances.
+- **References** (CF-310 `tag {name} does not exist`):
+  - an output's `target` and `feedback` (a tag, `on` and `off`, or `tag`);
+  - an area's `authority.local_panel.input`;
+  - an alarm's `tag`, wherever the alarm stands (an alarm file, a tag file, a point or a bit), its `limit` when written as a tag, and its `setpoint`;
+  - a program block's source (`in`): `{ tag }`, or a scalar that is neither a literal (a boolean, a number, a duration) nor a pin `<block id>.<pin>` of the program (9.2); and the tags its `out` writes. A literal is read from the text, so a quoted `'5'` is a literal too.
+  - The kind a reference needs is checked with the rule that names it: the output's target and feedback (CF-702, CF-715) and the local panel's input (CF-718) in slice 7e.
+- **CF-312** for a `limit` or `setpoint` tag that is not a number: a limit and a setpoint are compared with a value (8), and the contract names no other type for them. A virtual tag is checked with the type slice 7b gives it.
+- **Within a device** (2.6: "The points of the same template after expansion"): `exponent_from.point`, `quality_from[].point` other than `self`, `source_time_from`, a health rule's `point` and `applies_to` names, a restart indication's and an identity check's `point` name a point of the device, or CF-310 `point {name} does not exist`. A bit is not a point: a companion that names a bit is CF-310 (stated choice, on #136). An `applies_to` pattern (2.5) that matches no point is CF-311 `pattern {pattern} matches no tag`, the contract's text; the patterns of one validation are compared with at most 20,000,000 point names in all, and those past it are not checked. A device given twice is checked once.
+- **Poll groups.** A channel's `poll_groups` replace the defaults `fast`, `normal`, `slow` (4.6: the defaults are the key's default; CS 4.6 and 4.7 support it, both reviews of the delta check follow it). A point's poll group, given or the default `normal`, is one of its channel's, or CF-604 at the `poll_group`, or at the point's name for the default. A `wo` point is never read (4.7) and has no default group; a group given to it is checked as any other and refused by CF-614 (slice 7d). An `io` channel has no `poll_groups` key (its schema): its groups are the defaults, and a group given to an `io` point is checked against them. The `period` tags of a channel are those of its groups.
+- **For slice 7b and #101.** Both take the names from the same `TagNames`: `find(name)` (a copy of the `TagInfo`), `size()`, `complete()`, `points_of` and `poll_groups_of`. What only slice 7b needs (setting a virtual tag's type, the tags under a pattern's prefix in the order of names) is added by 7b with its caller and its tests (item 5 of the delta check). `validate.cpp` keeps the `TagNames` as a local of stage 5 until #101 needs it after stage 5. #101 adds owners and queues to the names it gets this way; nothing here depends on how owners are named.
+Reason: a reference error now stays an error once #101 builds the tag set, since both read the same names; finding a device's and a channel's tags from their names keeps memory to the tags a user wrote.
+Consequences: `References.AReferenceToATagGivesNoErrorYet` is replaced, on purpose, by `References.AReferenceToATagNamesATag`, and three tests of other rules now list the CF-310 of their dangling tags. The `exponent_from` row of `MergedPoints.EveryKeyAMergedMapNeeds` (#149) now names a point that exists, as it tests CF-202 only. Corpus cases `s5-tag-references` and `s5-generated-tags-limit` (2,800 one-point devices, refused at the 2,777th by the default limit); corpus case `s5-program-of-section-9-2` now lists the CF-310 of its interlock source, a bare tag source. The README holds the table of every code of section 10 with where it is given or which issue holds it.
+
 ## D-118: The pipeline's apt reads only the distribution's sources
 Date: 2026-11-27
 Phase / issue: 2, #160
@@ -2562,7 +2605,7 @@ Decision:
 - **Signals.** `main` first calls `block_stop_signals`, before any thread starts, the logger's included: SIGTERM, SIGINT and SIGHUP are blocked on every thread and taken by the main thread from a signalfd. SIGPIPE is blocked too and never taken, so a write to a standard error or a socket nobody reads fails with EPIPE instead of ending the process (delta 2; scada-sim does the same, scada-tagd leaves SIGPIPE at its default). Every other signal keeps its default, so SIGABRT (a service manager's watchdog abort) and the fault signals end the process at once with a core (review M8). A child process the driver may one day start inherits this mask: it must reset its signal mask (and SIGPIPE) before it runs anything.
 - **The service manager.** As in scada-tagd, a notify environment that names a service manager wrongly (a bad NOTIFY_SOCKET, an empty WATCHDOG_PID) fails the start with "invalid environment", and a READY=1 that cannot be sent fails it with "cannot report readiness to the service manager" (review M10). A failed watchdog notification is logged once and the process runs on; STOPPING=1 is best effort.
 - **Threads.** The main thread and one worker per channel, a disabled channel included: every tag has one writing thread (TD 13.2), and a disabled channel's worker writes 9.1 for its tags and then only waits for the stop (review M2). It is never connected and has no transport (CS 4.6); slice 8's live enable can hand it an engine. A worker is a POSIX thread with a stack of `SCADA_DRIVER_WORKER_STACK_BYTES` (2.4: 256 KiB; 8 MiB in the sanitizer builds). The command thread comes with slices 6 and 7.
-- **Owners** (review M3). The main thread learns each channel's owner from the channel's first tag, checks that it is a thread of this process, and refuses two channels on one owner before any worker starts ("channels a and b both write owner o"). After the workers start it resolves every point tag `<device>.<point>` (CS 12.4), disabled devices included, and checks its type and that its owner is the channel's ("tag t of channel c is owned by o"). Either refusal fails the start, exit status 1. So does an owner of the process that no channel writes ("owner o of this process is written by no channel"), whose tags would otherwise keep the previous life's values, GOOD (the lead's ruling, delta 3). The one exception is the main thread's own owner, named like the process, for the `sys.proc` tags (D-144).
+- **Owners** (review M3). The main thread learns each channel's owner from the channel's first tag, checks that it is a thread of this process, and refuses two channels on one owner before any worker starts ("channels a and b both write owner o"). After the workers start it resolves every point tag `<device>.<point>` (CS 12.4), disabled devices included, and checks its type and that its owner is the channel's ("tag t of channel c is owned by o"). Either refusal fails the start, exit status 1. So does an owner of the process that no channel writes ("owner o of this process is written by no channel"), whose tags would otherwise keep the previous life's values, GOOD (the lead's ruling, delta 3). The one exception is the main thread's own owner, named like the process, for the `sys.proc` tags (D-146).
 - **9.1, first** (review M6). After attach, each worker writes every tag of its owner, by owner slot (`scada_owner_info`, `scada_tag_handle`), before anything else: its value as stored, BAD with NOT_INIT and source time 0 (the library stores its own update time with LOCAL_TIME, TD 13); a STRING keeps its text; a tag marked RESTORED is left as it is. Then one `scada_tag_notify`. It covers tags no point names. A read or write the library refuses fails the start (review M9). The window that remains, in which a tag of the previous life reads GOOD after the attach, is the time from the attach to the end of its owner's walk: one resolve and one tag information per channel, the start of the worker thread, and the slots before the tag in its owner's walk. A window of zero needs the tag library (attach marking the owner's tags); that is a point for #136.
 - **Seeding** (review M4). After 9.1 and the resolve, the worker reads each point's tag and gives its engine that value as the point's last value (`ChannelEngine::seed_point`), so that a COMM_FAIL before the first read keeps the value as stored (5.2 "keeps its last value") and never writes 0.
 - **Calls on the main thread** (review M12). `device_caps` and `point_caps` run on the main thread (DI 2.3). The worker builds its engine with the caps the main thread asked (`ChannelEngine` with a span of `DeviceCaps`). The test executable checks the thread of every call of the protocol.
@@ -2580,7 +2623,7 @@ Decision:
 
 Reason: the smallest process that meets 2.3, 2.4, 2.6, 9.1 and 10 with the engine of slice 3 and the transports of slice 4, with every end bounded.
 
-Consequences: `TagSink::device_state` writes nothing: the system tags of 11.1 are written by the worker after each step (slice 5b-1, D-144); identity checks and restarts (7.6) come with 5b-2; the command thread and the orders with slices 6 and 7; the compile step, bit tags, reload and the generation change with slice 8.
+Consequences: `TagSink::device_state` writes nothing: the system tags of 11.1 are written by the worker after each step (slice 5b-1, D-146); identity checks and restarts (7.6) come with 5b-2; the command thread and the orders with slices 6 and 7; the compile step, bit tags, reload and the generation change with slice 8.
 
 Tests:
 - `scada-driver-process-integration-test` runs scada-tagd, `scada-driver-test-sim` and `scada-drv-test` as processes, with a listener standing in for the service manager, and observes the tags, the exit and the log:
@@ -2632,7 +2675,54 @@ Consequences:
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
 
-## D-144: The system tags of the process, of a channel and of its devices
+## D-144: The zone table searches every interval that may hold a local time
+Date: 2026-11-27
+Phase / issue: 2, #158; follows D-130
+Status: accepted for review
+
+Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 51 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
+
+The same check then aborted in the fuzz job of PR 159 on a second input: changes 2 min and then 1 s apart (+2 h, +1 h, +2 h) and a footer without daylight time at -3 h. Two causes act there: (a) `from_tzif` added the footer's change at the last transition's own instant, which left an interval of length zero; (b) the window of two, as above.
+
+Decision:
+- `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets (the largest minus the smallest, with 0) of one another, at least 2. `convert` searches that many intervals on each side.
+- A table that would need more than 16 is refused, so that a conversion, which runs on a worker for each sample with a device time, stays bounded. `to_utc` does one binary search over the intervals and then looks at no more than 33 intervals (16 on each side and the one found) twice: once for the matches, once for a skipped hour. The header of `ZoneTable` states the bound.
+- The refusal is DATA_CORRUPT ("the zone file's changes of offset are too close together for its offsets"), as for any other file a table cannot be built from. INVALID_ARGUMENT is documented by `build` for a name that is not a zone name; the configuration compile reports both file cases as an unusable zone file. `from_tzif` now documents its failures.
+- The span bounds the distance in both directions at once, so it can be up to twice what one direction needs. It refuses more hand-made files than it must, never a real one, and keeps the rule simple. It is left as it is.
+- A change at the instant the last interval begins replaces that interval (`ZoneTable::add_change`), so no interval is empty; if the offset before it is the same, the two merge. A change at the begin of the table's only interval takes its place; no file reaches that today, since every change lies after the table's start.
+- The fuzz target's check is right and is not changed. Both inputs are in the corpus (`changes-closer-than-offsets`, `footer-at-the-last-transition`).
+- Tests (`zone_table_test.cpp`):
+  - each input as a unit test, and its mirror west of UTC, where the answer lies after the interval found;
+  - 16 close changes taken and 17 refused;
+  - a footer change back to the offset before;
+  - a seeded property test: on 4,000 generated tables, `to_utc` agrees with `ZoneTable::to_utc_searching_all`, a search of every interval written apart from `convert`.
+  These fail for each mutant the review of PR 162 found: either side of the window fixed at 2, the span without 0 or as `highest`, a cap other than 16, `>=` for `>`, the replacement without the merge.
+
+Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
+
+Consequences: real zone files are unaffected. On the build machine no zone file has two changes closer together than the span of its own offsets, so every table keeps the window of 2. `scada-driver-zones-test`, which compares every zone with the C library, passes unchanged. A hand-made or damaged file of that kind is either converted correctly (the repeated local time gives its earliest instant, marked uncertain) or refused, never converted wrongly.
+
+## D-145: Drivers set SUBSTITUTED (tag database contract 1.1)
+Date: 2026-11-26, revised 2026-11-27 after the review of PR 157
+Phase / issue: 2, #154 (P2-15); follows #151 (D-143)
+Status: for review by a person (contract change: driver interface contract 0.7).
+
+Context: tag database contract 1.1, section 6, gives SUBSTITUTED the meaning that ruling R-6 of the driver interface contract asked for: a value substituted by configuration, and a value the device reports as forced, besides one entered by a person. The driver interface contract 0.6 and `libscada-driver` held the flag back "until tag database 1.1" (decision D-131: device flags masked to OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST).
+
+Decision:
+- One source gives SUBSTITUTED: the `substitute` action of `on_invalid` or of an invalid marker (CS 4.7) writes the configured value UNCERTAIN with SUBSTITUTED.
+- The flag stays with the value (review R1). `PointState::substituted` records that the value held is a configured substitute. Every write that keeps it carries the flag, with that write's own quality: after COMM_FAIL, ABSENT and NO_VALUE, after a stale check, in the writes of driver interface contract 9.1 (`kept_flags` in `tag_writer.cpp`), and after a restart, where `TagWriter::seed` reads the flag from the stored value. The next value read from the device ends it. A companion does not pass it to a dependent point (`companion_flags`): the flag describes the companion's value.
+- Two masks (review R2). `CONFIG_FLAGS_MASK` is the flags the configuration may give in a marker or a `quality_from` map: OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST, as CS 4.7 allows. `DEVICE_FLAGS_MASK` is the flags a protocol's mapping may give: the same four. Neither holds SUBSTITUTED; the last point of D-131 on the mask stands. `keep_last` stays without SUBSTITUTED (contract 5.2).
+- A value the device reports as forced is room only (review R3), until a protocol carries a value with a mark (#136). A NO_VALUE or DEVICE_INVALID answer carries no value of the device's, so the flag would land on a kept value the device did not give. Row 4 of contract 5.2 no longer lists SUBSTITUTED.
+- Bits of a word (`bits`, CS 4.7): on a substitute they keep the values last read, and `ProcessedSample` gives them the word's quality and flags, SUBSTITUTED included (`sample_processing.h`). Nothing writes bit tags yet (`TagWriter` writes the point's own tag only). The slice that writes them decides whether a bit of a substituted word carries the flag.
+- The driver interface contract goes to 0.7: it cites tag database 1.1, 5.2 states the rule without "until 1.1", R-6 says what is in effect, and 2.5 no longer names TD 1.1 for the wake-only form of #116, which 1.1 does not have.
+- The golden vector of `substitute` (`tests/golden/driver-vectors.txt`, shared with #105 and #106) expects SUBSTITUTED,LOCAL_TIME.
+
+Reason: the code and the contracts follow tag database 1.1; nothing read the flag from a driver before. A flag that a kept value lost at the next failed poll would tell an operator the substitute was a measurement.
+
+Consequences: the writer of the driver process (`tag_writer.*`, PR 150) is on `main`, so the flag reaches the tag database; `tests/integration/tag_writer_integration_test.cpp` shows that the writes of 9.1 keep it. A test of `on_invalid: substitute` through a running driver process waits for #104 and is part of #154. The fuzz target `sample_processing_fuzz` checks both ways that a write has the flag exactly when its value is a configured substitute.
+
+## D-146: The system tags of the process, of a channel and of its devices
 Date: 2026-11-26; rebased on the reviewed slice 5a (D-142) on 2026-11-27
 Phase / issue: 2, #104 (P2-07), slice 5b-1
 Status: accepted; the cut of slice 5b into 5b-1 (system tags), 5b-2 (identity and restart) and 5b-3 (log queues) is the lead's (2026-11-26). Review by a person: it adds writes after every attach (9.1) and at the stop.
@@ -2644,13 +2734,16 @@ Decision:
   - `identity`, `identity_ok` and `restarts` come with 5b-2.
   - `selections_lost` and `last_command_stage` come with the command slices.
   - `refresh_failures` comes with phase 5.
-- Per process, written by the main thread as the owner named like the process (`drv-<protocol>`, CS 12.5; the count-free names of tag database contract 1.1, D-143): every signal of 11.1. `realtime` is false: a driver has no real-time thread (DI 2.5). `config_id` is 0 until the compile step gives the driver one (slice 8); `config_state` is 0 (loading) from the start and 1 (applied) once READY=1 is sent, so a state read with `config_id` 0 matches no configuration `scada-conf` waits for. `stale_outcomes`, `answers_dropped`, `safe_unjournalled` and `log_dropped` are 0 until the slices that count them (the command slices, the fail-safe slice, 5b-3).
+  - The validator generates `restarts`, `selections_lost` and `last_command_stage` for every device, `refresh_failures` for a device that a refreshed output writes, and `identity` and `identity_ok` for a device with `identify`. The driver does not resolve them, and they read BAD with NOT_INIT, from the walk of 9.1, for the driver's whole life until their slice (PR 159 review S2).
+- Per process, written by the main thread as the owner named like the process (`drv-<protocol>`, CS 12.5; the count-free names of tag database contract 1.1, D-143): every signal of 11.1. `realtime` is false: a driver has no real-time thread (DI 2.5). `config_id` is 0 until the compile step gives the driver one (slice 8); `config_state` is 0 (loading) from the start, 1 (applied) once READY=1 is sent, and 0 again at the stop, once every worker returned (review M3), so a state read with `config_id` 0 matches no configuration `scada-conf` waits for. What `config_state` says across a reload is slice 8's. `stale_outcomes`, `answers_dropped`, `safe_unjournalled` and `log_dropped` are 0 until the slices that count them (the command slices, the fail-safe slice, 5b-3).
 - The process owner: right after the attach, before any worker starts, the main thread finds the owner named like the process, writes 9.1 for it by owner slot (so it is that owner's first writer, TD 13.2), resolves its `sys.proc` tags with the type and owner checks, and writes them. A tag set without that owner or one of its tags fails the start ("the tag set has no owner p for the sys.proc tags"). A channel whose tags have that owner is refused ("channel c writes owner p, the main thread's"): it would be a second writer. The unused-owner rule of D-142 does not apply to it.
-- The main thread resolves every tag of this list after the point tags of the channel, with the same checks (D-142): a tag the tag set lacks, or one of another type or of another owner than the channel's, fails the start (`RunEnd::FAILED`, exit status 1, "the tag set has no tag t", "tag t is not of its type (11.1)"): the tag set was not built for this configuration (CS 12.5). The handles reach the worker with its point handles (`Worker::begin`).
+- Refused writes of the `sys.proc` tags follow D-142's rules for the point tags (review M4). A refused write at the start fails the start ("the writes of the sys.proc tags of p were refused"): the tags would keep the previous life's values. One while running is counted and logged at the heartbeat, with the workers' counts ("tag writes refused", field OWNER). The refused writes of the stop are logged once, as soon as every worker has returned. A disabled channel's worker stores its refused count as a running one's does.
+- The main thread resolves every tag of this list after the point tags of the channel. The checks are those of D-142 for a point tag, but in code of their own (`resolve_one`, review S3). A tag the tag set lacks, one of another type, or one of another owner than the channel's fails the start (`RunEnd::FAILED`, exit status 1) with "the tag set has no tag t", "tag t is not of its type (11.1)" or "tag t of channel c is owned by o, not by the owner of channel c". Such a tag set was not built for this configuration (CS 12.5). The handles reach the worker with its point handles (`Worker::begin`).
 - A channel's owner is that of its first point tag, as in D-142, or, for a channel without one, that of its `sys.drv.<channel>.state` tag.
 - Values are written GOOD, with no flags and source time 0 (the library stores its own update time with LOCAL_TIME, TD 13). The walk of 9.1 by owner slot (D-142) writes them NOT_INIT with the other tags of the owner; once the worker has its engine, every one is written with its current value, then one notify, all before READY=1 (9.1: "Diagnostic tags are written with their current values").
 - A disabled channel has no engine (CS 4.6): its worker writes its system tags once, at its start, as a channel never connected: `state` 0, every device DISABLED (0), `secured` false, every count, time and average 0, and `requests_per_scan` that of the device's plan.
-- States are checked after every step and written when they change: the channel's and every device's `state`, `secured` and `pacing_limited`. Everything else is written at most once a second, and only when it changed. A worker's wait ends at the next such second, so an idle channel's counters move too.
+- States are checked after every step and written when they change: the channel's and every device's `state`, `secured` and `pacing_limited`. Everything else is written at most once a second, and only when it changed. A worker's wait ends at the next such second, so an idle channel's counters move too. At the stop, once the connection is closed and nothing more is counted, the counters that changed since their last write are written, whatever the period, so a reader after the stop sees every request the channel sent (review M1). The states follow (review M3): the channel's `state` 0; each device's `state` as 3.5 gives it for a channel not connected, CONNECTING, or DISABLED for a disabled device; and `pacing_limited` false. Then `config_state` is 0 (above). The stop does not write states through the engine, which still says connected.
+- What remains of the window of D-142 (review M3). After a clean stop the tags say "not connected" and "loading" until the next life's walk of 9.1. After a kill or a stall nothing is written: the tags keep the previous life's values with OWNER_DOWN. Once the next life attaches, OWNER_DOWN is gone and those values read GOOD until its walk by owner slot, the first thing each thread does after the attach. So, from the attach to the walk, a reader can see the previous life's "connected", "running" and "applied". D-142 keeps that time as short as the threads' start allows.
 - The channel's `state`: 1 (connecting) is written and the readers woken just before a connect begins, since the connect blocks the worker up to `connect_timeout`. It is 2 once connected, and 0 otherwise: after a refused or failed connect, during the back-off, after a loss or a close of the driver's own, and at the stop once the connection is closed.
 - Device counts, kept by the engine for every device:
   - `requests` counts every frame sent to it, retries and probes included.
@@ -2660,12 +2753,17 @@ Decision:
   - `refusals` counts BUSY and UNREACHABLE answers (busy and gateway).
   - `last_status` is the `raw` code of the last answer that `exceptions` or `refusals` counted. The contract fills `raw` only for a REFUSED write, so for reads it stays 0 until the protocols report a code there too (a point for #136).
   - `last_ok_time` is the CLOCK_REALTIME of the last SAMPLES or WRITE_OK answer, 0 before the first.
-  - `response_ms` is the average, over the device's last 100 complete answers, of the time from the send to the first byte of the answer. Bytes left from before the send count as 0 ms, and bytes of frames dropped as stale do not start the time.
+  - `response_ms` is the average, over the device's last 100 complete answers, of the time from the send to the first byte of the answer. Bytes left from before the send count as 0 ms, and bytes of frames dropped as stale do not start the time. It is rounded to 0.1 ms before it is compared with the value last written (`AVERAGE_RESOLUTION_MS`, review S1): finer than the ms of 11.1, so that a local answer of a fraction of a ms does not read 0, and coarse enough that noise writes nothing.
   - `sentinels` and `invalid` come from the sample processing of contract 5 (`SampleCounts`).
   - `points_absent` is the number of its points that are ABSENT now.
   - `requests_per_scan` is that of the plan (6.3).
-- `requests_per_s` is the number of frames the channel sent in the last 10 whole seconds of the monotonic clock, the running second included, divided by 10.
-- `period.<group>` is the scheduler's achieved period in ms (6.3), and `pacing_limited` is the scheduler's verdict (6.4).
+- `requests_per_s` is the number of frames the channel sent in the 10 complete seconds of the monotonic clock before the running one, divided by 10 (review S1). The running second is not counted until it is complete, so a steady rate reads the same at every point of a second and is not rewritten each second. Its resolution is 0.1 per second, and it needs no rounding. Over the first 10 s after the start it ramps up from 0.
+- `period.<group>` is the scheduler's achieved period in ms (6.3), rounded as `response_ms` is; `pacing_limited` is the scheduler's verdict (6.4).
+- Notes from the review:
+  - `period.<group>` reads 0 when every device of the channel is demoted, since no group cycle ends.
+  - On a channel that never connects, `state` moves between 1 and 0 at each attempt: two writes per attempt, at most one attempt per `reconnect_min`.
+  - `last_status` is 0 for reads (above).
+  - A log record's REASON, like every field value, is cut to the logger's `LOG_MAX_VALUE_BYTES`, 96 bytes, at a UTF-8 boundary: a long tag name in a start failure is cut there.
 
 Reason: the counters the engine and the scheduler already have, published by the thread that owns the tags, with the fewest writes that meet the rate rule of 11.1.
 
@@ -2674,11 +2772,57 @@ Consequences:
 - A tag set without these tags no longer starts a driver. `scada-conf` does not yet generate them (CS 12.5); the integration tests' tag sets list them.
 - Tests:
   - `channel_engine_test.cpp` covers the counts for an answering device, a silent one, busy and gateway answers, an absent answer and a broken one, and the link callbacks.
-  - `diagnostics_test.cpp` covers the two windows.
-  - `scada-driver-process-integration-test` reads the `sys.proc` tags after READY; refuses a channel on the main thread's owner and a tag set without the process owner; reads the tags of a running driver: a connected channel with one live and one disabled device, a refused connect, and the state after the stop; a disabled channel's values; a channel without devices, owned through its state tag; a tag set without the system tags, and one with a system tag of another type, refused at the start. The fixture's tag sets list every system tag and the owner `drv-test` (`driver_fixture.h`); every channel's owner is `drv-test.<channel>`, so every process test also runs with a process owner that no channel writes.
-- Not tested, and why: a system tag of another owner than the channel's is refused by the same check as a point tag's, which D-142's test covers.
+  - `diagnostics_test.cpp` covers the two windows, a steady 100 requests a second among them.
+  - `system_tags_test.cpp` drives `SystemTags` and `ProcessTags` on the fake clock, with the tag write replaced by a recorder (review M2). It covers:
+    - a counter written at most once a second;
+    - a state written in the step that changed it;
+    - no rewrite of an unchanged value;
+    - the due time;
+    - a stop between two counter writes;
+    - the states the stop leaves and `config_state`;
+    - the rounding;
+    - a refused write counted.
+  - `scada-driver-process-integration-test` covers:
+    - the `sys.proc` tags after READY;
+    - a channel on the main thread's owner, and a tag set without the process owner, refused;
+    - a running driver: a connected channel with one live and one disabled device, and every state after the stop;
+    - a refused connect;
+    - a connect that waits, read as 1 right after a notify of the driver (S4);
+    - the values written before READY=1, with a first connect that waits;
+    - a dead device's time-outs and demotion beside a live one;
+    - a killed driver's tags OWNER_DOWN, and the next life counting from 0;
+    - a disabled channel's values;
+    - a channel without devices, owned through its state tag;
+    - `response_ms` within the time-out and in tenths;
+    - the unbuilt device tags NOT_INIT.
 
-## D-145: Identity checks and restart indications, the pure logic (slice 5b-2a)
+    The start fails for each of these tag sets: one without the system tags; a channel tag of another type; a missing `sys.proc` tag; a mistyped `sys.dev` tag; a mistyped `period` tag; and the system tags of another owner (S3).
+  - The rate rule:
+    - after the stop, `requests` equals the requests the simulator received, the stop coming while the tag is behind it;
+    - a device's `state` is written in the step of its first answer, within 500 ms of its point;
+    - a counter is written within 1.5 s of that answer, though the slow group polls every 10 s and the connect timeout of 5 s caps each wait at 5 s;
+    - in the fast group, three writes of `requests` in a row are at least 900 ms apart.
+
+    The fixture's tag sets list every system tag the validator generates for a device without identity checks or refreshed outputs, and the owner `drv-test` (`driver_fixture.h`). Every channel's owner is `drv-test.<channel>`, so every process test also runs with a process owner that no channel writes.
+  - The process tests pass run as root and as an unprivileged user (uid 65534, `runuser -u nobody`): 58 of 58 each way.
+  - Mutants, each put in by hand, each failing at least one of these tests:
+    - counters written every step;
+    - `PERIOD_NS` 100 ms or 0;
+    - no wake at the due time;
+    - states written only at the second;
+    - unchanged values rewritten;
+    - no counter write at the stop;
+    - no stop states;
+    - no `config_state` 0 at the stop;
+    - CONNECTING written without its notify;
+    - no write before READY;
+    - the system tags' owner check off.
+- Not tested, and why:
+  - A refused `sys.proc` write failing the start has no process test. The library refuses a write by its owner only for a wrong type or owner, which the resolve refuses first; the unit test covers the count.
+  - A demoted device's recovery has no process test. The simulator cannot make a silent unit answer again; the engine's unit tests cover it.
+
+
+## D-147: Identity checks and restart indications, the pure logic (slice 5b-2a)
 
 Context: driver interface contract 3.6 says a device's `identify` checks run after a connect and before any point is published, and that a device that fails them is MISMATCH with `refuse`, or runs with `warn`. 7.6 says a `restart_indication` rule that holds is a restart, after which the device is initialised again. CS 4.8 and 4.9 give the keys. The contracts leave open how a check reads its address, what the scheduler sends while a check is pending, how the reads are counted, how a pattern is matched and within what bound, how values of different types compare, how the identity text is built, and when a restart rule fires. The lead ruled on these after a review by three (2026-11-27). Slice 5b-2 is split into two pull requests: 5b-2a, the pure logic and its unit tests, recorded here, and 5b-2b, the engine wiring, system tags, log records, test tools and process tests, which adds to this entry.
 
@@ -2695,7 +2839,7 @@ Decision:
   - A chain in the cycle holds its unit as a poll's chain does (D2), and an order of another device of the unit between its parts restarts the cycle from its start.
   - A device without a probe request is probed by its identity cycle.
   - Identity reads count toward neither the achieved period nor `pacing_limited`.
-  - A randomized test checks the ruling's invariant: for a device in IDENTITY, no request outside `plan.identity` is chosen.
+  - A randomized test checks the ruling's invariant: for a device in IDENTITY, no request outside `plan.identity` is chosen. It runs one fixed seed for 20,000 steps in about 20 ms, so it stays with the scheduler's unit tests rather than with the heavy property tests that #164 moved to executables of their own.
 - The failure tracker (items 2, 3 and 6):
   - A device with checks (`Device::identify`) has its check pending (`identity_pending`) after every connect and after a probe recovers it from DEMOTED. A demoted device is checked when it recovers, not at the connect. `resumed()` (the driver's own close, DI 7.3) starts no check and keeps a pending one pending.
   - The end of an identity read goes to `identity_ended`, never to `read_timed_out`: it neither adds to the run of consecutive time-outs nor empties it (DI 7.3).

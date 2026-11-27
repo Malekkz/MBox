@@ -177,7 +177,7 @@ Status validate_points(const std::vector<PlanPoint>& points,
                 continue;
             }
             if (point.identity && merged[index].kind != Kind::ATOMIC) {
-                // D-145: an identity read is never a read with a side
+                // D-147: an identity read is never a read with a side
                 // effect (6.6), and never of a no-read range.
                 return refused("an identity point in a side-effect range");
             }
@@ -219,7 +219,7 @@ struct Segment {
     std::vector<std::uint32_t> tags;      // side-effect ranges it reads
     bool side_effect = false;
     bool exclusive = false;
-    bool identity = false;  // holds an identity point (D-145)
+    bool identity = false;  // holds an identity point (D-147)
 };
 
 Segment segment_of(std::uint32_t index, const std::vector<PlanPoint>& points,
@@ -476,7 +476,7 @@ std::vector<Block> blocks_of(const std::vector<Segment>& segments,
         if (!blocks.empty()) {
             Block& open = blocks.back();
             const Segment& whole = open.whole;
-            // D-145: an identity point never joins a side effect.
+            // D-147: an identity point never joins a side effect.
             const bool identity_conflict =
                 (whole.identity && segment.side_effect) ||
                 (segment.identity && whole.side_effect);
@@ -698,7 +698,7 @@ void choose_keepalive(const std::vector<PlanPoint>& points,
     }
 }
 
-// The identity cycle (D-145): each run of `order` linked by `chained` that
+// The identity cycle (D-147): each run of `order` linked by `chained` that
 // holds an identity point, whole. False when one reads a side effect.
 bool add_identity(const std::vector<std::uint32_t>& order,
                   const std::vector<bool>& identity_point, ReadPlan& out) {
@@ -788,7 +788,7 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
     out = ReadPlan{};
     out.by_group.resize(poll_groups);
     GroupOut planned_out;
-    // The poll groups, then the points in no poll group (D-145), planned as
+    // The poll groups, then the points in no poll group (D-147), planned as
     // a group of their own whose requests are in no group of `by_group`.
     std::vector<std::uint32_t> groupless;
     for (std::uint32_t group = 0; group <= poll_groups; ++group) {

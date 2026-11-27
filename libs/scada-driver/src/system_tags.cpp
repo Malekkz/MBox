@@ -10,6 +10,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -106,8 +107,14 @@ std::string process_tag_name(std::string_view process,
     return name;
 }
 
-bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
-                std::uint64_t& refused) noexcept {
+double rounded_ms(double average_ms) noexcept {
+    // Averages are finite and far below 2^53 tenths of a ms.
+    return std::round(average_ms / AVERAGE_RESOLUTION_MS) *
+           AVERAGE_RESOLUTION_MS;
+}
+
+bool write_slot(TagWriteFn write, scada_ctx* ctx, SystemSlot& slot,
+                std::uint64_t bits, bool all, std::uint64_t& refused) noexcept {
     if (slot.handle == SCADA_INVALID_HANDLE ||
         (!all && slot.written && slot.last == bits)) {
         return false;
@@ -120,7 +127,7 @@ bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
     value.quality = SCADA_QUALITY_GOOD;
     value.quality_flags = 0;
     value.source_time_ns = 0;
-    if (scada_tag_write(ctx, slot.handle, &value) != SCADA_OK) {
+    if (write(ctx, slot.handle, &value) != SCADA_OK) {
         ++refused;
         return false;
     }
@@ -129,15 +136,16 @@ bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
     return true;
 }
 
-ProcessTags::ProcessTags(scada_ctx* ctx, const Slots& slots) noexcept
-    : ctx_(ctx), slots_(slots) {}
+ProcessTags::ProcessTags(scada_ctx* ctx, const Slots& slots,
+                         TagWriteFn write) noexcept
+    : ctx_(ctx), write_(write), slots_(slots) {}
 
 bool ProcessTags::publish_start() noexcept {
     static_assert(static_cast<int>(ConfigState::LOADING) == 0);
     // Every signal 0 at the start: false, no `config_id`, LOADING, no count.
     bool wrote = false;
     for (SystemSlot& slot : slots_) {
-        wrote = write_slot(ctx_, slot, 0, true, refused_) || wrote;
+        wrote = write_slot(write_, ctx_, slot, 0, true, refused_) || wrote;
     }
     return wrote;
 }
@@ -145,13 +153,22 @@ bool ProcessTags::publish_start() noexcept {
 bool ProcessTags::applied() noexcept {
     SystemSlot& state =
         slots_.at(static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
-    return write_slot(ctx_, state,
+    return write_slot(write_, ctx_, state,
                       bits_of(static_cast<std::int64_t>(ConfigState::APPLIED)),
                       false, refused_);
 }
 
-SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept
-    : ctx_(ctx), handles_(std::move(handles)) {}
+bool ProcessTags::stopped() noexcept {
+    SystemSlot& state =
+        slots_.at(static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
+    return write_slot(write_, ctx_, state,
+                      bits_of(static_cast<std::int64_t>(ConfigState::LOADING)),
+                      false, refused_);
+}
+
+SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles,
+                       TagWriteFn write) noexcept
+    : ctx_(ctx), write_(write), handles_(std::move(handles)) {}
 
 std::size_t SystemTags::device_slot(std::size_t device,
                                     DeviceSignal signal) const noexcept {
@@ -163,12 +180,37 @@ bool SystemTags::put(std::size_t slot, std::uint64_t bits, bool all) noexcept {
     if (slot >= handles_.slots.size()) {
         return false;
     }
-    return write_slot(ctx_, handles_.slots[slot], bits, all, refused_);
+    return write_slot(write_, ctx_, handles_.slots[slot], bits, all, refused_);
 }
 
 bool SystemTags::link(ChannelLink link) noexcept {
     return put(index_of(ChannelSignal::STATE),
                bits_of(static_cast<std::int64_t>(link)), false);
+}
+
+bool SystemTags::flush(ChannelEngine& engine, const CompiledChannel& channel,
+                       std::int64_t now_ns) noexcept {
+    return put_counters(engine, channel, now_ns, false);
+}
+
+bool SystemTags::stopped(const CompiledChannel& channel) noexcept {
+    bool wrote = put(
+        index_of(ChannelSignal::STATE),
+        bits_of(static_cast<std::int64_t>(ChannelLink::DISCONNECTED)), false);
+    for (std::size_t device = 0;
+         device < handles_.devices && device < channel.devices.size();
+         ++device) {
+        const DeviceStatus state = channel.devices[device].enabled
+                                       ? DeviceStatus::CONNECTING
+                                       : DeviceStatus::DISABLED;
+        wrote = put(device_slot(device, DeviceSignal::STATE),
+                    bits_of(static_cast<std::int64_t>(state)), false) ||
+                wrote;
+        wrote = put(device_slot(device, DeviceSignal::PACING_LIMITED),
+                    bits_of(false), false) ||
+                wrote;
+    }
+    return wrote;
 }
 
 bool SystemTags::put_states(ChannelEngine& engine,
@@ -213,7 +255,9 @@ bool SystemTags::put_counters(ChannelEngine& engine,
             static_cast<double>(engine.scheduler().achieved_period_ns(
                 static_cast<std::uint32_t>(group), now_ns)) /
             NS_PER_MS;
-        wrote = put(CHANNEL_SIGNALS + group, bits_of(period_ms), all) || wrote;
+        wrote =
+            put(CHANNEL_SIGNALS + group, bits_of(rounded_ms(period_ms)), all) ||
+            wrote;
     }
     for (std::size_t device = 0;
          device < handles_.devices && device < channel.devices.size();
@@ -230,7 +274,7 @@ bool SystemTags::put_counters(ChannelEngine& engine,
         wrote = put(slot(DeviceSignal::ERRORS), diag.errors, all) || wrote;
         wrote = put(slot(DeviceSignal::TIMEOUTS), diag.timeouts, all) || wrote;
         wrote = put(slot(DeviceSignal::RESPONSE_MS),
-                    bits_of(engine.response_ms(index)), all) ||
+                    bits_of(rounded_ms(engine.response_ms(index))), all) ||
                 wrote;
         wrote = put(slot(DeviceSignal::REQUESTS_PER_SCAN),
                     requests_per_scan(channel.devices[device].plan), all) ||

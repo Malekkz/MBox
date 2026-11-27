@@ -2,7 +2,7 @@
 #define SCADA_DRIVER_DIAGNOSTICS_H
 
 // The counts behind the system tags of a channel and its devices (driver
-// interface contract 11.1, decision D-144). The engine keeps them; the
+// interface contract 11.1, decision D-146). The engine keeps them; the
 // worker publishes them. Nothing here allocates.
 
 #include "scada/common/realtime.h"
@@ -20,10 +20,10 @@ enum class ChannelLink : std::uint8_t {
     CONNECTED = 2,
 };
 
-// The counters of one device since attach (11.1, D-144).
+// The counters of one device since attach (11.1, D-146).
 struct DeviceCounts {
     std::uint64_t requests = 0;    // frames sent to it
-    std::uint64_t errors = 0;      // answers that are errors (D-144)
+    std::uint64_t errors = 0;      // answers that are errors (D-146)
     std::uint64_t timeouts = 0;    // attempts with no answer in time
     std::uint64_t exceptions = 0;  // error answers with a protocol code
     std::uint64_t refusals = 0;    // busy and gateway answers
@@ -53,23 +53,28 @@ private:
     std::size_t count_ = 0;
 };
 
-// Events over the last RATE_SECONDS whole seconds of the monotonic clock
-// (`requests_per_s`, 11.1): one bucket per second, the current one
-// included, so the rate is the count of the window over RATE_SECONDS.
+// Events over the last RATE_SECONDS complete seconds of the monotonic clock
+// (`requests_per_s`, 11.1): one bucket per second, and one more for the
+// running second, which is not counted until it is complete, so that a
+// steady rate reads the same at every second of it (PR 159 review S1). The
+// rate is the count of the window over RATE_SECONDS; over the first
+// RATE_SECONDS after the start it ramps up from 0 (D-146).
 class RateWindow {
 public:
     static constexpr std::int64_t RATE_SECONDS = 10;
 
     SCADA_RT void add(std::int64_t now_ns) noexcept;
 
-    // Events per second over the window that ends at `now_ns`.
+    // Events per second over the RATE_SECONDS complete seconds before the
+    // one of `now_ns`.
     [[nodiscard]] SCADA_RT double per_second(std::int64_t now_ns) noexcept;
 
 private:
     // Empties the buckets of the seconds that passed since the last call.
     SCADA_RT void advance(std::int64_t now_ns) noexcept;
 
-    std::array<std::uint64_t, RATE_SECONDS> buckets_{};
+    static constexpr std::int64_t BUCKETS = RATE_SECONDS + 1;
+    std::array<std::uint64_t, BUCKETS> buckets_{};
     std::int64_t second_ = 0;  // the second of the newest bucket
     bool started_ = false;
 };

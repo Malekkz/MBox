@@ -220,9 +220,11 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
 }
 
 void ChannelEngine::seed_point(std::uint32_t device, std::uint32_t point,
-                               const TagValue& stored) noexcept {
+                               const TagValue& stored,
+                               bool substituted) noexcept {
     if (device < devices_.size() && point < devices_[device].points.size()) {
-        seed_point_state(devices_[device].points[point].state, stored);
+        seed_point_state(devices_[device].points[point].state, stored,
+                         substituted);
     }
 }
 
@@ -269,7 +271,7 @@ std::int64_t ChannelEngine::step() noexcept {
         case Choice::Kind::IDENTITY:
             // Orders come with the command slices; none is added yet. The
             // identity cycle is wired in slice 5b-2b; until then the engine
-            // puts no device in DeviceMode::IDENTITY (D-145).
+            // puts no device in DeviceMode::IDENTITY (D-147).
             (void)scheduler_.not_sent();
             return now;
         case Choice::Kind::POLL:
@@ -891,7 +893,7 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const bool probe = choice.kind == Choice::Kind::PROBE;
     if (end == End::BROKEN) {
         ++counts_.broken;
-        ++run.diag.errors;  // a broken answer (D-144)
+        ++run.diag.errors;  // a broken answer (D-146)
     } else {
         ++counts_.timeouts;
         if (end == End::TIMEOUT) {
@@ -1151,8 +1153,23 @@ void ChannelEngine::count_answer(DeviceRun& run,
     run.diag.last_status = decoded.raw;
 }
 
+const DeviceCounts& ChannelEngine::device_counts(
+    std::uint32_t device) const noexcept {
+    // No device: the counts of none (coding standard 4; review S5).
+    static constexpr DeviceCounts NONE{};
+    return device < devices_.size() ? devices_[device].diag : NONE;
+}
+
+double ChannelEngine::response_ms(std::uint32_t device) const noexcept {
+    return device < devices_.size() ? devices_[device].response.average_ms()
+                                    : 0.0;
+}
+
 std::uint64_t ChannelEngine::points_absent(
     std::uint32_t device) const noexcept {
+    if (device >= devices_.size()) {
+        return 0;
+    }
     std::uint64_t absent = 0;
     for (const PointRun& point : devices_[device].points) {
         if (point.state.absent) {

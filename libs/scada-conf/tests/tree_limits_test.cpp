@@ -228,9 +228,11 @@ TEST(Expand, TheTextOfTheTree) {
     EXPECT_LE(expanded.counts.written_text, ONE_POINT_MORE);
 }
 
-// `limits.max_tags` at N passes and at N + 1 stops the expansion, so a
-// later device's own error is not reported; a point with `tag: false`
-// counts its bits only.
+// `limits.max_tags` at N passes stage 4 and at N + 1 stops the expansion,
+// so a later device's own error is not reported; a point with `tag: false`
+// counts its bits only. Stage 5 counts the generated tags too (D-116): 8
+// point tags pass stage 4 at 8, and the tree is refused at stage 5, at the
+// limit, where the 9th tag is a process tag.
 TEST(Expand, TheTagsOfTheTree) {
     const std::string meter = written_points(4);
     const auto with_limit = [](int limit) {
@@ -239,9 +241,8 @@ TEST(Expand, TheTagsOfTheTree) {
     };
     EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
                       {"system.yaml", with_limit(8)},
-                      {"drivers/modbus/line1.yaml", instances(2)}})
-                  .size(),
-              8U);
+                      {"drivers/modbus/line1.yaml", instances(2)}}),
+              Lines{"system.yaml:3:21: error CF-1001: 9 tags, the limit is 8"});
     EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
                       {"system.yaml", with_limit(7)},
                       {"drivers/modbus/line1.yaml",

@@ -5,7 +5,6 @@ scada_add_test(scada-driver-unit-test KIND unit
     golden_vectors_test.cpp
     golden_write_test.cpp
     loopback.cpp
-    plan_property_test.cpp
     plan_test.cpp
     point_rules_test.cpp
     sample_processing_test.cpp
@@ -15,12 +14,12 @@ scada_add_test(scada-driver-unit-test KIND unit
     driver_test.cpp
     drv_test_support.cpp
     drv_test_support_test.cpp
-    engine_random_test.cpp
     identity_test.cpp
     identity_text_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
     stall_watch_test.cpp
+    system_tags_test.cpp
     text_pattern_test.cpp
     test_protocol.cpp
     timing_test.cpp
@@ -36,6 +35,24 @@ scada_add_test(scada-driver-unit-test KIND unit
 target_compile_options(scada-driver-unit-test PRIVATE -ffp-contract=off)
 target_compile_definitions(scada-driver-unit-test PRIVATE
   "SCADA_DRIVER_GOLDEN_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/golden/driver-vectors.txt\"")
+
+# The property tests of the channel engine and of the planner, over many
+# random seeds and plans: each a time limit of its own, apart from the unit
+# tests above (#164). Compiled as the unit tests are.
+scada_add_test(scada-driver-engine-property-test KIND unit
+  SOURCES
+    engine_random_test.cpp
+    loopback.cpp
+    sim_transport.cpp
+    test_protocol.cpp
+  DEPENDS scada::driver)
+target_compile_options(scada-driver-engine-property-test
+  PRIVATE -ffp-contract=off)
+scada_add_test(scada-driver-plan-property-test KIND unit
+  SOURCES plan_property_test.cpp
+  DEPENDS scada::driver)
+target_compile_options(scada-driver-plan-property-test
+  PRIVATE -ffp-contract=off)
 
 # How dead devices share a line with live ones, with the default failure
 # keys (decision D-138; review G7, N1): minutes of a simulated line.

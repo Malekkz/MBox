@@ -1482,7 +1482,7 @@ TEST(Scheduling, NoProbeWhileAnOrderWaits) {
     EXPECT_EQ(scheduler.take(SECOND + MILLISECOND).kind, Choice::Kind::PROBE);
 }
 
-// --- The identity cycle (D-145) --------------------------------------------
+// --- The identity cycle (D-147) --------------------------------------------
 
 // d1: a point at 0 (fast) and one at 20 (slow), two requests; the one at 20
 // is the identity cycle.

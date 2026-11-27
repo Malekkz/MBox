@@ -1,5 +1,5 @@
 // The text pattern of identity checks (configuration schemas contract 2.5,
-// 4.8; decision D-145).
+// 4.8; decision D-147).
 
 #include "scada/driver/text_pattern.h"
 

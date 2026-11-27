@@ -2,7 +2,7 @@
 #define SCADA_DRIVER_IDENTITY_TEXT_H
 
 // The text of `sys.dev.<device>.identity` (driver interface contract 3.6,
-// 11.1; decision D-145): the values the identity checks read, which the
+// 11.1; decision D-147): the values the identity checks read, which the
 // device chose, made safe to show and joined.
 
 #include "scada/common/realtime.h"

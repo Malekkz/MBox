@@ -8,6 +8,7 @@
 #include "expression_site.h"
 #include "expression_types.h"
 #include "grouped_errors.h"
+#include "name_pattern.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expression.h"
@@ -66,7 +67,7 @@ constexpr std::size_t MAX_PARENTS = 4;
 constexpr std::size_t MAX_REPEAT_VALUES = 65536;
 constexpr std::size_t MAX_POINTS = 65536;
 // `limits.max_tags` without a value (4.1 of the system file).
-constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
+constexpr std::int64_t DEFAULT_MAX_TAGS = ExpandedTree::DEFAULT_MAX_TAGS;
 constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
 // The nodes of parsed expressions kept for later evaluations, about 33 MB;
 // past it the cache is emptied (E1 of the review of #146).
@@ -338,35 +339,6 @@ void merge(Value& into, const Value& over, std::string_view parent) {
     }
 }
 
-// True if `name` matches `pattern` (2.5): `*` any characters within one
-// segment, `?` one character of a segment.
-bool matches(std::string_view pattern, std::string_view name) {
-    std::size_t cursor = 0;
-    std::size_t pos = 0;
-    std::size_t star = std::string_view::npos;
-    std::size_t resume = 0;
-    while (pos < name.size()) {
-        if (cursor < pattern.size() &&
-            (pattern[cursor] == name[pos] ||
-             (pattern[cursor] == '?' && name[pos] != '.'))) {
-            ++cursor;
-            ++pos;
-        } else if (cursor < pattern.size() && pattern[cursor] == '*') {
-            star = cursor++;
-            resume = pos;
-        } else if (star != std::string_view::npos && name[resume] != '.') {
-            cursor = star + 1;
-            pos = ++resume;
-        } else {
-            return false;
-        }
-    }
-    while (cursor < pattern.size() && pattern[cursor] == '*') {
-        ++cursor;
-    }
-    return cursor == pattern.size();
-}
-
 // --- Parameters --------------------------------------------------------------
 
 struct Parameter {
@@ -428,7 +400,11 @@ public:
         if (failed_) {
             return std::nullopt;
         }
-        return writer_.finish();
+        std::optional<ExpandedTree> tree = writer_.finish();
+        if (tree) {
+            tree->max_tags = max_tags_;
+        }
+        return tree;
     }
 
 private:
@@ -1713,7 +1689,7 @@ private:
         }
         bool any = false;
         for (std::size_t i = 0; i < points.size(); ++i) {
-            if (matches(pattern, points[i].name)) {
+            if (matches_name_pattern(pattern, points[i].name)) {
                 matched[i] = true;
                 any = true;
             }
@@ -2671,6 +2647,34 @@ Diagnostic expanded_diagnostic(const ExpandedTree& tree, std::uint16_t code,
                          .detail = std::move(detail)});
     diagnostic.location = tree.instances[instance];
     return diagnostic;
+}
+
+bool written_in_instance(const ExpandedTree& tree, NodeId node) {
+    // A work list rather than recursion: the depth of a tree is the
+    // parser's to bound, not this check's.
+    const Document& document = tree.document;
+    std::vector<NodeId> pending{node};
+    while (!pending.empty()) {
+        const NodeId next = pending.back();
+        pending.pop_back();
+        const std::uint32_t instance = next < tree.instance_of.size()
+                                           ? tree.instance_of[next]
+                                           : ExpandedTree::NO_INSTANCE;
+        if (instance < tree.instances.size() &&
+            document.location(next).file == tree.instances[instance].file) {
+            return true;
+        }
+        if (document.kind(next) == NodeKind::MAP) {
+            for (const Entry& entry : document.entries(next)) {
+                pending.push_back(entry.key);
+                pending.push_back(entry.value);
+            }
+        } else if (document.kind(next) == NodeKind::SEQUENCE) {
+            const auto items = document.items(next);
+            pending.insert(pending.end(), items.begin(), items.end());
+        }
+    }
+    return false;
 }
 
 std::optional<ExpandedTree> expand_tree(std::span<const CheckedFile> files,

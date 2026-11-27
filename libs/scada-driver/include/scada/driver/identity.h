@@ -3,7 +3,7 @@
 
 // A device's identity checks and restart indications (driver interface
 // contract 3.6, 7.6; configuration schemas contract 4.8, 4.9; decision
-// D-145), as the compile step gives them to the driver: each names one point
+// D-147), as the compile step gives them to the driver: each names one point
 // of the device, by index. A check on a protocol `address` reaches the
 // driver as a point of its own, without a tag.
 
@@ -32,7 +32,7 @@ struct ExpectedValue {
     std::string text{};
 };
 
-// How two values order (D-145).
+// How two values order (D-147).
 enum class ValueOrder : std::uint8_t { LESS = 1, EQUAL, GREATER, UNORDERED };
 
 // `left` against `right`, exactly: INT64, UINT64 and FLOAT64 against each
@@ -88,7 +88,7 @@ struct RestartRule {
 // the first valid sample after the watch was made or `reset`, which the
 // engine does at an attach and a reload of the device only: it survives a
 // lost connection, so that a device that restarts and drops its connection
-// is counted (D-145). EQUALS holds on its rising edge only, so that a flag
+// is counted (D-147). EQUALS holds on its rising edge only, so that a flag
 // the device leaves set is one restart, not one per poll.
 class RestartWatch {
 public:

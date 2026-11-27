@@ -13,7 +13,7 @@
 // Orders (writes, select and operate, READ_NOW) come with the command
 // slices; this engine sends none yet. Identity checks and device restarts
 // (7.6) come with slice 5b-2. The counts behind the system tags (11.1) are
-// kept here and published by the worker (D-144).
+// kept here and published by the worker (D-146).
 
 #include "scada/common/realtime.h"
 #include "scada/common/status.h"
@@ -111,10 +111,11 @@ public:
 
     // Takes `stored`, the value point `point` of device `device` holds in
     // the tag database after the writes of 9.1, as its last value
-    // (seed_point_state, review M4). Out of range is ignored. Called once,
+    // (seed_point_state, review M4). `substituted`: the stored value carries
+    // SUBSTITUTED (review R1 of #157). Out of range is ignored. Called once,
     // before the first step.
     void seed_point(std::uint32_t device, std::uint32_t point,
-                    const TagValue& stored) noexcept;
+                    const TagValue& stored, bool substituted = false) noexcept;
 
     [[nodiscard]] Status status() const noexcept { return status_; }
 
@@ -140,17 +141,14 @@ public:
     [[nodiscard]] bool connected() const noexcept { return connected_; }
     [[nodiscard]] ChannelLink link() const noexcept { return link_; }
 
-    // The system tag counts of device `device` (11.1, D-144); `device` is
-    // an index of the channel's devices.
+    // The system tag counts of device `device` (11.1, D-146), an index of
+    // the channel's devices; every count 0 for an index out of range.
     [[nodiscard]] const DeviceCounts& device_counts(
-        std::uint32_t device) const noexcept {
-        return devices_[device].diag;
-    }
-    // `sys.dev.<device>.response_ms`.
-    [[nodiscard]] double response_ms(std::uint32_t device) const noexcept {
-        return devices_[device].response.average_ms();
-    }
-    // `sys.dev.<device>.points_absent`: its points ABSENT now.
+        std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.response_ms`; 0 for an index out of range.
+    [[nodiscard]] double response_ms(std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.points_absent`: its points ABSENT now; 0 for an
+    // index out of range.
     [[nodiscard]] std::uint64_t points_absent(
         std::uint32_t device) const noexcept;
     // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.
@@ -250,7 +248,7 @@ private:
     SCADA_RT void sync_scheduler() noexcept;
     // The link changed: kept and told to the sink. Not real-time.
     void set_link(ChannelLink link) noexcept;
-    // Counts the answer `decoded` of device `device` (11.1, D-144).
+    // Counts the answer `decoded` of device `device` (11.1, D-146).
     SCADA_RT void count_answer(DeviceRun& run,
                                const DecodeResult& decoded) noexcept;
     SCADA_RT void publish_states() noexcept;

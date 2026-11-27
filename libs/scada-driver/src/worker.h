@@ -58,7 +58,7 @@ public:
     // (DI 2.4). UNAVAILABLE if the thread or an eventfd cannot be had.
     [[nodiscard]] Status start() noexcept;
 
-    // Hands the worker its point handles and its system tags (D-144) once
+    // Hands the worker its point handles and its system tags (D-146) once
     // it is WRITTEN: it then builds its engine and runs, or, for a disabled
     // channel, writes its system tags and idles until the stop. Main thread
     // only, once.

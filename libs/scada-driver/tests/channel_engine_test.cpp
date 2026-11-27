@@ -89,6 +89,14 @@ std::size_t requests_of(const SimBus& bus, std::uint8_t unit) {
         [&](const LoggedRequest& request) { return request.unit_id == unit; }));
 }
 
+// The requests of every unit sent before `time_ns`.
+std::size_t requests_before(const SimBus& bus, std::int64_t time_ns) {
+    return static_cast<std::size_t>(std::count_if(
+        bus.log().begin(), bus.log().end(), [&](const LoggedRequest& request) {
+            return request.time_ns < time_ns;
+        }));
+}
+
 std::vector<std::int64_t> times_of(const SimBus& bus, std::uint8_t unit) {
     std::vector<std::int64_t> out;
     for (const LoggedRequest& request : bus.log()) {
@@ -2377,6 +2385,21 @@ TEST(ChannelEngine, ASeededPointKeepsItsValueThroughACommFail) {
     EXPECT_EQ(rig.tags.point(0, 0).value, 11);
 }
 
+TEST(ChannelEngine, ASeededSubstituteKeepsSubstitutedThroughACommFail) {
+    // Review R1 of PR 157, across a restart: a stored substitute keeps its
+    // flag on the writes that keep its value; a plain value gets none.
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.engine.seed_point(0, 0, int64_value(11), true);
+    rig.engine.seed_point(1, 0, int64_value(12), false);
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 11);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::SUBSTITUTED));
+    ASSERT_TRUE(rig.tags.has_flag(1, 0, Flag::COMM_FAIL));
+    EXPECT_FALSE(rig.tags.has_flag(1, 0, Flag::SUBSTITUTED));
+}
+
 TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
     CompiledChannel channel =
         channel_of(2, quick_failure(2, 3), TransportKind::TCP);
@@ -2391,7 +2414,7 @@ TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
     EXPECT_FALSE(engine.status().ok());
 }
 
-// --- 11.1: the counts behind the system tags (D-144) -----------------------
+// --- 11.1: the counts behind the system tags (D-146) -----------------------
 
 TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
     Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
@@ -2405,11 +2428,13 @@ TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
     EXPECT_GT(counts.last_ok_time_ns, 0);
     // The loopback answers each request whole after LATENCY.
     EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 1.0);
-    // Both devices' requests of the last 10 s, over 10 s.
-    const double expected =
-        static_cast<double>(rig.engine.counts().requests) / 10.0;
-    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(rig.clock.monotonic_ns()),
-                     expected);
+    // Both devices' requests of the complete seconds, over 10 s: not those
+    // of the running second (review S1).
+    const std::int64_t now = rig.clock.monotonic_ns();
+    const std::size_t complete = requests_before(rig.bus, now - (now % SECOND));
+    ASSERT_GT(complete, 0U);
+    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(now),
+                     static_cast<double>(complete) / 10.0);
     EXPECT_EQ(rig.engine.points_absent(0), 0U);
 }
 

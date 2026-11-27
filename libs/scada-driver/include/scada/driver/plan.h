@@ -58,7 +58,7 @@ struct ReadRules {
 };
 
 // The poll group of a point read only by the identity check: a protocol
-// address an identity check reads, which has no tag (D-145).
+// address an identity check reads, which has no tag (D-147).
 inline constexpr std::uint32_t NO_POLL_GROUP = 0xFFFF'FFFFU;
 
 // The protocol units a point reads (one span), in one poll group. A point
@@ -66,14 +66,14 @@ inline constexpr std::uint32_t NO_POLL_GROUP = 0xFFFF'FFFFU;
 // one poll, in one request when they fit, otherwise back to back.
 struct PlanPoint {
     std::uint32_t point = 0;  // index of the point in its device
-    // NO_POLL_GROUP only for an identity point (D-145).
+    // NO_POLL_GROUP only for an identity point (D-147).
     std::uint32_t poll_group = 0;
     std::uint32_t cluster = 0;
     std::uint32_t space = 0;
     std::uint32_t unit_id = 0;
     std::uint64_t first = 0;
     std::uint64_t count = 1;  // >= 1
-    // Read by an identity check or a restart rule (3.6, 7.6; D-145): never
+    // Read by an identity check or a restart rule (3.6, 7.6; D-147): never
     // in a request that reads a side effect.
     bool identity = false;
 };
@@ -135,7 +135,7 @@ struct ReadPlan {
     // (D-138, R8); the compile step reports such a device too.
     std::optional<std::uint32_t> keepalive;
     std::optional<std::uint32_t> probe;
-    // The identity cycle (3.6, 7.6; D-145): the planned requests that read
+    // The identity cycle (3.6, 7.6; D-147): the planned requests that read
     // an identity point, each with its whole chain, in the order of their
     // groups, then those of points in no poll group (which are in no group
     // of `by_group` and are never the keep-alive). None reads a side effect

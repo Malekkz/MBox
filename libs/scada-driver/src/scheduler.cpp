@@ -126,7 +126,7 @@ Status check_plan(const ReadPlan& plan, std::size_t groups) noexcept {
         (plan.probe.has_value() && *plan.probe >= size)) {
         return invalid("keep-alive or probe the plan does not hold");
     }
-    // D-145: the identity cycle never reads a side effect (6.6).
+    // D-147: the identity cycle never reads a side effect (6.6).
     for (const std::uint32_t index : plan.identity) {
         if (index >= size) {
             return invalid("identity cycle names a request it does not hold");
@@ -504,7 +504,7 @@ Choice Scheduler::take_order_step(std::uint32_t device,
                   .order = run.order.id,
                   .step = run.order_step};
     // D2: no order step between the requests of a chain, an identity
-    // cycle's included (D-145).
+    // cycle's included (D-147).
     choice.chain_dropped = drop_unit_chain(device, choice.chain_device) ||
                            drop_unit_identity(device, choice.chain_device);
     update_holder(units_[run.unit].holder, device, run.order.exclusive);
@@ -997,7 +997,7 @@ bool Scheduler::take_probe(std::uint32_t device, std::int64_t now_ns,
     DeviceRun& run = devices_[device];
     const CompiledDevice& compiled = channel_->devices[device];
     if (!compiled.plan.probe.has_value() && !compiled.plan.identity.empty()) {
-        // D-145: a device with an identity cycle and no probe request is
+        // D-147: a device with an identity cycle and no probe request is
         // probed by that cycle; it goes on only if the device recovers.
         const ReadPlan& plan = compiled.plan;
         Position position;
@@ -1204,7 +1204,7 @@ bool Scheduler::refused(std::uint32_t device, std::uint32_t request) noexcept {
     if ((undo_.valid && undo_.choice.kind == Choice::Kind::IDENTITY &&
          undo_.choice.device == device) ||
         refused_request.poll_group >= run.groups.size()) {
-        // Taken by the identity cycle (D-145): its split form next in it.
+        // Taken by the identity cycle (D-147): its split form next in it.
         const auto found =
             std::find(plan.identity.begin(), plan.identity.end(), request);
         if (found != plan.identity.end()) {

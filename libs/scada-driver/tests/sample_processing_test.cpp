@@ -41,6 +41,8 @@ constexpr std::int64_t SECOND_VALUE = 7;
 constexpr std::int64_t THIRD_VALUE = 9;
 constexpr std::int64_t STALE_VALUE = 10;
 constexpr std::int64_t KEPT_VALUE = 20;
+constexpr std::int64_t INT16_LOWEST = -32'768;
+constexpr std::uint64_t INT16_LOWEST_PATTERN = 0x8000U;
 constexpr std::int64_t MAX_AGE_S = 5;
 constexpr std::uint32_t COMPANION_INDEX = 9;
 // `field: [8, 11]` of a status word, and its value 5.
@@ -93,6 +95,14 @@ public:
             rules_, state_, sample, companions,
             SampleTimes{.receive_time_ns = RECEIVE_NS + mono_ns,
                         .receive_mono_ns = mono_ns});
+    }
+
+    void seed(const TagValue& stored, bool substituted) {
+        seed_point_state(state_, stored, substituted);
+    }
+
+    void reset(std::int64_t mono_ns) {
+        reset_point_state(state_, rules_.tag_type, mono_ns);
     }
 
     ProcessedSample value(std::int64_t raw, std::int64_t mono_ns,
@@ -231,11 +241,11 @@ TEST(SampleProcessing, DeviceInvalidMappedBadIsBadWithoutStale) {
 }
 
 TEST(SampleProcessing, IncomingFlagsAreMaskedToWhatADeviceMayGive) {
-    // SUBSTITUTED waits for tag database 1.1; OWNER_DOWN is never stored and
-    // RESTORED is the library's (decision D-131).
-    const std::uint16_t forbidden = flags(
-        {QualityFlag::SUBSTITUTED, QualityFlag::OWNER_DOWN,
-         QualityFlag::RESTORED, QualityFlag::STALE, QualityFlag::NOT_INIT});
+    // OWNER_DOWN is never stored and RESTORED is the library's (decision
+    // D-131); STALE and NOT_INIT are the framework's.
+    const std::uint16_t forbidden =
+        flags({QualityFlag::OWNER_DOWN, QualityFlag::RESTORED,
+               QualityFlag::STALE, QualityFlag::NOT_INIT});
     PointRules rules = int_rules();
     rules.max_age_ns = MAX_AGE_S * SECOND;
     rules.quality_rules.push_back(QualityRule{
@@ -263,9 +273,216 @@ TEST(SampleProcessing, IncomingFlagsAreMaskedToWhatADeviceMayGive) {
                                      .flags = forbidden}},
                   3 * SECOND)
             .tag;
-    EXPECT_FALSE(has(invalid.flags, QualityFlag::SUBSTITUTED));
     EXPECT_FALSE(has(invalid.flags, QualityFlag::OWNER_DOWN));
     EXPECT_FALSE(has(invalid.flags, QualityFlag::RESTORED));
+}
+
+// Review R2 and R3 of #157: SUBSTITUTED comes from the `substitute` action
+// alone. A protocol's mark (forced at the device: room only, no protocol
+// carries a value with a mark yet), a configured `bad` marker and a
+// `quality_from` entry cannot give it.
+TEST(SampleProcessing, OnlyTheSubstituteActionGivesSubstituted) {
+    const std::uint16_t substituted = flags({QualityFlag::SUBSTITUTED});
+    PointRules rules = int_rules();
+    rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
+                                          .action = InvalidAction::BAD,
+                                          .flags = substituted});
+    rules.quality_rules.push_back(QualityRule{
+        .self = true,
+        .entries = {
+            {.key = 1,
+             .mark = {.quality = Quality::UNCERTAIN, .flags = substituted}}}});
+    Point point(rules);
+    EXPECT_FALSE(has(point.value(1, SECOND).tag.flags,
+                     QualityFlag::SUBSTITUTED));  // quality_from
+    EXPECT_FALSE(has(point.value(-1, 2 * SECOND).tag.flags,
+                     QualityFlag::SUBSTITUTED));  // a `bad` marker
+    for (const Outcome outcome : {Outcome::DEVICE_INVALID, Outcome::NO_VALUE}) {
+        const TagWrite marked =
+            point
+                .feed(RawSample{.outcome = outcome,
+                                .mark = {.quality = Quality::UNCERTAIN,
+                                         .flags = substituted}},
+                      3 * SECOND)
+                .tag;
+        EXPECT_FALSE(has(marked.flags, QualityFlag::SUBSTITUTED));
+    }
+}
+
+// Review R1 of #157: SUBSTITUTED describes the value. It stays with a kept
+// substitute through COMM_FAIL, ABSENT and NO_VALUE, and the next value
+// from the device ends it.
+// A BAD write that keeps the substitute KEPT_VALUE with its flag.
+::testing::AssertionResult keeps_the_substitute(const TagWrite& write) {
+    if (write.quality == Quality::BAD && write.value.i == KEPT_VALUE &&
+        has(write.flags, QualityFlag::SUBSTITUTED)) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "quality " << static_cast<int>(write.quality) << ", value "
+           << write.value.i << ", flags " << write.flags;
+}
+
+// A point whose marker substitutes KEPT_VALUE for all ones.
+PointRules substituting_rules() {
+    PointRules rules = int_rules();
+    rules.markers.push_back(
+        InvalidMarker{.pattern = UINT16_ALL_ONES,
+                      .action = InvalidAction::SUBSTITUTE,
+                      .substitute = int64_value(KEPT_VALUE)});
+    return rules;
+}
+
+TEST(SampleProcessing, AKeptSubstituteKeepsSubstituted) {
+    Point point(substituting_rules());
+    const TagWrite substitute = point.value(-1, SECOND).tag;
+    EXPECT_EQ(substitute.value.i, KEPT_VALUE);
+    EXPECT_TRUE(has(substitute.flags, QualityFlag::SUBSTITUTED));
+    std::int64_t now = SECOND;
+    for (const Outcome outcome :
+         {Outcome::COMM_FAIL, Outcome::ABSENT, Outcome::NO_VALUE}) {
+        now += SECOND;
+        EXPECT_TRUE(keeps_the_substitute(
+            point.feed(RawSample{.outcome = outcome}, now).tag))
+            << static_cast<int>(outcome);
+    }
+}
+
+TEST(SampleProcessing, AValueReadEndsAKeptSubstitute) {
+    Point point(substituting_rules());
+    (void)point.value(-1, SECOND);
+    (void)point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 2 * SECOND);
+    const TagWrite read = point.value(FIRST_VALUE, 3 * SECOND).tag;
+    EXPECT_EQ(read.quality, Quality::GOOD);
+    EXPECT_FALSE(has(read.flags, QualityFlag::SUBSTITUTED));
+    // And a COMM_FAIL after it keeps the read value without the flag.
+    EXPECT_FALSE(
+        has(point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 4 * SECOND)
+                .tag.flags,
+            QualityFlag::SUBSTITUTED));
+}
+
+// A refused answer keeps the substitute and its flag: it gives no value
+// (review of PR 157).
+TEST(SampleProcessing, ARefusedValueKeepsAKeptSubstitute) {
+    Point point(substituting_rules());
+    (void)point.value(-1, SECOND);
+    RawValue refused = raw_signed(1, INT16);
+    refused.width = 0;  // no raw value has width 0
+    EXPECT_TRUE(keeps_the_substitute(
+        point
+            .feed(RawSample{.outcome = Outcome::VALUE, .raw = refused},
+                  2 * SECOND)
+            .tag));
+}
+
+// A reset point holds no substitute (review of PR 157).
+TEST(SampleProcessing, AResetEndsASubstitute) {
+    Point point(substituting_rules());
+    (void)point.value(-1, SECOND);
+    point.reset(2 * SECOND);
+    EXPECT_FALSE(
+        has(point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, 3 * SECOND)
+                .tag.flags,
+            QualityFlag::SUBSTITUTED));
+}
+
+// A point that substitutes all ones and keeps the last value for 0x8000.
+PointRules substituting_and_keeping_rules() {
+    PointRules rules = substituting_rules();
+    rules.max_age_ns = MAX_AGE_S * SECOND;
+    rules.markers.push_back(InvalidMarker{.pattern = INT16_LOWEST_PATTERN,
+                                          .action = InvalidAction::KEEP_LAST});
+    return rules;
+}
+
+// A young hold after a substitute holds the last value read from the
+// device, which is no substitute: UNCERTAIN with STALE, without
+// SUBSTITUTED (review of PR 157). By `keep_last` and by DEVICE_INVALID.
+TEST(SampleProcessing, AHoldAfterASubstituteHoldsTheValueReadWithoutTheFlag) {
+    const auto held_value = [](const TagWrite& write) {
+        return write.value.i == FIRST_VALUE &&
+               write.quality == Quality::UNCERTAIN &&
+               has(write.flags, QualityFlag::STALE) &&
+               !has(write.flags, QualityFlag::SUBSTITUTED);
+    };
+    Point keep(substituting_and_keeping_rules());
+    (void)keep.value(FIRST_VALUE, SECOND);
+    ASSERT_TRUE(
+        has(keep.value(-1, 2 * SECOND).tag.flags, QualityFlag::SUBSTITUTED));
+    EXPECT_TRUE(held_value(keep.value(INT16_LOWEST, 3 * SECOND).tag));
+
+    Point invalid(substituting_and_keeping_rules());
+    (void)invalid.value(FIRST_VALUE, SECOND);
+    ASSERT_TRUE(
+        has(invalid.value(-1, 2 * SECOND).tag.flags, QualityFlag::SUBSTITUTED));
+    EXPECT_TRUE(
+        held_value(invalid
+                       .feed(RawSample{.outcome = Outcome::DEVICE_INVALID,
+                                       .mark = {.quality = Quality::UNCERTAIN}},
+                             3 * SECOND)
+                       .tag));
+}
+
+// A substitute of every type of a point with markers carries the flag.
+TEST(SampleProcessing, ASubstituteOfEveryTypeIsSubstituted) {
+    for (const TagValue substitute :
+         {bool_value(true), int64_value(KEPT_VALUE),
+          uint64_value(static_cast<std::uint64_t>(KEPT_VALUE)),
+          float64_value(-1.0)}) {
+        PointRules rules;
+        rules.tag_type = substitute.type;
+        rules.markers.push_back(
+            InvalidMarker{.pattern = UINT16_ALL_ONES,
+                          .action = InvalidAction::SUBSTITUTE,
+                          .substitute = substitute});
+        Point point(rules);
+        const TagWrite write =
+            point
+                .feed(RawSample{.outcome = Outcome::VALUE,
+                                .raw = raw_unsigned(UINT16_ALL_ONES, INT16)},
+                      SECOND)
+                .tag;
+        EXPECT_EQ(write.quality, Quality::UNCERTAIN)
+            << static_cast<int>(substitute.type);
+        EXPECT_TRUE(has(write.flags, QualityFlag::SUBSTITUTED))
+            << static_cast<int>(substitute.type);
+        EXPECT_EQ(write.value.type, substitute.type);
+    }
+}
+
+// Review R1 of #157: a companion whose value was substituted does not pass
+// SUBSTITUTED to the point that depends on it; the point is UNCERTAIN.
+TEST(SampleProcessing, ASubstitutedCompanionDoesNotPassTheFlag) {
+    PointRules rules = int_rules();
+    rules.companions = {3};
+    rules.quality_rules.push_back(
+        QualityRule{.companion = 0, .entries = {{.key = 0, .mark = {}}}});
+    Point point(rules);
+    const CompanionInput substituted{
+        .outcome = Outcome::VALUE,
+        .raw = raw_unsigned(0, INT16),
+        .mark = {.quality = Quality::UNCERTAIN,
+                 .flags = flags({QualityFlag::SUBSTITUTED})}};
+    const TagWrite write = point.value(1, SECOND, {&substituted, 1}).tag;
+    EXPECT_EQ(write.quality, Quality::UNCERTAIN);
+    EXPECT_FALSE(has(write.flags, QualityFlag::SUBSTITUTED));
+}
+
+// Review R1 of #157, across a restart: a point seeded with a stored value
+// that carries SUBSTITUTED keeps the flag on the writes that keep it.
+TEST(SampleProcessing, ASeededSubstituteKeepsItsFlag) {
+    Point point(int_rules());
+    point.seed(int64_value(KEPT_VALUE), true);
+    const TagWrite kept =
+        point.feed(RawSample{.outcome = Outcome::COMM_FAIL}, SECOND).tag;
+    EXPECT_EQ(kept.value.i, KEPT_VALUE);
+    EXPECT_TRUE(has(kept.flags, QualityFlag::SUBSTITUTED));
+    Point plain(int_rules());
+    plain.seed(int64_value(KEPT_VALUE), false);
+    EXPECT_FALSE(has(
+        plain.feed(RawSample{.outcome = Outcome::COMM_FAIL}, SECOND).tag.flags,
+        QualityFlag::SUBSTITUTED));
 }
 
 TEST(SampleProcessing, CommFailIsBadCommFailAndKeepsTheValue) {
@@ -1128,10 +1345,13 @@ TEST(SampleProcessing, SubstituteBeforeAnyReadThenStale) {
     const TagWrite first = point.value(-1, SECOND).tag;
     EXPECT_EQ(first.value.i, KEPT_VALUE);
     EXPECT_EQ(first.quality, Quality::UNCERTAIN);
+    EXPECT_TRUE(has(first.flags, QualityFlag::SUBSTITUTED));
     EXPECT_FALSE(has(first.flags, QualityFlag::NOT_INIT));  // decision D-131
     ProcessedSample out;
     ASSERT_TRUE(point.stale((MAX_AGE_S + 1) * SECOND, out));  // never confirmed
     EXPECT_TRUE(has(out.tag.flags, QualityFlag::STALE));
+    // STALE is added to the kept substitute; SUBSTITUTED stays with it.
+    EXPECT_TRUE(has(out.tag.flags, QualityFlag::SUBSTITUTED));
 }
 
 TEST(SampleProcessing, StringEdges) {
@@ -1254,7 +1474,7 @@ TEST(SampleProcessing, TimeRawOnAFloatTagIsBad) {
         Quality::BAD);
 }
 
-// --- Withheld points and the restart rules' inputs (D-145) ---------------
+// --- Withheld points and the restart rules' inputs (D-147) ---------------
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers): the values are the test data
 

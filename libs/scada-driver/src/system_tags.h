@@ -1,7 +1,7 @@
 #ifndef SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 #define SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 
-// The system tags of driver interface contract 11.1 (decision D-144): those
+// The system tags of driver interface contract 11.1 (decision D-146): those
 // of one channel and its devices, written by the channel's worker, which
 // owns them with the channel's point tags, and those of the process,
 // written by the main thread as the owner named like the process (CS 12.5).
@@ -34,7 +34,7 @@ inline constexpr std::size_t CHANNEL_SIGNALS = 5;
 // The signals of `sys.dev.<device>.<signal>` this slice writes, in slot
 // order. `identity`, `identity_ok` and `restarts` come with slice 5b-2,
 // `selections_lost` and `last_command_stage` with the command slices,
-// `refresh_failures` with phase 5 (D-144).
+// `refresh_failures` with phase 5 (D-146).
 enum class DeviceSignal : std::uint8_t {
     STATE = 0,
     LAST_OK_TIME,
@@ -98,11 +98,16 @@ struct SystemSlot {
     std::uint64_t last = 0;  // the bits of the value last written
 };
 
-// Writes `bits` to `slot`, GOOD with no flags and source time 0, if it
-// differs from the value last written or with `all`; true if it wrote. A
-// write the library refuses is counted in `refused`. Not real-time.
-bool write_slot(scada_ctx* ctx, SystemSlot& slot, std::uint64_t bits, bool all,
-                std::uint64_t& refused) noexcept;
+// How a system tag is written: the tag library's `scada_tag_write`, or a
+// unit test's recorder.
+using TagWriteFn = int (*)(scada_ctx*, std::uint32_t, const scada_value*);
+
+// Writes `bits` to `slot` by `write`, GOOD with no flags and source time 0,
+// if it differs from the value last written or with `all`; true if it
+// wrote. A write the library refuses is counted in `refused`. Not
+// real-time.
+bool write_slot(TagWriteFn write, scada_ctx* ctx, SystemSlot& slot,
+                std::uint64_t bits, bool all, std::uint64_t& refused) noexcept;
 
 // The slots of a channel: CHANNEL_SIGNALS, then one `period.<group>` per
 // poll group, then DEVICE_SIGNALS per device of the channel (disabled ones
@@ -113,13 +118,22 @@ struct SystemTagHandles {
     std::size_t devices = 0;
 };
 
+// An average in ms (`response_ms`, `period.<group>`) rounded to
+// AVERAGE_RESOLUTION_MS before it is compared with the value last written,
+// so that noise below the resolution writes nothing (PR 159 review S1;
+// D-146).
+inline constexpr double AVERAGE_RESOLUTION_MS = 0.1;
+[[nodiscard]] double rounded_ms(double average_ms) noexcept;
+
 class SystemTags {
 public:
     // How often counters, times and averages are written at most (11.1).
     static constexpr std::int64_t PERIOD_NS = 1'000'000'000;
 
-    // `ctx` is borrowed and used only from the worker's thread.
-    SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept;
+    // `ctx` is borrowed and used only from the worker's thread; `write` is
+    // the library's, or a test's.
+    SystemTags(scada_ctx* ctx, SystemTagHandles handles,
+               TagWriteFn write = &scada_tag_write) noexcept;
 
     // Writes what changed: the states at every call, the other signals at
     // most once every PERIOD_NS of `now_ns`; with `all`, every signal at
@@ -129,10 +143,26 @@ public:
     bool publish(ChannelEngine& engine, const CompiledChannel& channel,
                  std::int64_t now_ns, bool all) noexcept;
 
+    // Writes the counters, times and averages that changed since they were
+    // last written, whatever the period: their last values, at the stop,
+    // once the connection is closed and nothing more is counted (D-146).
+    // The states are not written: the stop writes the channel's own. Returns
+    // true when it wrote anything. Not real-time.
+    bool flush(ChannelEngine& engine, const CompiledChannel& channel,
+               std::int64_t now_ns) noexcept;
+
+    // Writes the states of a channel whose worker stopped, once its
+    // connection is closed: `state` DISCONNECTED, each device's `state` as
+    // DI 3.5 gives it for a channel not connected (CONNECTING; DISABLED for
+    // a disabled device) and `pacing_limited` false, so that the tags left
+    // after the stop do not say "connected" (PR 159 review M3; D-146). True
+    // when it wrote anything. Not real-time.
+    bool stopped(const CompiledChannel& channel) noexcept;
+
     // Writes every signal of a channel that has no engine, a disabled one
     // (CS 4.6), once at its start: never connected, every device DISABLED,
     // every count 0 (9.1: "Diagnostic tags are written with their current
-    // values"; D-144). Returns true when it wrote anything. Not real-time.
+    // values"; D-146). Returns true when it wrote anything. Not real-time.
     bool publish_idle(const CompiledChannel& channel) noexcept;
 
     // Writes `sys.drv.<channel>.state` at once if it changed; true if it
@@ -157,12 +187,13 @@ private:
                                           DeviceSignal signal) const noexcept;
 
     scada_ctx* ctx_;
+    TagWriteFn write_;
     SystemTagHandles handles_;
     std::int64_t due_ns_ = 0;
     std::uint64_t refused_ = 0;
 };
 
-// The `sys.proc.<process>.*` tags, written by the main thread (D-144). The
+// The `sys.proc.<process>.*` tags, written by the main thread (D-146). The
 // counters stay 0 until the slices that count them: the command slices
 // (`stale_outcomes`, `answers_dropped`), the fail-safe slice
 // (`safe_unjournalled`) and 5b-3 (`log_dropped`).
@@ -171,8 +202,10 @@ public:
     // One slot per ProcessSignal, in order, resolved by the main thread.
     using Slots = std::array<SystemSlot, PROCESS_SIGNALS>;
 
-    // `ctx` is borrowed and used only from the main thread.
-    ProcessTags(scada_ctx* ctx, const Slots& slots) noexcept;
+    // `ctx` is borrowed and used only from the main thread; `write` is the
+    // library's, or a test's.
+    ProcessTags(scada_ctx* ctx, const Slots& slots,
+                TagWriteFn write = &scada_tag_write) noexcept;
 
     // Every signal at the start: no real-time thread (a driver has none,
     // DI 2.5), `config_id` 0 until the compile step gives one (slice 8),
@@ -182,11 +215,17 @@ public:
     // `config_state` APPLIED, once READY=1 is sent. True if it wrote.
     bool applied() noexcept;
 
+    // `config_state` LOADING again, at the stop: the tags left after the
+    // stop do not say "applied" (PR 159 review M3; D-146). True if it
+    // wrote.
+    bool stopped() noexcept;
+
     // Writes the library refused.
     [[nodiscard]] std::uint64_t refused() const noexcept { return refused_; }
 
 private:
     scada_ctx* ctx_;
+    TagWriteFn write_;
     Slots slots_;
     std::uint64_t refused_ = 0;
 };
