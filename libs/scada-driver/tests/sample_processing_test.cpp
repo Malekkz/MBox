@@ -339,7 +339,7 @@ struct RefusedKind {
 constexpr std::uint8_t NO_SUCH_SLOT = 5;
 constexpr std::uint8_t BIT_64 = 64;
 
-const std::array<RefusedKind, 12> REFUSED_KINDS{{
+const std::array<RefusedKind, 15> REFUSED_KINDS{{
     {"exponent companion slot",
      [](PointRules& rules) {
          rules.exponent = ExponentRule{.companion = NO_SUCH_SLOT};
@@ -379,6 +379,21 @@ const std::array<RefusedKind, 12> REFUSED_KINDS{{
      [](PointRules& rules) { rules.raw_kind = RawKind::FLOAT; }},
     {"local device time without a zone",
      [](PointRules& rules) { rules.device_time.local = true; }},
+    // CF-504 as the compile step gives it (D-115): what sample_processing_fuzz
+    // found with STRING tags on, a STRING tag on a numeric raw that loses
+    // its substitute's text (#169).
+    {"STRING tag on a numeric raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::STRING;
+         rules.markers.front().substitute = string_value({});
+     }},
+    {"string raw on an INT64 tag",
+     [](PointRules& rules) { rules.raw_kind = RawKind::STRING; }},
+    {"BOOL tag on a numeric raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::BOOL;
+         rules.markers.front().substitute = bool_value(true);
+     }},
     // What sample_processing_fuzz found with STRING tags on (#169): an
     // enumeration on a STRING tag with an unsigned raw.
     {"enumeration on a STRING tag",
@@ -536,6 +551,9 @@ TEST(SampleProcessing, ASubstituteOfEveryTypeIsSubstituted) {
           float64_value(-1.0)}) {
         PointRules rules;
         rules.tag_type = substitute.type;
+        if (substitute.type == TagType::BOOL) {
+            rules.raw_kind = RawKind::BOOL;  // CF-504 (#169)
+        }
         rules.markers.push_back(
             InvalidMarker{.pattern = UINT16_ALL_ONES,
                           .action = InvalidAction::SUBSTITUTE,
@@ -803,6 +821,7 @@ std::span<const std::byte> bytes_of(std::string_view text) {
 TEST(SampleProcessing, StringIsKeptAndWrittenAgainOnALostAnswer) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     std::string text = "unit 7";
     const ProcessedSample out = point.feed(
@@ -818,6 +837,7 @@ TEST(SampleProcessing, StringIsKeptAndWrittenAgainOnALostAnswer) {
 TEST(SampleProcessing, LongStringIsCutAtACharacterBoundaryWithOverflow) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     // 249 ASCII bytes, then a 2-byte character that would end at byte 251.
     const std::string text = std::string(249, 'a') + "\xC3\xA9" + "bc";
@@ -835,6 +855,7 @@ TEST(SampleProcessing, LongStringIsCutAtACharacterBoundaryWithOverflow) {
 TEST(SampleProcessing, InvalidUtf8IsBad) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     const std::string text = "ab\xC0\x80";  // an overlong NUL
     const TagWrite write =
@@ -1462,6 +1483,7 @@ TEST(SampleProcessing, SubstituteBeforeAnyReadThenStale) {
 TEST(SampleProcessing, StringEdges) {
     PointRules rules;
     rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
     Point point(rules);
     const std::string exact(TAG_STRING_MAX_BYTES, 'x');
     const TagWrite whole =
