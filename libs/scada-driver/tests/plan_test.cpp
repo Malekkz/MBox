@@ -557,6 +557,32 @@ TEST(Plan, AnIdentityPointIsNeverReadWithASideEffect) {
     expect_refused({at(0, 0), companion}, chained);
 }
 
+TEST(Plan, AnIdentityPointInAnyRangeButAnAtomicOneIsRefused) {
+    // PR 171 S7: each kind of range on its own, the identity point inside.
+    for (const Kind kind :
+         {Kind::NO_READ, Kind::EXCLUSIVE, Kind::SIDE_EFFECT}) {
+        ReadRules rules{.max_units = 8};
+        rules.ranges = {range(kind, 5, 6)};
+        expect_refused({identity_at(0, 5)}, rules);
+    }
+    // An atomic range only keeps its points in one request.
+    ReadRules atomic{.max_units = 8};
+    atomic.ranges = {range(Kind::ATOMIC, 5, 6)};
+    const ReadPlan plan = planned({identity_at(0, 5)}, atomic);
+    EXPECT_EQ(plan.identity.size(), 1U);
+}
+
+TEST(Plan, ARequestInNoPollGroupIsNeverTheKeepAlive) {
+    // PR 171 S7: the identity read in no group is the shortest request;
+    // the keep-alive is still the group's longer one.
+    const ReadPlan plan =
+        planned({at(0, 0, 2), identity_at(1, 300, NO_POLL_GROUP)},
+                ReadRules{.max_units = 4});
+    ASSERT_TRUE(plan.keepalive.has_value());
+    EXPECT_EQ(plan.requests[plan.keepalive.value_or(0)].first, 0U);
+    EXPECT_EQ(plan.requests[plan.keepalive.value_or(0)].count, 2U);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace
