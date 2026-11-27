@@ -2,7 +2,7 @@
 #define SCADA_DRIVER_DIAGNOSTICS_H
 
 // The counts behind the system tags of a channel and its devices (driver
-// interface contract 11.1, decision D-144). The engine keeps them; the
+// interface contract 11.1, decision D-145). The engine keeps them; the
 // worker publishes them. Nothing here allocates.
 
 #include "scada/common/realtime.h"
@@ -20,10 +20,10 @@ enum class ChannelLink : std::uint8_t {
     CONNECTED = 2,
 };
 
-// The counters of one device since attach (11.1, D-144).
+// The counters of one device since attach (11.1, D-145).
 struct DeviceCounts {
     std::uint64_t requests = 0;    // frames sent to it
-    std::uint64_t errors = 0;      // answers that are errors (D-144)
+    std::uint64_t errors = 0;      // answers that are errors (D-145)
     std::uint64_t timeouts = 0;    // attempts with no answer in time
     std::uint64_t exceptions = 0;  // error answers with a protocol code
     std::uint64_t refusals = 0;    // busy and gateway answers

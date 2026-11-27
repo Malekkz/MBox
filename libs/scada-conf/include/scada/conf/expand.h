@@ -51,9 +51,20 @@ struct ExpandedTree {
     // The scalars computed from a configuration expression (13.3), in the
     // order written, for the checks of their values at stage 5 (D-115).
     std::vector<NodeId> computed;
+    // `limits.max_tags` of system.yaml, or its default: the tags of the tag
+    // set, generated tags included (4.1, CF-1001), which stage 5 counts
+    // (D-116).
+    std::int64_t max_tags = DEFAULT_MAX_TAGS;
 
     static constexpr std::uint32_t NO_INSTANCE = 0xFFFFFFFF;
+    static constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 };
+
+// True if `node` of `tree`, or a key or value below it, was written in its
+// instance's own file (an override, an instance point). An error placed
+// there is that instance's own, never one cause with a template's (D-114,
+// D-115).
+[[nodiscard]] bool written_in_instance(const ExpandedTree& tree, NodeId node);
 
 // A diagnostic on `node` of `tree` (contract 1.4): at the node when it was
 // written in its instance's own file or belongs to no instance; otherwise at

@@ -13,7 +13,7 @@
 // Orders (writes, select and operate, READ_NOW) come with the command
 // slices; this engine sends none yet. Identity checks and device restarts
 // (7.6) come with slice 5b-2. The counts behind the system tags (11.1) are
-// kept here and published by the worker (D-144).
+// kept here and published by the worker (D-145).
 
 #include "scada/common/realtime.h"
 #include "scada/common/status.h"
@@ -140,7 +140,7 @@ public:
     [[nodiscard]] bool connected() const noexcept { return connected_; }
     [[nodiscard]] ChannelLink link() const noexcept { return link_; }
 
-    // The system tag counts of device `device` (11.1, D-144); `device` is
+    // The system tag counts of device `device` (11.1, D-145); `device` is
     // an index of the channel's devices.
     [[nodiscard]] const DeviceCounts& device_counts(
         std::uint32_t device) const noexcept {
@@ -250,7 +250,7 @@ private:
     SCADA_RT void sync_scheduler() noexcept;
     // The link changed: kept and told to the sink. Not real-time.
     void set_link(ChannelLink link) noexcept;
-    // Counts the answer `decoded` of device `device` (11.1, D-144).
+    // Counts the answer `decoded` of device `device` (11.1, D-145).
     SCADA_RT void count_answer(DeviceRun& run,
                                const DecodeResult& decoded) noexcept;
     SCADA_RT void publish_states() noexcept;

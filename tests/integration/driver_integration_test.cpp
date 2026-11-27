@@ -543,7 +543,7 @@ TEST_F(DriverProcess, ARefusedConnectIsCountedOnTheChannel) {
 
 TEST_F(SystemTags, OfADisabledChannelShowItWasNeverConnected) {
     // A disabled channel has no engine: its system tags are written once
-    // at its start (9.1, D-144), the channel disconnected, its device
+    // at its start (9.1, D-145), the channel disconnected, its device
     // DISABLED, every count 0 but what a scan of the plan would send.
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     std::vector<std::string> off =
@@ -568,7 +568,7 @@ TEST_F(SystemTags, OfADisabledChannelShowItWasNeverConnected) {
 
 TEST_F(DriverProcess, AChannelWithoutDevicesIsOwnedByItsSystemTags) {
     // No point tag to learn the owner from: the channel's state tag gives
-    // it (D-144).
+    // it (D-145).
     start_tagd({{.name = "line1", .tags = {}}});
     auto driver = start_driver(tcp_channel("line1", LocalPort(false).port()));
     if (!driver.has_value()) {
@@ -582,7 +582,7 @@ TEST_F(DriverProcess, AChannelWithoutDevicesIsOwnedByItsSystemTags) {
 
 TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
     // CS 12.5: a tag set lists the system tags; one that lacks one, or
-    // gives one another type, does not run the driver (D-144).
+    // gives one another type, does not run the driver (D-145).
     const std::vector<std::string> args = joined(
         tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0"));
     start_tagd({{.name = "line1", .tags = {"d1.v"}, .system_tags = false}});
@@ -611,7 +611,7 @@ TEST_F(DriverProcess, AMissingOrMistypedSystemTagFailsTheStart) {
 
 TEST_F(SystemTags, OfTheProcessAreTheMainThreads) {
     // `sys.proc.drv-test.*`, owner `drv-test`, written by the main thread
-    // (D-144): no real-time thread, no `config_id` until the compile step,
+    // (D-145): no real-time thread, no `config_id` until the compile step,
     // APPLIED (1) once READY=1 is sent, every count 0. The owner has no
     // channel and is no unused owner.
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});

@@ -190,7 +190,7 @@ void Worker::serve(TagWriter& writer) noexcept {
     }
     writer.seed(*engine, *channel_);
     // 9.1: "Diagnostic tags are written with their current values", after
-    // the walk of the owner wrote them NOT_INIT (D-144).
+    // the walk of the owner wrote them NOT_INIT (D-145).
     writer.publish_system(*engine, *channel_, clock_->monotonic_ns(), true);
     writer.notify();
     // A stop gives up a read in flight and a connect (DI 10, R-14).

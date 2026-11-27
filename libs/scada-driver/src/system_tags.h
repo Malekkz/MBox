@@ -1,7 +1,7 @@
 #ifndef SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 #define SCADA_DRIVER_SRC_SYSTEM_TAGS_H
 
-// The system tags of driver interface contract 11.1 (decision D-144): those
+// The system tags of driver interface contract 11.1 (decision D-145): those
 // of one channel and its devices, written by the channel's worker, which
 // owns them with the channel's point tags, and those of the process,
 // written by the main thread as the owner named like the process (CS 12.5).
@@ -34,7 +34,7 @@ inline constexpr std::size_t CHANNEL_SIGNALS = 5;
 // The signals of `sys.dev.<device>.<signal>` this slice writes, in slot
 // order. `identity`, `identity_ok` and `restarts` come with slice 5b-2,
 // `selections_lost` and `last_command_stage` with the command slices,
-// `refresh_failures` with phase 5 (D-144).
+// `refresh_failures` with phase 5 (D-145).
 enum class DeviceSignal : std::uint8_t {
     STATE = 0,
     LAST_OK_TIME,
@@ -132,7 +132,7 @@ public:
     // Writes every signal of a channel that has no engine, a disabled one
     // (CS 4.6), once at its start: never connected, every device DISABLED,
     // every count 0 (9.1: "Diagnostic tags are written with their current
-    // values"; D-144). Returns true when it wrote anything. Not real-time.
+    // values"; D-145). Returns true when it wrote anything. Not real-time.
     bool publish_idle(const CompiledChannel& channel) noexcept;
 
     // Writes `sys.drv.<channel>.state` at once if it changed; true if it
@@ -162,7 +162,7 @@ private:
     std::uint64_t refused_ = 0;
 };
 
-// The `sys.proc.<process>.*` tags, written by the main thread (D-144). The
+// The `sys.proc.<process>.*` tags, written by the main thread (D-145). The
 // counters stay 0 until the slices that count them: the command slices
 // (`stale_outcomes`, `answers_dropped`), the fail-safe slice
 // (`safe_unjournalled`) and 5b-3 (`log_dropped`).

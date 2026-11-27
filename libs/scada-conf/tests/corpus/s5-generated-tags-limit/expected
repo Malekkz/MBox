@@ -1,0 +1,7 @@
+# `limits.max_tags` counts the tags of the tag set, generated tags included
+# (4.1; D-116): 2,800 one-point devices pass stage 4, which counts their
+# 2,800 point tags, and stage 5 refuses the tree. Each device has 17
+# signals of the driver interface contract (11.1) and its point's tag, the
+# tree 21 process tags and line1's 8: the 2,777th device passes the default
+# of 50,000 with 50,014 tags (CF-1001, at that device). Invented.
+drivers/modbus/line1.yaml:2783:13: CF-1001

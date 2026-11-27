@@ -4,7 +4,7 @@
 // The TagSink of a channel worker over the tag library (driver.h, D-142):
 // each point's resolved handle, written on the worker's own thread, which
 // owns the channel's tags (DI 2.4, CS 12.3), the writes of 9.1, and the
-// system tags of the channel and its devices (11.1, D-144).
+// system tags of the channel and its devices (11.1, D-145).
 
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
@@ -59,13 +59,13 @@ public:
                               const ProcessedSample& sample) noexcept override;
 
     // `sys.dev.<device>.state` is written by `publish_system` after the
-    // step that changed it (D-144).
+    // step that changed it (D-145).
     SCADA_RT void device_state(std::uint32_t /*device*/,
                                DeviceStatus /*state*/) noexcept override {}
 
     // `sys.drv.<channel>.state` at once; CONNECTING also wakes the readers
     // at once, since the connect that follows blocks the worker up to its
-    // `connect_timeout` (D-144). Not real-time: the notify is a system call.
+    // `connect_timeout` (D-145). Not real-time: the notify is a system call.
     void channel_link(ChannelLink link) noexcept override;
 
     // The system tags of the channel and its devices (SystemTags::publish).

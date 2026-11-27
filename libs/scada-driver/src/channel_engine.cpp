@@ -888,7 +888,7 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const bool probe = choice.kind == Choice::Kind::PROBE;
     if (end == End::BROKEN) {
         ++counts_.broken;
-        ++run.diag.errors;  // a broken answer (D-144)
+        ++run.diag.errors;  // a broken answer (D-145)
     } else {
         ++counts_.timeouts;
         if (end == End::TIMEOUT) {

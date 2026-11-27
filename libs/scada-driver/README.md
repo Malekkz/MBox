@@ -25,7 +25,7 @@ The library is built in slices. These are the first two:
 | The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 | The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
 | The driver process: main thread, a worker per channel, the writes after attach, the channel watchdog, the bounded stop | `scada/driver/driver.h` | 2.3, 2.4, 2.6, 9.1, 10 (decision D-142) |
-| The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-144) |
+| The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-145) |
 
 The worker writes the `sys.drv.<channel>.*` and `sys.dev.<device>.*` tags
 of 11.1: states when they change, counters at most once a second. The main
@@ -36,7 +36,7 @@ lacks one does not start.
 Not yet here: the identity and restart tags (slice 5b-2), the workers' log
 queues (slice 5b-3),
 commands, the generation change and reload. `docs/decisions.md` D-130 to
-D-142 and D-144 record the choices the contracts left open.
+D-142 and D-145 record the choices the contracts left open.
 
 ## What it does
 
@@ -159,6 +159,13 @@ carry them there. They are read when a configuration is compiled.
   configuration with a local-time device is refused.
 - A file without a footer rule makes every time after its last transition
   uncertain.
+- A file in which more than 16 begins of intervals of constant offset
+  (the table's start and each change) lie within less than the span of its
+  offsets (the largest minus the smallest, with 0) of one another is
+  refused as not valid, so that every conversion looks at a bounded number
+  of intervals: at most 33 (#158, D-144).
+  No real zone file comes near it: in each of the 499 zone files of the
+  build machine, changes are further apart than the span of the offsets.
 
 ## Testing
 

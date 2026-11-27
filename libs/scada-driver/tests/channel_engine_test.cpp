@@ -2391,7 +2391,7 @@ TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
     EXPECT_FALSE(engine.status().ok());
 }
 
-// --- 11.1: the counts behind the system tags (D-144) -----------------------
+// --- 11.1: the counts behind the system tags (D-145) -----------------------
 
 TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
     Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);

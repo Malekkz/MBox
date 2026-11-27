@@ -72,7 +72,7 @@ inline constexpr milliseconds HEARTBEAT_TIMEOUT{1500};
 // One channel of the tag set: its name and its INT64 tags
 // `<device>.<point>`. The owner is `drv-test.<channel>` (CS 12.5, TD 1.1),
 // unless `owner` names another; `drv-test` itself is the main thread's,
-// with the `sys.proc.drv-test.*` tags (D-144).
+// with the `sys.proc.drv-test.*` tags (D-145).
 // `retain` gives every tag RETAIN.
 struct ChannelTags {
     std::string name;
@@ -92,7 +92,7 @@ struct SystemTag {
 
 // The system tags of 11.1 that slice 5b-1 writes, as CS 12.5 names them:
 // written out here, not taken from the library, so that a wrong name or
-// type in the driver fails the start (D-144).
+// type in the driver fails the start (D-145).
 inline constexpr std::array<SystemTag, 5> CHANNEL_SYSTEM_TAGS{{
     {.signal = "state", .type = "int64"},
     {.signal = "connects", .type = "uint64"},

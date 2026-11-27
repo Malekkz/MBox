@@ -1,5 +1,5 @@
 // The windows behind `response_ms` and `requests_per_s` (driver interface
-// contract 11.1, D-144).
+// contract 11.1, D-145).
 
 #include "scada/driver/diagnostics.h"
 
