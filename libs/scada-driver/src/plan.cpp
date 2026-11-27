@@ -167,13 +167,19 @@ Status validate_points(const std::vector<PlanPoint>& points,
             point.first > UINT64_MAX - (point.count - 1)) {
             return refused("point span empty or larger than one request");
         }
-        if (point.poll_group >= poll_groups) {
+        if (point.poll_group >= poll_groups &&
+            !(point.poll_group == NO_POLL_GROUP && point.identity)) {
             return refused("poll group out of range");
         }
         for (std::size_t index = 0; index < merged.size(); ++index) {
             if (!overlaps(point.first, last_of(point), merged[index],
                           point.space, point.unit_id)) {
                 continue;
+            }
+            if (point.identity && merged[index].kind != Kind::ATOMIC) {
+                // D-145: an identity read is never a read with a side
+                // effect (6.6), and never of a no-read range.
+                return refused("an identity point in a side-effect range");
             }
             if (const Status status =
                     check_point_in(point, merged[index], reader[index]);
@@ -213,6 +219,7 @@ struct Segment {
     std::vector<std::uint32_t> tags;      // side-effect ranges it reads
     bool side_effect = false;
     bool exclusive = false;
+    bool identity = false;  // holds an identity point (D-145)
 };
 
 Segment segment_of(std::uint32_t index, const std::vector<PlanPoint>& points,
@@ -227,7 +234,8 @@ Segment segment_of(std::uint32_t index, const std::vector<PlanPoint>& points,
                     .clusters = {point.cluster},
                     .tags = {},
                     .side_effect = false,
-                    .exclusive = false};
+                    .exclusive = false,
+                    .identity = point.identity};
     for (std::uint32_t tag = 0; tag < merged.size(); ++tag) {
         const ReadRange& range = merged[tag];
         if (!overlaps(point.first, last_of(point), range, point.space,
@@ -262,6 +270,7 @@ void absorb(Segment& into, const Segment& from) {
     add_distinct(into.tags, from.tags);
     into.side_effect = into.side_effect || from.side_effect;
     into.exclusive = into.exclusive || from.exclusive;
+    into.identity = into.identity || from.identity;
 }
 
 void normalise(std::vector<Segment>& segments) {
@@ -467,8 +476,12 @@ std::vector<Block> blocks_of(const std::vector<Segment>& segments,
         if (!blocks.empty()) {
             Block& open = blocks.back();
             const Segment& whole = open.whole;
+            // D-145: an identity point never joins a side effect.
+            const bool identity_conflict =
+                (whole.identity && segment.side_effect) ||
+                (segment.identity && whole.side_effect);
             if (whole.place == segment.place && !whole.exclusive &&
-                !segment.exclusive &&
+                !segment.exclusive && !identity_conflict &&
                 !chain_conflict(whole, segment, chained) &&
                 bridgeable(whole.place, whole.last, segment.first, rules) &&
                 fits(whole.place, whole.first,
@@ -640,7 +653,8 @@ Status plan_group(std::vector<Segment> segments,
                 continue;
             }
             for (const Segment& part : block.parts) {
-                if (!part.side_effect && !part.exclusive &&
+                if (part.place.group != NO_POLL_GROUP && !part.side_effect &&
+                    !part.exclusive &&
                     !brings_a_chain(part, Segment{}, chained)) {
                     group.keepalive_parts.push_back(part);
                 }
@@ -661,7 +675,8 @@ void choose_keepalive(const std::vector<PlanPoint>& points,
     // range).
     for (std::uint32_t index = 0; index < planned; ++index) {
         const Request& request = out.requests[index];
-        if (request.side_effect || request.exclusive || in_chain[index]) {
+        if (request.side_effect || request.exclusive || in_chain[index] ||
+            request.poll_group == NO_POLL_GROUP) {
             continue;
         }
         if (!out.keepalive.has_value() ||
@@ -681,6 +696,41 @@ void choose_keepalive(const std::vector<PlanPoint>& points,
         out.keepalive = static_cast<std::uint32_t>(out.requests.size());
         out.requests.push_back(request_of(*shortest, points));
     }
+}
+
+// The identity cycle (D-145): each run of `order` linked by `chained` that
+// holds an identity point, whole. False when one reads a side effect.
+bool add_identity(const std::vector<std::uint32_t>& order,
+                  const std::vector<bool>& identity_point, ReadPlan& out) {
+    for (std::size_t start = 0; start < order.size();) {
+        std::size_t end = start;
+        while (end + 1 < order.size() && out.requests[order[end]].chained) {
+            ++end;
+        }
+        bool holds = false;
+        bool side_effect = false;
+        for (std::size_t position = start; position <= end; ++position) {
+            const Request& request = out.requests[order[position]];
+            side_effect =
+                side_effect || request.side_effect || request.exclusive;
+            holds = holds ||
+                    std::any_of(request.points.begin(), request.points.end(),
+                                [&](std::uint32_t point) {
+                                    return point < identity_point.size() &&
+                                           identity_point[point];
+                                });
+        }
+        if (holds && side_effect) {
+            return false;
+        }
+        if (holds) {
+            for (std::size_t position = start; position <= end; ++position) {
+                out.identity.push_back(order[position]);
+            }
+        }
+        start = end + 1;
+    }
+    return true;
 }
 
 }  // namespace
@@ -715,21 +765,47 @@ Status plan_blocks(const std::vector<PlanPoint>& points, const ReadRules& rules,
     out = ReadPlan{};
     out.by_group.resize(poll_groups);
     GroupOut planned_out;
-    for (std::uint32_t group = 0; group < poll_groups; ++group) {
+    // The poll groups, then the points in no poll group (D-145), planned as
+    // a group of their own whose requests are in no group of `by_group`.
+    std::vector<std::uint32_t> groupless;
+    for (std::uint32_t group = 0; group <= poll_groups; ++group) {
+        const std::uint32_t place = group < poll_groups ? group : NO_POLL_GROUP;
         std::vector<Segment> of_group;
         for (const Segment& segment : segments) {
-            if (segment.place.group == group) {
+            if (segment.place.group == place) {
                 of_group.push_back(segment);
             }
         }
-        if (const Status status =
-                plan_group(std::move(of_group), points, rules, out,
-                           out.by_group[group], planned_out);
+        std::vector<std::uint32_t>& order =
+            group < poll_groups ? out.by_group[group] : groupless;
+        if (const Status status = plan_group(std::move(of_group), points, rules,
+                                             out, order, planned_out);
             !status.ok()) {
             out = ReadPlan{};
             out.by_group.resize(poll_groups);
             return status;
         }
+    }
+    std::vector<bool> identity_point;
+    for (const PlanPoint& point : points) {
+        if (point.identity) {
+            if (identity_point.size() <= point.point) {
+                identity_point.resize(std::size_t{point.point} + 1, false);
+            }
+            identity_point[point.point] = true;
+        }
+    }
+    for (const std::vector<std::uint32_t>& order : out.by_group) {
+        if (!add_identity(order, identity_point, out)) {
+            out = ReadPlan{};
+            out.by_group.resize(poll_groups);
+            return refused("an identity point is read with a side effect");
+        }
+    }
+    if (!add_identity(groupless, identity_point, out)) {
+        out = ReadPlan{};
+        out.by_group.resize(poll_groups);
+        return refused("an identity point is read with a side effect");
     }
     const std::vector<std::vector<Segment>>& parts = planned_out.parts;
     // Split forms: one request per part, for a request of several parts

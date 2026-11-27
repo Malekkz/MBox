@@ -57,17 +57,25 @@ struct ReadRules {
     // NOLINTEND(readability-redundant-member-init)
 };
 
+// The poll group of a point read only by the identity check: a protocol
+// address an identity check reads, which has no tag (D-145).
+inline constexpr std::uint32_t NO_POLL_GROUP = 0xFFFF'FFFFU;
+
 // The protocol units a point reads (one span), in one poll group. A point
 // and its companions (5.5) name the same `cluster`: the plan reads them in
 // one poll, in one request when they fit, otherwise back to back.
 struct PlanPoint {
     std::uint32_t point = 0;  // index of the point in its device
+    // NO_POLL_GROUP only for an identity point (D-145).
     std::uint32_t poll_group = 0;
     std::uint32_t cluster = 0;
     std::uint32_t space = 0;
     std::uint32_t unit_id = 0;
     std::uint64_t first = 0;
     std::uint64_t count = 1;  // >= 1
+    // Read by an identity check or a restart rule (3.6, 7.6; D-145): never
+    // in a request that reads a side effect.
+    bool identity = false;
 };
 
 // One request: a planned read, or one write of an order (2.2). A planned
@@ -127,6 +135,13 @@ struct ReadPlan {
     // (D-138, R8); the compile step reports such a device too.
     std::optional<std::uint32_t> keepalive;
     std::optional<std::uint32_t> probe;
+    // The identity cycle (3.6, 7.6; D-145): the planned requests that read
+    // an identity point, each with its whole chain, in the order of their
+    // groups, then those of points in no poll group (which are in no group
+    // of `by_group` and are never the keep-alive). None reads a side effect
+    // or an exclusive range.
+    // NOLINTNEXTLINE(readability-redundant-member-init): designated initializers may omit it (-Wmissing-field-initializers)
+    std::vector<std::uint32_t> identity{};
 };
 
 // `sys.dev.<device>.requests_per_scan`: the requests of one period of every
@@ -153,7 +168,9 @@ struct ReadPlan {
 // range, a point across the edge of an exclusive range, a point, an atomic
 // range or the points of one side-effect range that do not fit one request,
 // a side-effect range read by more than one poll group, a poll group out of
-// range, limits given twice for a space. Allocates.
+// range, limits given twice for a space, an identity point in a side-effect
+// or exclusive range or read with one, a point in no poll group that is not
+// an identity point. Allocates.
 [[nodiscard]] Status plan_blocks(const std::vector<PlanPoint>& points,
                                  const ReadRules& rules,
                                  std::uint32_t poll_groups, ReadPlan& out);
