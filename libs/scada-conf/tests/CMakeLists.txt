@@ -43,3 +43,8 @@ scada_add_test(scada-conf-tree-limits-test KIND unit
 scada_add_test(scada-conf-expression-limits-test KIND unit
   SOURCES expression_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+# The work of the run-time expressions of stage 5 at tens of thousands of
+# tags and patterns (D-117), with its own time limit.
+scada_add_test(scada-conf-runtime-limits-test KIND unit
+  SOURCES runtime_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)

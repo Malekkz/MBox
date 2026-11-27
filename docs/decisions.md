@@ -2369,37 +2369,42 @@ Status: proposed
 
 Context: contract 5.6 has virtual tags, alarm expressions, `suppress_when` and interlock conditions compiled and type-checked at validation, over the tags of the expanded tree (2.6), with patterns resolved then (2.5), a cycle of virtual tags refused (CF-525) and a virtual tag's `value_type` derived from its expression. Slice 7a (D-116) built the tags by name and type; a virtual tag's type was left empty. Some points are left open, below.
 Options: for each open point, the simplest reading of 5.6, or a question on #136 where the contract does not decide.
-Decision: `check_run_time_expressions` (`src/runtime_expressions.cpp`) runs after the tags are collected and before the references to them are checked (D-116), so every later check reads a virtual tag's derived type.
+Decision: `check_run_time_expressions` (`src/runtime_expressions.cpp`) runs after the tags are collected and before the references to them are checked (D-116), so every later check reads a virtual tag's derived type. Past `limits.max_tags` the tags are not whole (CF-1001), and it checks nothing, as the references do not (M4 of the review of #163).
 - **The sites:**
   - a virtual tag's `expr` in `tags/*.yaml`, run by its `task` (`normal` by default, 5.1);
   - an interlock's `condition` in `outputs/*.yaml`, run by its `task` (`normal` by default, 7.3);
+  - without `task`, `normal` is the task; a `control/tasks.yaml` without `normal` leaves the tag or interlock with none: CF-310 `task "normal" does not exist` at its name (S4 of the review of #163; an explicit `task` is checked with the other names, D-113);
   - an alarm's `expr` (of `type: expression`) and `suppress_when`, wherever the alarm stands: `alarms/*.yaml`, a tag of a tag file, a point or a bit of the expanded tree. An alarm runs in no control task (`scada-alarm`).
   
   An expression of the expanded tree is placed at its instance with the template note and the point, and one cause at many instances is one error (D-114). Structured text is not in phase 2.
 - **Names and types** (`run_time_type`, `src/expression_types.cpp`):
   - a reference is a tag, read as its type: `bool` BOOL, `float64` REAL, the integer types (and an enumeration, a double point) INT; a `uint64` tag reads as INT (5.6);
   - `x.quality` is INT and `x.age` TIME when `x` is a tag; a name that is both a tag and such an attribute is CF-521;
-  - a STRING tag is CF-522, also through `.quality`, `.age`, `tag("...")` or a pattern;
+  - a STRING tag is CF-522 `string tag {name} cannot be used in an expression`, also through `.quality`, `.age`, `tag("...")` or a pattern, whose error names the first such tag it matches (S1 of the review of #163);
   - a name that is no tag is CF-310 `tag {name} does not exist`, in the form of D-116;
   - `quality`, `age` and `is_good` take one tag reference (a tag by name or `tag("...")`, not `x.quality`);
-  - `tag("...")` names one tag; a pattern there is CF-523.
-- **Aggregates:** one pattern, resolved now against every tag (2.5), CF-311 `pattern {pattern} matches no tag` when it matches none; or two or more tag references. BOOL inputs are CF-523 for `sum`, `avg`, `min_of` and `max_of`; `count_good` takes any input but STRING.
+  - `tag("...")` names one tag; a pattern there is CF-523;
+  - the count of `shl` and `shr` written as a number is 0 to 63 (5.6), or CF-523 `expression: shl: the count must be from 0 to 63`; a count read from a tag is the run time's. A configuration expression evaluates its shifts, and gives CF-410 there.
+- **Aggregates:** one pattern, resolved now against every tag (2.5), CF-311 `pattern {pattern} matches no tag` when it matches none; or two or more tag references. BOOL inputs are CF-523 for `sum`, `avg`, `min_of` and `max_of`, naming the first BOOL tag a pattern matches; `count_good` takes any input but STRING.
 - **Time functions** (`moving_avg`, `rate`, `totalise`): a tag reference that is a number and a TIME literal. The window must be 1 to 10,000 cycles of the task's period, the window at least one period and at most 10,000 (CF-524). The periods are those of `control/tasks.yaml`, else `fast` 10 ms, `normal` 100 ms, `slow` 1 s (9.1). An alarm's windows are not checked: 5.6 names no task for them (on #136). A task that does not exist is CF-310 elsewhere (D-113), and its windows are not checked.
 - **Results:** an alarm's `expr`, its `suppress_when` and an interlock's `condition` are BOOL, or CF-523 `expression: the result must be BOOL, not {type}`.
-- **Virtual tags:**
-  - What one reads: the virtual tags it names, with `.quality` or `.age`, through `tag("...")`, or through a pattern that matches them (5.6: a cycle through a pattern that matches the tag itself counts).
-  - The components of that graph are found with Tarjan's walk, iteratively, and each is complete before any that reads it. A component of more than one tag, or a tag that reads itself, is CF-525 `virtual tags form a cycle: {names}`, once, at the name of its first tag in the order written, the names in that order. Its tags stay of unknown type.
+- **Virtual tags and interlocks:**
+  - An interlock is evaluated "like a virtual tag" (7.3) and is a command permissive: it is a vertex of the same graph (R1 of the review of #163). A cycle through interlocks, or through interlocks and virtual tags, is CF-525, in the contract's text `virtual tags form a cycle: {names}` (on #136 for the owner to confirm). An interlock's condition is then checked with the other expressions.
+  - What one reads: the virtual tags and interlocks it names, with `.quality` or `.age`, through `tag("...")`, or through a pattern that matches them (5.6: a cycle through a pattern that matches the tag itself counts). Each distinct pattern is one vertex of its own, whose inputs are the virtual tags and interlocks whose names it matches. They are walked from the sorted names that start with its prefix when the walk reaches it, once, and are never stored (M1 of the review of #163).
+  - A name given twice is CF-302 (D-116): the vertex is the tag that defines the name, and the other is not read as it (S3 of the review of #163).
+  - The components of that graph are found with Tarjan's walk, iteratively, and each is complete before any that reads it. A component of more than one vertex, or one that reads itself, is CF-525, once, at the name of its first virtual tag or interlock in the order written, their names in that order; a pattern is not named. Its virtual tags stay of unknown type.
   - Every other virtual tag is typed after its inputs: BOOL gives `bool`, INT `int64`, REAL `float64`, TIME `int64` (milliseconds, 5.6). A given `value_type` that is not the derived one is CF-527 `{name}: the expression gives {value type}`, at the given `value_type`, named as `value_type` is written. The given type stays the tag's, as its readers expect it.
   - An expression that reads a tag of unknown type (in a cycle, or whose own expression is refused) is not checked further and gives no error of its own: the cause is reported where it stands.
-- **Cost:**
-  - A pattern's tags are found from its prefix before the first wildcard (`TagNames::each_with_prefix`, D-116): the stored names in order, and the tags of the devices and channels whose names can start with it. What a pattern matches is kept (at most 65,536 patterns): the reads of tags whose type is fixed, and the tags of tag files, which TagNames holds, read at each use, since a virtual tag's type changes only as it is typed.
-  - Once every virtual tag is typed, the result of an expression text (with its task) is kept for the next site that has the same (at most 65,536), so one template line at every instance is checked once.
+- **Cost** (M1 to M3 of the review of #163):
+  - A pattern is resolved once, from its prefix before the first wildcard (`TagNames::each_with_prefix`, D-116). What it matches is kept as a summary of fixed size (`PatternReads`): the count, the first STRING tag or tag of unknown type, the first BOOL tag, whether any is REAL. Every virtual tag a pattern matches is an input of what reads it, so it is typed before the pattern is first resolved, and the summary does not change. One use of a pattern is then O(1), whatever it matches.
+  - At most 65,536 summaries and 65,536 results of an expression text (with its task) are kept; past them a pattern is resolved, and a text checked, at each use (`ExpandLimits::kept_run_time`). One template line at every instance is checked once.
+  - The work counted (`Validation::run_time`) is the comparisons of a pattern with a name: in the graph, each distinct pattern against the names of virtual tags and interlocks under its prefix, once; when resolved, against the tags under its prefix, once. It is the number of distinct patterns times the names under their prefixes, and no limit of 1.3 bounds that product. A work limit would refuse a tree that the contract accepts, so none is added; the question is on #136. `scada-conf-runtime-limits-test` bounds the work of each case.
   - Measured (release build, x86-64, the whole of `validate_and_expand`):
     - 2 instances of a 65,536-point `repeat` whose points each have an alarm with a `suppress_when` over a pattern: 2.12 s, against 2.21 s on main, without the check;
     - 10,000 virtual tags in one chain, written in reverse order: 0.09 s;
     - 2,000 virtual tags that each sum one pattern over 60,000 tags: 1.35 s, against 0.51 s on main;
-    - 2,000 virtual tags of 2,000 different patterns with no literal prefix over 60,000 tags: 2.93 s, against 0.35 s on main.
-  - The work of resolving patterns grows with the number of distinct patterns times the tags they are compared with, and no limit of 1.3 bounds that product. A work limit for it would refuse a tree that the contract accepts, so none is added here; the question is with the lead and on #136.
+    - 2,000 virtual tags of 2,000 different patterns with no literal prefix over 60,000 tags: 2.93 s, against 0.35 s on main;
+    - the trees of the review of #163: in the pull request.
 Reason: this is 5.6 as written. Where it does not decide (the windows of an alarm, a given `value_type` that differs from the derived one only in width), the narrower reading is taken and asked on #136, so that nothing is accepted that a ruling might refuse later, except the alarm's window, which is not checked rather than guessed.
 Consequences: tests whose run-time expressions named tags that do not exist now list their CF-310, or define the tags where the test is about something else; the corpus case `s3-valid-expressions` defines the tags it reads. Corpus case `s5-run-time-expressions`. The README's code table names the source of each code.
 

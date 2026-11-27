@@ -9,6 +9,7 @@
 #include "scada/conf/expand.h"
 #include "scada/conf/tree.h"
 
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 
@@ -48,11 +49,23 @@ namespace scada::conf {
 
 // What `validate_and_expand` gives: the report, and the expanded tree of
 // stage 4 when the report has no error.
+// The work of stage 5 on run-time expressions (D-117), for tests of its
+// bound: a pattern compared with a name, in the graph of virtual tags and
+// interlocks and when a pattern is resolved; the patterns whose summary is
+// kept; and the results of expression texts kept.
+struct RunTimeCounts {
+    std::size_t comparisons = 0;
+    std::size_t kept_patterns = 0;
+    std::size_t kept_results = 0;
+};
+
 struct Validation {
     Report report;
     std::optional<ExpandedTree> expanded;
     // What stage 4 held to report its errors (expand.h).
     ExpandCounts expansion;
+    // The work of stage 5 on run-time expressions.
+    RunTimeCounts run_time;
 };
 
 // As `validate_tree`, and keeps the expanded tree, which the expanded files

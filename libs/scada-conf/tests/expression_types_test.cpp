@@ -279,7 +279,7 @@ std::string run_time_of(std::string_view text) {
         return std::nullopt;
     };
     context.matching = [&tags](std::string_view pattern) {
-        std::vector<TagRead> found;
+        PatternReads found;
         // The few patterns of these cases, by their text.
         for (const auto& [tag, read] : tags) {
             const bool hit =
@@ -288,7 +288,7 @@ std::string run_time_of(std::string_view text) {
                 (pattern == "a.*" && tag.starts_with("a.")) ||
                 (pattern == "v.*" && tag.starts_with("v."));
             if (hit) {
-                found.push_back(read);
+                add_read(found, tag, read);
             }
         }
         return found;
@@ -358,13 +358,16 @@ TEST(RunTimeTypes, FunctionsOfTags) {
     EXPECT_EQ(run_time_of("min_of(a.i, a.r)"), "REAL");
     EXPECT_EQ(run_time_of("avg(a.i, inv2.power)"), "REAL");
     EXPECT_EQ(run_time_of("count_good(\"f?\")"), "INT");
+    // A pattern's error names the tag of the wrong type (S1 of the review
+    // of #163), in the text of section 10 for CF-522.
     EXPECT_EQ(run_time_of("sum(\"f?\")"),
-              "CF-523 at 1: expression: sum needs numbers, not BOOL");
+              "CF-523 at 1: expression: sum needs numbers, not BOOL: tag "
+              "\"f1\" of pattern \"f?\"");
     EXPECT_EQ(run_time_of("max_of(\"none.*\")"),
               "CF-311 at 8: pattern \"none.*\" matches no tag");
     EXPECT_EQ(run_time_of("count_good(\"a.*\")"),
-              "CF-522 at 12: pattern \"a.*\" matches a string tag, which "
-              "cannot be used in an expression");
+              "CF-522 at 12: string tag \"a.s\" cannot be used in an "
+              "expression");
     EXPECT_EQ(run_time_of("avg(\"v.*\")"), "silent");
     EXPECT_EQ(run_time_of("sum(a.i)"),
               "CF-523 at 1: expression: sum takes one pattern or two or more "

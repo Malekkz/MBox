@@ -24,6 +24,8 @@ constexpr std::uint16_t CF_NO_SUCH_NAME = 310;
 constexpr std::uint16_t CF_NO_MATCH = 311;
 constexpr std::uint16_t CF_AMBIGUOUS = 521;
 constexpr std::uint16_t CF_STRING_TAG = 522;
+// The largest shift count of `shl` and `shr` (5.6).
+constexpr std::int64_t MAX_SHIFT = 63;
 constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
 constexpr std::uint16_t CF_WINDOW = 524;
 
@@ -452,48 +454,57 @@ private:
         return ValueType::REAL;
     }
 
+    // An aggregate over one pattern: what the tags it matches are read as
+    // (PatternReads), the same work whatever their number (D-117).
+    std::optional<ValueType> pattern_aggregate(const ExprNode& node,
+                                               const ExprNode& pattern) {
+        const PatternReads reads = run_time_->matching(pattern.text);
+        if (reads.count == 0) {
+            return fail(
+                CF_NO_MATCH, pattern,
+                "pattern " + quote_text(pattern.text) + " matches no tag");
+        }
+        if (!reads.first_odd.empty()) {
+            // A tag not typed yet is reported where it stands.
+            return reads.odd == TagRead::STRING
+                       ? string_tag(reads.first_odd, pattern)
+                       : fail(0, pattern, {});
+        }
+        if (node.text == "count_good") {
+            return ValueType::INT;
+        }
+        if (!reads.first_bool.empty()) {
+            return mismatch(node, node.text + " needs numbers, not BOOL: tag " +
+                                      quote_text(reads.first_bool) +
+                                      " of pattern " +
+                                      quote_text(pattern.text));
+        }
+        if (node.text == "avg" || reads.any_real) {
+            return ValueType::REAL;
+        }
+        return ValueType::INT;
+    }
+
     // `sum`, `avg`, `min_of`, `max_of`, `count_good`: one pattern, resolved
     // now (2.5), or two or more tag references.
     std::optional<ValueType> aggregate(const ExprNode& node) {
-        std::vector<ValueType> inputs;
         if (node.children.size() == 1 &&
             tree_->nodes.at(node.children[0]).op == ExprOp::PATTERN) {
-            const ExprNode& pattern = tree_->nodes.at(node.children[0]);
-            const std::vector<TagRead> reads =
-                run_time_->matching(pattern.text);
-            if (reads.empty()) {
-                return fail(
-                    CF_NO_MATCH, pattern,
-                    "pattern " + quote_text(pattern.text) + " matches no tag");
-            }
-            for (const TagRead read : reads) {
-                if (read == TagRead::STRING) {
-                    return fail(CF_STRING_TAG, pattern,
-                                "pattern " + quote_text(pattern.text) +
-                                    " matches a string tag, which cannot be "
-                                    "used in an expression");
-                }
-                const std::optional<ValueType> type =
-                    read_as(read, pattern.text, pattern);
-                if (!type) {
-                    return std::nullopt;
-                }
-                inputs.push_back(*type);
-            }
-        } else {
-            if (node.children.size() < 2) {
+            return pattern_aggregate(node, tree_->nodes.at(node.children[0]));
+        }
+        if (node.children.size() < 2) {
+            return mismatch(node, node.text +
+                                      " takes one pattern or two or more "
+                                      "tag references");
+        }
+        std::vector<ValueType> inputs;
+        for (std::size_t i = 0; i < node.children.size(); ++i) {
+            if (!is_tag(i, node)) {
                 return mismatch(node, node.text +
                                           " takes one pattern or two or more "
                                           "tag references");
             }
-            for (std::size_t i = 0; i < node.children.size(); ++i) {
-                if (!is_tag(i, node)) {
-                    return mismatch(node, node.text +
-                                              " takes one pattern or two or "
-                                              "more tag references");
-                }
-                inputs.push_back(child(node, i));
-            }
+            inputs.push_back(child(node, i));
         }
         if (node.text == "count_good") {
             return ValueType::INT;
@@ -570,7 +581,19 @@ private:
         if (name == "bit") {
             return typed_call(node, 2, ValueType::INT, ValueType::BOOL);
         }
-        // band, bor, bxor, shl, shr take two INTs; bnot one.
+        // band, bor, bxor, shl, shr take two INTs; bnot one. A shift count
+        // written as a number is 0 to 63 (5.6); a configuration expression
+        // evaluates it, and gives CF-410 there.
+        if (run_time_ != nullptr && (name == "shl" || name == "shr") &&
+            node.children.size() == 2) {
+            const ExprNode& count = tree_->nodes.at(node.children[1]);
+            if (count.op == ExprOp::INTEGER &&
+                (count.integer < 0 || count.integer > MAX_SHIFT)) {
+                return fail(
+                    CF_TYPE_MISMATCH, count,
+                    "expression: " + name + ": the count must be from 0 to 63");
+            }
+        }
         return typed_call(node, name == "bnot" ? 1 : 2, ValueType::INT,
                           ValueType::INT);
     }
@@ -736,6 +759,30 @@ std::optional<ValueType> configuration_type(
         *node_types = checker.types();
     }
     return type;
+}
+
+void add_read(PatternReads& reads, std::string_view name, TagRead read) {
+    ++reads.count;
+    if (!reads.first_odd.empty()) {
+        return;
+    }
+    switch (read) {
+        case TagRead::STRING:
+        case TagRead::UNKNOWN:
+            reads.first_odd = std::string(name);
+            reads.odd = read;
+            break;
+        case TagRead::BOOL:
+            if (reads.first_bool.empty()) {
+                reads.first_bool = std::string(name);
+            }
+            break;
+        case TagRead::REAL:
+            reads.any_real = true;
+            break;
+        case TagRead::INT:
+            break;
+    }
 }
 
 }  // namespace scada::conf

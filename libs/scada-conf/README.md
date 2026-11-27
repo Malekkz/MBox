@@ -496,6 +496,15 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
 - `tests/tag_names_test.cpp`: the tags of the expanded tree (point, bit and
   generated tags and their types, CF-301, CF-302, CF-403, CF-1001), the
   references to them outside expressions (CF-310, CF-311, CF-312, CF-604),
-  and one cause at many instances given once.
+  and one cause at many instances given once. `tests/tag_names_prefix_test.cpp`:
+  the tags under a prefix, in the order of names, for the patterns of
+  run-time expressions.
+- `tests/runtime_expressions_test.cpp`: the run-time expressions against
+  the tags (D-117): types, cycles of virtual tags and interlocks, task
+  windows, BOOL results, grouping, and what is kept.
+  `tests/runtime_limits_test.cpp` (`scada-conf-runtime-limits-test`, an
+  executable of its own) bounds the work of patterns over tens of
+  thousands of tags: each pattern a vertex walked once, resolved once for
+  all its uses.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

@@ -97,5 +97,30 @@ TEST(TagNamesPrefix, StoredAndMadeTagsInOrder) {
     EXPECT_TRUE(names_under("sys.dev.ps1.m9").empty());
 }
 
+// S2 of the review of #163: `set_value_type` gives a type to a tag of a
+// tag file only; a point's tag keeps its own.
+TEST(TagNamesPrefix, OnlyATagFilesTagTakesAType) {
+    const Result<Validation> validation =
+        validated({{"templates/meter_a.yaml", std::string(METER)},
+                   {"drivers/modbus/line1.yaml",
+                    channel("  - { name: ps1.m1, template: meter_a, "
+                            "unit_id: 1 }\n")}});
+    ASSERT_TRUE(validation.ok());
+    const std::optional<ExpandedTree>& expanded = validation.value().expanded;
+    ASSERT_TRUE(expanded.has_value());
+    Diagnostics diagnostics;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): asserted above
+    TagNames tags = collect_tags(*expanded, {}, diagnostics);
+    const std::optional<TagInfo> before = tags.find("ps1.m1.flow");
+    ASSERT_TRUE(before.has_value());
+    tags.set_value_type("ps1.m1.flow", "bool");
+    const std::optional<TagInfo> after = tags.find("ps1.m1.flow");
+    ASSERT_TRUE(after.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access): asserted above
+    EXPECT_EQ(after->value_type, before->value_type);
+    EXPECT_NE(after->value_type, "bool");
+    // NOLINTEND(bugprone-unchecked-optional-access)
+}
+
 }  // namespace
 }  // namespace scada::conf

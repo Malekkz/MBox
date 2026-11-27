@@ -99,10 +99,8 @@ public:
 
     // Calls `visit(name, info)` for each tag whose name starts with
     // `prefix`, in the order of names: the stored tags, and those of the
-    // devices and channels whose names can start that way. `name` is valid
-    // during the call only; so is `info` for a tag of a device or channel,
-    // while `info` of a stored tag is this TagNames' own and lives as long
-    // (a tag file's tag: its type follows `set_value_type`).
+    // devices and channels whose names can start that way, each once.
+    // `name` and `info` are valid during the call only.
     void each_with_prefix(
         std::string_view prefix,
         const std::function<void(std::string_view, const TagInfo&)>& visit)

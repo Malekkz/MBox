@@ -304,7 +304,8 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 // Virtual tags get their types from their expressions before
                 // any reference reads them (D-117, slice 7b of #100).
                 check_run_time_expressions(tags, *validation.expanded, checked,
-                                           stage5);
+                                           stage5, expand_limits.kept_run_time,
+                                           &validation.run_time);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);
             }

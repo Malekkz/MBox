@@ -4,9 +4,11 @@
 // expression against the tags of the tree. Invented examples only.
 
 #include "expand_cases.h"
+#include "scada/conf/expand.h"
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -170,6 +172,140 @@ TEST(RunTimeExpressions, LaterChecksReadTheDerivedType) {
                           "1, setpoint: v.b, priority: high, area: ps1 }\n"}}),
               Lines{"alarms/site.yaml:2:54: error CF-312: \"v.b\" must be a "
                     "number tag"});
+}
+
+// An interlock with a condition, for the cases of interlock cycles.
+std::string interlock(std::string_view name, std::string_view condition,
+                      std::string_view more = {}) {
+    return "  - { name: " + std::string(name) + ", condition: \"" +
+           std::string(condition) + "\", message: m" + std::string(more) +
+           " }\n";
+}
+
+Lines with_interlocks(std::string_view interlocks, std::string_view tags = {}) {
+    return with_tags(tags, {{"outputs/ps1.yaml",
+                             "interlocks:\n" + std::string(interlocks)}});
+}
+
+// R1 of the review of #163: an interlock is evaluated like a virtual tag
+// (7.3), so a cycle through interlocks, or through interlocks and virtual
+// tags, is CF-525 as for virtual tags.
+TEST(RunTimeExpressions, ACycleThroughInterlocks) {
+    EXPECT_EQ(with_interlocks(interlock("il.y", "il.z") +
+                              interlock("il.z", "NOT il.y")),
+              Lines{"outputs/ps1.yaml:2:13: error CF-525: virtual tags form a "
+                    "cycle: il.y, il.z"});
+    EXPECT_EQ(with_interlocks(interlock("il.s", "il.s OR a.b")),
+              Lines{"outputs/ps1.yaml:2:13: error CF-525: virtual tags form a "
+                    "cycle: il.s"});
+    EXPECT_EQ(with_interlocks(interlock("il.v", "v.b"),
+                              virtual_tag("v.b", "il.v AND a.b")),
+              Lines{"outputs/ps1.yaml:2:13: error CF-525: virtual tags form a "
+                    "cycle: il.v, v.b"});
+    // An interlock that reads a virtual tag, which reads none of them.
+    EXPECT_EQ(
+        with_interlocks(interlock("il.w", "v.c"), virtual_tag("v.c", "a.b")),
+        Lines{});
+}
+
+// S2: a cycle of three is reported once, with every name of it in the
+// order written.
+TEST(RunTimeExpressions, ACycleOfThree) {
+    EXPECT_EQ(with_tags(virtual_tag("v.a", "v.b + 1") +
+                        virtual_tag("v.b", "v.c + 1") +
+                        virtual_tag("v.c", "v.a + 1") +
+                        virtual_tag("v.d", "v.c * 2")),
+              Lines{"tags/site.yaml:5:13: error CF-525: virtual tags form a "
+                    "cycle: v.a, v.b, v.c"});
+}
+
+// M4: past `limits.max_tags` the tags are not whole, and no run-time
+// expression is checked against them: CF-1001 alone.
+TEST(RunTimeExpressions, NothingIsCheckedPastTheTagLimit) {
+    const Lines lines = with_tags(
+        virtual_tag("v.e", "z.e + 1") + virtual_tag("v.p", R"(sum(\"z.*\"))"),
+        {{"system.yaml", std::string(SYSTEM) + "limits: { max_tags: 3 }\n"}});
+    ASSERT_EQ(lines.size(), 1U);
+    EXPECT_NE(lines.front().find("CF-1001"), std::string::npos)
+        << lines.front();
+}
+
+// S3: a virtual tag of an internal tag's name is CF-302 (D-116), and the
+// internal tag keeps its type: no second error from the virtual one.
+TEST(RunTimeExpressions, ATagGivenTwiceKeepsItsFirstType) {
+    EXPECT_EQ(with_tags("  - { name: x.n, type: internal, value_type: int64 "
+                        "}\n" +
+                        virtual_tag("x.n", "a.b") +
+                        virtual_tag("v.u", "x.n + 1", ", value_type: int64")),
+              Lines{"tags/site.yaml:6:13: error CF-302: tag \"x.n\" is defined "
+                    "twice; first at tags/site.yaml:5"});
+}
+
+// S4: a tasks file without `normal` leaves a virtual tag or an interlock
+// without `task` with no task (CF-310); a shift count written as a number
+// is 0 to 63 (5.6).
+TEST(RunTimeExpressions, TheDefaultTaskAndTheShiftCount) {
+    const Files tasks{
+        {"control/tasks.yaml", "tasks:\n  fast: { period: 10ms }\n"}};
+    EXPECT_EQ(with_tags(virtual_tag("v.t", "a.i + 1") +
+                            virtual_tag("v.f", "a.i + 2", ", task: fast"),
+                        tasks),
+              Lines{"tags/site.yaml:5:13: error CF-310: task \"normal\" does "
+                    "not exist"});
+    EXPECT_EQ(with_tags(virtual_tag("v.s", "shl(a.i, 64)")),
+              Lines{"tags/site.yaml:5:49: error CF-523: expression: shl: the "
+                    "count must be from 0 to 63"});
+    EXPECT_EQ(with_tags(virtual_tag("v.s", "shr(a.i, 63)")), Lines{});
+}
+
+// S2: one text in two tasks is checked in each (the task is part of the
+// kept result); an interlock without `task` runs in `normal`; a window far
+// above 10,000 cycles is CF-524; the given type stays a virtual tag's after
+// CF-527, as its readers expect it.
+TEST(RunTimeExpressions, TasksWindowsAndGivenTypes) {
+    EXPECT_EQ(
+        with_tags(virtual_tag("v.m", "rate(a.r, T#500ms)", ", task: fast") +
+                  virtual_tag("v.n", "rate(a.r, T#500ms)", ", task: slow")),
+        Lines{"tags/site.yaml:6:50: error CF-524: rate: the window must be 1 "
+              "to 10000 cycles of task \"slow\""});
+    EXPECT_EQ(with_interlocks(interlock("il.r", "rate(a.r, T#1ms) > 1")),
+              Lines{"outputs/ps1.yaml:2:41: error CF-524: rate: the window "
+                    "must be 1 to 10000 cycles of task \"normal\""});
+    EXPECT_EQ(with_tags(virtual_tag("v.l", "rate(a.r, T#100d)")),
+              Lines{"tags/site.yaml:5:50: error CF-524: rate: the window must "
+                    "be 1 to 10000 cycles of task \"normal\""});
+    EXPECT_EQ(with_tags(virtual_tag("v.g", "a.i * 1.5", ", value_type: int64") +
+                        virtual_tag("v.h", "v.g AND a.b")),
+              (Lines{"tags/site.yaml:5:64: error CF-527: \"v.g\": the "
+                     "expression gives float64",
+                     "tags/site.yaml:6:44: error CF-523: expression: AND needs "
+                     "BOOL, not INT"}));
+}
+
+// S2: at most `kept_run_time` pattern summaries and expression results are
+// kept (65,536 by default); past them a pattern is resolved, and a text
+// checked, at each use, and nothing is lost: 18 interlocks of distinct
+// texts over distinct patterns that match no tag are each CF-311, with 16
+// of each kept.
+TEST(RunTimeExpressions, WhatIsKeptIsCapped) {
+    constexpr std::size_t KEPT = 16;
+    constexpr std::size_t MORE = KEPT + 2;
+    std::string interlocks;
+    for (std::size_t i = 0; i < MORE; ++i) {
+        interlocks +=
+            interlock("il.k" + std::to_string(i),
+                      "count_good(\\\"n" + std::to_string(i) + ".*\\\") > 0");
+    }
+    ExpandLimits limits;
+    limits.kept_run_time = KEPT;
+    const Expanded expanded =
+        expand_limited({{"areas.yaml", std::string(AREAS)},
+                        {"tags/site.yaml", "tags:\n" + std::string(BASE_TAGS)},
+                        {"outputs/ps1.yaml", "interlocks:\n" + interlocks}},
+                       limits);
+    EXPECT_EQ(expanded.error_count, MORE);
+    EXPECT_EQ(expanded.run_time.kept_patterns, KEPT);
+    EXPECT_EQ(expanded.run_time.kept_results, KEPT);
 }
 
 }  // namespace

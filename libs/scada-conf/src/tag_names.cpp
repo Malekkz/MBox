@@ -1555,6 +1555,12 @@ void TagNames::each_with_prefix(
         for (; next != made.end() && next->first < entry->first; ++next) {
             visit(next->first, next->second);
         }
+        // A stored name that is also a device's or a channel's tag is
+        // CF-302 (D-116); it is visited once, as stored (S3 of the review
+        // of #163).
+        while (next != made.end() && next->first == entry->first) {
+            ++next;
+        }
         visit(entry->first, entry->second);
     }
     for (; next != made.end(); ++next) {

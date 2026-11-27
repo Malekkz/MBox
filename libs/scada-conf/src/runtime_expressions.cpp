@@ -17,6 +17,7 @@
 #include "scada/conf/references.h"
 #include "scada/conf/scalar.h"
 #include "scada/conf/tree.h"
+#include "scada/conf/validate.h"
 #include "tag_names.h"
 
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,6 +38,7 @@ namespace scada::conf {
 
 namespace {
 
+constexpr std::uint16_t CF_NO_SUCH_NAME = 310;
 constexpr std::uint16_t CF_TYPE_MISMATCH = 523;
 constexpr std::uint16_t CF_CYCLE = 525;
 constexpr std::uint16_t CF_DERIVED_TYPE = 527;
@@ -47,10 +50,6 @@ constexpr std::int64_t SLOW_MS = 1000;
 
 // The task of a virtual tag or an interlock without `task` (5.1, 7.3).
 constexpr std::string_view DEFAULT_TASK = "normal";
-
-// The results of an expression kept for the next instance that holds the
-// same text (one template line at every instance), at most this many.
-constexpr std::size_t MAX_KEPT_RESULTS = 65536;
 
 // How a tag of `value_type` (4.7) is read: UINT64 as INT (5.6); a virtual
 // tag not typed yet has none.
@@ -84,11 +83,10 @@ std::string_view derived_value_type(ValueType type) {
     }
 }
 
-// The part of a name pattern before its first wildcard: every name it
-// matches starts with it.
-std::string_view pattern_prefix(std::string_view pattern) {
-    return pattern.substr(
-        0, std::min(pattern.find_first_of("*?"), pattern.size()));
+// The bytes of a name pattern before its first wildcard: every name it
+// matches starts with them.
+std::size_t prefix_of(std::string_view pattern) {
+    return std::min(pattern.find_first_of("*?"), pattern.size());
 }
 
 // The scalar at `key` of `map` in `document`, or nothing.
@@ -138,32 +136,49 @@ struct Site {
     std::string detail;
 };
 
-// A virtual tag and what its expression reads.
-struct Virtual {
+// A virtual tag or an interlock: a vertex of the graph of what reads what
+// (an interlock is evaluated "like a virtual tag", 7.3; R1 of the review
+// of #163).
+struct Named {
     std::string name;
     const CheckedFile* file = nullptr;
     NodeId name_node = 0;
+    bool is_virtual = true;
     std::optional<NodeId> value_type;
     Site site;
     std::optional<Expression> tree;
-    // The virtual tags it reads, by index.
+    // The vertices it reads: a virtual tag or an interlock by index, a
+    // pattern by its own vertex; sorted.
     std::vector<std::size_t> inputs;
+};
+
+// A distinct name pattern that a virtual tag or an interlock reads: a
+// vertex whose inputs are the names it matches, walked when needed from
+// the sorted names, never stored (M1 of the review of #163).
+struct Pattern {
+    std::string text;
+    std::size_t prefix = 0;  // the bytes before its first wildcard
 };
 
 // Tarjan's strongly connected components, iteratively (no recursion: a
 // tree may hold many virtual tags). Each component is complete before any
 // that reads it, so the virtual tags are typed in the order their inputs
-// need.
+// need. `next(node, cursor)` gives a node's next input, from a cursor that
+// starts at 0, or nothing past the last: inputs may be made as they are
+// walked.
 class Components {
 public:
-    explicit Components(std::span<const std::vector<std::size_t>* const> inputs)
-        : inputs_(inputs),
-          index_(inputs.size(), UNSEEN),
-          low_(inputs.size(), 0),
-          on_stack_(inputs.size(), false) {}
+    using Next =
+        std::function<std::optional<std::size_t>(std::size_t, std::size_t&)>;
+
+    Components(std::size_t size, Next next)
+        : next_input_(std::move(next)),
+          index_(size, UNSEEN),
+          low_(size, 0),
+          on_stack_(size, false) {}
 
     std::vector<std::vector<std::size_t>> run() {
-        for (std::size_t start = 0; start < inputs_.size(); ++start) {
+        for (std::size_t start = 0; start < index_.size(); ++start) {
             if (index_[start] == UNSEEN) {
                 walk_from(start);
             }
@@ -178,13 +193,13 @@ private:
     void walk_from(std::size_t start) {
         walk_.emplace_back(start, 0);
         while (!walk_.empty()) {
-            auto& [node, edge] = walk_.back();
-            if (edge == 0 && index_[node] == UNSEEN) {
+            auto& [node, cursor] = walk_.back();
+            if (index_[node] == UNSEEN) {
                 open(node);
             }
-            const std::vector<std::size_t>& inputs = *inputs_[node];
-            if (edge < inputs.size()) {
-                const std::size_t input = inputs[edge++];
+            if (const std::optional<std::size_t> next =
+                    next_input_(node, cursor)) {
+                const std::size_t input = *next;
                 if (index_[input] == UNSEEN) {
                     walk_.emplace_back(input, 0);
                 } else if (on_stack_[input]) {
@@ -223,12 +238,12 @@ private:
         out_.push_back(std::move(component));
     }
 
-    std::span<const std::vector<std::size_t>* const> inputs_;
+    Next next_input_;
     std::vector<std::size_t> index_;
     std::vector<std::size_t> low_;
     std::vector<bool> on_stack_;
     std::vector<std::size_t> stack_;
-    // The walk: a node and the next of its inputs to visit.
+    // The walk: a node and the cursor of its next input.
     std::vector<std::pair<std::size_t, std::size_t>> walk_;
     std::vector<std::vector<std::size_t>> out_;
     std::size_t next_ = 0;
@@ -237,22 +252,33 @@ private:
 class Checker {
 public:
     Checker(TagNames& tags, const ExpandedTree& tree,
-            std::span<const CheckedFile> files, Diagnostics& diagnostics)
+            std::span<const CheckedFile> files, Diagnostics& diagnostics,
+            std::size_t kept, RunTimeCounts* counts)
         : tags_(&tags),
           tree_(&tree),
           files_(files),
           diagnostics_(&diagnostics),
+          kept_(kept),
+          counts_out_(counts),
           grouped_(MAX_KEPT_ERRORS) {}
 
     void run() {
+        // Past `limits.max_tags` the tags are not whole (CF-1001): nothing
+        // is looked up, as for the references of D-116 (M4 of the review).
+        if (!tags_->complete()) {
+            return;
+        }
         read_tasks();
-        collect_virtuals();
+        collect_named();
         type_virtuals();
         for (const CheckedFile& file : files_) {
             check_file(file);
         }
         check_expanded();
         grouped_.flush(*diagnostics_);
+        if (counts_out_ != nullptr) {
+            *counts_out_ = counts_;
+        }
     }
 
 private:
@@ -267,6 +293,7 @@ private:
             }
             // A tasks file replaces the default tasks (9.1).
             periods_.clear();
+            tasks_given_ = true;
             const Document& document = *file.document;
             const std::optional<NodeId> tasks =
                 document.find(document.root(), "tasks");
@@ -274,6 +301,7 @@ private:
                 continue;
             }
             for (const Entry& entry : document.entries(*tasks)) {
+                task_names_.emplace(document.text(entry.key));
                 const std::optional<std::uint64_t> period =
                     parse_duration_ms(text_at(document, entry.value, "period"));
                 if (period &&
@@ -307,95 +335,134 @@ private:
         return context;
     }
 
-    // How each tag `pattern` matches is read. The tags a pattern matches do
-    // not change, and only the type of a tag file's tag can (a virtual tag,
-    // as it is typed): the reads of the others are kept, and the tag files'
-    // tags, stored in TagNames, read at each use. At most 65,536 patterns.
-    std::vector<TagRead> matching(std::string_view pattern) {
-        auto kept = matches_.find(pattern);
-        if (kept == matches_.end()) {
-            Matched found;
-            tags_->each_with_prefix(
-                pattern_prefix(pattern),
-                [&found, pattern](std::string_view name, const TagInfo& info) {
-                    if (!matches_name_pattern(pattern, name)) {
-                        return;
-                    }
-                    if (info.origin == TagOrigin::TAG_FILE) {
-                        found.tag_file.push_back(&info);
-                    } else {
-                        found.fixed.push_back(read_of(info.value_type));
-                    }
-                });
-            if (matches_.size() >= MAX_KEPT_RESULTS) {
-                return reads_of(found);
-            }
-            kept =
-                matches_.emplace(std::string(pattern), std::move(found)).first;
+    // How the tags `pattern` matches are read (PatternReads), found once
+    // and kept: at most `kept_` patterns (65,536 by default), each a few
+    // names in size, whatever
+    // it matches (M2 of the review of #163). Every virtual tag a pattern
+    // matches is an input of what reads it, so it is typed before the
+    // pattern is first resolved, and the summary does not change.
+    PatternReads matching(std::string_view pattern) {
+        if (const auto kept = matches_.find(pattern); kept != matches_.end()) {
+            return kept->second;
         }
-        return reads_of(kept->second);
-    }
-
-    // The tags a pattern matches: the reads that do not change, and the
-    // tags of tag files, which TagNames holds (each_with_prefix).
-    struct Matched {
-        std::vector<TagRead> fixed;
-        std::vector<const TagInfo*> tag_file;
-    };
-
-    [[nodiscard]] static std::vector<TagRead> reads_of(const Matched& matched) {
-        std::vector<TagRead> reads = matched.fixed;
-        reads.reserve(matched.fixed.size() + matched.tag_file.size());
-        for (const TagInfo* tag : matched.tag_file) {
-            reads.push_back(read_of(tag->value_type));
+        PatternReads reads;
+        tags_->each_with_prefix(pattern.substr(0, prefix_of(pattern)),
+                                [this, &reads, pattern](std::string_view name,
+                                                        const TagInfo& info) {
+                                    ++counts_.comparisons;
+                                    if (matches_name_pattern(pattern, name)) {
+                                        add_read(reads, name,
+                                                 read_of(info.value_type));
+                                    }
+                                });
+        if (matches_.size() < kept_) {
+            matches_.emplace(std::string(pattern), reads);
+            counts_.kept_patterns = matches_.size();
         }
         return reads;
     }
 
-    // --- Virtual tags --------------------------------------------------------
+    // --- Virtual tags and interlocks ---------------------------------------
 
-    void collect_virtuals() {
+    void collect_named() {
         for (const CheckedFile& file : files_) {
-            if (file.source->path_class.type != FileType::TAGS) {
+            const FileType type = file.source->path_class.type;
+            if (type == FileType::TAGS) {
+                collect_virtuals(file);
+            } else if (type == FileType::OUTPUTS) {
+                collect_interlocks(file);
+            }
+        }
+        // The names in order, for the inputs of a pattern; the views stay
+        // valid, as `named_` no longer grows.
+        names_.reserve(by_name_.size());
+        for (const auto& [name, index] : by_name_) {
+            names_.emplace_back(named_[index].name, index);
+        }
+        for (Named& vertex : named_) {
+            vertex.inputs = inputs_of(vertex);
+        }
+    }
+
+    void collect_virtuals(const CheckedFile& file) {
+        const Document& document = *file.document;
+        for (const NodeId tag : items_at(document, document.root(), "tags")) {
+            const std::optional<NodeId> name = scalar_at(document, tag, "name");
+            const std::optional<NodeId> expr = scalar_at(document, tag, "expr");
+            if (text_at(document, tag, "type") != "virtual" || !name || !expr) {
                 continue;
             }
-            const Document& document = *file.document;
-            for (const NodeId tag :
-                 items_at(document, document.root(), "tags")) {
-                const std::optional<NodeId> name =
-                    scalar_at(document, tag, "name");
-                const std::optional<NodeId> expr =
-                    scalar_at(document, tag, "expr");
-                if (text_at(document, tag, "type") != "virtual" || !name ||
-                    !expr) {
-                    continue;
-                }
-                std::string task = text_at(document, tag, "task");
-                Virtual made{
-                    .name = std::string(document.text(*name)),
-                    .file = &file,
-                    .name_node = *name,
-                    .value_type = scalar_at(document, tag, "value_type"),
-                    .site =
-                        Site{.document = &document,
-                             .scalar = *expr,
-                             .task = task.empty() ? std::string(DEFAULT_TASK)
-                                                  : std::move(task),
-                             .needs_bool = false,
-                             .expanded = false,
-                             .device = {},
-                             .detail = {}},
-                    .tree = parse(document, *expr),
-                    .inputs = {}};
-                // Two tags of one name are CF-302 (D-116): the first counts.
-                if (by_name_.try_emplace(made.name, virtuals_.size()).second) {
-                    virtuals_.push_back(std::move(made));
-                }
+            add_named(
+                Named{.name = std::string(document.text(*name)),
+                      .file = &file,
+                      .name_node = *name,
+                      .is_virtual = true,
+                      .value_type = scalar_at(document, tag, "value_type"),
+                      .site = Site{.document = &document,
+                                   .scalar = *expr,
+                                   .task = task_of(document, tag, *name),
+                                   .needs_bool = false,
+                                   .expanded = false,
+                                   .device = {},
+                                   .detail = {}},
+                      .tree = parse(document, *expr),
+                      .inputs = {}});
+        }
+    }
+
+    // An interlock is a vertex only for its cycles: its condition is
+    // checked with the other expressions.
+    void collect_interlocks(const CheckedFile& file) {
+        const Document& document = *file.document;
+        for (const NodeId interlock :
+             items_at(document, document.root(), "interlocks")) {
+            const std::optional<NodeId> name =
+                scalar_at(document, interlock, "name");
+            const std::optional<NodeId> condition =
+                scalar_at(document, interlock, "condition");
+            if (!name || !condition) {
+                continue;
             }
+            add_named(Named{.name = std::string(document.text(*name)),
+                            .file = &file,
+                            .name_node = *name,
+                            .is_virtual = false,
+                            .value_type = std::nullopt,
+                            .site = Site{},
+                            .tree = parse(document, *condition),
+                            .inputs = {}});
+            static_cast<void>(task_of(document, interlock, *name));
         }
-        for (Virtual& tag : virtuals_) {
-            tag.inputs = inputs_of(tag);
+    }
+
+    // A vertex for the tag that defines its name: one of two of one name is
+    // CF-302 (D-116), and the other is not read as this one (S3 of the
+    // review of #163).
+    void add_named(Named vertex) {
+        const std::optional<TagInfo> info = tags_->find(vertex.name);
+        if (!info || info->document != vertex.file->document ||
+            info->node != vertex.name_node) {
+            return;
         }
+        if (by_name_.try_emplace(vertex.name, named_.size()).second) {
+            named_.push_back(std::move(vertex));
+        }
+    }
+
+    // The task of a virtual tag or an interlock: its `task`, else `normal`
+    // (5.1, 7.3), which a tasks file without it does not have: CF-310 at
+    // the name (S4 of the review of #163).
+    std::string task_of(const Document& document, NodeId map, NodeId name) {
+        std::string task = text_at(document, map, "task");
+        if (!task.empty()) {
+            return task;
+        }
+        if (tasks_given_ && !task_names_.contains(DEFAULT_TASK)) {
+            diagnostics_->error(
+                CF_NO_SUCH_NAME, document.location(name),
+                "task " + quote_text(DEFAULT_TASK) + " does not exist");
+        }
+        return std::string(DEFAULT_TASK);
     }
 
     static std::optional<Expression> parse(const Document& document,
@@ -405,12 +472,13 @@ private:
                                 unused);
     }
 
-    // The virtual tags that `tag`'s expression reads: by name, with
-    // `.quality` or `.age`, through `tag("...")` or a pattern (5.6: a cycle
+    // The vertices that `vertex`'s expression reads: virtual tags and
+    // interlocks by name, with `.quality` or `.age`, or through
+    // `tag("...")`, and the vertex of each distinct pattern (5.6: a cycle
     // through a pattern that matches the tag itself is one).
-    [[nodiscard]] std::vector<std::size_t> inputs_of(const Virtual& tag) const {
+    [[nodiscard]] std::vector<std::size_t> inputs_of(const Named& vertex) {
         std::vector<std::size_t> inputs;
-        if (!tag.tree) {
+        if (!vertex.tree) {
             return inputs;
         }
         const auto add_named = [this, &inputs](std::string_view name) {
@@ -419,7 +487,7 @@ private:
                 inputs.push_back(found->second);
             }
         };
-        for (const ExprNode& node : tag.tree->nodes) {
+        for (const ExprNode& node : vertex.tree->nodes) {
             if (node.op == ExprOp::REFERENCE) {
                 add_named(node.text);
                 for (const std::string_view suffix : {".quality", ".age"}) {
@@ -433,11 +501,13 @@ private:
                     add_named(node.text);
                     continue;
                 }
-                for (std::size_t i = 0; i < virtuals_.size(); ++i) {
-                    if (matches_name_pattern(node.text, virtuals_[i].name)) {
-                        inputs.push_back(i);
-                    }
+                const auto [entry, added] =
+                    pattern_index_.try_emplace(node.text, patterns_.size());
+                if (added) {
+                    patterns_.push_back(Pattern{
+                        .text = node.text, .prefix = prefix_of(node.text)});
                 }
+                inputs.push_back(named_.size() + entry->second);
             }
         }
         std::ranges::sort(inputs);
@@ -446,44 +516,91 @@ private:
         return inputs;
     }
 
-    // Each component of the graph of virtual tags, complete before any
-    // that reads it (a cycle is one component).
-    [[nodiscard]] std::vector<std::vector<std::size_t>> components() const {
-        std::vector<const std::vector<std::size_t>*> inputs;
-        inputs.reserve(virtuals_.size());
-        for (const Virtual& tag : virtuals_) {
-            inputs.push_back(&tag.inputs);
+    // The next input of `vertex` from `cursor`: of a virtual tag or an
+    // interlock, the next it reads; of a pattern, the next name it
+    // matches, from the sorted names that start with its prefix. A pattern
+    // is walked once, however many read it.
+    std::optional<std::size_t> next_input(std::size_t vertex,
+                                          std::size_t& cursor) {
+        if (vertex < named_.size()) {
+            const std::vector<std::size_t>& inputs = named_[vertex].inputs;
+            if (cursor < inputs.size()) {
+                return inputs[cursor++];
+            }
+            return std::nullopt;
         }
-        return Components(inputs).run();
+        const Pattern& pattern = patterns_[vertex - named_.size()];
+        const std::string_view prefix =
+            std::string_view(pattern.text).substr(0, pattern.prefix);
+        if (cursor == 0) {
+            // The cursor is one past the position of the next name.
+            cursor =
+                1 + static_cast<std::size_t>(
+                        std::ranges::lower_bound(
+                            names_, prefix, {},
+                            &std::pair<std::string_view, std::size_t>::first) -
+                        names_.begin());
+        }
+        while (cursor - 1 < names_.size() &&
+               names_[cursor - 1].first.starts_with(prefix)) {
+            const auto [name, index] = names_[cursor - 1];
+            ++cursor;
+            ++counts_.comparisons;
+            if (matches_name_pattern(pattern.text, name)) {
+                return index;
+            }
+        }
+        cursor = names_.size() + 1;
+        return std::nullopt;
+    }
+
+    // Each component of the graph, complete before any that reads it (a
+    // cycle is one component).
+    [[nodiscard]] std::vector<std::vector<std::size_t>> components() {
+        return Components(named_.size() + patterns_.size(),
+                          [this](std::size_t vertex, std::size_t& cursor) {
+                              return next_input(vertex, cursor);
+                          })
+            .run();
     }
 
     void type_virtuals() {
         for (const std::vector<std::size_t>& component : components()) {
-            const Virtual& first = virtuals_[component.front()];
-            const bool reads_itself =
-                std::ranges::binary_search(first.inputs, component.front());
-            if (component.size() > 1 || reads_itself) {
-                report_cycle(component);
+            // A component's virtual tags and interlocks, without patterns:
+            // a component is sorted, so they come first.
+            const auto end = std::ranges::lower_bound(component, named_.size());
+            const std::span<const std::size_t> members(component.begin(), end);
+            if (members.empty()) {
                 continue;
             }
-            type_virtual(virtuals_[component.front()]);
+            const Named& first = named_[members.front()];
+            const bool reads_itself =
+                std::ranges::binary_search(first.inputs, members.front());
+            if (component.size() > 1 || reads_itself) {
+                report_cycle(members);
+                continue;
+            }
+            if (first.is_virtual) {
+                type_virtual(first);
+            }
         }
     }
 
-    // CF-525 once for a cycle, at its first tag in the order written; its
-    // tags stay of unknown type.
-    void report_cycle(const std::vector<std::size_t>& component) {
+    // CF-525 once for a cycle, at its first tag in the order written, also
+    // for a cycle through interlocks (R1 of the review of #163); its
+    // virtual tags stay of unknown type.
+    void report_cycle(std::span<const std::size_t> members) {
         std::string names;
-        for (const std::size_t member : component) {
-            names += (names.empty() ? "" : ", ") + virtuals_[member].name;
+        for (const std::size_t member : members) {
+            names += (names.empty() ? "" : ", ") + named_[member].name;
         }
-        const Virtual& first = virtuals_[component.front()];
+        const Named& first = named_[members.front()];
         diagnostics_->error(CF_CYCLE,
                             first.file->document->location(first.name_node),
                             "virtual tags form a cycle: " + names);
     }
 
-    void type_virtual(const Virtual& tag) {
+    void type_virtual(const Named& tag) {
         if (!tag.tree) {
             return;
         }
@@ -623,8 +740,9 @@ private:
             return;
         }
         std::optional<TypeError> failed = type_of(site);
-        if (results_.size() < MAX_KEPT_RESULTS) {
+        if (results_.size() < kept_) {
             results_.emplace(key, failed);
+            counts_.kept_results = results_.size();
         }
         if (failed) {
             report(site, *failed);
@@ -694,21 +812,31 @@ private:
     const ExpandedTree* tree_;
     std::span<const CheckedFile> files_;
     Diagnostics* diagnostics_;
+    // The summaries of patterns and the results of texts kept, at most.
+    std::size_t kept_;
+    RunTimeCounts* counts_out_;
     GroupedErrors grouped_;
     std::map<std::string, std::int64_t, std::less<>> periods_;
-    std::vector<Virtual> virtuals_;
+    std::set<std::string, std::less<>> task_names_;
+    bool tasks_given_ = false;
+    std::vector<Named> named_;
     std::map<std::string, std::size_t, std::less<>> by_name_;
-    // The tags of each pattern.
-    std::map<std::string, Matched, std::less<>> matches_;
+    std::vector<std::pair<std::string_view, std::size_t>> names_;
+    std::vector<Pattern> patterns_;
+    std::map<std::string, std::size_t, std::less<>> pattern_index_;
+    // What the tags of each pattern are read as.
+    std::map<std::string, PatternReads, std::less<>> matches_;
     std::map<std::string, std::optional<TypeError>, std::less<>> results_;
+    RunTimeCounts counts_;
 };
 
 }  // namespace
 
 void check_run_time_expressions(TagNames& tags, const ExpandedTree& tree,
                                 std::span<const CheckedFile> files,
-                                Diagnostics& diagnostics) {
-    Checker(tags, tree, files, diagnostics).run();
+                                Diagnostics& diagnostics, std::size_t kept,
+                                RunTimeCounts* counts) {
+    Checker(tags, tree, files, diagnostics, kept, counts).run();
 }
 
 }  // namespace scada::conf

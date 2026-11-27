@@ -8,6 +8,7 @@
 
 #include "scada/conf/expression.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -58,13 +59,30 @@ using NameTypes = std::function<std::optional<ValueType>(std::string_view)>;
 // (D-117), which is reported there and not again.
 enum class TagRead : std::uint8_t { BOOL, INT, REAL, STRING, UNKNOWN };
 
+// What the tags a name pattern matches are read as, in the order of their
+// names: all an aggregate needs (D-117), in a size that does not grow with
+// the tags, so that one use of a pattern costs the same whatever it matches.
+struct PatternReads {
+    std::size_t count = 0;
+    // The first tag read as STRING or not typed yet (UNKNOWN), if any.
+    std::string first_odd;
+    TagRead odd = TagRead::INT;
+    // The first BOOL tag, if any.
+    std::string first_bool;
+    bool any_real = false;
+};
+
+// Adds to `reads` a tag of `name`, read as `read`, after those added
+// before.
+void add_read(PatternReads& reads, std::string_view name, TagRead read);
+
 // What a run-time expression is checked against (D-117).
 struct RunTimeContext {
     // How tag `name` is read, or nothing if no tag has that name.
     std::function<std::optional<TagRead>(std::string_view)> tag;
-    // How each tag that name pattern `pattern` (2.5) matches is read; empty
-    // if none.
-    std::function<std::vector<TagRead>(std::string_view)> matching;
+    // How the tags that name pattern `pattern` (2.5) matches are read; a
+    // count of 0 if none.
+    std::function<PatternReads(std::string_view)> matching;
     // The task that runs the expression and its period, for the window of
     // a time function (CF-524); an empty name where no task runs it.
     std::string task;

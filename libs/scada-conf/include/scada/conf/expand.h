@@ -83,6 +83,7 @@ struct ExpandedTree {
 inline constexpr std::size_t MAX_EXPANDED_NODES = 4'000'000;
 inline constexpr std::size_t MAX_EXPANDED_TEXT = std::size_t{256} << 20U;
 inline constexpr std::size_t MAX_KEPT_ERRORS = 2 * Diagnostics::REPORTED_LIMIT;
+inline constexpr std::size_t MAX_KEPT_RUN_TIME = 65536;
 // The expression budget is 32 times the node limit (G1 of the review of
 // #146): an expression node takes up to about 96 ns, so the worst accepted
 // tree evaluates for about 13 s.
@@ -101,6 +102,10 @@ struct ExpandLimits {
     std::size_t expression_work = MAX_EXPRESSION_WORK;
     // Diagnostics kept; past it an error is counted only.
     std::size_t kept_errors = MAX_KEPT_ERRORS;
+    // At stage 5, the summaries of run-time patterns and the results of
+    // run-time expression texts kept, each; past it a pattern is resolved,
+    // and a text checked, at each use (D-117).
+    std::size_t kept_run_time = MAX_KEPT_RUN_TIME;
 };
 
 // What the expansion held to report its errors, at its end: the texts that
