@@ -6,7 +6,9 @@
 #include "scada/driver/driver.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/plan.h"
+#include "scada/driver/point_rules.h"
 #include "scada/driver/protocol.h"
+#include "scada/driver/tag_value.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
@@ -79,6 +81,10 @@ constexpr std::uint8_t MAX_UNIT_ID = 247;
 constexpr std::uint8_t MAX_RETRIES = 10;
 constexpr std::uint32_t MAX_REGISTER = 1'000'000;
 constexpr std::uint32_t MAX_GROUP = 2;
+// A unit of the test protocol is 16 bits; a substitute is any INT64 the
+// command line can give.
+constexpr std::uint64_t MAX_RAW = 0xFFFFU;
+constexpr std::int64_t MAX_SUBSTITUTE = 1'000'000'000;
 constexpr std::uint32_t MAX_PORT = 65'535;
 constexpr std::uint32_t MAX_BAUD = 4'000'000;
 // The CS 4.6 default poll groups, in ms.
@@ -94,7 +100,8 @@ constexpr std::string_view USAGE =
     "               [--disabled] [--hang | --spin]\n"
     "           ( --device NAME UNIT [--timeout-ms N] [--retries N] "
     "[--disabled]\n"
-    "             ( --point NAME FIRST GROUP [--max-age-ms N] )... )... )...\n"
+    "             ( --point NAME FIRST GROUP [--max-age-ms N]\n"
+    "                 [--substitute RAW VALUE] )... )... )...\n"
     "       scada-drv-test --help\n"
     "\n"
     "A driver of the test protocol. A point reads one unit of space 0 into\n"
@@ -102,6 +109,8 @@ constexpr std::string_view USAGE =
     "(10 s). --hang and --spin make the channel's first receive block or\n"
     "spin for good, deaf to the stop. --refuse-write refuses the writes of\n"
     "VALUE to the system tag TAG once SKIP of them were written.\n"
+    "--substitute writes VALUE, UNCERTAIN with SUBSTITUTED, when the point\n"
+    "reads RAW (`on_invalid: { substitute: VALUE }` of that pattern).\n"
     "Every number is unsigned.\n"
     "Exit status: 0 stopped, 1 failed, 2 usage, 3 thread check, 4 stall.\n";
 
@@ -366,6 +375,18 @@ private:
         }
         if (arg == "--max-age-ms" && !device.points.empty()) {
             return millis(device.points.back().rules.max_age_ns);
+        }
+        if (arg == "--substitute" && !device.points.empty()) {
+            std::uint64_t raw = 0;
+            std::int64_t value = 0;
+            if (!take(raw, MAX_RAW) || !take(value, MAX_SUBSTITUTE)) {
+                return false;
+            }
+            device.points.back().rules.markers.push_back(
+                InvalidMarker{.pattern = raw,
+                              .action = InvalidAction::SUBSTITUTE,
+                              .substitute = int64_value(value)});
+            return true;
         }
         return false;
     }

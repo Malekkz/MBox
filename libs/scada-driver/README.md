@@ -140,7 +140,9 @@ D-142, D-145 and D-146 record the choices the contracts left open.
   `substitute` action writes its value UNCERTAIN with SUBSTITUTED, and every
   write that keeps that value, across a restart too, keeps the flag. A
   companion does not pass it on. A value forced at the device is not marked
-  yet: no protocol carries a value with a mark (#136).
+  yet: no protocol carries a value with a mark (#136). `scada-drv-test
+  --substitute RAW VALUE` gives a point that substitute, for the process
+  test (#154).
 - **No integer tag on a floating raw type** (CF-504, D-134), other than an
   enumeration or a double point: the rules are refused, a read is BAD with
   OUT_OF_RANGE and a write is refused. Use `value_type: float64`.
