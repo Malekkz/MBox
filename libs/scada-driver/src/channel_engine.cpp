@@ -3,6 +3,7 @@
 #include "scada/common/static_string.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
@@ -316,6 +317,7 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         return next_connect_ns_;
     }
     const ConnectionRules& rules = channel_->connection;
+    set_link(ChannelLink::CONNECTING);
     const IoStatus status =
         transport_->connect(later(now_ns, rules.connect_timeout_ns));
     const std::int64_t now = clock_->monotonic_ns();
@@ -338,6 +340,7 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         }
         own_close_ = false;
         connected_ = true;
+        set_link(ChannelLink::CONNECTED);
         ++counts_.connects;
         channel_state_.reset();
         answered_since_connect_ = false;
@@ -357,6 +360,7 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
         publish_states();
         return now;
     }
+    set_link(ChannelLink::DISCONNECTED);
     if (status == IoStatus::REFUSED) {
         ++counts_.refused;
     }
@@ -391,6 +395,7 @@ void ChannelEngine::apply_loss() noexcept {
 void ChannelEngine::lose(std::int64_t now_ns) noexcept {
     transport_->close(false);
     connected_ = false;
+    set_link(ChannelLink::DISCONNECTED);
     carry_ = 0;
     apply_loss();
     next_connect_after_backoff(now_ns);
@@ -399,6 +404,7 @@ void ChannelEngine::lose(std::int64_t now_ns) noexcept {
 void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
     transport_->close(true);
     connected_ = false;
+    set_link(ChannelLink::DISCONNECTED);
     carry_ = 0;
     ++counts_.own_closes;
     for (DeviceRun& run : devices_) {
@@ -599,9 +605,12 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     if (transport_->closed_by_peer()) {
         return End::CLOSED;  // checked before a write (7.3)
     }
+    const std::int64_t sent_ns = clock_->monotonic_ns();
     const IoStatus status =
         transport_->send(std::span(tx_).first(encoded.length));
     ++counts_.requests;
+    ++run.diag.requests;
+    request_rate_.add(sent_ns);
     if (status == IoStatus::PARTIAL) {
         return End::PARTIAL;
     }
@@ -624,6 +633,9 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     if (end != End::ANSWER) {
         return end;
     }
+    // A complete frame: its time to the first byte (`response_ms`). Bytes
+    // carried from before the send count as 0.
+    run.response.add(first_byte_ns_ - sent_ns);
     if (channel_->transport == TransportKind::SERIAL) {
         // The silence before the next request, from the last byte (7.2).
         quiet_until_ns_ =
@@ -633,6 +645,7 @@ ChannelEngine::End ChannelEngine::attempt(const Choice& choice,
     decoded = protocol_->decode(device, run.protocol, request, sent,
                                 std::span(rx_).first(frame_bytes), sink);
     sink_count_ = sink.samples().size();
+    count_answer(run, decoded);
     // Bytes after the frame: on a stream the start of the next one, kept;
     // on a serial line noise, discarded by the quiet-time rule (Q12).
     if (have > frame_bytes && channel_->transport != TransportKind::SERIAL) {
@@ -664,6 +677,7 @@ ChannelEngine::End ChannelEngine::wait_answer(
     bool started = false;  // bytes that may start this request's answer
     have = carry_;  // bytes a stream delivered after the last frame (Q12)
     carry_ = 0;
+    first_byte_ns_ = clock_->monotonic_ns();
     for (;;) {
         if (have > 0) {
             switch (scan(request, sent, have, frame_bytes)) {
@@ -702,6 +716,11 @@ ChannelEngine::End ChannelEngine::wait_answer(
             // Closed or failed; OK with nothing read is a transport fault,
             // taken as a failed connection (Q8, Q14).
             return End::CLOSED;
+        }
+        if (have == 0) {
+            // The first byte of this answer, stale frames dropped (11.1,
+            // `response_ms`).
+            first_byte_ns_ = clock_->monotonic_ns();
         }
         have += got;
     }
@@ -871,8 +890,12 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const bool probe = choice.kind == Choice::Kind::PROBE;
     if (end == End::BROKEN) {
         ++counts_.broken;
+        ++run.diag.errors;  // a broken answer (D-146)
     } else {
         ++counts_.timeouts;
+        if (end == End::TIMEOUT) {
+            ++run.diag.timeouts;
+        }
     }
     after_bad_frame(request, end);
     const std::int64_t now = clock_->monotonic_ns();
@@ -1084,9 +1107,73 @@ void ChannelEngine::process(std::uint32_t device,
         }
         process_sample(rules, run.points[sample.point].state, sample.sample,
                        companions_, times, processed_);
+        if (processed_.counts.sentinel) {
+            ++run.diag.sentinels;
+        }
+        if (processed_.counts.invalid) {
+            ++run.diag.invalid;
+        }
         tags_->write_point(device, sample.point, processed_);
     }
     run.comm_failed = false;
+}
+
+void ChannelEngine::set_link(ChannelLink link) noexcept {
+    if (link == link_) {
+        return;
+    }
+    link_ = link;
+    tags_->channel_link(link);
+}
+
+void ChannelEngine::count_answer(DeviceRun& run,
+                                 const DecodeResult& decoded) noexcept {
+    switch (decoded.kind) {
+        case DecodeResult::Kind::SAMPLES:
+        case DecodeResult::Kind::WRITE_OK:
+            run.diag.last_ok_time_ns = clock_->realtime_ns();
+            return;
+        case DecodeResult::Kind::BUSY:
+        case DecodeResult::Kind::UNREACHABLE:
+            ++run.diag.refusals;
+            break;
+        case DecodeResult::Kind::SPLIT:
+        case DecodeResult::Kind::ABSENT:
+        case DecodeResult::Kind::DEVICE_INVALID:
+        case DecodeResult::Kind::REFUSED:
+            ++run.diag.exceptions;
+            break;
+        case DecodeResult::Kind::BROKEN:
+            return;  // counted with the other broken answers, in `failed`
+    }
+    ++run.diag.errors;
+    run.diag.last_status = decoded.raw;
+}
+
+const DeviceCounts& ChannelEngine::device_counts(
+    std::uint32_t device) const noexcept {
+    // No device: the counts of none (coding standard 4; review S5).
+    static constexpr DeviceCounts NONE{};
+    return device < devices_.size() ? devices_[device].diag : NONE;
+}
+
+double ChannelEngine::response_ms(std::uint32_t device) const noexcept {
+    return device < devices_.size() ? devices_[device].response.average_ms()
+                                    : 0.0;
+}
+
+std::uint64_t ChannelEngine::points_absent(
+    std::uint32_t device) const noexcept {
+    if (device >= devices_.size()) {
+        return 0;
+    }
+    std::uint64_t absent = 0;
+    for (const PointRun& point : devices_[device].points) {
+        if (point.state.absent) {
+            ++absent;
+        }
+    }
+    return absent;
 }
 
 }  // namespace scada::driver

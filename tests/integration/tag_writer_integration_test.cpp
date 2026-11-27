@@ -125,7 +125,7 @@ protected:
                          PointHandles{.handles = {number_, SCADA_INVALID_HANDLE,
                                                   text_, theirs_},
                                       .first = {0}},
-                         strings);
+                         strings, {});
     }
 
     [[nodiscard]] std::string text() const {

@@ -9,8 +9,11 @@
 #include "scada/driver/protocol.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
+#include "scada/tag/scada_tag.h"
 #include "test_protocol.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <cstddef>
@@ -33,11 +36,45 @@
 namespace scada::driver::test {
 namespace {
 
+// The one system tag write that `--refuse-write` refuses (PR 159 review):
+// set before any thread starts, then read by the thread that owns the tag,
+// which alone counts down `skip`.
+struct Refusal {
+    std::array<char, SCADA_TAG_NAME_SIZE> name{};
+    std::uint64_t bits = 0;
+    std::uint64_t skip = 0;
+};
+
+Refusal& refusal() noexcept {
+    static Refusal instance;
+    return instance;
+}
+
+// The library's write, but the chosen one refused as a full ring or a lost
+// owner would be.
+int refusing_write(scada_ctx* ctx, std::uint32_t handle,
+                   const scada_value* value) {
+    Refusal& refused = refusal();
+    scada_tag_info_t info{};
+    if (value->value == refused.bits &&
+        scada_tag_info(ctx, handle, &info) == SCADA_OK &&
+        std::string_view(std::data(info.name)) ==
+            std::string_view(refused.name.data())) {
+        if (refused.skip == 0) {
+            return SCADA_E_NOT_OWNER;
+        }
+        --refused.skip;
+    }
+    return scada_tag_write(ctx, handle, value);
+}
+
 constexpr std::int64_t NS_PER_MS = 1'000'000;
 constexpr std::int64_t MAX_MS = 3'600'000;
 constexpr std::uint16_t SERIAL_BITS_8N1 = 10;
 // The limits of the command line: those of CS 4.6 and A.1 where it has them.
 constexpr std::int64_t MAX_UID = std::int64_t{1} << 31;
+// The value and the count of `--refuse-write`.
+constexpr std::uint64_t MAX_REFUSED = std::uint64_t{1} << 32;
 constexpr std::uint8_t MAX_UNIT_ID = 247;
 constexpr std::uint8_t MAX_RETRIES = 10;
 constexpr std::uint32_t MAX_REGISTER = 1'000'000;
@@ -51,7 +88,7 @@ constexpr std::int64_t SLOW_MS = 10'000;
 
 constexpr std::string_view USAGE =
     "usage: scada-drv-test --base-dir DIR [--retain-dir DIR] [--tagd-uid N]\n"
-    "           [--heartbeat-ms N]\n"
+    "           [--heartbeat-ms N] [--refuse-write TAG VALUE SKIP]\n"
     "         ( --channel NAME (tcp HOST PORT | serial PATH BAUD)\n"
     "               [--connect-timeout-ms N] [--reconnect-ms MIN MAX]\n"
     "               [--disabled] [--hang | --spin]\n"
@@ -63,7 +100,9 @@ constexpr std::string_view USAGE =
     "A driver of the test protocol. A point reads one unit of space 0 into\n"
     "an INT64 tag <device>.<point>; GROUP is 0 (200 ms), 1 (1 s) or 2\n"
     "(10 s). --hang and --spin make the channel's first receive block or\n"
-    "spin for good, deaf to the stop. Every number is unsigned.\n"
+    "spin for good, deaf to the stop. --refuse-write refuses the writes of\n"
+    "VALUE to the system tag TAG once SKIP of them were written.\n"
+    "Every number is unsigned.\n"
     "Exit status: 0 stopped, 1 failed, 2 usage, 3 thread check, 4 stall.\n";
 
 [[noreturn]] void thread_check_failed(std::string_view call) noexcept {
@@ -198,6 +237,9 @@ private:
         if (arg == "--heartbeat-ms") {
             return millis(options_.settings.heartbeat_period_ns);
         }
+        if (arg == "--refuse-write") {
+            return refuse_write();
+        }
         if (arg == "--channel") {
             return channel();
         }
@@ -205,6 +247,20 @@ private:
             return false;
         }
         return channel_option(arg);
+    }
+
+    // `--refuse-write TAG VALUE SKIP`.
+    bool refuse_write() {
+        const std::string_view tag = next();
+        Refusal& refused = refusal();
+        if (tag.empty() || tag.size() >= refused.name.size() ||
+            !take(refused.bits, MAX_REFUSED) ||
+            !take(refused.skip, MAX_REFUSED)) {
+            return false;
+        }
+        std::copy(tag.begin(), tag.end(), refused.name.begin());
+        options_.settings.system_write = &refusing_write;
+        return true;
     }
 
     bool channel() {

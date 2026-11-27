@@ -18,15 +18,18 @@
 // watchdog, 2.6). A worker runs its ChannelEngine, waiting between steps on
 // its connection (POLLRDHUP, a stream only) and on its stop eventfd, each
 // wait at most a third of the channel's stall limit; the stop eventfd also
-// ends the transport's own waits (DI 10). The command thread comes with
-// the command slices (6, 7), the system tags and the workers' log queues
-// with slice 5b.
+// ends the transport's own waits (DI 10). Each worker also writes the
+// system tags of its channel and devices, the main thread those of the
+// process (11.1, D-146). The command thread
+// comes with the command slices (6, 7), the workers' log queues with slice
+// 5b-3.
 
 #include "scada/common/log.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
+#include "scada/tag/scada_tag.h"
 
 #include <cstdint>
 #include <functional>
@@ -90,6 +93,12 @@ struct DriverSettings {
     // process's heartbeat timeout in the tag set. Above 0 and at most
     // MAX_HEARTBEAT_PERIOD_NS.
     std::int64_t heartbeat_period_ns = DEFAULT_HEARTBEAT_PERIOD_NS;
+    // How the system tags of 11.1 are written, those of the process and of
+    // every channel: null for the tag library's `scada_tag_write`. A test
+    // gives one that refuses chosen writes, so that the refused-write paths
+    // run (PR 159 review; D-146). Called from the thread that owns the tag.
+    int (*system_write)(scada_ctx*, std::uint32_t,
+                        const scada_value*) = nullptr;
 };
 
 // Blocks the stop signals the main thread takes from its signalfd
