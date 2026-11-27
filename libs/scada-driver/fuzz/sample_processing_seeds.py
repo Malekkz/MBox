@@ -1,0 +1,80 @@
+# Writes the hand-made seeds of sample_processing_fuzz into the corpus
+# directory given (#165): each holds a path the fuzz target must reach (a
+# substitute and the value after it, a young and an expired hold, health
+# and time companions, a quality rule). The byte layout is the one
+# sample_processing_fuzz.cpp reads: a 10-byte header and 28-byte samples.
+#
+#   python3 -I sample_processing_seeds.py corpus/sample_processing_fuzz
+import struct, sys, os
+out = sys.argv[1]
+
+def header(tag=1, choice=0, gain=0, offset=0, exponent=0, marker=0, low=0, high=1, features=0, status=1):
+    return bytes([tag, choice, gain, offset, exponent, marker, low, high, features, status])
+
+KIND = {'bool': 0, 'signed': 1, 'unsigned': 2, 'float': 3, 'string': 4, 'time': 5}
+WIDTH = {0: 0, 1: 1, 8: 2, 16: 3, 32: 4, 64: 5}
+OUTCOME = {'value': 0, 'no_value': 1, 'absent': 2, 'device_invalid': 3, 'comm_fail': 4}
+
+def sample(kind='signed', width=16, outcome='value', quality=0, number=0, flt=0.0, pattern=None, flt_bits=None):
+    if pattern is None:
+        pattern = number & ((1 << width) - 1) if width < 64 else number & (2**64 - 1)
+    if kind == 'float':
+        bits = struct.unpack('<Q', struct.pack('<d', flt))[0]
+        pattern = bits if width == 64 else struct.unpack('<I', struct.pack('<f', flt))[0]
+        fbits = bits
+    else:
+        fbits = 0 if flt_bits is None else flt_bits
+    # Byte 1 is also the health companion's status when the header does not
+    # make it good: an odd byte reads 1.
+    b = bytes([KIND[kind], WIDTH[width], OUTCOME[outcome], quality])
+    b += struct.pack('<Q', pattern & (2**64 - 1))
+    b += struct.pack('<Q', number & (2**64 - 1))
+    b += struct.pack('<Q', fbits)
+    assert len(b) == 28
+    return b
+
+SUBSTITUTE = 5   # 5 % 3 == 2: action SUBSTITUTE, pattern 5
+KEEP_LAST = 4    # 4 % 3 == 1: action KEEP_LAST, pattern 4
+MARKER = 0x10    # HAS_MARKER; choice % 4 == 0: max_age 1 s
+
+seeds = {
+    # A value, a substitute, a COMM_FAIL that keeps it, a value again.
+    'substitute-then-value': header(marker=SUBSTITUTE, choice=MARKER)
+        + sample(number=42) + sample(number=SUBSTITUTE)
+        + sample(outcome='comm_fail') + sample(number=43),
+    # A substitute before any value, then a value.
+    'substitute-first': header(marker=SUBSTITUTE, choice=MARKER)
+        + sample(number=SUBSTITUTE) + sample(number=44),
+    # keep_last: a value, a young hold, an expired hold, a value.
+    'keep-last-young-then-expired': header(marker=KEEP_LAST, choice=MARKER)
+        + sample(number=42) + sample(number=KEEP_LAST)
+        + sample(number=KEEP_LAST) + sample(number=43),
+    # DEVICE_INVALID held UNCERTAIN, then expired, then a value.
+    'device-invalid': header(choice=MARKER)
+        + sample(number=42) + sample(outcome='device_invalid', quality=1)
+        + sample(outcome='device_invalid', quality=1) + sample(number=43),
+    'comm-fail': header() + sample(number=42) + sample(outcome='comm_fail'),
+    'value-int16': header() + sample(number=-1234),
+    'negative-64': header() + sample(width=64, number=-(2**62)),
+    'marker-all-ones': header(marker=0xFF, choice=MARKER, tag=1)
+        + sample(width=8, number=0xFF, pattern=0xFF) + sample(width=8, number=7),
+    'float-huge': header(tag=3) + sample(kind='float', width=64, flt=1.0e300)
+        + sample(kind='float', width=64, flt=2.5),
+    'float-nan': header(tag=3, choice=MARKER) + sample(kind='float', width=64, flt=1.5)
+        + sample(kind='float', width=64, flt=float('nan')),
+    'time': header(features=0b11011, marker=3)
+        + sample(kind='time', number=1_800_000_000 * 10**9)
+        + sample(number=1_800_000_001 * 10**9),
+    # Health and a time companion with its own device time, a quality rule.
+    'companions-good': header(features=0b11011, marker=3)
+        + sample(number=1_800_000_000 * 10**9) + sample(number=1_800_000_002 * 10**9),
+    'quality-rule-uncertain': header(features=0b00100, gain=1, offset=0, exponent=3)
+        + sample(number=0x30) + sample(number=0x31),
+    'health-bad-then-good': header(features=0b01010, status=0)
+        + bytes([1, 2]) + sample(number=42)[2:]   # width 8, status 0: BAD
+        + sample(number=43),                       # width 16, status 1: good
+}
+for name, data in seeds.items():
+    with open(os.path.join(out, name), 'wb') as f:
+        f.write(data)
+    print(name, len(data))

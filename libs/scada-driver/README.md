@@ -206,9 +206,14 @@ until reload; every other signal has its default.
   them fails the tests, it does not skip them.
 - Fuzz targets: `sample_processing_fuzz` (samples, rule fields, a local
   zone, the write conversion; every accepted write is read back through the
-  processing and must give the value written) and `tzif_fuzz` (the zone file
+  processing and must give the value written; a write carries SUBSTITUTED
+  exactly when its value is a substitute) and `tzif_fuzz` (the zone file
   reader and the TZ string parser; transitions ordered, offsets within
   RFC 9636's bounds, an instant converts back to itself).
+  `fuzz/sample_processing_seeds.py` writes the seeds of the paths
+  `sample_processing_fuzz` must reach. `SCADA_FUZZ_STATS=1` makes a run
+  print its writes by quality and the paths it hit; a replay of the corpus
+  (`-runs=0`) shows each of them (#165).
 - `zone_file_test.cpp` builds a zone directory in the temporary directory,
   with links inside and out of it, a FIFO and a subdirectory, and reads it
   with `openat2` and with the fallback.
