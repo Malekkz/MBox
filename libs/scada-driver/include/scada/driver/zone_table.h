@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -51,19 +52,32 @@ public:
     // named by the environment variable TZDIR, else the one the build set
     // (CMake option SCADA_ZONEINFO_DIR). Reads a file and allocates. Fails
     // with INVALID_ARGUMENT for a name that is not a zone name, NOT_FOUND
-    // for a zone without a file, DATA_CORRUPT for a file that is not valid.
+    // for a zone without a file, and as `from_tzif` for its bytes.
     [[nodiscard]] static Result<ZoneTable> build(
         std::string_view zone_name) noexcept;
 
-    // Builds the table from the bytes of a zone file. Allocates.
+    // Builds the table from the bytes of a zone file. Allocates. Fails with
+    // DATA_CORRUPT for a file that is not valid (RFC 9636), and for one
+    // whose changes of offset lie so close together that more than 16
+    // interval begins fall within less than the span of its offsets (the
+    // largest minus the smallest, with 0) of one another: its conversions
+    // could not stay bounded (#158). RESOURCE_EXHAUSTED when out of memory.
     [[nodiscard]] static Result<ZoneTable> from_tzif(
         std::span<const std::byte> file) noexcept;
 
     // Converts `local_ns`, nanoseconds since 1970-01-01 on the zone's local
     // clock, to UTC (configuration schemas contract 4.6). Any input gives a
     // result; one outside the table is marked uncertain and saturates at
-    // the limits of int64.
+    // the limits of int64. Bounded: one binary search over the intervals,
+    // then at most 33 of them (a window of up to 16 on each side of the
+    // one found, #158), looked at twice.
     SCADA_RT [[nodiscard]] UtcTime to_utc(std::int64_t local_ns) const noexcept;
+
+    // `to_utc` with every interval searched, without the binary search and
+    // the window, written apart from them: the reference they are tested
+    // against. Not real-time.
+    [[nodiscard]] UtcTime to_utc_searching_all(
+        std::int64_t local_ns) const noexcept;
 
     // The number of intervals of constant offset (for tests).
     [[nodiscard]] std::size_t interval_count() const noexcept {
@@ -78,12 +92,36 @@ private:
         std::int64_t offset_ns = 0;
     };
 
-    // `to_utc` within the table, without the check of
-    // `certain_until_utc_ns_`.
+    // Adds a change to `offset_ns` at `begin_ns` to `intervals`, which
+    // hold at least one and end before or at `begin_ns`. A change at the
+    // instant the last interval begins replaces it, so that no interval is
+    // empty (the footer's change at the last transition, #158); a change
+    // to the offset in force adds nothing.
+    static void add_change(std::vector<Interval>& intervals,
+                           std::int64_t begin_ns,
+                           std::int64_t offset_ns) noexcept;
+    // The search window `intervals` need: at least 2, and the largest number
+    // of interval begins that lie within less than the span of the table's
+    // offsets (with 0) of one another. Nothing if that is more than the
+    // widest window taken (#158).
+    [[nodiscard]] static std::optional<std::ptrdiff_t> search_window_for(
+        std::span<const Interval> intervals) noexcept;
+    // `table` with the search window its intervals need, or the refusal of
+    // a table that needs more than the widest (#158).
+    [[nodiscard]] static Result<ZoneTable> with_search_window(ZoneTable table);
+
+    // `to_utc` within the table, searching `window` intervals on each side
+    // of the one found, without the check of `certain_until_utc_ns_`.
     SCADA_RT [[nodiscard]] UtcTime convert(
-        std::int64_t local_ns) const noexcept;
+        std::int64_t local_ns, std::ptrdiff_t window) const noexcept;
+    // `time` marked uncertain past `certain_until_utc_ns_`.
+    SCADA_RT [[nodiscard]] UtcTime marked(UtcTime time) const noexcept;
 
     std::vector<Interval> intervals_;
+    // How many intervals on each side of the one that holds a local time
+    // read as UTC may hold it; set by `from_tzif` from the table's own
+    // offsets and spacing (#158).
+    std::ptrdiff_t search_window_ = 2;
     // The end of the table's last year (UTC).
     std::int64_t end_utc_ns_ = 0;
     // From this instant on the file states no offset: its last transition
