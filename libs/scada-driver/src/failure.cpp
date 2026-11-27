@@ -72,6 +72,8 @@ void FailureTracker::connected(std::int64_t now_ns) noexcept {
             run.demoted ? DeviceStatus::DEMOTED : DeviceStatus::INITIALISING;
         run.grace_until_ns =
             later(now_ns, devices_[index].rules.startup_grace_ns);
+        // A demoted device is checked when a probe recovers it.
+        run.identity_pending = devices_[index].identify && !run.demoted;
     }
 }
 
@@ -145,15 +147,20 @@ bool FailureTracker::request_ended(std::uint32_t device, RequestEnd end,
         run.probe_recovered = false;
         return false;
     }
-    if (now_ns < run.grace_until_ns) {
+    return count_failure(device, now_ns);
+}
+
+bool FailureTracker::count_failure(std::uint32_t device,
+                                   std::int64_t now_ns) noexcept {
+    if (now_ns < runs_[device].grace_until_ns) {
         return false;  // within startup_grace: not counted (7.4)
     }
     const std::uint32_t count = ++count_of(device);
     bool demoted = false;
-    // Every polled device of the same unit whose limit the shared count
-    // reached is demoted together.
+    // Every device of the same unit whose failures count and whose limit
+    // the shared count reached is demoted together.
     for (std::uint32_t other = 0; other < devices_.size(); ++other) {
-        if (unit_index_[other] != unit_index_[device] || !polled(other) ||
+        if (unit_index_[other] != unit_index_[device] || !counted(other) ||
             count < devices_[other].rules.demote_after) {
             continue;
         }
@@ -193,6 +200,7 @@ void FailureTracker::probe_ended(std::uint32_t device, bool answered,
             run.state = DeviceStatus::INITIALISING;
             run.demoted = false;
             run.probe_recovered = true;
+            run.identity_pending = devices_[other].identify;
             continue;
         }
         run.backoff_ns = doubled(run.backoff_ns, rules);
@@ -224,6 +232,77 @@ std::int64_t FailureTracker::probe_due_ns(std::uint32_t device) const noexcept {
 
 std::uint32_t FailureTracker::failures(std::uint32_t device) const noexcept {
     return device < runs_.size() ? count_of(device) : 0;
+}
+
+bool FailureTracker::identity_ended(std::uint32_t device, RequestEnd end,
+                                    std::int64_t now_ns) noexcept {
+    if (device >= devices_.size() || !counted(device)) {
+        return false;
+    }
+    switch (end) {
+        case RequestEnd::ANSWERED:
+            // Not RUNNING, no back-off reset, `probe_recovered` kept (DI 7.3).
+            count_of(device) = 0;
+            return false;
+        case RequestEnd::FAILED:
+            return count_failure(device, now_ns);
+        case RequestEnd::NOT_COUNTED:
+            return false;
+    }
+    return false;
+}
+
+void FailureTracker::identity_passed(std::uint32_t device) noexcept {
+    if (device >= devices_.size()) {
+        return;
+    }
+    Run& run = runs_[device];
+    run.identity_pending = false;
+    if (run.state == DeviceStatus::MISMATCH) {
+        run.state = DeviceStatus::INITIALISING;  // RUNNING on a poll's answer
+    }
+}
+
+void FailureTracker::identity_mismatched(std::uint32_t device,
+                                         std::int64_t now_ns) noexcept {
+    if (device >= devices_.size() ||
+        runs_[device].state != DeviceStatus::INITIALISING) {
+        return;
+    }
+    Run& run = runs_[device];
+    run.state = DeviceStatus::MISMATCH;
+    run.identity_pending = false;
+    // At the constant `backoff` (DI 3.6), not the probe's grown one.
+    run.probe_due_ns = later(now_ns, devices_[device].rules.backoff_ns);
+}
+
+void FailureTracker::restarted(std::uint32_t device, std::int64_t now_ns,
+                               bool rearm_grace) noexcept {
+    if (device >= devices_.size()) {
+        return;
+    }
+    // The unit restarted: every device of it (D-145, ruling item 6).
+    for (std::uint32_t other = 0; other < devices_.size(); ++other) {
+        Run& run = runs_[other];
+        if (unit_index_[other] != unit_index_[device] ||
+            run.state != DeviceStatus::RUNNING) {
+            continue;
+        }
+        run.state = DeviceStatus::INITIALISING;
+        run.identity_pending = devices_[other].identify;
+        if (rearm_grace) {
+            run.grace_until_ns =
+                later(now_ns, devices_[other].rules.startup_grace_ns);
+        }
+    }
+}
+
+bool FailureTracker::identity_pending(std::uint32_t device) const noexcept {
+    return device < devices_.size() && runs_[device].identity_pending;
+}
+
+bool FailureTracker::counted(std::uint32_t device) const noexcept {
+    return polled(device) || state(device) == DeviceStatus::MISMATCH;
 }
 
 bool FailureTracker::polled(std::uint32_t device) const noexcept {
