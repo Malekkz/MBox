@@ -735,7 +735,8 @@ private:
     // Other pairs (`epoch`, `datetime`, `mod10k`; `float64` on a 64-bit
     // integer) are not refused here; they are on #136. False after a CF-504.
     // validate_point_rules in libscada-driver refuses the string and bool
-    // pairs too; the two must change together (#169).
+    // pairs and a counter on a floating raw too, for every protocol; the two
+    // must change together (#169).
     bool check_value_type(NodeId point, const std::string& raw,
                           const std::string& type) {
         const std::optional<NodeId> address = child_map(point, "address");

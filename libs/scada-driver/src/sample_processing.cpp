@@ -917,7 +917,8 @@ void process_sample(const PointRules& rules, PointState& state,
     // Rules that validate_point_rules refuses give BAD with OUT_OF_RANGE on
     // every path, the value kept: no marker, hold or companion applies to
     // them (#169; decision D-131). The compile step refuses them first.
-    if (!validate_point_rules(rules).ok()) {
+    const bool refused = !validate_point_rules(rules).ok();
+    if (refused) {
         state.holding = false;
         work.mark = bad(flag(QualityFlag::OUT_OF_RANGE));
     } else {
@@ -938,10 +939,11 @@ void process_sample(const PointRules& rules, PointState& state,
         out.counts.left_absent = true;
     }
 
-    if (sample.outcome == Outcome::VALUE) {
+    if (sample.outcome == Outcome::VALUE && !refused) {
         sample_time(work);
     } else {
-        // The time is the time of this observation, stamped by the driver.
+        // The time is the time of this observation, stamped by the driver;
+        // refused rules apply no time companion either (#169).
         work.source_time_ns = times.receive_time_ns;
         work.time_flags = flag(QualityFlag::LOCAL_TIME);
     }

@@ -110,6 +110,10 @@ seeds = {
     # is outside, UNCERTAIN with OUT_OF_RANGE; 50 is inside.
     'raw-range': header(features=0b1000000, gain=0, offset=100)
         + sample(number=150) + sample(number=50),
+    # 10 is a BOOL tag on a configured signed raw, which CF-504 refuses: BAD
+    # with OUT_OF_RANGE, though the value itself reads well (#169).
+    'bool-tag-on-a-signed-raw': header(tag=10)
+        + sample(kind='bool', width=1, number=1),
     'health-bad-then-good': header(features=0b01010, status=0)
         + sample(number=42)                      # status 0: BAD
         + sample(number=43, flt_bits=1 << 56),   # status 1: good

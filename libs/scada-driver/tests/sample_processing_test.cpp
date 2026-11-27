@@ -340,7 +340,7 @@ constexpr std::uint8_t NO_SUCH_SLOT = 5;
 constexpr std::uint8_t BIT_64 = 64;
 constexpr double HALF = 0.5;
 
-constexpr std::array<RefusedKind, 15> REFUSED_KINDS{{
+constexpr std::array<RefusedKind, 17> REFUSED_KINDS{{
     {"exponent companion slot",
      [](PointRules& rules) {
          rules.exponent = ExponentRule{.companion = NO_SUCH_SLOT};
@@ -380,6 +380,15 @@ constexpr std::array<RefusedKind, 15> REFUSED_KINDS{{
      [](PointRules& rules) { rules.raw_kind = RawKind::FLOAT; }},
     {"local device time without a zone",
      [](PointRules& rules) { rules.device_time.local = true; }},
+    {"companion local time without a zone",
+     [](PointRules& rules) { rules.companion_time.local = true; }},
+    {"counter on a floating raw",
+     [](PointRules& rules) {
+         rules.tag_type = TagType::FLOAT64;
+         rules.raw_kind = RawKind::FLOAT;
+         rules.counter = CounterRule{.limit = UINT16_ALL_ONES};
+         rules.markers.front().substitute = float64_value(-1.0);
+     }},
     // CF-504 as the compile step gives it (D-115): what sample_processing_fuzz
     // found with STRING tags on, a STRING tag on a numeric raw that loses
     // its substitute's text (#169).
@@ -441,11 +450,15 @@ TEST(SampleProcessing, TheRulesOfTheRefusedKindsSubstituteWhenValid) {
     EXPECT_TRUE(has(write.flags, QualityFlag::SUBSTITUTED));
 }
 
-// A write of refused rules: BAD with OUT_OF_RANGE, never SUBSTITUTED.
+// A write of refused rules: BAD with OUT_OF_RANGE, never SUBSTITUTED, no
+// companion's COMM_FAIL, and the driver's time (LOCAL_TIME).
 ::testing::AssertionResult refused_write(const TagWrite& write) {
     if (write.quality == Quality::BAD &&
         has(write.flags, QualityFlag::OUT_OF_RANGE) &&
-        !has(write.flags, QualityFlag::SUBSTITUTED)) {
+        !has(write.flags, QualityFlag::SUBSTITUTED) &&
+        !has(write.flags, QualityFlag::COMM_FAIL) &&
+        has(write.flags, QualityFlag::LOCAL_TIME) &&
+        !has(write.flags, QualityFlag::TIME_UNCERTAIN)) {
         return ::testing::AssertionSuccess();
     }
     return ::testing::AssertionFailure()
@@ -466,6 +479,25 @@ TEST(SampleProcessing, RefusedRulesGiveBadOnEveryPath) {
         EXPECT_TRUE(refused_write(point.value(FIRST_VALUE, 2 * SECOND).tag))
             << kind.name;
     }
+}
+
+// Refused rules take no time from a companion: a device time is not used,
+// and a failed companion adds no COMM_FAIL (#169).
+TEST(SampleProcessing, RefusedRulesKeepTheDriversTime) {
+    PointRules rules = int_rules();
+    rules.companions = {COMPANION_INDEX};
+    rules.time_companion = 0;
+    rules.bits = {BitRule{.bit = BIT_64}};
+    ASSERT_FALSE(validate_point_rules(rules).ok());
+    Point point(rules);
+    const CompanionInput time{.outcome = Outcome::VALUE,
+                              .raw = raw_time(SECOND)};
+    const TagWrite timed = point.value(FIRST_VALUE, SECOND, {&time, 1}).tag;
+    EXPECT_TRUE(refused_write(timed));
+    EXPECT_EQ(timed.source_time_ns, RECEIVE_NS + SECOND);
+    const CompanionInput lost{.outcome = Outcome::COMM_FAIL};
+    EXPECT_TRUE(
+        refused_write(point.value(FIRST_VALUE, 2 * SECOND, {&lost, 1}).tag));
 }
 
 // A young DEVICE_INVALID hold under refused rules is BAD too: the rules
