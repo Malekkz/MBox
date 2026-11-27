@@ -57,6 +57,17 @@ struct OrderTicket {
     bool exclusive = false;
 };
 
+// What a device is read for (3.5, 3.6; D-145): nothing (DISABLED,
+// CONNECTING, DEMOTED, REFUSING), every poll group (INITIALISING once its
+// identity check passed, RUNNING), or only its identity cycle
+// (`ReadPlan::identity`: INITIALISING while its identity check is pending,
+// MISMATCH).
+enum class DeviceMode : std::uint8_t {
+    OFF = 1,
+    ALL,
+    IDENTITY,
+};
+
 // What the worker sends next.
 struct Choice {
     enum class Kind : std::uint8_t {
@@ -66,6 +77,7 @@ struct Choice {
         POLL,       // request `request` of `device`'s plan
         KEEPALIVE,  // the keep-alive request `request` of `device`
         PROBE,      // the probe request `request` of demoted `device` (7.4)
+        IDENTITY,   // request `request` of `device`'s identity cycle (D-145)
     };
     Kind kind = Kind::IDLE;
     std::uint32_t device = 0;
@@ -183,11 +195,33 @@ public:
     [[nodiscard]] bool pacing_limited(std::uint32_t device,
                                       std::int64_t now_ns) const noexcept;
 
-    // Whether `device` is polled (INITIALISING or RUNNING, 3.5). A device
-    // that is not gets no poll, keep-alive or retry, and its chain and retry
-    // are dropped; when it is polled again, every group of it is due at once
-    // and the outage is not an achieved period.
-    void set_polled(std::uint32_t device, bool polled) noexcept;
+    // What `device` is read for (D-145). Leaving ALL drops its chain and
+    // retry; entering ALL makes every group of it due at once, and the time
+    // it was not polled is not an achieved period. In IDENTITY the device
+    // sends only its identity cycle, the requests of `plan.identity` in
+    // order within its unit's pacing: no group cycle starts and no
+    // keep-alive is sent; a request of a chain holds the unit until the
+    // chain ends; a retry of an identity request is an IDENTITY choice;
+    // the cycle is no achieved period and no pacing limit. Entering
+    // IDENTITY makes a cycle due at once; `identity_again` makes the next.
+    void set_mode(std::uint32_t device, DeviceMode mode) noexcept;
+    [[nodiscard]] DeviceMode mode(std::uint32_t device) const noexcept {
+        return device < devices_.size() ? devices_[device].mode
+                                        : DeviceMode::OFF;
+    }
+    // `set_mode` with ALL or OFF.
+    void set_polled(std::uint32_t device, bool polled) noexcept {
+        set_mode(device, polled ? DeviceMode::ALL : DeviceMode::OFF);
+    }
+    // Another identity cycle of `device`, due at `due_ns`: a re-check of a
+    // device in MISMATCH at its back-off, or a check without a verdict yet
+    // (D-145). Ignored unless the device is in IDENTITY with no cycle in
+    // progress.
+    void identity_again(std::uint32_t device, std::int64_t due_ns) noexcept;
+    // Whether `device` has an identity cycle in progress.
+    [[nodiscard]] bool identity_running(std::uint32_t device) const noexcept {
+        return device < devices_.size() && devices_[device].identity_cycle;
+    }
 
     // A probe waits for a poll that falls due within its time-out at most
     // this many time-outs past its own due time (D-138, Q4).
@@ -278,17 +312,24 @@ private:
         // Where in the group's cycle a chain in progress started.
         std::size_t chain_next = 0;
         std::size_t chain_next_split = 0;
+        // The identity cycle's position in `plan.identity` (D-145).
+        std::size_t identity_next = 0;
+        std::size_t identity_next_split = 0;
         // Failure handling (7.4).
         std::int64_t probe_due_ns = 0;
         std::int64_t retry_due_ns = 0;
         std::int64_t probe_timeout_ns = 0;
+        std::int64_t identity_due_ns = 0;  // when the next identity cycle is
         std::vector<GroupState> groups;
         // An order whose steps have started.
         OrderTicket order{};
         std::vector<bool> split;    // per request: replaced by its split form
         std::vector<bool> absent;   // per request: refused, not sent
         std::vector<bool> resting;  // per request: in its back-off (G8)
-        std::uint32_t unit = 0;     // index into units_
+        // All false: the identity cycle reads every request, a resting one
+        // too, since a failure of it is no verdict (D-145).
+        std::vector<bool> never_rests;
+        std::uint32_t unit = 0;         // index into units_
         std::uint32_t chain_group = 0;  // the group of a chain in progress
         std::uint32_t order_step = 0;
         std::uint32_t retry_request = 0;
@@ -297,7 +338,10 @@ private:
         // Within one `take`: an earlier order of this device waits, so its
         // later orders wait too (arrival order per device).
         bool order_blocked = false;
-        bool polled = true;
+        DeviceMode mode = DeviceMode::ALL;
+        // An identity cycle in progress, or one due (D-145).
+        bool identity_cycle = false;
+        bool identity_due = false;
         bool probe = false;
         bool retry = false;
         // A windowed probe was sent for this due time: the next one waits for
@@ -323,6 +367,8 @@ private:
         std::int64_t last_write_ns = 0;
         std::size_t chain_next = 0;
         std::size_t chain_next_split = 0;
+        std::size_t identity_next = 0;
+        std::size_t identity_next_split = 0;
         Choice choice;
         UnitRun unit;
         GroupState group_state;
@@ -335,6 +381,9 @@ private:
         bool chain = false;
         bool retry = false;
         bool probe_in_flight = false;
+        bool identity_cycle = false;
+        bool identity_due = false;
+        DeviceMode mode = DeviceMode::ALL;
     };
 
     // The time from which a request (or a write) to `device` is allowed.
@@ -394,6 +443,20 @@ private:
     // PROBE_FLOOR + 1 probe time-outs per channel (the lead's ruling N1).
     bool choose_floor_probe(std::int64_t now_ns, Choice& out,
                             std::int64_t& wake) noexcept;
+    // The identity cycles and their retries (D-145).
+    bool choose_identity(std::int64_t now_ns, Choice& out,
+                         std::int64_t& wake) noexcept;
+    // Moves `device`'s identity cycle past the request `sent`, at `index`
+    // (and `part` of its split form, `in_split`) in `plan.identity`: the
+    // cycle ends with its last request; a chain holds the unit to its end.
+    void advance_identity(std::uint32_t device, std::size_t index,
+                          std::size_t part, bool in_split,
+                          std::uint32_t sent) noexcept;
+    // Restarts an identity cycle on `device`'s unit that a chain of it holds,
+    // for an order step (D2): true when one was, its device in
+    // `chain_device`.
+    bool drop_unit_identity(std::uint32_t device,
+                            std::uint32_t& chain_device) noexcept;
     bool choose_poll(std::int64_t now_ns, Choice& out,
                      std::int64_t& wake) noexcept;
     bool choose_keepalive(std::int64_t now_ns, Choice& out,

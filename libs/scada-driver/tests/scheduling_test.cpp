@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1479,6 +1480,238 @@ TEST(Scheduling, NoProbeWhileAnOrderWaits) {
     EXPECT_EQ(wait.wake_ns, SECOND);
     EXPECT_EQ(scheduler.take(SECOND).kind, Choice::Kind::ORDER);
     EXPECT_EQ(scheduler.take(SECOND + MILLISECOND).kind, Choice::Kind::PROBE);
+}
+
+// --- The identity cycle (D-145) --------------------------------------------
+
+// d1: a point at 0 (fast) and one at 20 (slow), two requests; the one at 20
+// is the identity cycle.
+CompiledChannel identity_channel(std::int64_t keepalive_ns = 0) {
+    const std::vector<PointSpec> points{PointSpec{.first = 0, .group = FAST},
+                                        PointSpec{.first = 20, .group = SLOW}};
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .points = points, .keepalive_ns = keepalive_ns}},
+        ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    plan.identity = {plan.by_group[SLOW].front()};
+    return channel;
+}
+
+TEST(Scheduling, InIdentityOnlyTheIdentityCycleIsSent) {
+    const CompiledChannel channel = identity_channel(SECOND);
+    const ReadPlan& plan = channel.devices[0].plan;
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    const Choice first = scheduler.take(0);
+    EXPECT_EQ(first.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(first.request, plan.identity.front());
+    // One cycle; no group cycle, no keep-alive, however long it waits.
+    EXPECT_EQ(scheduler.take(MILLISECOND).kind, Choice::Kind::IDLE);
+    EXPECT_EQ(scheduler.take(5 * SECOND).kind, Choice::Kind::IDLE);
+    EXPECT_FALSE(scheduler.identity_running(0));
+    // The next cycle when asked for, at its time.
+    scheduler.identity_again(0, 7 * SECOND);
+    const Choice early = scheduler.take(6 * SECOND);
+    EXPECT_EQ(early.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(early.wake_ns, 7 * SECOND);
+    EXPECT_EQ(scheduler.take(7 * SECOND).kind, Choice::Kind::IDENTITY);
+    // Every group, once the check passed: all due at once.
+    scheduler.set_mode(0, DeviceMode::ALL);
+    const Choice poll = scheduler.take(8 * SECOND);
+    EXPECT_EQ(poll.kind, Choice::Kind::POLL);
+    EXPECT_EQ(poll.request, plan.by_group[FAST].front());
+    // The identity cycle was no achieved period, no pacing limit.
+    EXPECT_LT(scheduler.achieved_period_ns(SLOW, 8 * SECOND), SECOND);
+    EXPECT_FALSE(scheduler.pacing_limited(0, 8 * SECOND));
+}
+
+TEST(Scheduling, ARetryOfAnIdentityReadIsAnIdentityChoice) {
+    const CompiledChannel channel = identity_channel();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::IDENTITY);
+    scheduler.retry(0, first.request, 10 * MILLISECOND);
+    const Choice again = scheduler.take(10 * MILLISECOND);
+    EXPECT_EQ(again.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(again.request, first.request);
+    // Not sent: taken again, the cycle as before.
+    EXPECT_FALSE(scheduler.not_sent().has_value());
+    EXPECT_EQ(scheduler.take(10 * MILLISECOND).kind, Choice::Kind::IDENTITY);
+}
+
+TEST(Scheduling, AChainOfTheIdentityCycleHoldsItsUnit) {
+    // d1 and d2 share unit 1. d1's identity cycle is two requests chained
+    // (a point and its companion): d2 gets nothing between them; an order
+    // of d2 between them restarts the cycle (D2).
+    // A third request is the probe and keep-alive: neither reads part of a
+    // chain (6.5).
+    const std::vector<PointSpec> points{PointSpec{.first = 0, .group = SLOW},
+                                        PointSpec{.first = 20, .group = SLOW},
+                                        PointSpec{.first = 60, .group = SLOW}};
+    CompiledChannel channel =
+        make_channel({{.name = "d1", .unit_id = 1, .points = points},
+                      {.name = "d2", .unit_id = 1, .points = adjacent(40, 1)}},
+                     ReadRules{.max_units = 4});
+    ReadPlan& plan = channel.devices[0].plan;
+    const std::uint32_t head = plan.by_group[SLOW][0];
+    const std::uint32_t tail = plan.by_group[SLOW][1];
+    plan.requests[head].chained = true;
+    plan.identity = {head, tail};
+    plan.probe = plan.by_group[SLOW][2];
+    plan.keepalive = plan.probe;
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    const Choice first = scheduler.take(0);
+    ASSERT_EQ(first.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(first.device, 0U);
+    EXPECT_EQ(first.request, head);
+    const Choice second = scheduler.take(MILLISECOND);
+    EXPECT_EQ(second.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(second.device, 0U);
+    EXPECT_EQ(second.request, tail);
+    EXPECT_FALSE(scheduler.identity_running(0));  // ended with its last
+    // Again, with an order of d2 after the head.
+    scheduler.identity_again(0, 0);
+    const Choice head_again = scheduler.take(2 * MILLISECOND);
+    ASSERT_EQ(head_again.kind, Choice::Kind::IDENTITY);
+    ASSERT_EQ(head_again.device, 0U);
+    ASSERT_EQ(head_again.request, head);
+    ASSERT_TRUE(scheduler.add_order(
+        OrderTicket{.id = 9, .device = 1, .kind = OrderKind::WRITE}));
+    const Choice order = scheduler.take(3 * MILLISECOND);
+    ASSERT_EQ(order.kind, Choice::Kind::ORDER);
+    EXPECT_TRUE(order.chain_dropped);
+    EXPECT_EQ(order.chain_device, 0U);
+    const Choice restart = scheduler.take(4 * MILLISECOND);
+    EXPECT_EQ(restart.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(restart.device, 0U);
+    EXPECT_EQ(restart.request, head);  // read again from its start
+}
+
+TEST(Scheduling, ADeviceWithoutAProbeRequestIsProbedByItsIdentityCycle) {
+    CompiledChannel channel = identity_channel();
+    ReadPlan& plan = channel.devices[0].plan;
+    plan.probe.reset();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::OFF);
+    scheduler.set_probe(0, 0, 100 * MILLISECOND);
+    const Choice probe = scheduler.take(0);
+    EXPECT_EQ(probe.kind, Choice::Kind::PROBE);
+    EXPECT_EQ(probe.request, plan.identity.front());
+    EXPECT_TRUE(probe.cycle);
+    EXPECT_EQ(scheduler.mode(0), DeviceMode::IDENTITY);
+    // Not sent: as before it.
+    EXPECT_FALSE(scheduler.not_sent().has_value());
+    EXPECT_EQ(scheduler.mode(0), DeviceMode::OFF);
+}
+
+TEST(Scheduling, ThePlanOfAnIdentityCycleIsChecked) {
+    CompiledChannel channel = identity_channel();
+    ReadPlan& plan = channel.devices[0].plan;
+    EXPECT_TRUE(Scheduler::check(channel).ok());
+    plan.requests[plan.identity.front()].side_effect = true;
+    EXPECT_FALSE(Scheduler::check(channel).ok());
+    plan.requests[plan.identity.front()].side_effect = false;
+    plan.identity.push_back(99);
+    EXPECT_FALSE(Scheduler::check(channel).ok());
+}
+
+// Two devices on one unit, each with an identity cycle of two requests.
+CompiledChannel random_identity_channel() {
+    std::vector<PointSpec> points;
+    for (std::uint32_t index = 0; index < 6; ++index) {
+        points.push_back(PointSpec{.first = index * 10, .group = index % 3});
+    }
+    CompiledChannel channel = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = points, .keepalive_ns = SECOND},
+         {.name = "d2",
+          .unit_id = 1,
+          .points = points,
+          .keepalive_ns = SECOND}},
+        ReadRules{.max_units = 4});
+    for (CompiledDevice& device : channel.devices) {
+        device.plan.identity = {device.plan.by_group[NORMAL].front(),
+                                device.plan.by_group[SLOW].front()};
+    }
+    return channel;
+}
+
+// A fixed sequence of numbers, the same on every run.
+class Random {
+public:
+    std::uint32_t next() noexcept {
+        seed_ = seed_ * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<std::uint32_t>(seed_ >> 33U);
+    }
+
+private:
+    std::uint64_t seed_ = 12345;
+};
+
+// A random mode change or re-check, or nothing.
+void random_step(Scheduler& scheduler, Random& random, std::int64_t now) {
+    const std::uint32_t device = random.next() % 2;
+    switch (random.next() % 8) {
+        case 0:
+            scheduler.set_mode(device,
+                               static_cast<DeviceMode>(1 + random.next() % 3));
+            break;
+        case 1:
+            scheduler.identity_again(device, now + random.next() % 500'000'000);
+            break;
+        default:
+            break;
+    }
+}
+
+// True when `choice`, taken with its device in `before`, keeps the
+// invariant; counts the identity choices in `identity_choices`.
+bool keeps_identity_invariant(const ReadPlan& plan, const Choice& choice,
+                              DeviceMode before,
+                              std::size_t& identity_choices) {
+    if (choice.kind != Choice::Kind::POLL &&
+        choice.kind != Choice::Kind::KEEPALIVE &&
+        choice.kind != Choice::Kind::IDENTITY) {
+        return true;
+    }
+    if (before != DeviceMode::IDENTITY) {
+        return choice.kind != Choice::Kind::IDENTITY;
+    }
+    ++identity_choices;
+    return choice.kind == Choice::Kind::IDENTITY &&
+           std::find(plan.identity.begin(), plan.identity.end(),
+                     choice.request) != plan.identity.end();
+}
+
+TEST(Scheduling, InIdentityNoRequestOutsideTheCycleIsEverChosen) {
+    // The ruling's invariant, over random mode changes, re-checks, retries
+    // and time: for a device in IDENTITY, only IDENTITY choices of requests
+    // of its cycle; never a poll or keep-alive.
+    const CompiledChannel channel = random_identity_channel();
+    Scheduler scheduler(channel, 4, 0);
+    Random random;
+    std::int64_t now = 0;
+    std::size_t identity_choices = 0;
+    for (int step = 0; step < 20'000; ++step) {
+        random_step(scheduler, random, now);
+        const std::array<DeviceMode, 2> before{scheduler.mode(0),
+                                               scheduler.mode(1)};
+        const Choice choice = scheduler.take(now);
+        const DeviceMode mode = std::span(before)[choice.device % 2];
+        ASSERT_TRUE(
+            keeps_identity_invariant(channel.devices[choice.device % 2].plan,
+                                     choice, mode, identity_choices))
+            << step;
+        if (mode == DeviceMode::IDENTITY &&
+            choice.kind == Choice::Kind::IDENTITY && random.next() % 4 == 0) {
+            scheduler.retry(choice.device, choice.request, now);
+        }
+        now += choice.kind == Choice::Kind::WAIT && choice.wake_ns > now
+                   ? std::min<std::int64_t>(choice.wake_ns - now, SECOND)
+                   : MILLISECOND;
+    }
+    EXPECT_GT(identity_choices, 100U);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
