@@ -73,6 +73,11 @@ struct PointState {
     bool holding = false;
     // The point is ABSENT (contract 5.2), for `points_absent`.
     bool absent = false;
+    // `value` is a substitute from configuration (`on_invalid: substitute`):
+    // every write that keeps it carries SUBSTITUTED, which describes the
+    // value (contract 5.2, R-6; tag database contract 1.1, 6 and 12). A new
+    // value from the device ends it.
+    bool substituted = false;
     // Counters (contract 5.4): the previous raw value, and the value `hold`
     // keeps until the counter passes it.
     bool counter_has_previous = false;
@@ -101,9 +106,10 @@ SCADA_RT void reset_point_state(PointState& state, tag::TagType type,
 // stored", 5.2 "keeps its last value"; review M4). Quality, flags and
 // `has_value` stay those of the reset. A value of another type than the
 // state's is ignored; a STRING's text is copied within the reserved
-// capacity.
-SCADA_RT void seed_point_state(PointState& state,
-                               const TagValue& stored) noexcept;
+// capacity. `substituted`: the stored value carries SUBSTITUTED, so the
+// writes that keep it carry it too.
+SCADA_RT void seed_point_state(PointState& state, const TagValue& stored,
+                               bool substituted = false) noexcept;
 
 // One tag write that processing asks for.
 struct TagWrite {

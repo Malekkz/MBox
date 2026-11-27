@@ -2701,3 +2701,23 @@ Decision:
 Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
 
 Consequences: real zone files are unaffected. On the build machine no zone file has two changes closer together than the span of its own offsets, so every table keeps the window of 2. `scada-driver-zones-test`, which compares every zone with the C library, passes unchanged. A hand-made or damaged file of that kind is either converted correctly (the repeated local time gives its earliest instant, marked uncertain) or refused, never converted wrongly.
+
+## D-145: Drivers set SUBSTITUTED (tag database contract 1.1)
+Date: 2026-11-26, revised 2026-11-27 after the review of PR 157
+Phase / issue: 2, #154 (P2-15); follows #151 (D-143)
+Status: for review by a person (contract change: driver interface contract 0.7).
+
+Context: tag database contract 1.1, section 6, gives SUBSTITUTED the meaning that ruling R-6 of the driver interface contract asked for: a value substituted by configuration, and a value the device reports as forced, besides one entered by a person. The driver interface contract 0.6 and `libscada-driver` held the flag back "until tag database 1.1" (decision D-131: device flags masked to OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST).
+
+Decision:
+- One source gives SUBSTITUTED: the `substitute` action of `on_invalid` or of an invalid marker (CS 4.7) writes the configured value UNCERTAIN with SUBSTITUTED.
+- The flag stays with the value (review R1). `PointState::substituted` records that the value held is a configured substitute. Every write that keeps it carries the flag, with that write's own quality: after COMM_FAIL, ABSENT and NO_VALUE, after a stale check, in the writes of driver interface contract 9.1 (`kept_flags` in `tag_writer.cpp`), and after a restart, where `TagWriter::seed` reads the flag from the stored value. The next value read from the device ends it. A companion does not pass it to a dependent point (`companion_flags`): the flag describes the companion's value.
+- Two masks (review R2). `CONFIG_FLAGS_MASK` is the flags the configuration may give in a marker or a `quality_from` map: OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST, as CS 4.7 allows. `DEVICE_FLAGS_MASK` is the flags a protocol's mapping may give: the same four. Neither holds SUBSTITUTED; the last point of D-131 on the mask stands. `keep_last` stays without SUBSTITUTED (contract 5.2).
+- A value the device reports as forced is room only (review R3), until a protocol carries a value with a mark (#136). A NO_VALUE or DEVICE_INVALID answer carries no value of the device's, so the flag would land on a kept value the device did not give. Row 4 of contract 5.2 no longer lists SUBSTITUTED.
+- Bits of a word (`bits`, CS 4.7): on a substitute they keep the values last read, and `ProcessedSample` gives them the word's quality and flags, SUBSTITUTED included (`sample_processing.h`). Nothing writes bit tags yet (`TagWriter` writes the point's own tag only). The slice that writes them decides whether a bit of a substituted word carries the flag.
+- The driver interface contract goes to 0.7: it cites tag database 1.1, 5.2 states the rule without "until 1.1", R-6 says what is in effect, and 2.5 no longer names TD 1.1 for the wake-only form of #116, which 1.1 does not have.
+- The golden vector of `substitute` (`tests/golden/driver-vectors.txt`, shared with #105 and #106) expects SUBSTITUTED,LOCAL_TIME.
+
+Reason: the code and the contracts follow tag database 1.1; nothing read the flag from a driver before. A flag that a kept value lost at the next failed poll would tell an operator the substitute was a measurement.
+
+Consequences: the writer of the driver process (`tag_writer.*`, PR 150) is on `main`, so the flag reaches the tag database; `tests/integration/tag_writer_integration_test.cpp` shows that the writes of 9.1 keep it. A test of `on_invalid: substitute` through a running driver process waits for #104 and is part of #154. The fuzz target `sample_processing_fuzz` checks both ways that a write has the flag exactly when its value is a configured substitute.

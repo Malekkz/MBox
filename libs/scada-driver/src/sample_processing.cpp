@@ -48,14 +48,24 @@ QualityMark bad(std::uint16_t flags) noexcept {
     return QualityMark{.quality = Quality::BAD, .flags = flags};
 }
 
-// A mark that came from a device or a configured map, with only the flags a
-// device may give (DEVICE_FLAGS_MASK).
-QualityMark device_mark(QualityMark mark) noexcept {
+// `mark` with a quality of the tag database and only the flags in `mask`.
+QualityMark masked_mark(QualityMark mark, std::uint16_t mask) noexcept {
     const Quality quality =
         tag::quality_from_raw(tag::to_raw(mark.quality)).value_or(Quality::BAD);
-    return QualityMark{
-        .quality = quality,
-        .flags = static_cast<std::uint16_t>(mark.flags & DEVICE_FLAGS_MASK)};
+    return QualityMark{.quality = quality,
+                       .flags = static_cast<std::uint16_t>(mark.flags & mask)};
+}
+
+// A mark a protocol gave a sample, with only the flags a protocol may give
+// (DEVICE_FLAGS_MASK).
+QualityMark device_mark(QualityMark mark) noexcept {
+    return masked_mark(mark, DEVICE_FLAGS_MASK);
+}
+
+// A mark the configuration gave (a `quality_from` entry), with only the
+// flags the configuration may give (CONFIG_FLAGS_MASK; review R2 of #157).
+QualityMark config_mark(QualityMark mark) noexcept {
+    return masked_mark(mark, CONFIG_FLAGS_MASK);
 }
 
 // The flags a failed companion passes to the point that depends on it
@@ -64,9 +74,12 @@ std::uint16_t companion_flags(const CompanionInput& companion) noexcept {
     const std::uint16_t own = companion.outcome == Outcome::COMM_FAIL
                                   ? flag(QualityFlag::COMM_FAIL)
                                   : 0;
+    // The companion's own processing gave these. SUBSTITUTED describes the
+    // companion's value, not the point's, and does not pass (review R1 of
+    // #157): neither mask holds it.
     const auto carried = static_cast<std::uint16_t>(
         companion.mark.flags &
-        (DEVICE_FLAGS_MASK | flag(QualityFlag::COMM_FAIL)));
+        (CONFIG_FLAGS_MASK | DEVICE_FLAGS_MASK | flag(QualityFlag::COMM_FAIL)));
     return static_cast<std::uint16_t>(own | carried);
 }
 
@@ -245,6 +258,8 @@ struct Work {
     // The new value came from the device (or a substitute), so the point is
     // no longer NOT_INIT.
     bool from_device = false;
+    // The new value is the configured substitute (`on_invalid: substitute`).
+    bool substituted = false;
     TagValue value{};
     // The read confirmed the value (contract 7.5).
     bool confirmed = false;
@@ -303,7 +318,7 @@ QualityMark quality_from_rules(const Work& work) noexcept {
         }
         const std::optional<std::int64_t> key =
             key_of(*raw, rule.has_field, rule.lo, rule.hi);
-        QualityMark found = device_mark(rule.otherwise);
+        QualityMark found = config_mark(rule.otherwise);
         if (key.has_value()) {
             const auto entry = std::lower_bound(
                 rule.entries.begin(), rule.entries.end(), *key,
@@ -311,7 +326,7 @@ QualityMark quality_from_rules(const Work& work) noexcept {
                     return candidate.key < wanted;
                 });
             if (entry != rule.entries.end() && entry->key == *key) {
-                found = device_mark(entry->mark);
+                found = config_mark(entry->mark);
             }
         }
         mark = worse(mark, found);
@@ -638,16 +653,18 @@ bool apply_markers(Work& work) noexcept {
         work.state->holding = false;
         switch (marker.action) {
             case InvalidAction::BAD:
-                work.mark = bad(marker.flags & DEVICE_FLAGS_MASK);
+                work.mark = bad(marker.flags & CONFIG_FLAGS_MASK);
                 break;
             case InvalidAction::KEEP_LAST:
                 hold_last(work, GOOD_MARK);
                 break;
             case InvalidAction::SUBSTITUTE:
-                // UNCERTAIN; SUBSTITUTED only from tag database 1.1
-                // (contract 5.2, R-6 depends on #89).
+                // UNCERTAIN with SUBSTITUTED: a value substituted by
+                // configuration (contract 5.2, R-6; tag database contract
+                // 1.1, section 6).
                 work.new_value = true;
                 work.from_device = true;
+                work.substituted = true;
                 work.value = marker.substitute;
                 work.mark = UNCERTAIN_MARK;
                 break;
@@ -831,13 +848,16 @@ void reset_point_state(PointState& state, TagType type,
     state.counter_holding = false;
     state.counter_held = zero_value(type);
     state.bit_values = 0;
+    state.substituted = false;
     state.text.clear();
 }
 
-void seed_point_state(PointState& state, const TagValue& stored) noexcept {
+void seed_point_state(PointState& state, const TagValue& stored,
+                      bool substituted) noexcept {
     if (stored.type != state.value.type) {
         return;
     }
+    state.substituted = substituted;
     if (stored.type == TagType::STRING) {
         store_text(state, std::as_bytes(std::span(stored.text)));
         return;
@@ -904,8 +924,12 @@ void process_sample(const PointRules& rules, PointState& state,
         work.time_flags = flag(QualityFlag::LOCAL_TIME);
     }
 
-    // The new state of the point.
+    // The new state of the point. SUBSTITUTED describes the value (tag
+    // database contract 6, 12): it is set by the substitute action alone,
+    // and stays with a kept substitute value through COMM_FAIL, ABSENT,
+    // NO_VALUE and a refused value (review R1 of #157).
     if (work.new_value) {
+        state.substituted = work.substituted;
         state.value = work.value;
         if (rules.tag_type == TagType::STRING && !state.holding) {
             store_text(state, work.text);
@@ -914,7 +938,11 @@ void process_sample(const PointRules& rules, PointState& state,
             state.has_value = true;
         }
     }
-    auto flags = static_cast<std::uint16_t>(work.mark.flags | work.time_flags);
+    auto flags = static_cast<std::uint16_t>(
+        (work.mark.flags & ~flag(QualityFlag::SUBSTITUTED)) | work.time_flags);
+    if (state.substituted) {
+        flags |= flag(QualityFlag::SUBSTITUTED);
+    }
     if (work.confirmed) {
         state.confirmed_mono_ns = times.receive_mono_ns;
     } else {
