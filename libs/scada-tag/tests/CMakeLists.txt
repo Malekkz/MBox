@@ -29,6 +29,14 @@ scada_add_test(scada-tag-unit-test KIND unit
     tag_set_test.cpp
     types_test.cpp
   DEPENDS scada::tag)
+# The count limits of a tag set: a time limit of their own, apart from the
+# unit tests above (#164).
+scada_add_test(scada-tag-limits-test KIND unit
+  SOURCES tag_set_limits_test.cpp
+  DEPENDS scada::tag)
+target_include_directories(scada-tag-limits-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
 # A limit for a hung binary, not a bound: about 35 s unloaded, most of it
 # fixed waits of tests, and more under load (decision D-56).
 set_tests_properties(scada-tag-unit-test PROPERTIES TIMEOUT 120)

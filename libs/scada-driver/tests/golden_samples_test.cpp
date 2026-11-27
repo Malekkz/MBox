@@ -299,7 +299,9 @@ TEST(GoldenSamples, RawRangeGivesUncertainOutOfRange) {
 
 // --- on_invalid actions ----------------------------------------------------
 
-TEST(GoldenSamples, SubstituteIsUncertainWithoutSubstitutedUntilTagDatabase11) {
+// Contract 5.2, R-6, with tag database contract 1.1, section 6 (#154): a
+// value substituted by configuration is UNCERTAIN with SUBSTITUTED.
+TEST(GoldenSamples, SubstituteIsUncertainWithSubstituted) {
     PointRules rules = float_rules();
     rules.markers.push_back(InvalidMarker{.pattern = UINT16_ALL_ONES,
                                           .action = InvalidAction::SUBSTITUTE,
@@ -307,7 +309,8 @@ TEST(GoldenSamples, SubstituteIsUncertainWithoutSubstitutedUntilTagDatabase11) {
     const TagWrite write = run(rules, raw_unsigned(0xFFFF, 16));
     EXPECT_EQ(write.quality, Quality::UNCERTAIN);
     EXPECT_EQ(bits_of(write.value.f), bits_of(-1.0));
-    EXPECT_EQ(write.flags, LOCAL);
+    EXPECT_EQ(write.flags,
+              flags({QualityFlag::SUBSTITUTED, QualityFlag::LOCAL_TIME}));
 }
 
 // --- Enumerations ----------------------------------------------------------

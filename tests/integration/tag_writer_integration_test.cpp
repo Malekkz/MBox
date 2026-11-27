@@ -2,11 +2,13 @@
 // scada-tagd, in this process attached as `drv-test` (driver interface
 // contract 9.1; decision D-142; delta 5 of the review of PR 150): a STRING
 // write waits for the notify, a point without a tag is skipped, a refused
-// write is counted, and 9.1 by owner slot keeps every value as stored.
+// write is counted, and 9.1 by owner slot keeps every value as stored, with
+// SUBSTITUTED on a kept substitute (D-145).
 
 #include "tagd_fixture.h"
 
 #include "scada/common/status.h"
+#include "scada/driver/compiled.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/tag_value.h"
 #include "scada/tag/scada_tag.h"
@@ -30,6 +32,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace scada::test::driver_it {
 namespace {
@@ -40,6 +43,7 @@ using scada::driver::ProcessedSample;
 using scada::driver::TagValue;
 using scada::driver::TagWrite;
 using scada::driver::detail::PointHandles;
+using scada::driver::detail::PointSeeds;
 using scada::driver::detail::TagWriter;
 using scada::driver::detail::write_owner_not_initialised;
 using scada::test::tagd::RunningTagd;
@@ -210,6 +214,83 @@ TEST_F(TagWriterTest, NineOneByOwnerSlotKeepsEveryValueAsStored) {
     EXPECT_NE(text_value().quality_flags & SCADA_FLAG_NOT_INIT, 0);
     // Another process's owner is refused: the start would fail.
     EXPECT_FALSE(not_initialise_theirs().ok());
+}
+
+// The writes of 9.1 keep SUBSTITUTED with a kept substitute value, and
+// only with one (D-145; review R1 of PR 157).
+TEST_F(TagWriterTest, NineOneKeepsSubstitutedWithTheValue) {
+    TagWriter tags = writer();
+    ProcessedSample substitute = good(scada::driver::int64_value(4));
+    substitute.tag.quality = tag::Quality::UNCERTAIN;
+    substitute.tag.flags = tag::to_raw(tag::QualityFlag::SUBSTITUTED);
+    tags.write_point(0, 0, substitute);
+    tags.write_point(
+        0, 2, good(TagValue{.type = tag::TagType::STRING, .text = "read"}));
+    tags.notify();
+    ASSERT_TRUE(not_initialise_ours().ok());
+    const scada_value number = this->number();
+    EXPECT_EQ(number.quality, SCADA_QUALITY_BAD);
+    EXPECT_EQ(std::bit_cast<std::int64_t>(number.value), 4);
+    // LOCAL_TIME is the library's: the write gave no source time.
+    EXPECT_EQ(number.quality_flags & ~SCADA_FLAG_LOCAL_TIME,
+              SCADA_FLAG_NOT_INIT | SCADA_FLAG_SUBSTITUTED);
+    EXPECT_EQ(text_value().quality_flags & SCADA_FLAG_SUBSTITUTED, 0);
+}
+
+// What TagWriter::seed hands over, by point of device 0.
+class RecordedSeeds final : public PointSeeds {
+public:
+    struct Seed {
+        std::uint32_t point = 0;
+        TagValue stored{};
+        std::string text;  // `stored.text` is borrowed only for the call
+        bool substituted = false;
+    };
+
+    void seed_point(std::uint32_t device, std::uint32_t point,
+                    const TagValue& stored,
+                    bool substituted) noexcept override {
+        if (device == 0) {
+            seeds_.push_back(Seed{.point = point,
+                                  .stored = stored,
+                                  .text = std::string(stored.text),
+                                  .substituted = substituted});
+        }
+    }
+
+    [[nodiscard]] const std::vector<Seed>& seeds() const { return seeds_; }
+
+private:
+    std::vector<Seed> seeds_;
+};
+
+// The restart path (review R1 of PR 157): after 9.1, a tag that holds a
+// substitute is seeded with SUBSTITUTED, and a tag that holds a value read
+// from the device without it.
+TEST_F(TagWriterTest, ASeedCarriesSubstitutedFromTheStoredValue) {
+    TagWriter tags = writer();
+    ProcessedSample substitute = good(scada::driver::int64_value(4));
+    substitute.tag.quality = tag::Quality::UNCERTAIN;
+    substitute.tag.flags = tag::to_raw(tag::QualityFlag::SUBSTITUTED);
+    tags.write_point(0, 0, substitute);
+    tags.write_point(
+        0, 2, good(TagValue{.type = tag::TagType::STRING, .text = "read"}));
+    tags.notify();
+    ASSERT_TRUE(not_initialise_ours().ok());
+    scada::driver::CompiledChannel channel;
+    channel.devices.resize(1);
+    channel.devices[0].points.resize(4);
+    RecordedSeeds recorded;
+    tags.seed(recorded, channel);
+    // Point 1 has no tag; point 3's tag is another process's, read all the
+    // same.
+    ASSERT_EQ(recorded.seeds().size(), 3U);
+    EXPECT_EQ(recorded.seeds()[0].point, 0U);
+    EXPECT_EQ(recorded.seeds()[0].stored.i, 4);
+    EXPECT_TRUE(recorded.seeds()[0].substituted);
+    EXPECT_EQ(recorded.seeds()[1].point, 2U);
+    EXPECT_EQ(recorded.seeds()[1].text, "read");
+    EXPECT_FALSE(recorded.seeds()[1].substituted);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

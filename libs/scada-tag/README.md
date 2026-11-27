@@ -668,6 +668,7 @@ scada_tag_detach(ctx);
 
 ```
 ctest --preset dev -R scada-tag-unit-test
+ctest --preset dev -R scada-tag-limits-test
 ctest --preset dev -R scada-tagd-integration-test
 ctest --preset dev -R scada-tag-access-integration-test
 ctest --preset dev -R scada-tag-rt-integration-test

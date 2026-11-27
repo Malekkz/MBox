@@ -461,6 +461,10 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   `corpus_test.cpp`; its README gives the format.
 - `tests/yaml_test.cpp`: every construct of the subset, accepted and refused,
   with its code, line and column, and each parsing limit.
+  `tests/yaml_limits_test.cpp` holds the default limits at N and N + 1 (a
+  file of 8 MiB, a million nodes, 65,536 entries), an executable of its
+  own with its own time limit (`scada-conf-yaml-limits-test`, #164); the
+  helpers both use are in `tests/yaml_cases.h`.
 - `fuzz/`: fuzz targets with their seed corpora (`ctest --preset fuzz` in the
   `fuzz` build): `path_class_fuzz` (stage 1 paths), `yaml_fuzz` (the
   parser; its seeds hold the contract's examples and every refused
@@ -478,6 +482,10 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   same tree.
 - `tests/schema_test.cpp`: each keyword of the validator with its code, and
   the built-in schemas against the contract's examples.
+  `tests/schema_limits_test.cpp` checks that typed keys cost linearithmic
+  time, over files of 4,096 and 65,536 keys, in an executable of its own
+  (`scada-conf-schema-limits-test`, #164); `tests/schema_cases.h` holds
+  the schema set both build.
 - `tests/expand_test.cpp`: each step of the merge order and each CF-4xx
   code, with the instance and the template line of its errors.
 - `tests/limits_test.cpp`, `tests/tree_limits_test.cpp` and

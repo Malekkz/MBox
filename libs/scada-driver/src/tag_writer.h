@@ -28,6 +28,24 @@ struct PointHandles {
     std::vector<std::size_t> first;  // one per device of the channel
 };
 
+// What TagWriter::seed hands each point's stored value to: the channel
+// engine, or a test's recorder.
+class PointSeeds {
+public:
+    PointSeeds() = default;
+    PointSeeds(const PointSeeds&) = delete;
+    PointSeeds& operator=(const PointSeeds&) = delete;
+    PointSeeds(PointSeeds&&) = delete;
+    PointSeeds& operator=(PointSeeds&&) = delete;
+    virtual ~PointSeeds() = default;
+
+    // As ChannelEngine::seed_point: `stored` is the value point `point` of
+    // `device` holds; `substituted`, that it carries SUBSTITUTED.
+    virtual void seed_point(std::uint32_t device, std::uint32_t point,
+                            const TagValue& stored,
+                            bool substituted) noexcept = 0;
+};
+
 // 9.1, by owner slot: every tag of owner `owner` is written with its value
 // as stored, BAD with NOT_INIT and source time 0, except a tag still marked
 // RESTORED from a retain file, which keeps its value and quality until the
@@ -61,6 +79,8 @@ public:
     // Gives `engine` the value each point's tag holds now, after 9.1, as
     // its last value (review M4). Not real-time.
     void seed(ChannelEngine& engine, const CompiledChannel& channel) noexcept;
+    // The same, into `seeds` (for the tests).
+    void seed(PointSeeds& seeds, const CompiledChannel& channel) noexcept;
 
     // Writes the pending STRING values, then wakes the consumers once if
     // anything was written since the last call: one `scada_tag_notify` per

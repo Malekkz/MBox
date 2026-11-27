@@ -2720,3 +2720,50 @@ Consequences:
 - Slice 5b of #104 (the `sys.proc` tags of a driver's main thread) and the tag-set generator of #101 can build on the 1.1 rule.
 - Reference 5.6 says a restored value reads UNCERTAIN with RESTORED; under a bound it can read BAD with RESTORED. Recorded as a difference in contract section 17, for the next revision of the reference (accepted by the lead).
 - Configuration schemas 0.7 also ties CW-510 and 5.2 to the library part of the bound (#89), not to the version, and cites the wider SUBSTITUTED in 4.7 and difference 16. The driver interface contract and `libscada-driver` set SUBSTITUTED for the two new cases with #154.
+
+## D-144: The zone table searches every interval that may hold a local time
+Date: 2026-11-27
+Phase / issue: 2, #158; follows D-130
+Status: accepted for review
+
+Context: `tzif_fuzz` aborted on `main` (the run for b67f666) at the round-trip check: a local time converted to an instant other than the one it was written from, without being marked uncertain. The input is a valid version 2 zone file. It has three changes in mid-1970: to +15:04:16, 38,656 s later to +18:08:23, 128 s later back to +15:04:16, and then the footer `CET-3` (+3 h). `ZoneTable::convert` looked at two intervals on each side of the one that holds the local time read as UTC (`SEARCH_WINDOW`). That is enough only while every interval of constant offset is longer than the span of the offsets (under 51 h, RFC 9636). Here the interval that holds the answer was three places away. The only match found was the footer's interval, a later instant, given as certain.
+
+The same check then aborted in the fuzz job of PR 159 on a second input: changes 2 min and then 1 s apart (+2 h, +1 h, +2 h) and a footer without daylight time at -3 h. Two causes act there: (a) `from_tzif` added the footer's change at the last transition's own instant, which left an interval of length zero; (b) the window of two, as above.
+
+Decision:
+- `from_tzif` computes the window each table needs: the largest number of interval begins that lie within less than the span of the table's offsets (the largest minus the smallest, with 0) of one another, at least 2. `convert` searches that many intervals on each side.
+- A table that would need more than 16 is refused, so that a conversion, which runs on a worker for each sample with a device time, stays bounded. `to_utc` does one binary search over the intervals and then looks at no more than 33 intervals (16 on each side and the one found) twice: once for the matches, once for a skipped hour. The header of `ZoneTable` states the bound.
+- The refusal is DATA_CORRUPT ("the zone file's changes of offset are too close together for its offsets"), as for any other file a table cannot be built from. INVALID_ARGUMENT is documented by `build` for a name that is not a zone name; the configuration compile reports both file cases as an unusable zone file. `from_tzif` now documents its failures.
+- The span bounds the distance in both directions at once, so it can be up to twice what one direction needs. It refuses more hand-made files than it must, never a real one, and keeps the rule simple. It is left as it is.
+- A change at the instant the last interval begins replaces that interval (`ZoneTable::add_change`), so no interval is empty; if the offset before it is the same, the two merge. A change at the begin of the table's only interval takes its place; no file reaches that today, since every change lies after the table's start.
+- The fuzz target's check is right and is not changed. Both inputs are in the corpus (`changes-closer-than-offsets`, `footer-at-the-last-transition`).
+- Tests (`zone_table_test.cpp`):
+  - each input as a unit test, and its mirror west of UTC, where the answer lies after the interval found;
+  - 16 close changes taken and 17 refused;
+  - a footer change back to the offset before;
+  - a seeded property test: on 4,000 generated tables, `to_utc` agrees with `ZoneTable::to_utc_searching_all`, a search of every interval written apart from `convert`.
+  These fail for each mutant the review of PR 162 found: either side of the window fixed at 2, the span without 0 or as `highest`, a cap other than 16, `>=` for `>`, the replacement without the merge.
+
+Reason: the window follows from the table itself, so a correct answer does not depend on how real zones happen to be laid out. The bound keeps the real-time cost of a conversion fixed.
+
+Consequences: real zone files are unaffected. On the build machine no zone file has two changes closer together than the span of its own offsets, so every table keeps the window of 2. `scada-driver-zones-test`, which compares every zone with the C library, passes unchanged. A hand-made or damaged file of that kind is either converted correctly (the repeated local time gives its earliest instant, marked uncertain) or refused, never converted wrongly.
+
+## D-145: Drivers set SUBSTITUTED (tag database contract 1.1)
+Date: 2026-11-26, revised 2026-11-27 after the review of PR 157
+Phase / issue: 2, #154 (P2-15); follows #151 (D-143)
+Status: for review by a person (contract change: driver interface contract 0.7).
+
+Context: tag database contract 1.1, section 6, gives SUBSTITUTED the meaning that ruling R-6 of the driver interface contract asked for: a value substituted by configuration, and a value the device reports as forced, besides one entered by a person. The driver interface contract 0.6 and `libscada-driver` held the flag back "until tag database 1.1" (decision D-131: device flags masked to OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST).
+
+Decision:
+- One source gives SUBSTITUTED: the `substitute` action of `on_invalid` or of an invalid marker (CS 4.7) writes the configured value UNCERTAIN with SUBSTITUTED.
+- The flag stays with the value (review R1). `PointState::substituted` records that the value held is a configured substitute. Every write that keeps it carries the flag, with that write's own quality: after COMM_FAIL, ABSENT and NO_VALUE, after a stale check, in the writes of driver interface contract 9.1 (`kept_flags` in `tag_writer.cpp`), and after a restart, where `TagWriter::seed` reads the flag from the stored value. The next value read from the device ends it. A companion does not pass it to a dependent point (`companion_flags`): the flag describes the companion's value.
+- Two masks (review R2). `CONFIG_FLAGS_MASK` is the flags the configuration may give in a marker or a `quality_from` map: OUT_OF_RANGE, OVERFLOW, BLOCKED and TEST, as CS 4.7 allows. `DEVICE_FLAGS_MASK` is the flags a protocol's mapping may give: the same four. Neither holds SUBSTITUTED; the last point of D-131 on the mask stands. `keep_last` stays without SUBSTITUTED (contract 5.2).
+- A value the device reports as forced is room only (review R3), until a protocol carries a value with a mark (#136). A NO_VALUE or DEVICE_INVALID answer carries no value of the device's, so the flag would land on a kept value the device did not give. Row 4 of contract 5.2 no longer lists SUBSTITUTED.
+- Bits of a word (`bits`, CS 4.7): on a substitute they keep the values last read, and `ProcessedSample` gives them the word's quality and flags, SUBSTITUTED included (`sample_processing.h`). Nothing writes bit tags yet (`TagWriter` writes the point's own tag only). The slice that writes them decides whether a bit of a substituted word carries the flag.
+- The driver interface contract goes to 0.7: it cites tag database 1.1, 5.2 states the rule without "until 1.1", R-6 says what is in effect, and 2.5 no longer names TD 1.1 for the wake-only form of #116, which 1.1 does not have.
+- The golden vector of `substitute` (`tests/golden/driver-vectors.txt`, shared with #105 and #106) expects SUBSTITUTED,LOCAL_TIME.
+
+Reason: the code and the contracts follow tag database 1.1; nothing read the flag from a driver before. A flag that a kept value lost at the next failed poll would tell an operator the substitute was a measurement.
+
+Consequences: the writer of the driver process (`tag_writer.*`, PR 150) is on `main`, so the flag reaches the tag database; `tests/integration/tag_writer_integration_test.cpp` shows that the writes of 9.1 keep it. A test of `on_invalid: substitute` through a running driver process waits for #104 and is part of #154. The fuzz target `sample_processing_fuzz` checks both ways that a write has the flag exactly when its value is a configured substitute.

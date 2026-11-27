@@ -125,8 +125,11 @@ D-142 record the choices the contracts left open.
   reads 12.3; `to_raw_value` returns 12.3 as the value written.
 - **A late poll group does not catch up.** When a cycle ends after the next
   one was due, the next starts at once, and missed cycles are not sent.
-- **SUBSTITUTED** is not written until tag database contract 1.1 (#89): a
-  configured substitute is UNCERTAIN, and incoming flags are masked.
+- **SUBSTITUTED comes only from a configured substitute** (D-145): the
+  `substitute` action writes its value UNCERTAIN with SUBSTITUTED, and every
+  write that keeps that value, across a restart too, keeps the flag. A
+  companion does not pass it on. A value forced at the device is not marked
+  yet: no protocol carries a value with a mark (#136).
 - **No integer tag on a floating raw type** (CF-504, D-134), other than an
   enumeration or a double point: the rules are refused, a read is BAD with
   OUT_OF_RANGE and a write is refused. Use `value_type: float64`.
@@ -152,12 +155,20 @@ carry them there. They are read when a configuration is compiled.
   configuration with a local-time device is refused.
 - A file without a footer rule makes every time after its last transition
   uncertain.
+- A file in which more than 16 begins of intervals of constant offset
+  (the table's start and each change) lie within less than the span of its
+  offsets (the largest minus the smallest, with 0) of one another is
+  refused as not valid, so that every conversion looks at a bounded number
+  of intervals: at most 33 (#158, D-144).
+  No real zone file comes near it: in each of the 499 zone files of the
+  build machine, changes are further apart than the span of the offsets.
 
 ## Testing
 
 ```
-cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test \
-  scada-driver-transport-test scada-driver-test-sim scada-drv-test \
+cmake --build --preset dev --target scada-driver-unit-test \
+  scada-driver-engine-property-test scada-driver-plan-property-test \
+  scada-driver-zones-test scada-driver-transport-test scada-driver-test-sim scada-drv-test \
   scada-driver-process-integration-test scada-tagd
 ctest --preset unit -R 'scada-driver|sample_processing|tzif'
 ctest --preset integration -R 'scada-driver-(zones|transport|process)'
@@ -209,7 +220,10 @@ until reload; every other signal has its default.
   injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
   time. `plan_test.cpp` checks the planner against plans worked out by
   hand, and `plan_property_test.cpp` checks every rule on 10,000 random
-  plans from a fixed seed.
+  plans from a fixed seed. It and `engine_random_test.cpp` (the channel
+  engine's invariants for many seeds) are executables of their own, with
+  their own time limits (`scada-driver-plan-property-test`,
+  `scada-driver-engine-property-test`, #164).
 - The conformance tests of failure handling (15, 16, 17, the dead-device
   part of 12 and the gateway and busy parts of 19) run the channel engine
   over a simulated transport (`tests/sim_transport.h`) on the same bus:

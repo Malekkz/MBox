@@ -4,11 +4,11 @@
 
 #include "scada/tag/tag_set.h"
 
+#include "tag_set_expect.h"
 #include "tag_set_samples.h"
 
 #include "scada/common/result.h"
 #include "scada/common/status.h"
-#include "scada/tag/handle.h"
 #include "scada/tag/types.h"
 
 #include <gtest/gtest.h>
@@ -27,30 +27,9 @@ namespace {
 
 using namespace scada::tag;
 using scada::Result;
-using scada::Status;
 using scada::StatusCode;
-
-// Expects that `tag_set` is rejected with `code` and a detail that contains
-// `fragment`.
-void expect_rejected(const TagSet& tag_set, StatusCode code,
-                     std::string_view fragment) {
-    std::string detail;
-    const Status status = validate(tag_set, detail);
-    EXPECT_EQ(status.code(), code) << detail;
-    EXPECT_NE(detail.find(fragment), std::string::npos)
-        << "detail: " << detail << "\nexpected to contain: " << fragment;
-    // The hash refuses the same tag set for the same reason.
-    std::string hash_detail;
-    const Result<ConfigHash> hash = config_hash(tag_set, hash_detail);
-    EXPECT_EQ(hash.status().code(), code);
-    EXPECT_EQ(hash_detail, detail);
-}
-
-void expect_valid(const TagSet& tag_set) {
-    std::string detail = "untouched";
-    EXPECT_TRUE(validate(tag_set, detail).ok()) << detail;
-    EXPECT_EQ(detail, "untouched");
-}
+using scada::tag::tag_set_expect::expect_rejected;
+using scada::tag::tag_set_expect::expect_valid;
 
 ConfigHash hash_of(const TagSet& tag_set) {
     std::string detail;
@@ -453,60 +432,6 @@ TEST(TagSetValidate, AppliesTheChangeRingLimits) {
         StatusCode::OUT_OF_RANGE,
         "owner 'p': change_ring_capacity 1024 is less than twice "
         "its 513 tags");
-}
-
-// Contract section 14: number of processes, owners, queues and tags.
-TEST(TagSetValidate, AppliesTheCountLimits) {
-    {
-        TagSet tag_set;
-        for (std::size_t i = 0; i < MAX_PROCESSES; ++i) {
-            tag_set.processes.push_back(
-                {.name = "p" + std::to_string(i), .uid = 1});
-        }
-        expect_valid(tag_set);
-        tag_set.processes.push_back({.name = "one-too-many", .uid = 1});
-        expect_rejected(tag_set, StatusCode::OUT_OF_RANGE,
-                        "the tag set has 1025 process entries; the limit is "
-                        "1024");
-    }
-    {
-        TagSet tag_set;
-        tag_set.processes = {{.name = "p", .uid = 1}};
-        for (std::size_t i = 0; i < MAX_OWNERS; ++i) {
-            tag_set.owners.push_back(
-                {.name = "p.w" + std::to_string(i), .process = "p"});
-        }
-        expect_valid(tag_set);
-        tag_set.owners.push_back({.name = "p.one-too-many", .process = "p"});
-        expect_rejected(tag_set, StatusCode::OUT_OF_RANGE,
-                        "the tag set has 1024 owner entries; the limit is "
-                        "1023");
-    }
-    {
-        TagSet tag_set = samples::one_owner();
-        tag_set.processes.push_back({.name = "c", .uid = samples::UID_OTHER});
-        for (std::size_t i = 0; i < MAX_QUEUES; ++i) {
-            tag_set.queues.push_back({.name = "events.q" + std::to_string(i),
-                                      .producer = "p",
-                                      .consumer = "c"});
-        }
-        expect_valid(tag_set);
-        tag_set.queues.push_back(
-            {.name = "events.one-too-many", .producer = "p", .consumer = "c"});
-        expect_rejected(tag_set, StatusCode::OUT_OF_RANGE,
-                        "the tag set has 4097 queue entries; the limit is "
-                        "4096");
-    }
-    {
-        // The count is checked before anything else, so the entries need no
-        // content. The largest valid tag set is built in the performance
-        // test, where it does not slow the unit tests down.
-        TagSet tag_set = samples::one_owner();
-        tag_set.tags.resize(MAX_TAGS + 1);
-        expect_rejected(tag_set, StatusCode::OUT_OF_RANGE,
-                        "the tag set has 1000001 tag entries; the limit is "
-                        "1000000");
-    }
 }
 
 // The hash is the SHA-256 of the canonical encoding described in the

@@ -103,10 +103,11 @@ public:
 
     // Takes `stored`, the value point `point` of device `device` holds in
     // the tag database after the writes of 9.1, as its last value
-    // (seed_point_state, review M4). Out of range is ignored. Called once,
+    // (seed_point_state, review M4). `substituted`: the stored value carries
+    // SUBSTITUTED (review R1 of #157). Out of range is ignored. Called once,
     // before the first step.
     void seed_point(std::uint32_t device, std::uint32_t point,
-                    const TagValue& stored) noexcept;
+                    const TagValue& stored, bool substituted = false) noexcept;
 
     [[nodiscard]] Status status() const noexcept { return status_; }
 
