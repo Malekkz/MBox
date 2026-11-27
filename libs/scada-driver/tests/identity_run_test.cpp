@@ -23,13 +23,13 @@ namespace {
 
 using Kind = IdentityVerdict::Kind;
 
-// A check on point 0 that its STRING matches `ABC*`, and one on point 1
+// A check on point 0 that its STRING matches `MODEL-*`, and one on point 1
 // that its UINT64 is 3 or 4.
 std::vector<IdentityCheck> two_checks() {
     std::vector<IdentityCheck> checks(2);
     checks[0].point = 0;
     checks[0].kind = IdentityCheck::Kind::PATTERN;
-    checks[0].pattern = "ABC*";
+    checks[0].pattern = "MODEL-*";
     checks[1].point = 1;
     checks[1].kind = IdentityCheck::Kind::IN;
     checks[1].values = {ExpectedValue{.type = tag::TagType::UINT64, .u = 3},
@@ -47,11 +47,11 @@ TEST(IdentityRun, EveryCheckMatchedIsAMatch) {
     IdentityRun run(checks);
     run.start(100);
     EXPECT_EQ(run.verdict(0).kind, Kind::NONE);  // nothing read yet
-    run.sample(0, Outcome::VALUE, true, string_value("ABC2000"));
+    run.sample(0, Outcome::VALUE, true, string_value("MODEL-A"));
     EXPECT_EQ(run.verdict(0).kind, Kind::NONE);  // one check not read
     run.sample(1, Outcome::VALUE, true, uint64_value(4));
     EXPECT_EQ(run.verdict(0).kind, Kind::MATCH);
-    EXPECT_EQ(text_of(run), "ABC2000; 4");
+    EXPECT_EQ(text_of(run), "MODEL-A; 4");
 }
 
 TEST(IdentityRun, AWrongValueOrAnAbsentAddressIsAMismatchAtOnce) {
@@ -82,7 +82,7 @@ TEST(IdentityRun, AnUnreadableValueWaitsForTheDeadline) {
     EXPECT_EQ(late.reason, MismatchReason::UNREADABLE);
     // A value processing refused is unreadable too.
     run.start(100);
-    run.sample(0, Outcome::VALUE, false, string_value("ABC"));
+    run.sample(0, Outcome::VALUE, false, string_value("MODEL"));
     EXPECT_EQ(run.verdict(200).reason, MismatchReason::UNREADABLE);
 }
 
@@ -121,12 +121,12 @@ TEST(IdentityRun, AMovedRunKeepsItsTexts) {
     const std::vector<IdentityCheck> checks = two_checks();
     IdentityRun first(checks);
     first.start(100);
-    first.sample(0, Outcome::VALUE, true, string_value("ABC5"));
+    first.sample(0, Outcome::VALUE, true, string_value("MODEL-5"));
     first.sample(1, Outcome::VALUE, true, uint64_value(3));
     std::vector<IdentityRun> runs;
     runs.push_back(std::move(first));
     runs.emplace_back(checks);  // the vector grows: the first run moves
-    EXPECT_EQ(text_of(runs.front()), "ABC5; 3");
+    EXPECT_EQ(text_of(runs.front()), "MODEL-5; 3");
     EXPECT_EQ(runs.front().verdict(0).kind, Kind::MATCH);
 }
 

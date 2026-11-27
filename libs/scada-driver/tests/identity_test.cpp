@@ -114,9 +114,9 @@ TEST(Identity, EqualsAndInCompareTheValues) {
     EXPECT_TRUE(identity_matches(equals, int64_value(12)));  // its value
     EXPECT_FALSE(identity_matches(equals, uint64_value(13)));
     const IdentityCheck any_of =
-        check(IdentityCheck::Kind::IN, {text("ABC2000"), text("ABC3000")});
-    EXPECT_TRUE(identity_matches(any_of, string_value("ABC3000")));
-    EXPECT_FALSE(identity_matches(any_of, string_value("ABC4000")));
+        check(IdentityCheck::Kind::IN, {text("MODEL-A"), text("MODEL-B")});
+    EXPECT_TRUE(identity_matches(any_of, string_value("MODEL-B")));
+    EXPECT_FALSE(identity_matches(any_of, string_value("MODEL-C")));
     EXPECT_FALSE(identity_matches(check(IdentityCheck::Kind::EQUALS, {}),
                                   uint64_value(0)));
 }
@@ -142,9 +142,9 @@ TEST(Identity, ARangeIncludesBothEnds) {
 
 TEST(Identity, APatternMatchesAStringOnly) {
     const IdentityCheck pattern =
-        check(IdentityCheck::Kind::PATTERN, {}, "ABC2000-*KW*");
-    EXPECT_TRUE(identity_matches(pattern, string_value("ABC2000-10KW-M1")));
-    EXPECT_FALSE(identity_matches(pattern, string_value("ABC5000-10KW")));
+        check(IdentityCheck::Kind::PATTERN, {}, "MODEL-A-*X*");
+    EXPECT_TRUE(identity_matches(pattern, string_value("MODEL-A-10X-R1")));
+    EXPECT_FALSE(identity_matches(pattern, string_value("MODEL-E-10X")));
     EXPECT_FALSE(identity_matches(pattern, uint64_value(1)));
     // `*` matches the empty text, which a number would give: still no match
     // (review S7).
@@ -204,11 +204,11 @@ TEST(Identity, APatternIsCheckedAsTheMatcherTakesIt) {
     // Ruling item 5: at most 250 bytes, no single backslash at the end, on a
     // STRING point only.
     EXPECT_TRUE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "ABC*"),
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"),
                                 TagType::STRING)
             .ok());
     EXPECT_FALSE(
-        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "ABC*"),
+        validate_identity_check(check(IdentityCheck::Kind::PATTERN, {}, "MODEL-*"),
                                 TagType::UINT64)
             .ok());
     EXPECT_FALSE(

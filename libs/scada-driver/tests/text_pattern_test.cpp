@@ -18,17 +18,17 @@ namespace {
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers): the texts are the test data
 
 TEST(TextPattern, MatchesTheWholeText) {
-    EXPECT_TRUE(text_matches("SUN2000", "SUN2000"));
-    EXPECT_FALSE(text_matches("SUN2000", "SUN2000-10KTL"));
-    EXPECT_FALSE(text_matches("SUN2000", "XSUN2000"));
+    EXPECT_TRUE(text_matches("MODEL-A", "MODEL-A"));
+    EXPECT_FALSE(text_matches("MODEL-A", "MODEL-A-10X"));
+    EXPECT_FALSE(text_matches("MODEL-A", "XMODEL-A"));
     EXPECT_TRUE(text_matches("", ""));
     EXPECT_FALSE(text_matches("", "a"));
 }
 
 TEST(TextPattern, AStarTakesAnyCharactersAQuestionMarkOne) {
-    EXPECT_TRUE(text_matches("SUN2000-*KTL", "SUN2000-10KTL"));
-    EXPECT_TRUE(text_matches("SUN2000-*KTL", "SUN2000-KTL"));
-    EXPECT_FALSE(text_matches("SUN2000-*KTL", "SUN2000-10KTL-M1"));
+    EXPECT_TRUE(text_matches("MODEL-A-*X", "MODEL-A-10X"));
+    EXPECT_TRUE(text_matches("MODEL-A-*X", "MODEL-A-X"));
+    EXPECT_FALSE(text_matches("MODEL-A-*X", "MODEL-A-10X-R1"));
     EXPECT_TRUE(text_matches("*", ""));
     EXPECT_TRUE(text_matches("**", "abc"));
     EXPECT_TRUE(text_matches("v?.?", "v1.2"));
