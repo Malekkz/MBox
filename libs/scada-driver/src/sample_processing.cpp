@@ -645,6 +645,13 @@ void hold_last(Work& work, QualityMark extra) noexcept {
 // Step 1, invalid markers on the raw pattern. Returns true when one matched
 // and decided the value.
 bool apply_markers(Work& work) noexcept {
+    // A marker never applies to a STRING tag: a string has no raw pattern,
+    // and a sample of another kind is no string (take_string gives it BAD).
+    // marker_matches looks at the sample's kind, which a protocol fault can
+    // make other than the configured one (#169).
+    if (work.rules->tag_type == TagType::STRING) {
+        return false;
+    }
     for (const InvalidMarker& marker : work.rules->markers) {
         if (!marker_matches(marker, work.sample->raw)) {
             continue;

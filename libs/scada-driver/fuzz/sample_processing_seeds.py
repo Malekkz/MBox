@@ -11,6 +11,9 @@
 # string-overlong and string-utf8. They came from earlier fuzzing and hand
 # edits, were long enough to run, and are kept as they were, with the two
 # header bytes the target gained in #165 inserted as 0 (no companion rules).
+#
+# Nor the three `found-*` seeds: inputs the fuzzer found when STRING tags
+# were turned on (#169), kept as they were found, as regression tests.
 import struct, sys, os
 out = sys.argv[1]
 

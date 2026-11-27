@@ -2396,6 +2396,11 @@ Decision:
 - An enumeration is an INT64 tag of the device's code, without a scale: it is read and written as the code (CS 7.2), so the two are inverse. The compile step refuses an enumeration with a scale or on another type.
 - A `quality_from` map without `default` gives BAD for a value it does not list. A counter on a negative or floating raw value is BAD with OUT_OF_RANGE. A raw value whose width does not fit its kind (a protocol fault; a width of 0 would make every marker miss) is BAD with OUT_OF_RANGE. A device time on a tag that is not INT64 is BAD.
 - `validate_point_rules` states what the compile step refuses (companion slots, bit and field numbers above 63, unsorted tables, a `divide_by` of 0, CF-517, a local time without a zone); the processing writes BAD for any rule that reaches it anyway, never undefined behaviour.
+- Amended by #169 (the lead's ruling of 2026-11-27: the library holds to its own documented rules whatever the compile step catches first):
+  - `process_sample` calls `validate_point_rules` (real-time: no allocation, one pass over the rules' lists) before any step. Refused rules give BAD with OUT_OF_RANGE for every outcome, the value kept; no marker, hold, `quality_from` or `health` rule is applied. Before, some paths, such as a substitute marker or a young hold, still gave UNCERTAIN.
+  - `validate_point_rules` also refuses the CF-504 pairs of the compile step (`check_value_type` in libscada-conf, D-115): a STRING tag if and only if the raw is a string, and a BOOL tag only on a bool raw. The two lists must change together.
+  - A marker never applies to a STRING tag: a sample of another kind on a STRING tag (a protocol fault) goes to the string step, which gives BAD with OUT_OF_RANGE, and is never substituted.
+  - Whether the framework must refuse a sample of any other kind than the configured raw type is a contract question, on #136.
 Reason: each is the reading that never shows a value as better than it is; the rest is left as tag database contract 6 defines its flags.
 Consequences: conformance tests 4, 7, 8, 17 and 40 test these readings with the test protocol; a protocol cannot change them. A time-valued point's TIME_UNCERTAIN follows the lead's ruling on CS 4.6, not this decision.
 

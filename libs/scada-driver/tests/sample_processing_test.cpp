@@ -338,8 +338,9 @@ struct RefusedKind {
 
 constexpr std::uint8_t NO_SUCH_SLOT = 5;
 constexpr std::uint8_t BIT_64 = 64;
+constexpr double HALF = 0.5;
 
-const std::array<RefusedKind, 15> REFUSED_KINDS{{
+constexpr std::array<RefusedKind, 15> REFUSED_KINDS{{
     {"exponent companion slot",
      [](PointRules& rules) {
          rules.exponent = ExponentRule{.companion = NO_SUCH_SLOT};
@@ -374,7 +375,7 @@ const std::array<RefusedKind, 15> REFUSED_KINDS{{
                                  .divide_by = 0};
      }},
     {"integer tag with a binary64 scale",
-     [](PointRules& rules) { rules.scale = ScaleRule{.gain = 0.5}; }},
+     [](PointRules& rules) { rules.scale = ScaleRule{.gain = HALF}; }},
     {"integer tag on a floating raw type",
      [](PointRules& rules) { rules.raw_kind = RawKind::FLOAT; }},
     {"local device time without a zone",
@@ -404,6 +405,32 @@ const std::array<RefusedKind, 15> REFUSED_KINDS{{
      }},
 }};
 
+// sample_processing_fuzz with STRING tags on (#169): a STRING tag on a
+// string raw, with a substitute marker, given a sample of another kind (a
+// signed 8-bit raw whose pattern is the marker's). A marker never applies
+// to a STRING tag: the sample is no string, so BAD with OUT_OF_RANGE, and
+// never a substitute.
+TEST(SampleProcessing, AMarkerNeverAppliesToAStringTag) {
+    constexpr std::uint64_t MARKER = 5;
+    constexpr unsigned INT8 = 8;
+    PointRules rules;
+    rules.tag_type = TagType::STRING;
+    rules.raw_kind = RawKind::STRING;
+    rules.markers.push_back(InvalidMarker{.pattern = MARKER,
+                                          .action = InvalidAction::SUBSTITUTE,
+                                          .substitute = string_value({})});
+    ASSERT_TRUE(validate_point_rules(rules).ok());
+    Point point(rules);
+    const TagWrite write = point
+                               .feed(RawSample{.outcome = Outcome::VALUE,
+                                               .raw = raw_signed(MARKER, INT8)},
+                                     SECOND)
+                               .tag;
+    EXPECT_EQ(write.quality, Quality::BAD);
+    EXPECT_TRUE(has(write.flags, QualityFlag::OUT_OF_RANGE));
+    EXPECT_FALSE(has(write.flags, QualityFlag::SUBSTITUTED));
+}
+
 // The control: the rules are valid, and all ones gives the substitute.
 TEST(SampleProcessing, TheRulesOfTheRefusedKindsSubstituteWhenValid) {
     const PointRules rules = substituting_rules();
@@ -414,6 +441,18 @@ TEST(SampleProcessing, TheRulesOfTheRefusedKindsSubstituteWhenValid) {
     EXPECT_TRUE(has(write.flags, QualityFlag::SUBSTITUTED));
 }
 
+// A write of refused rules: BAD with OUT_OF_RANGE, never SUBSTITUTED.
+::testing::AssertionResult refused_write(const TagWrite& write) {
+    if (write.quality == Quality::BAD &&
+        has(write.flags, QualityFlag::OUT_OF_RANGE) &&
+        !has(write.flags, QualityFlag::SUBSTITUTED)) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "quality " << static_cast<int>(write.quality) << ", flags "
+           << write.flags;
+}
+
 // Whatever path a sample takes, refused rules give BAD with OUT_OF_RANGE:
 // no substitute, no value read.
 TEST(SampleProcessing, RefusedRulesGiveBadOnEveryPath) {
@@ -422,14 +461,10 @@ TEST(SampleProcessing, RefusedRulesGiveBadOnEveryPath) {
         kind.refuse(rules);
         ASSERT_FALSE(validate_point_rules(rules).ok()) << kind.name;
         Point point(rules);
-        for (const std::int64_t raw : {std::int64_t{-1}, FIRST_VALUE}) {
-            const TagWrite write = point.value(raw, SECOND).tag;
-            EXPECT_EQ(write.quality, Quality::BAD) << kind.name << " " << raw;
-            EXPECT_TRUE(has(write.flags, QualityFlag::OUT_OF_RANGE))
-                << kind.name << " " << raw;
-            EXPECT_FALSE(has(write.flags, QualityFlag::SUBSTITUTED))
-                << kind.name << " " << raw;
-        }
+        // All ones would be the substitute; FIRST_VALUE a value read.
+        EXPECT_TRUE(refused_write(point.value(-1, SECOND).tag)) << kind.name;
+        EXPECT_TRUE(refused_write(point.value(FIRST_VALUE, 2 * SECOND).tag))
+            << kind.name;
     }
 }
 
