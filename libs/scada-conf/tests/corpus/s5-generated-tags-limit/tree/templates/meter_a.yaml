@@ -1,0 +1,4 @@
+template: meter_a
+protocol: modbus
+points:
+  - { name: flow, address: { table: holding, register: 1, type: uint16 } }

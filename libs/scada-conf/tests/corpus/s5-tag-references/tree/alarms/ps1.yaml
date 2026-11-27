@@ -1,0 +1,5 @@
+alarms:
+  - { tag: ps1.p1.tripped, type: state, alarm_on: true, priority: high, area: ps1 }
+  - { tag: ps1.p1.speed, type: deviation, limit: 50, setpoint: ps1.p1.running, priority: high, area: ps1 }
+  - { tag: ps1.p1.speed_cmd.status, type: state, alarm_on: 4, priority: low, area: ps1 }
+  - { tag: ps1.p2.speed, type: high, limit: ps1.flow_sp, priority: high, area: ps1 }

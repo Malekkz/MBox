@@ -1,0 +1,16 @@
+# The tags of the expanded tree and the references to them outside
+# expressions (contract 2.6, 12.4, 12.5; D-116, slice 7a of #100). Each
+# reference names a tag of the tree: a point, a bit (ps1.p1.tripped), a tag
+# file's tag (ps1.flow_sp) or a generated tag (ps1.p1.speed_cmd.status). In
+# order: the setpoint of a deviation alarm is the BOOL bit ps1.p1.running
+# (CF-312); ps1.p2.speed is no tag; the local panel's input is no tag; the
+# template's exponent_from names no point of the device; poll group hourly
+# is not on line1; the output's feedback is no tag; tags/site.yaml defines
+# ps1.p1.flow, the point tag of ps1.p1. Invented.
+alarms/ps1.yaml:3:64: CF-312
+alarms/ps1.yaml:5:12: CF-310
+areas.yaml:5:29: CF-310
+drivers/modbus/line1.yaml:7:13: CF-310
+drivers/modbus/line1.yaml:7:13: CF-604
+outputs/ps1.yaml:6:15: CF-310
+tags/site.yaml:2:13: CF-302
