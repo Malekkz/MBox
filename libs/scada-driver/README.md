@@ -28,10 +28,14 @@ The library is built in slices. These are the first two:
 | The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-145) |
 
 The worker writes the `sys.drv.<channel>.*` and `sys.dev.<device>.*` tags
-of 11.1: states when they change, counters at most once a second. The main
-thread writes the `sys.proc.<process>.*` tags as the owner named like the
-process. A tag set must list them all (CS 12.5); a driver whose tag set
-lacks one does not start.
+of 11.1: states when they change, counters at most once a second, averages
+rounded to 0.1 ms. At the stop it writes the counters' last values, then the
+channel and its devices as not connected. The main thread writes the
+`sys.proc.<process>.*` tags as the owner named like the process, and
+`config_state` 0 again at the stop. A tag set must list them all (CS 12.5);
+a driver whose tag set lacks one does not start. The device tags of slices
+not built yet (`restarts`, `selections_lost`, `last_command_stage`) read
+NOT_INIT.
 
 Not yet here: the identity and restart tags (slice 5b-2), the workers' log
 queues (slice 5b-3),

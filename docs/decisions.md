@@ -2714,13 +2714,16 @@ Decision:
   - `identity`, `identity_ok` and `restarts` come with 5b-2.
   - `selections_lost` and `last_command_stage` come with the command slices.
   - `refresh_failures` comes with phase 5.
-- Per process, written by the main thread as the owner named like the process (`drv-<protocol>`, CS 12.5; the count-free names of tag database contract 1.1, D-143): every signal of 11.1. `realtime` is false: a driver has no real-time thread (DI 2.5). `config_id` is 0 until the compile step gives the driver one (slice 8); `config_state` is 0 (loading) from the start and 1 (applied) once READY=1 is sent, so a state read with `config_id` 0 matches no configuration `scada-conf` waits for. `stale_outcomes`, `answers_dropped`, `safe_unjournalled` and `log_dropped` are 0 until the slices that count them (the command slices, the fail-safe slice, 5b-3).
+  - The validator generates `restarts`, `selections_lost` and `last_command_stage` for every device, `refresh_failures` for a device that a refreshed output writes, and `identity` and `identity_ok` for a device with `identify`. The driver does not resolve them, and they read BAD with NOT_INIT, from the walk of 9.1, for the driver's whole life until their slice (PR 159 review S2).
+- Per process, written by the main thread as the owner named like the process (`drv-<protocol>`, CS 12.5; the count-free names of tag database contract 1.1, D-143): every signal of 11.1. `realtime` is false: a driver has no real-time thread (DI 2.5). `config_id` is 0 until the compile step gives the driver one (slice 8); `config_state` is 0 (loading) from the start, 1 (applied) once READY=1 is sent, and 0 again at the stop, once every worker returned (review M3), so a state read with `config_id` 0 matches no configuration `scada-conf` waits for. What `config_state` says across a reload is slice 8's. `stale_outcomes`, `answers_dropped`, `safe_unjournalled` and `log_dropped` are 0 until the slices that count them (the command slices, the fail-safe slice, 5b-3).
 - The process owner: right after the attach, before any worker starts, the main thread finds the owner named like the process, writes 9.1 for it by owner slot (so it is that owner's first writer, TD 13.2), resolves its `sys.proc` tags with the type and owner checks, and writes them. A tag set without that owner or one of its tags fails the start ("the tag set has no owner p for the sys.proc tags"). A channel whose tags have that owner is refused ("channel c writes owner p, the main thread's"): it would be a second writer. The unused-owner rule of D-142 does not apply to it.
-- The main thread resolves every tag of this list after the point tags of the channel, with the same checks (D-142): a tag the tag set lacks, or one of another type or of another owner than the channel's, fails the start (`RunEnd::FAILED`, exit status 1, "the tag set has no tag t", "tag t is not of its type (11.1)"): the tag set was not built for this configuration (CS 12.5). The handles reach the worker with its point handles (`Worker::begin`).
+- Refused writes of the `sys.proc` tags follow D-142's rules for the point tags (review M4). A refused write at the start fails the start ("the writes of the sys.proc tags of p were refused"): the tags would keep the previous life's values. One while running is counted and logged at the heartbeat, with the workers' counts ("tag writes refused", field OWNER). The refused writes of the stop are logged once, as soon as every worker has returned. A disabled channel's worker stores its refused count as a running one's does.
+- The main thread resolves every tag of this list after the point tags of the channel. The checks are those of D-142 for a point tag, but in code of their own (`resolve_one`, review S3). A tag the tag set lacks, one of another type, or one of another owner than the channel's fails the start (`RunEnd::FAILED`, exit status 1) with "the tag set has no tag t", "tag t is not of its type (11.1)" or "tag t of channel c is owned by o, not by the owner of channel c". Such a tag set was not built for this configuration (CS 12.5). The handles reach the worker with its point handles (`Worker::begin`).
 - A channel's owner is that of its first point tag, as in D-142, or, for a channel without one, that of its `sys.drv.<channel>.state` tag.
 - Values are written GOOD, with no flags and source time 0 (the library stores its own update time with LOCAL_TIME, TD 13). The walk of 9.1 by owner slot (D-142) writes them NOT_INIT with the other tags of the owner; once the worker has its engine, every one is written with its current value, then one notify, all before READY=1 (9.1: "Diagnostic tags are written with their current values").
 - A disabled channel has no engine (CS 4.6): its worker writes its system tags once, at its start, as a channel never connected: `state` 0, every device DISABLED (0), `secured` false, every count, time and average 0, and `requests_per_scan` that of the device's plan.
-- States are checked after every step and written when they change: the channel's and every device's `state`, `secured` and `pacing_limited`. Everything else is written at most once a second, and only when it changed. A worker's wait ends at the next such second, so an idle channel's counters move too. At the stop, once the connection is closed and nothing more is counted, the counters that changed since their last write are written, whatever the period, before the channel's `state` 0: a reader after the stop sees every request the channel sent (PR 159 review).
+- States are checked after every step and written when they change: the channel's and every device's `state`, `secured` and `pacing_limited`. Everything else is written at most once a second, and only when it changed. A worker's wait ends at the next such second, so an idle channel's counters move too. At the stop, once the connection is closed and nothing more is counted, the counters that changed since their last write are written, whatever the period, so a reader after the stop sees every request the channel sent (review M1). The states follow (review M3): the channel's `state` 0; each device's `state` as 3.5 gives it for a channel not connected, CONNECTING, or DISABLED for a disabled device; and `pacing_limited` false. Then `config_state` is 0 (above). The stop does not write states through the engine, which still says connected.
+- What remains of the window of D-142 (review M3). After a clean stop the tags say "not connected" and "loading" until the next life's walk of 9.1. After a kill or a stall nothing is written: the tags keep the previous life's values with OWNER_DOWN. Once the next life attaches, OWNER_DOWN is gone and those values read GOOD until its walk by owner slot, the first thing each thread does after the attach. So, from the attach to the walk, a reader can see the previous life's "connected", "running" and "applied". D-142 keeps that time as short as the threads' start allows.
 - The channel's `state`: 1 (connecting) is written and the readers woken just before a connect begins, since the connect blocks the worker up to `connect_timeout`. It is 2 once connected, and 0 otherwise: after a refused or failed connect, during the back-off, after a loss or a close of the driver's own, and at the stop once the connection is closed.
 - Device counts, kept by the engine for every device:
   - `requests` counts every frame sent to it, retries and probes included.
@@ -2730,12 +2733,17 @@ Decision:
   - `refusals` counts BUSY and UNREACHABLE answers (busy and gateway).
   - `last_status` is the `raw` code of the last answer that `exceptions` or `refusals` counted. The contract fills `raw` only for a REFUSED write, so for reads it stays 0 until the protocols report a code there too (a point for #136).
   - `last_ok_time` is the CLOCK_REALTIME of the last SAMPLES or WRITE_OK answer, 0 before the first.
-  - `response_ms` is the average, over the device's last 100 complete answers, of the time from the send to the first byte of the answer. Bytes left from before the send count as 0 ms, and bytes of frames dropped as stale do not start the time.
+  - `response_ms` is the average, over the device's last 100 complete answers, of the time from the send to the first byte of the answer. Bytes left from before the send count as 0 ms, and bytes of frames dropped as stale do not start the time. It is rounded to 0.1 ms before it is compared with the value last written (`AVERAGE_RESOLUTION_MS`, review S1): finer than the ms of 11.1, so that a local answer of a fraction of a ms does not read 0, and coarse enough that noise writes nothing.
   - `sentinels` and `invalid` come from the sample processing of contract 5 (`SampleCounts`).
   - `points_absent` is the number of its points that are ABSENT now.
   - `requests_per_scan` is that of the plan (6.3).
-- `requests_per_s` is the number of frames the channel sent in the last 10 whole seconds of the monotonic clock, the running second included, divided by 10.
-- `period.<group>` is the scheduler's achieved period in ms (6.3), and `pacing_limited` is the scheduler's verdict (6.4).
+- `requests_per_s` is the number of frames the channel sent in the 10 complete seconds of the monotonic clock before the running one, divided by 10 (review S1). The running second is not counted until it is complete, so a steady rate reads the same at every point of a second and is not rewritten each second. Its resolution is 0.1 per second, and it needs no rounding. Over the first 10 s after the start it ramps up from 0.
+- `period.<group>` is the scheduler's achieved period in ms (6.3), rounded as `response_ms` is; `pacing_limited` is the scheduler's verdict (6.4).
+- Notes from the review:
+  - `period.<group>` reads 0 when every device of the channel is demoted, since no group cycle ends.
+  - On a channel that never connects, `state` moves between 1 and 0 at each attempt: two writes per attempt, at most one attempt per `reconnect_min`.
+  - `last_status` is 0 for reads (above).
+  - A log record's REASON, like every field value, is cut to the logger's `LOG_MAX_VALUE_BYTES`, 96 bytes, at a UTF-8 boundary: a long tag name in a start failure is cut there.
 
 Reason: the counters the engine and the scheduler already have, published by the thread that owns the tags, with the fewest writes that meet the rate rule of 11.1.
 
@@ -2744,12 +2752,51 @@ Consequences:
 - A tag set without these tags no longer starts a driver. `scada-conf` does not yet generate them (CS 12.5); the integration tests' tag sets list them.
 - Tests:
   - `channel_engine_test.cpp` covers the counts for an answering device, a silent one, busy and gateway answers, an absent answer and a broken one, and the link callbacks.
-  - `diagnostics_test.cpp` covers the two windows.
-  - `scada-driver-process-integration-test` reads the `sys.proc` tags after READY; refuses a channel on the main thread's owner and a tag set without the process owner; reads the tags of a running driver: a connected channel with one live and one disabled device, a refused connect, and the state after the stop; a disabled channel's values; a channel without devices, owned through its state tag; a tag set without the system tags, and one with a system tag of another type, refused at the start. The rate rule:
+  - `diagnostics_test.cpp` covers the two windows, a steady 100 requests a second among them.
+  - `system_tags_test.cpp` drives `SystemTags` and `ProcessTags` on the fake clock, with the tag write replaced by a recorder (review M2). It covers:
+    - a counter written at most once a second;
+    - a state written in the step that changed it;
+    - no rewrite of an unchanged value;
+    - the due time;
+    - a stop between two counter writes;
+    - the states the stop leaves and `config_state`;
+    - the rounding;
+    - a refused write counted.
+  - `scada-driver-process-integration-test` covers:
+    - the `sys.proc` tags after READY;
+    - a channel on the main thread's owner, and a tag set without the process owner, refused;
+    - a running driver: a connected channel with one live and one disabled device, and every state after the stop;
+    - a refused connect;
+    - a connect that waits, read as 1 right after a notify of the driver (S4);
+    - the values written before READY=1, with a first connect that waits;
+    - a dead device's time-outs and demotion beside a live one;
+    - a killed driver's tags OWNER_DOWN, and the next life counting from 0;
+    - a disabled channel's values;
+    - a channel without devices, owned through its state tag;
+    - `response_ms` within the time-out and in tenths;
+    - the unbuilt device tags NOT_INIT.
+
+    The start fails for each of these tag sets: one without the system tags; a channel tag of another type; a missing `sys.proc` tag; a mistyped `sys.dev` tag; a mistyped `period` tag; and the system tags of another owner (S3).
+  - The rate rule:
     - after the stop, `requests` equals the requests the simulator received, the stop coming while the tag is behind it;
     - a device's `state` is written in the step of its first answer, within 500 ms of its point;
     - a counter is written within 1.5 s of that answer, though the slow group polls every 10 s and the connect timeout of 5 s caps each wait at 5 s;
     - in the fast group, three writes of `requests` in a row are at least 900 ms apart.
 
-    Each of these fails with its fault put in by hand: no write at the stop, `PERIOD_NS` 0, states written only at the second, and no wake for the counters. The fixture's tag sets list every system tag and the owner `drv-test` (`driver_fixture.h`); every channel's owner is `drv-test.<channel>`, so every process test also runs with a process owner that no channel writes.
-- Not tested, and why: a system tag of another owner than the channel's is refused by the same check as a point tag's, which D-142's test covers.
+    The fixture's tag sets list every system tag the validator generates for a device without identity checks or refreshed outputs, and the owner `drv-test` (`driver_fixture.h`). Every channel's owner is `drv-test.<channel>`, so every process test also runs with a process owner that no channel writes.
+  - The process tests pass run as root and as an unprivileged user (uid 65534, `runuser -u nobody`): 58 of 58 each way.
+  - Mutants, each put in by hand, each failing at least one of these tests:
+    - counters written every step;
+    - `PERIOD_NS` 100 ms or 0;
+    - no wake at the due time;
+    - states written only at the second;
+    - unchanged values rewritten;
+    - no counter write at the stop;
+    - no stop states;
+    - no `config_state` 0 at the stop;
+    - CONNECTING written without its notify;
+    - no write before READY;
+    - the system tags' owner check off.
+- Not tested, and why:
+  - A refused `sys.proc` write failing the start has no process test. The library refuses a write by its owner only for a wrong type or owner, which the resolve refuses first; the unit test covers the count.
+  - A demoted device's recovery has no process test. The simulator cannot make a silent unit answer again; the engine's unit tests cover it.

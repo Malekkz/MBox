@@ -929,7 +929,11 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
         return;
     }
     next_refused_log_ns_ = add(now, REFUSED_LOG_PERIOD_NS);
-    for (std::size_t index = 0; index < workers_.size(); ++index) {
+    // A start that failed before the counts were set up has none to log:
+    // the stop logs from `finish` in every end (review M4).
+    const std::size_t workers =
+        std::min(workers_.size(), logged_refused_.size());
+    for (std::size_t index = 0; index < workers; ++index) {
         const std::uint64_t refused = workers_[index]->refused_writes();
         if (refused != logged_refused_[index]) {
             log(LogLevel::WARNING, "tag writes refused",
