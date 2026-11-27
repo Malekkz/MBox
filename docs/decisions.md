@@ -2677,3 +2677,69 @@ Consequences:
   - `diagnostics_test.cpp` covers the two windows.
   - `scada-driver-process-integration-test` reads the `sys.proc` tags after READY; refuses a channel on the main thread's owner and a tag set without the process owner; reads the tags of a running driver: a connected channel with one live and one disabled device, a refused connect, and the state after the stop; a disabled channel's values; a channel without devices, owned through its state tag; a tag set without the system tags, and one with a system tag of another type, refused at the start. The fixture's tag sets list every system tag and the owner `drv-test` (`driver_fixture.h`); every channel's owner is `drv-test.<channel>`, so every process test also runs with a process owner that no channel writes.
 - Not tested, and why: a system tag of another owner than the channel's is refused by the same check as a point tag's, which D-142's test covers.
+
+## D-145: Identity checks and restart indications, the pure logic (slice 5b-2a)
+
+Context: driver interface contract 3.6 says a device's `identify` checks run after a connect and before any point is published, and that a device that fails them is MISMATCH with `refuse`, or runs with `warn`. 7.6 says a `restart_indication` rule that holds is a restart, after which the device is initialised again. CS 4.8 and 4.9 give the keys. The contracts leave open how a check reads its address, what the scheduler sends while a check is pending, how the reads are counted, how a pattern is matched and within what bound, how values of different types compare, how the identity text is built, and when a restart rule fires. The lead ruled on these after a review by three (2026-11-27). Slice 5b-2 is split into two pull requests: 5b-2a, the pure logic and its unit tests, recorded here, and 5b-2b, the engine wiring, system tags, log records, test tools and process tests, which adds to this entry.
+
+Decision:
+- The plan (ruling item 1):
+  - The compile step gives the checks and rules as `CompiledDevice::identify`, `refuse_on_mismatch` and `restart_indication`, each naming a point of the device by index. A check on a protocol `address` reaches the driver as a point without a tag, in no poll group (`NO_POLL_GROUP`).
+  - A point that a check or a rule reads is a `PlanPoint::identity`. The planner refuses one in a side-effect or exclusive range, and never puts one in a request with a side-effect read (DI 6.6).
+  - `ReadPlan::identity` lists the planned requests that read an identity point, each with its whole chain, in the order of their groups. Then come the requests of points in no poll group, which are planned after the groups, are in no list of `by_group`, are never the keep-alive and are not counted in `requests_per_scan`.
+  - `Scheduler::check` refuses a plan whose identity list names a request it does not hold, or one that reads a side effect or an exclusive range. It also refuses a request in no poll group that the identity list does not name.
+- The scheduler (item 2):
+  - Each device has a mode, OFF, ALL or IDENTITY, in place of the earlier `polled`. In IDENTITY only requests of the identity cycle are sent, as `Choice::Kind::IDENTITY`: no group cycle starts and no keep-alive of another request is sent.
+  - The cycle runs once. It ends when its last request is taken, so that `identity_again(device, due)` can ask for the next one at once, for the re-check of a MISMATCH device at `backoff`.
+  - A retry of an identity read is an IDENTITY choice.
+  - A chain in the cycle holds its unit as a poll's chain does (D2), and an order of another device of the unit between its parts restarts the cycle from its start.
+  - A device without a probe request is probed by its identity cycle.
+  - Identity reads count toward neither the achieved period nor `pacing_limited`.
+  - A randomized test checks the ruling's invariant: for a device in IDENTITY, no request outside `plan.identity` is chosen.
+- The failure tracker (items 2, 3 and 6):
+  - A device with checks (`Device::identify`) has its check pending (`identity_pending`) after every connect and after a probe recovers it from DEMOTED. A demoted device is checked when it recovers, not at the connect. `resumed()` (the driver's own close, DI 7.3) starts no check and keeps a pending one pending.
+  - The end of an identity read goes to `identity_ended`, never to `read_timed_out`: it neither adds to the run of consecutive time-outs nor empties it (DI 7.3).
+  - A failed identity read outside the grace counts toward the unit's demotion as a polled read's does, so a dead device is DEMOTED, never MISMATCH.
+  - An answered identity read empties the unit's count, since the unit answered. It does not make the device RUNNING, does not reset the back-off and keeps `probe_recovered` (review G6), so a unit that answers its identity and nothing else backs off to `backoff_max`. Emptying the count is our choice; the ruling names only the other two effects.
+  - `identity_mismatched` moves an INITIALISING device to MISMATCH, its next check due after `backoff`, which does not grow (DI 3.6).
+  - `identity_passed` ends the pending check. It moves a MISMATCH device to INITIALISING, which becomes RUNNING only when a poll answers.
+  - A MISMATCH device's failures count, and it is demoted with its unit.
+  - `restarted(device, now, rearm_grace)` makes every RUNNING device of the unit INITIALISING, with its check pending and, when `rearm_grace`, its grace started again. A device INITIALISING, MISMATCH or DEMOTED is left as it is. The engine (5b-2b) decides `rearm_grace` by the ruling's bound: once, until the device has run one full period of every group without a restart.
+- Withholding a point (item 3): `withhold_point` writes the point BAD with exactly the given flags, keeping the value, with the given source time. It clears `has_value`, `has_valid` and the hold, so that neither `keep_last` nor a held DEVICE_INVALID brings back a value read before. A counter's previous value and the bits' values are kept. It is used for MISMATCH (no flags), and for the writes of 9.1 after a restart (NOT_INIT, source time 0). It is not the ABSENT outcome.
+- The comparison (items 3 and 6): `compare_values` is the one comparison of checks and rules.
+  - INT64, UINT64 and FLOAT64 compare by their mathematical values, with no conversion that could round: a signed against an unsigned integer, an integer against a FLOAT64.
+  - BOOL compares to BOOL, false below true. A STRING is equal to a STRING of the same bytes, else UNORDERED.
+  - A NaN, and any other pair of types, is UNORDERED, which no check passes.
+- The identity text (item 4):
+  - `clean_identity_text` replaces every byte outside 0x20 to 0x7E with `?`. A pattern is matched against the cleaned text.
+  - A number is printed in decimal by `to_chars`, a FLOAT64 in its shortest exact form; a BOOL is `true` or `false`.
+  - `join_identity` joins the checks' values with `; ` into the 250 bytes of the tag database's STRING. Each value gets an equal share of the bytes left after the separators. A value longer than its share is cut to it, its last byte `~`. A check not read is an empty field.
+  - The join uses fixed buffers and allocates nothing. A fuzz target (`identity_text_fuzz`) checks that the text fits and is printable whatever the values.
+- The pattern (item 5):
+  - `text_matches` is the two-cursor matcher: it remembers the last `*` and its text position, with no allocation and no recursion. It matches the whole text, by byte, case-sensitively.
+  - `\` makes the next byte literal. An empty pattern matches only the empty text. A pattern is at most 250 bytes (`TEXT_PATTERN_MAX_BYTES`). A trailing single `\` is for the compile step to refuse (ruling item 5), together with the length and the NaN constants and the `decreases` types of item 6; the slice that compiles these keys for the driver does it. Until then the matcher takes a trailing `\` as itself.
+  - The bound is at most (n+1)(m+1) byte comparisons for a pattern of n bytes and a text of m, not "linear" as CS 2.5 says (#136). `text_matches_counted` counts them.
+  - A unit test checks the bound on the worst case (`*` and 100 `a` then `b`, against 250 `a`). An exhaustive differential test compares the matcher with a table-filling one over every pattern and text of a small alphabet up to a few bytes, and a fuzz target (`text_pattern_fuzz`) compares the two on any input.
+- Restart rules (item 6): `RestartWatch` takes the valid samples of the rules' points, as computed before a counter's hold (`ProcessedSample::rule_valid`, `rule_value`).
+  - A sample that is not valid neither fires a rule nor moves its baseline. An `equals` edge is taken across it.
+  - The baseline is the first valid sample after the watch is made or `reset`. The engine resets it at an attach and a reload of the device only, so it survives a lost connection and the driver's own close: a device that restarts and drops its connection is counted.
+  - `decreases` fires when a value is below the one before it, except a counter's wrap that the processing of DI 5.4 read as a wrap (`SampleCounts::counter_wrapped`). Any other wrap is a false restart; the README of 5b-2b lists, for each rule, when it gives a false restart and when it misses one.
+  - `equals` fires on its rising edge only, so a flag the device leaves set is one restart.
+
+Reason: each is the ruling's, or the simplest choice that keeps it. Every function the real-time path calls is `SCADA_RT`, allocates nothing, has no recursion and works on fixed buffers, so the engine of 5b-2b can call it from `step()`.
+
+Consequences:
+- Until 5b-2b, the engine passes no checks to the tracker and puts no device in IDENTITY. It answers an IDENTITY choice with `not_sent`, which cannot happen yet.
+- For #136:
+  - the (n+1)(m+1) bound in place of CS 2.5's "linear", and the pattern's 250-byte limit;
+  - with every device of a `tcp` channel pending, no read adds to the run of time-outs, so a connection that is accepted and never answers is ended only by demotion and the user's time-out;
+  - an answered identity read empties the unit's count.
+- Tests:
+  - `text_pattern_test.cpp` covers the matcher: the differential test, the bound, the escapes and the edge cases.
+  - `identity_test.cpp` covers `compare_values` across types, the checks and `RestartWatch`.
+  - `identity_text_test.cpp` covers cleaning and the join.
+  - `sample_processing_test.cpp` covers `withhold_point`.
+  - `plan_test.cpp` covers the identity flag, the refusals and points in no poll group.
+  - `scheduling_test.cpp` covers the mode, the cycle, its retry, its chain, the identity probe and the plan check, and the randomized invariant.
+  - `failure_test.cpp` covers the pending check, the accounting, MISMATCH, the back-off of a unit that answers only its identity, and restarts.
+  - The two fuzz targets have seed corpora.
