@@ -869,6 +869,136 @@ TEST_F(DriverProcess, ASystemTagOfAnotherOwnerFailsTheStart) {
                             "line1"));
 }
 
+// `--refuse-write TAG VALUE SKIP` of scada-drv-test: the driver's system
+// tag writes go through a write that refuses that one (review M4).
+std::vector<std::string> refusing(const std::string& tag,
+                                  const std::string& value,
+                                  const std::string& skip) {
+    return {"--refuse-write", tag, value, skip};
+}
+
+TEST_F(DriverProcess, ARefusedProcessTagWriteFailsTheStart) {
+    // As a refused write of 9.1 (D-142): the tags would keep the previous
+    // life's values (review M4).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto driver = start_driver(joined(
+        refusing("sys.proc.drv-test.config_id", "0", "0"),
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(fails_start(
+        *driver, "the writes of the sys.proc tags of drv-test were refused"));
+}
+
+TEST_F(DriverProcess, ARefusedProcessTagWriteWhileRunningIsLogged) {
+    // `config_state` APPLIED, written once READY=1 is sent, refused: the
+    // driver runs on and the heartbeat logs the count (review M4).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto driver = start_driver(joined(
+        refusing("sys.proc.drv-test.config_state", "1", "0"),
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(driver->wait_for_error(
+        [](std::string_view err) {
+            return has(
+                std::string(err),
+                R"(MESSAGE_ID="driver-writes-refused" OWNER="drv-test" COUNT="1")");
+        },
+        WAIT_LIMIT))
+        << driver->err();
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(DriverProcess, ADisabledChannelsRefusedWriteIsLogged) {
+    // A disabled channel writes its system tags once; a refusal is counted
+    // and logged as a running channel's (review M4).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    std::vector<std::string> channel =
+        tcp_channel("line1", LocalPort(false).port());
+    channel.emplace_back("--disabled");
+    auto driver =
+        start_driver(joined(refusing("sys.dev.d1.requests_per_scan", "1", "0"),
+                            channel, device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    EXPECT_TRUE(driver->wait_for_error(
+        [](std::string_view err) {
+            return has(
+                std::string(err),
+                R"(MESSAGE_ID="driver-writes-refused" CHANNEL="line1" COUNT="1")");
+        },
+        WAIT_LIMIT))
+        << driver->err();
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+TEST_F(DriverProcess, AWorkersRefusedStopWriteIsLoggedAtTheStop) {
+    // d1 CONNECTING (1) is written once before it connects, and again at
+    // the stop: the second is refused. No heartbeat follows the stop, so
+    // the count is logged once every worker returned (review M4).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "7"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(joined(refusing("sys.dev.d1.state", "1", "1"),
+                                      tcp_channel("line1", port_of(*sim)),
+                                      device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    ASSERT_TRUE(eventually(handle("d1.v"), read_seven)) << driver->err();
+    ASSERT_TRUE(stops_cleanly(*driver));
+    EXPECT_TRUE(
+        has(driver->err(),
+            R"(MESSAGE_ID="driver-writes-refused" CHANNEL="line1" COUNT="1")"))
+        << driver->err();
+}
+
+TEST_F(DriverProcess, TheMainThreadsRefusedStopWriteIsLoggedAtTheStop) {
+    // `config_state` LOADING (0) is written at the start and again at the
+    // stop: the second is refused and logged at once (review M4).
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto driver = start_driver(joined(
+        refusing("sys.proc.drv-test.config_state", "0", "1"),
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    ASSERT_TRUE(stops_cleanly(*driver));
+    EXPECT_TRUE(
+        has(driver->err(),
+            R"(MESSAGE_ID="driver-writes-refused" OWNER="drv-test" COUNT="1")"))
+        << driver->err();
+}
+
+TEST_F(DriverProcess, TheProcessOwnersTagsAreWrittenNotInitialisedFirst) {
+    // 9.1 for the main thread's owner (D-146; review M8): a tag of that
+    // owner that no code of the driver writes holds a previous life's GOOD
+    // value; once the driver is ready it reads BAD with NOT_INIT, from the
+    // walk of the owner's slots.
+    add_process_tag("sys.proc.drv-test.spare");
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    ASSERT_TRUE(write_as_driver("sys.proc.drv-test.spare", 5));
+    auto driver = start_driver(joined(
+        tcp_channel("line1", LocalPort(false).port()), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(receives(listener(), "READY=1")) << driver->err();
+    observe();
+    const scada_value spare = read(handle("sys.proc.drv-test.spare"));
+    EXPECT_EQ(spare.quality, SCADA_QUALITY_BAD);
+    EXPECT_NE(spare.quality_flags & SCADA_FLAG_NOT_INIT, 0);
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
 TEST_F(DriverProcess, AMissingProcessTagFailsTheStart) {
     omit_tag("sys.proc.drv-test.log_dropped");
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
@@ -918,7 +1048,11 @@ TEST_F(DriverProcess, ARefusedConnectIsCountedOnTheChannel) {
         handle("sys.drv.line1.refused_connects"),
         [](const auto& value) { return good(value) && value.value >= 1; }));
     EXPECT_EQ(read(handle("sys.drv.line1.connects")).value, 0U);
-    EXPECT_NE(as_i64(read(handle("sys.drv.line1.state"))), 2);
+    // Not connected (0) between the attempts; each refused attempt is 1 for
+    // no longer than its refusal (review, the delta check).
+    EXPECT_TRUE(eventually(
+        handle("sys.drv.line1.state"),
+        [](const auto& value) { return good(value) && as_i64(value) == 0; }));
     EXPECT_EQ(as_i64(read(handle("sys.dev.d1.state"))), 1);  // CONNECTING
     EXPECT_EQ(read(handle("sys.dev.d1.requests")).value, 0U);
     EXPECT_TRUE(stops_cleanly(*driver));

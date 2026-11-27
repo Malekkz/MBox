@@ -29,6 +29,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/transport.h"
+#include "scada/tag/scada_tag.h"
 
 #include <cstdint>
 #include <functional>
@@ -92,6 +93,12 @@ struct DriverSettings {
     // process's heartbeat timeout in the tag set. Above 0 and at most
     // MAX_HEARTBEAT_PERIOD_NS.
     std::int64_t heartbeat_period_ns = DEFAULT_HEARTBEAT_PERIOD_NS;
+    // How the system tags of 11.1 are written, those of the process and of
+    // every channel: null for the tag library's `scada_tag_write`. A test
+    // gives one that refuses chosen writes, so that the refused-write paths
+    // run (PR 159 review; D-146). Called from the thread that owns the tag.
+    int (*system_write)(scada_ctx*, std::uint32_t,
+                        const scada_value*) = nullptr;
 };
 
 // Blocks the stop signals the main thread takes from its signalfd
