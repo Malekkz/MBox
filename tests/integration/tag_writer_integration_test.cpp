@@ -251,14 +251,17 @@ public:
                     const TagValue& stored,
                     bool substituted) noexcept override {
         if (device == 0) {
-            seeds.push_back(Seed{.point = point,
-                                 .stored = stored,
-                                 .text = std::string(stored.text),
-                                 .substituted = substituted});
+            seeds_.push_back(Seed{.point = point,
+                                  .stored = stored,
+                                  .text = std::string(stored.text),
+                                  .substituted = substituted});
         }
     }
 
-    std::vector<Seed> seeds;
+    [[nodiscard]] const std::vector<Seed>& seeds() const { return seeds_; }
+
+private:
+    std::vector<Seed> seeds_;
 };
 
 // The restart path (review R1 of PR 157): after 9.1, a tag that holds a
@@ -281,13 +284,13 @@ TEST_F(TagWriterTest, ASeedCarriesSubstitutedFromTheStoredValue) {
     tags.seed(recorded, channel);
     // Point 1 has no tag; point 3's tag is another process's, read all the
     // same.
-    ASSERT_EQ(recorded.seeds.size(), 3U);
-    EXPECT_EQ(recorded.seeds[0].point, 0U);
-    EXPECT_EQ(recorded.seeds[0].stored.i, 4);
-    EXPECT_TRUE(recorded.seeds[0].substituted);
-    EXPECT_EQ(recorded.seeds[1].point, 2U);
-    EXPECT_EQ(recorded.seeds[1].text, "read");
-    EXPECT_FALSE(recorded.seeds[1].substituted);
+    ASSERT_EQ(recorded.seeds().size(), 3U);
+    EXPECT_EQ(recorded.seeds()[0].point, 0U);
+    EXPECT_EQ(recorded.seeds()[0].stored.i, 4);
+    EXPECT_TRUE(recorded.seeds()[0].substituted);
+    EXPECT_EQ(recorded.seeds()[1].point, 2U);
+    EXPECT_EQ(recorded.seeds()[1].text, "read");
+    EXPECT_FALSE(recorded.seeds()[1].substituted);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
