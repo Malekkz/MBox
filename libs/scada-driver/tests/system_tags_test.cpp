@@ -12,6 +12,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/diagnostics.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
 #include "scada/driver/plan.h"
 #include "scada/tag/scada_tag.h"
 #include "sim_transport.h"
@@ -62,6 +63,8 @@ struct Recorder {
     std::vector<Recorded> writes;
     std::int64_t now_ns = 0;
     std::uint32_t refuse = SCADA_INVALID_HANDLE;  // a handle it refuses
+    // The STRING writes: the slot and the text.
+    std::vector<std::pair<std::uint32_t, std::string>> texts;
 };
 
 Recorder& recorder() {
@@ -76,6 +79,13 @@ int record(scada_ctx* /*ctx*/, std::uint32_t handle, const scada_value* value) {
     }
     seen.writes.push_back(
         {.slot = handle, .bits = value->value, .at_ns = seen.now_ns});
+    return SCADA_OK;
+}
+
+int record_text(scada_ctx* /*ctx*/, std::uint32_t handle, const char* text,
+                std::size_t length, std::uint8_t /*quality*/,
+                std::uint16_t /*flags*/, std::int64_t /*source_time_ns*/) {
+    recorder().texts.emplace_back(handle, std::string(text, length));
     return SCADA_OK;
 }
 
@@ -136,6 +146,7 @@ struct Rig {
     static SystemTagHandles handles(const CompiledChannel& compiled) {
         SystemTagHandles out;
         out.write = &record;
+        out.write_text = &record_text;
         out.groups = compiled.poll_groups.size();
         out.devices = compiled.devices.size();
         const std::size_t slots =
@@ -176,6 +187,66 @@ struct Rig {
     SystemTags system;
 };
 // NOLINTEND(misc-non-private-member-variables-in-classes)
+
+// One device whose point 0 (register 0, which the bus holds at 0) its
+// identity check reads, equal to `expected`.
+CompiledChannel identified(std::int64_t expected) {
+    CompiledChannel channel = Rig::make(1, false);
+    CompiledDevice& device = channel.devices[0];
+    IdentityCheck check;
+    check.point = 0;
+    check.kind = IdentityCheck::Kind::EQUALS;
+    check.values = {
+        ExpectedValue{.type = device.points[0].rules.tag_type, .i = expected}};
+    device.identify = {check};
+    device.plan = ReadPlan{};
+    device.plan.by_group.resize(channel.poll_groups.size());
+    EXPECT_TRUE(TestProtocol{}
+                    .plan(device, ReadRules{.max_units = 4}, device.plan)
+                    .ok());
+    return channel;
+}
+
+TEST(SystemTags, TheIdentityTagsAreWrittenOnceThereIsAVerdict) {
+    // D-147: no write before the verdict, then `identity_ok` and the text.
+    Rig rig(identified(0), 1);
+    rig.publish(true);
+    EXPECT_TRUE(writes_of(rig.slot(DeviceSignal::IDENTITY_OK)).empty());
+    EXPECT_TRUE(recorder().texts.empty());
+    rig.run_until(SECOND);
+    const std::vector<Recorded> matched =
+        writes_of(rig.slot(DeviceSignal::IDENTITY_OK));
+    ASSERT_EQ(matched.size(), 1U);
+    EXPECT_EQ(matched.front().bits, 1U);
+    ASSERT_EQ(recorder().texts.size(), 1U);
+    EXPECT_EQ(
+        recorder().texts.front(),
+        std::make_pair(rig.slot(DeviceSignal::IDENTITY), std::string("0")));
+    // Unchanged: not written again; with `all`, written again.
+    rig.run_until(3 * SECOND);
+    EXPECT_EQ(recorder().texts.size(), 1U);
+    rig.publish(true);
+    EXPECT_EQ(recorder().texts.size(), 2U);
+}
+
+TEST(SystemTags, AMismatchWritesIdentityOkFalse) {
+    Rig rig(identified(5), 1);
+    rig.run_until(SECOND);
+    const std::vector<Recorded> matched =
+        writes_of(rig.slot(DeviceSignal::IDENTITY_OK));
+    ASSERT_EQ(matched.size(), 1U);
+    EXPECT_EQ(matched.front().bits, 0U);
+}
+
+TEST(SystemTags, RestartsAreACounter) {
+    // A device without checks: `restarts` 0, written with the counters.
+    Rig rig;
+    rig.publish(true);
+    const std::vector<Recorded> restarts =
+        writes_of(rig.slot(DeviceSignal::RESTARTS));
+    ASSERT_EQ(restarts.size(), 1U);
+    EXPECT_EQ(restarts.front().bits, 0U);
+}
 
 TEST(SystemTags, ACounterIsWrittenAtMostOncePerPeriod) {
     Rig rig;

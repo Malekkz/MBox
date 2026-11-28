@@ -676,12 +676,19 @@ Status Driver::Impl::resolve_system(const CompiledChannel& channel,
             return status;
         }
     }
-    // Every device, disabled ones too: CS 12.5 gives each its set.
+    // Every device, disabled ones too: CS 12.5 gives each its set; the
+    // identity tags only to a device with `identify` (11.1).
     for (const CompiledDevice& device : channel.devices) {
         for (std::size_t signal = 0; signal < detail::DEVICE_SIGNALS;
              ++signal) {
-            const detail::SignalSpec& spec =
-                detail::device_signal(static_cast<DeviceSignal>(signal));
+            const auto which = static_cast<DeviceSignal>(signal);
+            const detail::SignalSpec& spec = detail::device_signal(which);
+            if (device.identify.empty() &&
+                (which == DeviceSignal::IDENTITY_OK ||
+                 which == DeviceSignal::IDENTITY)) {
+                out.slots.push_back(SystemSlot{.type = spec.type});
+                continue;
+            }
             Status status =
                 add(detail::device_tag_name(device.name, spec.name), spec.type);
             if (!status.ok()) {

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -47,6 +48,9 @@ constexpr std::array<SignalSpec, DEVICE_SIGNALS> DEVICE_SPECS{{
     {.name = "sentinels", .type = SCADA_TYPE_UINT64},
     {.name = "invalid", .type = SCADA_TYPE_UINT64},
     {.name = "points_absent", .type = SCADA_TYPE_UINT64},
+    {.name = "restarts", .type = SCADA_TYPE_UINT64},
+    {.name = "identity_ok", .type = SCADA_TYPE_BOOL},
+    {.name = "identity", .type = SCADA_TYPE_STRING},
 }};
 
 constexpr std::array<SignalSpec, PROCESS_SIGNALS> PROCESS_SPECS{{
@@ -67,6 +71,18 @@ std::uint64_t bits_of(double value) noexcept {
 }
 std::uint64_t bits_of(bool value) noexcept {
     return value ? 1U : 0U;
+}
+
+// FNV-1a of `text`: a change of the identity text is seen without keeping
+// a copy of it in the slot.
+std::uint64_t hash_of(std::string_view text) noexcept {
+    constexpr std::uint64_t OFFSET = 14695981039346656037ULL;
+    constexpr std::uint64_t PRIME = 1099511628211ULL;
+    std::uint64_t hash = OFFSET;
+    for (const char byte : text) {
+        hash = (hash ^ static_cast<unsigned char>(byte)) * PRIME;
+    }
+    return hash;
 }
 
 std::size_t index_of(ChannelSignal signal) noexcept {
@@ -168,7 +184,10 @@ bool ProcessTags::stopped() noexcept {
 }
 
 SystemTags::SystemTags(scada_ctx* ctx, SystemTagHandles handles) noexcept
-    : ctx_(ctx), write_(handles.write), handles_(std::move(handles)) {}
+    : ctx_(ctx),
+      write_(handles.write),
+      write_text_(handles.write_text),
+      handles_(std::move(handles)) {}
 
 std::size_t SystemTags::device_slot(std::size_t device,
                                     DeviceSignal signal) const noexcept {
@@ -181,6 +200,50 @@ bool SystemTags::put(std::size_t slot, std::uint64_t bits, bool all) noexcept {
         return false;
     }
     return write_slot(write_, ctx_, handles_.slots[slot], bits, all, refused_);
+}
+
+bool SystemTags::put_text(std::size_t slot, std::string_view text,
+                          bool all) noexcept {
+    if (slot >= handles_.slots.size()) {
+        return false;
+    }
+    SystemSlot& target = handles_.slots[slot];
+    const std::uint64_t hash = hash_of(text);
+    if (target.handle == SCADA_INVALID_HANDLE ||
+        (!all && target.written && target.last == hash)) {
+        return false;
+    }
+    // GOOD, no flags, source time 0, as every system tag.
+    if (write_text_(ctx_, target.handle, text.data(), text.size(),
+                    SCADA_QUALITY_GOOD, 0, 0) != SCADA_OK) {
+        ++refused_;
+        return false;
+    }
+    target.written = true;
+    target.last = hash;
+    return true;
+}
+
+bool SystemTags::put_identity(ChannelEngine& engine,
+                              const CompiledChannel& channel,
+                              bool all) noexcept {
+    bool wrote = false;
+    for (std::size_t device = 0;
+         device < handles_.devices && device < channel.devices.size();
+         ++device) {
+        const auto index = static_cast<std::uint32_t>(device);
+        const std::optional<bool> matched = engine.identity_ok(index);
+        if (!matched.has_value()) {
+            continue;  // no verdict yet: NOT_INIT from the walk of 9.1
+        }
+        wrote = put(device_slot(device, DeviceSignal::IDENTITY_OK),
+                    bits_of(*matched), all) ||
+                wrote;
+        wrote = put_text(device_slot(device, DeviceSignal::IDENTITY),
+                         engine.identity_text(index), all) ||
+                wrote;
+    }
+    return wrote;
 }
 
 bool SystemTags::link(ChannelLink link) noexcept {
@@ -234,7 +297,7 @@ bool SystemTags::put_states(ChannelEngine& engine,
                     bits_of(limited), all) ||
                 wrote;
     }
-    return wrote;
+    return put_identity(engine, channel, all) || wrote;
 }
 
 bool SystemTags::put_counters(ChannelEngine& engine,
@@ -291,6 +354,9 @@ bool SystemTags::put_counters(ChannelEngine& engine,
         wrote = put(slot(DeviceSignal::POINTS_ABSENT),
                     engine.points_absent(index), all) ||
                 wrote;
+        wrote =
+            put(slot(DeviceSignal::RESTARTS), engine.restarts(index), all) ||
+            wrote;
     }
     return wrote;
 }
@@ -311,6 +377,10 @@ bool SystemTags::publish_idle(const CompiledChannel& channel) noexcept {
          ++device) {
         for (std::size_t signal = 0; signal < DEVICE_SIGNALS; ++signal) {
             const auto which = static_cast<DeviceSignal>(signal);
+            if (which == DeviceSignal::IDENTITY_OK ||
+                which == DeviceSignal::IDENTITY) {
+                continue;  // no verdict: NOT_INIT from the walk of 9.1
+            }
             const std::uint64_t bits =
                 which == DeviceSignal::REQUESTS_PER_SCAN
                     ? requests_per_scan(channel.devices[device].plan)

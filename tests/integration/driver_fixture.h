@@ -116,7 +116,7 @@ inline constexpr std::array<SystemTag, 7> PROCESS_SYSTEM_TAGS{{
 // scada-drv-test's poll groups.
 inline constexpr std::array<std::string_view, 3> POLL_GROUPS{"fast", "normal",
                                                              "slow"};
-inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
+inline constexpr std::array<SystemTag, 15> DEVICE_SYSTEM_TAGS{{
     {.signal = "state", .type = "int64"},
     {.signal = "last_ok_time", .type = "int64"},
     {.signal = "requests", .type = "uint64"},
@@ -131,15 +131,15 @@ inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
     {.signal = "sentinels", .type = "uint64"},
     {.signal = "invalid", .type = "uint64"},
     {.signal = "points_absent", .type = "uint64"},
+    {.signal = "restarts", .type = "uint64"},
 }};
 
 // The device tags the validator generates for every device (11.1) that no
 // slice built yet writes: the driver resolves none of them, and they read
 // BAD with NOT_INIT, from the walk of 9.1, for the driver's whole life
-// (5b-2 brings `restarts`, the command slices the other two; review S2).
-// `refresh_failures` and the identity tags are only for some devices.
-inline constexpr std::array<SystemTag, 3> UNWRITTEN_DEVICE_TAGS{{
-    {.signal = "restarts", .type = "uint64"},
+// (the command slices bring them; review S2). `refresh_failures` and the
+// identity tags are only for some devices.
+inline constexpr std::array<SystemTag, 2> UNWRITTEN_DEVICE_TAGS{{
     {.signal = "selections_lost", .type = "uint64"},
     {.signal = "last_command_stage", .type = "int64"},
 }};
