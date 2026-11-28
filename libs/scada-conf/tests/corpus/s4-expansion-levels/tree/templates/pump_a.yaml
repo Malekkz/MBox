@@ -1,6 +1,7 @@
 template: pump_a
 extends: pump_base
 protocol: modbus
+bit_order: lsb0
 params:
   has_aux: { type: bool, default: false }
 enums:
