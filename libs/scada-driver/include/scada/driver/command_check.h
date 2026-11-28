@@ -28,6 +28,7 @@ namespace scada::driver {
 
 // The reason of a result (DI 8.8, D-85): `protocol_error` is the reason
 // shifted 16 bits left, or'd with the device's raw code.
+// NOLINTNEXTLINE(performance-enum-size): the contract's range is 0 to 32767
 enum class Reason : std::uint16_t {
     NONE = 0,
     ALREADY_IN_POSITION = 1,
@@ -77,7 +78,7 @@ struct Answer {
 };
 
 // The modes of an output's mode tag (DI 8.2, check 5; coding agreed with CS).
-enum class OutputMode : std::int64_t { AUTO = 1, MANUAL = 2, REMOTE = 3 };
+enum class OutputMode : std::uint8_t { AUTO = 1, MANUAL = 2, REMOTE = 3 };
 
 // A read of a tag at a check: the library's return code and the value.
 struct TagReading {

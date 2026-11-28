@@ -17,11 +17,12 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 
 namespace scada::driver {
 namespace {
 
-// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers,misc-non-private-member-variables-in-classes)
 
 constexpr std::int64_t NOW = 1'000'000'000;
 constexpr std::int64_t SECOND = 1'000'000'000;
@@ -279,20 +280,21 @@ TEST(CommandCheck, Check4AnIntegerLimitIsComparedExactly) {
     Rig rig;
     CompiledPoint& counter = rig.device.points[2];
     counter.rules.tag_type = tag::TagType::UINT64;
-    CompiledOutput output{
+    const CompiledOutput output{
         .name = "count.cmd",
         .point = 2,
         .kind = OutputKind::SETPOINT,
         .limits = OutputLimits{.min = std::nullopt, .max = 9007199254740992.0},
         .raw_width = 64};
-    const std::uint64_t at = 9007199254740992U;
-    EXPECT_TRUE(check_request(with(SCADA_OP_DIRECT, SCADA_TYPE_UINT64, at),
+    const std::uint64_t two_53 = 9007199254740992U;
+    EXPECT_TRUE(check_request(with(SCADA_OP_DIRECT, SCADA_TYPE_UINT64, two_53),
                               rig.target(output), rig.reads, NOW)
                     .order);
-    EXPECT_EQ(check_request(with(SCADA_OP_DIRECT, SCADA_TYPE_UINT64, at + 1),
-                            rig.target(output), rig.reads, NOW)
-                  .answer,
-              rejected(Reason::INVALID_VALUE));
+    EXPECT_EQ(
+        check_request(with(SCADA_OP_DIRECT, SCADA_TYPE_UINT64, two_53 + 1),
+                      rig.target(output), rig.reads, NOW)
+            .answer,
+        rejected(Reason::INVALID_VALUE));
 }
 
 TEST(CommandCheck, Check4AValueOutsideTheRawTypeIsRefused) {
@@ -305,83 +307,113 @@ TEST(CommandCheck, Check4AValueOutsideTheRawTypeIsRefused) {
               rejected(Reason::INVALID_VALUE));
 }
 
-TEST(CommandCheck, Check4TheValuesOfEachKind) {
+// A DIRECT from AUTO (allowed on every output) of `value` to `output`.
+CheckOutcome auto_direct(Rig& rig, const CompiledOutput& output,
+                         std::uint8_t type, std::uint64_t value) {
+    rig.reads.mode_reading = Reads::good_int(1);
+    return check_request(with(SCADA_OP_DIRECT, type, value, SCADA_SOURCE_AUTO),
+                         rig.target(output), rig.reads, NOW);
+}
+
+TEST(CommandCheck, Check4ADoubleTakesOneOrTwo) {
     Rig rig;
-    rig.reads.mode_reading = Reads::good_int(1);  // AUTO, for the sbo double
-    const auto direct = [&](const CompiledOutput& output, std::uint8_t type,
-                            std::uint64_t value) {
-        return check_request(
-            with(SCADA_OP_DIRECT, type, value, SCADA_SOURCE_AUTO),
-            rig.target(output), rig.reads, NOW);
-    };
-    // double: 1 open, 2 closed; 0 and 3 refused.
-    EXPECT_TRUE(direct(rig.breaker_cmd, SCADA_TYPE_INT64, 1).order);
-    EXPECT_TRUE(direct(rig.breaker_cmd, SCADA_TYPE_INT64, 2).order);
-    EXPECT_FALSE(direct(rig.breaker_cmd, SCADA_TYPE_INT64, 0).order);
-    EXPECT_FALSE(direct(rig.breaker_cmd, SCADA_TYPE_INT64, 3).order);
-    // single: 0 or 1, but on_only refuses 0.
-    EXPECT_TRUE(direct(rig.single, SCADA_TYPE_BOOL, 0).order);
-    rig.single.on_only = true;
-    EXPECT_EQ(direct(rig.single, SCADA_TYPE_BOOL, 0).answer,
+    EXPECT_TRUE(auto_direct(rig, rig.breaker_cmd, SCADA_TYPE_INT64, 1).order);
+    EXPECT_TRUE(auto_direct(rig, rig.breaker_cmd, SCADA_TYPE_INT64, 2).order);
+    EXPECT_EQ(auto_direct(rig, rig.breaker_cmd, SCADA_TYPE_INT64, 0).answer,
               rejected(Reason::INVALID_VALUE));
-    EXPECT_TRUE(direct(rig.single, SCADA_TYPE_BOOL, 1).order);
-    // pulse and trigger: 1 only.
-    rig.single.kind = OutputKind::PULSE;
-    rig.single.on_only = false;
-    EXPECT_FALSE(direct(rig.single, SCADA_TYPE_BOOL, 0).order);
-    EXPECT_TRUE(direct(rig.single, SCADA_TYPE_BOOL, 1).order);
-    rig.single.kind = OutputKind::TRIGGER;
-    EXPECT_FALSE(direct(rig.single, SCADA_TYPE_BOOL, 0).order);
-    // step: +1 or -1.
+    EXPECT_EQ(auto_direct(rig, rig.breaker_cmd, SCADA_TYPE_INT64, 3).answer,
+              rejected(Reason::INVALID_VALUE));
+}
+
+TEST(CommandCheck, Check4OnOnlyRefusesOff) {
+    Rig rig;
+    EXPECT_TRUE(auto_direct(rig, rig.single, SCADA_TYPE_BOOL, 0).order);
+    rig.single.on_only = true;
+    EXPECT_EQ(auto_direct(rig, rig.single, SCADA_TYPE_BOOL, 0).answer,
+              rejected(Reason::INVALID_VALUE));
+    EXPECT_TRUE(auto_direct(rig, rig.single, SCADA_TYPE_BOOL, 1).order);
+}
+
+TEST(CommandCheck, Check4APulseAndATriggerTakeOneOnly) {
+    Rig rig;
+    for (const OutputKind kind : {OutputKind::PULSE, OutputKind::TRIGGER}) {
+        rig.single.kind = kind;
+        EXPECT_EQ(auto_direct(rig, rig.single, SCADA_TYPE_BOOL, 0).answer,
+                  rejected(Reason::INVALID_VALUE));
+        EXPECT_TRUE(auto_direct(rig, rig.single, SCADA_TYPE_BOOL, 1).order);
+    }
+}
+
+TEST(CommandCheck, Check4AStepTakesPlusOrMinusOne) {
+    Rig rig;
     CompiledOutput step = rig.breaker_cmd;
     step.kind = OutputKind::STEP;
-    EXPECT_TRUE(direct(step, SCADA_TYPE_INT64, 1).order);
-    EXPECT_TRUE(direct(step, SCADA_TYPE_INT64,
-                       std::bit_cast<std::uint64_t>(std::int64_t{-1}))
+    EXPECT_TRUE(auto_direct(rig, step, SCADA_TYPE_INT64, 1).order);
+    EXPECT_TRUE(auto_direct(rig, step, SCADA_TYPE_INT64,
+                            std::bit_cast<std::uint64_t>(std::int64_t{-1}))
                     .order);
-    EXPECT_FALSE(direct(step, SCADA_TYPE_INT64, 2).order);
+    EXPECT_EQ(auto_direct(rig, step, SCADA_TYPE_INT64, 2).answer,
+              rejected(Reason::INVALID_VALUE));
 }
 
 // --- Check 5: source against mode (D-92, O-2) --------------------------------
 
-TEST(CommandCheck, Check5EachSourceNeedsItsMode) {
+// The answer to a valid DIRECT from `source` with the mode tag at `mode`.
+Answer from_in_mode(std::uint8_t source, std::int64_t mode) {
     Rig rig;
-    const auto from = [&](std::uint8_t source, std::int64_t mode) {
-        rig.reads.mode_reading = Reads::good_int(mode);
-        return check_request(direct_float(1.0, source),
-                             rig.target(rig.setpoint), rig.reads, NOW);
-    };
-    EXPECT_TRUE(from(SCADA_SOURCE_OPERATOR, 2).order);
-    EXPECT_TRUE(from(SCADA_SOURCE_REMOTE, 3).order);
-    EXPECT_TRUE(from(SCADA_SOURCE_AUTO, 1).order);
+    rig.reads.mode_reading = Reads::good_int(mode);
+    const CheckOutcome outcome = check_request(
+        direct_float(1.0, source), rig.target(rig.setpoint), rig.reads, NOW);
+    return outcome.order ? Answer{} : outcome.answer;
+}
+
+TEST(CommandCheck, Check5EachSourceNeedsItsMode) {
+    const Answer order{};
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_OPERATOR, 2), order);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_REMOTE, 3), order);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_AUTO, 1), order);
+}
+
+TEST(CommandCheck, Check5AnotherModeIsNotAuthorised) {
     const Answer not_authorised{.status = SCADA_RESULT_NOT_AUTHORISED};
-    EXPECT_EQ(from(SCADA_SOURCE_OPERATOR, 1).answer, not_authorised);
-    EXPECT_EQ(from(SCADA_SOURCE_REMOTE, 2).answer, not_authorised);
-    EXPECT_EQ(from(SCADA_SOURCE_AUTO, 3).answer, not_authorised);
-    EXPECT_EQ(from(SCADA_SOURCE_AUTO, 0).answer, not_authorised);
-    EXPECT_EQ(from(SCADA_SOURCE_AUTO, 4).answer, not_authorised);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_OPERATOR, 1), not_authorised);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_REMOTE, 2), not_authorised);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_AUTO, 3), not_authorised);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_AUTO, 0), not_authorised);
+    EXPECT_EQ(from_in_mode(SCADA_SOURCE_AUTO, 4), not_authorised);
+}
+
+// The mode tag of a stopped `scada-cmd`: BAD with `flags` and a stored
+// `mode`.
+TagReading owner_down(std::int64_t mode, std::uint16_t flags) {
+    TagReading reading = Reads::good_int(mode);
+    reading.value.quality = SCADA_QUALITY_BAD;
+    reading.value.quality_flags = flags;
+    return reading;
 }
 
 TEST(CommandCheck, Check5AutoGoesOnWhileTheModesOwnerIsDown) {
     // Ruling O-2: BAD with OWNER_DOWN as its only flag and a stored AUTO.
     Rig rig;
-    rig.reads.mode_reading = Reads::good_int(1);
-    rig.reads.mode_reading.value.quality = SCADA_QUALITY_BAD;
-    rig.reads.mode_reading.value.quality_flags = SCADA_FLAG_OWNER_DOWN;
+    rig.reads.mode_reading = owner_down(1, SCADA_FLAG_OWNER_DOWN);
     EXPECT_TRUE(check_request(direct_float(1.0, SCADA_SOURCE_AUTO),
                               rig.target(rig.setpoint), rig.reads, NOW)
                     .order);
-    // Not for the operator, and not with any other flag.
-    rig.reads.mode_reading.value.value = 2;
-    EXPECT_FALSE(check_request(direct_float(1.0), rig.target(rig.setpoint),
-                               rig.reads, NOW)
-                     .order);
-    rig.reads.mode_reading.value.value = 1;
-    rig.reads.mode_reading.value.quality_flags =
-        SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_NOT_INIT;
-    EXPECT_FALSE(check_request(direct_float(1.0, SCADA_SOURCE_AUTO),
-                               rig.target(rig.setpoint), rig.reads, NOW)
-                     .order);
+}
+
+TEST(CommandCheck, Check5TheStoredModeServesOnlyAuto) {
+    Rig rig;
+    rig.reads.mode_reading = owner_down(2, SCADA_FLAG_OWNER_DOWN);
+    EXPECT_EQ(check_request(direct_float(1.0), rig.target(rig.setpoint),
+                            rig.reads, NOW)
+                  .answer,
+              (Answer{.status = SCADA_RESULT_NOT_AUTHORISED}));
+    rig.reads.mode_reading =
+        owner_down(1, SCADA_FLAG_OWNER_DOWN | SCADA_FLAG_NOT_INIT);
+    EXPECT_EQ(check_request(direct_float(1.0, SCADA_SOURCE_AUTO),
+                            rig.target(rig.setpoint), rig.reads, NOW)
+                  .answer,
+              (Answer{.status = SCADA_RESULT_NOT_AUTHORISED}));
 }
 
 TEST(CommandCheck, Check5FailsClosed) {
@@ -460,26 +492,34 @@ TEST(CommandCheck, Check7WithNoSelectionLive) {
 
 // --- Check 8: the device's state --------------------------------------------
 
-TEST(CommandCheck, Check8TheDevicesState) {
+// The answer to a valid DIRECT on a device in `state`.
+CheckOutcome in_state(DeviceStatus state) {
     Rig rig;
-    const auto in = [&](DeviceStatus state) {
-        return check_request(direct_float(1.0), rig.target(rig.setpoint, state),
-                             rig.reads, NOW);
-    };
-    EXPECT_EQ(in(DeviceStatus::DISABLED).answer,
+    return check_request(direct_float(1.0), rig.target(rig.setpoint, state),
+                         rig.reads, NOW);
+}
+
+TEST(CommandCheck, Check8ADisabledOrMismatchedDeviceIsAConfigMismatch) {
+    EXPECT_EQ(in_state(DeviceStatus::DISABLED).answer,
               rejected(Reason::CONFIG_MISMATCH));
-    EXPECT_EQ(in(DeviceStatus::MISMATCH).answer,
+    EXPECT_EQ(in_state(DeviceStatus::MISMATCH).answer,
               rejected(Reason::CONFIG_MISMATCH));
-    EXPECT_EQ(in(DeviceStatus::DEMOTED).answer,
+}
+
+TEST(CommandCheck, Check8ADemotedRefusingOrInitialisingDeviceIsUnavailable) {
+    EXPECT_EQ(in_state(DeviceStatus::DEMOTED).answer,
               rejected(Reason::DEVICE_UNAVAILABLE));
-    EXPECT_EQ(in(DeviceStatus::REFUSING).answer,
+    EXPECT_EQ(in_state(DeviceStatus::REFUSING).answer,
               rejected(Reason::DEVICE_UNAVAILABLE));
     // The strict interim of D-147: no write while INITIALISING.
-    EXPECT_EQ(in(DeviceStatus::INITIALISING).answer,
+    EXPECT_EQ(in_state(DeviceStatus::INITIALISING).answer,
               rejected(Reason::DEVICE_UNAVAILABLE));
+}
+
+TEST(CommandCheck, Check8ARunningOrConnectingDevicePasses) {
     // CONNECTING is the worker's check 11.
-    EXPECT_TRUE(in(DeviceStatus::CONNECTING).order);
-    EXPECT_TRUE(in(DeviceStatus::RUNNING).order);
+    EXPECT_TRUE(in_state(DeviceStatus::CONNECTING).order);
+    EXPECT_TRUE(in_state(DeviceStatus::RUNNING).order);
 }
 
 TEST(CommandCheck, Check8AReadNowOnADemotedDeviceIsAProbe) {
@@ -569,7 +609,7 @@ TEST(CommandCheck, TheFirstFailingCheckAnswers) {
         rejected(Reason::RATE_LIMITED));
 }
 
-// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers,misc-non-private-member-variables-in-classes)
 
 }  // namespace
 }  // namespace scada::driver
