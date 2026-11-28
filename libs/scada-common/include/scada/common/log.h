@@ -246,18 +246,34 @@ public:
 
     // Makes a queue of `capacity` records for one thread (see `LogQueue`)
     // and returns it, shared with the Logger, whose worker drains it from
-    // then on. Allocates about 1.5 KiB per record, so call it at set-up, not in
-    // real-time code. Fails with OUT_OF_RANGE for a capacity of 0 or above
-    // LOG_MAX_QUEUE_CAPACITY, RESOURCE_EXHAUSTED without memory, and
-    // FAILED_PRECONDITION on a moved-from Logger. Thread-safe.
+    // then on. `name` (a thread's or a channel's) is the QUEUE field of the
+    // notice of its dropped records; empty: none. Allocates about 1.5 KiB per
+    // record, so call it at set-up, not in real-time code. Fails with
+    // OUT_OF_RANGE for a capacity of 0 or above LOG_MAX_QUEUE_CAPACITY,
+    // RESOURCE_EXHAUSTED without memory, and FAILED_PRECONDITION on a
+    // moved-from Logger. Thread-safe.
     [[nodiscard]] Result<std::shared_ptr<LogQueue>> make_queue(
-        std::size_t capacity) noexcept;
+        std::size_t capacity, std::string_view name = {}) noexcept;
 
     // Number of records dropped because a queue was full, since creation:
-    // the Logger's own queue and every `LogQueue` of it.
+    // the Logger's own queue and every `LogQueue` of it. Lock-free, so that
+    // a thread that writes a heartbeat may read it (DI 11.3).
     [[nodiscard]] std::uint64_t dropped() const noexcept;
 
-    // Number of records the sink refused, since creation.
+    // Records accepted, by `log` or a push, and not yet handed to the sink:
+    // after a `flush` that timed out, those still on their way. Lock-free.
+    [[nodiscard]] std::uint64_t pending() const noexcept;
+
+    // Times a caller took the Logger's mutex (`log`, `flush`,
+    // `make_queue`), since creation: a probe for the tests that show a path
+    // takes none. `dropped`, `pending`, `sink_failures` and a push take none.
+    [[nodiscard]] std::uint64_t caller_locks() const noexcept;
+
+    // Rounds of the worker thread's loop, since creation: a probe for the
+    // test that a Logger without a LogQueue does not poll.
+    [[nodiscard]] std::uint64_t worker_rounds() const noexcept;
+
+    // Number of records the sink refused, since creation. Lock-free.
     [[nodiscard]] std::uint64_t sink_failures() const noexcept;
 
 private:

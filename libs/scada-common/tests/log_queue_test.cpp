@@ -9,9 +9,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -172,6 +175,91 @@ TEST_F(Queued, TheLossIsReportedAfterTheKeptRecords) {
     EXPECT_EQ(capture().snapshot(), after_loss(SIZE, EXTRA));
     // Room again once drained.
     EXPECT_TRUE(queue().push(LogLevel::INFO, TIME_NS, "again"));
+}
+
+TEST_F(Queued, ANamedQueuesLossNamesIt) {
+    // PR 182 S2: the notice says which thread or channel lost records.
+    capture().set_stalled(true);
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    Result<std::shared_ptr<LogQueue>> named = logger().make_queue(1, "line1");
+    if (!named.ok()) {
+        FAIL() << "named queue not made";
+    }
+    logger().log(LogLevel::INFO, "first");
+    ASSERT_TRUE(capture().wait_for_entered(1));
+    EXPECT_TRUE(named.value()->push(LogLevel::INFO, TIME_NS, "kept"));
+    EXPECT_FALSE(named.value()->push(LogLevel::INFO, TIME_NS, "lost"));
+    capture().set_stalled(false);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    EXPECT_EQ(capture().snapshot(),
+              (std::vector<std::string>{
+                  "6|unit-test|first", "6|unit-test|kept",
+                  "4|unit-test|log records dropped: the queue was "
+                  "full|QUEUE=line1|DROPPED=1"}));
+}
+
+TEST_F(Queued, TheCountsAndAPushTakeNoLock) {
+    // DI 11.3, PR 182 M1: a thread that writes a heartbeat reads the drop
+    // counts and pushes, and none of that takes the Logger's mutex.
+    if (!start(1)) {
+        FAIL() << "logger or queue not made";
+    }
+    const std::uint64_t before = logger().caller_locks();
+    (void)queue().push(LogLevel::INFO, TIME_NS, "one");
+    (void)queue().push(LogLevel::INFO, TIME_NS, "two");  // full, or not
+    EXPECT_GE(logger().dropped(), 0U);
+    (void)logger().pending();
+    (void)logger().sink_failures();
+    (void)queue().dropped();
+    EXPECT_EQ(logger().caller_locks(), before);
+    // The probe counts: `log` takes it.
+    logger().log(LogLevel::INFO, "direct");
+    EXPECT_EQ(logger().caller_locks(), before + 1);
+}
+
+TEST_F(Queued, PendingCountsWhatIsNotYetDelivered) {
+    capture().set_stalled(true);
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    logger().log(LogLevel::INFO, "first");
+    ASSERT_TRUE(capture().wait_for_entered(1));
+    EXPECT_EQ(push_numbered(queue(), 3), 3U);
+    // The first is in the sink; the three wait.
+    EXPECT_EQ(logger().pending(), 4U);
+    capture().set_stalled(false);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    EXPECT_EQ(logger().pending(), 0U);
+}
+
+TEST(LoggerPolling, ALoggerWithoutQueuesDoesNotPoll) {
+    // PR 182 S3: with no LogQueue the worker sleeps until a record comes;
+    // with one, it looks at least every LOG_QUEUE_POLL_MS. The interval is
+    // waited out on a condition that never holds: absence takes time to
+    // show.
+    static constexpr std::chrono::milliseconds INTERVAL{300};
+    Capture capture;
+    Result<Logger> made = make_logger(capture);
+    if (!made.ok()) {
+        FAIL() << "no logger";
+    }
+    Logger& logger = made.value();
+    const auto wait_out = [] {
+        std::mutex mutex;
+        std::condition_variable never;
+        std::unique_lock lock(mutex);
+        (void)never.wait_for(lock, INTERVAL, [] { return false; });
+    };
+    const std::uint64_t idle = logger.worker_rounds();
+    wait_out();
+    EXPECT_LE(logger.worker_rounds() - idle, 1U);
+    Result<std::shared_ptr<LogQueue>> queue = logger.make_queue(4);
+    ASSERT_TRUE(queue.ok());
+    const std::uint64_t polling = logger.worker_rounds();
+    wait_out();
+    EXPECT_GE(logger.worker_rounds() - polling, 5U);
 }
 
 TEST_F(Queued, TheDestructorDeliversQueuedRecords) {

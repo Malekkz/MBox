@@ -4,11 +4,17 @@
 // Helpers shared by the logger and its sinks. Not part of the public
 // interface; the unit tests include this header directly.
 
+#include "scada/common/log.h"
+#include "scada/common/realtime.h"
+
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace scada::log_internal {
 
@@ -61,6 +67,96 @@ private:
     std::span<char> storage_;
     std::size_t size_ = 0;
     bool truncated_ = false;
+};
+
+// Where a field's key and value end in a record's text.
+struct FieldSize {
+    std::uint16_t key = 0;
+    std::uint16_t value = 0;
+};
+
+inline constexpr std::size_t SLOT_TEXT_BYTES =
+    LOG_MAX_MESSAGE_BYTES +
+    (LOG_MAX_FIELDS * (LOG_MAX_KEY_BYTES + LOG_MAX_VALUE_BYTES));
+
+// One queued record. `text` holds the message, then key and value of each
+// field in turn, without separators; the sizes say where each part ends.
+// Fixed size, so that queueing a record never allocates.
+struct Slot {
+    std::array<char, SLOT_TEXT_BYTES> text{};
+    std::array<FieldSize, LOG_MAX_FIELDS> fields{};
+    std::int64_t time_ns = 0;
+    std::size_t message_size = 0;
+    std::size_t field_count = 0;
+    LogLevel level = LogLevel::INFO;
+};
+
+// Copies a record into `slot`, cut to the size limits, fields with an
+// invalid key omitted. Allocates nothing, takes no lock, makes no system
+// call.
+SCADA_RT void fill_slot(Slot& slot, LogLevel level, std::int64_t time_ns,
+                        std::string_view message,
+                        std::span<const LogField> fields) noexcept;
+
+// The message of `slot`, and its fields into `fields`; the views point into
+// `slot`, valid while it is.
+std::string_view read_slot(const Slot& slot,
+                           std::array<LogField, LOG_MAX_FIELDS>& fields,
+                           std::size_t& field_count) noexcept;
+
+// A single-producer, single-consumer ring of records, the core of a
+// LogQueue (D-148). `tail_` is written by the producer only and `head_` by
+// the consumer only; each publishes the slots before it with release, and
+// the other side reads it with acquire, so a slot is never read and written
+// at once, with no lock between the two. The indexes count records since
+// creation: at 2^64 records they would wrap, which no process lives to see.
+class RecordRing {
+public:
+    // `capacity` records, at least 1. May throw std::bad_alloc.
+    explicit RecordRing(std::size_t capacity) : slots_(capacity) {}
+
+    // Producer: copies the record in and returns true, or false when full.
+    SCADA_RT bool push(LogLevel level, std::int64_t time_ns,
+                       std::string_view message,
+                       std::span<const LogField> fields) noexcept {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t head = head_.load(std::memory_order_acquire);
+        if (tail - head == slots_.size()) {
+            return false;
+        }
+        fill_slot(slots_[tail % slots_.size()], level, time_ns, message,
+                  fields);
+        tail_.store(tail + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Consumer: moves the oldest record into `out`; false when empty.
+    bool pop(Slot& out) noexcept {
+        const std::size_t head = head_.load(std::memory_order_relaxed);
+        const std::size_t tail = tail_.load(std::memory_order_acquire);
+        if (head == tail) {
+            return false;
+        }
+        out = slots_[head % slots_.size()];
+        head_.store(head + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Any thread: true if no record waits. Exact for the consumer; another
+    // thread may see a record that is being taken.
+    [[nodiscard]] bool empty() const noexcept {
+        return head_.load(std::memory_order_acquire) ==
+               tail_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::size_t capacity() const noexcept {
+        return slots_.size();
+    }
+
+private:
+    std::vector<Slot> slots_;  // fixed size; never grows
+    std::atomic<std::size_t> head_{0};
+    std::atomic<std::size_t> tail_{0};
 };
 
 }  // namespace scada::log_internal
