@@ -6,6 +6,7 @@
 
 #include "expand_cases.h"
 #include "scada/common/result.h"
+#include "scada/conf/diagnostic.h"
 #include "scada/conf/validate.h"
 
 #include <gtest/gtest.h>
@@ -19,6 +20,10 @@ namespace {
 
 // The bound, with room for a slower runner (D-122 gives the measured time).
 constexpr double MAX_SECONDS = 10.0;
+
+// The bound of ManyWritablePoints: about 3 times the time measured with
+// the fix (D-122), well under the 24.9 s the review measured without it.
+constexpr double MAX_WRITABLE_SECONDS = 15.0;
 
 TEST(ModbusRulesPerf, ManyLongValues) {
     constexpr std::size_t POINTS = 40000;
@@ -44,6 +49,48 @@ TEST(ModbusRulesPerf, ManyLongValues) {
     EXPECT_EQ(validation.value().report.error_count, 0U);
     RecordProperty("seconds", std::to_string(seconds));
     EXPECT_LT(seconds, MAX_SECONDS);
+}
+
+// CF-615 reads each point's own writes (M2 of the review of #180): a
+// template of 32,768 `rw` holding registers and 32,768 `rw` coils with a
+// `functions` list, at three instances. Before the fix every point scanned
+// all the device's writes.
+TEST(ModbusRulesPerf, ManyWritablePoints) {
+    constexpr std::size_t EACH = 32768;
+    std::string meter =
+        "template: meter_a\nprotocol: modbus\n"
+        "functions: [1, 3, 5, 6, 15, 16]\npoints:\n";
+    for (std::size_t i = 0; i < EACH; ++i) {
+        meter += "  - { name: h" + std::to_string(i) +
+                 ", access: rw, storage: volatile, address: { table: "
+                 "holding, register: " +
+                 std::to_string(i) + ", type: uint16 } }\n";
+        meter += "  - { name: c" + std::to_string(i) +
+                 ", access: rw, storage: volatile, address: { table: coil, "
+                 "register: " +
+                 std::to_string(i) + " } }\n";
+    }
+    Files files = {
+        {"templates/meter_a.yaml", meter},
+        {"drivers/modbus/line1.yaml",
+         channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                 "  - { name: ps1.m2, template: meter_a, unit_id: 2 }\n"
+                 "  - { name: ps1.m3, template: meter_a, unit_id: 3 }\n")}};
+    // 3 x 65,536 point tags and their signals pass the default 50,000.
+    files.emplace("system.yaml",
+                  std::string(SYSTEM) + "limits: { max_tags: 1000000 }\n");
+    const auto start = std::chrono::steady_clock::now();
+    const Result<Validation> validation = validated(files);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+    ASSERT_TRUE(validation.ok());
+    EXPECT_EQ(validation.value().report.error_count, 0U);
+    for (const Diagnostic& error : validation.value().report.errors) {
+        ADD_FAILURE() << format(error);
+    }
+    RecordProperty("seconds", std::to_string(seconds));
+    EXPECT_LT(seconds, MAX_WRITABLE_SECONDS);
 }
 
 }  // namespace

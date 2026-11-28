@@ -1,5 +1,5 @@
 // Stage 5: the Modbus addresses of the expanded tree (configuration schemas
-// contract Annex A.1 to A.5, 10.6; decision D-121; slice 7d-2 of #100).
+// contract Annex A.1 to A.5, 10.6; decision D-122; slice 7d-2 of #100).
 
 #include "expand_cases.h"
 #include "scada/common/result.h"
@@ -71,9 +71,9 @@ TEST(ModbusRules, ARegisterAfterTheBase) {
                   "65535, type: uint16 } }\n"
                   "  - { name: d, address: { table: holding, register: "
                   "65534, type: uint32 } }\n"),
-        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"d\" "
-               "and \"c\" overlap at holding 65535 of unit 1\n"
-               "  from template templates/meter_a.yaml:6:53 (point c)",
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"c\" "
+               "and \"d\" overlap at holding 65535 of unit 1\n"
+               "  from template templates/meter_a.yaml:7:53 (point d)",
                "drivers/modbus/line1.yaml:7:11: error CF-603: "
                "\"ps1.m1.a\": register 65536 is outside 0 to 65,535 after "
                "address_base 0\n"
@@ -190,10 +190,11 @@ TEST(ModbusRules, PointsReadingOneRegister) {
                "drivers/modbus/line1.yaml:7:11: error CF-602: points \"a\" "
                "and \"b\" overlap at holding 11 of unit 1\n"
                "  from template templates/meter_a.yaml:5:53 (point b)",
-               // g's second part is met after h, which starts before it.
-               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"h\" "
-               "and \"g\" overlap at holding 30 of unit 1\n"
-               "  from template templates/meter_a.yaml:10:82 (point g)"}));
+               // At h, written after g, though g's second part is met
+               // after h, which starts before it.
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"g\" "
+               "and \"h\" overlap at holding 30 of unit 1\n"
+               "  from template templates/meter_a.yaml:11:53 (point h)"}));
 }
 
 // Write-only points share a command register when the bits each writes are
@@ -405,6 +406,12 @@ TEST(ModbusRules, SideEffectRanges) {
                "side_effect holding 45 to 46 of device \"ps1.m1\": it "
                "overlaps range no_read holding 40 to 45\n"
                "  from template templates/meter_a.yaml:9:15 (read)",
+               // An atomic read must not touch a no_read range (M3 of the
+               // review of #180).
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range no_read "
+               "holding 55 to 56 of device \"ps1.m1\": it overlaps range "
+               "atomic holding 50 to 55\n"
+               "  from template templates/meter_a.yaml:11:15 (read)",
                "drivers/modbus/line1.yaml:7:11: error CF-610: range "
                "side_effect holding 10 to 12 of device \"ps1.m1\": points "
                "\"b\" and \"a\" are in different poll groups\n"
@@ -503,6 +510,255 @@ TEST(ModbusRules, AnIdleTimeoutShorterThanThePolls) {
                "\"ps1.m1\": the connection may be closed between polls; "
                "set keepalive\n"
                "  from template templates/meter_a.yaml:3:15"}));
+}
+
+// --- Review of #180 ------------------------------------------------------
+
+// A byte is a part of its register (A.2): the two bytes of one register,
+// and a bit or a field of either half, are read together; writes of one
+// half meet (M1 of the review of #180).
+TEST(ModbusRules, TheBytesOfOneRegister) {
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                  "  - { name: a, address: { table: holding, register: 1, "
+                  "type: uint8, byte: high } }\n"
+                  "  - { name: b, address: { table: holding, register: 1, "
+                  "type: uint8, byte: low } }\n"
+                  "  - { name: c, address: { table: holding, register: 1, "
+                  "bit: 9 } }\n"
+                  "  - { name: d, address: { table: holding, register: 1, "
+                  "type: uint16, field: [0, 3] } }\n"
+                  "  - { name: e, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 2, type: uint8, byte: high } }\n"
+                  "  - { name: f, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 2, type: uint8, byte: low } }\n"
+                  "  - { name: g, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 2, bit: 12 } }\n"
+                  "  - { name: h, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 2, write: { mask: 0x0008 } } }\n"
+                  "bit_order: lsb0\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"e\" a"
+               "nd \"g\" overlap at holding 2 of unit 1\n  from template tem"
+               "plates/meter_a.yaml:10:84 (point g)",
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"f\" a"
+               "nd \"h\" overlap at holding 2 of unit 1\n  from template tem"
+               "plates/meter_a.yaml:11:84 (point h)"}));
+}
+
+// A `write.quantity` that runs past 65,535 is CF-603, at the quantity
+// (S1 of the review of #180).
+TEST(ModbusRules, AWriteQuantityPastTheEnd) {
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                  "  - { name: a, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 65530, write: { mask: 0x0001, "
+                  "quantity: 10 } } }\n"
+                  "  - { name: b, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 65520, write: { mask: 0x0001, "
+                  "quantity: 16 } } }\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: error CF-603: \"ps1.m1.a\": "
+              "write quantity 10 from register 65530 runs past 65,535 after"
+              " address_base 0\n  from template templates/meter_a.yaml:4:12"
+              "4 (point a)"});
+}
+
+// Ranges of any two different kinds must not overlap (A.4; the lead's
+// ruling M3 of the review of #180); two of one kind may.
+TEST(ModbusRules, RangesOfEachPairOfKinds) {
+    EXPECT_EQ(
+        errors_of(
+            "read:\n  ranges:\n"
+            "    - { kind: side_effect, table: holding, first: 100, last: 105 "
+            "}\n"
+            "    - { kind: exclusive, table: holding, first: 105, last: 109 }\n"
+            "    - { kind: side_effect, table: holding, first: 200, last: 205 "
+            "}\n"
+            "    - { kind: atomic, table: holding, first: 205, last: 209 }\n"
+            "    - { kind: side_effect, table: holding, first: 300, last: 305 "
+            "}\n"
+            "    - { kind: no_read, table: holding, first: 305, last: 309 }\n"
+            "    - { kind: exclusive, table: holding, first: 400, last: 405 }\n"
+            "    - { kind: atomic, table: holding, first: 405, last: 409 }\n"
+            "    - { kind: exclusive, table: holding, first: 500, last: 505 }\n"
+            "    - { kind: no_read, table: holding, first: 505, last: 509 }\n"
+            "    - { kind: atomic, table: holding, first: 600, last: 605 }\n"
+            "    - { kind: no_read, table: holding, first: 605, last: 609 }\n"
+            "    - { kind: atomic, table: holding, first: 900, last: 905 }\n"
+            "    - { kind: atomic, table: holding, first: 903, last: 909 }\n"
+            "points:\n"
+            "  - { name: a, address: { table: holding, register: "
+            "1, type: uint16 } }\n"),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-610: range exclusive "
+               "holding 105 to 109 of device \"ps1.m1\": it overlaps "
+               "range side_effect holding 100 to 105\n"
+               "  from template templates/meter_a.yaml:6:15 (read)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range atomic "
+               "holding 205 to 209 of device \"ps1.m1\": it overlaps "
+               "range side_effect holding 200 to 205\n"
+               "  from template templates/meter_a.yaml:8:15 (read)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range no_read "
+               "holding 305 to 309 of device \"ps1.m1\": it overlaps "
+               "range side_effect holding 300 to 305\n"
+               "  from template templates/meter_a.yaml:10:15 (read)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range atomic "
+               "holding 405 to 409 of device \"ps1.m1\": it overlaps "
+               "range exclusive holding 400 to 405\n"
+               "  from template templates/meter_a.yaml:12:15 (read)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range no_read "
+               "holding 505 to 509 of device \"ps1.m1\": it overlaps "
+               "range exclusive holding 500 to 505\n"
+               "  from template templates/meter_a.yaml:14:15 (read)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range no_read "
+               "holding 605 to 609 of device \"ps1.m1\": it overlaps "
+               "range atomic holding 600 to 605\n"
+               "  from template templates/meter_a.yaml:16:15 (read)"}));
+}
+
+// The mutants of S2 of the review of #180, one test each.
+
+// A range's registers are after `address_base`, as the points' are.
+TEST(ModbusRules, ARangeAfterTheBase) {
+    EXPECT_EQ(
+        errors_of("address_base: 1\n"
+                  "read:\n  ranges:\n"
+                  "    - { kind: side_effect, table: holding, first: "
+                  "100, last: 101 }\n"
+                  "points:\n"
+                  "  - { name: a, poll_group: fast, address: { table: "
+                  "holding, register: 100, type: uint16 } }\n"
+                  "  - { name: b, address: { table: holding, register: "
+                  "101, type: uint16 } }\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: error CF-610: range side_eff"
+              "ect holding 100 to 101 of device \"ps1.m1\": points \"b\" an"
+              "d \"a\" are in different poll groups\n  from template templa"
+              "tes/meter_a.yaml:6:15 (read)"});
+}
+
+// An `rw` point writes: it meets a `wo` point's coil, and writes a
+// side-effect range.
+TEST(ModbusRules, AReadWritePointWrites) {
+    EXPECT_EQ(
+        errors_of("read:\n  ranges:\n"
+                  "    - { kind: side_effect, table: holding, first: "
+                  "30, last: 30 }\n"
+                  "points:\n"
+                  "  - { name: a, access: rw, storage: volatile, "
+                  "address: { table: coil, register: 5 } }\n"
+                  "  - { name: b, access: wo, storage: volatile, "
+                  "address: { table: coil, register: 5 } }\n"
+                  "  - { name: c, access: rw, storage: volatile, "
+                  "address: { table: holding, register: 30, type: "
+                  "uint16 } }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"a\" a"
+               "nd \"b\" overlap at coil 5 of unit 1\n  from template templa"
+               "tes/meter_a.yaml:8:81 (point b)",
+               "drivers/modbus/line1.yaml:7:11: error CF-610: range side_eff"
+               "ect holding 30 to 30 of device \"ps1.m1\": point \"c\" write"
+               "s it\n  from template templates/meter_a.yaml:5:15 (read)"}));
+}
+
+// With `msb0`, bit 0 is the register's most significant bit.
+TEST(ModbusRules, MostSignificantBitFirst) {
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                  "  - { name: a, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 3, bit: 0 } }\n"
+                  "  - { name: b, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 3, write: { mask: 0x8000 } } }\n"
+                  "  - { name: c, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 4, bit: 0 } }\n"
+                  "  - { name: d, access: wo, storage: volatile, address: { "
+                  "table: holding, register: 4, write: { mask: 0x0001 } } }\n"
+                  "bit_order: msb0\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"a\" a"
+              "nd \"b\" overlap at holding 3 of unit 1\n  from template tem"
+              "plates/meter_a.yaml:5:84 (point b)"});
+}
+
+// The registers of a string of odd length, an epoch, a datetime and a
+// mod10k value.
+TEST(ModbusRules, TheRegistersOfEachType) {
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                  "  - { name: s, address: { table: holding, register: 10, "
+                  "type: string, length: 5 } }\n"
+                  "  - { name: t, address: { table: holding, register: 12, "
+                  "type: uint16 } }\n"
+                  "  - { name: e, address: { table: holding, register: 20, "
+                  "type: epoch, width: 64, resolution: 1s } }\n"
+                  "  - { name: f, address: { table: holding, register: 23, "
+                  "type: uint16 } }\n"
+                  "  - { name: d, address: { table: holding, register: 30, "
+                  "type: datetime, fields: [year, month, day, hour] } }\n"
+                  "  - { name: g, address: { table: holding, register: 33, "
+                  "type: uint16 } }\n"
+                  "  - { name: m, address: { table: holding, register: 40, "
+                  "type: mod10k, count: 3 } }\n"
+                  "  - { name: h, address: { table: holding, register: 42, "
+                  "type: uint16 } }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"s\" a"
+               "nd \"t\" overlap at holding 12 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:5:53 (point t)",
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"e\" a"
+               "nd \"f\" overlap at holding 23 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:7:53 (point f)",
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"d\" a"
+               "nd \"g\" overlap at holding 33 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:9:53 (point g)",
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"m\" a"
+               "nd \"h\" overlap at holding 42 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:11:53 (point h)"}));
+}
+
+// A `values` map writes the union of its patterns, and a negative pattern
+// is its two's complement.
+TEST(ModbusRules, ValuesAndNegativePatterns) {
+    EXPECT_EQ(
+        errors_of(
+            std::string(POINTS) +
+            "  - { name: a, kind: double_point, access: wo, storage: "
+            "volatile, address: { table: holding, register: 50, write: "
+            "{ values: { 1: 0x0004, 2: 0x0001 } } } }\n"
+            "  - { name: b, access: wo, storage: volatile, address: { "
+            "table: holding, register: 50, write: { mask: 0x0004 } } }\n"
+            "  - { name: c, access: wo, storage: volatile, address: { "
+            "table: holding, register: 51, write: { value: -1 } } }\n"
+            "  - { name: d, access: wo, storage: volatile, address: { "
+            "table: holding, register: 51, write: { mask: 0x8000 } } }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"a\" a"
+               "nd \"b\" overlap at holding 50 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:5:84 (point b)",
+               "drivers/modbus/line1.yaml:7:11: error CF-602: points \"c\" a"
+               "nd \"d\" overlap at holding 51 of unit 1\n  from template te"
+               "mplates/meter_a.yaml:7:84 (point d)"}));
+}
+
+// CW-607 needs a period longer than the time-out, not equal to it, and an
+// explicit `keepalive: off` is no keep-alive.
+TEST(ModbusRules, AnIdleTimeoutAtItsBound) {
+    const std::string points =
+        "points:\n"
+        "  - { name: a, poll_group: slow, address: { table: holding, "
+        "register: 1, type: uint16 } }\n";
+    EXPECT_EQ(warnings_of("idle_timeout: 300s\n" + points), Lines{});
+    EXPECT_EQ(warnings_of("idle_timeout: 60s\nkeepalive: off\n" + points),
+              Lines{"drivers/modbus/line1.yaml:7:11: warning CW-607: device "
+                    "\"ps1.m1\": the connection may be closed between polls; "
+                    "set keepalive\n"
+                    "  from template templates/meter_a.yaml:3:15"});
+}
+
+// A device given twice (CF-303) is checked once: it does not meet itself.
+TEST(ModbusRules, ADeviceGivenTwice) {
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                      "  - { name: a, address: { table: holding, "
+                      "register: 1, type: uint16 } }\n",
+                  "  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                  "  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"),
+        Lines{"drivers/modbus/line1.yaml:8:13: error CF-303: device \"ps1.m"
+              "1\" is defined twice; first at drivers/modbus/line1.yaml:7"});
 }
 
 }  // namespace

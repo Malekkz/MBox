@@ -1,5 +1,5 @@
 // The Modbus addresses of the expanded tree (configuration schemas contract
-// Annex A.1 to A.5 and 10.6; decision D-121, slice 7d-2 of #100).
+// Annex A.1 to A.5 and 10.6; decision D-122, slice 7d-2 of #100).
 
 #include "modbus_rules.h"
 
@@ -61,9 +61,14 @@ constexpr unsigned FN_WRITE_REGISTER = 6;
 constexpr unsigned FN_WRITE_COILS = 15;
 constexpr unsigned FN_WRITE_REGISTERS = 16;
 
-// A register's bits.
+// A register's bits, and its bytes (A.2 `byte`).
 constexpr unsigned REGISTER_BITS = 16;
 constexpr std::uint64_t REGISTER_MASK = 0xFFFF;
+constexpr std::uint64_t HIGH_BYTE = 0xFF00;
+constexpr std::uint64_t LOW_BYTE = 0x00FF;
+
+// A.1: the largest unit id.
+constexpr std::uint64_t MAX_UNIT = 255;
 
 // 4.6: the poll groups of a channel that gives none, and their periods.
 constexpr std::array<std::pair<std::string_view, std::uint64_t>, 3>
@@ -203,6 +208,8 @@ using Owners =
 [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint64_t>> first_met(
     const std::vector<Use>& uses, const Use& use, const Owners& owners,
     bool token) {
+    // `use.last` is at most 65,535 (add_register, write_uses), so `reg`
+    // cannot wrap and the loop ends (S3 of the review of #180).
     for (std::uint64_t reg = use.first; reg <= use.last; ++reg) {
         const std::uint64_t mask = claimed_bits(use, reg - use.first, token);
         const auto held = owners.find(reg);
@@ -223,6 +230,8 @@ using Owners =
 // Gives the bits of `use`, the `index`-th of the uses, that no one holds to
 // it.
 void claim(Owners& owners, const Use& use, std::size_t index, bool token) {
+    // `use.last` is at most 65,535 (add_register, write_uses), so `reg`
+    // cannot wrap and the loop ends (S3 of the review of #180).
     for (std::uint64_t reg = use.first; reg <= use.last; ++reg) {
         const std::uint64_t mask = claimed_bits(use, reg - use.first, token);
         if (mask == 0) {
@@ -455,6 +464,19 @@ private:
         return value ? as_uint64(*value) : std::nullopt;
     }
 
+    // A unit id at `node`, `fallback` without one. A value past 255 is the
+    // schema's error (A.1, the tree is refused) and gives 256, a unit no
+    // valid device has, so that it meets no other device's registers; the
+    // narrowing below is then proven (coding standard 5).
+    [[nodiscard]] std::uint32_t unit_at(std::optional<NodeId> node,
+                                        std::uint32_t fallback) const {
+        const std::optional<std::uint64_t> unit = number(node);
+        if (!unit) {
+            return fallback;
+        }
+        return static_cast<std::uint32_t>(std::min(*unit, MAX_UNIT + 1));
+    }
+
     // A raw pattern (2.3) at `node`, as the bits of a value of `width` bits.
     [[nodiscard]] std::optional<std::uint64_t> pattern(NodeId node,
                                                        unsigned width) const {
@@ -522,14 +544,14 @@ private:
     void check_device(NodeId device, NodeId name) {
         device_ = text(name);
         base_ = number(expanded_.scalar(device, "address_base")).value_or(0);
-        unit_ = static_cast<std::uint32_t>(
-            number(expanded_.scalar(device, "unit_id")).value_or(0));
+        unit_ = unit_at(expanded_.scalar(device, "unit_id"), 0);
         bit_order_msb0_ = expanded_.text_of(device, "bit_order") == "msb0";
         reads_.clear();
         writes_.clear();
         groups_.clear();
         point_names_.clear();
         point_reads_.clear();
+        point_writes_.clear();
         const std::span<const NodeId> points =
             expanded_.items(device, "points");
         for (const NodeId point : points) {
@@ -541,6 +563,7 @@ private:
             const auto index = static_cast<std::uint32_t>(point_names_.size());
             point_names_.push_back(text(*point_name));
             point_reads_.emplace_back();
+            point_writes_.emplace_back();
             read_point(point, index);
         }
         check_points();
@@ -576,8 +599,8 @@ private:
         }
         const auto group_id = static_cast<std::uint32_t>(
             groups_.try_emplace(group, groups_.size()).first->second);
-        const std::uint32_t unit = static_cast<std::uint32_t>(
-            number(expanded_.scalar(*address, "unit_id")).value_or(unit_));
+        const std::uint32_t unit =
+            unit_at(expanded_.scalar(*address, "unit_id"), unit_);
 
         std::vector<Use> own;
         // A double point's shapes: each one coil or one bit (A.2).
@@ -617,8 +640,12 @@ private:
             return;
         }
         const std::string raw = modbus_raw_type(expanded_.document(), map);
-        const bool part_of_register = expanded_.child(map, "bit").has_value() ||
-                                      expanded_.child(map, "field").has_value();
+        // A bit, a field or a byte of a register shares it with the others
+        // (A.2, A.3; M1 of the review of #180).
+        const bool part_of_register =
+            expanded_.child(map, "bit").has_value() ||
+            expanded_.child(map, "field").has_value() ||
+            expanded_.child(map, "byte").has_value();
         if (is_bit_table(*table)) {
             for (const std::string_view key :
                  {"bit", "field", "byte", "parts"}) {
@@ -733,9 +760,16 @@ private:
     }
 
     // The bits of a value of `count` registers that `map`'s `bit` or
-    // `field` names, numbered by the device's `bit_order` (A.2).
+    // `field` names, numbered by the device's `bit_order`, or its `byte`,
+    // the register's high or low byte whatever the bit order (A.2).
     [[nodiscard]] std::uint64_t part_bits(NodeId map,
                                           std::uint64_t count) const {
+        if (const std::optional<NodeId> byte = expanded_.scalar(map, "byte")) {
+            if (text(*byte) == "high") {
+                return HIGH_BYTE;
+            }
+            return text(*byte) == "low" ? LOW_BYTE : 0;
+        }
         const std::uint64_t width = count * REGISTER_BITS;
         std::uint64_t low = 0;
         std::uint64_t high = 0;
@@ -823,14 +857,28 @@ private:
             const std::uint64_t width =
                 (use.last - use.first + 1) * REGISTER_BITS;
             if (write) {
+                const std::optional<NodeId> quantity_node =
+                    expanded_.scalar(*write, "quantity");
                 if (const std::optional<std::uint64_t> quantity =
-                        number(expanded_.scalar(*write, "quantity"));
-                    quantity && *quantity > use.last - use.first + 1) {
+                        number(quantity_node);
+                    quantity_node && quantity &&
+                    *quantity > use.last - use.first + 1) {
+                    // `use.first` is at most 65,535 (add_register), so the
+                    // compare cannot overflow (S1, S3 of the review of #180).
+                    if (*quantity - 1 > LAST_REGISTER - use.first) {
+                        refuse_address(
+                            *quantity_node, point_owner(name),
+                            "write quantity " + std::to_string(*quantity) +
+                                " from register " +
+                                std::to_string(use.first + base_) +
+                                " runs past 65,535 after address_base " +
+                                std::to_string(base_));
+                        continue;
+                    }
                     // The rest are written 0 (A.5): every bit of them.
-                    use.last =
-                        std::min(LAST_REGISTER, use.first + *quantity - 1);
+                    use.last = use.first + *quantity - 1;
                     use.whole = true;
-                    writes_.push_back(use);
+                    add_write(use);
                     continue;
                 }
                 if (const std::optional<std::uint64_t> bits = encoding_bits(
@@ -840,8 +888,16 @@ private:
                     use.pattern = *bits;
                 }
             }
-            writes_.push_back(use);
+            add_write(use);
         }
+    }
+
+    // A write of the point `use.owner`, indexed by its point (M2 of the
+    // review of #180: CF-615 reads a point's writes, not all of them).
+    void add_write(const Use& use) {
+        point_writes_.at(use.owner).push_back(
+            static_cast<std::uint32_t>(writes_.size()));
+        writes_.push_back(use);
     }
 
     // The register of a `write.on` or `write.off` target, `{ table,
@@ -866,7 +922,7 @@ private:
                      targets);
         for (Use& use : targets) {
             use.owner = index;
-            writes_.push_back(use);
+            add_write(use);
         }
     }
 
@@ -903,8 +959,13 @@ private:
                 whole_reads.push_back(use);
             }
         }
-        const auto told = [this](const Use& later, const Use& earlier,
+        // At the point written later, naming the one written first, as
+        // CF-302 and CF-601 are placed (a note of the review of #180).
+        const auto told = [this](const Use& one, const Use& other,
                                  std::uint64_t reg) {
+            const bool one_later = one.owner > other.owner;
+            const Use& later = one_later ? one : other;
+            const Use& earlier = one_later ? other : one;
             const std::string_view name = point_names_.at(later.owner);
             const std::string message =
                 "points " + quote_text(point_names_.at(earlier.owner)) +
@@ -966,10 +1027,8 @@ private:
                 const Use& use = reads_.at(read_index);
                 need(read_function(use.table), use.site);
             }
-            for (const Use& use : writes_) {
-                if (use.owner == index) {
-                    need_write(point, use, need);
-                }
+            for (const std::uint32_t write_index : point_writes_.at(index)) {
+                need_write(point, writes_.at(write_index), need);
             }
             ++index;
         }
@@ -1091,15 +1150,14 @@ private:
             *first > SCHEMA_LAST_REGISTER || *last > SCHEMA_LAST_REGISTER) {
             return std::nullopt;
         }
-        Range range{
-            .kind = text(*kind),
-            .unit = static_cast<std::uint32_t>(
-                number(expanded_.scalar(entry, "unit_id")).value_or(unit_)),
-            .table = *table,
-            .site = *kind,
-            .text = std::string(text(*kind)) + " " +
-                    std::string(name_of(*table)) + " " +
-                    std::to_string(*first) + " to " + std::to_string(*last)};
+        Range range{.kind = text(*kind),
+                    .unit = unit_at(expanded_.scalar(entry, "unit_id"), unit_),
+                    .table = *table,
+                    .site = *kind,
+                    .text = std::string(text(*kind)) + " " +
+                            std::string(name_of(*table)) + " " +
+                            std::to_string(*first) + " to " +
+                            std::to_string(*last)};
         for (const auto& [value, node] :
              {std::pair{*first, *first_node}, std::pair{*last, *last_node}}) {
             if (value < base_ || value - base_ > LAST_REGISTER) {
@@ -1125,8 +1183,9 @@ private:
         return range;
     }
 
-    // A `side_effect` or `exclusive` range that overlaps a range of another
-    // kind (A.4): once per range, naming the first such range before it.
+    // A range that overlaps a range of another kind (A.4, the lead's ruling
+    // M3 of the review of #180: an `atomic` read must not touch a `no_read`
+    // range either): once per range, naming the first such range before it.
     void check_kinds(const std::vector<Range>& ranges) {
         std::vector<std::size_t> order(ranges.size());
         for (std::size_t i = 0; i < order.size(); ++i) {
@@ -1149,14 +1208,9 @@ private:
                 furthest.clear();
                 key = std::pair{range.unit, range.table};
             }
-            const bool strict =
-                range.kind == "side_effect" || range.kind == "exclusive";
             std::optional<std::size_t> met;
             for (const auto& [kind, other] : furthest) {
-                const bool other_strict =
-                    kind == "side_effect" || kind == "exclusive";
-                if (kind != range.kind && (strict || other_strict) &&
-                    ranges[other].last >= range.first &&
+                if (kind != range.kind && ranges[other].last >= range.first &&
                     (!met || other < *met)) {
                     met = other;
                 }
@@ -1267,7 +1321,8 @@ private:
     std::uint32_t unit_ = 0;
     bool bit_order_msb0_ = false;
     std::vector<std::string_view> point_names_;
-    std::vector<std::vector<std::uint32_t>> point_reads_;  // into reads_
+    std::vector<std::vector<std::uint32_t>> point_reads_;   // into reads_
+    std::vector<std::vector<std::uint32_t>> point_writes_;  // into writes_
     std::vector<Use> reads_;
     std::vector<Use> writes_;
     std::map<std::string_view, std::size_t, std::less<>> groups_;
