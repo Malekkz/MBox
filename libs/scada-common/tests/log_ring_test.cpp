@@ -128,10 +128,10 @@ TEST(RecordRing, AFullRingRefusesAndAnEmptyOneGivesNothing) {
 
 // The id of a thread other than this one.
 std::thread::id other_thread() {
-    std::thread::id id;
-    std::thread thread([&id] { id = std::this_thread::get_id(); });
+    std::thread::id other;
+    std::thread thread([&other] { other = std::this_thread::get_id(); });
     thread.join();
-    return id;
+    return other;
 }
 
 // PR 182 delta, item 1: the first thread to push owns the queue; a second
