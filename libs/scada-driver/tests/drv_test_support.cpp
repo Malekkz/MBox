@@ -89,6 +89,9 @@ constexpr std::uint32_t MAX_GROUP = 2;
 // command line can give.
 constexpr std::uint64_t MAX_RAW = 0xFFFFU;
 constexpr std::int64_t MAX_SUBSTITUTE = 1'000'000'000;
+// A test point's raw width: one 16-bit unit (test_protocol.h).
+constexpr std::uint8_t TEST_RAW_WIDTH = 16;
+constexpr std::uint32_t MAX_WRITES_PER_DAY = 1'000'000;
 constexpr std::uint32_t MAX_PORT = 65'535;
 constexpr std::uint32_t MAX_BAUD = 4'000'000;
 // The CS 4.6 default poll groups, in ms.
@@ -109,7 +112,10 @@ constexpr std::string_view USAGE =
     "             ( --point NAME FIRST GROUP [--max-age-ms N]\n"
     "                 [--substitute RAW VALUE] )...\n"
     "             [--identify-equals POINT VALUE]... [--on-mismatch-warn]\n"
-    "             [--restart-decreases POINT]... )... )...\n"
+    "             [--restart-decreases POINT]...\n"
+    "             [--output NAME KIND [--sbo] [--on-only] [--min N] [--max N]\n"
+    "                [--local-panel TAG] [--write-min-interval-ms N]\n"
+    "                [--write-max-per-day N]]... )... )...\n"
     "       scada-drv-test --help\n"
     "\n"
     "A driver of the test protocol. A point reads one unit of space 0 into\n"
@@ -129,6 +135,11 @@ constexpr std::string_view USAGE =
     "published; a mismatch is MISMATCH, or with --on-mismatch-warn the\n"
     "device runs. --restart-decreases makes a decrease of POINT a\n"
     "restart of the device (`restart_indication: { decreases: ... }`).\n"
+    "--output makes the device's last point the target of an output NAME of\n"
+    "KIND (single, double, setpoint, step, pulse or trigger), its mode tag\n"
+    "NAME.mode; --sbo, --on-only, --min, --max and --local-panel (the panel\n"
+    "input of local_blocks_auto) set its keys, and the --write-* options its\n"
+    "target's write_limits.\n"
     "Every number is unsigned.\n"
     "Exit status: 0 stopped, 1 failed, 2 usage, 3 thread check, 4 stall.\n";
 
@@ -417,6 +428,12 @@ private:
             device.refuse_on_mismatch = false;
             return true;
         }
+        if (arg == "--output" && !device.points.empty()) {
+            return output(device);
+        }
+        if (!device.outputs.empty() && output_option(arg, device)) {
+            return true;
+        }
         if (arg == "--substitute" && !device.points.empty()) {
             std::uint64_t raw = 0;
             std::int64_t value = 0;
@@ -428,6 +445,72 @@ private:
                               .action = InvalidAction::SUBSTITUTE,
                               .substitute = int64_value(value)});
             return true;
+        }
+        return false;
+    }
+
+    // `--output NAME KIND`: the device's last point is the target of an
+    // output (D-150; the compile step's until slice 8). Test points are
+    // INT64 tags of one 16-bit unit.
+    bool output(CompiledDevice& device) {
+        CompiledOutput made;
+        made.name = next();
+        const std::string_view kind = next();
+        static constexpr std::array<std::pair<std::string_view, OutputKind>, 6>
+            KINDS{{{"single", OutputKind::SINGLE},
+                   {"double", OutputKind::DOUBLE},
+                   {"setpoint", OutputKind::SETPOINT},
+                   {"step", OutputKind::STEP},
+                   {"pulse", OutputKind::PULSE},
+                   {"trigger", OutputKind::TRIGGER}}};
+        const auto* found = std::find_if(
+            KINDS.begin(), KINDS.end(),
+            [&](const auto& entry) { return entry.first == kind; });
+        if (made.name.empty() || found == KINDS.end()) {
+            return false;
+        }
+        made.kind = found->second;
+        made.on_only =
+            made.kind == OutputKind::PULSE || made.kind == OutputKind::TRIGGER;
+        made.point = static_cast<std::uint32_t>(device.points.size() - 1);
+        made.raw_width = TEST_RAW_WIDTH;
+        device.points.back().access = Access::RW;
+        device.outputs.push_back(std::move(made));
+        return true;
+    }
+
+    // The keys of the device's last output, and the write limits of its
+    // target.
+    bool output_option(std::string_view arg, CompiledDevice& device) {
+        CompiledOutput& last = device.outputs.back();
+        CompiledPoint& target = device.points.at(last.point);
+        std::int64_t number = 0;
+        if (arg == "--sbo") {
+            last.model = ControlModel::SBO;
+            return true;
+        }
+        if (arg == "--on-only") {
+            last.on_only = true;
+            return true;
+        }
+        if (arg == "--min" || arg == "--max") {
+            if (!take(number, MAX_SUBSTITUTE)) {
+                return false;
+            }
+            (arg == "--min" ? last.limits.min : last.limits.max) =
+                static_cast<double>(number);
+            return true;
+        }
+        if (arg == "--local-panel") {
+            last.local_blocks_auto = true;
+            last.panel_input = next();
+            return !last.panel_input.empty();
+        }
+        if (arg == "--write-min-interval-ms") {
+            return millis(target.write_limits.min_interval_ns);
+        }
+        if (arg == "--write-max-per-day") {
+            return take(target.write_limits.max_per_day, MAX_WRITES_PER_DAY);
         }
         return false;
     }

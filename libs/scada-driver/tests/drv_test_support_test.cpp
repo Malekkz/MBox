@@ -171,6 +171,78 @@ TEST(DrvTestArgs, TheRefusingSinkWritesAndRefuses) {
     EXPECT_EQ(count, 2);
 }
 
+TEST(DrvTestArgs, AnOutputOnTheLastPoint) {
+    std::string err;
+    const auto options = parse({"--base-dir",
+                                "/b",
+                                "--channel",
+                                "c",
+                                "tcp",
+                                "h",
+                                "1",
+                                "--device",
+                                "d1",
+                                "1",
+                                "--point",
+                                "v",
+                                "0",
+                                "0",
+                                "--point",
+                                "set",
+                                "1",
+                                "0",
+                                "--output",
+                                "pump.speed",
+                                "setpoint",
+                                "--sbo",
+                                "--min",
+                                "0",
+                                "--max",
+                                "100",
+                                "--local-panel",
+                                "area.panel",
+                                "--write-min-interval-ms",
+                                "500",
+                                "--write-max-per-day",
+                                "10"},
+                               err);
+    if (!options.has_value()) {
+        FAIL() << err;
+    }
+    const CompiledDevice& device = options->config.channels.at(0).devices.at(0);
+    ASSERT_EQ(device.outputs.size(), 1U);
+    const CompiledOutput& output = device.outputs[0];
+    EXPECT_EQ(output.name, "pump.speed");
+    EXPECT_EQ(output.point, 1U);
+    EXPECT_EQ(output.kind, OutputKind::SETPOINT);
+    EXPECT_EQ(output.model, ControlModel::SBO);
+    EXPECT_EQ(output.limits.min, 0.0);
+    EXPECT_EQ(output.limits.max, 100.0);
+    EXPECT_TRUE(output.local_blocks_auto);
+    EXPECT_EQ(output.panel_input, "area.panel");
+    EXPECT_EQ(output.raw_width, 16U);
+    EXPECT_EQ(device.points[1].access, Access::RW);
+    EXPECT_EQ(device.points[1].write_limits.min_interval_ns, 500'000'000);
+    EXPECT_EQ(device.points[1].write_limits.max_per_day, 10U);
+    // A trigger and a pulse are on_only; an unknown kind is refused.
+    const auto trigger = parse(
+        {"--base-dir", "/b", "--channel", "c", "tcp", "h", "1", "--device",
+         "d1", "1", "--point", "r", "0", "0", "--output", "reset", "trigger"},
+        err);
+    ASSERT_TRUE(trigger.has_value()) << err;
+    EXPECT_TRUE(trigger->config.channels[0].devices[0].outputs[0].on_only);
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--channel", "c", "tcp", "h", "1",
+                        "--device", "d1", "1", "--point", "r", "0", "0",
+                        "--output", "x", "latch"},
+                       err)
+                     .has_value());
+    // An output needs a point.
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--channel", "c", "tcp", "h", "1",
+                        "--device", "d1", "1", "--output", "x", "setpoint"},
+                       err)
+                     .has_value());
+}
+
 TEST(DrvTestArgs, TheWorkerLogQueueSize) {
     // Sized from the devices by default; 1 to the logger's limit (D-148).
     std::string err;
