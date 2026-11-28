@@ -56,9 +56,10 @@ inline std::string health_patterns_meter(std::size_t points,
 inline std::string served_patterns_meter(std::size_t points) {
     std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
     for (std::size_t i = 0; i < points; ++i) {
-        meter += "  - { name: p" + std::to_string(i) +
-                 ", address: { table: holding, register: " +
-                 std::to_string(i + 1) + ", type: uint16 } }\n";
+        meter +=
+            "  - { name: p" + std::to_string(i) +
+            ", address: { table: holding, register: " + std::to_string(i + 1) +
+            ", type: uint16 } }\n";
     }
     meter +=
         "  - { name: h, address: { table: holding, register: 60001, type: "

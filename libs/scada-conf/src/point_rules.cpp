@@ -449,12 +449,11 @@ private:
         }
         const std::string_view template_name = template_of(device);
         // Section 10's text, `{name}` the template, else the device.
-        error(
-            *site, CF_NO_BIT_ORDER,
-            "template " +
-                quote_text(template_name.empty() ? device_ : template_name) +
-                " uses bits and needs bit_order",
-            detail);
+        error(*site, CF_NO_BIT_ORDER,
+              "template " +
+                  quote_text(template_name.empty() ? device_ : template_name) +
+                  " uses bits and needs bit_order",
+              detail);
     }
 
     // The `template` of the instance `device` was made from, as its channel

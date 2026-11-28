@@ -57,9 +57,9 @@ TEST(PointLimitsPerf, ServedPointsAreNotScannedForFree) {
     const Result<Validation> validation =
         validated({{"templates/meter_a.yaml", meter},
                    {"drivers/modbus/line1.yaml", one_device()}});
-    const double seconds = std::chrono::duration<double>(
-                               std::chrono::steady_clock::now() - start)
-                               .count();
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
     ASSERT_TRUE(validation.ok());
     EXPECT_EQ(validation.value().report.error_count, 0U);
     RecordProperty("seconds", std::to_string(seconds));
