@@ -71,6 +71,29 @@ constexpr std::string_view METER =
     "} } }\n"
     "  - { name: fixed, access: wo, storage: volatile, address: { table: "
     "holding, register: 92, type: uint16, write: { value: 1 } } }\n"
+    // B1 of the delta check of #185: one-sided and partial encodings.
+    "  - { name: lone_on, access: rw, storage: volatile, address: { table: "
+    "coil, register: 110, write: { on: { table: holding, register: 120, "
+    "value: 1 } } } }\n"
+    "  - { name: lone_on2, kind: double_point, access: rw, storage: "
+    "volatile, states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: "
+    "holding, register: 111, type: uint16, write: { on: { table: holding, "
+    "register: 121, value: 1 } } } }\n"
+    "  - { name: lone_off, access: rw, storage: volatile, address: { table: "
+    "coil, register: 112, write: { off: { table: holding, register: 122, "
+    "value: 1 } } } }\n"
+    "  - { name: dvals, kind: double_point, access: rw, storage: volatile, "
+    "states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: holding, "
+    "register: 113, type: uint16, write: { values: { 2: 0x0002 } } } }\n"
+    "  - { name: dvals2, kind: double_point, access: rw, storage: volatile, "
+    "states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: holding, "
+    "register: 114, type: uint16, write: { values: { 1: 0x0001, 2: 0x0002 "
+    "} } } }\n"
+    "  - { name: polar, access: rw, storage: volatile, address: { table: "
+    "holding, register: 115, type: uint16, write: { values: { true: 0, "
+    "false: 1 } } } }\n"
+    "  - { name: fixed2, access: wo, storage: volatile, address: { table: "
+    "holding, register: 116, type: uint16, write: { value: 1 } } }\n"
     "  - { name: narrow, access: rw, storage: volatile, address: { table: "
     "holding, register: 100, type: uint32, write: { type: uint16 } } }\n"
     "  - { name: mode, access: rw, storage: volatile, enum: { 0: stop, 1: "
@@ -285,7 +308,7 @@ TEST(OutputRules, SafeStatesAndFailSafeKeys) {
             "no_feedback: true, interlocks: [], safe_state: on }\n" +
             output("ps1.e", "single", "ps1.m1.c3", ", on_shutdown: release") +
             output("ps1.f", "setpoint", "ps1.m1.sp2",
-                   ", on_control_loss: { action: release }") +
+                   ", on_control_loss: { action: release, after: 1s }") +
             output("ps1.g", "setpoint", "ps1.m1.nvm",
                    ", on_shutdown: release, limits: { release: { raw: "
                    "0xFFFF } }") +
@@ -702,8 +725,8 @@ TEST(OutputRules, ValuesAgainstTheWrite) {
                "safe_state.value does not fit the target's type",
                "outputs/ps1.yaml:5:107: error CF-713: output \"ps1.b\": "
                "safe_state.raw does not fit the target's type",
-               "outputs/ps1.yaml:6:107: error CF-713: output \"ps1.c\": "
-               "safe_state.raw does not fit the target's type",
+               "outputs/ps1.yaml:6:55: error CF-702: output \"ps1.c\": "
+               "target \"ps1.m1.fixed\" is not a writable point",
                "outputs/ps1.yaml:7:108: error CF-713: output \"ps1.d\": "
                "safe_state.value does not fit the target's type",
                "outputs/ps1.yaml:9:108: error CF-713: output \"ps1.f\": "
@@ -714,6 +737,74 @@ TEST(OutputRules, ValuesAgainstTheWrite) {
                   "ps1.m1.signed, no_feedback: true, safe_state: { value: -5 "
                   "}, limits: { release: { raw: -5 } } }\n"),
               Lines{});
+}
+
+// B1 of the delta check of #185: a write encoding must be able to write
+// the safe side. The reviewer's probes P46, P47, P53, P55, P60 and P61.
+TEST(OutputRules, EncodingsThatWriteTheSafeSide) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            // P46, P47: a lone write.on cannot write off.
+            "  - { name: ps1.a, area: ps1, kind: single, target: "
+            "ps1.m1.lone_on, no_feedback: true, interlocks: [], safe_state: "
+            "off }\n"
+            "  - { name: ps1.b, area: ps1, kind: double, target: "
+            "ps1.m1.lone_on2, no_feedback: true, interlocks: [], safe_state: "
+            "off }\n"
+            // A lone write.off cannot write on.
+            "  - { name: ps1.c, area: ps1, kind: single, target: "
+            "ps1.m1.lone_off, no_feedback: true, interlocks: [], safe_state: "
+            "on }\n"
+            // P55: values without code 1, the double's off.
+            "  - { name: ps1.d, area: ps1, kind: double, target: ps1.m1.dvals, "
+            "no_feedback: true, interlocks: [], safe_state: off }\n"
+            // P53: a single on a fixed write.value.
+            "  - { name: ps1.e, area: ps1, kind: single, target: "
+            "ps1.m1.fixed2, no_feedback: true, interlocks: [], safe_state: off "
+            "}\n"
+            // P61: a setpoint on a fixed write.value.
+            "  - { name: ps1.f, area: ps1, kind: setpoint, target: "
+            "ps1.m1.fixed, no_feedback: true, safe_state: hold }\n"
+            // P60: a safe value that is not a key of write.values.
+            "  - { name: ps1.g, area: ps1, kind: setpoint, target: "
+            "ps1.m1.coded, no_feedback: true, safe_state: { value: 5 } }\n"
+            // S1 of the delta check: release without after.
+            "  - { name: ps1.h, area: ps1, kind: setpoint, target: ps1.m1.sp, "
+            "no_feedback: true, safe_state: hold, limits: { release: { value: "
+            "1 } }, on_control_loss: { action: release } }\n"),
+        (Lines{"outputs/ps1.yaml:4:116: error CF-707: output \"ps1.a\" is "
+               "on-only",
+               "outputs/ps1.yaml:5:117: error CF-707: output \"ps1.b\" is "
+               "on-only",
+               "outputs/ps1.yaml:6:117: error CF-707: output \"ps1.c\" is "
+               "off-only",
+               "outputs/ps1.yaml:7:114: error CF-713: output \"ps1.d\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:8:53: error CF-702: output \"ps1.e\": target "
+               "\"ps1.m1.fixed2\" is not a writable point",
+               "outputs/ps1.yaml:9:55: error CF-702: output \"ps1.f\": target "
+               "\"ps1.m1.fixed\" is not a writable point",
+               "outputs/ps1.yaml:10:109: error CF-713: output \"ps1.g\": "
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:11:165: error CF-714: output \"ps1.h\": "
+               "on_control_loss with action release needs after"}));
+    // A.5's polarity example, a double with both codes, a lone on with
+    // safe_state on, and a pulse on a fixed value: all accepted.
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: single, target: ps1.m1.polar, "
+            "no_feedback: true, interlocks: [], safe_state: off }\n"
+            "  - { name: ps1.b, area: ps1, kind: double, target: "
+            "ps1.m1.dvals2, no_feedback: true, interlocks: [], safe_state: off "
+            "}\n"
+            "  - { name: ps1.c, area: ps1, kind: single, target: "
+            "ps1.m1.lone_on, no_feedback: true, interlocks: [], safe_state: on "
+            "}\n"
+            "  - { name: ps1.d, area: ps1, kind: pulse, target: ps1.m1.fixed2, "
+            "no_feedback: true, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.e, area: ps1, kind: setpoint, target: "
+            "ps1.m1.coded, no_feedback: true, safe_state: { value: 0x1 } }\n"),
+        Lines{});
 }
 
 // M6 of the review of #185: a named enumeration resolves over the

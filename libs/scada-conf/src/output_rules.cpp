@@ -90,6 +90,12 @@ struct Target {
     bool on_off = false;  // `write.on` or `write.off`
     // Any write encoding: `mask`, `on`/`off`, `values` or `value` (A.5).
     bool encoded = false;
+    bool write_on = false;     // `write.on`
+    bool write_off = false;    // `write.off`
+    bool fixed_value = false;  // `write.value`: one value, whatever is asked
+    // The commanded values of `write.values`, when given.
+    bool has_values = false;
+    std::vector<std::string_view> value_keys;
     // The codes of the point's enumeration (5.5), when it has one.
     bool has_enum = false;
     std::vector<std::string_view> enum_codes;
@@ -266,11 +272,21 @@ private:
     // The write encoding of a point (A.5).
     void read_write(NodeId write, Target& target) const {
         target.mask = expanded_.child(write, "mask").has_value();
-        target.on_off = expanded_.child(write, "on").has_value() ||
-                        expanded_.child(write, "off").has_value();
-        target.encoded = target.mask || target.on_off ||
-                         expanded_.child(write, "values").has_value() ||
-                         expanded_.child(write, "value").has_value();
+        target.write_on = expanded_.child(write, "on").has_value();
+        target.write_off = expanded_.child(write, "off").has_value();
+        target.on_off = target.write_on || target.write_off;
+        target.fixed_value = expanded_.child(write, "value").has_value();
+        if (const std::optional<NodeId> values =
+                expanded_.child(write, "values");
+            values && expanded_.document().kind(*values) == NodeKind::MAP) {
+            target.has_values = true;
+            for (const Entry& entry : expanded_.document().entries(*values)) {
+                target.value_keys.push_back(
+                    expanded_.document().text(entry.key));
+            }
+        }
+        target.encoded = target.mask || target.on_off || target.has_values ||
+                         target.fixed_value;
     }
 
     // --- One output ------------------------------------------------------
@@ -306,6 +322,7 @@ private:
         check_interlocks(reader, output, *name_node, head, kind);
         check_refresh(reader, output, head, kind, target);
         check_actions(reader, output, head, kind, dangerous);
+        check_loss_after(reader, output, head, kind, dangerous);
         if (const std::optional<NodeId> duration =
                 reader.child(output, "duration");
             duration && kind == "pulse") {
@@ -318,6 +335,7 @@ private:
         if (target && writable(kind, *target)) {
             check_dangerous_flags(reader, output, head, *target);
             check_on_only(reader, output, head, kind, *target);
+            check_safe_side(reader, output, head, kind, *target);
             check_values(reader, output, head, kind, *target, form_fits);
             check_native_select(reader, output, head, *target);
             check_defaults(reader, output, head, kind, *target);
@@ -330,8 +348,15 @@ private:
     // a write encoding; a `step` or `setpoint` needs a number.
     [[nodiscard]] static bool kind_fits(std::string_view kind,
                                         const Target& target) {
-        if (kind == "single" || kind == "pulse" || kind == "trigger") {
-            return target.value_type == "bool" || target.mask || target.on_off;
+        const bool always_on = kind == "pulse" || kind == "trigger";
+        // `write.value` writes one value whatever is asked: only for a
+        // trigger or a pulse (A.5; ruling B1 of the delta check of #185).
+        if (target.fixed_value) {
+            return always_on;
+        }
+        if (kind == "single" || always_on) {
+            return target.value_type == "bool" || target.mask ||
+                   target.on_off || bool_values(target);
         }
         if (kind == "double") {
             return target.double_point || target.on_off;
@@ -379,6 +404,62 @@ private:
             refuse_value(reader, *safe_state, head, "safe_state");
         }
         return fits;
+    }
+
+    // True if `write.values` maps BOOL commands, as A.5's polarity
+    // example `{ true: 0, false: 1 }` does: a switching command is written
+    // through it whatever the register's type.
+    [[nodiscard]] static bool bool_values(const Target& target) {
+        return target.has_values &&
+               std::ranges::all_of(target.value_keys, [](std::string_view key) {
+                   return key == "true" || key == "false";
+               });
+    }
+
+    // True if `value`, a commanded value, is a key of `write.values`.
+    [[nodiscard]] static bool is_values_key(const Target& target,
+                                            std::string_view value) {
+        return std::ranges::any_of(
+            target.value_keys, [value](std::string_view key) {
+                return key == value ||
+                       compare_numbers(value, key).value_or(1) == 0;
+            });
+    }
+
+    // The side a switching output's safe_state commands (B1 of the delta
+    // check of #185): a lone `write.on` or `write.off` writes one side only
+    // (CF-707), and `write.values` must give the side a pattern (CF-713).
+    void check_safe_side(const Reader& reader, NodeId output,
+                         const std::string& head, std::string_view kind,
+                         const Target& target) {
+        const std::optional<NodeId> safe_state =
+            reader.scalar(output, "safe_state");
+        if (!is_switching(kind) || !safe_state) {
+            return;
+        }
+        const std::string_view state = reader.document().text(*safe_state);
+        if (state != "off" && state != "on") {
+            return;
+        }
+        const bool wants_on = state == "on";
+        if (target.on_off && !(wants_on ? target.write_on : target.write_off)) {
+            error(reader, *safe_state, CF_ON_ONLY,
+                  head + (wants_on ? " is off-only" : " is on-only"));
+        } else if (target.has_values) {
+            if (!is_values_key(target, command_of(kind, wants_on))) {
+                refuse_value(reader, *safe_state, head, "safe_state");
+            }
+        }
+    }
+
+    // The command a switching output writes for on or off: a single's
+    // true or false, a double's code 2 (closed) or 1 (open) (7.2).
+    [[nodiscard]] static std::string_view command_of(std::string_view kind,
+                                                     bool wants_on) {
+        if (kind == "single") {
+            return wants_on ? "true" : "false";
+        }
+        return wants_on ? "2" : "1";
     }
 
     // CF-702, CF-708 and CF-703.
@@ -496,9 +577,6 @@ private:
         }
         const std::optional<NodeId> limits = reader.child(output, "limits");
         const bool has_release = limits && reader.child(*limits, "release");
-        const std::optional<NodeId> loss =
-            reader.child(output, "on_control_loss");
-        const bool loss_timed = loss && reader.child(*loss, "after");
         for (const auto& [key, node] : actions_of(reader, output)) {
             const std::string_view action = document.text(node);
             if (action == "hold") {
@@ -527,14 +605,30 @@ private:
                 error(
                     reader, node, CF_SAFE_WITH_HOLD,
                     head + ": action safe needs a safe_state other than hold");
-            } else if (action == "safe" && key == "on_control_loss" &&
-                       !loss_timed) {
-                // Interim rule (j) of D-124 (S1 of the review of #185): a
-                // written safe action on control loss says when.
-                error(reader, node, CF_REFRESH_OR_RELEASE,
-                      head + ": on_control_loss with action safe needs after");
             }
         }
+    }
+
+    // Interim rule (j) of D-124 (S1 of the review of #185 and of its delta
+    // check): a written control-loss action other than hold says when. A
+    // dangerous output and the kinds with no safe action hold (CF-705,
+    // CF-719).
+    void check_loss_after(const Reader& reader, NodeId output,
+                          const std::string& head, std::string_view kind,
+                          bool dangerous) {
+        const std::optional<NodeId> loss =
+            reader.child(output, "on_control_loss");
+        const std::optional<NodeId> action =
+            loss ? reader.scalar(*loss, "action") : std::nullopt;
+        if (!loss || !action || dangerous || has_no_safe_action(kind) ||
+            reader.document().text(*action) == "hold" ||
+            reader.child(*loss, "after")) {
+            return;
+        }
+        error(reader, *action, CF_REFRESH_OR_RELEASE,
+              head + ": on_control_loss with action " +
+                  std::string(reader.document().text(*action)) +
+                  " needs after");
     }
 
     void no_safe_action(const Reader& reader, NodeId node,
@@ -824,6 +918,7 @@ private:
             const std::string_view text = document.text(*value);
             if (!fits_value_type(text, target.value_type) ||
                 (target.has_enum && !is_enum_code(target, text)) ||
+                (target.has_values && !is_values_key(target, text)) ||
                 (!target.write_raw.empty() &&
                  !survives_scaling(text, target.value_type, target.write_raw,
                                    target.scaling)) ||
