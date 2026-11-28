@@ -1,0 +1,16 @@
+# Stage 5 on the points (contract 4.6 to 4.9, 5.3; D-120): a template meter
+# without bit_order whose points meet every rule of slice 7d-1 once, at two
+# instances. Each cause is one error at the first instance, which names the
+# other (D-114): CF-611 (temp: 3 periods of normal, 3 s, below 5 s), CF-612
+# (power's exponent in slow), CF-613 (breaker, a field without states),
+# CF-614 (command: wo with a poll group), CF-616 (identity check on command),
+# CF-618 (trip's bit), CF-640 (level's keep_last). CF-619 (setpoint without
+# storage) is at ps1.m1 only: ps1.m2's override gives storage. Invented.
+drivers/modbus/line1.yaml:7:13: CF-611
+drivers/modbus/line1.yaml:7:13: CF-612
+drivers/modbus/line1.yaml:7:13: CF-613
+drivers/modbus/line1.yaml:7:13: CF-614
+drivers/modbus/line1.yaml:7:13: CF-616
+drivers/modbus/line1.yaml:7:13: CF-618
+drivers/modbus/line1.yaml:7:13: CF-619
+drivers/modbus/line1.yaml:7:13: CF-640

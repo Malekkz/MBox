@@ -51,6 +51,10 @@ struct ExpandedTree {
     // The scalars computed from a configuration expression (13.3), in the
     // order written, for the checks of their values at stage 5 (D-115).
     std::vector<NodeId> computed;
+    // The keys of points that only a `defaults` map gave (4.5 step 5), not
+    // the point or an override: their key nodes, in increasing order
+    // (D-120).
+    std::vector<NodeId> from_defaults;
     // `limits.max_tags` of system.yaml, or its default: the tags of the tag
     // set, generated tags included (4.1, CF-1001), which stage 5 counts
     // (D-116).
@@ -59,6 +63,10 @@ struct ExpandedTree {
     static constexpr std::uint32_t NO_INSTANCE = 0xFFFFFFFF;
     static constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 };
+
+// True if the key node `key` of `tree` is a point's key that only a
+// `defaults` map gave (D-120).
+[[nodiscard]] bool from_defaults(const ExpandedTree& tree, NodeId key);
 
 // True if `node` of `tree`, or a key or value below it, was written in its
 // instance's own file (an override, an instance point). An error placed
@@ -102,6 +110,10 @@ inline constexpr std::uint64_t MAX_RUN_TIME_PATTERN_WORK = 10'000'000'000;
 // device's points for CF-311 at stage 5, counted as for run-time patterns
 // (D-116; #176); past it the patterns left are not checked.
 inline constexpr std::uint64_t MAX_APPLIES_TO_PATTERN_WORK = 1'000'000'000;
+// The work of matching the patterns of health rules' `applies_to` at stage
+// 5, counted as for run-time patterns (D-120; M4 of the review of #174);
+// past it the patterns left are not checked.
+inline constexpr std::uint64_t MAX_HEALTH_PATTERN_WORK = 1'000'000'000;
 
 struct ExpandLimits {
     std::size_t nodes = MAX_EXPANDED_NODES;
@@ -122,6 +134,8 @@ struct ExpandLimits {
     std::uint64_t run_time_pattern_work = MAX_RUN_TIME_PATTERN_WORK;
     // At stage 5, the work of matching `applies_to` patterns for CF-311.
     std::uint64_t applies_to_pattern_work = MAX_APPLIES_TO_PATTERN_WORK;
+    // At stage 5, the work of matching health rules' patterns (D-120).
+    std::uint64_t health_pattern_work = MAX_HEALTH_PATTERN_WORK;
 };
 
 // What the expansion held to report its errors, at its end: the texts that
