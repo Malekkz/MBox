@@ -1,0 +1,29 @@
+# Stage 5 on areas and outputs (contract 7.1 to 7.4, 10.7; D-124, slice
+# 7e-1 of #100). Each output breaks one rule: in order, a read-only target
+# (CF-702), a target of two outputs (CF-703), a dangerous target with
+# safe_state off (CF-705), an on-only output with safe_state off (CF-707),
+# a mod10k target (CF-708), no feedback (CF-709), no safe_state (CF-710),
+# no interlocks (CF-711), a safe value that does not survive the scaling
+# into uint16 (CF-713), refresh on a single (CF-714), a setpoint fed back
+# by a plain tag (CF-715), a step with safe_state off (CF-719), a pulse
+# timed by the unit (CF-720), safe with safe_state hold (CF-722), release
+# on a single (CF-723), a single with a value form of safe_state (CF-713,
+# M1 of the review of #185); and an area that blocks automatic commands
+# with no local panel (CF-718). Invented.
+areas.yaml:4:37: CF-718
+outputs/ps1.yaml:2:53: CF-702
+outputs/ps1.yaml:4:53: CF-703
+outputs/ps1.yaml:5:118: CF-705
+outputs/ps1.yaml:6:129: CF-707
+outputs/ps1.yaml:7:55: CF-708
+outputs/ps1.yaml:8:13: CF-709
+outputs/ps1.yaml:9:13: CF-710
+outputs/ps1.yaml:10:13: CF-711
+outputs/ps1.yaml:11:106: CF-713
+outputs/ps1.yaml:12:128: CF-714
+outputs/ps1.yaml:13:76: CF-715
+outputs/ps1.yaml:14:109: CF-719
+outputs/ps1.yaml:15:129: CF-720
+outputs/ps1.yaml:16:133: CF-722
+outputs/ps1.yaml:17:132: CF-723
+outputs/ps1.yaml:18:115: CF-713

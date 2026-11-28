@@ -19,6 +19,23 @@ constexpr std::size_t NAMED_INSTANCES = 10;
 
 }  // namespace
 
+std::string instance_free_key(std::string_view message,
+                              std::string_view device) {
+    std::string key(message);
+    if (device.empty()) {
+        return key;
+    }
+    const std::string dotted = "\"" + std::string(device) + ".";
+    const std::string whole = "\"" + std::string(device) + "\"";
+    for (const std::string& own : {dotted, whole}) {
+        for (std::size_t at = key.find(own); at != std::string::npos;
+             at = key.find(own, at + 1)) {
+            key.replace(at, own.size(), "\"");
+        }
+    }
+    return key;
+}
+
 void GroupedErrors::add(Diagnostic diagnostic, std::string_view key,
                         std::string_view instance, Diagnostics& diagnostics,
                         bool groupable) {

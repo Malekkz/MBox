@@ -7,9 +7,12 @@
 #include "channel_builder.h"
 #include "loopback.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/diagnostics.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
+#include "scada/driver/protocol.h"
+#include "scada/driver/tag_value.h"
 #include "scada/driver/timing.h"
 #include "scada/tag/types.h"
 #include "sim_transport.h"
@@ -84,6 +87,14 @@ std::size_t requests_of(const SimBus& bus, std::uint8_t unit) {
     return static_cast<std::size_t>(std::count_if(
         bus.log().begin(), bus.log().end(),
         [&](const LoggedRequest& request) { return request.unit_id == unit; }));
+}
+
+// The requests of every unit sent before `time_ns`.
+std::size_t requests_before(const SimBus& bus, std::int64_t time_ns) {
+    return static_cast<std::size_t>(std::count_if(
+        bus.log().begin(), bus.log().end(), [&](const LoggedRequest& request) {
+            return request.time_ns < time_ns;
+        }));
 }
 
 std::vector<std::int64_t> times_of(const SimBus& bus, std::uint8_t unit) {
@@ -2329,6 +2340,179 @@ TEST(ChannelEngine, AProbeTimeOutAbove1sIsBoundedTo1sInTheBudget) {
     const std::size_t before = requests_of(rig.bus, 2);
     rig.run_until(20 * SECOND);
     EXPECT_GE(requests_of(rig.bus, 2), before + 3);
+}
+
+// --- DI 10: a stop gives up a read in flight and a connect -------------------
+
+TEST(ChannelEngine, AnAbandonedReadCountsNothingAndKeepsTheValues) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    const int writes = rig.tags.point(0, 0).writes;
+    const EngineCounts before = rig.engine.counts();
+    rig.transport.abandon();
+    rig.run_until(5 * FAST_PERIOD);
+    // Requests were sent and given up: no time-out, no retry, no loss, no
+    // tag write, and the device is still RUNNING (R-14).
+    EXPECT_GT(rig.engine.counts().requests, before.requests);
+    EXPECT_EQ(rig.engine.counts().timeouts, before.timeouts);
+    EXPECT_EQ(rig.engine.counts().retries, before.retries);
+    EXPECT_EQ(rig.engine.counts().losses, before.losses);
+    EXPECT_EQ(rig.tags.point(0, 0).writes, writes);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    EXPECT_EQ(rig.state(0), DeviceStatus::RUNNING);
+}
+
+TEST(ChannelEngine, AnAbandonedConnectIsNoFailure) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.transport.abandon();
+    rig.run_until(3 * SECOND);
+    EXPECT_EQ(rig.engine.counts().refused, 0U);
+    EXPECT_EQ(rig.engine.counts().connects, 0U);
+    // Not written COMM_FAIL by a connect that failed: never connected.
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+}
+
+TEST(ChannelEngine, ASeededPointKeepsItsValueThroughACommFail) {
+    // Review M4: the value the tag held after 9.1 is the point's last
+    // value, so a COMM_FAIL before the first read writes it, not 0.
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.engine.seed_point(0, 0, int64_value(11));
+    rig.engine.seed_point(9, 9, int64_value(5));  // out of range: ignored
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 11);
+}
+
+TEST(ChannelEngine, ASeededSubstituteKeepsSubstitutedThroughACommFail) {
+    // Review R1 of PR 157, across a restart: a stored substitute keeps its
+    // flag on the writes that keep its value; a plain value gets none.
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.engine.seed_point(0, 0, int64_value(11), true);
+    rig.engine.seed_point(1, 0, int64_value(12), false);
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 11);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::SUBSTITUTED));
+    ASSERT_TRUE(rig.tags.has_flag(1, 0, Flag::COMM_FAIL));
+    EXPECT_FALSE(rig.tags.has_flag(1, 0, Flag::SUBSTITUTED));
+}
+
+TEST(ChannelEngine, FewerCapsThanDevicesRefuseTheChannel) {
+    CompiledChannel channel =
+        channel_of(2, quick_failure(2, 3), TransportKind::TCP);
+    SimBus bus = bus_of_units(2);
+    SimClock clock;
+    SimTransport transport(bus, clock, LATENCY);
+    RecordingTags tags;
+    const TestProtocol protocol;
+    const std::array<DeviceCaps, 1> caps{
+        protocol.device_caps(channel.devices[0])};
+    const ChannelEngine engine(channel, protocol, transport, clock, tags, caps);
+    EXPECT_FALSE(engine.status().ok());
+}
+
+// --- 11.1: the counts behind the system tags (D-146) -----------------------
+
+TEST(ChannelEngine, AnAnsweringDeviceCountsItsRequestsAndResponseTime) {
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.run_until(10 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_EQ(counts.requests, requests_of(rig.bus, 1));
+    EXPECT_EQ(rig.engine.device_counts(1).requests, requests_of(rig.bus, 2));
+    EXPECT_GE(counts.requests, 10U);
+    EXPECT_EQ(counts.errors, 0U);
+    EXPECT_EQ(counts.timeouts, 0U);
+    EXPECT_GT(counts.last_ok_time_ns, 0);
+    // The loopback answers each request whole after LATENCY.
+    EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 1.0);
+    // Both devices' requests of the complete seconds, over 10 s: not those
+    // of the running second (review S1).
+    const std::int64_t now = rig.clock.monotonic_ns();
+    const std::size_t complete = requests_before(rig.bus, now - (now % SECOND));
+    ASSERT_GT(complete, 0U);
+    EXPECT_DOUBLE_EQ(rig.engine.requests_per_s(now),
+                     static_cast<double>(complete) / 10.0);
+    EXPECT_EQ(rig.engine.points_absent(0), 0U);
+}
+
+TEST(ChannelEngine, ASilentDeviceCountsEveryAttemptAsATimeOut) {
+    Rig rig(channel_of(2, quick_failure(2, 100), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(2 * SECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.requests, 3U);
+    EXPECT_EQ(counts.timeouts, counts.requests);  // retries included
+    EXPECT_EQ(counts.errors, 0U);
+    EXPECT_EQ(counts.last_ok_time_ns, 0);
+    EXPECT_DOUBLE_EQ(rig.engine.response_ms(0), 0.0);  // nothing answered
+    EXPECT_EQ(rig.engine.device_counts(1).timeouts, 0U);
+}
+
+// True when every one of at least 5 requests was refused: an error and a
+// refusal, never an exception or a time-out.
+::testing::AssertionResult only_refused(const DeviceCounts& counts) {
+    if (counts.refusals >= 5 && counts.errors == counts.refusals &&
+        counts.errors == counts.requests && counts.exceptions == 0 &&
+        counts.timeouts == 0) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "requests " << counts.requests << ", errors " << counts.errors
+           << ", refusals " << counts.refusals << ", exceptions "
+           << counts.exceptions << ", time-outs " << counts.timeouts;
+}
+
+TEST(ChannelEngine, BusyAndGatewayAnswersAreRefusalsAndErrors) {
+    Rig rig(channel_of(2, quick_failure(0, 100), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::BUSY);
+    rig.bus.fault(2, Fault::UNREACHABLE);
+    rig.run_until(5 * FAST_PERIOD - MILLISECOND);
+    EXPECT_TRUE(only_refused(rig.engine.device_counts(0)));  // busy
+    EXPECT_TRUE(only_refused(rig.engine.device_counts(1)));  // gateway
+}
+
+TEST(ChannelEngine, AnAbsentAnswerIsAnExceptionAndItsPointsAreAbsent) {
+    Rig rig(channel_of(1, quick_failure(0, 100), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::ABSENT);
+    rig.run_until(3 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.exceptions, 1U);
+    EXPECT_EQ(counts.errors, counts.exceptions);
+    EXPECT_EQ(counts.refusals, 0U);
+    EXPECT_EQ(rig.engine.points_absent(0), 1U);
+}
+
+TEST(ChannelEngine, ABrokenAnswerIsAnError) {
+    // A serial line: a broken frame is retried, not a close (7.3).
+    Rig rig(channel_of(1, quick_failure(0, 100), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::GARBAGE);
+    rig.run_until(3 * FAST_PERIOD - MILLISECOND);
+    const DeviceCounts& counts = rig.engine.device_counts(0);
+    EXPECT_GE(counts.errors, 3U);
+    EXPECT_EQ(counts.errors, rig.engine.counts().broken);
+    EXPECT_EQ(counts.exceptions + counts.refusals + counts.timeouts, 0U);
+}
+
+TEST(ChannelEngine, TheLinkIsToldBeforeAConnectAndAfterALoss) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.transport.refuse_connects(1, 10 * MILLISECOND);
+    rig.run_until(500 * MILLISECOND);
+    EXPECT_EQ(rig.tags.links(),
+              (std::vector<ChannelLink>{ChannelLink::CONNECTING,
+                                        ChannelLink::DISCONNECTED}));
+    EXPECT_EQ(rig.engine.link(), ChannelLink::DISCONNECTED);
+    rig.run_until(2 * SECOND);
+    EXPECT_EQ(rig.engine.link(), ChannelLink::CONNECTED);
+    rig.transport.close_by_peer();
+    rig.run_until(2 * SECOND + 100 * MILLISECOND);
+    EXPECT_EQ(rig.tags.links(),
+              (std::vector<ChannelLink>{
+                  ChannelLink::CONNECTING, ChannelLink::DISCONNECTED,
+                  ChannelLink::CONNECTING, ChannelLink::CONNECTED,
+                  ChannelLink::DISCONNECTED}));
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

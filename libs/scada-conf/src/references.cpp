@@ -34,8 +34,6 @@ namespace scada::conf {
 
 namespace {
 
-constexpr std::uint16_t CF_SYSTEM_TAG = 301;
-constexpr std::uint16_t CF_TAG_TWICE = 302;
 constexpr std::uint16_t CF_NAME_TWICE = 303;
 constexpr std::uint16_t CF_NO_SUCH = 310;
 constexpr std::uint16_t CF_EXPRESSION_FAILS = 410;
@@ -274,11 +272,6 @@ private:
             case FileType::OUTPUTS:
                 collect_outputs();
                 break;
-            case FileType::TAGS:
-                for (const NodeId tag : items(root(), "tags")) {
-                    define_tag(tag, "name");
-                }
-                break;
             default:
                 break;
         }
@@ -357,7 +350,6 @@ private:
             if (const std::optional<NodeId> name =
                     find_scalar(interlock, "name")) {
                 define(interlocks_, "interlock", *name);
-                define_tag(interlock, "name");
             }
         }
         for (const NodeId output : items(root(), "outputs")) {
@@ -365,28 +357,6 @@ private:
                     find_scalar(output, "name")) {
                 outputs_.add(text(*name), document_->location(*name));
             }
-        }
-    }
-
-    // A tag that a tag file or an interlock defines: CF-301 in `sys`, CF-302
-    // when given twice. Point tags come with the expander (#103).
-    void define_tag(NodeId owner, std::string_view key) {
-        const std::optional<NodeId> name = find_scalar(owner, key);
-        if (!name) {
-            return;
-        }
-        const std::string_view tag = text(*name);
-        // 2.1: a user tag name "must not start with the segment `sys`".
-        if (tag == "sys" || tag.starts_with("sys.")) {
-            error(CF_SYSTEM_TAG, *name,
-                  "tag names starting with sys. are reserved");
-            return;
-        }
-        if (std::optional<Location> first =
-                tags_.add(tag, document_->location(*name))) {
-            error(CF_TAG_TWICE, *name,
-                  "tag " + quote_text(tag) + " is defined twice" +
-                      first_at(*first));
         }
     }
 
@@ -1132,7 +1102,6 @@ private:
     Definitions outputs_;
     Definitions priorities_;
     Definitions classes_;
-    Definitions tags_;
     bool tiers_given_ = false;
     bool tasks_given_ = false;
     bool priorities_given_ = false;

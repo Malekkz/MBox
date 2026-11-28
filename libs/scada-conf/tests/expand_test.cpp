@@ -265,10 +265,12 @@ TEST(Expand, DisableAndOnly) {
         expand({{"templates/base_a.yaml", base},
                 {"templates/meter_a.yaml", meter},
                 {"drivers/modbus/line1.yaml",
-                 one_device("    only: [\"inv*.power\"]\n")}}),
+                 one_device("    only: [\"inv*.power\"]\n"
+                            "    overrides: { inv12.power: { address: { "
+                            "register: 2 } } }\n")}}),
         (Lines{"ps1.m1.inv1.power: {address: {table: holding, register: 1, "
                "type: uint16}, unit: kW}",
-               "ps1.m1.inv12.power: {address: {table: holding, register: 1, "
+               "ps1.m1.inv12.power: {address: {table: holding, register: 2, "
                "type: uint16}, unit: kW}"}));
     EXPECT_EQ(
         expand({{"templates/base_a.yaml", base},
@@ -553,15 +555,16 @@ constexpr std::string_view ADDRESS =
 TEST(Expand, TheFirstVariableIsOutermost) {
     EXPECT_EQ(one_template("repeat:\n"
                            "  - for: { a: \"1..2\", b: \"1..2\" }\n"
-                           "    points: [ { name: \"p{a}_{b}\", " +
-                           std::string(ADDRESS) + " } ]\n"),
-              (Lines{"ps1.m1.p1_1: {address: {table: holding, register: 1, "
+                           "    points: [ { name: \"p{a}_{b}\", address: "
+                           "{ table: holding, register: \"10 * a + b\", "
+                           "type: uint16 } } ]\n"),
+              (Lines{"ps1.m1.p1_1: {address: {table: holding, register: 11, "
                      "type: uint16}}",
-                     "ps1.m1.p1_2: {address: {table: holding, register: 1, "
+                     "ps1.m1.p1_2: {address: {table: holding, register: 12, "
                      "type: uint16}}",
-                     "ps1.m1.p2_1: {address: {table: holding, register: 1, "
+                     "ps1.m1.p2_1: {address: {table: holding, register: 21, "
                      "type: uint16}}",
-                     "ps1.m1.p2_2: {address: {table: holding, register: 1, "
+                     "ps1.m1.p2_2: {address: {table: holding, register: 22, "
                      "type: uint16}}"}));
 }
 
@@ -865,6 +868,29 @@ TEST(Expand, TheIdentityChecksAreEvaluated) {
               "\"1 > 2\": the value must be an INT, not BOOL"});
 }
 
+// A template's `address_base` (A.1: a template and device key) is a key of
+// the expanded device, as `functions` and `read` are; the instance's wins.
+TEST(Expand, AddressBaseComesFromTheTemplate) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\naddress_base: 1\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: 1, type: "
+        "uint16 } }\n";
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml", one_device()}},
+                     true),
+              (Lines{"ps1.m1: {address_base: 1, unit_id: 1}",
+                     "ps1.m1.p: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    address_base: 0\n")}},
+                     true),
+              (Lines{"ps1.m1: {address_base: 0, unit_id: 1}",
+                     "ps1.m1.p: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+}
+
 // --- The review of #146 ------------------------------------------------
 
 // B1: a range over the whole INT span is refused from its bounds; its
@@ -999,16 +1025,17 @@ TEST(Expand, StringKeysMergeAsText) {
     EXPECT_EQ(
         expand({{"templates/base_a.yaml",
                  "template: base_a\nprotocol: modbus\n"
-                 "points: [ { name: c, access: rw, address: { table: holding, "
-                 "register: 1, type: uint16, write: { values: { 16: 1 } } } } "
-                 "]\n"},
+                 "points: [ { name: c, access: rw, storage: volatile, "
+                 "address: { table: holding, register: 1, type: uint16, "
+                 "write: { values: { 16: 1 } } } } ]\n"},
                 {"templates/meter_a.yaml",
                  "template: meter_a\nextends: base_a\nprotocol: modbus\n"
                  "points: [ { name: c, address: { write: { values: { 0x10: 2 } "
                  "} } } ]\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        Lines{"ps1.m1.c: {access: rw, address: {table: holding, register: 1, "
-              "type: uint16, write: {values: {16: 1, 0x10: 2}}}}"});
+        Lines{"ps1.m1.c: {access: rw, storage: volatile, address: {table: "
+              "holding, register: 1, type: uint16, write: {values: {16: 1, "
+              "0x10: 2}}}}"});
 }
 
 // B6: map keys of the integer form merge by their value: a child's `0xF`
@@ -1373,7 +1400,10 @@ TEST(Expand, AlarmsOnABitAreNotEvaluated) {
                  "      0: { name: fault, alarms: [ { type: state, alarm_on: "
                  "true, priority: high, suppress_when: ps1.station.maint } ] "
                  "}\n"},
-                {"drivers/modbus/line1.yaml", one_device()}}),
+                {"drivers/modbus/line1.yaml", one_device()},
+                {"tags/site.yaml",
+                 "tags:\n  - { name: ps1.station.maint, type: internal, "
+                 "value_type: bool }\n"}}),
         Lines{"ps1.m1.w: {tag: false, address: {table: holding, register: 1, "
               "type: uint16}, bits: {0: {name: fault, alarms: [{type: state, "
               "alarm_on: true, priority: high, suppress_when: "
@@ -1411,7 +1441,7 @@ Lines merged(std::string_view points, std::string_view more = {},
     Files files{{"templates/meter_a.yaml",
                  std::string("template: meter_a\nprotocol: modbus\n") +
                      (base.empty() ? "" : "extends: base_a\n") + "points:\n" +
-                     std::string(points)},
+                     std::string(points) + "bit_order: lsb0\n"},
                 {"drivers/modbus/line1.yaml", one_device(more)}};
     if (!base.empty()) {
         files.emplace("templates/base_a.yaml",
@@ -1576,7 +1606,8 @@ TEST(MergedPoints, ComputedValuesOutOfRange) {
         "uint16 }, equals: 7 }\n"
         "points:\n"
         "  - { name: p, address: { table: holding, register: \"r * 65536\", "
-        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n";
+        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n"
+        "bit_order: lsb0\n";
     // With r = 0 every value is in range but the divisor.
     EXPECT_EQ(
         expand({{"templates/meter_a.yaml", meter},
@@ -1633,7 +1664,8 @@ TEST(MergedPoints, AComputedValueWithoutARuleIsInternal) {
                       .types = {},
                       .instance_of = {},
                       .instances = {},
-                      .computed = {value}};
+                      .computed = {value},
+                      .from_defaults = {}};
     tree.types = ScalarTypes(tree.document);
     Diagnostics diagnostics;
     const Status status = check_merged_points(tree, {}, diagnostics);

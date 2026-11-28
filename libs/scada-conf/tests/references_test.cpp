@@ -165,10 +165,15 @@ TEST(References, AlarmPrioritiesClassesAndAreas) {
                    "high, area: ps1 }\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "normal, class: safety, area: ps9 }\n"}}),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
         (Lines{"alarms/site.yaml:2:27 CF-310: alarm priority \"high\" does "
                "not exist",
+               "alarms/site.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
                "alarms/site.yaml:4:58 CF-310: alarm priority \"high\" does "
                "not exist",
+               "alarms/site.yaml:5:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
                "alarms/site.yaml:5:72 CF-310: alarm class \"safety\" does not "
                "exist",
                "alarms/site.yaml:5:86 CF-310: area \"ps9\" does not exist"}));
@@ -210,9 +215,15 @@ TEST(References, OutputsInterlocksAndPrograms) {
                "does not exist",
                "control/tasks.yaml:2:46 CF-310: program \"ps1_fan\" does not "
                "exist",
+               "outputs/ps1.yaml:2:37 CF-310: tag \"ps1.tank.low\" does not "
+               "exist",
                "outputs/ps1.yaml:2:72 CF-310: task \"slow\" does not exist",
+               "outputs/ps1.yaml:7:13 CF-310: tag \"ps1.pump1.run_cmd\" does "
+               "not exist",
                "outputs/ps1.yaml:9:26 CF-310: interlock \"ps1.dry\" does not "
                "exist",
+               "outputs/ps1.yaml:14:13 CF-310: tag \"ps1.valve.run_cmd\" does "
+               "not exist",
                "outputs/ps1.yaml:16:39 CF-310: interlock \"ps1.wet\" does not "
                "exist"}));
 }
@@ -354,9 +365,11 @@ TEST(References, TagsInSysAndTagsGivenTwice) {
                "at tags/a.yaml:3"}));
 }
 
-// A reference to a tag waits for the expander (#103), which makes the point
-// tags: no error yet, however wrong it is.
-TEST(References, AReferenceToATagGivesNoErrorYet) {
+// Slice 7a of #100 (D-116): a reference to a tag outside an expression names
+// a tag of the expanded tree, or is CF-310; so does a name in a run-time
+// expression (slice 7b, D-117), there the virtual tag's: its first error,
+// within its escaped text.
+TEST(References, AReferenceToATagNamesATag) {
     EXPECT_EQ(
         validate(
             {{"areas.yaml",
@@ -377,7 +390,17 @@ TEST(References, AReferenceToATagGivesNoErrorYet) {
               "    feedback: ps1.nothing.either\n"
               "    interlocks: []\n"
               "    safe_state: off\n"}}),
-        Lines{});
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"alarms/site.yaml:2:12 CF-310: tag \"ps1.fm9.flow\" does not "
+               "exist",
+               "alarms/site.yaml:2:63 CF-310: tag \"ps1.sp9\" does not exist",
+               "areas.yaml:4:29 CF-310: tag \"ps1.panel.local\" does not exist",
+               "outputs/ps1.yaml:5:13 CF-310: tag \"ps1.nothing.here\" does "
+               "not exist",
+               "outputs/ps1.yaml:6:15 CF-310: tag \"ps1.nothing.either\" does "
+               "not exist",
+               "tags/site.yaml:2:39 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist at line 1, column 1 of the expression's text"}));
 }
 
 TEST(References, ProtocolRulesOfAModbusChannel) {
@@ -491,7 +514,9 @@ TEST(References, TheDefaultTasks) {
 }
 
 // B2: an alarm's expressions read tags wherever the alarm stands, a point,
-// a bit of a point or a tag; they are not configuration expressions.
+// a bit of a point or a tag; they are not configuration expressions. The
+// template has no instance, so only the tag file's alarm is checked as a
+// run-time expression (D-117), whose tag does not exist.
 TEST(References, AlarmExpressionsAreRunTimeWhereverTheAlarmStands) {
     EXPECT_EQ(
         validate(
@@ -514,7 +539,8 @@ TEST(References, AlarmExpressionsAreRunTimeWhereverTheAlarmStands) {
               "  - { name: a.b, type: internal, value_type: bool, alarms: "
               "[ { type: state, alarm_on: true, priority: high, "
               "suppress_when: ps1.station.maint } ] }\n"}}),
-        Lines{});
+        Lines{"tags/site.yaml:2:124 CF-310: tag \"ps1.station.maint\" does "
+              "not exist"});
 }
 
 // B3: data_bits by its value, however it is written.
@@ -694,8 +720,10 @@ TEST(References, StageFiveWaitsForTheStagesBefore) {
 }
 
 // B2: where names are checked, a device without template, an alarm's
-// expressions are not: each would otherwise be CF-410 for a tag name. One
-// alarm on a point, one on a bit: the two places that skip `alarms`.
+// expressions are not configuration expressions: each would otherwise be
+// CF-410 for a tag name. They are run-time expressions (D-117), whose names
+// are tags: CF-310 here, as no tag of that name exists. One alarm on a
+// point, one on a bit: the two places that skip `alarms`.
 TEST(References, AlarmsOfADeviceWithoutTemplateAreRunTime) {
     EXPECT_EQ(
         validate({{"drivers/modbus/line1.yaml",
@@ -707,7 +735,8 @@ TEST(References, AlarmsOfADeviceWithoutTemplateAreRunTime) {
                            "type: uint16 }\n"
                            "        alarms: [ { type: expression, name: p.hot, "
                            "expr: \"ps1.t1 > 80\", priority: high } ]\n")}}),
-        Lines{});
+        Lines{"drivers/modbus/line1.yaml:12:59 CF-310: tag \"ps1.t1\" does "
+              "not exist"});
     EXPECT_EQ(
         validate({{"drivers/modbus/line1.yaml",
                    channel("  - name: ps1.m1\n"
@@ -723,7 +752,12 @@ TEST(References, AlarmsOfADeviceWithoutTemplateAreRunTime) {
                            "            alarms: [ { type: state, alarm_on: "
                            "true, priority: high, suppress_when: "
                            "ps1.station.maint } ]\n")}}),
-        Lines{});
+        // A device without a template that uses a bit is CF-618 too (M3 of
+        // the review of #174).
+        (Lines{"drivers/modbus/line1.yaml:14:11 CF-618: template \"ps1.m1\" "
+               "uses bits and needs bit_order",
+               "drivers/modbus/line1.yaml:16:85 CF-310: tag "
+               "\"ps1.station.maint\" does not exist"}));
 }
 
 // The one CF-523 of a configuration expression: the type of a `for` value
@@ -881,8 +915,8 @@ TEST(References, TiersAndTheLoggingOfABit) {
 }
 
 // 6 and 7: a file that gives `classes` replaces the default classes, and
-// the first file that gives `priorities` defines them (a second is CF-811,
-// with slice 7 of #100).
+// the first file that gives `priorities` defines them (a second is
+// CF-811).
 TEST(References, AlarmListsOfAFile) {
     EXPECT_EQ(
         validate({{"areas.yaml", std::string(AREAS)},
@@ -897,7 +931,14 @@ TEST(References, AlarmListsOfAFile) {
                    "alarms:\n"
                    "  - { tag: ps1.fm1.flow, type: low, limit: 1, priority: "
                    "minor, class: safety, area: ps1 }\n"}}),
-        (Lines{"alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"alarms/a.yaml:4:12 CF-310: tag \"ps1.fm1.flow\" does not "
+               "exist",
+               "alarms/a.yaml:4:73 CF-310: alarm class \"process\" does not "
+               "exist",
+               "alarms/b.yaml:1:13 CF-811: priorities is given in "
+               "\"alarms/a.yaml\" and \"alarms/b.yaml\"",
+               "alarms/b.yaml:3:12 CF-310: tag \"ps1.fm1.flow\" does not "
                "exist",
                "alarms/b.yaml:3:57 CF-310: alarm priority \"minor\" does not "
                "exist"}));

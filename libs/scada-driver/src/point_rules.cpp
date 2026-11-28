@@ -90,6 +90,23 @@ Status validate_point_rules(const PointRules& rules) noexcept {
     if (const Status status = validate_references(rules); !status.ok()) {
         return status;
     }
+    // CF-504 as the compile step gives it (`check_value_type` in
+    // libscada-conf, decision D-115): a string raw is held by a STRING tag
+    // only, and a STRING tag holds nothing else; a BOOL tag holds a bool raw
+    // only; a counter holds no floating raw. The two must change together
+    // (#169).
+    if ((rules.tag_type == tag::TagType::STRING) !=
+        (rules.raw_kind == RawKind::STRING)) {
+        return refused(
+            "a STRING tag needs a string raw type, and only it (CF-504)");
+    }
+    if (rules.tag_type == tag::TagType::BOOL &&
+        rules.raw_kind != RawKind::BOOL) {
+        return refused("a BOOL tag needs a bool raw type (CF-504)");
+    }
+    if (rules.counter.has_value() && rules.raw_kind == RawKind::FLOAT) {
+        return refused("a counter cannot hold a floating raw type (CF-504)");
+    }
     if (rules.double_point.has_value() &&
         !strictly_sorted(
             rules.double_point->states,

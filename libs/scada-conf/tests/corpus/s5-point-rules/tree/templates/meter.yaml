@@ -1,0 +1,13 @@
+template: meter
+protocol: modbus
+points:
+  - { name: setpoint, access: rw, address: { table: holding, register: 1, type: uint16 } }
+  - { name: command, access: wo, storage: volatile, poll_group: fast, address: { table: holding, register: 2, type: uint16 } }
+  - { name: level, on_invalid: keep_last, address: { table: holding, register: 3, type: uint16 } }
+  - { name: temp, update_period: 5s, address: { table: holding, register: 4, type: uint16 } }
+  - { name: exponent, poll_group: slow, address: { table: holding, register: 5, type: int16 } }
+  - { name: power, exponent_from: { point: exponent, direction: multiply }, address: { table: holding, register: 6, type: int16 } }
+  - { name: breaker, kind: double_point, address: { table: holding, register: 7, field: [0, 1] } }
+  - { name: trip, address: { table: holding, register: 8, bit: 2 } }
+identify:
+  - { point: command, equals: 7 }

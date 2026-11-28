@@ -1,0 +1,20 @@
+template: flow_meter_x
+protocol: modbus
+points:
+  - name: flow
+    address: { table: holding, register: 100, type: float32, word_order: big }
+    unit: m3/h
+    scale: { gain: 1.0, offset: 0.0 }
+    poll_group: normal
+    max_age: 5s
+    logging: { policy: process_default, interval: 1s, raw_retention: 180d }
+    alarms:
+      - { type: high, limit: 450, deadband: 5, on_delay: 10s, priority: medium, area: ps1 }
+  - name: total
+    address: { table: holding, register: 102, type: uint32 }
+    unit: m3
+    poll_group: slow
+    kind: counter
+    logging: counters
+  - name: running
+    address: { table: coil, register: 1 }

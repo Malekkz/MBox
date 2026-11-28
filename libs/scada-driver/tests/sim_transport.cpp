@@ -15,6 +15,10 @@
 namespace scada::driver::test {
 
 IoStatus SimTransport::connect(std::int64_t deadline_ns) noexcept {
+    if (abandon_) {
+        open_ = false;
+        return IoStatus::ABANDONED;
+    }
     ++connects_;
     connect_times_.push_back(clock_->monotonic_ns());
     if (refusals_ > 0) {
@@ -101,6 +105,9 @@ IoStatus SimTransport::receive(std::span<std::byte> into,
     if (!open_ || peer_closed_) {
         return IoStatus::CLOSED;
     }
+    if (abandon_) {
+        return IoStatus::ABANDONED;
+    }
     if (empty_read_) {
         empty_read_ = false;
         return IoStatus::OK;  // a read of 0 bytes
@@ -164,6 +171,8 @@ SCADA_RT void RecordingTags::write_point(
     written.value = sample.tag.value.i;
     written.time_ns = sample.tag.source_time_ns;
     ++written.writes;
+    history_.push_back(
+        Logged{.device = device, .point = point, .written = written});
 }
 
 std::size_t run_engine(ChannelEngine& engine, SimClock& clock,

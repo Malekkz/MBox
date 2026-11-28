@@ -1,6 +1,11 @@
 #include "scada/conf/validate.h"
 
+#include "channel_rules.h"
 #include "merged_points.h"
+#include "modbus_rules.h"
+#include "output_rules.h"
+#include "point_rules.h"
+#include "runtime_expressions.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 #include "scada/conf/diagnostic.h"
@@ -13,6 +18,8 @@
 #include "scada/conf/tree.h"
 #include "scada/conf/types.h"
 #include "scada/conf/yaml.h"
+#include "tag_names.h"
+#include "tag_rules.h"
 #include "validate_internal.h"
 
 #include <cstdint>
@@ -284,8 +291,9 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
         const bool stage4_failed = stage4.error_count() > 0;
         stage4.move_into(report);
         if (!stage4_failed) {
-            // Stage 5: what needs no point tags (D-113); the rest comes with
-            // slice 7 of #100.
+            // Stage 5: what needs no point tags (D-113), the merged points
+            // (D-115) and the tag references (D-116); the rest comes with
+            // slices 7b to 7e of #100.
             Diagnostics stage5;
             check_references(checked, stage5);
             if (validation.expanded) {
@@ -294,6 +302,29 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 if (!merged.ok()) {
                     return merged;
                 }
+                // The tags of the expanded tree and the references to them
+                // (D-116, slice 7a of #100).
+                TagNames tags =
+                    collect_tags(*validation.expanded, checked, stage5);
+                // Virtual tags get their types from their expressions before
+                // any reference reads them (D-117, slice 7b of #100).
+                check_run_time_expressions(tags, *validation.expanded, checked,
+                                           stage5, expand_limits.kept_run_time,
+                                           expand_limits.run_time_pattern_work,
+                                           &validation.run_time);
+                check_tag_references(tags, *validation.expanded, checked,
+                                     stage5,
+                                     expand_limits.applies_to_pattern_work);
+                check_tag_rules(tags, *validation.expanded, checked, stage5);
+                check_point_rules(*validation.expanded, checked, stage5,
+                                  expand_limits.health_pattern_work);
+                check_modbus_rules(*validation.expanded, stage5);
+                // The channels against the limits and each other (D-123,
+                // slice 7d-3 of #100).
+                check_channel_rules(*validation.expanded, checked, stage5);
+                // Areas, outputs and their safe states (D-124, slice 7e-1
+                // of #100).
+                check_output_rules(tags, *validation.expanded, checked, stage5);
             }
             stage5.move_into(report);
         }

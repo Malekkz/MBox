@@ -1,0 +1,10 @@
+template: breaker
+protocol: modbus
+points:
+  - { name: pos, address: { table: coil, register: 1 } }
+  - { name: lone_on, access: rw, storage: volatile, address: { table: coil, register: 10, write: { on: { table: holding, register: 20, value: 1 } } } }
+  - { name: lone_on2, kind: double_point, access: rw, storage: volatile, states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: holding, register: 11, type: uint16, write: { on: { table: holding, register: 21, value: 1 } } } }
+  - { name: dvals, kind: double_point, access: rw, storage: volatile, states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: holding, register: 12, type: uint16, write: { values: { 2: 0x0002 } } } }
+  - { name: fixed, access: wo, storage: volatile, address: { table: holding, register: 13, type: uint16, write: { value: 1 } } }
+  - { name: fixed2, access: wo, storage: volatile, address: { table: holding, register: 14, type: uint16, write: { value: 1 } } }
+  - { name: coded, access: rw, storage: volatile, address: { table: holding, register: 15, type: uint16, write: { values: { 0: 1, 1: 2 } } } }

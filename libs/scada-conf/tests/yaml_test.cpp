@@ -4,10 +4,10 @@
 #include "scada/conf/yaml.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/node.h"
+#include "yaml_cases.h"
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -21,105 +21,8 @@ constexpr std::size_t KIB_64 = std::size_t{64} * 1024;
 constexpr std::size_t KEY_LIMIT = 64;
 constexpr std::size_t DEPTH_LIMIT = 32;
 
-// NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
-void dump(const Document& document, NodeId node_id, std::string& out);
-
-void dump_scalar(const Document& document, NodeId node_id, std::string& out) {
-    const ScalarStyle style = document.style(node_id);
-    switch (style) {
-        case ScalarStyle::PLAIN:
-            break;
-        case ScalarStyle::SINGLE_QUOTED:
-            out += "'";
-            break;
-        case ScalarStyle::DOUBLE_QUOTED:
-            out += "\"";
-            break;
-        case ScalarStyle::LITERAL:
-            out += "|\"";
-            break;
-        case ScalarStyle::FOLDED:
-            out += ">\"";
-            break;
-    }
-    for (const char chr : document.text(node_id)) {
-        if (chr == '\n') {
-            out += "\\n";
-        } else if (chr == '\t') {
-            out += "\\t";
-        } else {
-            out.push_back(chr);
-        }
-    }
-    if (style != ScalarStyle::PLAIN) {
-        out += style == ScalarStyle::SINGLE_QUOTED ? "'" : "\"";
-    }
-}
-
-// A compact, unambiguous text of a node: maps as {k: v, ...}, sequences as
-// [a, b], plain scalars as written, others with their quotes ('', "", |"",
-// >"") and \n, \t escaped.
-// NOLINTNEXTLINE(misc-no-recursion): bounded by the depth limit of the parsed document
-void dump(const Document& document, NodeId node_id, std::string& out) {
-    const NodeKind kind = document.kind(node_id);
-    if (kind == NodeKind::SCALAR) {
-        dump_scalar(document, node_id, out);
-        return;
-    }
-    if (kind == NodeKind::MAP) {
-        out += "{";
-        bool first = true;
-        for (const Entry& entry : document.entries(node_id)) {
-            out += first ? "" : ", ";
-            first = false;
-            dump(document, entry.key, out);
-            out += ": ";
-            dump(document, entry.value, out);
-        }
-        out += "}";
-        return;
-    }
-    out += "[";
-    bool first = true;
-    for (const NodeId item : document.items(node_id)) {
-        out += first ? "" : ", ";
-        first = false;
-        dump(document, item, out);
-    }
-    out += "]";
-}
-
-// The tree of `text`, or "error <line>:<column> CF-<n>: <message>".
-std::string parse(std::string_view text, const ParseLimits& limits = {},
-                  NodeBudget* budget = nullptr) {
-    Diagnostics diagnostics;
-    const std::optional<Document> document =
-        parse_yaml(text, "f.yaml", diagnostics, limits, budget);
-    Report report;
-    diagnostics.move_into(report);
-    if (!document) {
-        if (report.errors.size() != 1) {
-            return "no single error";
-        }
-        const Diagnostic& error = report.errors.front();
-        return "error " + std::to_string(error.location.line) + ":" +
-               std::to_string(error.location.column) + " " + code_text(error) +
-               ": " + error.message;
-    }
-    if (report.error_count != 0) {
-        return "errors beside a document";
-    }
-    std::string out;
-    dump(*document, document->root(), out);
-    return out;
-}
-
-// The error line only up to its code: "error <line>:<column> CF-<n>".
-std::string code_at(std::string_view text, const ParseLimits& limits = {}) {
-    const std::string result = parse(text, limits);
-    const std::size_t colon = result.find(": ");
-    return result.substr(0, colon);
-}
+using yaml_cases::code_at;
+using yaml_cases::parse;
 
 // --- What the subset accepts ---------------------------------------------
 
@@ -597,29 +500,6 @@ TEST(Yaml, TheDefaultLimitsAreThoseOfTheContract) {
 
 // --- Review fixes of #130 -----------------------------------------------
 
-// B1: every line counts against the scalar limit before it is stored, and
-// empty lines are counted, not stored.
-TEST(Yaml, EmptyLinesOfABlockScalarCountAgainstTheLimit) {
-    constexpr std::size_t LIMIT = 8;
-    ParseLimits limits;
-    limits.max_scalar_bytes = LIMIT;
-    // "x\n" and six kept empty lines: 8 bytes.
-    EXPECT_EQ(parse("a: |+\n x\n" + std::string(6, '\n'), limits),
-              "{a: |\"x\\n\\n\\n\\n\\n\\n\\n\"}");
-    EXPECT_EQ(parse("a: |+\n x\n" + std::string(7, '\n'), limits),
-              "error 1:4 CF-113: a scalar exceeds its limit of 8 bytes");
-    // Between two lines, the empty lines are in the value.
-    EXPECT_EQ(parse("a: |\n x\n\n\n\n\n y\n", limits),
-              "{a: |\"x\\n\\n\\n\\n\\ny\\n\"}");
-    EXPECT_EQ(code_at("a: |\n x\n\n\n\n\n\n y\n", limits), "error 1:4 CF-113");
-    // Stripped or clipped, trailing empty lines are not in the value and
-    // cost nothing: 1,000,000 of them are accepted.
-    const std::string many(1000000, '\n');
-    EXPECT_EQ(parse("a: |\n x\n" + many, limits), "{a: |\"x\\n\"}");
-    EXPECT_EQ(parse("a: >-\n x\n" + many, limits), "{a: >\"x\"}");
-    EXPECT_EQ(parse("a: |\n" + many), "{a: |\"\"}");
-}
-
 TEST(Yaml, FoldedLinesOfPlainAndQuotedScalarsCountAgainstTheLimit) {
     ParseLimits limits;
     limits.max_scalar_bytes = 4;
@@ -747,51 +627,6 @@ TEST(Yaml, MessagesOfBlockScalarIndicators) {
               "error 1:6 CF-110: an indentation indicator of more than one "
               "digit is not allowed in configuration files");
     EXPECT_EQ(code_at("a: |0\n  x\n"), "error 1:5 CF-110");
-}
-
-// Ruling 10: the default limits at N and N + 1.
-TEST(Yaml, TheDefaultEntryLimitAtNAndNPlusOne) {
-    constexpr std::size_t ENTRIES = 65536;
-    std::string list = "[0";
-    for (std::size_t i = 1; i < ENTRIES; ++i) {
-        list += ",0";
-    }
-    EXPECT_EQ(parse(list + "]").substr(0, 2), "[0");
-    // Item 65,537 stands at column 2 x 65,537.
-    EXPECT_EQ(code_at(list + ",0]"), "error 1:131074 CF-113");
-}
-
-TEST(Yaml, TheDefaultNodeLimitOfAFileAtNAndNPlusOne) {
-    // A list of 20 lists, of 999,979 items in all: 1,000,000 nodes, each list
-    // within the entry limit.
-    constexpr std::size_t LISTS = 20;
-    constexpr std::size_t ITEMS = 999979;
-    constexpr std::size_t PER_LIST = 50000;
-    std::string tree = "[\n";
-    tree.reserve(3 * ITEMS);
-    std::size_t left = ITEMS;
-    for (std::size_t list = 0; list < LISTS; ++list) {
-        const std::size_t count = std::min(left, PER_LIST);
-        tree += "[0";
-        for (std::size_t i = 1; i < count; ++i) {
-            tree += ",0";
-        }
-        left -= count;
-        tree += "],\n";
-    }
-    EXPECT_EQ(parse(tree + "]").substr(0, 3), "[[0");
-    // One item more in the outer list.
-    const std::string over = parse(tree + "0]");
-    EXPECT_EQ(over.substr(over.find("CF-113")),
-              "CF-113: the file exceeds its limit of 1000000 nodes");
-}
-
-TEST(Yaml, TheDefaultFileSizeAtNAndNPlusOne) {
-    constexpr std::size_t MIB_8 = std::size_t{8} * 1024 * 1024;
-    const std::string comment = "#" + std::string(MIB_8 - 1, 'c');
-    EXPECT_EQ(parse(comment), "{}");
-    EXPECT_EQ(parse(comment + "c"),
-              "error 1:1 CF-113: the file exceeds its limit of 8 MiB");
 }
 
 TEST(Yaml, TheDefaultTreeLimitAtNAndNPlusOne) {

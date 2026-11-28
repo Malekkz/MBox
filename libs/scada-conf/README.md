@@ -102,7 +102,11 @@ the whole of `validate_and_expand`):
 - time: about 12.8 s for the worst tree of expressions within their
   budget (additions and uncached parses take about 96 ns a node), 10.7 s
   for 61 instances of a template of 65,536 written points that each keep
-  one (`only`), just under the work budget.
+  one (`only`), just under the work budget. These are the expansion's;
+  the matching budgets of stage 5 add their own, each at its worst: about
+  7 s for run-time patterns (D-117), 1.2 s for health rules' `applies_to`
+  names (CF-311, D-116) and 1.4 s for their poll groups (CF-612, D-120).
+  A budget that runs out is CF-113, and the tree is refused.
 
 A tree past a limit is refused within that: a `when` of 400 terms over
 65,536 values in 30 instances in 5.2 s (it took 729 s when every
@@ -138,13 +142,257 @@ error that names the others, as in stage 4. About 2 µs a computed value:
   chain upward lacks may come from a child, and is checked at the instance
   (#103).
 
-A reference to a tag gives no error yet: point tags exist only once
-instances are expanded, so those references, and the names and types of
-run-time expressions, are checked in slice 7 of #100, after #103.
+Stage 5 also builds the tags of the expanded tree by name, with their value
+types (`src/tag_names.cpp`, D-116): point and bit tags, the tags of tag files,
+interlocks, and the generated tags of section 12.5. The tags of a device
+(`sys.dev.*`) and a channel (`sys.drv.*`) are found from their names and the
+signal tables of driver interface contract 11.1, not stored one by one. It
+gives CF-301 for a user's name in `sys` (a tag, a device, an output, an
+expression alarm), CF-302 for a name given twice, generated names included,
+CF-403 for a generated name over 127 bytes and CF-1001 when the tags,
+generated tags included, pass `limits.max_tags`. It checks every reference
+to a tag outside an expression (outputs, the local panel, alarms wherever
+they stand, programs: CF-310, and CF-312 for a `limit` or `setpoint` that
+is not a number), every point a device's rules name, `applies_to` included
+(CF-310, CF-311), and each point's poll group, given or the default
+`normal` (CF-604). Errors on the expanded tree are grouped as in stage 4.
+Owner names are #101's and are not used.
+
+Stage 5 then checks every run-time expression against those tags
+(`src/runtime_expressions.cpp`, D-117): virtual tags, alarm expressions,
+`suppress_when` and interlock conditions. Virtual tags are typed first, in
+the order their inputs need, and their derived types enter the tags before
+any later check reads them. It gives CF-310 for a name that is no tag,
+CF-311 for a pattern that matches none, CF-521 for an ambiguous `.quality`
+or `.age`, CF-522 for a STRING tag, CF-523 for a type that does not fit or
+a result that must be BOOL, CF-524 for a time function's window out of its
+task's range, CF-525 for virtual tags that form a cycle and CF-527 for a
+given `value_type` that is not the derived one. Matching patterns against the
+tags has a work budget of 1e10 units, 32 per name visited and 1 per step
+of the matcher (`ExpandLimits::run_time_pattern_work`): past it the tree
+is refused with CF-113. The worst accepted tree takes about 14.4 s in
+release on x86-64 (D-117).
+
+Last, stage 5 checks the keys of the tags, logging and alarms
+(`src/tag_rules.cpp`, D-119): CF-505 for a percentage deadband a tag
+writes in its own alarm or `logging`, without `range`; CF-506 to CF-509
+for the retain keys, with warning CW-510 for each `retain_max_age` until
+#89; CF-801 for aggregate tiers out of
+order; CF-802 and CF-803 for logging settings; CF-811 for an alarm list
+given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
+limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags;
+warning CW-805 for a logging `interval` shorter than the tag's refresh, its
+poll group's or its task's period (D-123). Warning CW-804 is not given yet.
+
+Then stage 5 checks the keys of each device's points that need no
+protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a read
+point's `max_age`, given or 3 periods of its poll group, below
+`update_period`; CF-612 for a companion or a health point in another poll
+group or not read; CF-613 for a read Modbus double point of a field or an
+integer without `states`; CF-614 for `poll_group`, `alarms` or `logging`
+that a `wo` point or its override gives (not `defaults`, `none` or `[]`);
+CF-616 for an identity check on a `wo` point; CF-618 for a device that uses
+a bit or a field anywhere without `bit_order`, once per device; CF-619 for
+an `rw` or `wo` point without `storage`; CF-640 for `keep_last` on a read
+point that gives no `max_age`. The patterns of health rules share a budget
+of matching work (D-120).
+
+Then stage 5 checks the Modbus addresses of each channel
+(`src/modbus_rules.cpp`, D-122), with registers taken after the device's
+`address_base`: CF-603 for an address that is not valid for Modbus (a
+register outside 0 to 65,535, a value that runs past it, a bit key or a
+type other than `bool` on a coil or discrete input, a field wider than its
+raw type, a read range outside the table); CF-602 for two points of one
+device that read one register as whole values or write a bit in common;
+CF-601 for two devices of one channel whose registers meet; CF-610 for a
+`side_effect` or `exclusive` range read in two poll groups, read by an
+identity check or written, and for any range overlapping a range of
+another kind; CF-615
+for a function a point needs that `functions` excludes, with no
+substitution; warning CW-607 for an `idle_timeout` shorter than the
+device's slowest poll or `backoff_max`, with no `keepalive`. The warnings
+that need the block plan (CW-606, CW-608) are the Modbus check mode's
+(#104).
+
+Then stage 5 checks the channels (`src/channel_rules.cpp`, D-123): CF-605
+for a channel with more devices than `limits.max_devices_per_channel`;
+CF-620 for two Modbus `rtu` channels on one `device` path, compared as
+written; warning CW-621 for two Modbus `tcp` or `rtu_over_tcp` channels to
+one host and port, the host compared as an address.
+
+Then stage 5 checks the outputs and areas (`src/output_rules.cpp`,
+D-124; review by a person): CF-702 and CF-703 for targets; CF-708 for a
+shape no write carries; CF-709 to CF-711 and warning CW-712 for the keys an
+output needs; CF-705 for a dangerous target, CF-706 and CF-714 for
+`refresh`, CF-707 for an on-only output, CF-713 for a value that does not
+fit the target or survive its scaling (`src/output_values.cpp`), CF-715 for
+feedback, CF-719, CF-720, CF-722 and CF-723 for safe states and fail-safe
+keys, written or by default; CF-718 and warning CW-701 for areas; warning
+CW-721 for a switching output that holds on control loss. D-124 lists the
+interim rules (a) to (k), fail-safe, pending the product owner.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
+
+## The codes of contract section 10
+
+Where each error code of section 10 is given, or which issue holds it (the
+ruling on #100: #100 closes without the codes of stages 6 and 7, of the
+protocols' own refusals and of what is not in phase 2). Kept current by each
+slice of #100. The warnings of section 10.6, of the protocols' `configure`
+codes that #100 gives, and CW-805 are listed too.
+
+| Code | Where |
+| --- | --- |
+| CF-101 | `src/tree_scan.cpp` |
+| CF-102 | `src/validate.cpp` |
+| CF-103 | `src/tree_scan.cpp` |
+| CF-110 | `src/yaml_parser.cpp` |
+| CF-111 | `src/schema.cpp`, `src/yaml_parser.cpp` |
+| CF-112 | `src/yaml_parser.cpp` |
+| CF-113 | `src/expand.cpp`, `src/runtime_expressions.cpp`, `src/tree_scan.cpp`, `src/yaml_parser.cpp` |
+| CF-114 | `src/yaml_parser.cpp` |
+| CF-201 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-202 | `src/expand.cpp`, `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp`, `src/validate.cpp` |
+| CF-203 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-204 | `src/merged_points.cpp`, `src/rules.cpp`, `src/schema.cpp` |
+| CF-205 | `src/rules.cpp`, `src/schema.cpp` |
+| CF-206 | `src/schema.cpp` |
+| CF-207 | `src/schema.cpp` |
+| CF-208 | `src/schema.cpp` |
+| CF-210 | `src/schema.cpp` |
+| CF-211 | `src/validate.cpp` |
+| CF-212 | `src/expand.cpp`, `src/rules.cpp`, `src/schema.cpp` |
+| CF-213 | `src/schema.cpp` |
+| CF-214 | `src/schema.cpp` |
+| CF-301 | `src/tag_names.cpp` |
+| CF-302 | `src/tag_names.cpp` |
+| CF-303 | `src/references.cpp` |
+| CF-310 | `src/expression_types.cpp`, `src/merged_points.cpp`, `src/references.cpp`, `src/tag_names.cpp` |
+| CF-311 | `src/tag_names.cpp` (`applies_to`); `src/expression_types.cpp` (expressions) |
+| CF-312 | `src/tag_names.cpp` |
+| CF-401 | `src/expand.cpp` |
+| CF-402 | `src/expand.cpp` |
+| CF-403 | `src/expand.cpp`; `src/tag_names.cpp` (the names of 12.5) |
+| CF-410 | `src/config_eval.cpp`, `src/expand.cpp`, `src/references.cpp` |
+| CF-411 | `src/expand.cpp` |
+| CF-412 | `src/expand.cpp` |
+| CF-413 | `src/expand.cpp` |
+| CF-414 | `src/expand.cpp` |
+| CF-415 | `src/expand.cpp` |
+| CF-416 | `src/expand.cpp` |
+| CF-417 | `src/expand.cpp` |
+| CF-419 | `src/expand.cpp` |
+| CF-420 | `src/expand.cpp` |
+| CF-421 | `src/expand.cpp` |
+| CF-422 | `src/expand.cpp` |
+| CF-504 | `src/merged_points.cpp` |
+| CF-505 | `src/tag_rules.cpp` |
+| CF-506 | `src/tag_rules.cpp` |
+| CF-507 | `src/tag_rules.cpp` |
+| CF-508 | `src/tag_rules.cpp` |
+| CF-509 | `src/tag_rules.cpp` |
+| CF-520 | `src/expression.cpp`, `src/schema.cpp` |
+| CF-521 | `src/expression_types.cpp` |
+| CF-522 | `src/expression_types.cpp` |
+| CF-523 | `src/config_eval.cpp`, `src/expand.cpp`, `src/expression_types.cpp`, `src/references.cpp`, `src/runtime_expressions.cpp` |
+| CF-524 | `src/expression_types.cpp` |
+| CF-525 | `src/runtime_expressions.cpp` |
+| CF-526 | `src/expression.cpp` |
+| CF-527 | `src/runtime_expressions.cpp` |
+| CF-528 | `src/expression.cpp` |
+| CF-529 | `src/expression.cpp` |
+| CF-516 | `src/merged_points.cpp` |
+| CF-517 | `src/merged_points.cpp`, `src/rules.cpp` |
+| CF-601 | `src/modbus_rules.cpp` |
+| CF-602 | `src/modbus_rules.cpp` |
+| CF-603 | `src/modbus_rules.cpp` |
+| CF-604 | `src/tag_names.cpp` |
+| CF-605 | `src/channel_rules.cpp` |
+| CF-610 | `src/modbus_rules.cpp` |
+| CF-611 | `src/point_rules.cpp` |
+| CF-612 | `src/point_rules.cpp` |
+| CF-613 | `src/point_rules.cpp` |
+| CF-614 | `src/point_rules.cpp` |
+| CF-615 | `src/modbus_rules.cpp` |
+| CF-616 | `src/point_rules.cpp` |
+| CF-618 | `src/point_rules.cpp` |
+| CF-619 | `src/point_rules.cpp` |
+| CF-620 | `src/channel_rules.cpp` |
+| CF-622 | `src/references.cpp` |
+| CF-640 | `src/point_rules.cpp` |
+| CW-606 | #104 (the Modbus check mode at stage 7, from the block plan; D-122) |
+| CW-607 | `src/modbus_rules.cpp` |
+| CW-608 | #104 (the Modbus check mode at stage 7, from the block plan; D-122) |
+| CW-621 | `src/channel_rules.cpp` |
+| CW-660 | #107 (the `io` `configure`, D-123) |
+| CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
+| CF-702 | `src/output_rules.cpp` |
+| CF-703 | `src/output_rules.cpp` |
+| CF-704 | #104 (the Modbus `configure`, stage 7: the device's select window; D-124) |
+| CF-705 | `src/output_rules.cpp` |
+| CF-706 | `src/output_rules.cpp` |
+| CF-707 | `src/output_rules.cpp` |
+| CF-708 | `src/output_rules.cpp` |
+| CF-709 | `src/output_rules.cpp` |
+| CF-710 | `src/output_rules.cpp` |
+| CF-711 | `src/output_rules.cpp` |
+| CF-713 | `src/output_rules.cpp` |
+| CF-714 | `src/output_rules.cpp` |
+| CF-715 | `src/output_rules.cpp` |
+| CF-716 | #104 (the Modbus `configure`, stage 7: the device's select window; D-124) |
+| CF-717 | not in phase 2 (needs the programs, phase 6; D-124) |
+| CF-718 | `src/output_rules.cpp` |
+| CF-719 | `src/output_rules.cpp` |
+| CF-720 | `src/output_rules.cpp` |
+| CF-723 | `src/output_rules.cpp` |
+| CF-722 | `src/output_rules.cpp` |
+| CW-701 | `src/output_rules.cpp` |
+| CW-712 | `src/output_rules.cpp` |
+| CW-721 | `src/output_rules.cpp` |
+| CF-801 | `src/tag_rules.cpp` |
+| CF-802 | `src/tag_rules.cpp` |
+| CF-803 | `src/tag_rules.cpp` |
+| CF-811 | `src/tag_rules.cpp` |
+| CF-812 | `src/tag_rules.cpp` |
+| CF-813 | `src/tag_rules.cpp` |
+| CF-814 | `src/tag_rules.cpp` |
+| CF-815 | `src/tag_rules.cpp` |
+| CW-805 | `src/tag_rules.cpp` |
+| CF-901 | slice 7e of #100 |
+| CF-902 | slice 7e of #100 |
+| CF-904 | slice 7e of #100 |
+| CF-905 | slice 7e of #100 |
+| CF-906 | slice 7e of #100 |
+| CF-910 | not in phase 2 (block library and structured text) |
+| CF-911 | not in phase 2 (block library and structured text) |
+| CF-912 | not in phase 2 (block library and structured text) |
+| CF-913 | not in phase 2 (block library and structured text) |
+| CF-914 | not in phase 2 (block library and structured text) |
+| CF-915 | not in phase 2 (block library and structured text) |
+| CF-916 | not in phase 2 (block library and structured text) |
+| CF-920 | `src/validate.cpp` |
+| CF-921 | not in phase 2 (block library and structured text) |
+| CF-922 | not in phase 2 (block library and structured text) |
+| CF-1001 | `src/expand.cpp` (point and bit tags); `src/tag_names.cpp` (all tags) |
+| CF-1002 | #101 and #102 (stages 6 and 7) |
+| CF-1003 | #101 and #102 (stages 6 and 7) |
+| CF-1004 | #101 and #102 (stages 6 and 7) |
+| CF-1006 | #101 and #102 (stages 6 and 7) |
+| CF-1007 | #101 and #102 (stages 6 and 7) |
+| CF-1008 | #101 and #102 (stages 6 and 7) |
+| CF-1009 | #101 and #102 (stages 6 and 7) |
+| CF-1005 | #101 and #102 (stages 6 and 7) |
+| CF-1010 | #101 and #102 (stages 6 and 7) |
+| CF-1011 | #101 and #102 (stages 6 and 7) |
+| CF-1012 | #104 and #102 (protocol refusals of section 13.1) |
+| CF-1016 | #101 and #102 (stages 6 and 7) |
+| CF-1014 | #101 and #102 (stages 6 and 7) |
+| CF-651 | #104 (the Modbus `configure`; stage 5 gives CF-615, D-120) |
+| CF-652 | #104 (the Modbus `configure`, stage 7; D-122) |
+| CF-653 | #104 (the Modbus `configure`, stage 7; D-122) |
+| CF-662 | #107 (the `io` `configure`, D-123) |
 
 ## The YAML subset parser
 
@@ -289,6 +537,10 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   `corpus_test.cpp`; its README gives the format.
 - `tests/yaml_test.cpp`: every construct of the subset, accepted and refused,
   with its code, line and column, and each parsing limit.
+  `tests/yaml_limits_test.cpp` holds the default limits at N and N + 1 (a
+  file of 8 MiB, a million nodes, 65,536 entries), an executable of its
+  own with its own time limit (`scada-conf-yaml-limits-test`, #164); the
+  helpers both use are in `tests/yaml_cases.h`.
 - `fuzz/`: fuzz targets with their seed corpora (`ctest --preset fuzz` in the
   `fuzz` build): `path_class_fuzz` (stage 1 paths), `yaml_fuzz` (the
   parser; its seeds hold the contract's examples and every refused
@@ -306,6 +558,10 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   same tree.
 - `tests/schema_test.cpp`: each keyword of the validator with its code, and
   the built-in schemas against the contract's examples.
+  `tests/schema_limits_test.cpp` checks that typed keys cost linearithmic
+  time, over files of 4,096 and 65,536 keys, in an executable of its own
+  (`scada-conf-schema-limits-test`, #164); `tests/schema_cases.h` holds
+  the schema set both build.
 - `tests/expand_test.cpp`: each step of the merge order and each CF-4xx
   code, with the instance and the template line of its errors.
 - `tests/limits_test.cpp`, `tests/tree_limits_test.cpp` and
@@ -314,12 +570,27 @@ ctest --preset dev -R 'scada-conf|_fuzz-corpus'
   and its weighting of expressions) at their edges, and the parse of each
   expression once for all its evaluations. Each makes millions of nodes or
   units of work, so each is an executable of its own
-  (`scada-conf-limits-test`, `scada-conf-tree-limits-test`,
+  (`scada-conf-limits-test`, `scada-conf-checked-values-limits-test` for
+  the bound of the checked values of D-115, `scada-conf-tree-limits-test`,
   `scada-conf-expression-limits-test`) with its own time limit; the cases
   they share are in `tests/expand_cases.h`.
 - `tests/config_eval_test.cpp`: the values of configuration expressions and
   the failures that are CF-410.
-- `tests/references_test.cpp`: each check of stage 5 on a whole tree, and
-  that a reference to a tag gives no error before slice 7 of #100.
+- `tests/references_test.cpp`: each check of stage 5 on a whole tree.
+- `tests/tag_names_test.cpp`: the tags of the expanded tree (point, bit and
+  generated tags and their types, CF-301, CF-302, CF-403, CF-1001), the
+  references to them outside expressions (CF-310, CF-311, CF-312, CF-604),
+  and one cause at many instances given once. `tests/tag_names_prefix_test.cpp`:
+  the tags under a prefix, in the order of names, for the patterns of
+  run-time expressions.
+- `tests/runtime_expressions_test.cpp`: the run-time expressions against
+  the tags (D-117): types, cycles of virtual tags and interlocks, task
+  windows, BOOL results, grouping, and what is kept.
+  `tests/runtime_limits_test.cpp` (`scada-conf-runtime-limits-test`, an
+  executable of its own) bounds the work of patterns over tens of
+  thousands of tags: each pattern a vertex walked once, resolved once for
+  all its uses.
+- `tests/tag_rules_test.cpp`: the retain keys, logging and alarms of the
+  tags (D-119), at instances and past the tag limit.
 - `tests/expression_types_test.cpp`: each row of the operator and function
   tables of contract 5.6 for configuration expressions.

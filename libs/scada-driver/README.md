@@ -24,10 +24,89 @@ The library is built in slices. These are the first two:
 | What the engine needs of a connection and of time | `scada/driver/transport.h` | 7.1 to 7.3 |
 | The exchanges of a channel worker: connect, retries, demotion, probes, closes, staleness | `scada/driver/channel_engine.h` | 6.2, 7.1 to 7.5 |
 | The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
+| The driver process: main thread, a worker per channel, the writes after attach, the channel watchdog, the bounded stop | `scada/driver/driver.h` | 2.3, 2.4, 2.6, 9.1, 10 (decision D-142) |
+| The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-146) |
+| Identity checks and restart rules: comparison, checks of the keys, the restart watch | `scada/driver/identity.h` | 3.6, 7.6; CS 4.8, 4.9 (decision D-147) |
+| One round of a device's identity check, its verdict and text | `scada/driver/identity_run.h` | 3.6 (D-147) |
+| The identity text of `sys.dev.<device>.identity` | `scada/driver/identity_text.h` | 3.6, 11.1 (D-147) |
+| The text pattern of an identity check | `scada/driver/text_pattern.h` | CS 2.5 (D-147) |
+| The engine's inputs of the check: deadline, full period, scheduler mode, identity points | `scada/driver/identity_setup.h` | 3.6, 7.6 (D-147) |
 
-Not yet here: the driver process with its threads, commands, the generation
-change and reload. `docs/decisions.md` D-130 to D-141 record the choices
-the contracts left open.
+The worker writes the `sys.drv.<channel>.*` and `sys.dev.<device>.*` tags
+of 11.1: states when they change, counters at most once a second, averages
+rounded to 0.1 ms. At the stop it writes the counters' last values, then the
+channel and its devices as not connected. The main thread writes the
+`sys.proc.<process>.*` tags as the owner named like the process, and
+`config_state` 0 again at the stop. A tag set must list them all (CS 12.5);
+a driver whose tag set lacks one does not start. `identity` and
+`identity_ok` exist only for a device with `identify`, and are written once
+the check has a verdict. The device tags of slices not built yet
+(`selections_lost`, `last_command_stage`) read NOT_INIT.
+
+Not yet here: commands, the generation change and reload.
+`docs/decisions.md` D-130 to D-148 record the choices the contracts left
+open.
+
+## Logging
+
+No thread that writes a heartbeat or a tag writes to the journal (11.3,
+D-148). The main thread and each worker push records into a queue of their
+own (`LogQueue` of libscada-common), which never blocks, allocates or makes
+a system call; the logger's thread drains them at least every 20 ms. A
+worker logs its devices' identity and restart events through `LogLimit`:
+the first of a kind and device at once, then one summary per 10 s with the
+COUNT of the events since. A record a full queue refuses gives its count
+to the next summary, so no count is lost; the refused records, and the
+records the journal refused, are `sys.proc.<process>.log_dropped`. The
+stop logs every held count, waiting for room in the queue 0.5 s at most,
+drains every queue (1 s at most) and then writes `log_dropped` a last
+time, before the run returns. The journal's order across threads is the
+drain's, not the records' times. The main thread's queue holds 1024
+records; a worker's, two per device of its channel and at least 64, unless
+`DriverSettings::worker_log_queue` sets it (below 64 for tests only).
+
+`log_dropped` counts dropped records, not lost events: after a burst it can
+be above zero while every COUNT still arrived. Compare the records' COUNTs
+with `restarts` before concluding that events were lost. A mismatch record
+refused in a burst comes back only as a count, without REASON, CHECK and
+VALUE; the identity read stays in the device's `identity` tag. A queue
+belongs to its first producer thread for life. With a slow sink the
+Logger's destructor delivers the backlog after the run has ended, without a
+bound; the journal sink does not block.
+
+## Identity checks and restarts
+
+A device with `identify` reads only its identity cycle after every connect,
+recovery and restart, until its check has a verdict; nothing of it is
+published before (3.6). A match makes it INITIALISING, then RUNNING on its
+first answered poll. A mismatch with `refuse` makes it MISMATCH: its points
+BAD without COMM_FAIL, re-checked every `backoff`, but no sooner than one
+period of its identity points' group after the last check. With `warn` it
+runs and `identity_ok` is false. A value it cannot read is a mismatch only
+after max(`startup_grace`, 3 periods of that group); a busy answer is read
+again up to `retries` times. A keep-alive of a device in its check proves
+the link only: verdicts come from its identity cycles alone. A cycle that
+nothing answered is read again a
+period of the device's fastest group later, so a dead device is demoted as a
+polled one is. Until the owner rules, only a RUNNING device takes writes,
+fail-safe writes included (`accepts_writes`, D-147). The log has `driver-identity-mismatch` (REASON
+`value`, `absent` or `unreadable`, CHECK, VALUE), `driver-identity-matched`
+when a device leaves MISMATCH, and `driver-device-restart`, each with the
+COUNT since its last record: the first at once, then at most one summary
+per 10 s per device, without the details (see Logging).
+
+A restart rule that holds is a restart of the device's unit: every RUNNING
+device of it is checked again, and its points written NOT_INIT (9.1). Every
+rule sees the whole answer before any point of it is written, and an answer
+that shows a restart writes no value. A device already being checked starts
+its check again. The grace starts again once, until the unit has run the
+longest group's period without a restart. When each rule is wrong:
+
+| Rule | False restart | Missed restart |
+| --- | --- | --- |
+| `decreases` | A counter that wraps (one per wrap period: 18.2 h for a 16-bit counter of one count a second); a value the device lowers itself | A restart that leaves the value at or above the last one read, or that happens and recovers between two reads |
+| `changes` | Any change the device makes in normal running | A restart that brings back the same value |
+| `equals` | The flag set for another reason; it fires on the rising edge only, so a flag left set is one restart | A flag cleared again before the next read |
 
 ## What it does
 
@@ -123,8 +202,13 @@ the contracts left open.
   reads 12.3; `to_raw_value` returns 12.3 as the value written.
 - **A late poll group does not catch up.** When a cycle ends after the next
   one was due, the next starts at once, and missed cycles are not sent.
-- **SUBSTITUTED** is not written until tag database contract 1.1 (#89): a
-  configured substitute is UNCERTAIN, and incoming flags are masked.
+- **SUBSTITUTED comes only from a configured substitute** (D-145): the
+  `substitute` action writes its value UNCERTAIN with SUBSTITUTED, and every
+  write that keeps that value, across a restart too, keeps the flag. A
+  companion does not pass it on. A value forced at the device is not marked
+  yet: no protocol carries a value with a mark (#136). `scada-drv-test
+  --substitute RAW VALUE` gives a point that substitute, for the process
+  test (#154).
 - **No integer tag on a floating raw type** (CF-504, D-134), other than an
   enumeration or a double point: the rules are refused, a read is BAD with
   OUT_OF_RANGE and a write is refused. Use `value_type: float64`.
@@ -150,15 +234,42 @@ carry them there. They are read when a configuration is compiled.
   configuration with a local-time device is refused.
 - A file without a footer rule makes every time after its last transition
   uncertain.
+- A file in which more than 16 begins of intervals of constant offset
+  (the table's start and each change) lie within less than the span of its
+  offsets (the largest minus the smallest, with 0) of one another is
+  refused as not valid, so that every conversion looks at a bounded number
+  of intervals: at most 33 (#158, D-144).
+  No real zone file comes near it: in each of the 499 zone files of the
+  build machine, changes are further apart than the span of the offsets.
 
 ## Testing
 
 ```
-cmake --build --preset dev --target scada-driver-unit-test scada-driver-zones-test \
-  scada-driver-transport-test scada-driver-test-sim
+cmake --build --preset dev --target scada-driver-unit-test \
+  scada-driver-engine-property-test scada-driver-plan-property-test \
+  scada-driver-zones-test scada-driver-transport-test scada-driver-test-sim scada-drv-test \
+  scada-driver-process-integration-test scada-tagd
 ctest --preset unit -R 'scada-driver|sample_processing|tzif'
-ctest --preset integration -R 'scada-driver-(zones|transport)'
+ctest --preset integration -R 'scada-driver-(zones|transport|process)'
 ```
+
+To run a driver of the test protocol by hand against the simulator and a
+running scada-tagd (its tag set must have the process `drv-test` and the
+tags `<device>.<point>` of type INT64):
+
+```
+scada-driver-test-sim --tcp --map 1 0 0 3 --set 1 0 0 1234   # prints "tcp <port>"
+scada-drv-test --base-dir <dir> --tagd-uid <uid> \
+  --channel line1 tcp 127.0.0.1 <port> --device d1 1 --point v 0 1
+scada-drv-test --help
+```
+
+`scada-drv-test` stops on SIGTERM or SIGINT with status 0 within the stop
+budget of 2 s (a read in flight is given up), ends with 4 on a stall (2.6)
+or a worker that did not stop within the budget, 1 when it cannot start or
+the generation retires (the reason on standard error), 2 on a bad command
+line, 3 when a protocol call ran on the wrong thread. SIGHUP is ignored
+until reload; every other signal has its default.
 
 - The golden vectors are in `tests/golden/driver-vectors.txt`, a data file
   that the protocols and their simulators share (its header gives the
@@ -174,9 +285,16 @@ ctest --preset integration -R 'scada-driver-(zones|transport)'
   them fails the tests, it does not skip them.
 - Fuzz targets: `sample_processing_fuzz` (samples, rule fields, a local
   zone, the write conversion; every accepted write is read back through the
-  processing and must give the value written) and `tzif_fuzz` (the zone file
+  processing and must give the value written; a write carries SUBSTITUTED
+  exactly when its value is a substitute) and `tzif_fuzz` (the zone file
   reader and the TZ string parser; transitions ordered, offsets within
   RFC 9636's bounds, an instant converts back to itself).
+  `fuzz/sample_processing_seeds.py` writes the seeds of the paths
+  `sample_processing_fuzz` must reach. `SCADA_FUZZ_STATS=1` makes a run
+  print its writes by quality and the paths it hit. The test
+  `sample_processing_fuzz-reach` replays the corpus with
+  `SCADA_FUZZ_REACH=1` and fails unless it gives GOOD and UNCERTAIN writes,
+  substitutes, holds and a good value after each (#165).
 - `zone_file_test.cpp` builds a zone directory in the temporary directory,
   with links inside and out of it, a FIFO and a subdirectory, and reads it
   with `openat2` and with the fallback.
@@ -188,7 +306,10 @@ ctest --preset integration -R 'scada-driver-(zones|transport)'
   injected clock. Nothing sleeps; each exchange takes 1 ms of simulated
   time. `plan_test.cpp` checks the planner against plans worked out by
   hand, and `plan_property_test.cpp` checks every rule on 10,000 random
-  plans from a fixed seed.
+  plans from a fixed seed. It and `engine_random_test.cpp` (the channel
+  engine's invariants for many seeds) are executables of their own, with
+  their own time limits (`scada-driver-plan-property-test`,
+  `scada-driver-engine-property-test`, #164).
 - The conformance tests of failure handling (15, 16, 17, the dead-device
   part of 12 and the gateway and busy parts of 19) run the channel engine
   over a simulated transport (`tests/sim_transport.h`) on the same bus:
@@ -211,3 +332,21 @@ ctest --preset integration -R 'scada-driver-(zones|transport)'
   loop and the discard limit are unit tests (`connections_test.cpp`). A pseudo-terminal has no bit rate or
   parity (7.2): line timing is tested on the target board (#41). Every wait
   is on a condition with a time-out; nothing sleeps.
+- `scada-driver-process-integration-test` (in `tests/integration`) runs
+  scada-tagd, the simulator and `scada-drv-test` as processes, with a
+  listener standing in for the service manager, and reads the tags through
+  the C interface (`driver_fixture.h`). `driver_integration_test.cpp`: the
+  writes after attach (9.1) before READY, a restored tag, a disabled
+  channel, a kill and a restart, the owners of the tags, one notify per
+  change, every protocol call on its thread (test 1), a lost and a refused
+  connection (test 16), STALE (test 17). `driver_identity_integration_test.cpp`:
+  a match, a mismatch with `refuse` and `warn`, a hot swap, a restart (the
+  simulator's `--set-after`) and two whose COUNTs add up, with their tags
+  and log records (D-147).
+  `driver_stop_integration_test.cpp`:
+  READY, WATCHDOG and STOPPING, a wrong notify socket, the signals, a stop
+  with a read in flight, an idle worker, a peer's close, a stop and a
+  retiring generation with a hung worker, a stall, a stall that logs the
+  restart records it held, a spinning worker, a
+  pause of the whole process, and the start's exit statuses (test 2). It
+  takes about 2 minutes; the idle case alone runs 20 s.

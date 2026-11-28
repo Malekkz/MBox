@@ -1,5 +1,6 @@
 template: meter
 protocol: modbus
+bit_order: lsb0
 repeat:
   - for: { n: [65536, 70000] }
     points:
@@ -12,3 +13,4 @@ repeat:
       - name: "flow{d}"
         address: { table: holding, register: "2 + d", type: uint16 }
         scale: { divide_by: "d" }
+address_base: 1

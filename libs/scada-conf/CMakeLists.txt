@@ -37,6 +37,7 @@ configure_file(src/builtin_schemas.cpp.in
 
 scada_add_library(scada-conf
   SOURCES
+    src/channel_rules.cpp
     src/config_eval.cpp
     src/diagnostic.cpp
     src/expand.cpp
@@ -45,14 +46,23 @@ scada_add_library(scada-conf
     src/expression_types.cpp
     src/grouped_errors.cpp
     src/merged_points.cpp
+    src/modbus_rules.cpp
     src/names.cpp
+    src/output_rules.cpp
+    src/output_values.cpp
     src/node.cpp
+    src/point_rules.cpp
+    src/point_types.cpp
+    src/name_pattern.cpp
     src/path_class.cpp
     src/read.cpp
     src/references.cpp
     src/rules.cpp
+    src/runtime_expressions.cpp
     src/scalar.cpp
     src/schema.cpp
+    src/tag_names.cpp
+    src/tag_rules.cpp
     src/tree_scan.cpp
     src/utf8.cpp
     src/validate.cpp

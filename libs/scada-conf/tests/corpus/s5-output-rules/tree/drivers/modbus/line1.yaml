@@ -1,0 +1,6 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+devices:
+  - { name: ps1.v1, template: valve, unit_id: 1 }

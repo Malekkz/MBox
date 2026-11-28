@@ -1,0 +1,5 @@
+areas:
+  ps1:
+    description: Pump station 1
+    authority:
+      local_panel: { input: ps1.panel.local_mode, active: true }

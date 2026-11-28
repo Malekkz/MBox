@@ -1,0 +1,20 @@
+template: pump
+protocol: modbus
+bit_order: lsb0
+points:
+  - name: speed
+    address: { table: holding, register: 10, type: uint16 }
+    access: rw
+    storage: volatile
+    exponent_from: { point: speed_exp, direction: multiply }
+  - name: status
+    address: { table: holding, register: 11, type: uint16 }
+    tag: false
+    bits: { 0: running, 1: tripped }
+  - name: flow
+    address: { table: input, register: 12, type: uint16 }
+    poll_group: hourly
+  - name: speed_sp
+    address: { table: holding, register: 20, type: uint16 }
+    access: rw
+    storage: volatile

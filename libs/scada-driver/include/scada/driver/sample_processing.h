@@ -73,6 +73,11 @@ struct PointState {
     bool holding = false;
     // The point is ABSENT (contract 5.2), for `points_absent`.
     bool absent = false;
+    // `value` is a substitute from configuration (`on_invalid: substitute`):
+    // every write that keeps it carries SUBSTITUTED, which describes the
+    // value (contract 5.2, R-6; tag database contract 1.1, 6 and 12). A new
+    // value from the device ends it.
+    bool substituted = false;
     // Counters (contract 5.4): the previous raw value, and the value `hold`
     // keeps until the counter passes it.
     bool counter_has_previous = false;
@@ -94,6 +99,17 @@ void init_point_state(PointState& state, tag::TagType type);
 // staleness timers start at `now_mono_ns`. Keeps the reserved text.
 SCADA_RT void reset_point_state(PointState& state, tag::TagType type,
                                 std::int64_t now_mono_ns) noexcept;
+
+// Takes `stored`, the value the point's tag holds after the writes of 9.1,
+// as the state's last value, so that a sample before the first read (a
+// COMM_FAIL) writes the value as stored and not 0 (contract 9.1 "value as
+// stored", 5.2 "keeps its last value"; review M4). Quality, flags and
+// `has_value` stay those of the reset. A value of another type than the
+// state's is ignored; a STRING's text is copied within the reserved
+// capacity. `substituted`: the stored value carries SUBSTITUTED, so the
+// writes that keep it carry it too.
+SCADA_RT void seed_point_state(PointState& state, const TagValue& stored,
+                               bool substituted = false) noexcept;
 
 // One tag write that processing asks for.
 struct TagWrite {
@@ -123,6 +139,12 @@ struct ProcessedSample {
     std::size_t bit_count = 0;
     std::uint64_t bit_values = 0;
     SampleCounts counts{};
+    // For the restart rules (contract 7.6; D-147): the sample gave a value
+    // read from the device that is not BAD, and `rule_value` is that value
+    // as processing computed it before a counter's `on_decrease: hold`. A
+    // STRING's text points into the state, as `tag`'s does.
+    bool rule_valid = false;
+    TagValue rule_value{};
 };
 
 // The value of bit rule `index` in `sample`.
@@ -142,11 +164,25 @@ struct SampleTimes {
 // holds one input per slot of `rules.companions`, in order; a missing slot
 // counts as COMM_FAIL. The returned STRING value (if any) points into
 // `state`, and is valid until the next call with `state`. Rules that
-// validate_point_rules refuses give BAD, never undefined behaviour.
+// validate_point_rules refuses give BAD with OUT_OF_RANGE for every outcome,
+// the value kept, never undefined behaviour: no marker, hold or companion
+// rule is applied to them (#169).
 SCADA_RT void process_sample(const PointRules& rules, PointState& state,
                              const RawSample& sample,
                              std::span<const CompanionInput> companions,
                              const SampleTimes& times,
+                             ProcessedSample& out) noexcept;
+
+// Writes the point withheld (D-147): BAD with exactly `flags`, the value
+// kept, `source_time_ns` as given (0: the library's own time). The state
+// forgets every value read before, so that neither `keep_last` nor a held
+// DEVICE_INVALID can bring one back (`has_value`, `has_valid` and holding
+// cleared); a counter's previous value and the bits' values are kept. For a
+// device found not to be the one configured (MISMATCH) and the writes of
+// 9.1 after a device restart (contract 3.6, 7.6). Fills `out` for the
+// write.
+SCADA_RT void withhold_point(const PointRules& rules, PointState& state,
+                             std::uint16_t flags, std::int64_t source_time_ns,
                              ProcessedSample& out) noexcept;
 
 // The staleness check of contract 7.5 at a transaction boundary. Returns

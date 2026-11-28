@@ -150,7 +150,7 @@ sample pulses_saturate raw=unsigned:16:9998 raw=unsigned:16:9999 -> value=uint64
 sample breaker raw=unsigned:16:20 -> value=int64:2 quality=GOOD flags=LOCAL_TIME
 sample breaker raw=unsigned:16:30 -> value=int64:0 quality=GOOD flags=LOCAL_TIME
 sample breaker raw=unsigned:16:11 -> value=int64:3 quality=BAD flags=OUT_OF_RANGE,LOCAL_TIME
-sample temp_substitute raw=unsigned:16:0x8000 -> value=float64:0xBFF0000000000000 quality=UNCERTAIN flags=LOCAL_TIME
+sample temp_substitute raw=unsigned:16:0x8000 -> value=float64:0xBFF0000000000000 quality=UNCERTAIN flags=SUBSTITUTED,LOCAL_TIME
 sample temp_keep raw=signed:16:215 raw=signed:16:32767 -> value=float64:0x4035800000000000 quality=UNCERTAIN flags=STALE,LOCAL_TIME
 # Never read: nothing to hold, and nothing stale.
 sample temp_keep raw=signed:16:32767 -> value=float64:0x0 quality=BAD flags=NOT_INIT,LOCAL_TIME

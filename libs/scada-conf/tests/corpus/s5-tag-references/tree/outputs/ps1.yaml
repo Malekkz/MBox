@@ -1,0 +1,8 @@
+outputs:
+  - name: ps1.p1.speed_cmd
+    area: ps1
+    kind: setpoint
+    target: ps1.p1.speed_sp
+    feedback: { tag: ps1.p1.speed_fb, within: 1, settle: 1s }
+    interlocks: []
+    safe_state: hold

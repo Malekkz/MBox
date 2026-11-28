@@ -340,7 +340,7 @@ The age is CLOCK_BOOTTIME since the write in the same boot; in another boot
 CLOCK_REALTIME since the write, only if the clock was synchronised at the
 write and is now (`adjtimex`); otherwise unknown. Attach never refuses a
 value on its age. `scada_tag_attach_retain` takes a bound on the age for
-some tags (contract 1.1, section 12; D-144): a value whose age is greater
+some tags (contract 1.1, section 12; D-149): a value whose age is greater
 than its tag's bound, or unknown, is restored with quality BAD instead of
 UNCERTAIN, with RESTORED, the carried flags, the value and the source time
 as above. `scada-tagd` takes that record as no change and keeps the value
@@ -682,6 +682,7 @@ scada_tag_detach(ctx);
 
 ```
 ctest --preset dev -R scada-tag-unit-test
+ctest --preset dev -R scada-tag-limits-test
 ctest --preset dev -R scada-tagd-integration-test
 ctest --preset dev -R scada-tag-access-integration-test
 ctest --preset dev -R scada-tag-rt-integration-test

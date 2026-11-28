@@ -1,5 +1,6 @@
 template: base
 protocol: modbus
+bit_order: lsb0
 points:
   - { name: breaker, kind: double_point, address: { on: { table: holding, register: 60, bit: 4 } } }
   - { name: label, address: { type: string } }

@@ -138,9 +138,10 @@ namespace {
 std::string written_points(int points) {
     std::string text = "template: meter_a\nprotocol: modbus\npoints:\n";
     for (int point = 0; point < points; ++point) {
+        // A register of its own (CF-602, D-122).
         text += "  - { name: p" + std::to_string(point) +
-                ", address: { table: holding, register: 1, type: uint16 } "
-                "}\n";
+                ", address: { table: holding, register: " +
+                std::to_string(point + 1) + ", type: uint16 } }\n";
     }
     return text;
 }
@@ -159,10 +160,13 @@ std::string instances(int count, std::string_view more = {}) {
 // A template of one `repeat` over `values` values whose block `when` is
 // `when`, making one point per value.
 std::string repeat_when(int values, const std::string& when) {
-    return "template: meter_a\nprotocol: modbus\nrepeat:\n  - for: { n: \"1.." +
+    // One bit of one register for every point: bits share it (A.3), and a
+    // literal adds no expression work.
+    return "template: meter_a\nprotocol: modbus\nbit_order: lsb0\nrepeat:\n"
+           "  - for: { n: \"1.." +
            std::to_string(values) + "\" }\n    when: \"" + when +
            "\"\n    points:\n      - { name: \"p{n}\", address: { table: "
-           "holding, register: 1, type: uint16 } }\n";
+           "holding, register: 1, bit: 0 } }\n";
 }
 
 // meter_a with a SET parameter `s` of `items` values, all given by default,
@@ -172,12 +176,13 @@ std::string with_set(int items, const std::string& when) {
     for (int item = 0; item < items; ++item) {
         values += (item == 0 ? "v" : ", v") + std::to_string(item);
     }
-    return "template: meter_a\nprotocol: modbus\nparams: { s: { type: set, "
-           "values: [" +
+    // One bit of one register for every point, as `repeat_when`.
+    return "template: meter_a\nprotocol: modbus\nbit_order: lsb0\nparams: { "
+           "s: { type: set, values: [" +
            values + "], default: [" + values +
            "] } }\nrepeat:\n  - for: { n: \"1..10\" }\n    when: \"" + when +
            "\"\n    points:\n      - { name: \"p{n}\", address: { table: "
-           "holding, register: 1, type: uint16 } }\n";
+           "holding, register: 1, bit: 0 } }\n";
 }
 
 }  // namespace
@@ -228,9 +233,11 @@ TEST(Expand, TheTextOfTheTree) {
     EXPECT_LE(expanded.counts.written_text, ONE_POINT_MORE);
 }
 
-// `limits.max_tags` at N passes and at N + 1 stops the expansion, so a
-// later device's own error is not reported; a point with `tag: false`
-// counts its bits only.
+// `limits.max_tags` at N passes stage 4 and at N + 1 stops the expansion,
+// so a later device's own error is not reported; a point with `tag: false`
+// counts its bits only. Stage 5 counts the generated tags too (D-116): 8
+// point tags pass stage 4 at 8, and the tree is refused at stage 5, at the
+// limit, where the 9th tag is a process tag.
 TEST(Expand, TheTagsOfTheTree) {
     const std::string meter = written_points(4);
     const auto with_limit = [](int limit) {
@@ -239,9 +246,8 @@ TEST(Expand, TheTagsOfTheTree) {
     };
     EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
                       {"system.yaml", with_limit(8)},
-                      {"drivers/modbus/line1.yaml", instances(2)}})
-                  .size(),
-              8U);
+                      {"drivers/modbus/line1.yaml", instances(2)}}),
+              Lines{"system.yaml:3:21: error CF-1001: 9 tags, the limit is 8"});
     EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
                       {"system.yaml", with_limit(7)},
                       {"drivers/modbus/line1.yaml",

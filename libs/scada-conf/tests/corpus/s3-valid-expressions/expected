@@ -2,4 +2,5 @@
 # 5.6): function names used as references (`sum`, `power.avg`, a parameter
 # named `max`), reserved words only as whole names, `**` and unary minus,
 # IN with a set and with a range, `for` values as ranges and lists.
-# Invented. Stage 5 checks their names and types.
+# The tags they read are defined, so that stage 5, which checks their names
+# and types (D-117), passes them too. Invented.

@@ -11,9 +11,11 @@
 #include <cstdlib>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #ifndef SCADA_ZONEINFO_DIR
@@ -50,9 +52,15 @@ std::int64_t saturating_subtract(std::int64_t a_value,
 }
 
 // How many intervals on each side of the one found by a search may hold a
-// local time: offsets and their changes are under 26 h (RFC 9636), and the
-// table merges intervals of equal offset.
+// local time. Two suffice when every interval is longer than the span of
+// the table's offsets (under 51 h, RFC 9636), as in every real zone; a file
+// with changes closer together than that needs more, and `from_tzif`
+// widens the window to what the table needs (#158).
 constexpr std::ptrdiff_t SEARCH_WINDOW = 2;
+// The widest window taken. A file whose changes are so close that a local
+// time may lie in more intervals than this is refused, so that a conversion
+// stays bounded: at most 2 * 16 + 1 = 33 intervals are looked at.
+constexpr std::ptrdiff_t MAX_SEARCH_WINDOW = 16;
 
 // One change of offset, at `at_s` (UT seconds).
 struct Change {
@@ -261,30 +269,128 @@ Result<ZoneTable> ZoneTable::from_tzif(
             .begin_utc_ns = first_s * NS_PER_S,
             .offset_ns = static_cast<std::int64_t>(offset) * NS_PER_S});
         for (const Change& change : changes) {
-            const std::int64_t offset_ns =
-                static_cast<std::int64_t>(change.offset_s) * NS_PER_S;
-            if (offset_ns == table.intervals_.back().offset_ns) {
-                continue;  // merged: no change of offset
-            }
-            table.intervals_.push_back(
-                Interval{.begin_utc_ns = change.at_s * NS_PER_S,
-                         .offset_ns = offset_ns});
+            add_change(table.intervals_, change.at_s * NS_PER_S,
+                       static_cast<std::int64_t>(change.offset_s) * NS_PER_S);
         }
-        return table;
+        return with_search_window(std::move(table));
     } catch (const std::bad_alloc&) {
         return Status(StatusCode::RESOURCE_EXHAUSTED, "out of memory");
     }
 }
 
+void ZoneTable::add_change(std::vector<Interval>& intervals,
+                           std::int64_t begin_ns,
+                           std::int64_t offset_ns) noexcept {
+    if (intervals.back().begin_utc_ns == begin_ns) {
+        if (intervals.size() == 1) {
+            // The table's first interval takes the offset. Not reached
+            // today: every change is after the table's start.
+            intervals.back().offset_ns = offset_ns;
+            return;
+        }
+        intervals.pop_back();  // replaced: the interval would be empty
+    }
+    if (offset_ns == intervals.back().offset_ns) {
+        return;  // merged: no change of offset
+    }
+    intervals.push_back(
+        Interval{.begin_utc_ns = begin_ns, .offset_ns = offset_ns});
+}
+
+std::optional<std::ptrdiff_t> ZoneTable::search_window_for(
+    std::span<const Interval> intervals) noexcept {
+    // A local time `l` held by interval `m` and found from interval `c`
+    // (the one that holds `l` read as UTC) has `c - m` interval begins in
+    // less than the largest offset before it, or `m - c` in less than the
+    // smallest offset after it: both are within the span of the offsets.
+    std::int64_t lowest = 0;
+    std::int64_t highest = 0;
+    for (const Interval& interval : intervals) {
+        lowest = std::min(lowest, interval.offset_ns);
+        highest = std::max(highest, interval.offset_ns);
+    }
+    // Offsets are within RFC 9636's bounds (checked by the reader), so the
+    // span is under 51 h and the begins lie within the table's years: no
+    // subtraction below overflows. The span bounds both directions at
+    // once, so it may be up to twice what one direction needs: it refuses
+    // more hand-made files than it must, never a real one (D-144).
+    const std::int64_t span = highest - lowest;
+    std::size_t widest = 1;
+    std::size_t last = 0;
+    for (std::size_t first = 0; first < intervals.size(); ++first) {
+        last = std::max(last, first);
+        while (last + 1 < intervals.size() &&
+               intervals[last + 1].begin_utc_ns -
+                       intervals[first].begin_utc_ns <
+                   span) {
+            ++last;
+        }
+        widest = std::max(widest, last - first + 1);
+    }
+    if (widest > static_cast<std::size_t>(MAX_SEARCH_WINDOW)) {
+        return std::nullopt;
+    }
+    return std::max(SEARCH_WINDOW, static_cast<std::ptrdiff_t>(widest));
+}
+
+Result<ZoneTable> ZoneTable::with_search_window(ZoneTable table) {
+    const std::optional<std::ptrdiff_t> window =
+        search_window_for(table.intervals_);
+    if (!window.has_value()) {
+        return Status(StatusCode::DATA_CORRUPT,
+                      "the zone file's changes of offset are too close "
+                      "together for its offsets");
+    }
+    table.search_window_ = *window;
+    return table;
+}
+
 UtcTime ZoneTable::to_utc(std::int64_t local_ns) const noexcept {
-    UtcTime time = convert(local_ns);
+    return marked(convert(local_ns, search_window_));
+}
+
+UtcTime ZoneTable::to_utc_searching_all(std::int64_t local_ns) const noexcept {
+    // Written apart from `convert` on purpose: no binary search and no
+    // window, so that a fault in either shows against it.
+    if (intervals_.empty() || local_ns < intervals_.front().begin_utc_ns ||
+        local_ns >= end_utc_ns_) {
+        return to_utc(local_ns);  // outside the table: no search at all
+    }
+    std::optional<std::int64_t> earliest;
+    std::size_t matches = 0;
+    for (std::size_t index = 0; index < intervals_.size(); ++index) {
+        const std::int64_t utc = local_ns - intervals_[index].offset_ns;
+        const bool last = index + 1 == intervals_.size();
+        if (utc >= intervals_[index].begin_utc_ns &&
+            (last || utc < intervals_[index + 1].begin_utc_ns)) {
+            earliest = std::min(utc, earliest.value_or(utc));
+            ++matches;
+        }
+    }
+    if (earliest.has_value()) {
+        return marked(UtcTime{.utc_ns = *earliest, .uncertain = matches > 1});
+    }
+    for (std::size_t index = 1; index < intervals_.size(); ++index) {
+        const Interval& before = intervals_[index - 1];
+        const Interval& after = intervals_[index];
+        if (local_ns - before.offset_ns >= after.begin_utc_ns &&
+            local_ns - after.offset_ns < after.begin_utc_ns) {
+            return marked(UtcTime{.utc_ns = local_ns - before.offset_ns,
+                                  .uncertain = true});
+        }
+    }
+    return UtcTime{.utc_ns = 0, .uncertain = true};  // no answer: a fault
+}
+
+UtcTime ZoneTable::marked(UtcTime time) const noexcept {
     if (time.utc_ns >= certain_until_utc_ns_) {
         time.uncertain = true;
     }
     return time;
 }
 
-UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
+UtcTime ZoneTable::convert(std::int64_t local_ns,
+                           std::ptrdiff_t window) const noexcept {
     if (intervals_.empty()) {
         return UtcTime{.utc_ns = local_ns, .uncertain = false};
     }
@@ -301,8 +407,8 @@ UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
                        .uncertain = true};
     }
 
-    // The interval that holds `local_ns` read as UTC; the answer is in it or
-    // next to it.
+    // The interval that holds `local_ns` read as UTC; the answer is within
+    // `window` intervals of it on either side (search_window_for).
     const auto found =
         std::upper_bound(intervals_.begin(), intervals_.end(), local_ns,
                          [](std::int64_t value, const Interval& interval) {
@@ -311,10 +417,8 @@ UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
     const std::ptrdiff_t center =
         std::max<std::ptrdiff_t>(0, (found - intervals_.begin()) - 1);
     const auto count = static_cast<std::ptrdiff_t>(intervals_.size());
-    const std::ptrdiff_t from =
-        std::max<std::ptrdiff_t>(0, center - SEARCH_WINDOW);
-    const std::ptrdiff_t last_index =
-        std::min(count - 1, center + SEARCH_WINDOW);
+    const std::ptrdiff_t from = std::max<std::ptrdiff_t>(0, center - window);
+    const std::ptrdiff_t last_index = std::min(count - 1, center + window);
 
     auto interval_at = [&](std::ptrdiff_t index) -> const Interval& {
         return intervals_[static_cast<std::size_t>(index)];
@@ -353,7 +457,8 @@ UtcTime ZoneTable::convert(std::int64_t local_ns) const noexcept {
                            .uncertain = true};
         }
     }
-    // Not reached for a table of a valid file; stated, not assumed.
+    // Not reached for a table `from_tzif` accepts, whose window holds every
+    // interval that may hold a local time; stated, not assumed.
     return UtcTime{.utc_ns = local_ns - interval_at(center).offset_ns,
                    .uncertain = true};
 }

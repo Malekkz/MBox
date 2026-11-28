@@ -458,7 +458,7 @@ TEST(MergedPoints, TheEdgesOfAnIntegerScaling) {
 // epoch are in `MergedPoints.IncompleteMergedMaps`.
 TEST(MergedPoints, EveryKeyAMergedMapNeeds) {
     const std::vector<std::pair<std::string_view, std::string_view>> rows = {
-        {"exponent_from: { point: q }, address: { table: input, register: 1, "
+        {"exponent_from: { point: p }, address: { table: input, register: 1, "
          "type: int16 }",
          "drivers/modbus/line1.yaml:7:11: error CF-202: exponent_from of "
          "\"ps1.m1.p\" needs direction\n  from template "
@@ -773,7 +773,8 @@ TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
                       .types = {},
                       .instance_of = {},
                       .instances = {},
-                      .computed = {}};
+                      .computed = {},
+                      .from_defaults = {}};
     tree.types = ScalarTypes(tree.document);
     for (NodeId node = 0; node < tree.document.size(); ++node) {
         if (tree.document.kind(node) == NodeKind::SCALAR &&
@@ -815,7 +816,8 @@ TEST(MergedPoints, TheRestOfTheKeysAndScalings) {
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs at_start\n  from template "
                     "templates/sensor_a.yaml:4:29 (point level)"});
-    EXPECT_EQ(gpio("access: wo, address: { line: 1, direction: input }"),
+    EXPECT_EQ(gpio("access: wo, address: { line: 1, direction: input }, "
+                   "storage: volatile"),
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs at_start\n  from template "
                     "templates/sensor_a.yaml:4:41 (point level)"});

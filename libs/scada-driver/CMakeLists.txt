@@ -9,25 +9,48 @@ set(SCADA_ZONEINFO_DIR "/usr/share/zoneinfo" CACHE PATH
 scada_add_library(scada-driver
   SOURCES
     src/channel_engine.cpp
+    src/channel_engine_identity.cpp
+    src/diagnostics.cpp
+    src/driver.cpp
+    src/event_log.cpp
     src/failure.cpp
     src/fd_io.cpp
+    src/identity.cpp
+    src/log_limit.cpp
+    src/identity_run.cpp
+    src/identity_setup.cpp
+    src/identity_text.cpp
     src/plan.cpp
     src/point_rules.cpp
     src/raw_value.cpp
     src/sample_processing.cpp
     src/scheduler.cpp
     src/serial_transport.cpp
+    src/stall_watch.cpp
     src/system_clock.cpp
+    src/system_tags.cpp
+    src/text_pattern.cpp
+    src/tag_writer.cpp
     src/tcp_transport.cpp
     src/tzif.cpp
     src/utf8.cpp
+    src/worker.cpp
     src/write_conversion.cpp
     src/zone_file.cpp
     src/zone_table.cpp
-  DEPENDS scada::common scada::conf scada::tag)
+  DEPENDS scada::common scada::conf scada::service scada::tag)
+
+# A worker thread's stack (driver interface contract 2.4): 256 KiB, more
+# under the sanitizers, whose instrumentation needs it.
+if(SCADA_SANITIZER STREQUAL "")
+  set(SCADA_DRIVER_WORKER_STACK_BYTES 262144)
+else()
+  set(SCADA_DRIVER_WORKER_STACK_BYTES 8388608)
+endif()
 
 target_compile_definitions(libscada-driver PRIVATE
-  "SCADA_ZONEINFO_DIR=\"${SCADA_ZONEINFO_DIR}\"")
+  "SCADA_ZONEINFO_DIR=\"${SCADA_ZONEINFO_DIR}\""
+  "SCADA_DRIVER_WORKER_STACK_BYTES=${SCADA_DRIVER_WORKER_STACK_BYTES}")
 
 # Scaling and value conversion give the same bits on both architectures only
 # without floating-point contraction (decision D-98): GCC contracts a

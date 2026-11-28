@@ -1,0 +1,9 @@
+tags:
+  - { name: site.flow, type: internal, value_type: float64, range: [0, 10], logging: changes }
+  - { name: site.level, type: internal, value_type: float64, logging: { policy: changes, deadband: 1% } }
+  - { name: site.note, type: manual, value_type: string, area: site }
+  - { name: site.text, type: internal, value_type: string, logging: sampled }
+  - { name: site.hold, type: internal, value_type: int64, retain_now: true }
+  - { name: site.calc, type: virtual, expr: "site.flow * 2", retain_now: false }
+  - { name: site.total, type: internal, value_type: uint64, kind: counter, retain: true, retain_max_age: 1d }
+  - { name: site.run, type: internal, value_type: bool, logging: { mode: on_change } }

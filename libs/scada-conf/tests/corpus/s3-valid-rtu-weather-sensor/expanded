@@ -1,7 +1,7 @@
 # Expanded devices and points (contract 14, test 6; S6 of the delta review
 # of #146): 1 device and 3 points, as the reviewer's reference expander
 # gives them. Invented.
-site.weather: {enums: {sky: {0: clear, 1: cloudy, 2: rain, 3: snow}}, unit_id: 17, timeout: 300ms, retries: 1}
+site.weather: {address_base: 1, enums: {sky: {0: clear, 1: cloudy, 2: rain, 3: snow}}, unit_id: 17, timeout: 300ms, retries: 1}
 site.weather.temperature: {address: {table: input, register: 1, type: int16}, scale: {divide_by: 10}, unit: degC, invalid_values: [{raw: 0x7FFF, flags: [OUT_OF_RANGE], reason: sensor open}], poll_group: slow, alarms: [{type: low, limit: -20, priority: low, area: site}]}
 site.weather.sky: {address: {table: input, register: 2, type: uint16}, enum: sky, poll_group: slow}
 site.weather.wind: {address: {table: input, register: 3, type: uint16}, scale: {gain: 0.1, offset: 0}, unit: m/s, poll_group: slow}

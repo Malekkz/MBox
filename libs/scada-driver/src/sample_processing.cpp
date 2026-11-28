@@ -1,6 +1,7 @@
 #include "scada/driver/sample_processing.h"
 
 #include "checked.h"
+#include "element.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/tag_value.h"
@@ -48,14 +49,24 @@ QualityMark bad(std::uint16_t flags) noexcept {
     return QualityMark{.quality = Quality::BAD, .flags = flags};
 }
 
-// A mark that came from a device or a configured map, with only the flags a
-// device may give (DEVICE_FLAGS_MASK).
-QualityMark device_mark(QualityMark mark) noexcept {
+// `mark` with a quality of the tag database and only the flags in `mask`.
+QualityMark masked_mark(QualityMark mark, std::uint16_t mask) noexcept {
     const Quality quality =
         tag::quality_from_raw(tag::to_raw(mark.quality)).value_or(Quality::BAD);
-    return QualityMark{
-        .quality = quality,
-        .flags = static_cast<std::uint16_t>(mark.flags & DEVICE_FLAGS_MASK)};
+    return QualityMark{.quality = quality,
+                       .flags = static_cast<std::uint16_t>(mark.flags & mask)};
+}
+
+// A mark a protocol gave a sample, with only the flags a protocol may give
+// (DEVICE_FLAGS_MASK).
+QualityMark device_mark(QualityMark mark) noexcept {
+    return masked_mark(mark, DEVICE_FLAGS_MASK);
+}
+
+// A mark the configuration gave (a `quality_from` entry), with only the
+// flags the configuration may give (CONFIG_FLAGS_MASK; review R2 of #157).
+QualityMark config_mark(QualityMark mark) noexcept {
+    return masked_mark(mark, CONFIG_FLAGS_MASK);
 }
 
 // The flags a failed companion passes to the point that depends on it
@@ -64,9 +75,12 @@ std::uint16_t companion_flags(const CompanionInput& companion) noexcept {
     const std::uint16_t own = companion.outcome == Outcome::COMM_FAIL
                                   ? flag(QualityFlag::COMM_FAIL)
                                   : 0;
+    // The companion's own processing gave these. SUBSTITUTED describes the
+    // companion's value, not the point's, and does not pass (review R1 of
+    // #157): neither mask holds it.
     const auto carried = static_cast<std::uint16_t>(
         companion.mark.flags &
-        (DEVICE_FLAGS_MASK | flag(QualityFlag::COMM_FAIL)));
+        (CONFIG_FLAGS_MASK | DEVICE_FLAGS_MASK | flag(QualityFlag::COMM_FAIL)));
     return static_cast<std::uint16_t>(own | carried);
 }
 
@@ -75,6 +89,10 @@ std::uint16_t companion_flags(const CompanionInput& companion) noexcept {
 constexpr std::array<double, 21> POWERS_OF_TEN{
     1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9, 1e10,
     1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20};
+
+static_assert(POWERS_OF_TEN.size() == EXPONENT_MAX + 1 &&
+                  -EXPONENT_MIN <= EXPONENT_MAX,
+              "the table holds 10^|e| for every exponent CS 4.7 allows");
 
 // 2^63 as a binary64: every integral binary64 of smaller magnitude converts
 // to int64 exactly.
@@ -245,11 +263,17 @@ struct Work {
     // The new value came from the device (or a substitute), so the point is
     // no longer NOT_INIT.
     bool from_device = false;
+    // The new value is the configured substitute (`on_invalid: substitute`).
+    bool substituted = false;
     TagValue value{};
     // The read confirmed the value (contract 7.5).
     bool confirmed = false;
     // Set for a STRING value taken from the sample.
     std::span<const std::byte> text;
+    // A counter's `on_decrease: hold` replaced the value computed, which is
+    // `unheld` (for the restart rules, D-147).
+    bool counter_held = false;
+    TagValue unheld{};
     std::int64_t source_time_ns = 0;
     std::uint16_t time_flags = 0;
 };
@@ -303,7 +327,7 @@ QualityMark quality_from_rules(const Work& work) noexcept {
         }
         const std::optional<std::int64_t> key =
             key_of(*raw, rule.has_field, rule.lo, rule.hi);
-        QualityMark found = device_mark(rule.otherwise);
+        QualityMark found = config_mark(rule.otherwise);
         if (key.has_value()) {
             const auto entry = std::lower_bound(
                 rule.entries.begin(), rule.entries.end(), *key,
@@ -311,7 +335,7 @@ QualityMark quality_from_rules(const Work& work) noexcept {
                     return candidate.key < wanted;
                 });
             if (entry != rule.entries.end() && entry->key == *key) {
-                found = device_mark(entry->mark);
+                found = config_mark(entry->mark);
             }
         }
         mark = worse(mark, found);
@@ -357,8 +381,11 @@ std::optional<double> apply_exponent(Work& work,
         return std::nullopt;
     }
     const std::int64_t power = rule.divide ? -*exponent : *exponent;
-    const double factor =
-        POWERS_OF_TEN.at(static_cast<std::size_t>(power >= 0 ? power : -power));
+    // In range: |power| is at most EXPONENT_MAX, checked above, and the
+    // table holds 10^0 to 10^EXPONENT_MAX (issue #181: no throwing `.at` in
+    // noexcept code).
+    const double factor = detail::element(
+        POWERS_OF_TEN, static_cast<std::size_t>(power >= 0 ? power : -power));
     // A negative power divides by the exact 10^|e|, never multiplies by an
     // inexact 10^-|e|.
     const double raw = double_of(work.sample->raw);
@@ -477,6 +504,8 @@ bool apply_counter(Work& work, const CounterRule& rule) noexcept {
                     // Keep the counter's own last value, not whatever the
                     // tag held last, until the counter passes it.
                     state.counter_holding = true;
+                    work.counter_held = true;
+                    work.unheld = work.value;
                     work.value = state.counter_held;
                     work.mark = worse(work.mark, UNCERTAIN_MARK);
                     return true;
@@ -630,6 +659,13 @@ void hold_last(Work& work, QualityMark extra) noexcept {
 // Step 1, invalid markers on the raw pattern. Returns true when one matched
 // and decided the value.
 bool apply_markers(Work& work) noexcept {
+    // A marker never applies to a STRING tag: a string has no raw pattern,
+    // and a sample of another kind is no string (take_string gives it BAD).
+    // marker_matches looks at the sample's kind, which a protocol fault can
+    // make other than the configured one (#169).
+    if (work.rules->tag_type == TagType::STRING) {
+        return false;
+    }
     for (const InvalidMarker& marker : work.rules->markers) {
         if (!marker_matches(marker, work.sample->raw)) {
             continue;
@@ -638,16 +674,18 @@ bool apply_markers(Work& work) noexcept {
         work.state->holding = false;
         switch (marker.action) {
             case InvalidAction::BAD:
-                work.mark = bad(marker.flags & DEVICE_FLAGS_MASK);
+                work.mark = bad(marker.flags & CONFIG_FLAGS_MASK);
                 break;
             case InvalidAction::KEEP_LAST:
                 hold_last(work, GOOD_MARK);
                 break;
             case InvalidAction::SUBSTITUTE:
-                // UNCERTAIN; SUBSTITUTED only from tag database 1.1
-                // (contract 5.2, R-6 depends on #89).
+                // UNCERTAIN with SUBSTITUTED: a value substituted by
+                // configuration (contract 5.2, R-6; tag database contract
+                // 1.1, section 6).
                 work.new_value = true;
                 work.from_device = true;
+                work.substituted = true;
                 work.value = marker.substitute;
                 work.mark = UNCERTAIN_MARK;
                 break;
@@ -778,6 +816,35 @@ void process_device_invalid(Work& work) noexcept {
     hold_last(work, mapping);
 }
 
+// Steps 1 to 6 for rules validate_point_rules accepts: the outcome, then
+// the worst of all `quality_from` and `health` rules (CS 4.7, 4.9).
+void process_outcome(Work& work) noexcept {
+    PointState& state = *work.state;
+    const RawSample& sample = *work.sample;
+    switch (sample.outcome) {
+        case Outcome::VALUE:
+            process_value(work);
+            break;
+        case Outcome::NO_VALUE:
+            state.holding = false;
+            work.mark = bad(device_mark(sample.mark).flags);
+            break;
+        case Outcome::ABSENT:
+            state.holding = false;
+            work.mark = bad(0);
+            break;
+        case Outcome::DEVICE_INVALID:
+            process_device_invalid(work);
+            break;
+        case Outcome::COMM_FAIL:
+            state.holding = false;
+            work.mark = bad(flag(QualityFlag::COMM_FAIL));
+            break;
+    }
+    work.mark = worse(work.mark, quality_from_rules(work));
+    work.mark = worse(work.mark, health_mark(work));
+}
+
 // Fills `out` from the state's last value and mark.
 void fill_writes(const PointRules& rules, const PointState& state,
                  ProcessedSample& out) noexcept {
@@ -831,8 +898,39 @@ void reset_point_state(PointState& state, TagType type,
     state.counter_holding = false;
     state.counter_held = zero_value(type);
     state.bit_values = 0;
+    state.substituted = false;
     state.text.clear();
 }
+
+void seed_point_state(PointState& state, const TagValue& stored,
+                      bool substituted) noexcept {
+    if (stored.type != state.value.type) {
+        return;
+    }
+    state.substituted = substituted;
+    if (stored.type == TagType::STRING) {
+        store_text(state, std::as_bytes(std::span(stored.text)));
+        return;
+    }
+    state.value = stored;
+}
+
+namespace {
+
+// ABSENT is counted while it lasts; a lost answer says nothing either way.
+void track_absent(Outcome outcome, PointState& state,
+                  SampleCounts& counts) noexcept {
+    if (outcome == Outcome::ABSENT && !state.absent) {
+        state.absent = true;
+        counts.became_absent = true;
+    } else if (outcome != Outcome::ABSENT && outcome != Outcome::COMM_FAIL &&
+               state.absent) {
+        state.absent = false;
+        counts.left_absent = true;
+    }
+}
+
+}  // namespace
 
 void process_sample(const PointRules& rules, PointState& state,
                     const RawSample& sample,
@@ -847,54 +945,37 @@ void process_sample(const PointRules& rules, PointState& state,
     work.times = &times;
     work.out = &out;
 
-    switch (sample.outcome) {
-        case Outcome::VALUE:
-            process_value(work);
-            break;
-        case Outcome::NO_VALUE:
-            out.counts.sentinel = true;
-            state.holding = false;
-            work.mark = bad(device_mark(sample.mark).flags);
-            break;
-        case Outcome::ABSENT:
-            state.holding = false;
-            work.mark = bad(0);
-            break;
-        case Outcome::DEVICE_INVALID:
-            process_device_invalid(work);
-            break;
-        case Outcome::COMM_FAIL:
-            state.holding = false;
-            work.mark = bad(flag(QualityFlag::COMM_FAIL));
-            break;
+    // Rules that validate_point_rules refuses give BAD with OUT_OF_RANGE on
+    // every path, the value kept: no marker, hold or companion applies to
+    // them (#169; decision D-131). The compile step refuses them first.
+    const bool refused = !validate_point_rules(rules).ok();
+    if (refused) {
+        state.holding = false;
+        work.mark = bad(flag(QualityFlag::OUT_OF_RANGE));
+    } else {
+        process_outcome(work);
+    }
+    if (sample.outcome == Outcome::NO_VALUE) {
+        out.counts.sentinel = true;
     }
 
-    // Step 6 for every outcome and every marker action: the worst of all
-    // rules is the tag's quality (CS 4.7, 4.9).
-    work.mark = worse(work.mark, quality_from_rules(work));
-    work.mark = worse(work.mark, health_mark(work));
+    track_absent(sample.outcome, state, out.counts);
 
-    // ABSENT is counted while it lasts; a lost answer says nothing either
-    // way.
-    if (sample.outcome == Outcome::ABSENT && !state.absent) {
-        state.absent = true;
-        out.counts.became_absent = true;
-    } else if (sample.outcome != Outcome::ABSENT &&
-               sample.outcome != Outcome::COMM_FAIL && state.absent) {
-        state.absent = false;
-        out.counts.left_absent = true;
-    }
-
-    if (sample.outcome == Outcome::VALUE) {
+    if (sample.outcome == Outcome::VALUE && !refused) {
         sample_time(work);
     } else {
-        // The time is the time of this observation, stamped by the driver.
+        // The time is the time of this observation, stamped by the driver;
+        // refused rules apply no time companion either (#169).
         work.source_time_ns = times.receive_time_ns;
         work.time_flags = flag(QualityFlag::LOCAL_TIME);
     }
 
-    // The new state of the point.
+    // The new state of the point. SUBSTITUTED describes the value (tag
+    // database contract 6, 12): it is set by the substitute action alone,
+    // and stays with a kept substitute value through COMM_FAIL, ABSENT,
+    // NO_VALUE and a refused value (review R1 of #157).
     if (work.new_value) {
+        state.substituted = work.substituted;
         state.value = work.value;
         if (rules.tag_type == TagType::STRING && !state.holding) {
             store_text(state, work.text);
@@ -903,7 +984,11 @@ void process_sample(const PointRules& rules, PointState& state,
             state.has_value = true;
         }
     }
-    auto flags = static_cast<std::uint16_t>(work.mark.flags | work.time_flags);
+    auto flags = static_cast<std::uint16_t>(
+        (work.mark.flags & ~flag(QualityFlag::SUBSTITUTED)) | work.time_flags);
+    if (state.substituted) {
+        flags |= flag(QualityFlag::SUBSTITUTED);
+    }
     if (work.confirmed) {
         state.confirmed_mono_ns = times.receive_mono_ns;
     } else {
@@ -923,6 +1008,24 @@ void process_sample(const PointRules& rules, PointState& state,
     state.flags = flags;
     state.source_time_ns = work.source_time_ns;
 
+    fill_writes(rules, state, out);
+    if (work.new_value && work.from_device && work.confirmed &&
+        work.mark.quality != Quality::BAD && !state.holding) {
+        out.rule_valid = true;
+        out.rule_value = work.counter_held ? work.unheld : out.tag.value;
+    }
+}
+
+void withhold_point(const PointRules& rules, PointState& state,
+                    std::uint16_t flags, std::int64_t source_time_ns,
+                    ProcessedSample& out) noexcept {
+    out = ProcessedSample{};
+    state.quality = Quality::BAD;
+    state.flags = flags;
+    state.source_time_ns = source_time_ns;
+    state.has_value = false;
+    state.has_valid = false;
+    state.holding = false;
     fill_writes(rules, state, out);
 }
 
