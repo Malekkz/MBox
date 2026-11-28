@@ -180,8 +180,9 @@ for the retain keys, with warning CW-510 for each `retain_max_age` until
 #89; CF-801 for aggregate tiers out of
 order; CF-802 and CF-803 for logging settings; CF-811 for an alarm list
 given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
-limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags.
-The warnings CW-804 and CW-805 are not given yet.
+limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags;
+warning CW-805 for a logging `interval` shorter than the tag's refresh, its
+poll group's or its task's period (D-123). Warning CW-804 is not given yet.
 
 Then stage 5 checks the keys of each device's points that need no
 protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a read
@@ -195,6 +196,12 @@ a bit or a field anywhere without `bit_order`, once per device; CF-619 for
 an `rw` or `wo` point without `storage`; CF-640 for `keep_last` on a read
 point that gives no `max_age`. The patterns of health rules share a budget
 of matching work (D-120).
+
+Then stage 5 checks the channels (`src/channel_rules.cpp`, D-123): CF-605
+for a channel with more devices than `limits.max_devices_per_channel`;
+CF-620 for two Modbus `rtu` channels on one `device` path, compared as
+written; warning CW-621 for two Modbus `tcp` or `rtu_over_tcp` channels to
+one host and port, the host compared as an address.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
@@ -274,7 +281,7 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-602 | slice 7d-2 of #100 (Modbus addresses) |
 | CF-603 | slice 7d-2 of #100 (Modbus addresses) |
 | CF-604 | `src/tag_names.cpp` |
-| CF-605 | slice 7d-3 of #100 (channels and `io`) |
+| CF-605 | `src/channel_rules.cpp` |
 | CF-610 | slice 7d-2 of #100 (Modbus addresses) |
 | CF-611 | `src/point_rules.cpp` |
 | CF-612 | `src/point_rules.cpp` |
@@ -284,14 +291,14 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-616 | `src/point_rules.cpp` |
 | CF-618 | `src/point_rules.cpp` |
 | CF-619 | `src/point_rules.cpp` |
-| CF-620 | slice 7d-3 of #100 (channels and `io`) |
+| CF-620 | `src/channel_rules.cpp` |
 | CF-622 | `src/references.cpp` |
 | CF-640 | `src/point_rules.cpp` |
 | CW-606 | slice 7d-2 of #100 (Modbus addresses) |
 | CW-607 | slice 7d-2 of #100 (Modbus addresses) |
 | CW-608 | slice 7d-2 of #100 (Modbus addresses) |
-| CW-621 | slice 7d-3 of #100 (channels and `io`) |
-| CW-660 | slice 7d-3 of #100 (channels and `io`) |
+| CW-621 | `src/channel_rules.cpp` |
+| CW-660 | #107 (the `io` `configure`, D-123) |
 | CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
 | CF-702 | slice 7e of #100 |
 | CF-703 | slice 7e of #100 |
@@ -321,7 +328,7 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-813 | `src/tag_rules.cpp` |
 | CF-814 | `src/tag_rules.cpp` |
 | CF-815 | `src/tag_rules.cpp` |
-| CW-805 | slice 7d-3 of #100 (channels and `io`) |
+| CW-805 | `src/tag_rules.cpp` |
 | CF-901 | slice 7e of #100 |
 | CF-902 | slice 7e of #100 |
 | CF-904 | slice 7e of #100 |
@@ -354,7 +361,7 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-651 | #104 (the Modbus `configure`; stage 5 gives CF-615, D-120) |
 | CF-652 | slice 7d-2 of #100 (Modbus addresses) |
 | CF-653 | slice 7d-2 of #100 (Modbus addresses) |
-| CF-662 | slice 7d-3 of #100 (channels and `io`) |
+| CF-662 | #107 (the `io` `configure`, D-123) |
 
 ## The YAML subset parser
 

@@ -1,0 +1,6 @@
+channel:
+  name: gw1
+  type: tcp
+  host: 192.0.2.10
+devices:
+  - { name: gw1.m1, template: meter, unit_id: 1 }

@@ -1,5 +1,6 @@
 // Retained values, logging and alarms of the tags (configuration schemas
-// contract 5.2, 6 and 8; decision D-119, slice 7c of #100).
+// contract 5.2, 6 and 8; decision D-119, slice 7c of #100; CW-805, decision
+// D-123, slice 7d-3).
 
 #include "tag_rules.h"
 
@@ -46,6 +47,7 @@ constexpr std::uint16_t CW_AGE_NO_EFFECT = 510;
 constexpr std::uint16_t CF_BAD_TIER = 801;
 constexpr std::uint16_t CF_LOGGING_INCOMPLETE = 802;
 constexpr std::uint16_t CF_STRING_LOGGING = 803;
+constexpr std::uint16_t CW_INTERVAL_FINER = 805;
 constexpr std::uint16_t CF_GIVEN_TWICE = 811;
 constexpr std::uint16_t CF_ALARM_ID_TWICE = 812;
 constexpr std::uint16_t CF_LIMIT_ORDER = 813;
@@ -59,6 +61,30 @@ constexpr std::array<std::string_view, 4> LIMIT_TYPES = {"high_high", "high",
 // 8: the keys of an alarms file that one file of the tree may give.
 constexpr std::array<std::string_view, 3> ALARM_LISTS = {
     "priorities", "max_shelve", "classes"};
+
+// A period and its text, as written or the contract's: how often a tag is
+// refreshed (CW-805).
+struct Period {
+    std::uint64_t ms = 0;
+    std::string_view text;
+};
+
+// 4.6: the poll groups of a channel that gives none.
+constexpr std::array<std::pair<std::string_view, Period>, 3> DEFAULT_GROUPS = {
+    {{"fast", {.ms = 200, .text = "200ms"}},
+     {"normal", {.ms = 1000, .text = "1s"}},
+     {"slow", {.ms = 10000, .text = "10s"}}}};
+
+// 9.1: the tasks of a tree without control/tasks.yaml.
+constexpr std::array<std::pair<std::string_view, Period>, 3> DEFAULT_TASKS = {
+    {{"fast", {.ms = 10, .text = "10ms"}},
+     {"normal", {.ms = 100, .text = "100ms"}},
+     {"slow", {.ms = 1000, .text = "1s"}}}};
+
+// 4.7, 5.1: the poll group of a point, and the task of a virtual tag, that
+// give none.
+constexpr std::string_view DEFAULT_GROUP = "normal";
+constexpr std::string_view DEFAULT_TASK = "normal";
 
 bool is_limit_type(std::string_view type) {
     return std::ranges::find(LIMIT_TYPES, type) != LIMIT_TYPES.end();
@@ -84,6 +110,9 @@ struct Site {
     NodeId name_node = 0;  // where an error that has no key of its own goes
     NodeId keys = 0;       // its map
     bool tag_file = false;
+    // How often its value is refreshed: its poll group's or its task's
+    // period; none (0) when that is not known (CW-805).
+    Period refresh;
 };
 
 // An alarm on a tag (not an expression alarm).
@@ -126,7 +155,12 @@ public:
         for (std::size_t i = 0; i < files_.size(); ++i) {
             if (files_[i].source->path_class.type == FileType::LOGGING) {
                 read_logging(i);
+            } else if (files_[i].source->path_class.type == FileType::TASKS) {
+                read_tasks(i);
             }
+        }
+        if (!tasks_file_) {
+            tasks_.insert(DEFAULT_TASKS.begin(), DEFAULT_TASKS.end());
         }
         walk_tree();
         for (std::size_t i = 0; i < files_.size(); ++i) {
@@ -198,6 +232,31 @@ private:
         }
     }
 
+    // --- control/tasks.yaml ----------------------------------------------
+
+    // The periods of the tasks; the file replaces the default tasks (9.1).
+    // A period the schema refused gives none.
+    void read_tasks(std::size_t index) {
+        tasks_file_ = true;
+        const Reader& reader = readers_[index];
+        for (const Entry& task :
+             reader.entries(reader.document().root(), "tasks")) {
+            const std::optional<NodeId> period =
+                reader.scalar(task.value, "period");
+            if (!period) {
+                continue;
+            }
+            const std::optional<std::uint64_t> period_ms =
+                parse_duration_ms(reader.document().text(*period));
+            if (period_ms) {
+                tasks_.try_emplace(
+                    reader.document().text(task.key),
+                    Period{.ms = *period_ms,
+                           .text = reader.document().text(*period)});
+            }
+        }
+    }
+
     // CF-801: each interval longer than the one before and a whole
     // multiple of it. An interval the schema refused is skipped.
     void check_tiers(const Reader& reader, NodeId root) {
@@ -246,6 +305,7 @@ private:
         // every device (S2 of the review of #172).
         std::set<std::string_view> devices;
         for (const NodeId channel : expanded_.items(root, "channels")) {
+            read_groups(channel);
             for (const NodeId device : expanded_.items(channel, "devices")) {
                 const std::optional<NodeId> name =
                     expanded_.scalar(device, "name");
@@ -262,6 +322,40 @@ private:
         }
     }
 
+    // The poll groups of `channel` and their periods (4.6): its own replace
+    // the defaults (D-116).
+    void read_groups(NodeId channel) {
+        groups_.clear();
+        const std::optional<NodeId> keys = expanded_.child(channel, "channel");
+        if (!keys || !expanded_.child(*keys, "poll_groups")) {
+            groups_.insert(DEFAULT_GROUPS.begin(), DEFAULT_GROUPS.end());
+            return;
+        }
+        for (const Entry& group : expanded_.entries(*keys, "poll_groups")) {
+            const std::optional<NodeId> period =
+                expanded_.scalar(group.value, "period");
+            if (!period) {
+                continue;
+            }
+            const std::optional<std::uint64_t> period_ms =
+                parse_duration_ms(expanded_.document().text(*period));
+            if (period_ms) {
+                groups_.try_emplace(
+                    expanded_.document().text(group.key),
+                    Period{.ms = *period_ms,
+                           .text = expanded_.document().text(*period)});
+            }
+        }
+    }
+
+    // The period of `name` in `periods`, none for a name that has none.
+    [[nodiscard]] static Period period_of(
+        const std::map<std::string_view, Period, std::less<>>& periods,
+        std::string_view name) {
+        const auto found = periods.find(name);
+        return found == periods.end() ? Period{} : found->second;
+    }
+
     void walk_point(std::string_view device, NodeId point) {
         const std::optional<NodeId> name = expanded_.scalar(point, "name");
         if (!name) {
@@ -272,6 +366,14 @@ private:
                             .expanded = true,
                             .point = point,
                             .device = device};
+        // A `wo` point is not read, so not refreshed (4.7; CF-614 for its
+        // logging).
+        Period refresh;
+        if (expanded_.text_of(point, "access") != "wo") {
+            const std::string_view group =
+                expanded_.text_of(point, "poll_group");
+            refresh = period_of(groups_, group.empty() ? DEFAULT_GROUP : group);
+        }
         const auto tag_of = [device](std::string_view own) {
             std::string tag(device);
             tag += '.';
@@ -283,7 +385,8 @@ private:
                             .name = tag_of(expanded_.document().text(*name)),
                             .name_node = *name,
                             .keys = point,
-                            .tag_file = false});
+                            .tag_file = false,
+                            .refresh = refresh});
         } else {
             // No tag of its own (D-116): only alarms that name a tag.
             collect_alarms(source, point, {});
@@ -304,8 +407,25 @@ private:
                             .name = tag_of(expanded_.document().text(*bit)),
                             .name_node = *bit,
                             .keys = entry.value,
-                            .tag_file = false});
+                            .tag_file = false,
+                            .refresh = refresh});
         }
+    }
+
+    // A virtual tag is computed in every cycle of its task, by default
+    // `normal`; an internal tag that names its task is written by that
+    // task's programs (5.1). Another tag, and an internal tag that names no
+    // task, has no period these rules know.
+    [[nodiscard]] Period task_refresh(const Reader& reader, NodeId tag) const {
+        const std::string_view type = reader.text_of(tag, "type");
+        const std::string_view task = reader.text_of(tag, "task");
+        if (type == "virtual") {
+            return period_of(tasks_, task.empty() ? DEFAULT_TASK : task);
+        }
+        if (type == "internal" && !task.empty()) {
+            return period_of(tasks_, task);
+        }
+        return {};
     }
 
     void walk_tag_file(std::size_t index) {
@@ -325,7 +445,8 @@ private:
                             .name = std::string(reader.document().text(*name)),
                             .name_node = *name,
                             .keys = tag,
-                            .tag_file = true});
+                            .tag_file = true,
+                            .refresh = task_refresh(reader, tag)});
         }
     }
 
@@ -409,6 +530,8 @@ private:
         const Reader* deadband_reader = nullptr;
         const ScalarTypes* deadband_types = nullptr;
         NodeId deadband = 0;
+        const Reader* interval_reader = nullptr;
+        NodeId interval = 0;
     };
 
     // Takes the mode and deadband of `policy`; false for a name that is no
@@ -425,6 +548,11 @@ private:
             logged.deadband_reader = given.reader;
             logged.deadband_types = given.types;
             logged.deadband = *deadband;
+        }
+        if (const std::optional<NodeId> interval =
+                given.reader->scalar(given.settings, "interval")) {
+            logged.interval_reader = given.reader;
+            logged.interval = *interval;
         }
         return true;
     }
@@ -469,6 +597,11 @@ private:
             logged.deadband_types = site.source.types;
             logged.deadband = *deadband;
         }
+        if (const std::optional<NodeId> interval =
+                reader.scalar(*logging, "interval")) {
+            logged.interval_reader = &reader;
+            logged.interval = *interval;
+        }
         return true;
     }
 
@@ -497,6 +630,31 @@ private:
             error(site.source, logged.deadband, CF_PERCENTAGE_WITHOUT_RANGE,
                   quote_text(site.name) + ": a percentage needs range");
         }
+        check_interval(site, logged, place);
+    }
+
+    // CW-805 (6): an interval finer than the tag's refresh samples one
+    // value again and again. The warning is at the tag's own `interval`,
+    // else at its `logging` or its name: a policy's interval is the tag's
+    // choice of policy.
+    void check_interval(const Site& site, const Logged& logged, NodeId place) {
+        if (logged.interval_reader == nullptr || site.refresh.ms == 0) {
+            return;
+        }
+        const std::string_view interval =
+            logged.interval_reader->document().text(logged.interval);
+        const std::optional<std::uint64_t> interval_ms =
+            parse_duration_ms(interval);
+        if (!interval_ms || *interval_ms >= site.refresh.ms) {
+            return;
+        }
+        warning(site.source,
+                logged.interval_reader == site.source.reader ? logged.interval
+                                                             : place,
+                CW_INTERVAL_FINER,
+                quote_text(site.name) + ": interval " + std::string(interval) +
+                    " is finer than the tag's refresh " +
+                    std::string(site.refresh.text));
     }
 
     [[nodiscard]] static bool has_range(const Site& site) {
@@ -766,6 +924,11 @@ private:
     std::map<std::string_view, Policy, std::less<>> policies_;
     // A view into logging.yaml's Document; empty for none.
     std::string_view default_policy_;
+    // The periods of the tasks and of the poll groups of the channel being
+    // walked: views into the trees' Documents, or constants (CW-805).
+    std::map<std::string_view, Period, std::less<>> tasks_;
+    bool tasks_file_ = false;
+    std::map<std::string_view, Period, std::less<>> groups_;
     std::set<std::string, std::less<>> ranged_;  // the tags with `range`
     std::vector<AlarmRef> alarms_;
     // The first alarms file of each of ALARM_LISTS: views into the paths

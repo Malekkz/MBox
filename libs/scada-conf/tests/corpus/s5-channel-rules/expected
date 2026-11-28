@@ -1,0 +1,6 @@
+# Stage 5 on the channels (contract 4.1, 10.6, Annex A.1; D-123, slice 7d-3
+# of #100): line1 has 3 devices over a limit of 2 (CF-605, at its name), and
+# line2 is an RTU channel on line1's serial path (CF-620, at its device).
+# Invented.
+drivers/modbus/line1.yaml:2:9: CF-605
+drivers/modbus/line2.yaml:4:11: CF-620
