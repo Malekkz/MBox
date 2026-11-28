@@ -428,6 +428,7 @@ TEST_F(Logged, TheChannelRecordsOfTheConnection) {
     EventRecord refused;
     refused.count = 2;
     refused.has_details = true;
+    refused.reason = static_cast<std::uint8_t>(CloseReason::TIMED_OUT);
     log().add_channel(ChannelEvent::REFUSED, refused, 0, WALL);
     EventRecord closed = lost;
     closed.reason = static_cast<std::uint8_t>(CloseReason::BROKEN);
@@ -436,8 +437,8 @@ TEST_F(Logged, TheChannelRecordsOfTheConnection) {
               (std::vector<std::string>{
                   "connection lost|MESSAGE_ID=driver-connection-lost|CHANNEL="
                   "line1|REASON=time-outs|COUNT=1",
-                  "connection refused|MESSAGE_ID=driver-connection-refused|"
-                  "CHANNEL=line1|COUNT=2",
+                  "connect failed|MESSAGE_ID=driver-connection-refused|"
+                  "CHANNEL=line1|REASON=timed out|COUNT=2",
                   "connection closed by the driver|MESSAGE_ID=driver-"
                   "connection-closed|CHANNEL=line1|REASON=broken answer|"
                   "COUNT=1"}));
@@ -450,6 +451,7 @@ TEST_F(Logged, AChannelsRecordsAreLimitedPerKind) {
     EventRecord refused;
     refused.count = 1;
     refused.has_details = true;
+    refused.reason = static_cast<std::uint8_t>(CloseReason::REFUSED);
     log().add_channel(ChannelEvent::REFUSED, refused, 0, WALL);
     log().add_channel(ChannelEvent::REFUSED, refused, 1, WALL);
     log().add_channel(ChannelEvent::REFUSED, refused, 2, WALL);
@@ -459,12 +461,33 @@ TEST_F(Logged, AChannelsRecordsAreLimitedPerKind) {
     log().due(PERIOD, WALL);
     EXPECT_EQ(lines(),
               (std::vector<std::string>{
-                  "connection refused|MESSAGE_ID=driver-connection-refused|"
-                  "CHANNEL=line1|COUNT=1",
+                  "connect failed|MESSAGE_ID=driver-connection-refused|"
+                  "CHANNEL=line1|REASON=refused|COUNT=1",
                   "connection lost|MESSAGE_ID=driver-connection-lost|CHANNEL="
                   "line1|REASON=peer|COUNT=1",
-                  "connection refused|MESSAGE_ID=driver-connection-refused|"
+                  "connect failed|MESSAGE_ID=driver-connection-refused|"
                   "CHANNEL=line1|COUNT=2"}));
+}
+
+// PR 188 review: a channel's record that the full queue refuses gives its
+// count to the next summary, as a device's does.
+TEST_F(Logged, ARefusedChannelRecordsCountGoesInTheNextSummary) {
+    ASSERT_TRUE(start(1));
+    ASSERT_TRUE(hold());
+    EventRecord lost;
+    lost.count = 1;
+    lost.has_details = true;
+    log().add(0, DeviceEvent::RESTART, lost, 0, WALL);     // takes the room
+    log().add_channel(ChannelEvent::LOST, lost, 0, WALL);  // refused
+    release();
+    EXPECT_EQ(queue().dropped(), 1U);
+    (void)lines();  // room again
+    log().due(PERIOD, WALL);
+    const std::vector<std::string> got = lines();
+    EXPECT_NE(std::find(got.begin(), got.end(),
+                        "connection lost|MESSAGE_ID=driver-connection-lost|"
+                        "CHANNEL=line1|COUNT=1"),
+              got.end());
 }
 
 TEST(EventLog, EveryCloseReasonHasItsText) {
@@ -474,6 +497,10 @@ TEST(EventLog, EveryCloseReasonHasItsText) {
     EXPECT_EQ(close_reason_text(CloseReason::PARTIAL), "partial frame");
     EXPECT_EQ(close_reason_text(CloseReason::BROKEN), "broken answer");
     EXPECT_EQ(close_reason_text(CloseReason::SIDE_EFFECT), "side-effect read");
+    EXPECT_EQ(close_reason_text(CloseReason::REFUSED), "refused");
+    EXPECT_EQ(close_reason_text(CloseReason::TIMED_OUT), "timed out");
+    EXPECT_EQ(close_reason_text(CloseReason::UNREACHABLE), "unreachable");
+    EXPECT_EQ(close_reason_text(CloseReason::OPEN_FAILED), "open failed");
 }
 
 TEST(EventLog, AnEventOfNoDeviceOrNoQueueIsIgnored) {

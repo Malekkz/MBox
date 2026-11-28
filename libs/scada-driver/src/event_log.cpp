@@ -56,6 +56,14 @@ std::string_view close_reason_text(CloseReason reason) noexcept {
             return "broken answer";
         case CloseReason::SIDE_EFFECT:
             return "side-effect read";
+        case CloseReason::REFUSED:
+            return "refused";
+        case CloseReason::TIMED_OUT:
+            return "timed out";
+        case CloseReason::UNREACHABLE:
+            return "unreachable";
+        case CloseReason::OPEN_FAILED:
+            return "open failed";
     }
     return "unknown";
 }
@@ -192,10 +200,17 @@ bool EventLog::push_channel(ChannelEvent kind, const EventRecord& events,
                                  {"REASON", reason},
                                  {"COUNT", count.view()}});
         case ChannelEvent::REFUSED:
-            return queue_->push(LogLevel::WARNING, wall_ns,
-                                "connection refused",
+            if (!details) {
+                return queue_->push(
+                    LogLevel::WARNING, wall_ns, "connect failed",
+                    {{"MESSAGE_ID", "driver-connection-refused"},
+                     {"CHANNEL", channel},
+                     {"COUNT", count.view()}});
+            }
+            return queue_->push(LogLevel::WARNING, wall_ns, "connect failed",
                                 {{"MESSAGE_ID", "driver-connection-refused"},
                                  {"CHANNEL", channel},
+                                 {"REASON", reason},
                                  {"COUNT", count.view()}});
         case ChannelEvent::CLOSED:
             if (!details) {

@@ -73,7 +73,8 @@ TEST_F(DriverProcess, ARefusedConnectIsLogged) {
         FAIL() << "no driver";
     }
     EXPECT_TRUE(logs(
-        *driver, R"(MESSAGE_ID="driver-connection-refused" CHANNEL="line1")"));
+        *driver, R"(MESSAGE_ID="driver-connection-refused" CHANNEL="line1" )"
+                 R"(REASON="refused")"));
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 

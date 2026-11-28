@@ -53,6 +53,9 @@ public:
         refusals_ = count;
         refuse_ns_ = refuse_ns;
     }
+    // The next `count` connects fail at once (no route, a port that will
+    // not open): FAILED.
+    void fail_connects(int count) noexcept { failures_ = count; }
     // Each connect takes `delay_ns`: past its deadline it is a TIMEOUT.
     void connect_delay(std::int64_t delay_ns) noexcept {
         connect_delay_ns_ = delay_ns;
@@ -156,6 +159,7 @@ private:
     std::int64_t connect_delay_ns_ = 0;
     int closing_connects_ = 0;
     int partial_sends_ = 0;
+    int failures_ = 0;
     int failed_sends_ = 0;
     int connects_ = 0;
     int abortive_closes_ = 0;

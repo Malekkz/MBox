@@ -101,13 +101,15 @@ inline constexpr std::size_t DEVICE_EVENTS = 6;
 // An event of the channel's connection, for the log (11.3; D-149).
 enum class ChannelEvent : std::uint8_t {
     LOST = 0,  // the connection is lost: every device CONNECTING (7.3)
-    REFUSED,   // a connect was refused
-    CLOSED,    // the driver closed the connection itself (7.3)
+    // A connect failed: refused, timed out, unreachable or a port that
+    // would not open, with its reason (the lead's interim ruling, D-149).
+    REFUSED,
+    CLOSED,  // the driver closed the connection itself (7.3)
 };
 inline constexpr std::size_t CHANNEL_EVENTS = 3;
 
-// Why a connection was lost or closed: `EventRecord::reason` of a LOST or
-// CLOSED event (D-149).
+// Why a connection was lost or closed, or a connect failed:
+// `EventRecord::reason` of a LOST, CLOSED or REFUSED event (D-149).
 enum class CloseReason : std::uint8_t {
     PEER = 0,     // the peer closed it, or it failed
     TIMEOUTS,     // a run of time-outs spanning every live unit
@@ -116,6 +118,11 @@ enum class CloseReason : std::uint8_t {
     PARTIAL,      // a frame not taken whole
     BROKEN,       // a broken answer on a stream
     SIDE_EFFECT,  // a side-effect read that failed
+    // A connect that failed (REFUSED events).
+    REFUSED,      // the peer refused it
+    TIMED_OUT,    // no connection within `connect_timeout`
+    UNREACHABLE,  // a stream's connect failed otherwise (no route, ...)
+    OPEN_FAILED,  // a serial port that would not open
 };
 
 // The events of one kind since they were last taken: how many, and the last
@@ -316,6 +323,8 @@ private:
     std::int64_t try_connect(std::int64_t now_ns) noexcept;
     void lose(std::int64_t now_ns) noexcept;
     void apply_loss(CloseReason reason) noexcept;
+    // The reason of a failed connect's record.
+    [[nodiscard]] CloseReason connect_failure(IoStatus status) const noexcept;
     void close_own(std::int64_t now_ns, bool lost, CloseReason reason) noexcept;
     void next_connect_after_backoff(std::int64_t now_ns) noexcept;
     End attempt(const Choice& choice, DecodeResult& decoded) noexcept;

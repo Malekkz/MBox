@@ -24,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -2585,6 +2586,80 @@ TEST(EngineEvents, EachRefusedConnectIsNoted) {
     ASSERT_EQ(rig.state(0), DeviceStatus::RUNNING);
     EXPECT_EQ(taken(rig.engine, ChannelEvent::REFUSED), 3U);
     EXPECT_EQ(taken(rig.engine, ChannelEvent::LOST), 0U);
+}
+
+// The lead's ruling on PR 188: every failed connect is logged, with its
+// reason.
+CloseReason failed_connect_reason(TransportKind transport,
+                                  const std::function<void(Rig&)>& fault) {
+    Rig rig(channel_of(1, quick_failure(2, 3), transport), 1);
+    fault(rig);
+    rig.run_until(5 * SECOND);
+    EventRecord failed;
+    EXPECT_GE(taken(rig.engine, ChannelEvent::REFUSED, &failed), 1U);
+    return static_cast<CloseReason>(failed.reason);
+}
+
+TEST(EngineEvents, EachFailedConnectIsNotedWithItsReason) {
+    EXPECT_EQ(failed_connect_reason(TransportKind::TCP,
+                                    [](Rig& rig) {
+                                        rig.transport.refuse_connects(
+                                            1, 10 * MILLISECOND);
+                                    }),
+              CloseReason::REFUSED);
+    EXPECT_EQ(failed_connect_reason(
+                  TransportKind::TCP,
+                  [](Rig& rig) { rig.transport.connect_delay(10 * SECOND); }),
+              CloseReason::TIMED_OUT);
+    EXPECT_EQ(
+        failed_connect_reason(TransportKind::TCP,
+                              [](Rig& rig) { rig.transport.fail_connects(1); }),
+        CloseReason::UNREACHABLE);
+    EXPECT_EQ(
+        failed_connect_reason(TransportKind::SERIAL,
+                              [](Rig& rig) { rig.transport.fail_connects(1); }),
+        CloseReason::OPEN_FAILED);
+}
+
+TEST(EngineEvents, APartialFrameIsAnOwnCloseWithItsReason) {
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    rig.transport.partial_sends(1);
+    rig.run_until(2 * SECOND);
+    EventRecord closed;
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::CLOSED, &closed), 1U);
+    EXPECT_EQ(closed.reason, static_cast<std::uint8_t>(CloseReason::PARTIAL));
+}
+
+TEST(EngineEvents, AFailedSideEffectReadIsAnOwnCloseWithItsReason) {
+    ReadRules rules{.max_units = LARGE};
+    rules.ranges = {ReadRange{.kind = ReadRange::Kind::SIDE_EFFECT,
+                              .unit_id = 1,
+                              .first = 0,
+                              .last = 0}};
+    CompiledChannel side = make_channel(
+        {{.name = "d1", .unit_id = 1, .points = adjacent(0, 1, SLOW)}}, rules);
+    side.devices[0].failure = quick_failure(2, 3);
+    Rig rig(std::move(side), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(500 * MILLISECOND);
+    EventRecord closed;
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::CLOSED, &closed), 1U);
+    EXPECT_EQ(closed.reason,
+              static_cast<std::uint8_t>(CloseReason::SIDE_EFFECT));
+}
+
+TEST(EngineEvents, AnOwnCloseNotResumedInTimeIsALossOfItsOwnReason) {
+    // A partial send closes the connection; every reconnect is refused past
+    // `connect_timeout` (3 s): the loss is "not resumed", not "peer".
+    Rig rig(channel_of(1, quick_failure(0, 5), TransportKind::TCP), 1);
+    rig.run_until(FAST_PERIOD - MILLISECOND);
+    rig.transport.partial_sends(1);
+    rig.transport.refuse_connects(100, MILLISECOND);
+    rig.run_until(10 * SECOND);
+    EventRecord lost;
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::LOST, &lost), 1U);
+    EXPECT_EQ(lost.reason, static_cast<std::uint8_t>(CloseReason::NOT_RESUMED));
 }
 
 TEST(EngineEvents, AnOwnCloseIsNotedWithItsReason) {

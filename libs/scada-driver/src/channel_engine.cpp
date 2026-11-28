@@ -414,8 +414,10 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     set_link(ChannelLink::DISCONNECTED);
     if (status == IoStatus::REFUSED) {
         ++counts_.refused;
-        note_channel_event(ChannelEvent::REFUSED, CloseReason::PEER);
     }
+    // Every failed connect is logged, not only a refused one, so that a
+    // channel that never connects is not silent (D-149).
+    note_channel_event(ChannelEvent::REFUSED, connect_failure(status));
     if (!own_close_) {
         // CONNECTING with COMM_FAIL (conformance test 16).
         for (std::uint32_t device = 0; device < devices_.size(); ++device) {
@@ -427,6 +429,19 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     next_connect_after_backoff(now);
     publish_states();
     return next_connect_ns_;
+}
+
+CloseReason ChannelEngine::connect_failure(IoStatus status) const noexcept {
+    switch (status) {
+        case IoStatus::REFUSED:
+            return CloseReason::REFUSED;
+        case IoStatus::TIMEOUT:
+            return CloseReason::TIMED_OUT;
+        default:
+            return channel_->transport == TransportKind::SERIAL
+                       ? CloseReason::OPEN_FAILED
+                       : CloseReason::UNREACHABLE;
+    }
 }
 
 void ChannelEngine::apply_loss(CloseReason reason) noexcept {
