@@ -112,6 +112,41 @@ TEST_F(DriverProcess, TheWritesOf91ComeFirstAndBeforeReady) {
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 
+// Issue #186: a read that finds the owner mid-write (SCADA_E_BUSY) is
+// transient (TD, the read section): the fixture reads again, both in
+// `eventually` and in `read`, instead of failing the test. Here the first
+// reads say BUSY, as under load a preempted owner's do.
+TEST_F(DriverProcess, ABusyReadIsReadAgain) {
+    start_tagd({{.name = "line1", .tags = {"d1.v"}}});
+    auto sim = start_sim({"--set", "1", "0", "0", "11"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    auto driver = start_driver(
+        joined(tcp_channel("line1", port_of(*sim)), device("d1", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    int busy = 2;
+    int reads = 0;
+    set_tag_read([&](scada_ctx* ctx, std::uint32_t tag, scada_value* value) {
+        ++reads;
+        if (busy > 0) {
+            --busy;
+            return static_cast<int>(SCADA_E_BUSY);
+        }
+        return scada_tag_read(ctx, tag, value);
+    });
+    const std::uint32_t tag = handle("d1.v");
+    EXPECT_TRUE(eventually(
+        tag, [](const scada_value& value) { return good_with(value, 11); }));
+    busy = 3;
+    EXPECT_TRUE(good_with(read(tag), 11));
+    EXPECT_GE(reads, 2 + 3 + 2);
+    EXPECT_TRUE(stops_cleanly(*driver));
+}
+
 TEST_F(DriverProcess, AKilledDriverIsOwnerDownAndItsRestartKeepsTheValue) {
     // Review M4 and M6: a kill leaves the tag with its value and OWNER_DOWN
     // (asserted, not masked out); a restart with the peer gone writes it
