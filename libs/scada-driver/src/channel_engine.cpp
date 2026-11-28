@@ -6,6 +6,8 @@
 #include "scada/driver/diagnostics.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
+#include "scada/driver/identity_setup.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/protocol.h"
@@ -65,7 +67,12 @@ std::vector<FailureTracker::Device> tracked_devices(
                        .own_unit = device.unit == CompiledDevice::OWN_UNIT,
                        .rules = device.failure,
                        .enabled = device.enabled,
-                       .has_poll_group = polls});
+                       .has_poll_group = polls,
+                       .identify = !device.identify.empty(),
+                       .identity_wait_ns =
+                           identity_wait_ns(device.failure.startup_grace_ns,
+                                            device.plan, channel.poll_groups),
+                       .full_period_ns = full_period_ns(channel.poll_groups)});
     }
     return out;
 }
@@ -79,6 +86,44 @@ std::uint32_t lost_after(const CompiledChannel& channel) noexcept {
 
 Status invalid(StaticString what) noexcept {
     return {StatusCode::INVALID_ARGUMENT, what};
+}
+
+// The points of identity checks and restart rules are read on their own and
+// processed first, so they have no companions (ruling item 6), and they are
+// points of the device.
+Status check_identity_points(const CompiledDevice& device) noexcept {
+    const auto usable = [&](std::uint32_t point) {
+        return point < device.points.size() &&
+               device.points[point].rules.companions.empty();
+    };
+    for (const IdentityCheck& check : device.identify) {
+        if (!usable(check.point)) {
+            return invalid(
+                "an identity check reads no point of its device, or one with "
+                "companions");
+        }
+        // The compile step checks the keys; the engine again on what it
+        // is given (D-147, S3).
+        if (Status status = validate_identity_check(
+                check, device.points[check.point].rules.tag_type);
+            !status.ok()) {
+            return status;
+        }
+    }
+    for (const RestartRule& rule : device.restart_indication) {
+        if (!usable(rule.point)) {
+            return invalid(
+                "a restart rule reads no point of its device, or one with "
+                "companions");
+        }
+        const PointRules& rules = device.points[rule.point].rules;
+        if (Status status = validate_restart_rule(
+                rule, rules.tag_type, rules.raw_kind == RawKind::TIME);
+            !status.ok()) {
+            return status;
+        }
+    }
+    return {};
 }
 
 // When a point next goes STALE, or a held value BAD (7.5, D-131), after
@@ -208,6 +253,7 @@ ChannelEngine::ChannelEngine(const CompiledChannel& channel,
         device_points = std::max(device_points, device.points.size());
         run.chain.reserve(device.points.size());
         run.rests.resize(device.plan.requests.size());
+        set_up_identity(static_cast<std::uint32_t>(index), now);
         run.published =
             device.enabled ? DeviceStatus::CONNECTING : DeviceStatus::DISABLED;
         tags.device_state(static_cast<std::uint32_t>(index), run.published);
@@ -268,12 +314,10 @@ std::int64_t ChannelEngine::step() noexcept {
         case Choice::Kind::WAIT:
             return std::min(choice.wake_ns, stale_due);
         case Choice::Kind::ORDER:
-        case Choice::Kind::IDENTITY:
-            // Orders come with the command slices; none is added yet. The
-            // identity cycle is wired in slice 5b-2b; until then the engine
-            // puts no device in DeviceMode::IDENTITY (D-147).
+            // Orders come with the command slices; none is added yet.
             (void)scheduler_.not_sent();
             return now;
+        case Choice::Kind::IDENTITY:
         case Choice::Kind::POLL:
         case Choice::Kind::KEEPALIVE:
         case Choice::Kind::PROBE:
@@ -438,8 +482,16 @@ void ChannelEngine::sync_scheduler() noexcept {
         if (!compiled.enabled) {
             continue;
         }
-        scheduler_.set_polled(device, failures_.polled(device));
         DeviceRun& run = devices_[device];
+        // The mode from the tracker's state (D-147, ruling item 2); a round
+        // of the identity check starts as the device enters IDENTITY.
+        const DeviceMode mode = mode_of(device);
+        if (mode == DeviceMode::IDENTITY && !run.identity_round) {
+            start_identity_round(device);
+        } else if (mode != DeviceMode::IDENTITY) {
+            run.identity_round = false;
+        }
+        scheduler_.set_mode(device, mode);
         if (run.any_resting) {
             // A resting block is polled again at the end of its back-off;
             // a further failure rests it again, for twice as long (G8).
@@ -574,6 +626,9 @@ std::int64_t ChannelEngine::check_staleness(std::int64_t now_ns) noexcept {
             continue;
         }
         DeviceRun& run = devices_[device];
+        if (mode_of(device) == DeviceMode::IDENTITY) {
+            continue;  // no point tag is written while the check is pending
+        }
         for (std::uint32_t point = 0; point < run.points.size(); ++point) {
             const PointRules& rules = compiled.points[point].rules;
             PointState& state = run.points[point].state;
@@ -770,6 +825,9 @@ void ChannelEngine::exchange(const Choice& choice) noexcept {
             if (choice.kind == Choice::Kind::PROBE) {
                 failures_.probe_ended(choice.device, false, now);
                 scheduler_.probe_done();
+            } else if (choice.kind == Choice::Kind::IDENTITY ||
+                       choice.identity_keepalive) {
+                identity_failed(choice, End::NOT_SENT);
             } else {
                 fail_request(choice);
             }
@@ -808,6 +866,12 @@ void ChannelEngine::answered(const Choice& choice,
     const CompiledDevice& compiled = channel_->devices[device];
     const Request& request = compiled.plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
+    if (choice.kind == Choice::Kind::IDENTITY || choice.identity_keepalive) {
+        // An identity keep-alive is an identity read (D-147, S8): its
+        // samples go to the check, never to the tags.
+        identity_answered(choice, decoded);
+        return;
+    }
     run.attempts = 0;
     run.verdict_pending = false;
     if (choice.kind == Choice::Kind::PROBE) {
@@ -816,6 +880,18 @@ void ChannelEngine::answered(const Choice& choice,
         // the reconnect back-off (7.3; the lead's ruling R10).
         failures_.probe_ended(device, true, now);
         scheduler_.probe_done();
+        if (choice.identity_probe) {
+            // A probe by the identity cycle (D-147, S4): the device is
+            // alive, its samples are dropped, and the check that the
+            // recovery starts reads its cycle. The probe was the cycle's
+            // first request and the scheduler is in IDENTITY already, so
+            // the next cycle is asked for here; nothing else would.
+            if (!scheduler_.identity_running(device)) {
+                scheduler_.identity_again(
+                    device, now, Scheduler::IdentityFloor::FASTEST_PERIOD);
+            }
+            return;
+        }
         if (choice.cycle && decoded.kind == DecodeResult::Kind::BUSY) {
             // A busy part cuts its chain, as a poll's does (H4).
             cut_chain(device, request.chained);
@@ -911,8 +987,9 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         (end == End::BROKEN && channel_->transport != TransportKind::TCP);
     if (retryable && connected_ && !probe && !request.side_effect &&
         run.attempts < compiled.failure.retries) {
-        if (run.attempts == 0 && (choice.kind == Choice::Kind::POLL ||
-                                  choice.kind == Choice::Kind::KEEPALIVE)) {
+        if (run.attempts == 0 && !choice.identity_keepalive &&
+            (choice.kind == Choice::Kind::POLL ||
+             choice.kind == Choice::Kind::KEEPALIVE)) {
             // The verdict does not wait for retries that wait for their
             // turn: one period of the group, or the retries' time-outs if
             // longer (J2), whether the first attempt was a poll or a
@@ -928,7 +1005,12 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         }
         ++run.attempts;
         ++counts_.retries;
-        scheduler_.retry(device, choice.request, now);
+        scheduler_.retry(device, choice.request, now,
+                         choice.identity_keepalive);
+        return;
+    }
+    if (choice.kind == Choice::Kind::IDENTITY || choice.identity_keepalive) {
+        identity_failed(choice, end);
         return;
     }
     run.attempts = 0;
@@ -1067,48 +1149,108 @@ void ChannelEngine::deliver(const Choice& choice,
     process(choice.device, samples);
 }
 
+void ChannelEngine::set_up_identity(std::uint32_t device_index,
+                                    std::int64_t now_ns) {
+    const CompiledDevice& device = channel_->devices[device_index];
+    DeviceRun& run = devices_[device_index];
+    if (!device.identify.empty() || !device.restart_indication.empty()) {
+        if (status_.ok()) {
+            status_ = check_identity_points(device);
+        }
+        // The processing of identity and restart samples in an identity
+        // round, apart from the points' own states (ruling item 2).
+        run.scratch.resize(device.points.size());
+        for (std::size_t point = 0; point < device.points.size(); ++point) {
+            init_point_state(run.scratch[point],
+                             device.points[point].rules.tag_type);
+            reset_point_state(run.scratch[point],
+                              device.points[point].rules.tag_type, now_ns);
+        }
+    }
+    if (!device.identify.empty()) {
+        run.identity.emplace(device.identify);
+    }
+    if (!device.restart_indication.empty()) {
+        run.restart.emplace(device.restart_indication);
+    }
+}
+
+bool ChannelEngine::is_restart_point(const CompiledDevice& device,
+                                     std::uint32_t point) noexcept {
+    return std::any_of(
+        device.restart_indication.begin(), device.restart_indication.end(),
+        [&](const RestartRule& rule) { return rule.point == point; });
+}
+
+void ChannelEngine::order_batch(
+    std::uint32_t device, std::span<const DeliveredSample> samples) noexcept {
+    const DeviceRun& run = devices_[device];
+    const CompiledDevice& compiled = channel_->devices[device];
+    // The points of restart rules first, so that a restart drops the rest
+    // of the answer (ruling item 6); then points without companions, so
+    // that a dependent point sees what its companions' own processing gave
+    // them (5.5, D-131): three passes into the engine's own storage,
+    // nothing allocated (P8).
+    const auto pass_of = [&](std::uint32_t point) {
+        if (run.restart.has_value() && is_restart_point(compiled, point)) {
+            return 0;
+        }
+        return compiled.points[point].rules.companions.empty() ? 1 : 2;
+    };
+    batch_.clear();
+    for (const int pass : {0, 1, 2}) {
+        for (const DeliveredSample& sample : samples) {
+            if (sample.point < run.points.size() &&
+                pass_of(sample.point) == pass &&
+                batch_.size() < batch_.capacity()) {
+                batch_.push_back(sample);
+            }
+        }
+    }
+}
+
+void ChannelEngine::gather_companions(std::uint32_t device,
+                                      std::size_t index) noexcept {
+    const DeviceRun& run = devices_[device];
+    const PointRules& rules =
+        channel_->devices[device].points[batch_[index].point].rules;
+    companions_.clear();
+    for (const std::uint32_t companion : rules.companions) {
+        CompanionInput input{};
+        for (std::size_t other = 0; other < index; ++other) {
+            if (batch_[other].point == companion) {
+                const PointState& state = run.points[companion].state;
+                input = CompanionInput{
+                    .outcome = batch_[other].sample.outcome,
+                    .raw = batch_[other].sample.raw,
+                    .mark = {.quality = state.quality, .flags = state.flags},
+                    .stale = false};
+            }
+        }
+        if (companions_.size() < companions_.capacity()) {
+            companions_.push_back(input);
+        }
+    }
+}
+
 void ChannelEngine::process(std::uint32_t device,
                             std::span<const DeliveredSample> samples) noexcept {
     DeviceRun& run = devices_[device];
     const CompiledDevice& compiled = channel_->devices[device];
     const SampleTimes times{.receive_time_ns = clock_->realtime_ns(),
                             .receive_mono_ns = clock_->monotonic_ns()};
-    // Points without companions first, so that a dependent point sees what
-    // its companions' own processing gave them (5.5, D-131): two passes
-    // into the engine's own storage, nothing allocated (P8).
-    batch_.clear();
-    for (const bool dependent : {false, true}) {
-        for (const DeliveredSample& sample : samples) {
-            if (sample.point < run.points.size() &&
-                compiled.points[sample.point].rules.companions.empty() !=
-                    dependent &&
-                batch_.size() < batch_.capacity()) {
-                batch_.push_back(sample);
-            }
-        }
+    order_batch(device, samples);
+    if (answer_restarted(device, times)) {
+        // No value of the answer is written: every point gets the NOT_INIT
+        // withhold, and the check starts (the lead's ruling on PR 177 M2).
+        restarted(device);
+        return;
     }
     for (std::size_t index = 0; index < batch_.size(); ++index) {
         const DeliveredSample& sample = batch_[index];
-        const PointRules& rules = compiled.points[sample.point].rules;
-        companions_.clear();
-        for (const std::uint32_t companion : rules.companions) {
-            CompanionInput input{};
-            for (std::size_t other = 0; other < index; ++other) {
-                if (batch_[other].point == companion) {
-                    const PointState& state = run.points[companion].state;
-                    input =
-                        CompanionInput{.outcome = batch_[other].sample.outcome,
-                                       .raw = batch_[other].sample.raw,
-                                       .mark = {.quality = state.quality,
-                                                .flags = state.flags},
-                                       .stale = false};
-                }
-            }
-            if (companions_.size() < companions_.capacity()) {
-                companions_.push_back(input);
-            }
-        }
-        process_sample(rules, run.points[sample.point].state, sample.sample,
+        gather_companions(device, index);
+        process_sample(compiled.points[sample.point].rules,
+                       run.points[sample.point].state, sample.sample,
                        companions_, times, processed_);
         if (processed_.counts.sentinel) {
             ++run.diag.sentinels;
@@ -1119,6 +1261,33 @@ void ChannelEngine::process(std::uint32_t device,
         tags_->write_point(device, sample.point, processed_);
     }
     run.comm_failed = false;
+}
+
+bool ChannelEngine::answer_restarted(std::uint32_t device,
+                                     const SampleTimes& times) noexcept {
+    DeviceRun& run = devices_[device];
+    if (!run.restart.has_value()) {
+        return false;
+    }
+    const CompiledDevice& compiled = channel_->devices[device];
+    // Every rule sees the whole answer, so that each keeps its baseline
+    // when one fires; the points of the rules are first in the batch
+    // (order_batch). Each is processed on a copy of its state, so that
+    // nothing is written or kept before the verdict.
+    bool restarted = false;
+    for (std::size_t index = 0; index < batch_.size(); ++index) {
+        const std::uint32_t point = batch_[index].point;
+        if (!is_restart_point(compiled, point)) {
+            break;
+        }
+        PointState& copy = run.scratch[point];
+        copy = run.points[point].state;  // capacity reserved: no allocation
+        gather_companions(device, index);
+        process_sample(compiled.points[point].rules, copy, batch_[index].sample,
+                       companions_, times, processed_);
+        restarted = watch_restart(device, point, processed_) || restarted;
+    }
+    return restarted;
 }
 
 void ChannelEngine::set_link(ChannelLink link) noexcept {

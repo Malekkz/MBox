@@ -89,10 +89,22 @@ std::optional<T> number(std::string_view text) {
     return value;
 }
 
+// A register that changes once unit `unit` received `after` requests: a
+// device that restarts during the test (`--set-after`).
+struct LaterSet {
+    std::uint8_t unit = 0;
+    std::uint8_t space = 0;
+    std::uint32_t address = 0;
+    std::uint16_t value = 0;
+    std::uint32_t after = 0;
+    bool done = false;
+};
+
 struct Options {
     bool tcp = false;
     bool pty = false;
     std::optional<std::size_t> close_after;
+    std::vector<LaterSet> later;
 };
 
 // The `count` numbers after `args[index]`; empty when they are not there.
@@ -117,7 +129,16 @@ std::vector<std::uint32_t> numbers_after(std::span<char*> args,
 bool apply(std::span<char*> args, std::size_t& index, SimBus& bus,
            Options& options) {
     const std::string_view arg = args[index];
-    const std::size_t count = arg == "--map" || arg == "--set" ? 4 : 1;
+    // The numbers each option takes: unit, space, address or first, and
+    // value or last; `--set-after` adds its count of requests.
+    constexpr std::size_t REGISTER_NUMBERS = 4;
+    constexpr std::size_t LATER_NUMBERS = REGISTER_NUMBERS + 1;
+    std::size_t count = 1;
+    if (arg == "--map" || arg == "--set") {
+        count = REGISTER_NUMBERS;
+    } else if (arg == "--set-after") {
+        count = LATER_NUMBERS;
+    }
     const std::vector<std::uint32_t> values = numbers_after(args, index, count);
     if (values.empty()) {
         return false;
@@ -130,6 +151,13 @@ bool apply(std::span<char*> args, std::size_t& index, SimBus& bus,
     } else if (arg == "--set") {
         bus.set(unit, static_cast<std::uint8_t>(values[1]), values[2],
                 static_cast<std::uint16_t>(values[3]));
+    } else if (arg == "--set-after") {
+        options.later.push_back(
+            LaterSet{.unit = unit,
+                     .space = static_cast<std::uint8_t>(values[1]),
+                     .address = values[2],
+                     .value = static_cast<std::uint16_t>(values[3]),
+                     .after = values[4]});
     } else if (arg == "--silent") {
         bus.fault(unit, SimBus::Fault::SILENT);
     } else if (arg == "--close-after") {
@@ -174,8 +202,8 @@ bool write_all(int descriptor, std::span<const std::byte> bytes) {
 
 // Takes the whole requests out of `pending` and answers each on `fd`.
 // Returns the answers written.
-std::size_t serve(std::vector<std::byte>& pending, SimBus& bus,
-                  int descriptor) {
+std::size_t serve(std::vector<std::byte>& pending, SimBus& bus, int descriptor,
+                  std::vector<LaterSet>& later) {
     std::size_t answered = 0;
     while (pending.size() >= REQUEST_BYTES) {
         const std::span<const std::byte> request =
@@ -188,6 +216,20 @@ std::size_t serve(std::vector<std::byte>& pending, SimBus& bus,
                            std::to_integer<std::uint32_t>(request[8]);
         say("request " + std::to_string(now) + " " + std::to_string(unit) +
             " " + std::to_string(first));
+        // A change due after this many requests to its unit, before the
+        // answer: the answer to request `after` + 1 has the new value.
+        for (LaterSet& change : later) {
+            if (change.unit != unit || change.done) {
+                continue;
+            }
+            if (change.after == 0) {
+                bus.set(change.unit, change.space, change.address,
+                        change.value);
+                change.done = true;
+            } else {
+                --change.after;
+            }
+        }
         const std::vector<std::byte> answer = bus.answer(request, now);
         pending.erase(
             pending.begin(),
@@ -228,7 +270,7 @@ Input take_input(int descriptor, std::vector<std::byte>& pending) {
     return Input::MORE;
 }
 
-int run_tcp(SimBus& bus, const Options& options) {
+int run_tcp(SimBus& bus, Options& options) {
     const scada::Fd listener(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
     if (!listener.valid()) {
         return 1;
@@ -259,7 +301,7 @@ int run_tcp(SimBus& bus, const Options& options) {
         std::size_t answered = 0;
         Input input = Input::MORE;
         while ((input = take_input(client.get(), pending)) == Input::MORE) {
-            answered += serve(pending, bus, client.get());
+            answered += serve(pending, bus, client.get(), options.later);
             if (options.close_after && answered >= *options.close_after) {
                 break;
             }
@@ -275,7 +317,7 @@ int run_tcp(SimBus& bus, const Options& options) {
     }
 }
 
-int run_pty(SimBus& bus) {
+int run_pty(SimBus& bus, Options& options) {
     const scada::Fd master(::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC));
     std::array<char, PATH_CAPACITY> path{};
     if (!master.valid() || ::grantpt(master.get()) != 0 ||
@@ -294,7 +336,7 @@ int run_pty(SimBus& bus) {
     say(std::string("pty ") + path.data());
     std::vector<std::byte> pending;
     while (take_input(master.get(), pending) == Input::MORE) {
-        (void)serve(pending, bus, master.get());
+        (void)serve(pending, bus, master.get(), options.later);
     }
     return 1;
 }
@@ -316,8 +358,9 @@ int main(int argc, char** argv) {
     const std::span<char*> args(argv, static_cast<std::size_t>(argc));
     if (args.size() < 2 || !parse(args.subspan(1), bus, options)) {
         say("usage: scada-driver-test-sim (--tcp | --pty) [--map U S F L] "
-            "[--set U S A V] [--silent U] [--close-after N]");
+            "[--set U S A V] [--set-after U S A V N] [--silent U] "
+            "[--close-after N]");
         return EXIT_USAGE;
     }
-    return options.tcp ? run_tcp(bus, options) : run_pty(bus);
+    return options.tcp ? run_tcp(bus, options) : run_pty(bus, options);
 }

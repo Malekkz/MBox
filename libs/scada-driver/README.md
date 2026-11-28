@@ -26,6 +26,11 @@ The library is built in slices. These are the first two:
 | The real connections: TCP, a serial port, the system clocks | `scada/driver/connections.h` | 7.1 to 7.3; CS A.1 (decision D-141) |
 | The driver process: main thread, a worker per channel, the writes after attach, the channel watchdog, the bounded stop | `scada/driver/driver.h` | 2.3, 2.4, 2.6, 9.1, 10 (decision D-142) |
 | The counts behind the system tags of the process, a channel and its devices | `scada/driver/diagnostics.h` | 11.1 (decision D-146) |
+| Identity checks and restart rules: comparison, checks of the keys, the restart watch | `scada/driver/identity.h` | 3.6, 7.6; CS 4.8, 4.9 (decision D-147) |
+| One round of a device's identity check, its verdict and text | `scada/driver/identity_run.h` | 3.6 (D-147) |
+| The identity text of `sys.dev.<device>.identity` | `scada/driver/identity_text.h` | 3.6, 11.1 (D-147) |
+| The text pattern of an identity check | `scada/driver/text_pattern.h` | CS 2.5 (D-147) |
+| The engine's inputs of the check: deadline, full period, scheduler mode, identity points | `scada/driver/identity_setup.h` | 3.6, 7.6 (D-147) |
 
 The worker writes the `sys.drv.<channel>.*` and `sys.dev.<device>.*` tags
 of 11.1: states when they change, counters at most once a second, averages
@@ -33,14 +38,48 @@ rounded to 0.1 ms. At the stop it writes the counters' last values, then the
 channel and its devices as not connected. The main thread writes the
 `sys.proc.<process>.*` tags as the owner named like the process, and
 `config_state` 0 again at the stop. A tag set must list them all (CS 12.5);
-a driver whose tag set lacks one does not start. The device tags of slices
-not built yet (`restarts`, `selections_lost`, `last_command_stage`) read
-NOT_INIT.
+a driver whose tag set lacks one does not start. `identity` and
+`identity_ok` exist only for a device with `identify`, and are written once
+the check has a verdict. The device tags of slices not built yet
+(`selections_lost`, `last_command_stage`) read NOT_INIT.
 
-Not yet here: the identity and restart tags (slice 5b-2), the workers' log
-queues (slice 5b-3),
-commands, the generation change and reload. `docs/decisions.md` D-130 to
-D-142, D-145 and D-146 record the choices the contracts left open.
+Not yet here: the workers' log queues (slice 5b-3), commands, the
+generation change and reload. `docs/decisions.md` D-130 to D-147 record the
+choices the contracts left open.
+
+## Identity checks and restarts
+
+A device with `identify` reads only its identity cycle after every connect,
+recovery and restart, until its check has a verdict; nothing of it is
+published before (3.6). A match makes it INITIALISING, then RUNNING on its
+first answered poll. A mismatch with `refuse` makes it MISMATCH: its points
+BAD without COMM_FAIL, re-checked every `backoff`, but no sooner than one
+period of its identity points' group after the last check. With `warn` it
+runs and `identity_ok` is false. A value it cannot read is a mismatch only
+after max(`startup_grace`, 3 periods of that group); a busy answer is read
+again up to `retries` times. A keep-alive of a device in its check proves
+the link only: verdicts come from its identity cycles alone. A cycle that
+nothing answered is read again a
+period of the device's fastest group later, so a dead device is demoted as a
+polled one is. Until the owner rules, only a RUNNING device takes writes,
+fail-safe writes included (`accepts_writes`, D-147). The log has `driver-identity-mismatch` (REASON
+`value`, `absent` or `unreadable`, CHECK, VALUE), `driver-identity-matched`
+when a device leaves MISMATCH, and `driver-device-restart`, each with the
+COUNT since its last record: the first at once, then at most one per 10 s
+per device.
+
+A restart rule that holds is a restart of the device's unit: every RUNNING
+device of it is checked again, and its points written NOT_INIT (9.1). Every
+rule sees the whole answer before any point of it is written, and an answer
+that shows a restart writes no value. A device already being checked starts
+its check again. The grace starts again once, until the unit has run the
+longest group's period without a restart. When each rule is wrong:
+
+| Rule | False restart | Missed restart |
+| --- | --- | --- |
+| `decreases` | A counter that wraps (one per wrap period: 18.2 h for a 16-bit counter of one count a second); a value the device lowers itself | A restart that leaves the value at or above the last one read, or that happens and recovers between two reads |
+| `changes` | Any change the device makes in normal running | A restart that brings back the same value |
+| `equals` | The flag set for another reason; it fires on the rising edge only, so a flag left set is one restart | A flag cleared again before the next read |
 
 ## What it does
 
@@ -273,9 +312,14 @@ until reload; every other signal has its default.
   writes after attach (9.1) before READY, a restored tag, a disabled
   channel, a kill and a restart, the owners of the tags, one notify per
   change, every protocol call on its thread (test 1), a lost and a refused
-  connection (test 16), STALE (test 17). `driver_stop_integration_test.cpp`:
+  connection (test 16), STALE (test 17). `driver_identity_integration_test.cpp`:
+  a match, a mismatch with `refuse` and `warn`, a hot swap, a restart (the
+  simulator's `--set-after`) and two whose COUNTs add up, with their tags
+  and log records (D-147).
+  `driver_stop_integration_test.cpp`:
   READY, WATCHDOG and STOPPING, a wrong notify socket, the signals, a stop
   with a read in flight, an idle worker, a peer's close, a stop and a
-  retiring generation with a hung worker, a stall, a spinning worker, a
+  retiring generation with a hung worker, a stall, a stall that logs the
+  restart records it held, a spinning worker, a
   pause of the whole process, and the start's exit statuses (test 2). It
   takes about 2 minutes; the idle case alone runs 20 s.

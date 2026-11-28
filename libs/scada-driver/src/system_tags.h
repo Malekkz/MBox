@@ -32,8 +32,10 @@ enum class ChannelSignal : std::uint8_t {
 inline constexpr std::size_t CHANNEL_SIGNALS = 5;
 
 // The signals of `sys.dev.<device>.<signal>` this slice writes, in slot
-// order. `identity`, `identity_ok` and `restarts` come with slice 5b-2,
-// `selections_lost` and `last_command_stage` with the command slices,
+// order. `identity` and `identity_ok` exist only for a device with
+// `identify` (11.1): for another their slots hold no handle and are never
+// written. `selections_lost` and `last_command_stage` come with the command
+// slices,
 // `refresh_failures` with phase 5 (D-146).
 enum class DeviceSignal : std::uint8_t {
     STATE = 0,
@@ -50,8 +52,11 @@ enum class DeviceSignal : std::uint8_t {
     SENTINELS,
     INVALID,
     POINTS_ABSENT,
+    RESTARTS,
+    IDENTITY_OK,
+    IDENTITY,
 };
-inline constexpr std::size_t DEVICE_SIGNALS = 14;
+inline constexpr std::size_t DEVICE_SIGNALS = 17;
 
 // The signals of `sys.proc.<process>.<signal>`, in slot order.
 enum class ProcessSignal : std::uint8_t {
@@ -99,8 +104,11 @@ struct SystemSlot {
 };
 
 // How a system tag is written: the tag library's `scada_tag_write`, or a
-// unit test's recorder.
+// unit test's recorder; a STRING by `scada_tag_write_string`, or a test's.
 using TagWriteFn = int (*)(scada_ctx*, std::uint32_t, const scada_value*);
+using TagWriteTextFn = int (*)(scada_ctx*, std::uint32_t, const char*,
+                               std::size_t, std::uint8_t, std::uint16_t,
+                               std::int64_t);
 
 // Writes `bits` to `slot` by `write`, GOOD with no flags and source time 0,
 // if it differs from the value last written or with `all`; true if it
@@ -112,12 +120,24 @@ bool write_slot(TagWriteFn write, scada_ctx* ctx, SystemSlot& slot,
 // The slots of a channel: CHANNEL_SIGNALS, then one `period.<group>` per
 // poll group, then DEVICE_SIGNALS per device of the channel (disabled ones
 // too). Filled by the main thread when it resolves the tags.
+// The text a STRING system tag was last written with, kept whole so that a
+// new text is compared byte by byte: the device chooses the identity text,
+// so it could build a collision of any hash of it (PR 177 S3).
+struct KeptText {
+    std::array<char, TAG_STRING_MAX_BYTES> bytes{};
+    std::size_t length = 0;
+};
+
 struct SystemTagHandles {
     std::vector<SystemSlot> slots;
     std::size_t groups = 0;
     std::size_t devices = 0;
+    // One per device, for its `identity` (D-147); sized with `devices`.
+    // A device without one has its text written at every call.
+    std::vector<KeptText> identity_texts;
     // How they are written: the library's, or a test's (review M4).
     TagWriteFn write = &scada_tag_write;
+    TagWriteTextFn write_text = &scada_tag_write_string;
 };
 
 // An average in ms (`response_ms`, `period.<group>`) rounded to a tenth of
@@ -180,6 +200,14 @@ private:
     // Writes `bits` of the slot's type if it differs from the last value,
     // or with `all`; true if it wrote.
     bool put(std::size_t slot, std::uint64_t bits, bool all) noexcept;
+    // Writes `text` to a STRING slot if it differs from `kept`, the text
+    // last written, byte by byte, or with `all`, and keeps it there; true
+    // if it wrote. Without `kept`, written at every call.
+    bool put_text(std::size_t slot, std::string_view text, KeptText* kept,
+                  bool all) noexcept;
+    // `identity_ok` and `identity` of each device with a verdict (D-147).
+    bool put_identity(ChannelEngine& engine, const CompiledChannel& channel,
+                      bool all) noexcept;
     bool put_states(ChannelEngine& engine, const CompiledChannel& channel,
                     std::int64_t now_ns, bool all) noexcept;
     bool put_counters(ChannelEngine& engine, const CompiledChannel& channel,
@@ -189,6 +217,7 @@ private:
 
     scada_ctx* ctx_;
     TagWriteFn write_;
+    TagWriteTextFn write_text_;
     SystemTagHandles handles_;
     std::int64_t due_ns_ = 0;
     std::uint64_t refused_ = 0;

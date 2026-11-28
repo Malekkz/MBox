@@ -211,6 +211,15 @@ public:
     [[nodiscard]] const std::vector<ChannelLink>& links() const noexcept {
         return links_;
     }
+    // Every point write, in order, with what it wrote.
+    struct Logged {
+        std::uint32_t device = 0;
+        std::uint32_t point = 0;
+        Written written;
+    };
+    [[nodiscard]] const std::vector<Logged>& history() const noexcept {
+        return history_;
+    }
     // Every point write, in order: (device, point).
     [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>&
     order() const noexcept {
@@ -222,6 +231,7 @@ private:
     std::vector<std::pair<std::uint32_t, DeviceStatus>> states_;
     std::vector<ChannelLink> links_;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> order_;
+    std::vector<Logged> history_;
 };
 
 // Steps `engine` until the clock passes `end_ns`, moving the clock to each

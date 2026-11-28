@@ -33,6 +33,12 @@ namespace scada::driver {
 [[nodiscard]] std::int64_t full_period_ns(
     std::span<const CompiledPollGroup> groups) noexcept;
 
+// Whether `point` of `device` is read by an identity check or a restart
+// rule (3.6, 7.6): a protocol's plan step gives such a point to the planner
+// as a `PlanPoint::identity`, in no poll group when the point has none.
+[[nodiscard]] bool reads_identity(const CompiledDevice& device,
+                                  std::uint32_t point) noexcept;
+
 // What the scheduler reads of a device in tracker state `state` (D-147):
 // - OFF for DISABLED, CONNECTING, DEMOTED and REFUSING (a demoted device is
 //   reached by its probe alone);
@@ -41,6 +47,14 @@ namespace scada::driver {
 // - ALL otherwise.
 [[nodiscard]] SCADA_RT DeviceMode
 scheduler_mode(DeviceStatus state, bool identity_pending) noexcept;
+
+// Whether a device in tracker state `state` takes a write, an order step
+// or a fail-safe write: RUNNING only. INITIALISING (its identity check
+// pending or a first poll not yet answered) and MISMATCH take none, their
+// fail-safe writes included: the interim strict default of D-147 until the
+// owner rules (the lead's instruction). The command and fail-safe slices
+// call it before they queue a write.
+[[nodiscard]] SCADA_RT bool accepts_writes(DeviceStatus state) noexcept;
 
 }  // namespace scada::driver
 

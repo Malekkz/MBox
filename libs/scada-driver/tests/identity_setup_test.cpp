@@ -6,6 +6,7 @@
 
 #include "scada/driver/compiled.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/scheduler.h"
 
@@ -110,6 +111,37 @@ TEST(IdentitySetup, EachStateHasItsSchedulerMode) {
         EXPECT_EQ(scheduler_mode(row.state, row.pending), row.expected)
             << static_cast<int>(row.state) << " " << row.pending;
     }
+}
+
+TEST(IdentitySetup, OnlyARunningDeviceTakesWrites) {
+    // The interim strict default (D-147): no write, fail-safe ones
+    // included, before the identity check passed or in MISMATCH.
+    struct Row {
+        DeviceStatus state;
+        bool expected;
+    };
+    const std::vector<Row> rows{
+        {DeviceStatus::DISABLED, false},     {DeviceStatus::CONNECTING, false},
+        {DeviceStatus::INITIALISING, false}, {DeviceStatus::RUNNING, true},
+        {DeviceStatus::DEMOTED, false},      {DeviceStatus::MISMATCH, false},
+        {DeviceStatus::REFUSING, false},
+    };
+    for (const Row& row : rows) {
+        EXPECT_EQ(accepts_writes(row.state), row.expected)
+            << static_cast<int>(row.state);
+    }
+}
+
+TEST(IdentitySetup, IdentityAndRestartPointsAreReadByTheCycle) {
+    CompiledDevice device;
+    IdentityCheck check;
+    check.point = 1;
+    device.identify = {check};
+    device.restart_indication = {RestartRule{.point = 3}};
+    EXPECT_FALSE(reads_identity(device, 0));
+    EXPECT_TRUE(reads_identity(device, 1));
+    EXPECT_FALSE(reads_identity(device, 2));
+    EXPECT_TRUE(reads_identity(device, 3));
 }
 
 TEST(IdentitySetup, UnsetBoundsAreSafe) {
