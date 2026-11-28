@@ -192,5 +192,37 @@ TEST_F(Identity, TheRestartRecordsCountEveryRestart) {
     EXPECT_EQ(restart_counts(running->driver.err()), 2U);
 }
 
+TEST_F(Identity, ASecondRestartIsLoggedAfterItsPeriod) {
+    // Two restarts a few seconds apart: the first record at once, the
+    // second, a summary, only when the 10 s period has passed (PR 177 delta,
+    // item 3): a driver that logged each at once would write them seconds
+    // apart.
+    constexpr std::string_view RECORD = R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::int64_t PERIOD_MS = 10'000;
+    constexpr std::int64_t DAY_MS = 86'400'000;
+    std::optional<Running> running =
+        run("7",
+            {"--set-after", "1", "0", "0", "3", "20", "--set-after", "1", "0",
+             "0", "1", "40"},
+            {"--restart-decreases", "0"});
+    if (!running.has_value()) {
+        FAIL() << "no simulator or no driver";
+    }
+    EXPECT_TRUE(reaches("sys.dev.d1.restarts", std::int64_t{2}));
+    ASSERT_TRUE(running->driver.wait_for_error(
+        [&](std::string_view err) { return count_of(err, RECORD) >= 2; },
+        WAIT_LIMIT))
+        << running->driver.err();
+    const std::vector<std::int64_t> times =
+        record_times_ms(running->driver.err(), RECORD);
+    ASSERT_EQ(times.size(), 2U);
+    // Across midnight too; the clock of the log is the wall clock, so a
+    // little less than the monotonic period is allowed.
+    const std::int64_t apart = (times[1] - times[0] + DAY_MS) % DAY_MS;
+    EXPECT_GE(apart, PERIOD_MS - 100) << running->driver.err();
+    EXPECT_EQ(restart_counts(running->driver.err()), 2U);
+    EXPECT_TRUE(stops_cleanly(running->driver));
+}
+
 }  // namespace
 }  // namespace scada::test::driver_it

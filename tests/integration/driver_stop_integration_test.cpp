@@ -469,16 +469,22 @@ TEST_F(DriverProcess, AStallStopsTheOtherWorkers) {
 }
 
 TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
-    // Channel a's device restarts twice within a second or two: the first
-    // record at once, the second held for its 10 s period. Channel b hangs
-    // and stalls long before that period ends (its 3 s time-out makes its
-    // stall limit about 9 s); the stall's exit logs the held record (PR 177
-    // S6), so the counts add up to both restarts.
+    // Channel a's device restarts at its 3rd and 6th request, about a
+    // second apart: the first record at once, the second held for its 10 s
+    // period. Channel b hangs and stalls about 4.5 s in (its 1.5 s time-out
+    // makes its stall limit three times that), well before the period
+    // ends; the stall's exit logs the held record (PR 177 S6). The record
+    // times show that path was taken: the second after the stall, the stall
+    // within the period of the first.
+    constexpr std::string_view RESTART =
+        R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::string_view STALL = R"(MESSAGE_ID="driver-stall")";
+    constexpr std::int64_t PERIOD_MS = 10'000;
     start_tagd(
         {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
     auto sim =
         start_sim({"--set", "1", "0", "0", "5", "--set-after", "1", "0", "0",
-                   "3", "5", "--set-after", "1", "0", "0", "1", "10"});
+                   "3", "3", "--set-after", "1", "0", "0", "1", "6"});
     auto other = start_sim({});
     if (!sim.has_value() || !other.has_value()) {
         FAIL() << "no simulator";
@@ -487,7 +493,7 @@ TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
     auto driver = start_driver(joined(
         tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
         std::vector<std::string>{"--restart-decreases", "0"},
-        faulty("b", port_of(*other), "--hang"), device("d2", 2, "0", "3000")));
+        faulty("b", port_of(*other), "--hang"), device("d2", 2, "0", "1500")));
     if (!driver.has_value()) {
         FAIL() << "no driver";
     }
@@ -496,7 +502,15 @@ TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
             return value.quality == SCADA_QUALITY_GOOD && value.value == 2;
         }));
     EXPECT_TRUE(ends_with(*driver, EXIT_STALL));
-    EXPECT_EQ(restart_counts(driver->err()), 2U) << driver->err();
+    const std::string err = driver->err();
+    EXPECT_EQ(restart_counts(err), 2U) << err;
+    const std::vector<std::int64_t> restarts = record_times_ms(err, RESTART);
+    const std::vector<std::int64_t> stalls = record_times_ms(err, STALL);
+    ASSERT_EQ(restarts.size(), 2U) << err;
+    ASSERT_EQ(stalls.size(), 1U) << err;
+    EXPECT_LT(stalls[0] - restarts[0], PERIOD_MS) << err;
+    EXPECT_GE(restarts[1], stalls[0]) << err;
+    EXPECT_LT(err.find(STALL), err.rfind(RESTART)) << err;
 }
 
 TEST_F(DriverProcess, ASpinningWorkerIsAStallToo) {

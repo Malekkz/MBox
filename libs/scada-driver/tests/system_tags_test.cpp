@@ -264,6 +264,32 @@ TEST(SystemTags, TheIdentityTextIsWrittenAgainWhenItChanges) {
         std::make_pair(rig.slot(DeviceSignal::IDENTITY), std::string("5")));
 }
 
+// Runs `rig` until `until`; the identity texts written so far, in order.
+std::vector<std::string> texts_until(Rig& rig, std::int64_t until) {
+    rig.run_until(until);
+    std::vector<std::string> texts;
+    for (const auto& [slot, text] : recorder().texts) {
+        if (slot == rig.slot(DeviceSignal::IDENTITY)) {
+            texts.push_back(text);
+        }
+    }
+    return texts;
+}
+
+TEST(SystemTags, EveryByteAndTheLengthOfTheTextAreCompared) {
+    // Mismatches all: "10", then "12" (same length, same first byte), then
+    // "1" (a prefix): each is written (PR 177 delta, item 3).
+    Rig rig(identified(5), 1);
+    rig.bus.set(1, 0, 0, 10);
+    EXPECT_EQ(texts_until(rig, SECOND), std::vector<std::string>{"10"});
+    rig.bus.set(1, 0, 0, 12);
+    EXPECT_EQ(texts_until(rig, 30 * SECOND),
+              (std::vector<std::string>{"10", "12"}));
+    rig.bus.set(1, 0, 0, 1);
+    EXPECT_EQ(texts_until(rig, 60 * SECOND),
+              (std::vector<std::string>{"10", "12", "1"}));
+}
+
 TEST(SystemTags, RestartsCarryTheirCount) {
     // `decreases` on point 0: 5, then 3, is one restart (PR 177 S2).
     CompiledChannel channel = Rig::make(1, false);

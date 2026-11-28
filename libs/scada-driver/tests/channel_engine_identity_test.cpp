@@ -131,6 +131,9 @@ TEST(EngineIdentity, AMatchRunsTheDeviceAndPublishesItsPoints) {
     EXPECT_EQ(rig.engine.identity_text(0), "7");
     EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
     EXPECT_EQ(rig.tags.point(0, 0).value, 5);
+    // A match noted only when it ends a MISMATCH.
+    EventRecord record;
+    EXPECT_FALSE(rig.engine.take_event(0, DeviceEvent::MATCH, record));
     // The identity read came first, the data after it.
     ASSERT_FALSE(rig.bus.log().empty());
     EXPECT_EQ(rig.bus.log().front().first, IDENTITY);
@@ -478,6 +481,11 @@ TEST(EngineIdentity, NoValueOfARestartAnswerIsPublished) {
     ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
     ASSERT_GT(rig.tags.history().size(), before);
     EXPECT_TRUE(all_not_init(rig.tags.history(), before));
+    // The withheld writes keep the values from before: neither the data
+    // point's 6 nor the restart point's 3 of that answer (the restart rules
+    // ran on copies of the points' states).
+    EXPECT_EQ(rig.tags.point(0, 0).value, 5);
+    EXPECT_EQ(rig.tags.point(0, 2).value, 5);
     // Checked again at 10 s: the values return.
     rig.run_until(11 * SECOND);
     EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
@@ -747,6 +755,65 @@ TEST(EngineIdentity, AKeepAliveDoesNotEndAPendingCheck) {
     EXPECT_FALSE(rig.engine.identity_ok(0).has_value());
     rig.run_until(11 * SECOND);
     EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+}
+
+TEST(EngineIdentity, NoVerdictComesFromReadsBeforeARestart) {
+    // The cycle at 10 s reads the model (7) and then the restart: the round
+    // starts again, so the model read before the restart counts for
+    // nothing. Busy after that, the check has no verdict yet (PR 177 delta,
+    // item 3); a round kept from before would MATCH.
+    CompiledChannel channel = restart_channel(RESTART_LAST);
+    channel.devices[0].points[1].rules.markers.push_back(
+        InvalidMarker{.pattern = 0xFFFF, .action = InvalidAction::BAD});
+    Rig rig(std::move(channel), restart_bus(RESTART_LAST, 0xFFFF));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    rig.bus.set(1, 0, IDENTITY, MODEL);
+    rig.bus.set(1, 0, RESTART_LAST, 3);
+    rig.run_until(10'050 * MILLISECOND);
+    ASSERT_EQ(rig.engine.restarts(0), 1U);
+    rig.bus.busy_at(1, IDENTITY);
+    rig.run_until(15 * SECOND);
+    EXPECT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    EXPECT_FALSE(rig.engine.identity_ok(0).has_value());
+}
+
+TEST(EngineIdentity, ARestartIsTheWholeUnits) {
+    // d1 and d2 share unit 1; a restart seen by d1's rule is d2's too: it
+    // is counted, its point withheld NOT_INIT, and it reads again (S9 of
+    // PR 171; PR 177 delta, item 3).
+    CompiledChannel channel =
+        make_channel({{.name = "d1",
+                       .unit_id = 1,
+                       .points = {PointSpec{.first = DATA, .group = FAST}}},
+                      {.name = "d2",
+                       .unit_id = 1,
+                       .points = {PointSpec{.first = 30, .group = FAST}}}},
+                     ReadRules{.max_units = 4});
+    channel.devices[0].restart_indication = {
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
+    SimBus bus = identity_bus();
+    bus.set(1, 0, 30, 9);
+    Rig rig(std::move(channel), std::move(bus));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.engine.failures().state(1), DeviceStatus::RUNNING);
+    ASSERT_EQ(rig.tags.point(1, 0).quality, tag::Quality::GOOD);
+    const std::size_t before = rig.tags.history().size();
+    rig.bus.set(1, 0, DATA, 3);
+    rig.run_until(1'300 * MILLISECOND);
+    EXPECT_EQ(rig.engine.restarts(0), 1U);
+    EXPECT_EQ(rig.engine.restarts(1), 1U);
+    const std::vector<RecordingTags::Logged>& history = rig.tags.history();
+    EXPECT_TRUE(std::any_of(
+        history.begin() + static_cast<std::ptrdiff_t>(before), history.end(),
+        [](const RecordingTags::Logged& write) {
+            return write.device == 1 &&
+                   (write.written.flags &
+                    static_cast<std::uint16_t>(Flag::NOT_INIT)) != 0;
+        }));
+    rig.run_until(3 * SECOND);
+    EXPECT_EQ(rig.engine.failures().state(1), DeviceStatus::RUNNING);
+    EXPECT_EQ(rig.tags.point(1, 0).quality, tag::Quality::GOOD);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

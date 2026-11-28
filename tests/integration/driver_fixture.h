@@ -333,6 +333,33 @@ inline std::uint64_t restart_counts(std::string_view err) {
     return sum;
 }
 
+// The times of day, in ms since midnight UTC, of the lines of `err` that
+// hold `record`, in order: from the stream sink's leading
+// "YYYY-MM-DDTHH:MM:SS.mmmZ" (log.h, `make_stream_sink`).
+inline std::vector<std::int64_t> record_times_ms(std::string_view err,
+                                                 std::string_view record) {
+    constexpr std::size_t TIME_AT = 11;      // after "YYYY-MM-DDT"
+    constexpr std::size_t TIME_LENGTH = 12;  // "HH:MM:SS.mmm"
+    std::vector<std::int64_t> times;
+    for (std::size_t at = err.find(record); at != std::string_view::npos;
+         at = err.find(record, at + record.size())) {
+        const std::size_t start = err.rfind('\n', at);
+        const std::size_t line =
+            start == std::string_view::npos ? 0 : start + 1;
+        if (line + TIME_AT + TIME_LENGTH > err.size()) {
+            continue;
+        }
+        const std::string time(err.substr(line + TIME_AT, TIME_LENGTH));
+        const std::int64_t hours = std::stoll(time.substr(0, 2));
+        const std::int64_t minutes = std::stoll(time.substr(3, 2));
+        const std::int64_t seconds = std::stoll(time.substr(6, 2));
+        const std::int64_t millis = std::stoll(time.substr(9, 3));
+        times.push_back((((hours * 60) + minutes) * 60 + seconds) * 1000 +
+                        millis);
+    }
+    return times;
+}
+
 // The times `line` is in `out`.
 inline std::size_t count_of(std::string_view out, std::string_view line) {
     std::size_t count = 0;
