@@ -86,6 +86,9 @@ struct ChannelTags {
     // driver must refuse (review S3).
     // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
     std::string system_owner{};
+    // The devices with `identify`: they have the identity tags too (11.1).
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::vector<std::string> identified{};
 };
 
 // One system tag of driver interface contract 11.1: its signal and type.
@@ -181,6 +184,11 @@ inline std::vector<std::pair<std::string, std::string_view>> system_tags_of(
         for (const SystemTag& tag : UNWRITTEN_DEVICE_TAGS) {
             out.emplace_back(
                 "sys.dev." + device + "." + std::string(tag.signal), tag.type);
+        }
+        if (std::find(channel.identified.begin(), channel.identified.end(),
+                      device) != channel.identified.end()) {
+            out.emplace_back("sys.dev." + device + ".identity", "string");
+            out.emplace_back("sys.dev." + device + ".identity_ok", "bool");
         }
     }
     return out;
@@ -612,6 +620,20 @@ protected:
         EXPECT_EQ(scada_tag_resolve(ctx_, name.c_str(), &found), SCADA_OK)
             << name;
         return found;
+    }
+
+    // The text of the STRING tag `tag`, and its quality in `quality`.
+    std::string read_text(std::uint32_t tag, std::uint8_t& quality) {
+        std::array<char, SCADA_STRING_MAX> buffer{};
+        std::size_t length = 0;
+        scada_value value{};
+        if (scada_tag_read_string(ctx_, tag, buffer.data(), buffer.size(),
+                                  &length, &value) != SCADA_OK) {
+            quality = SCADA_QUALITY_BAD;
+            return {};
+        }
+        quality = value.quality;
+        return {buffer.data(), length};
     }
 
     scada_value read(std::uint32_t tag) {

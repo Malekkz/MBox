@@ -3024,3 +3024,36 @@ Consequences:
   - `identity_setup_test.cpp` covers the deadline, the full period, the mode of each state and the safe defaults.
   - `failure_test.cpp` covers the pending check and its deadline, the accounting, MISMATCH and its re-check, a poll answered while the check is pending, the back-off of a unit that answers only its identity, restarts and the grace re-armed once, and eligibility for the run.
   - The two fuzz targets have seed corpora.
+
+### D-147, slice 5b-2b: the engine, the system tags, the log records
+
+Decision:
+- The plan step: a protocol gives the planner a point that a check or a restart rule reads as a `PlanPoint::identity`, in no poll group when the point has none, by `reads_identity` (`identity_setup.h`). The test protocol does; contract 3.6 puts the identity reads on the framework, and this is the framework's part of the plan step, not a contract change.
+- The engine:
+  - It gives the tracker `identity_wait_ns` and `full_period_ns`, and the scheduler `scheduler_mode` of each state, in place of `set_polled`.
+  - It checks the keys again with `validate_identity_check` and `validate_restart_rule` (a point that reads a device time is a time point); a channel whose keys fail does not start.
+  - An identity read's samples go to `IdentityRun`, processed apart from the points' own states, and no point tag is written. An identity keep-alive is an identity read. An identity probe's samples are dropped: the recovery starts a new check, which reads its cycle.
+  - A busy identity read is read again at once, at most `retries` times, then the cycle ends without a verdict. The retry skips the identity floor, so the count bounds it.
+  - A failed re-check calls `identity_mismatched` again (M5), and the next cycle is asked for at the tracker's `probe_due_ns`.
+- The scheduler's floor (M3) applies to the engine's cycles too:
+  - a MISMATCH device is re-checked at its `backoff`, but no sooner than one identity period after its last check, so at max(`backoff`, identity period);
+  - after a restart, the check comes up to one identity period after the last one;
+  - a dead device's identity reads fail once per identity period, so it is DEMOTED after `demote_after` identity periods.
+- The system tags (11.1):
+  - `restarts` for every device, a counter written with the others.
+  - `identity_ok` and `identity` only for a device with `identify`: their slots hold no handle otherwise. Both are written once the check has a verdict, and are NOT_INIT from the walk of 9.1 before. `identity` is written by `scada_tag_write_string`, again only when its text changes (by a 64-bit hash of it).
+- The log records (the lead's option (b), an interim path until 5b-3):
+  - The engine notes per device and kind (`DeviceEvent`: MISMATCH, MATCH out of MISMATCH, RESTART) a count and the last event's details.
+  - The worker hands them after each step, and at the stop, to a per-device `EventSlot`: relaxed atomic counts, as the refused-write counts are, and the details in atomic words under a sequence number, so a take never reads a torn text and neither side waits. The words are stored with release and loaded with acquire, without fences, which GCC's thread sanitizer does not take.
+  - The main thread takes them at each heartbeat and logs `driver-identity-mismatch` (WARNING; CHANNEL, DEVICE, REASON `value`, `absent` or `unreadable`, CHECK, VALUE), `driver-identity-matched` (NOTICE; IDENTITY) and `driver-device-restart` (WARNING), each with COUNT. The first goes at once, then at most one per 10 s per kind and device, with the count since the last; whatever is left goes at the stop.
+  - 5b-3 replaces the slot with the workers' log queues. Between two takes only the last event's text survives; the count says how many there were.
+- The test tools: `scada-drv-test` takes `--identify-equals POINT VALUE`, `--on-mismatch-warn` and `--restart-decreases POINT` on a device's points; the simulator takes `--set-after U S A V N`, a register that changes after N requests to its unit, so that a restart in a process test is counted, not timed.
+
+Consequences:
+- The parts the 5b-2a entry named for the engine are done, each with its test. The probe's samples are not given to the check; the entry's last bullet there said they would be.
+- Tests:
+  - `channel_engine_identity_test.cpp`: a match, `refuse` and `warn`, an absent address, the unreadable deadline, busy retries, a restart, a recovery checked before its polls, an identity point in no group, malformed keys, the events noted.
+  - `system_tags_test.cpp`: the identity tags after the verdict, `identity_ok` false, `restarts`.
+  - `event_slot_test.cpp`: counts and the last details, a full text, and a take racing the writer (under the thread sanitizer too).
+  - `drv_test_support_test.cpp`: the new options.
+  - `driver_identity_integration_test.cpp`: a match, a mismatch with `refuse` and `warn`, a restart, in the tags and the log.
