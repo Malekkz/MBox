@@ -40,6 +40,7 @@ using detail::Reporter;
 constexpr std::uint16_t CF_SYSTEM_TAG = 301;
 constexpr std::uint16_t CF_TAG_TWICE = 302;
 constexpr std::uint16_t CF_NO_SUCH = 310;
+constexpr std::uint16_t CF_SIZE_LIMIT = 113;
 constexpr std::uint16_t CF_NO_MATCH = 311;
 constexpr std::uint16_t CF_WRONG_TAG_TYPE = 312;
 constexpr std::uint16_t CF_GENERATED_TOO_LONG = 403;
@@ -1275,12 +1276,23 @@ private:
             need_point(entry);
             return;
         }
+        if (over_budget_) {
+            return;  // CF-113 is given: the tree is refused (D-116)
+        }
         // Each name compared costs RUN_TIME_NAME_WORK and the matcher's
         // steps, as D-117 counts them (#176): the steps of one comparison
-        // grow with the pattern's length times the name's.
+        // grow with the pattern's length times the name's. A budget that
+        // runs out is CF-113, once, at the first pattern not checked (the
+        // lead's ruling on the review of #179; contract 1.3).
         for (const std::string_view point : *points_) {
             if (pattern_work_ >= max_pattern_work_) {
-                return;  // bounded (D-116): not checked
+                over_budget_ = true;
+                report(expanded_, CF_SIZE_LIMIT, entry,
+                       "the pattern matching of applies_to names exceeds its "
+                       "limit "
+                       "of " +
+                           std::to_string(max_pattern_work_) + " units");
+                return;
             }
             std::uint64_t steps = 0;
             const bool matched = matches_name_pattern(text, point, steps);
@@ -1307,6 +1319,7 @@ private:
     std::string_view point_;
     std::string detail_;
     std::uint64_t pattern_work_ = 0;
+    bool over_budget_ = false;
 };
 
 }  // namespace

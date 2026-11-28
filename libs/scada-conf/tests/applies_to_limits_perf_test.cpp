@@ -12,9 +12,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace scada::conf {
 namespace {
@@ -38,16 +41,20 @@ TEST(AppliesToLimitsPerf, PatternsAtTheDefaultBudget) {
     for (const Diagnostic& error : validation.value().report.errors) {
         named = named || format(error).find("\"nope\"") != std::string::npos;
     }
-    // The listed name is checked whatever the budget.
+    // The listed name is checked whatever the budget, and the budget that
+    // runs out is CF-113 (the review of #179).
     EXPECT_TRUE(named);
+    bool refused = false;
+    for (const Diagnostic& error : validation.value().report.errors) {
+        refused = refused || format(error).find("CF-113") != std::string::npos;
+    }
+    EXPECT_TRUE(refused);
     RecordProperty("seconds", std::to_string(seconds));
     EXPECT_LT(seconds, MAX_SECONDS);
 }
 
-// Many patterns each matched at once: the visits alone, all counted.
-TEST(AppliesToLimitsPerf, CheapPatternsAreCountedToo) {
-    constexpr std::size_t POINTS = 20000;
-    const std::string meter = cheap_patterns_meter(POINTS);
+// The errors of `meter` with one device, and the seconds it took.
+std::pair<Lines, double> timed(const std::string& meter) {
     const auto start = std::chrono::steady_clock::now();
     const Result<Validation> validation =
         validated({{"templates/meter_a.yaml", meter},
@@ -55,8 +62,40 @@ TEST(AppliesToLimitsPerf, CheapPatternsAreCountedToo) {
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
             .count();
-    ASSERT_TRUE(validation.ok());
-    EXPECT_EQ(validation.value().report.error_count, 0U);
+    EXPECT_TRUE(validation.ok());
+    Lines errors;
+    if (validation.ok()) {
+        for (const Diagnostic& error : validation.value().report.errors) {
+            errors.push_back(format(error));
+        }
+    }
+    return {errors, seconds};
+}
+
+bool has(const Lines& lines, std::string_view text) {
+    return std::ranges::any_of(lines, [text](const std::string& line) {
+        return line.find(text) != std::string::npos;
+    });
+}
+
+// Patterns that each match only the last name, one step on each other: the
+// budget runs out because every visit counts, and CF-113 refuses the tree
+// (the review of #179, items 1 and 2).
+TEST(AppliesToLimitsPerf, LatePatternsAreCountedToo) {
+    constexpr std::size_t POINTS = 20000;
+    const auto [errors, seconds] = timed(late_patterns_meter(POINTS));
+    EXPECT_TRUE(has(errors, "CF-113"));
+    RecordProperty("seconds", std::to_string(seconds));
+    EXPECT_LT(seconds, MAX_SECONDS);
+}
+
+// The reviewer's tree: 40 patterns that match only the last of 20,000
+// points, then `nomatch*`. CF-113, not a tree accepted unchecked.
+TEST(AppliesToLimitsPerf, TheReviewersTree) {
+    constexpr std::size_t POINTS = 20000;
+    constexpr std::size_t RULES = 40;
+    const auto [errors, seconds] = timed(last_match_meter(POINTS, RULES));
+    EXPECT_TRUE(has(errors, "CF-113"));
     RecordProperty("seconds", std::to_string(seconds));
     EXPECT_LT(seconds, MAX_SECONDS);
 }

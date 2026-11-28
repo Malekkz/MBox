@@ -183,7 +183,8 @@ private:
 // Nothing when `tags` is not complete. The references within run-time
 // expressions are slice 7b's. `pattern_work` bounds the matching of the
 // `applies_to` patterns (`ExpandLimits::applies_to_pattern_work`): a
-// pattern the budget runs out in, and those after it, are not checked.
+// pattern the budget runs out in, and those after it, are not checked:
+// CF-113, once, refuses the tree.
 void check_tag_references(
     const TagNames& tags, const ExpandedTree& tree,
     std::span<const CheckedFile> files, Diagnostics& diagnostics,

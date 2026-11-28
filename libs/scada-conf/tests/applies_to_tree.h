@@ -42,11 +42,12 @@ inline std::string applies_to_meter(std::size_t points, std::size_t rules) {
     return meter;
 }
 
-// meter_a with `points` points `p0` to `p<n-1>` and one health rule that
-// lists `points` patterns `p*`, each matched at the first name visited: the
-// whole cost is the visits, every one counted (the delta check of #174,
-// B-D1). The tree is valid.
-inline std::string cheap_patterns_meter(std::size_t points) {
+// meter_a with `points` points `p0` to `p<n-1>` and `zz`, and one health
+// rule that lists `points` patterns `zz*`. Each pattern matches only `zz`,
+// the last name, after one matcher step on each other name: the cost is the
+// visits, so the budget runs out only if every visit is counted (the review
+// of #179, item 2).
+inline std::string late_patterns_meter(std::size_t points) {
     std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
     for (std::size_t i = 0; i < points; ++i) {
         meter +=
@@ -54,10 +55,42 @@ inline std::string cheap_patterns_meter(std::size_t points) {
             ", address: { table: holding, register: " + std::to_string(i + 1) +
             ", type: uint16 } }\n";
     }
-    meter += "health:\n  - point: p0\n    good_when: 0\n    applies_to:\n";
+    meter +=
+        "  - { name: zz, address: { table: holding, register: 60000, type: "
+        "uint16 } }\n"
+        "health:\n  - point: p0\n    good_when: 0\n    applies_to:\n";
     for (std::size_t i = 0; i < points; ++i) {
-        meter += "      - \"p*\"\n";
+        meter += "      - \"zz*\"\n";
     }
+    return meter;
+}
+
+// The tree of the review of #179 (item 1): `points` points named `x`, 59
+// `a` and a number, and `x`, 40 `a` and `b`; `rules` health rules whose
+// pattern `*` + 40 `a` + `b` matches only that last name, after about
+// 2,600 steps on each other; then one with `nomatch*`, which matches none.
+inline std::string last_match_meter(std::size_t points, std::size_t rules) {
+    constexpr std::size_t STEM = 59;
+    constexpr std::size_t PATTERN = 40;
+    const std::string stem = "x" + std::string(STEM, 'a');
+    std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
+    for (std::size_t i = 0; i < points; ++i) {
+        meter +=
+            "  - { name: " + stem + std::to_string(i) +
+            ", address: { table: holding, register: " + std::to_string(i + 1) +
+            ", type: uint16 } }\n";
+    }
+    meter += "  - { name: x" + std::string(PATTERN, 'a') +
+             "b, address: { table: holding, register: 60000, type: uint16 } "
+             "}\nhealth:\n";
+    const std::string rule = "  - { point: " + stem +
+                             "0, good_when: 0, applies_to: [ \"*" +
+                             std::string(PATTERN, 'a') + "b\" ] }\n";
+    for (std::size_t i = 0; i < rules; ++i) {
+        meter += rule;
+    }
+    meter += "  - { point: " + stem +
+             "0, good_when: 0, applies_to: [ \"nomatch*\" ] }\n";
     return meter;
 }
 

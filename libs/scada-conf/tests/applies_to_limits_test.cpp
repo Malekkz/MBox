@@ -38,9 +38,13 @@ TEST(AppliesToLimits, PatternsStopAtTheirBudget) {
         {{"templates/meter_a.yaml", applies_to_meter(POINTS, RULES)},
          {"drivers/modbus/line1.yaml", one_device()}},
         limits);
-    // The patterns the budget covered, and the listed name after it; not
-    // `q*`, after the budget.
+    // The patterns the budget covered, CF-113 once at the first it did not
+    // (the review of #179), and the listed name after it; not `q*`.
     EXPECT_EQ(count_of(expanded.lines, "CF-311"), CHECKED);
+    EXPECT_EQ(count_of(expanded.lines,
+                       "CF-113: the pattern matching of applies_to names "
+                       "exceeds its limit of 50000000 units"),
+              1);
     EXPECT_EQ(count_of(expanded.lines, "CF-310: point \"nope\""), 1);
     EXPECT_EQ(count_of(expanded.lines, "\"q*\""), 0);
 }
@@ -57,6 +61,37 @@ TEST(AppliesToLimits, PatternsWithinTheirBudget) {
     EXPECT_EQ(count_of(expanded.lines, "CF-311"),
               static_cast<std::ptrdiff_t>(FEW) + 1);
     EXPECT_EQ(count_of(expanded.lines, "\"q*\""), 1);
+    EXPECT_EQ(count_of(expanded.lines, "CF-113"), 0);
+}
+
+// The tree of the review of #179: patterns that match only the last name.
+// A budget that runs out refuses the tree, which then cannot pass with
+// `nomatch*` unchecked.
+TEST(AppliesToLimits, ABudgetThatRunsOutRefusesTheTree) {
+    constexpr std::size_t EXPENSIVE = 40;
+    ExpandLimits limits;
+    limits.applies_to_pattern_work = SMALL_BUDGET;
+    const Expanded expanded = expand_limited(
+        {{"templates/meter_a.yaml", last_match_meter(POINTS, EXPENSIVE)},
+         {"drivers/modbus/line1.yaml", one_device()}},
+        limits);
+    EXPECT_EQ(count_of(expanded.lines, "CF-113"), 1);
+    EXPECT_EQ(count_of(expanded.lines, "\"nomatch*\""), 0);
+    EXPECT_GT(expanded.error_count, 0U);
+}
+
+// Patterns that each match only the last name, one step on each other: the
+// budget runs out only because every visit counts (the review of #179,
+// item 2).
+TEST(AppliesToLimits, EveryVisitCounts) {
+    constexpr std::size_t FEW_POINTS = 2000;
+    ExpandLimits limits;
+    limits.applies_to_pattern_work = SMALL_BUDGET;
+    const Expanded expanded = expand_limited(
+        {{"templates/meter_a.yaml", late_patterns_meter(FEW_POINTS)},
+         {"drivers/modbus/line1.yaml", one_device()}},
+        limits);
+    EXPECT_EQ(count_of(expanded.lines, "CF-113"), 1);
 }
 
 }  // namespace

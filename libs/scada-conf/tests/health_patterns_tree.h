@@ -6,6 +6,7 @@
 // Invented examples only.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace scada::conf {
@@ -69,6 +70,14 @@ inline std::string served_patterns_meter(std::size_t points) {
         meter += "      - \"p*\"\n";
     }
     return meter;
+}
+
+// The start of the CF-113 of the health pattern budget `limit`, given once at
+// the first pattern it does not check (the review of #179).
+inline std::string health_patterns_budget_error(std::uint64_t limit) {
+    return "drivers/modbus/line1.yaml:7:11: error CF-113: the pattern "
+           "matching of health rules' poll groups exceeds its limit of " +
+           std::to_string(limit) + " units";
 }
 
 // The CF-612 of the `zz` rule of `health_patterns_meter(points, rules)`.
