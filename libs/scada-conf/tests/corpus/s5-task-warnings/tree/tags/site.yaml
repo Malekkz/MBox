@@ -1,0 +1,35 @@
+tags:
+  - { name: v.flow, type: virtual, expr: "ps1.m1.flow * 2" }
+  - { name: w.t1, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 1d } }
+  - { name: w.t2, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 2d } }
+  - { name: w.t3, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 3d } }
+  - { name: w.t4, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 4d } }
+  - { name: w.t5, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 5d } }
+  - { name: w.t6, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 6d } }
+  - { name: w.t7, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 7d } }
+  - { name: w.t8, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 8d } }
+  - { name: w.t9, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 9d } }
+  - { name: w.t10, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 10d } }
+  - { name: w.t11, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 11d } }
+  - { name: w.t12, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 12d } }
+  - { name: w.t13, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 13d } }
+  - { name: w.t14, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 14d } }
+  - { name: w.t15, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 15d } }
+  - { name: w.t16, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 16d } }
+  - { name: w.t17, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 17d } }
+  - { name: w.t18, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 18d } }
+  - { name: w.t19, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 19d } }
+  - { name: w.t20, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 20d } }
+  - { name: w.t21, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 21d } }
+  - { name: w.t22, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 22d } }
+  - { name: w.t23, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 23d } }
+  - { name: w.t24, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 24d } }
+  - { name: w.t25, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 25d } }
+  - { name: w.t26, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 26d } }
+  - { name: w.t27, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 27d } }
+  - { name: w.t28, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 28d } }
+  - { name: w.t29, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 29d } }
+  - { name: w.t30, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 30d } }
+  - { name: w.t31, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 31d } }
+  - { name: w.t32, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 32d } }
+  - { name: w.t33, type: internal, value_type: int64, logging: { mode: on_change, raw_retention: 33d } }

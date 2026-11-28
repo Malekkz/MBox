@@ -47,7 +47,11 @@ constexpr std::uint16_t CW_AGE_NO_EFFECT = 510;
 constexpr std::uint16_t CF_BAD_TIER = 801;
 constexpr std::uint16_t CF_LOGGING_INCOMPLETE = 802;
 constexpr std::uint16_t CF_STRING_LOGGING = 803;
+constexpr std::uint16_t CW_RETENTION_CLASSES = 804;
 constexpr std::uint16_t CW_INTERVAL_FINER = 805;
+
+// 6: more retention classes than this is CW-804.
+constexpr std::size_t MAX_RETENTION_CLASSES = 32;
 constexpr std::uint16_t CF_GIVEN_TWICE = 811;
 constexpr std::uint16_t CF_ALARM_ID_TWICE = 812;
 constexpr std::uint16_t CF_LIMIT_ORDER = 813;
@@ -176,6 +180,7 @@ public:
             }
         }
         check_alarms();
+        warn_classes();
         reporter_.flush();
     }
 
@@ -323,9 +328,14 @@ private:
     }
 
     // The poll groups of `channel` and their periods (4.6): its own replace
-    // the defaults (D-116).
+    // the defaults (D-116). An `io` channel has none: its lines are read
+    // every scan cycle (the lead's interim ruling, D-125), so its points
+    // have no refresh for CW-805.
     void read_groups(NodeId channel) {
         groups_.clear();
+        if (expanded_.text_of(channel, "protocol") == "io") {
+            return;
+        }
         const std::optional<NodeId> keys = expanded_.child(channel, "channel");
         if (!keys || !expanded_.child(*keys, "poll_groups")) {
             groups_.insert(DEFAULT_GROUPS.begin(), DEFAULT_GROUPS.end());
@@ -546,6 +556,12 @@ private:
         NodeId deadband = 0;
         const Reader* interval_reader = nullptr;
         NodeId interval = 0;
+        // The retention class (6): `raw_retention` and `tiers`, each from
+        // the tag's map or its policy.
+        const Reader* raw_reader = nullptr;
+        NodeId raw_retention = 0;
+        const Reader* tiers_reader = nullptr;
+        NodeId tiers = 0;
     };
 
     // Takes the mode and deadband of `policy`; false for a name that is no
@@ -568,7 +584,23 @@ private:
             logged.interval_reader = given.reader;
             logged.interval = *interval;
         }
+        take_retention(*given.reader, given.settings, logged);
         return true;
+    }
+
+    // The retention keys of the settings at `settings`, over those taken.
+    static void take_retention(const Reader& reader, NodeId settings,
+                               Logged& logged) {
+        if (const std::optional<NodeId> raw =
+                reader.scalar(settings, "raw_retention")) {
+            logged.raw_reader = &reader;
+            logged.raw_retention = *raw;
+        }
+        if (const std::optional<NodeId> tiers =
+                reader.child(settings, "tiers")) {
+            logged.tiers_reader = &reader;
+            logged.tiers = *tiers;
+        }
     }
 
     // The settings `site` is logged with, from its `logging` or the default
@@ -616,6 +648,7 @@ private:
             logged.interval_reader = &reader;
             logged.interval = *interval;
         }
+        take_retention(reader, *logging, logged);
         return true;
     }
 
@@ -645,6 +678,54 @@ private:
                   quote_text(site.name) + ": a percentage needs range");
         }
         check_interval(site, logged, place);
+        count_class(site, logged, place);
+    }
+
+    // CW-804 (6): one retention class per distinct pair of raw retention
+    // and tiers, the tiers compared as a set of (tier, retention) pairs,
+    // durations by value. The warning is at the first tag of the 33rd class.
+    void count_class(const Site& site, const Logged& logged, NodeId place) {
+        if (logged.raw_reader == nullptr) {
+            return;  // CF-802 already
+        }
+        const std::optional<std::uint64_t> raw = parse_duration_ms(
+            logged.raw_reader->document().text(logged.raw_retention));
+        if (!raw) {
+            return;
+        }
+        std::set<std::pair<std::string_view, std::uint64_t>> tiers;
+        if (logged.tiers_reader != nullptr &&
+            logged.tiers_reader->document().kind(logged.tiers) ==
+                NodeKind::MAP) {
+            const Document& document = logged.tiers_reader->document();
+            for (const Entry& tier : document.entries(logged.tiers)) {
+                if (document.text(tier.key) == "replace") {
+                    continue;
+                }
+                tiers.emplace(
+                    document.text(tier.key),
+                    parse_duration_ms(document.text(tier.value)).value_or(0));
+            }
+        }
+        if (classes_.emplace(*raw, std::move(tiers)).second &&
+            classes_.size() == MAX_RETENTION_CLASSES + 1) {
+            past_classes_ = Site{.source = site.source,
+                                 .name = site.name,
+                                 .name_node = place,
+                                 .keys = site.keys,
+                                 .tag_file = site.tag_file,
+                                 .refresh = {}};
+        }
+    }
+
+    void warn_classes() {
+        if (past_classes_) {
+            warning(past_classes_->source, past_classes_->name_node,
+                    CW_RETENTION_CLASSES,
+                    std::to_string(classes_.size()) +
+                        " retention classes; more than 32 increases the "
+                        "number of open files");
+        }
     }
 
     // CW-805 (6): an interval finer than the tag's refresh samples one
@@ -943,6 +1024,11 @@ private:
     std::map<std::string_view, Period, std::less<>> tasks_;
     bool tasks_file_ = false;
     std::map<std::string_view, Period, std::less<>> groups_;
+    // The retention classes met (CW-804), and the first tag past 32.
+    std::set<std::pair<std::uint64_t,
+                       std::set<std::pair<std::string_view, std::uint64_t>>>>
+        classes_;
+    std::optional<Site> past_classes_;
     std::set<std::string, std::less<>> ranged_;  // the tags with `range`
     std::vector<AlarmRef> alarms_;
     // The first alarms file of each of ALARM_LISTS: views into the paths

@@ -1,0 +1,2 @@
+interlocks:
+  - { name: ps1.flow_ok, condition: "ps1.m1.flow > 2", message: low flow }

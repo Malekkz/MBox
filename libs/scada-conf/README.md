@@ -182,7 +182,8 @@ order; CF-802 and CF-803 for logging settings; CF-811 for an alarm list
 given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
 limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags;
 warning CW-805 for a logging `interval` shorter than the tag's refresh, its
-poll group's or its task's period (D-123). Warning CW-804 is not given yet.
+poll group's (none for an `io` line) or its task's period (D-123, D-125);
+warning CW-804 for more than 32 retention classes (D-125).
 
 Then stage 5 checks the keys of each device's points that need no
 protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a read
@@ -231,17 +232,25 @@ keys, written or by default; CF-718 and warning CW-701 for areas; warning
 CW-721 for a switching output that holds on control loss. D-124 lists the
 interim rules (a) to (k), fail-safe, pending the product owner.
 
+Then stage 5 checks the control tasks (`src/task_rules.cpp`, D-125):
+CF-901 and CF-902 for a program's task; CF-906 for a priority not below
+the I/O scan's; warning CW-903 for a program's source or an interlock's
+condition whose slowest input is polled more slowly than its task runs (not
+for a virtual tag); CF-904 for an `rt_required` task that reads a tag a protocol
+driver owns, directly or through virtual tags; CF-905 for an internal tag
+written by two tasks or by a task other than its own.
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
 
 ## The codes of contract section 10
 
-Where each error code of section 10 is given, or which issue holds it (the
-ruling on #100: #100 closes without the codes of stages 6 and 7, of the
-protocols' own refusals and of what is not in phase 2). Kept current by each
-slice of #100. The warnings of section 10.6, of the protocols' `configure`
-codes that #100 gives, and CW-805 are listed too.
+Where each error code and warning of section 10 is given, or which issue
+holds it (the ruling on #100: #100 closes without the codes of stages 6 and
+7, of the protocols' own refusals and of what is not in phase 2). Every code
+and warning of section 10 has a row, and the protocols' `configure` codes
+that other parts name are listed too. Kept current by each slice of #100.
 
 | Code | Where |
 | --- | --- |
@@ -293,6 +302,7 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-507 | `src/tag_rules.cpp` |
 | CF-508 | `src/tag_rules.cpp` |
 | CF-509 | `src/tag_rules.cpp` |
+| CW-510 | `src/tag_rules.cpp` |
 | CF-520 | `src/expression.cpp`, `src/schema.cpp` |
 | CF-521 | `src/expression_types.cpp` |
 | CF-522 | `src/expression_types.cpp` |
@@ -359,12 +369,14 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-813 | `src/tag_rules.cpp` |
 | CF-814 | `src/tag_rules.cpp` |
 | CF-815 | `src/tag_rules.cpp` |
+| CW-804 | `src/tag_rules.cpp` |
 | CW-805 | `src/tag_rules.cpp` |
-| CF-901 | slice 7e of #100 |
-| CF-902 | slice 7e of #100 |
-| CF-904 | slice 7e of #100 |
-| CF-905 | slice 7e of #100 |
-| CF-906 | slice 7e of #100 |
+| CF-901 | `src/task_rules.cpp` |
+| CF-902 | `src/task_rules.cpp` |
+| CF-904 | `src/task_rules.cpp` |
+| CF-905 | `src/task_rules.cpp`; an `out` to a tag that is not internal: phase 6 (block library) |
+| CF-906 | `src/task_rules.cpp` |
+| CW-903 | `src/task_rules.cpp` |
 | CF-910 | not in phase 2 (block library and structured text) |
 | CF-911 | not in phase 2 (block library and structured text) |
 | CF-912 | not in phase 2 (block library and structured text) |
@@ -389,6 +401,8 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-1012 | #104 and #102 (protocol refusals of section 13.1) |
 | CF-1016 | #101 and #102 (stages 6 and 7) |
 | CF-1014 | #101 and #102 (stages 6 and 7) |
+| CW-1013 | #101 and #102 (stages 6 and 7: a protocol whose driver is not installed) |
+| CW-1015 | #101 and #102 (stages 6 and 7: the limits of the installed units, #105) |
 | CF-651 | #104 (the Modbus `configure`; stage 5 gives CF-615, D-120) |
 | CF-652 | #104 (the Modbus `configure`, stage 7; D-122) |
 | CF-653 | #104 (the Modbus `configure`, stage 7; D-122) |

@@ -400,7 +400,8 @@ std::uint64_t work_of_one_use() {
 
 // Item 1 of the delta check: the work of matching patterns is counted, 32
 // units per name visited and one per step of the matcher. Resolving a
-// pattern again past the kept summaries counts again.
+// pattern again past the kept summaries counts again, also for the inputs
+// the task rules read (D-125).
 TEST(RunTimeExpressions, TheWorkOfPatternsIsCounted) {
     const std::uint64_t work = work_of_one_use();
     EXPECT_GT(work, RUN_TIME_NAME_WORK * BUDGET_TAGS);
@@ -411,7 +412,8 @@ TEST(RunTimeExpressions, TheWorkOfPatternsIsCounted) {
     EXPECT_EQ(with_budget(two, {}).run_time.pattern_work, work);
     ExpandLimits none;
     none.kept_run_time = 0;
-    EXPECT_EQ(with_budget(two, none).run_time.pattern_work, 2 * work);
+    // Not kept, each use is walked twice: for its type and for its inputs.
+    EXPECT_EQ(with_budget(two, none).run_time.pattern_work, 4 * work);
 }
 
 // Item 1: past the budget, one CF-113 at the expression being checked,

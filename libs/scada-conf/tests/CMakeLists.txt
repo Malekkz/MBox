@@ -9,6 +9,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     channel_rules_test.cpp
     output_rules_test.cpp
     output_values_test.cpp
+    task_rules_test.cpp
     modbus_rules_test.cpp
     expression_test.cpp
     expression_types_test.cpp
@@ -84,4 +85,10 @@ scada_add_test(scada-conf-point-limits-perf-test KIND perf
 # The Modbus address checks of stage 5 on a large tree, timed (D-122).
 scada_add_test(scada-conf-modbus-rules-perf-test KIND perf
   SOURCES modbus_rules_perf_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-task-rules-perf-test KIND perf
+  SOURCES task_rules_perf_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-task-rules-memory-perf-test KIND perf
+  SOURCES task_rules_memory_perf_test.cpp
   DEPENDS scada::conf scada::test-support)

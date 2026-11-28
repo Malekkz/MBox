@@ -445,6 +445,63 @@ TEST(TagRules, ATasksFileReplacesTheDefaults) {
                     "500ms is finer than the tag's refresh 1s"});
 }
 
+// CW-804 (6): more than 32 retention classes, one per distinct raw
+// retention and set of tiers, compared by value; at the first tag of the
+// 33rd class.
+TEST(TagRules, RetentionClasses) {
+    const auto with_classes = [](int count) {
+        std::string text;
+        for (int i = 1; i <= count; ++i) {
+            text += "  - { name: t" + std::to_string(i) +
+                    ", type: internal, value_type: int64, logging: { mode: "
+                    "on_change, raw_retention: " +
+                    std::to_string(i) + "d } }\n";
+        }
+        // The same class as t1, written otherwise.
+        text +=
+            "  - { name: same, type: internal, value_type: int64, logging: { "
+            "mode: on_change, raw_retention: 24h } }\n";
+        Files files = tags(text);
+        files.emplace("logging.yaml",
+                      "aggregate_tiers:\n"
+                      "  - { name: 1m, interval: 1m }\n"
+                      "  - { name: 1h, interval: 1h }\n");
+        return warnings_of(files);
+    };
+    EXPECT_EQ(with_classes(32), Lines{});
+    EXPECT_EQ(with_classes(33),
+              Lines{"tags/site.yaml:34:62: warning CW-804: 33 retention "
+                    "classes; more than 32 increases the number of open "
+                    "files"});
+}
+
+// Tiers are a set of (tier, retention) pairs: their order and the units of
+// equal durations do not make a class.
+TEST(TagRules, TiersCompareAsASet) {
+    constexpr int MOST_CLASSES = 32;  // the classes CW-804 allows (6)
+    std::string text;
+    for (int i = 1; i <= MOST_CLASSES; ++i) {
+        text += "  - { name: t" + std::to_string(i) +
+                ", type: internal, value_type: int64, logging: { mode: "
+                "on_change, raw_retention: " +
+                std::to_string(i) + "d } }\n";
+    }
+    text +=
+        "  - { name: a, type: internal, value_type: int64, logging: { mode: "
+        "on_change, raw_retention: 1d, tiers: { 1m: 1y, 1h: 2y } } }\n"
+        "  - { name: b, type: internal, value_type: int64, logging: { mode: "
+        "on_change, raw_retention: 24h, tiers: { 1h: 730d, 1m: 365d } } }\n";
+    Files files = tags(text);
+    files.emplace("logging.yaml",
+                  "aggregate_tiers:\n"
+                  "  - { name: 1m, interval: 1m }\n"
+                  "  - { name: 1h, interval: 1h }\n");
+    EXPECT_EQ(warnings_of(files),
+              Lines{"tags/site.yaml:34:60: warning CW-804: 33 retention "
+                    "classes; more than 32 increases the number of open "
+                    "files"});
+}
+
 // A `wo` point is not refreshed: the `logging` a `defaults` map gives it
 // (no CF-614, D-120) gives no CW-805. The read point after it does, once
 // for the template's line (D-119).
@@ -466,6 +523,25 @@ TEST(TagRules, AWriteOnlyPointHasNoRefresh) {
               "\"ps1.m1.flow\": interval 50ms is finer than the tag's "
               "refresh 1s\n  from template templates/meter_a.yaml:3:22 "
               "(point flow)"});
+}
+
+// An `io` line is read every scan cycle and has no poll group (the lead's
+// interim ruling, D-125): a fine interval on it gives no CW-805.
+TEST(TagRules, AnIoLineHasNoPollPeriod) {
+    Files files;
+    files.emplace("logging.yaml",
+                  std::string(LOGGING) +
+                      "  fast: { mode: periodic, interval: 50ms, "
+                      "raw_retention: 1d }\n");
+    files.emplace("templates/io_a.yaml",
+                  "template: io_a\nprotocol: io\ndefaults: { logging: fast "
+                  "}\npoints:\n"
+                  "  - { name: button, address: { line: 3, direction: input "
+                  "} }\n");
+    files.emplace("drivers/io/local.yaml",
+                  "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
+                  "devices:\n  - { name: ps1.io, template: io_a }\n");
+    EXPECT_EQ(warnings_of(files), Lines{});
 }
 
 // --- Alarms (8) --------------------------------------------------------
