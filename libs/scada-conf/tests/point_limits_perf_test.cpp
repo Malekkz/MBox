@@ -7,6 +7,7 @@
 #include "health_patterns_tree.h"
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
 #include "scada/conf/validate.h"
 
 #include <gtest/gtest.h>
@@ -42,8 +43,13 @@ TEST(PointLimitsPerf, HealthPatternsAtTheDefaultBudget) {
     for (const Diagnostic& error : validation.value().report.errors) {
         errors.push_back(format(error));
     }
-    // The listed name is checked; the pattern after the budget is not.
-    EXPECT_EQ(errors, Lines{health_patterns_zz_error(POINTS, RULES)});
+    // CF-113 once, at the first pattern the budget does not check (the
+    // review of #179); the listed name is checked; the pattern after the
+    // budget is not.
+    ASSERT_EQ(errors.size(), 2U);
+    EXPECT_TRUE(errors.front().starts_with(
+        health_patterns_budget_error(MAX_HEALTH_PATTERN_WORK)));
+    EXPECT_EQ(errors.back(), health_patterns_zz_error(POINTS, RULES));
     RecordProperty("seconds", std::to_string(seconds));
     EXPECT_LT(seconds, MAX_SECONDS);
 }

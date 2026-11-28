@@ -31,8 +31,13 @@ TEST(PointLimits, HealthPatternsStopAtTheirBudget) {
         {{"templates/meter_a.yaml", health_patterns_meter(POINTS, RULES)},
          {"drivers/modbus/line1.yaml", one_device()}},
         limits);
-    // The listed name is checked; the pattern after the budget is not.
-    EXPECT_EQ(expanded.lines, Lines{health_patterns_zz_error(POINTS, RULES)});
+    // CF-113 once, at the first pattern the budget does not check (the
+    // review of #179); the listed name is checked; the pattern after the
+    // budget is not.
+    ASSERT_EQ(expanded.lines.size(), 2U);
+    EXPECT_TRUE(expanded.lines.front().starts_with(
+        health_patterns_budget_error(SMALL_BUDGET)));
+    EXPECT_EQ(expanded.lines.back(), health_patterns_zz_error(POINTS, RULES));
 }
 
 // With room for every pattern, the last one is checked too.

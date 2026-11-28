@@ -33,7 +33,7 @@ namespace scada::conf {
 // - CF-640 for `keep_last` (in `on_invalid` or an invalid value's
 //   `action`) on a read point that gives no `max_age`.
 // The patterns of health rules share a budget of matching work; those past
-// it are not checked.
+// it are not checked: CF-113 refuses the tree.
 // An error of a template's point is at its instance, with the template
 // note, and one cause at many instances is one error (D-114). `files` are
 // the files of the tree, for the templates of the instances.
