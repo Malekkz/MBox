@@ -999,16 +999,17 @@ TEST(Expand, StringKeysMergeAsText) {
     EXPECT_EQ(
         expand({{"templates/base_a.yaml",
                  "template: base_a\nprotocol: modbus\n"
-                 "points: [ { name: c, access: rw, address: { table: holding, "
-                 "register: 1, type: uint16, write: { values: { 16: 1 } } } } "
-                 "]\n"},
+                 "points: [ { name: c, access: rw, storage: volatile, "
+                 "address: { table: holding, register: 1, type: uint16, "
+                 "write: { values: { 16: 1 } } } } ]\n"},
                 {"templates/meter_a.yaml",
                  "template: meter_a\nextends: base_a\nprotocol: modbus\n"
                  "points: [ { name: c, address: { write: { values: { 0x10: 2 } "
                  "} } } ]\n"},
                 {"drivers/modbus/line1.yaml", one_device()}}),
-        Lines{"ps1.m1.c: {access: rw, address: {table: holding, register: 1, "
-              "type: uint16, write: {values: {16: 1, 0x10: 2}}}}"});
+        Lines{"ps1.m1.c: {access: rw, storage: volatile, address: {table: "
+              "holding, register: 1, type: uint16, write: {values: {16: 1, "
+              "0x10: 2}}}}"});
 }
 
 // B6: map keys of the integer form merge by their value: a child's `0xF`
@@ -1414,7 +1415,7 @@ Lines merged(std::string_view points, std::string_view more = {},
     Files files{{"templates/meter_a.yaml",
                  std::string("template: meter_a\nprotocol: modbus\n") +
                      (base.empty() ? "" : "extends: base_a\n") + "points:\n" +
-                     std::string(points)},
+                     std::string(points) + "bit_order: lsb0\n"},
                 {"drivers/modbus/line1.yaml", one_device(more)}};
     if (!base.empty()) {
         files.emplace("templates/base_a.yaml",
@@ -1579,7 +1580,8 @@ TEST(MergedPoints, ComputedValuesOutOfRange) {
         "uint16 }, equals: 7 }\n"
         "points:\n"
         "  - { name: p, address: { table: holding, register: \"r * 65536\", "
-        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n";
+        "bit: \"r + 14\", type: uint16 }, scale: { divide_by: \"r - 1\" } }\n"
+        "bit_order: lsb0\n";
     // With r = 0 every value is in range but the divisor.
     EXPECT_EQ(
         expand({{"templates/meter_a.yaml", meter},

@@ -15,6 +15,7 @@ points:
     value_type: int64
     kind: double_point
     address: { table: input, register: 18, type: float32 }
+    states: { 0: 0, 1: 1, 2: 2, 3: 3 }
   - name: voltage
     value_type: float64
     address: { table: input, register: 20, type: float32 }

@@ -815,7 +815,8 @@ TEST(MergedPoints, TheRestOfTheKeysAndScalings) {
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs at_start\n  from template "
                     "templates/sensor_a.yaml:4:29 (point level)"});
-    EXPECT_EQ(gpio("access: wo, address: { line: 1, direction: input }"),
+    EXPECT_EQ(gpio("access: wo, address: { line: 1, direction: input }, "
+                   "storage: volatile"),
               Lines{"drivers/io/local.yaml:3:13: error CF-202: the address of "
                     "\"ps1.s1.level\" needs at_start\n  from template "
                     "templates/sensor_a.yaml:4:41 (point level)"});

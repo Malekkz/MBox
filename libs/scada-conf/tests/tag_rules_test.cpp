@@ -490,7 +490,8 @@ TEST(TagRules, BitsAndPointsWithoutATag) {
         "    bits: { 0: { name: hot, alarms: [ { type: high, limit: 1, "
         "priority: high, area: ps1 } ] } }\n"
         "    alarms: [ { tag: ps1.m1.run, type: low, limit: 0, priority: high, "
-        "area: ps1 } ]\n";
+        "area: ps1 } ]\n"
+        "bit_order: lsb0\n";
     EXPECT_EQ(errors_of({}, meter),
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-815: BOOL tag "
                      "\"ps1.m1.run\" cannot have a low alarm\n  from template "

@@ -5,6 +5,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     diagnostic_test.cpp
     expand_test.cpp
     merged_points_test.cpp
+    point_rules_test.cpp
     expression_test.cpp
     expression_types_test.cpp
     names_test.cpp

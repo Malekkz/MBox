@@ -179,6 +179,17 @@ given in two files; CF-812 for an alarm id given twice on a tag; CF-813 for
 limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags.
 The warnings CW-804 and CW-805 are not given yet.
 
+Then stage 5 checks the keys of each device's points that need no
+protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a
+`max_age`, given or 3 periods of its poll group, below `update_period`;
+CF-612 for a companion or a health point in another poll group or not
+read; CF-613 for a read Modbus double point of a field or an integer
+without `states`; CF-614 for a `wo` point with `poll_group`, `alarms` or
+`logging`; CF-616 for an identity check on a `wo` point; CF-618 for a
+template whose points use bits without `bit_order`, once per device;
+CF-619 for an `rw` or `wo` point without `storage`; CF-640 for `keep_last`
+on a point that gives no `max_age`.
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
@@ -188,7 +199,8 @@ not validate before phase 6.
 Where each error code of section 10 is given, or which issue holds it (the
 ruling on #100: #100 closes without the codes of stages 6 and 7, of the
 protocols' own refusals and of what is not in phase 2). Kept current by each
-slice of #100.
+slice of #100. The warnings of section 10.6, of the protocols' `configure`
+codes that #100 gives, and CW-805 are listed too.
 
 | Code | Where |
 | --- | --- |
@@ -252,23 +264,28 @@ slice of #100.
 | CF-529 | `src/expression.cpp` |
 | CF-516 | `src/merged_points.cpp` |
 | CF-517 | `src/merged_points.cpp`, `src/rules.cpp` |
-| CF-601 | slice 7d of #100 |
-| CF-602 | slice 7d of #100 |
-| CF-603 | slice 7d of #100 |
+| CF-601 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-602 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-603 | slice 7d-2 of #100 (Modbus addresses) |
 | CF-604 | `src/tag_names.cpp` |
-| CF-605 | slice 7d of #100 |
-| CF-610 | slice 7d of #100 |
-| CF-611 | slice 7d of #100 |
-| CF-612 | slice 7d of #100 |
-| CF-613 | slice 7d of #100 |
-| CF-614 | slice 7d of #100 |
-| CF-615 | slice 7d of #100 |
-| CF-616 | slice 7d of #100 |
-| CF-618 | slice 7d of #100 |
-| CF-619 | slice 7d of #100 |
-| CF-620 | slice 7d of #100 |
+| CF-605 | slice 7d-3 of #100 (channels and `io`) |
+| CF-610 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-611 | `src/point_rules.cpp` |
+| CF-612 | `src/point_rules.cpp` |
+| CF-613 | `src/point_rules.cpp` |
+| CF-614 | `src/point_rules.cpp` |
+| CF-615 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-616 | `src/point_rules.cpp` |
+| CF-618 | `src/point_rules.cpp` |
+| CF-619 | `src/point_rules.cpp` |
+| CF-620 | slice 7d-3 of #100 (channels and `io`) |
 | CF-622 | `src/references.cpp` |
-| CF-640 | slice 7d of #100 |
+| CF-640 | `src/point_rules.cpp` |
+| CW-606 | slice 7d-2 of #100 (Modbus addresses) |
+| CW-607 | slice 7d-2 of #100 (Modbus addresses) |
+| CW-608 | slice 7d-2 of #100 (Modbus addresses) |
+| CW-621 | slice 7d-3 of #100 (channels and `io`) |
+| CW-660 | slice 7d-3 of #100 (channels and `io`) |
 | CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
 | CF-702 | slice 7e of #100 |
 | CF-703 | slice 7e of #100 |
@@ -298,6 +315,7 @@ slice of #100.
 | CF-813 | `src/tag_rules.cpp` |
 | CF-814 | `src/tag_rules.cpp` |
 | CF-815 | `src/tag_rules.cpp` |
+| CW-805 | slice 7d-3 of #100 (channels and `io`) |
 | CF-901 | slice 7e of #100 |
 | CF-902 | slice 7e of #100 |
 | CF-904 | slice 7e of #100 |
@@ -327,10 +345,10 @@ slice of #100.
 | CF-1012 | #104 and #102 (protocol refusals of section 13.1) |
 | CF-1016 | #101 and #102 (stages 6 and 7) |
 | CF-1014 | #101 and #102 (stages 6 and 7) |
-| CF-651 | slice 7d of #100 |
-| CF-652 | slice 7d of #100 |
-| CF-653 | slice 7d of #100 |
-| CF-662 | slice 7d of #100 |
+| CF-651 | #104 (the Modbus `configure`; stage 5 gives CF-615, D-120) |
+| CF-652 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-653 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-662 | slice 7d-3 of #100 (channels and `io`) |
 
 ## The YAML subset parser
 

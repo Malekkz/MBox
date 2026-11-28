@@ -11,10 +11,10 @@
 # - `when` removes aux of p1 (has_aux false); p1's `disable` removes speed;
 #   p2 has has_aux true and its `only` keeps state and aux. (The order
 #   inside step 4 is pinned by s4-step-four-when-first.)
-ps1.p1: {enums: {states: {2: tripped}}, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 1}
+ps1.p1: {enums: {states: {2: tripped}}, bit_order: lsb0, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 1}
 ps1.p1.state: {poll_group: fast, max_age: 30s, enum: states, address: {table: holding, register: 10, type: uint16}}
 ps1.p1.fault: {poll_group: fast, max_age: 30s, address: {table: holding, register: 12, type: uint16, field: [0, 3]}}
 ps1.p1.energy: {poll_group: fast, max_age: 30s, address: {table: holding, type: uint32, parts: [{register: 20}, {register: 30}]}}
-ps1.p2: {enums: {states: {2: tripped}}, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 2}
+ps1.p2: {enums: {states: {2: tripped}}, bit_order: lsb0, identify: [{address: {table: holding, register: 2, type: uint16}, equals: 9}], unit_id: 2}
 ps1.p2.state: {poll_group: fast, max_age: 30s, enum: states, address: {table: holding, register: 10, type: uint16}}
 ps1.p2.aux: {poll_group: fast, max_age: 30s, address: {table: holding, register: 14, type: uint16}}
