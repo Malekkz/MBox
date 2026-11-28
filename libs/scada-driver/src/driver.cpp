@@ -1026,14 +1026,17 @@ Status Driver::Impl::make_log_queues() noexcept {
         return {};
     }
     Result<std::shared_ptr<LogQueue>> main =
-        logger_->make_queue(MAIN_LOG_QUEUE);
+        logger_->make_queue(MAIN_LOG_QUEUE, "main");
     if (!main.ok()) {
         return main.status();
     }
     for (const std::unique_ptr<Worker>& worker : workers_) {
         Result<std::shared_ptr<LogQueue>> own =
-            logger_->make_queue(worker_log_queue_size(
-                settings_.worker_log_queue, worker->channel().devices.size()));
+            // Named for its channel, which a drop notice names (S2).
+            logger_->make_queue(
+                worker_log_queue_size(settings_.worker_log_queue,
+                                      worker->channel().devices.size()),
+                worker->channel().name);
         if (!own.ok()) {
             return own.status();
         }

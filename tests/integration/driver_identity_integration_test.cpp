@@ -259,6 +259,8 @@ TEST_F(DriverProcess, AFullWorkerQueuesDropsShowInLogDropped) {
             return value.quality == SCADA_QUALITY_GOOD && value.value >= 1;
         }));
     EXPECT_TRUE(logs(*driver, R"(log records dropped: the queue was full)"));
+    // The notice names the worker's queue by its channel (PR 182 S2).
+    EXPECT_TRUE(logs(*driver, R"(QUEUE="line1")"));
     EXPECT_TRUE(stops_cleanly(*driver));
 }
 
