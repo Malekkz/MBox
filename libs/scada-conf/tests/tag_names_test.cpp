@@ -20,12 +20,13 @@ constexpr std::string_view AREAS = "areas:\n  ps1: { description: Station }\n";
 constexpr std::string_view METER =
     "template: meter_a\nprotocol: modbus\nbit_order: lsb0\npoints:\n"
     "  - { name: flow, address: { table: holding, register: 1, type: uint16 "
-    "} }\n"
+    "}, access: rw, storage: volatile }\n"
     "  - name: status\n"
     "    address: { table: holding, register: 2, type: uint16 }\n"
     "    tag: false\n"
     "    bits: { 0: run, 1: { name: trip } }\n"
-    "  - { name: alarm_on, address: { table: coil, register: 3 } }\n";
+    "  - { name: alarm_on, address: { table: coil, register: 3 }, access: rw, "
+    "storage: volatile }\n";
 
 // An alarm file of one alarm on `tag` with `more` keys.
 std::string alarm_on(std::string_view tag, std::string_view more = {}) {
@@ -334,7 +335,7 @@ TEST(TagNames, GeneratedNamesAtTheirInstances) {
         alarm_id +
         ", limit: 4, priority: high, area: ps1 } ]\n"
         "  - { name: mode, address: { table: holding, register: 2, type: "
-        "uint16 } }\n";
+        "uint16 }, access: rw, storage: volatile }\n";
     EXPECT_EQ(
         three_meters(meter,
                      {{"outputs/ps1.yaml",
@@ -373,7 +374,7 @@ TEST(TagNames, GeneratedNamesOfTwoCauses) {
               "target: ps1.m1.flow, no_feedback: true, interlocks: [], "
               "safe_state: hold }\n"
               "  - { name: sys.out, area: ps1, kind: setpoint, target: "
-              "ps1.m1.flow, no_feedback: true, interlocks: [], safe_state: "
+              "ps1.m1.alarm_on, no_feedback: true, interlocks: [], safe_state: "
               "hold }\n"}})),
         (Lines{"alarms/site.yaml:3:31: error CF-301: tag names starting "
                "with sys. are reserved",
@@ -496,6 +497,8 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
         "    address: { table: holding, register: 1, type: uint16 }\n"
         "    alarms: [ { type: high, id: hi, limit: 4, priority: high, area: "
         "ps1 } ]\n"
+        "    access: rw\n"
+        "    storage: volatile\n"
         "  - name: status\n"
         "    address: { table: holding, register: 2, type: uint16 }\n"
         "    tag: false\n"
@@ -505,9 +508,12 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
         "string, length: 4 } }\n"
         "  - { name: raw, address: { table: holding, register: 5, type: "
         "bytes, length: 4 } }\n"
-        "  - { name: valve, address: { table: coil, register: 7 } }\n"
+        "  - { name: valve, address: { table: coil, register: 7 }, access: rw, "
+        "storage: volatile }\n"
         "  - { name: breaker, dangerous: true, address: { table: coil, "
-        "register: 8 } }\n"
+        "register: 8 }, access: rw, storage: volatile }\n"
+        "  - { name: level, access: rw, storage: volatile, address: { table: "
+        "holding, register: 9, type: uint16 } }\n"
         "identify: [ { point: flow, equals: 7 } ]\n"
         "restart_indication: [ { point: gone, rule: changes } ]\n";
     const std::string outputs =
@@ -518,8 +524,8 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
         "feedback: { on: ps1.m1.run, off: ps1.m1.off }, interlocks: [], "
         "safe_state: off }\n"
         "  - { name: ps1.b, area: ps1, kind: single, target: ps1.m1.breaker, "
-        "no_feedback: true, interlocks: [], safe_state: off }\n"
-        "  - { name: ps1.s, area: ps1, kind: setpoint, target: ps1.m1.flow, "
+        "no_feedback: true, interlocks: [], safe_state: hold }\n"
+        "  - { name: ps1.s, area: ps1, kind: setpoint, target: ps1.m1.level, "
         "no_feedback: true, interlocks: [], safe_state: { value: 0 }, "
         "on_shutdown: safe }\n";
     // One id each: an id given twice on a tag is CF-812.
@@ -562,7 +568,7 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
         "number "
         "tag",
         "drivers/modbus/line1.yaml:7:11: error CF-310: point \"gone\" does "
-        "not exist\n  from template templates/meter_a.yaml:17:32",
+        "not exist\n  from template templates/meter_a.yaml:20:32",
         "outputs/ps1.yaml:3:100: error CF-310: tag \"ps1.m1.off\" does not "
         "exist",
         "tags/site.yaml:5:74: error CF-310: tag \"site.nope\" does not exist",
@@ -595,15 +601,16 @@ TEST(TagNames, LocalOutputsAndTheIoProcess) {
         "outputs:\n"
         "  - { name: ps1.lamp, area: ps1, kind: single, target: ps1.io.lamp, "
         "no_feedback: true, interlocks: [], safe_state: off }\n"
-        "  - { name: ps1.step, area: ps1, kind: step, target: ps1.io.lamp, "
+        "  - { name: ps1.step, area: ps1, kind: step, target: ps1.io.lamp2, "
         "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
         "hold, on_control_loss: { action: hold } }\n"
         "  - { name: ps1.gen, area: ps1, kind: setpoint, target: ps1.m1.flow, "
         "no_feedback: true, interlocks: [], safe_state: { value: 0 }, "
         "on_generation_change: safe }\n"
         "  - { name: ps1.loss, area: ps1, kind: setpoint, target: "
-        "ps1.m1.flow, no_feedback: true, interlocks: [], safe_state: { value: "
-        "0 }, on_control_loss: { action: release, after: 1s } }\n";
+        "ps1.m1.alarm_on, no_feedback: true, interlocks: [], safe_state: { "
+        "value: 0 }, on_control_loss: { action: release, after: 1s }, limits: "
+        "{ release: { raw: 0 } } }\n";
     std::string alarms = "alarms:\n";
     for (const std::string_view tag :
          {"sys.proc.io.realtime", "ps1.ai.level", "ps1.io.lamp",
@@ -624,7 +631,9 @@ TEST(TagNames, LocalOutputsAndTheIoProcess) {
              {"templates/io_a.yaml",
               "template: io_a\nprotocol: io\npoints:\n"
               "  - { name: lamp, address: { line: 1, direction: output, "
-              "at_start: safe } }\n"},
+              "at_start: safe }, access: rw, storage: volatile }\n"
+              "  - { name: lamp2, address: { line: 2, direction: output, "
+              "at_start: safe }, access: rw, storage: volatile }\n"},
              {"templates/adc_a.yaml",
               "template: adc_a\nprotocol: io\npoints:\n"
               "  - { name: level, address: { channel: in_voltage0 } }\n"},
@@ -866,7 +875,7 @@ TEST(TagNames, MoreTypesAndPlaces) {
         "  - { name: ps1.pulse, area: ps1, kind: pulse, target: ps1.io.lamp, "
         "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
         "hold, on_control_loss: { action: hold } }\n"
-        "  - { name: ps1.trig, area: ps1, kind: trigger, target: ps1.io.lamp, "
+        "  - { name: ps1.trig, area: ps1, kind: trigger, target: ps1.io.lamp2, "
         "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
         "hold, on_control_loss: { action: hold } }\n";
     EXPECT_EQ(
@@ -877,9 +886,11 @@ TEST(TagNames, MoreTypesAndPlaces) {
              {"templates/io_a.yaml",
               "template: io_a\nprotocol: io\npoints:\n"
               "  - { name: lamp, address: { line: 1, direction: output, "
-              "at_start: safe } }\n"
+              "at_start: safe }, access: rw, storage: volatile }\n"
               "  - { name: count, value_type: int64, address: { line: 2, "
-              "direction: input } }\n"},
+              "direction: input } }\n"
+              "  - { name: lamp2, address: { line: 3, direction: output, "
+              "at_start: safe }, access: rw, storage: volatile }\n"},
              {"drivers/io/local.yaml",
               "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
               "devices:\n  - { name: ps1.io, template: io_a }\n"},
