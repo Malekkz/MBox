@@ -9,6 +9,7 @@
 #include "scada/conf/expand.h"
 #include "scada/conf/references.h"
 
+#include <cstdint>
 #include <span>
 
 namespace scada::conf {
@@ -36,9 +37,12 @@ namespace scada::conf {
 // An error of a template's point is at its instance, with the template
 // note, and one cause at many instances is one error (D-114). `files` are
 // the files of the tree, for the templates of the instances.
+// `pattern_work` bounds the matching of the health rules' patterns
+// (`ExpandLimits::health_pattern_work`).
 void check_point_rules(const ExpandedTree& tree,
                        std::span<const CheckedFile> files,
-                       Diagnostics& diagnostics);
+                       Diagnostics& diagnostics,
+                       std::uint64_t pattern_work = MAX_HEALTH_PATTERN_WORK);
 
 }  // namespace scada::conf
 

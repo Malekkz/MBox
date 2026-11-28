@@ -65,3 +65,7 @@ scada_add_test(scada-conf-runtime-limits-test KIND unit
 scada_add_test(scada-conf-point-limits-test KIND unit
   SOURCES point_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+# The same at the default budget, timed (D-120).
+scada_add_test(scada-conf-point-limits-perf-test KIND perf
+  SOURCES point_limits_perf_test.cpp
+  DEPENDS scada::conf scada::test-support)

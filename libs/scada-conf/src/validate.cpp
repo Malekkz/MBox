@@ -312,7 +312,8 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5);
                 check_tag_rules(tags, *validation.expanded, checked, stage5);
-                check_point_rules(*validation.expanded, checked, stage5);
+                check_point_rules(*validation.expanded, checked, stage5,
+                                  expand_limits.health_pattern_work);
             }
             stage5.move_into(report);
         }

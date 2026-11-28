@@ -52,12 +52,6 @@ constexpr std::string_view DEFAULT_GROUP = "normal";
 // 4.7: the default `max_age` is this many poll group periods.
 constexpr std::uint64_t MAX_AGE_PERIODS = 3;
 
-// The work of matching health rules' `applies_to` patterns in one run, as
-// for run-time patterns (D-117): RUN_TIME_NAME_WORK per point name compared
-// and one per step of the matcher. Past it the patterns left are not
-// checked (D-120).
-constexpr std::uint64_t MAX_HEALTH_PATTERN_WORK = 1'000'000'000;
-
 // The keys a `wo` point must not have (CF-614).
 constexpr std::array<std::string_view, 3> READ_KEYS = {"poll_group", "alarms",
                                                        "logging"};
@@ -74,8 +68,9 @@ struct Point {
 class Checker {
 public:
     Checker(const ExpandedTree& tree, std::span<const CheckedFile> files,
-            Diagnostics& diagnostics)
-        : tree_(&tree),
+            Diagnostics& diagnostics, std::uint64_t pattern_work)
+        : max_pattern_work_(pattern_work),
+          tree_(&tree),
           files_(files),
           expanded_(tree.document),
           reporter_(tree, diagnostics) {
@@ -539,7 +534,7 @@ private:
     // `all`, or listed names and patterns) and that `health` does not serve:
     // `health` is not read, or is in another group. `all` is O(1); a name
     // is one look-up; the patterns of a run do at most
-    // MAX_HEALTH_PATTERN_WORK of matching work in all, counted as D-117
+    // `max_pattern_work_` of matching work in all, counted as D-117
     // counts it, and a pattern the budget runs out in, and those after it,
     // are not checked (D-120), so that their time stays bounded.
     [[nodiscard]] std::optional<std::string_view> first_unserved(
@@ -593,7 +588,7 @@ private:
             // In name order, the first point matched and not served.
             std::optional<std::string_view> matched;
             for (const auto& [name, point] : points_) {
-                if (pattern_work_ >= MAX_HEALTH_PATTERN_WORK) {
+                if (pattern_work_ >= max_pattern_work_) {
                     matched.reset();  // bounded (D-120): not checked
                     break;
                 }
@@ -636,6 +631,10 @@ private:
         }
     }
 
+    // The work of matching health rules' patterns in one run, as for
+    // run-time patterns (D-117): RUN_TIME_NAME_WORK per point name compared
+    // and one per step of the matcher (D-120).
+    std::uint64_t max_pattern_work_;
     const ExpandedTree* tree_;
     // The files of the tree, which outlive the check.
     std::span<const CheckedFile> files_;
@@ -667,8 +666,8 @@ private:
 
 void check_point_rules(const ExpandedTree& tree,
                        std::span<const CheckedFile> files,
-                       Diagnostics& diagnostics) {
-    Checker checker(tree, files, diagnostics);
+                       Diagnostics& diagnostics, std::uint64_t pattern_work) {
+    Checker checker(tree, files, diagnostics, pattern_work);
     checker.run();
 }
 
