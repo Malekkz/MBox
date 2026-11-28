@@ -3,6 +3,7 @@
 #include "channel_rules.h"
 #include "merged_points.h"
 #include "modbus_rules.h"
+#include "output_rules.h"
 #include "point_rules.h"
 #include "runtime_expressions.h"
 #include "scada/common/result.h"
@@ -321,6 +322,9 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 // The channels against the limits and each other (D-123,
                 // slice 7d-3 of #100).
                 check_channel_rules(*validation.expanded, checked, stage5);
+                // Areas, outputs and their safe states (D-124, slice 7e-1
+                // of #100).
+                check_output_rules(tags, *validation.expanded, checked, stage5);
             }
             stage5.move_into(report);
         }
