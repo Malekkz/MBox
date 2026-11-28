@@ -1,0 +1,13 @@
+# Stage 5 on the control tasks (9.1, D-125, slice 7e-2 of #100). Program
+# p_lost is in no task (CF-901); p_other names task fast, which does not
+# list it (CF-902). Task fast's priority 85 is not below io_priority 80
+# (CF-906). Fast is rt_required: its program reads a Modbus point (CF-904),
+# and its virtual tag v.high reads one through v.flow of task normal
+# (CF-904, ruling T2). The internal tag w.total is written by programs of
+# fast and normal (CF-905, ruling T3). Invented.
+control/p_fast.yaml:3:36: CF-904
+control/p_lost.yaml:1:10: CF-901
+control/p_normal.yaml:3:57: CF-905
+control/p_other.yaml:2:7: CF-902
+control/tasks.yaml:2:35: CF-906
+tags/site.yaml:4:54: CF-904

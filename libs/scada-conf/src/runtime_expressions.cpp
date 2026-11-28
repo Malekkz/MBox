@@ -164,6 +164,17 @@ struct Named {
     // The vertices it reads: a virtual tag or an interlock by index, a
     // pattern by its own vertex; sorted.
     std::vector<std::size_t> inputs;
+    // The task that evaluates it, given or `normal` (5.1, 7.3).
+    std::string_view task;
+};
+
+// What the tags a pattern matches are, for the task rules (D-125).
+struct PatternInputs {
+    std::string slowest;
+    InputClass slowest_class;
+    std::string driver_tag;
+    std::string driver;
+    std::vector<std::string> virtuals;
 };
 
 // A distinct name pattern that a virtual tag or an interlock reads: a
@@ -267,7 +278,8 @@ class Checker {
 public:
     Checker(TagNames& tags, const ExpandedTree& tree,
             std::span<const CheckedFile> files, Diagnostics& diagnostics,
-            std::size_t kept, std::uint64_t pattern_work, RunTimeCounts* counts)
+            std::size_t kept, std::uint64_t pattern_work, RunTimeCounts* counts,
+            TaskInputs* task_inputs)
         : tags_(&tags),
           tree_(&tree),
           files_(files),
@@ -275,6 +287,7 @@ public:
           kept_(kept),
           pattern_budget_(pattern_work),
           counts_out_(counts),
+          task_inputs_(task_inputs),
           grouped_(MAX_KEPT_ERRORS) {}
 
     void run() {
@@ -290,6 +303,7 @@ public:
             check_file(file);
         }
         check_expanded();
+        export_inputs();
         grouped_.flush(*diagnostics_);
         if (counts_out_ != nullptr) {
             *counts_out_ = counts_;
@@ -297,6 +311,125 @@ public:
     }
 
 private:
+    // --- The inputs of the task rules (D-125) ------------------------------
+
+    // Counts tag `name` among what `inputs` reads.
+    void note_input(PatternInputs& inputs, std::string_view name,
+                    const TagInfo& info) const {
+        if (task_inputs_ == nullptr || !task_inputs_->classify) {
+            return;
+        }
+        InputClass read = task_inputs_->classify(name, info);
+        if (read.poll_ms > inputs.slowest_class.poll_ms) {
+            inputs.slowest = std::string(name);
+            inputs.slowest_class = read;
+        }
+        if (!read.driver.empty() && inputs.driver_tag.empty()) {
+            inputs.driver_tag = std::string(name);
+            inputs.driver = std::move(read.driver);
+        }
+        if (const auto found = by_name_.find(name);
+            found != by_name_.end() && named_[found->second].is_virtual) {
+            inputs.virtuals.emplace_back(name);
+        }
+    }
+
+    [[nodiscard]] static std::size_t bytes_of(const PatternInputs& inputs) {
+        std::size_t bytes = inputs.slowest.size() + inputs.driver_tag.size() +
+                            inputs.driver.size() +
+                            inputs.slowest_class.poll_text.size();
+        for (const std::string& name : inputs.virtuals) {
+            bytes += name.size();
+        }
+        return bytes;
+    }
+
+    // Adds what `pattern` matches to `inputs`: from the summary kept, else
+    // from a walk of its own, counted in the budget as any walk past the
+    // kept summaries is.
+    void add_pattern(PatternInputs& inputs, std::string_view pattern) {
+        const auto kept = pattern_inputs_.find(pattern);
+        const PatternInputs* matched = nullptr;
+        if (kept != pattern_inputs_.end()) {
+            matched = &kept->second;
+        } else {
+            matches_.erase(std::string(pattern));
+            static_cast<void>(matching(pattern));
+            matched = &last_inputs_;
+        }
+        if (matched->slowest_class.poll_ms > inputs.slowest_class.poll_ms) {
+            inputs.slowest = matched->slowest;
+            inputs.slowest_class = matched->slowest_class;
+        }
+        if (inputs.driver_tag.empty() && !matched->driver_tag.empty()) {
+            inputs.driver_tag = matched->driver_tag;
+            inputs.driver = matched->driver;
+        }
+        inputs.virtuals.insert(inputs.virtuals.end(), matched->virtuals.begin(),
+                               matched->virtuals.end());
+    }
+
+    // Adds tag `name` to `inputs`, if it is one.
+    void add_name(PatternInputs& inputs, std::string_view name) const {
+        if (const std::optional<TagInfo> info = tags_->find(name)) {
+            note_input(inputs, name, *info);
+        }
+    }
+
+    // Adds what one node of an expression reads: a tag, its `.quality` or
+    // `.age` reading the tag, or the tags a pattern matches.
+    void add_node(PatternInputs& inputs, const ExprNode& node) {
+        if (node.op == ExprOp::REFERENCE) {
+            add_name(inputs, node.text);
+            for (const std::string_view suffix : {".quality", ".age"}) {
+                if (node.text.ends_with(suffix)) {
+                    add_name(inputs, std::string_view(node.text).substr(
+                                         0, node.text.size() - suffix.size()));
+                }
+            }
+        } else if (node.op == ExprOp::PATTERN) {
+            if (is_name_pattern(node.text)) {
+                add_pattern(inputs, node.text);
+            } else {
+                add_name(inputs, node.text);
+            }
+        }
+    }
+
+    // What each virtual tag and interlock reads (ruling T1 of D-125).
+    void export_inputs() {
+        if (task_inputs_ == nullptr) {
+            return;
+        }
+        for (const Named& vertex : named_) {
+            if (!vertex.tree) {
+                continue;
+            }
+            if (over_budget_) {
+                break;
+            }
+            // A pattern walked again is charged to the budget, and a CF-113
+            // is placed at the expression it is read for.
+            place_at(*vertex.site.document, vertex.site.scalar);
+            PatternInputs inputs;
+            for (const ExprNode& node : vertex.tree->nodes) {
+                add_node(inputs, node);
+            }
+            task_inputs_->expressions.push_back(ExpressionInputs{
+                .name = vertex.name,
+                .is_virtual = vertex.is_virtual,
+                .task = std::string(vertex.task),
+                .document = vertex.site.document,
+                .at = vertex.site.scalar,
+                .slowest = std::move(inputs.slowest),
+                .slowest_class = std::move(inputs.slowest_class),
+                .driver_tag = std::move(inputs.driver_tag),
+                .driver = std::move(inputs.driver),
+                .virtuals = std::move(inputs.virtuals)});
+        }
+        task_inputs_->whole = !over_budget_;
+    }
+
     // --- Tasks --------------------------------------------------------------
 
     void read_tasks() {
@@ -364,6 +497,7 @@ private:
         if (over_budget_) {
             return reads;  // not read: what checks it reports nothing
         }
+        last_inputs_ = PatternInputs{};
         tags_->each_with_prefix(
             pattern.substr(0, prefix_of(pattern)),
             [this, &reads, pattern](std::string_view name,
@@ -376,11 +510,16 @@ private:
                 }
                 if (matched) {
                     add_read(reads, name, read_of(info.value_type));
+                    note_input(last_inputs_, name, info);
                 }
                 return true;
             });
         if (over_budget_) {
             return reads;  // not read: what checks it reports nothing
+        }
+        if (task_inputs_ != nullptr && matches_.size() < kept_ &&
+            keep_bytes(bytes_of(last_inputs_))) {
+            pattern_inputs_.emplace(std::string(pattern), last_inputs_);
         }
         const std::size_t bytes =
             pattern.size() + reads.first_odd.size() + reads.first_bool.size();
@@ -463,6 +602,7 @@ private:
             if (text_at(document, tag, "type") != "virtual" || !name || !expr) {
                 continue;
             }
+            const std::string_view task = task_of(document, tag, *name);
             add_named(
                 Named{.name = std::string(document.text(*name)),
                       .file = &file,
@@ -471,13 +611,14 @@ private:
                       .value_type = scalar_at(document, tag, "value_type"),
                       .site = Site{.document = &document,
                                    .scalar = *expr,
-                                   .task = task_of(document, tag, *name),
+                                   .task = task,
                                    .needs_bool = false,
                                    .expanded = false,
                                    .device = {},
                                    .detail = {}},
                       .tree = parse(document, *expr),
-                      .inputs = {}});
+                      .inputs = {},
+                      .task = task});
         }
     }
 
@@ -494,15 +635,22 @@ private:
             if (!name || !condition) {
                 continue;
             }
+            const std::string_view task = task_of(document, interlock, *name);
             add_named(Named{.name = std::string(document.text(*name)),
                             .file = &file,
                             .name_node = *name,
                             .is_virtual = false,
                             .value_type = std::nullopt,
-                            .site = Site{},
+                            .site = Site{.document = &document,
+                                         .scalar = *condition,
+                                         .task = task,
+                                         .needs_bool = true,
+                                         .expanded = false,
+                                         .device = {},
+                                         .detail = {}},
                             .tree = parse(document, *condition),
-                            .inputs = {}});
-            static_cast<void>(task_of(document, interlock, *name));
+                            .inputs = {},
+                            .task = task});
         }
     }
 
@@ -922,6 +1070,10 @@ private:
     const Document* place_document_ = nullptr;
     NodeId place_node_ = 0;
     RunTimeCounts* counts_out_;
+    TaskInputs* task_inputs_ = nullptr;
+    // The inputs of each pattern kept, and of the last walked (D-125).
+    std::map<std::string, PatternInputs, std::less<>> pattern_inputs_;
+    PatternInputs last_inputs_;
     GroupedErrors grouped_;
     std::map<std::string, std::int64_t, std::less<>> periods_;
     std::set<std::string, std::less<>> task_names_;
@@ -945,8 +1097,11 @@ void check_run_time_expressions(TagNames& tags, const ExpandedTree& tree,
                                 std::span<const CheckedFile> files,
                                 Diagnostics& diagnostics, std::size_t kept,
                                 std::uint64_t pattern_work,
-                                RunTimeCounts* counts) {
-    Checker(tags, tree, files, diagnostics, kept, pattern_work, counts).run();
+                                RunTimeCounts* counts,
+                                TaskInputs* task_inputs) {
+    Checker(tags, tree, files, diagnostics, kept, pattern_work, counts,
+            task_inputs)
+        .run();
 }
 
 }  // namespace scada::conf

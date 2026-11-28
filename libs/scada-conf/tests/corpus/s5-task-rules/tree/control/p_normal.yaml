@@ -1,0 +1,3 @@
+program: p_normal
+blocks:
+  - { id: b1, type: move, in: { x: w.total }, out: { q: w.total } }

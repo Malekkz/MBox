@@ -1,0 +1,2 @@
+tasks:
+  normal: { period: 100ms, programs: [ps1_pump] }

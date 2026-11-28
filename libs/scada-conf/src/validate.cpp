@@ -20,6 +20,7 @@
 #include "scada/conf/yaml.h"
 #include "tag_names.h"
 #include "tag_rules.h"
+#include "task_rules.h"
 #include "validate_internal.h"
 
 #include <cstdint>
@@ -308,10 +309,16 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                     collect_tags(*validation.expanded, checked, stage5);
                 // Virtual tags get their types from their expressions before
                 // any reference reads them (D-117, slice 7b of #100).
+                // What each virtual tag and interlock reads, for the task
+                // rules (D-125).
+                TaskInputs task_inputs{
+                    .classify = input_classifier(*validation.expanded),
+                    .expressions = {},
+                    .whole = true};
                 check_run_time_expressions(tags, *validation.expanded, checked,
                                            stage5, expand_limits.kept_run_time,
                                            expand_limits.run_time_pattern_work,
-                                           &validation.run_time);
+                                           &validation.run_time, &task_inputs);
                 check_tag_references(tags, *validation.expanded, checked,
                                      stage5,
                                      expand_limits.applies_to_pattern_work);
@@ -325,6 +332,9 @@ Result<Validation> validate_and_expand_with(const std::filesystem::path& root,
                 // Areas, outputs and their safe states (D-124, slice 7e-1
                 // of #100).
                 check_output_rules(tags, *validation.expanded, checked, stage5);
+                // The control tasks (D-125, slice 7e-2 of #100).
+                check_task_rules(tags, *validation.expanded, checked,
+                                 task_inputs, stage5);
             }
             stage5.move_into(report);
         }

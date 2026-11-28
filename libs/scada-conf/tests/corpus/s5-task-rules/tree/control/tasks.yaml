@@ -1,0 +1,3 @@
+tasks:
+  fast: { period: 10ms, priority: 85, rt_required: true, programs: [p_fast] }
+  normal: { period: 100ms, programs: [p_normal, p_other] }

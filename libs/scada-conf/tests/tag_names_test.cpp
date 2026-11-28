@@ -479,6 +479,8 @@ TEST(TagNames, AProgramsBareSources) {
         errors(expand(
             {{"templates/meter_a.yaml", std::string(METER)},
              {"drivers/modbus/line1.yaml", one_device()},
+             {"control/tasks.yaml",
+              "tasks:\n  normal: { period: 100ms, programs: [p1] }\n"},
              {"control/p1.yaml",
               "program: p1\ntask: normal\nblocks:\n"
               "  - { id: run, type: compare, in: { a: ps1.m1.flow, b: 2.5 } }\n"

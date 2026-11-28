@@ -2,6 +2,7 @@ interlocks:
   - name: ps1.cb1.close_permissive
     condition: ps1.relay1.earth_open
     message: "earth switch closed"
+    task: slow
 outputs:
   - name: ps1.cb1.cmd
     area: ps1
