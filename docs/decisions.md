@@ -2188,7 +2188,7 @@ Options: per detail below; the simplest that fits the contract was chosen, or th
 Decision:
 - **One tree type.** The result is one `Document` (D-111) of the expanded channels, with its `ScalarTypes`, built by `expand_tree` (`expand.h`):
   - `channels`, each with `protocol`, `file`, the `channel` object as written, and its `devices`;
-  - each device holds its own keys and the template's device keys (`read`, `enums`, `bit_order`, `functions`, `device_time`, `keepalive`, `idle_timeout`, `on_mismatch`, `identify`, `health`, `restart_indication`) under them, and its `points`.
+  - each device holds its own keys and the template's device keys (`read`, `enums`, `bit_order`, `functions`, `address_base` (added by D-121), `device_time`, `keepalive`, `idle_timeout`, `on_mismatch`, `identify`, `health`, `restart_indication`) under them, and its `points`.
 
   The keys that steer expansion (`template`, `params`, `defaults`, `overrides`, `disable`, `only`), `when` and every `replace` are gone. A scalar keeps its text, style, position and type. A computed value has the canonical text of 13.3 (an INT in decimal, a REAL as the shortest decimal with a point, a BOOL as `true` or `false`, a TIME as milliseconds and `ms`) and the position of its expression. For each node, `instance_of` gives the device it belongs to, for diagnostics of later stages. `validate_and_expand` gives the report and this tree; #102 writes the expanded files from it.
 - **Where an error is (1.4).**
@@ -3045,3 +3045,13 @@ Decision: `check_point_rules` (`src/point_rules.cpp`) runs after the tag rules (
 - **CF-615 against CF-651** (the lead's ruling): stage 5 gives CF-615 when a point needs a function that the device's `functions` excludes and no substitution of 4.6 applies (slice 7d-2). CF-651 stays for the Modbus driver's `configure` (#104), as its defence in depth. A point with a substitution available gets neither.
 
 Consequences: fixtures with an `rw` or `wo` point now give `storage`, and templates whose points use bits give `bit_order`. The checks are linear in the points of a device, with a map look-up per companion, except the bounded patterns. Corpus case `s5-point-rules` holds every code once, at two instances.
+
+## D-121: The expanded device keeps a template's `address_base`
+Date: 2026-11-28
+Phase / issue: 2, #175 (defect of #103's expander)
+Status: proposed
+
+Context: Annex A.1 makes `address_base` a key of a template and of a device. The expander merged a level's device keys from a fixed list (D-114, step 3.1) that lacked it, so a template's `address_base: 1` was lost at expansion. The expanded file then gave the driver base-0 registers, one above each register the template's author meant. Corpus case `s3-valid-rtu-weather-sensor` pinned the loss: its template gives `address_base: 1` and its expected expanded device line had none.
+Options: none; the contract decides.
+Decision: the device keys a level gives and the expanded device holds are `read`, `bit_order`, `functions`, `address_base`, `device_time`, `keepalive`, `idle_timeout` and `on_mismatch`, merged level by level, the instance's own winning; `enums`, `identify`, `health` and `restart_indication` as D-114 says. Unit test `Expand.AddressBaseComesFromTheTemplate` holds a template's base and an instance's that wins over it.
+Consequences: the expected expanded line of `s3-valid-rtu-weather-sensor` gives `address_base: 1`. Whether the Modbus driver applies `address_base` to the registers it sends is #104's.
