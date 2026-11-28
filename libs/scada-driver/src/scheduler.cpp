@@ -192,29 +192,35 @@ bool in_identity(const ReadPlan& plan, std::uint32_t request) noexcept {
 }
 
 // The identity period of a device (`identity_period_ns`).
+// The shortest period of the device's groups that have requests, of the
+// groups of its identity requests only with `identity_only`; 0 for none.
+std::int64_t shortest_period(const CompiledChannel& channel,
+                             const ReadPlan& plan,
+                             bool identity_only) noexcept {
+    std::int64_t period = 0;
+    for (std::uint32_t group = 0; group < plan.by_group.size(); ++group) {
+        if (plan.by_group[group].empty()) {
+            continue;
+        }
+        const bool reads_identity =
+            std::any_of(plan.identity.begin(), plan.identity.end(),
+                        [&](std::uint32_t request) {
+                            return plan.requests[request].poll_group == group;
+                        });
+        if (identity_only && !reads_identity) {
+            continue;
+        }
+        const std::int64_t value = channel.poll_groups[group].period_ns;
+        period = period == 0 ? value : std::min(period, value);
+    }
+    return period;
+}
+
+// The identity period of a device (`identity_period_ns`).
 std::int64_t identity_period(const CompiledChannel& channel,
                              const ReadPlan& plan) noexcept {
-    const auto shortest = [&](bool identity_only) {
-        std::int64_t period = 0;
-        for (std::uint32_t group = 0; group < plan.by_group.size(); ++group) {
-            if (plan.by_group[group].empty()) {
-                continue;
-            }
-            const bool reads_identity = std::any_of(
-                plan.identity.begin(), plan.identity.end(),
-                [&](std::uint32_t request) {
-                    return plan.requests[request].poll_group == group;
-                });
-            if (identity_only && !reads_identity) {
-                continue;
-            }
-            const std::int64_t value = channel.poll_groups[group].period_ns;
-            period = period == 0 ? value : std::min(period, value);
-        }
-        return period;
-    };
-    const std::int64_t own = shortest(true);
-    return own != 0 ? own : shortest(false);
+    const std::int64_t own = shortest_period(channel, plan, true);
+    return own != 0 ? own : shortest_period(channel, plan, false);
 }
 
 }  // namespace
@@ -268,6 +274,7 @@ Scheduler::Scheduler(const CompiledChannel& channel,
         run.never_rests.assign(device.plan.requests.size(), false);
         run.identity_start_ns = EARLIEST;
         run.identity_period_ns = identity_period(channel, device.plan);
+        run.fastest_period_ns = shortest_period(channel, device.plan, false);
         // OWN_UNIT is never shared: each such device is a unit of its own.
         const auto found =
             device.unit == CompiledDevice::OWN_UNIT
@@ -907,7 +914,8 @@ Choice Scheduler::take_identity(std::uint32_t device,
     if (run.retry) {
         const Choice out{.kind = Choice::Kind::IDENTITY,
                          .device = device,
-                         .request = run.retry_request};
+                         .request = run.retry_request,
+                         .identity_keepalive = run.retry_keepalive};
         save_undo(out, 0);
         record(device, false, now_ns);
         run.retry = false;
@@ -1441,8 +1449,8 @@ void Scheduler::set_mode(std::uint32_t device, DeviceMode mode) noexcept {
     }
 }
 
-void Scheduler::identity_again(std::uint32_t device,
-                               std::int64_t due_ns) noexcept {
+void Scheduler::identity_again(std::uint32_t device, std::int64_t due_ns,
+                               IdentityFloor floor) noexcept {
     if (device >= devices_.size() ||
         devices_[device].mode != DeviceMode::IDENTITY ||
         devices_[device].identity_cycle) {
@@ -1450,8 +1458,14 @@ void Scheduler::identity_again(std::uint32_t device,
     }
     DeviceRun& run = devices_[device];
     run.identity_due = true;
+    // A cycle that nothing answered waits the device's fastest period only
+    // (the lead's ruling on 5b-2b): a dead device is demoted as soon as a
+    // polled one would be.
+    const std::int64_t floor_ns = floor == IdentityFloor::IDENTITY_PERIOD
+                                      ? run.identity_period_ns
+                                      : run.fastest_period_ns;
     run.identity_due_ns =
-        std::max(due_ns, later(run.identity_start_ns, run.identity_period_ns));
+        std::max(due_ns, later(run.identity_start_ns, floor_ns));
 }
 
 void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
@@ -1511,7 +1525,7 @@ void Scheduler::clear_probe(std::uint32_t device) noexcept {
 }
 
 void Scheduler::retry(std::uint32_t device, std::uint32_t request,
-                      std::int64_t now_ns) noexcept {
+                      std::int64_t now_ns, bool keepalive) noexcept {
     if (device >= devices_.size() || devices_[device].mode == DeviceMode::OFF ||
         request >= channel_->devices[device].plan.requests.size() ||
         channel_->devices[device].plan.requests[request].side_effect) {
@@ -1524,6 +1538,8 @@ void Scheduler::retry(std::uint32_t device, std::uint32_t request,
     devices_[device].retry = true;
     devices_[device].retry_request = request;
     devices_[device].retry_due_ns = now_ns;
+    devices_[device].retry_keepalive =
+        keepalive && devices_[device].mode == DeviceMode::IDENTITY;
 }
 
 std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,

@@ -1,7 +1,8 @@
 # The values computed from a repeat variable are checked as written values
 # are (contract 13.3, 1.2; D-115): CF-204 at the instance, with the template
 # line as the note, for level70000, alarm16 and flow0. Their neighbours give
-# each key its edge (register 65536, bit 15, divide_by 1) and are valid.
+# each key its edge (register 65536 with address_base 1, which is protocol
+# address 65,535 (A.1, CF-603); bit 15; divide_by 1) and are valid.
 # Invented.
 drivers/modbus/line1.yaml:7:13: CF-204
 drivers/modbus/line1.yaml:7:13: CF-204

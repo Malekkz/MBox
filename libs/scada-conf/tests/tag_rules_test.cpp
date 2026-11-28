@@ -364,6 +364,7 @@ TEST(TagRules, AnIntervalFinerThanTheRefresh) {
 
 // A channel's own poll groups replace the defaults; without
 // control/tasks.yaml a virtual tag's `normal` task runs every 100 ms (9.1).
+// An internal tag that names no task, and a manual tag, give none.
 TEST(TagRules, TheRefreshOfAChannelAndOfTheDefaultTasks) {
     const std::string meter =
         std::string(METER) +
@@ -373,7 +374,12 @@ TEST(TagRules, TheRefreshOfAChannelAndOfTheDefaultTasks) {
         "  - { name: v1, type: virtual, expr: \"1\", logging: { policy: "
         "sampled, interval: 100ms } }\n"
         "  - { name: v2, type: virtual, expr: \"1\", logging: { policy: "
-        "sampled, interval: 99ms } }\n");
+        "sampled, interval: 99ms } }\n"
+        // No refresh these rules know: written by a program, or by people.
+        "  - { name: i1, type: internal, value_type: int64, logging: { "
+        "policy: sampled, interval: 99ms } }\n"
+        "  - { name: m1, type: manual, value_type: int64, area: ps1, "
+        "logging: { policy: sampled, interval: 99ms } }\n");
     files.emplace("logging.yaml", std::string(LOGGING));
     files.emplace("drivers/modbus/line1.yaml",
                   "channel:\n  name: line1\n  type: rtu\n"

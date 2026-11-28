@@ -265,10 +265,12 @@ TEST(Expand, DisableAndOnly) {
         expand({{"templates/base_a.yaml", base},
                 {"templates/meter_a.yaml", meter},
                 {"drivers/modbus/line1.yaml",
-                 one_device("    only: [\"inv*.power\"]\n")}}),
+                 one_device("    only: [\"inv*.power\"]\n"
+                            "    overrides: { inv12.power: { address: { "
+                            "register: 2 } } }\n")}}),
         (Lines{"ps1.m1.inv1.power: {address: {table: holding, register: 1, "
                "type: uint16}, unit: kW}",
-               "ps1.m1.inv12.power: {address: {table: holding, register: 1, "
+               "ps1.m1.inv12.power: {address: {table: holding, register: 2, "
                "type: uint16}, unit: kW}"}));
     EXPECT_EQ(
         expand({{"templates/base_a.yaml", base},
@@ -553,15 +555,16 @@ constexpr std::string_view ADDRESS =
 TEST(Expand, TheFirstVariableIsOutermost) {
     EXPECT_EQ(one_template("repeat:\n"
                            "  - for: { a: \"1..2\", b: \"1..2\" }\n"
-                           "    points: [ { name: \"p{a}_{b}\", " +
-                           std::string(ADDRESS) + " } ]\n"),
-              (Lines{"ps1.m1.p1_1: {address: {table: holding, register: 1, "
+                           "    points: [ { name: \"p{a}_{b}\", address: "
+                           "{ table: holding, register: \"10 * a + b\", "
+                           "type: uint16 } } ]\n"),
+              (Lines{"ps1.m1.p1_1: {address: {table: holding, register: 11, "
                      "type: uint16}}",
-                     "ps1.m1.p1_2: {address: {table: holding, register: 1, "
+                     "ps1.m1.p1_2: {address: {table: holding, register: 12, "
                      "type: uint16}}",
-                     "ps1.m1.p2_1: {address: {table: holding, register: 1, "
+                     "ps1.m1.p2_1: {address: {table: holding, register: 21, "
                      "type: uint16}}",
-                     "ps1.m1.p2_2: {address: {table: holding, register: 1, "
+                     "ps1.m1.p2_2: {address: {table: holding, register: 22, "
                      "type: uint16}}"}));
 }
 

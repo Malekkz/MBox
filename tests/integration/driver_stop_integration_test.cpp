@@ -468,6 +468,65 @@ TEST_F(DriverProcess, AStallStopsTheOtherWorkers) {
     EXPECT_TRUE(prints(*sim, "peer closed"));
 }
 
+// Success if `err` shows the path of AStallLogsTheEventsItHeld: two
+// restart records and one stall, the stall within the first record's 10 s
+// period, and the second record logged after the stall, by its exit.
+::testing::AssertionResult held_until_the_stall(std::string_view err) {
+    constexpr std::string_view RESTART =
+        R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::string_view STALL = R"(MESSAGE_ID="driver-stall")";
+    constexpr std::int64_t PERIOD_MS = 10'000;
+    const std::vector<std::int64_t> restarts = record_times_ms(err, RESTART);
+    const std::vector<std::int64_t> stalls = record_times_ms(err, STALL);
+    if (restarts.size() != 2 || stalls.size() != 1) {
+        return ::testing::AssertionFailure()
+               << restarts.size() << " restart records, " << stalls.size()
+               << " stalls";
+    }
+    if (stalls[0] - restarts[0] >= PERIOD_MS || restarts[1] < stalls[0] ||
+        err.find(STALL) > err.rfind(RESTART)) {
+        return ::testing::AssertionFailure()
+               << "restarts at " << restarts[0] << " and " << restarts[1]
+               << " ms, the stall at " << stalls[0] << " ms";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
+    // Channel a's device restarts at its 3rd and 6th request, about a
+    // second apart: the first record at once, the second held for its 10 s
+    // period. Channel b hangs and stalls about 4.5 s in (its 1.5 s time-out
+    // makes its stall limit three times that), well before the period
+    // ends; the stall's exit logs the held record (PR 177 S6). The record
+    // times show that path was taken: the second after the stall, the stall
+    // within the period of the first.
+    start_tagd(
+        {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
+    auto sim =
+        start_sim({"--set", "1", "0", "0", "5", "--set-after", "1", "0", "0",
+                   "3", "3", "--set-after", "1", "0", "0", "1", "6"});
+    auto other = start_sim({});
+    if (!sim.has_value() || !other.has_value()) {
+        FAIL() << "no simulator";
+    }
+    observe();
+    auto driver = start_driver(joined(
+        tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
+        std::vector<std::string>{"--restart-decreases", "0"},
+        faulty("b", port_of(*other), "--hang"), device("d2", 2, "0", "1500")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(
+        eventually(handle("sys.dev.d1.restarts"), [](const scada_value& value) {
+            return value.quality == SCADA_QUALITY_GOOD && value.value == 2;
+        }));
+    EXPECT_TRUE(ends_with(*driver, EXIT_STALL));
+    const std::string err = driver->err();
+    EXPECT_EQ(restart_counts(err), 2U) << err;
+    EXPECT_TRUE(held_until_the_stall(err)) << err;
+}
+
 TEST_F(DriverProcess, ASpinningWorkerIsAStallToo) {
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     auto sim = start_sim({});

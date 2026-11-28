@@ -2,6 +2,8 @@
 // unsigned and in range, `--help`, a disabled channel and its faults.
 
 #include "drv_test_support.h"
+#include "scada/driver/compiled.h"
+#include "scada/driver/identity.h"
 
 #include <gtest/gtest.h>
 
@@ -54,6 +56,55 @@ TEST(DrvTestArgs, AChannelWithADeviceAndAPoint) {
     EXPECT_TRUE(parsed.config.channels[0].enabled);
     EXPECT_EQ(parsed.endpoints[0].fault, Fault::HANG);
     EXPECT_EQ(parsed.config.channels[0].devices[0].unit, 7);
+}
+
+// One device d1 on a channel, with points v (0) and model (1) and `extra`.
+std::optional<DrvTestOptions> with_points(const std::vector<const char*>& extra,
+                                          std::string& err) {
+    std::vector<const char*> args{
+        "--base-dir", "/b",       "--channel", "c1",    "tcp",     "127.0.0.1",
+        "502",        "--device", "d1",        "1",     "--point", "v",
+        "0",          "0",        "--point",   "model", "1",       "0"};
+    args.insert(args.end(), extra.begin(), extra.end());
+    return parse(args, err);
+}
+
+TEST(DrvTestArgs, AnIdentityCheckOnAPointTheDeviceHas) {
+    // D-147: `--on-mismatch-warn` runs a device whose check fails.
+    std::string err;
+    const auto options =
+        with_points({"--identify-equals", "1", "7", "--on-mismatch-warn"}, err);
+    if (!options.has_value()) {
+        FAIL() << err;
+    }
+    const CompiledDevice& device = options->config.channels[0].devices[0];
+    ASSERT_EQ(device.identify.size(), 1U);
+    EXPECT_EQ(device.identify[0].point, 1U);
+    ASSERT_EQ(device.identify[0].values.size(), 1U);
+    EXPECT_EQ(device.identify[0].values[0].i, 7);
+    EXPECT_FALSE(device.refuse_on_mismatch);
+}
+
+TEST(DrvTestArgs, ARestartRuleOnAPointTheDeviceHas) {
+    std::string err;
+    const auto options = with_points({"--restart-decreases", "0"}, err);
+    if (!options.has_value()) {
+        FAIL() << err;
+    }
+    const CompiledDevice& device = options->config.channels[0].devices[0];
+    ASSERT_EQ(device.restart_indication.size(), 1U);
+    EXPECT_EQ(device.restart_indication[0].point, 0U);
+    EXPECT_EQ(device.restart_indication[0].kind, RestartRule::Kind::DECREASES);
+    EXPECT_TRUE(device.refuse_on_mismatch);
+}
+
+TEST(DrvTestArgs, AnIdentityCheckOnAPointNotYetListedIsRefused) {
+    std::string err;
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--channel", "c1", "tcp",
+                        "127.0.0.1", "502", "--device", "d1", "1", "--point",
+                        "v", "0", "0", "--identify-equals", "1", "7"},
+                       err)
+                     .has_value());
 }
 
 TEST(DrvTestArgs, ADisabledChannelAndASpinningOne) {

@@ -3,6 +3,7 @@
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/exchange.h"
+#include "scada/driver/identity_setup.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/raw_value.h"
@@ -101,17 +102,23 @@ Status TestProtocol::plan(const CompiledDevice& device,
     std::vector<PlanPoint> points;
     for (std::uint32_t index = 0; index < device.points.size(); ++index) {
         const CompiledPoint& point = device.points[index];
-        if (!point.poll_group.has_value() || point.access == Access::WO) {
+        // A point of an identity check or restart rule is read even in no
+        // poll group, by the identity cycle (D-147).
+        const bool identity = reads_identity(device, index);
+        if ((!point.poll_group.has_value() && !identity) ||
+            point.access == Access::WO) {
             continue;
         }
         const auto& binding = protocol_data<TestPoint>(*point.protocol);
-        points.push_back(PlanPoint{.point = index,
-                                   .poll_group = *point.poll_group,
-                                   .cluster = root(index),
-                                   .space = binding.space,
-                                   .unit_id = unit.unit_id,
-                                   .first = binding.first,
-                                   .count = binding.count});
+        points.push_back(
+            PlanPoint{.point = index,
+                      .poll_group = point.poll_group.value_or(NO_POLL_GROUP),
+                      .cluster = root(index),
+                      .space = binding.space,
+                      .unit_id = unit.unit_id,
+                      .first = binding.first,
+                      .count = binding.count,
+                      .identity = identity});
     }
     return plan_blocks(points, read_rules, groups, out);
 }

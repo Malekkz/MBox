@@ -46,6 +46,7 @@ scada_add_library(scada-conf
     src/expression_types.cpp
     src/grouped_errors.cpp
     src/merged_points.cpp
+    src/modbus_rules.cpp
     src/names.cpp
     src/node.cpp
     src/point_rules.cpp
