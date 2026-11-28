@@ -38,6 +38,12 @@ namespace {
 
 constexpr std::int64_t NS_PER_S = 1'000'000'000;
 constexpr std::int64_t NEVER = std::numeric_limits<std::int64_t>::max();
+// At the stop, a full log queue is waited for in steps of 5 ms, 100 at
+// most: 0.5 s, well within the stop budget of 2 s, which the main thread's
+// own flush of at most 1 s follows (D-148). Counted in steps, not read from
+// the clock, so that a clock that does not move cannot hold the stop.
+constexpr std::int64_t LOG_ROOM_STEP_NS = 5'000'000;
+constexpr int LOG_ROOM_STEPS = 100;
 
 // A worker's stack (DI 2.4): 256 KiB, a build setting; the sanitizer
 // builds give it more (CMake SCADA_DRIVER_WORKER_STACK_BYTES).
@@ -237,9 +243,24 @@ void Worker::serve(TagWriter& writer) noexcept {
     refused_.store(writer.refused(), std::memory_order_relaxed);
     hand_events(*engine);
     // Every count the limit held, so that none is lost at the stop (11.3).
-    if (events_.has_value()) {
-        events_->flush(clock_->realtime_ns());
+    flush_events();
+}
+
+void Worker::flush_events() noexcept {
+    if (!events_.has_value()) {
+        return;
     }
+    for (int step = 0; step < LOG_ROOM_STEPS; ++step) {
+        if (events_->flush(clock_->realtime_ns(), false)) {
+            return;
+        }
+        // The Logger's thread drains the queue at least every 20 ms.
+        moved();
+        const timespec pause{.tv_sec = 0, .tv_nsec = LOG_ROOM_STEP_NS};
+        (void)::ppoll(nullptr, 0, &pause, nullptr);
+    }
+    // Out of time: what is left is dropped, and counted (D-148).
+    (void)events_->flush(clock_->realtime_ns(), true);
 }
 
 void Worker::hand_events(ChannelEngine& engine) noexcept {

@@ -17,8 +17,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,20 +38,38 @@ constexpr std::int64_t PERIOD = 10;
 constexpr std::int64_t WALL = 1'000;
 constexpr std::chrono::seconds WAIT{30};
 
-// The records a sink received, as "MESSAGE|KEY=value|...".
+// The records a sink received, as "MESSAGE|KEY=value|...". A stalled sink
+// holds the Logger's thread in its write, so that a test fills a queue.
 class Lines {
 public:
     void add(std::string line) {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
+        ++entered_;
+        changed_.notify_all();
+        changed_.wait(lock, [this] { return !stalled_; });
         lines_.push_back(std::move(line));
     }
     [[nodiscard]] std::vector<std::string> snapshot() {
         const std::scoped_lock lock(mutex_);
         return lines_;
     }
+    void set_stalled(bool stalled) {
+        const std::scoped_lock lock(mutex_);
+        stalled_ = stalled;
+        changed_.notify_all();
+    }
+    // True once `count` writes have begun, within WAIT.
+    bool wait_for_entered(std::size_t count) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, WAIT,
+                                 [&] { return entered_ >= count; });
+    }
 
 private:
     std::mutex mutex_;
+    std::condition_variable changed_;
+    bool stalled_ = false;
+    std::size_t entered_ = 0;
     std::vector<std::string> lines_;
 };
 
@@ -68,6 +88,22 @@ public:
 private:
     Lines& lines_;
 };
+
+// The sum of the COUNTs of the records of `message_id` of device `device`.
+std::uint64_t count_of(const std::vector<std::string>& lines,
+                       std::string_view message_id, std::string_view device) {
+    const std::string id = "|MESSAGE_ID=" + std::string(message_id) + "|";
+    const std::string name = "|DEVICE=" + std::string(device) + "|";
+    std::uint64_t sum = 0;
+    for (const std::string& line : lines) {
+        const std::size_t at = line.find("|COUNT=");
+        if (line.find(id) != std::string::npos &&
+            line.find(name) != std::string::npos && at != std::string::npos) {
+            sum += std::stoull(line.substr(at + std::string_view("|COUNT=").size()));
+        }
+    }
+    return sum;
+}
 
 // Two devices, d1 and d2, on channel line1.
 CompiledChannel two_devices() {
@@ -116,6 +152,15 @@ protected:
     }
     EventLog& log() { return *log_; }
     Logger& logger() { return *logger_; }
+    LogQueue& queue() { return *queue_; }
+    // Holds the Logger's thread in the sink's write of a record of its own,
+    // so that nothing leaves the queue until `release`.
+    bool hold() {
+        lines_.set_stalled(true);
+        logger_->log(LogLevel::INFO, "held");
+        return lines_.wait_for_entered(1);
+    }
+    void release() { lines_.set_stalled(false); }
 
 private:
     CompiledChannel channel_ = two_devices();
@@ -185,8 +230,8 @@ TEST_F(Logged, TheStopFlushesEveryHeldCount) {
     log().add(1, DeviceEvent::RESTART, restart, 0, WALL);
     restart.count = 2;
     log().add(1, DeviceEvent::RESTART, restart, 1, WALL);
-    log().flush(WALL);
-    log().flush(WALL);  // nothing held any more
+    EXPECT_TRUE(log().flush(WALL, false));
+    EXPECT_TRUE(log().flush(WALL, false));  // nothing held any more
     EXPECT_EQ(lines(), (std::vector<std::string>{
                            "device restart|MESSAGE_ID=driver-device-restart|"
                            "CHANNEL=line1|DEVICE=d2|COUNT=1",
@@ -224,11 +269,106 @@ TEST_F(Logged, AFullQueueDropsAndCounts) {
     EXPECT_GT(logger().dropped(), 0U);
 }
 
+// PR 182 M2: a record the full queue refused gives its count to the next
+// summary, so that the counts add up to the events.
+TEST_F(Logged, ARefusedRecordsCountGoesInTheNextSummary) {
+    if (!start(1) || !hold()) {
+        FAIL() << "no logger";
+    }
+    EventRecord restart;
+    restart.count = 1;
+    log().add(0, DeviceEvent::RESTART, restart, 0, WALL);  // takes the room
+    restart.count = 2;
+    log().add(1, DeviceEvent::RESTART, restart, 0, WALL);  // refused
+    EXPECT_EQ(queue().dropped(), 1U);
+    release();
+    EXPECT_EQ(count_of(lines(), "driver-device-restart", "d2"), 0U);
+    log().due(PERIOD - 1, WALL);
+    EXPECT_EQ(count_of(lines(), "driver-device-restart", "d2"), 0U);
+    log().due(PERIOD, WALL);
+    const std::vector<std::string> got = lines();
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d1"), 1U);
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d2"), 2U);
+}
+
+// A summary due while the queue is full stays due, and goes at the next
+// call with room: not a period later, and not dropped.
+TEST_F(Logged, ADueSummaryWaitsForRoom) {
+    if (!start(1)) {
+        FAIL() << "no logger";
+    }
+    EventRecord restart;
+    restart.count = 1;
+    log().add(0, DeviceEvent::RESTART, restart, 0, WALL);
+    log().add(0, DeviceEvent::RESTART, restart, 1, WALL);  // held
+    (void)lines();
+    if (!hold()) {
+        FAIL() << "the sink was not entered";
+    }
+    log().add(1, DeviceEvent::RESTART, restart, PERIOD, WALL);  // the room
+    log().due(PERIOD, WALL);  // d1's summary stays due
+    EXPECT_EQ(queue().dropped(), 0U);
+    release();
+    EXPECT_EQ(count_of(lines(), "driver-device-restart", "d1"), 1U);
+    log().due(PERIOD + 1, WALL);
+    EXPECT_EQ(count_of(lines(), "driver-device-restart", "d1"), 2U);
+}
+
+// One restart logged and one held for each device, through a queue of 1.
+void hold_one_each(EventLog& log, const std::function<void()>& drain) {
+    EventRecord restart;
+    restart.count = 1;
+    for (std::size_t device = 0; device < 2; ++device) {
+        log.add(device, DeviceEvent::RESTART, restart, 0, WALL);
+        drain();
+        log.add(device, DeviceEvent::RESTART, restart, 1, WALL);
+    }
+}
+
+// The stop's flush logs while there is room and says when it must wait.
+TEST_F(Logged, TheStopsFlushWaitsForRoom) {
+    if (!start(1)) {
+        FAIL() << "no logger";
+    }
+    hold_one_each(log(), [this] { (void)lines(); });
+    if (!hold()) {
+        FAIL() << "the sink was not entered";
+    }
+    EXPECT_FALSE(log().flush(WALL, false));  // one in, one waits
+    EXPECT_FALSE(log().flush(WALL, false));
+    EXPECT_EQ(queue().dropped(), 0U);
+    release();
+    (void)lines();
+    EXPECT_TRUE(log().flush(WALL, false));
+    const std::vector<std::string> got = lines();
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d1"), 2U);
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d2"), 2U);
+}
+
+// Out of time, the last flush drops what does not fit, and counts it.
+TEST_F(Logged, TheLastFlushDropsWhatDoesNotFit) {
+    if (!start(1)) {
+        FAIL() << "no logger";
+    }
+    hold_one_each(log(), [this] { (void)lines(); });
+    if (!hold()) {
+        FAIL() << "the sink was not entered";
+    }
+    EXPECT_TRUE(log().flush(WALL, true));
+    EXPECT_EQ(queue().dropped(), 1U);
+    release();
+    EXPECT_TRUE(log().flush(WALL, false));  // nothing held any more
+    const std::vector<std::string> got = lines();
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d1"), 2U);
+    EXPECT_EQ(count_of(got, "driver-device-restart", "d2"), 1U);
+    EXPECT_EQ(logger().dropped(), 1U);
+}
+
 TEST(EventLog, AnEventOfNoDeviceOrNoQueueIsIgnored) {
     const CompiledChannel channel = two_devices();
     EventLog without(channel, nullptr, PERIOD);
     without.add(0, DeviceEvent::MISMATCH, mismatch(1, "8"), 0, WALL);
-    without.flush(WALL);
+    EXPECT_TRUE(without.flush(WALL, false));
     EXPECT_EQ(reason_text(static_cast<std::uint8_t>(MismatchReason::ABSENT)),
               "absent");
     EXPECT_EQ(

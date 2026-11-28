@@ -188,6 +188,12 @@ public:
                        std::string_view message,
                        std::initializer_list<LogField> fields) noexcept;
 
+    // True if a push now would drop its record. For the producer, which can
+    // wait for room instead of dropping (the driver's stop, D-148): only the
+    // Logger's thread takes records out, so a false answer holds until the
+    // producer's next push. Takes no lock and makes no system call.
+    SCADA_RT [[nodiscard]] bool full() const noexcept;
+
     // Records this queue dropped because it was full, since creation. Any
     // thread.
     [[nodiscard]] std::uint64_t dropped() const noexcept;

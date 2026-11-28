@@ -65,9 +65,11 @@ constexpr std::int64_t STOP_GRACE_NS = NS_PER_S;
 // A change of a channel's refused tag writes is logged at the heartbeat
 // step, at most this often per channel (review M9; 5b-3 replaces it).
 constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
-// The main thread's log queue, in records of about 1.5 KiB each (D-148);
-// each worker's is `DriverSettings::worker_log_queue`.
-constexpr std::size_t MAIN_LOG_QUEUE = 256;
+// The main thread's log queue, in records of about 1.5 KiB each: 1.5 MiB,
+// so that the start's records, a few per channel and device, fit before
+// the Logger's thread first drains it (PR 182 S5, D-148). Each worker's is
+// `worker_log_queue_size`.
+constexpr std::size_t MAIN_LOG_QUEUE = 1024;
 // "process paused" is logged at most this often, with the pauses since.
 constexpr std::int64_t PAUSE_LOG_PERIOD_NS = 10 * NS_PER_S;
 constexpr std::chrono::milliseconds LOG_FLUSH_LIMIT{1000};
@@ -103,8 +105,7 @@ Status validate(const DriverSettings& settings) noexcept {
         return {StatusCode::INVALID_ARGUMENT,
                 "the heartbeat period is out of range"};
     }
-    if (settings.worker_log_queue == 0 ||
-        settings.worker_log_queue > LOG_MAX_QUEUE_CAPACITY) {
+    if (settings.worker_log_queue > LOG_MAX_QUEUE_CAPACITY) {
         return {StatusCode::INVALID_ARGUMENT,
                 "the worker log queue size is out of range"};
     }
@@ -158,6 +159,18 @@ Status block_stop_signals() noexcept {
         return {StatusCode::INTERNAL, "cannot block the stop signals"};
     }
     return {};
+}
+
+std::size_t worker_log_queue_size(std::size_t setting,
+                                  std::size_t devices) noexcept {
+    if (setting != 0) {
+        return setting;
+    }
+    // Two per device, without overflow for any count of devices.
+    const std::size_t two =
+        devices > LOG_MAX_QUEUE_CAPACITY / 2 ? LOG_MAX_QUEUE_CAPACITY
+                                             : devices * 2;
+    return std::clamp(two, MIN_WORKER_LOG_QUEUE, LOG_MAX_QUEUE_CAPACITY);
 }
 
 int exit_status(RunEnd end) noexcept {
@@ -243,13 +256,11 @@ private:
         }
     }
     // Every queue to the journal, the workers' included, once they have
-    // returned and before the Logger stops (11.3, D-148). A flush that
-    // times out loses only records.
-    void drain_logs() noexcept {
-        if (logger_ != nullptr) {
-            (void)logger_->flush(LOG_FLUSH_LIMIT);
-        }
-    }
+    // returned and before the Logger stops (11.3, D-148), and then the last
+    // `log_dropped`, so that it counts the drain's refusals too (PR 182
+    // S1). A flush that times out loses only records, and those it left
+    // undelivered count as dropped (S5).
+    void drain_logs() noexcept;
     // The queues: the main thread's, and one per worker given before its
     // start. Without a logger, none.
     [[nodiscard]] Status make_log_queues() noexcept;
@@ -1021,7 +1032,8 @@ Status Driver::Impl::make_log_queues() noexcept {
     }
     for (const std::unique_ptr<Worker>& worker : workers_) {
         Result<std::shared_ptr<LogQueue>> own =
-            logger_->make_queue(settings_.worker_log_queue);
+            logger_->make_queue(worker_log_queue_size(
+                settings_.worker_log_queue, worker->channel().devices.size()));
         if (!own.ok()) {
             return own.status();
         }
@@ -1057,7 +1069,23 @@ void Driver::Impl::process_stopped() noexcept {
     // no heartbeat follows (review M4).
     next_refused_log_ns_ = 0;
     log_refused(scada::monotonic_ns());
-    (void)process_tags_->log_dropped(log_dropped());
+}
+
+void Driver::Impl::drain_logs() noexcept {
+    if (logger_ == nullptr) {
+        return;
+    }
+    const bool drained = logger_->flush(LOG_FLUSH_LIMIT).ok();
+    if (!process_tags_.has_value()) {
+        return;
+    }
+    // After a time-out the Logger's destructor may still deliver some of
+    // them: the count can be high, never low.
+    const std::uint64_t left = drained ? 0 : logger_->pending();
+    if (process_tags_->log_dropped(log_dropped() + left)) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
 }
 
 Status Driver::Impl::start() noexcept {

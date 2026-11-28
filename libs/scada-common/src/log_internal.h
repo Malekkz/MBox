@@ -149,6 +149,14 @@ public:
                tail_.load(std::memory_order_acquire);
     }
 
+    // Producer: true if a push now would fail. The consumer only makes
+    // room, so a false answer holds until the producer's next push.
+    SCADA_RT [[nodiscard]] bool full() const noexcept {
+        return tail_.load(std::memory_order_relaxed) -
+                   head_.load(std::memory_order_acquire) ==
+               slots_.size();
+    }
+
     [[nodiscard]] std::size_t capacity() const noexcept {
         return slots_.size();
     }

@@ -141,6 +141,8 @@ public:
 
     [[nodiscard]] bool empty() const noexcept { return ring_.empty(); }
 
+    SCADA_RT [[nodiscard]] bool full() const noexcept { return ring_.full(); }
+
     [[nodiscard]] std::uint64_t dropped() const noexcept {
         return dropped_.load(std::memory_order_relaxed);
     }
@@ -208,6 +210,8 @@ bool LogQueue::push(LogLevel level, std::int64_t time_ns,
         level, time_ns, message,
         std::span<const LogField>(fields.begin(), fields.size()));
 }
+
+bool LogQueue::full() const noexcept { return impl_->full(); }
 
 std::uint64_t LogQueue::dropped() const noexcept {
     return impl_->dropped();

@@ -164,6 +164,24 @@ TEST_F(Queued, AFullQueueDropsAndCounts) {
     capture().set_stalled(false);
 }
 
+TEST_F(Queued, FullSaysWhetherAPushWouldDrop) {
+    capture().set_stalled(true);
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    logger().log(LogLevel::INFO, "first");
+    ASSERT_TRUE(capture().wait_for_entered(1));
+    EXPECT_EQ(push_numbered(queue(), SIZE - 1), SIZE - 1);
+    EXPECT_FALSE(queue().full());
+    EXPECT_EQ(push_numbered(queue(), 1), 1U);
+    EXPECT_TRUE(queue().full());
+    // Asking drops nothing.
+    EXPECT_EQ(queue().dropped(), 0U);
+    capture().set_stalled(false);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    EXPECT_FALSE(queue().full());
+}
+
 TEST_F(Queued, TheLossIsReportedAfterTheKeptRecords) {
     capture().set_stalled(true);
     if (!start()) {

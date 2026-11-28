@@ -123,6 +123,9 @@ private:
     void moved() noexcept { progress_.fetch_add(1, std::memory_order_relaxed); }
     // Logs the engine's events through `events_`, and the summaries due.
     void hand_events(ChannelEngine& engine) noexcept;
+    // At the stop: logs every count `events_` holds, waiting for room in
+    // the queue a bounded time (PR 182 M2).
+    void flush_events() noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;

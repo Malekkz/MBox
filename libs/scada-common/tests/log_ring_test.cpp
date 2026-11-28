@@ -109,11 +109,14 @@ TEST(RecordRing, AFullRingRefusesAndAnEmptyOneGivesNothing) {
     EXPECT_TRUE(ring.empty());
     EXPECT_FALSE(ring.pop(slot));
     EXPECT_TRUE(push_record(ring, 0));
+    EXPECT_FALSE(ring.full());
     EXPECT_TRUE(push_record(ring, 1));
+    EXPECT_TRUE(ring.full());
     EXPECT_FALSE(push_record(ring, 2));
     EXPECT_EQ(ring.capacity(), 2U);
     ASSERT_TRUE(ring.pop(slot));
     EXPECT_TRUE(is_record(slot, 0));
+    EXPECT_FALSE(ring.full());
     EXPECT_TRUE(push_record(ring, 2));
     ASSERT_TRUE(ring.pop(slot));
     EXPECT_TRUE(is_record(slot, 1));

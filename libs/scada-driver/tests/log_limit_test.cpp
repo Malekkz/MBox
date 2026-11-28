@@ -113,6 +113,62 @@ TEST(LogLimit, EachSummaryIsDueAtItsOwnPeriodsEnd) {
               (std::vector<LogSummary>{{.kind = 1, .key = 1, .count = 1}}));
 }
 
+// PR 182 M2: a record the queue refused hands its count to the next summary.
+TEST(LogLimit, AGivenBackCountGoesInTheNextSummary) {
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_TRUE(limit.admit(1, 2, 100, 3));
+    limit.give_back(1, 2, 3);
+    EXPECT_TRUE(due(limit, 109).empty());
+    EXPECT_EQ(due(limit, 110),
+              (std::vector<LogSummary>{{.kind = 1, .key = 2, .count = 3}}));
+}
+
+TEST(LogLimit, AGivenBackSummaryWaitsForItsNewPeriod) {
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_TRUE(limit.admit(0, 1, 100));
+    EXPECT_FALSE(limit.admit(0, 1, 101, 4));
+    const std::vector<LogSummary> first = due(limit, 110);
+    ASSERT_EQ(first.size(), 1U);
+    limit.give_back(0, 1, first[0].count);
+    EXPECT_FALSE(limit.admit(0, 1, 111, 2));
+    EXPECT_TRUE(due(limit, 119).empty());
+    EXPECT_EQ(due(limit, 120),
+              (std::vector<LogSummary>{{.kind = 0, .key = 1, .count = 6}}));
+}
+
+TEST(LogLimit, AGivenBackCountIsHeldAtTheStop) {
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_TRUE(limit.admit(2, 0, 100, 5));
+    limit.give_back(2, 0, 5);
+    limit.give_back(2, 0, 0);
+    limit.give_back(KINDS, 0, 1);
+    limit.give_back(0, KEYS + 1, 1);
+    EXPECT_TRUE(limit.holds());
+    EXPECT_EQ(held(limit),
+              (std::vector<LogSummary>{{.kind = 2, .key = 0, .count = 5}}));
+}
+
+TEST(LogLimit, HoldsSaysWhetherACountWaits) {
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_FALSE(limit.holds());
+    EXPECT_TRUE(limit.admit(0, 3, 100));
+    EXPECT_FALSE(limit.holds());
+    EXPECT_FALSE(limit.admit(0, 3, 101));
+    EXPECT_TRUE(limit.holds());
+    EXPECT_EQ(due(limit, 110).size(), 1U);
+    EXPECT_FALSE(limit.holds());
+}
+
+TEST(LogLimit, AGivenBackCountDoesNotWrap) {
+    constexpr std::uint64_t MOST = std::numeric_limits<std::uint64_t>::max();
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_TRUE(limit.admit(0, 0, 100));
+    limit.give_back(0, 0, MOST);
+    limit.give_back(0, 0, 2);
+    EXPECT_EQ(held(limit),
+              (std::vector<LogSummary>{{.kind = 0, .key = 0, .count = MOST}}));
+}
+
 TEST(LogLimit, NextHeldTakesEveryCountAtTheStop) {
     LogLimit limit(KINDS, KEYS, PERIOD);
     EXPECT_TRUE(limit.admit(0, 0, 0));

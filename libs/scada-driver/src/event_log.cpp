@@ -65,36 +65,54 @@ void EventLog::add(std::size_t device, DeviceEvent kind,
     if (events.count == 0) {
         return;
     }
-    if (limit_.admit(static_cast<std::size_t>(kind), device, now_ns,
-                     events.count)) {
-        push(device, kind, events, events.has_details, wall_ns);
+    const auto which = static_cast<std::size_t>(kind);
+    if (limit_.admit(which, device, now_ns, events.count) &&
+        !push(device, kind, events, events.has_details, wall_ns)) {
+        limit_.give_back(which, device, events.count);
     }
 }
 
 void EventLog::due(std::int64_t now_ns, std::int64_t wall_ns) noexcept {
     LogSummary summary;
-    while (limit_.next_due(now_ns, summary)) {
-        push(summary.key, static_cast<DeviceEvent>(summary.kind),
-             EventRecord{.count = summary.count}, false, wall_ns);
+    // While the queue is full the summaries stay due, and go at a later
+    // step once the Logger's thread made room, not a period later. One
+    // refused all the same is given back, with a new period, so the loop
+    // does not take it again.
+    while ((!queue_ || !queue_->full()) && limit_.next_due(now_ns, summary)) {
+        if (!push(summary.key, static_cast<DeviceEvent>(summary.kind),
+                  EventRecord{.count = summary.count}, false, wall_ns)) {
+            limit_.give_back(summary.kind, summary.key, summary.count);
+        }
     }
 }
 
-void EventLog::flush(std::int64_t wall_ns) noexcept {
+bool EventLog::flush(std::int64_t wall_ns, bool last) noexcept {
     LogSummary summary;
-    while (limit_.next_held(summary)) {
-        push(summary.key, static_cast<DeviceEvent>(summary.kind),
-             EventRecord{.count = summary.count}, false, wall_ns);
+    for (;;) {
+        if (!last && queue_ && queue_->full()) {
+            return !limit_.holds();
+        }
+        if (!limit_.next_held(summary)) {
+            return true;
+        }
+        if (!push(summary.key, static_cast<DeviceEvent>(summary.kind),
+                  EventRecord{.count = summary.count}, false, wall_ns) &&
+            !last) {
+            limit_.give_back(summary.kind, summary.key, summary.count);
+            return false;
+        }
     }
 }
 
 // A summary carries the count of the events it stands for and no details:
 // they were in the first record of the period, or in no record at all
 // (D-148).
-void EventLog::push(std::size_t device, DeviceEvent kind,
+bool EventLog::push(std::size_t device, DeviceEvent kind,
                     const EventRecord& events, bool details,
                     std::int64_t wall_ns) noexcept {
+    // Nothing to log into, or no device to name: nothing to give back.
     if (!queue_ || device >= channel_->devices.size()) {
-        return;
+        return true;
     }
     const std::string_view channel = channel_->name;
     const std::string_view name = channel_->devices[device].name;
@@ -104,16 +122,15 @@ void EventLog::push(std::size_t device, DeviceEvent kind,
     switch (kind) {
         case DeviceEvent::MISMATCH: {
             if (!details) {
-                (void)queue_->push(LogLevel::WARNING, wall_ns,
+                return queue_->push(LogLevel::WARNING, wall_ns,
                                    "identity mismatch",
                                    {{"MESSAGE_ID", "driver-identity-mismatch"},
                                     {"CHANNEL", channel},
                                     {"DEVICE", name},
                                     {"COUNT", count.view()}});
-                return;
             }
             const Number check(events.check);
-            (void)queue_->push(LogLevel::WARNING, wall_ns, "identity mismatch",
+            return queue_->push(LogLevel::WARNING, wall_ns, "identity mismatch",
                                {{"MESSAGE_ID", "driver-identity-mismatch"},
                                 {"CHANNEL", channel},
                                 {"DEVICE", name},
@@ -121,33 +138,30 @@ void EventLog::push(std::size_t device, DeviceEvent kind,
                                 {"CHECK", check.view()},
                                 {"VALUE", text},
                                 {"COUNT", count.view()}});
-            return;
         }
         case DeviceEvent::MATCH:
             if (!details) {
-                (void)queue_->push(LogLevel::NOTICE, wall_ns,
+                return queue_->push(LogLevel::NOTICE, wall_ns,
                                    "identity matched",
                                    {{"MESSAGE_ID", "driver-identity-matched"},
                                     {"CHANNEL", channel},
                                     {"DEVICE", name},
                                     {"COUNT", count.view()}});
-                return;
             }
-            (void)queue_->push(LogLevel::NOTICE, wall_ns, "identity matched",
+            return queue_->push(LogLevel::NOTICE, wall_ns, "identity matched",
                                {{"MESSAGE_ID", "driver-identity-matched"},
                                 {"CHANNEL", channel},
                                 {"DEVICE", name},
                                 {"IDENTITY", text},
                                 {"COUNT", count.view()}});
-            return;
         case DeviceEvent::RESTART:
-            (void)queue_->push(LogLevel::WARNING, wall_ns, "device restart",
+            return queue_->push(LogLevel::WARNING, wall_ns, "device restart",
                                {{"MESSAGE_ID", "driver-device-restart"},
                                 {"CHANNEL", channel},
                                 {"DEVICE", name},
                                 {"COUNT", count.view()}});
-            return;
     }
+    return true;  // no such kind: nothing to log
 }
 
 }  // namespace scada::driver::detail

@@ -10,6 +10,8 @@
 #include <gtest/gtest.h>
 
 #include <bit>
+#include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -258,6 +260,117 @@ TEST_F(DriverProcess, AFullWorkerQueuesDropsShowInLogDropped) {
         }));
     EXPECT_TRUE(logs(*driver, R"(log records dropped: the queue was full)"));
     EXPECT_TRUE(stops_cleanly(*driver));
+}
+
+// `devices` devices d1, d2, ... of unit 1 on channel line1, d1 with a
+// restart rule on `v`: a restart d1 sees is the unit's, so every device
+// restarts in the same step. The worker's log queue holds `queue` records.
+// The least size of a worker's queue (MIN_WORKER_LOG_QUEUE).
+constexpr std::size_t QUEUE = 64;
+
+class UnitRestarts : public DriverProcess {
+protected:
+    struct Running {
+        ChildProcess sim;
+        ChildProcess driver;
+    };
+
+    std::optional<Running> run(std::size_t devices, std::size_t queue,
+                               const std::vector<std::string>& sim_extra) {
+        std::vector<std::string> tags;
+        std::vector<std::string> args{"--worker-log-queue",
+                                      std::to_string(queue)};
+        for (std::size_t index = 1; index <= devices; ++index) {
+            const std::string name = "d" + std::to_string(index);
+            tags.push_back(name + ".v");
+        }
+        start_tagd({{.name = "line1", .tags = tags}});
+        std::vector<std::string> sim_args{"--set", "1", "0", "0", "5"};
+        sim_args.insert(sim_args.end(), sim_extra.begin(), sim_extra.end());
+        std::optional<ChildProcess> sim = start_sim(sim_args);
+        if (!sim.has_value()) {
+            return std::nullopt;
+        }
+        args = joined(args, tcp_channel("line1", port_of(*sim)));
+        for (std::size_t index = 1; index <= devices; ++index) {
+            args = joined(args, device("d" + std::to_string(index), 1, "0"));
+            if (index == 1) {
+                args = joined(args, std::vector<std::string>{
+                                        "--restart-decreases", "0"});
+            }
+        }
+        std::optional<ChildProcess> driver = start_driver(args);
+        if (!driver.has_value()) {
+            return std::nullopt;
+        }
+        observe();
+        return Running{.sim = std::move(*sim), .driver = std::move(*driver)};
+    }
+    // Waits until every device's `restarts` is GOOD with `expected`; their
+    // sum.
+    std::uint64_t restarts(std::size_t devices, std::int64_t expected) {
+        std::uint64_t sum = 0;
+        for (std::size_t index = 1; index <= devices; ++index) {
+            const std::string name =
+                "sys.dev.d" + std::to_string(index) + ".restarts";
+            const bool reached =
+                eventually(handle(name), [&](const scada_value& value) {
+                    return value.quality == SCADA_QUALITY_GOOD &&
+                           std::bit_cast<std::int64_t>(value.value) ==
+                               expected;
+                });
+            if (!reached) {
+                ADD_FAILURE() << name << " is not " << expected;
+                return sum;  // the others would wait as long
+            }
+            sum += static_cast<std::uint64_t>(expected);
+        }
+        return sum;
+    }
+};
+
+TEST_F(UnitRestarts, ABurstLargerThanTheQueueLosesNoCount) {
+    // 200 devices restart in one step into a queue of 64 records: 64 go at
+    // once, and the queue refuses the rest. Each refused record gives its
+    // count back to the limit, so the summaries after the 10 s period
+    // carry them, and the counts add up to `restarts` before the stop (PR
+    // 182 M2).
+    const std::size_t DEVICES = std::getenv("NDEV") ? std::stoul(std::getenv("NDEV")) : 200;
+    std::optional<Running> running =
+        run(DEVICES, QUEUE, {"--set-after", "1", "0", "0", "3", "20"});
+    if (!running.has_value()) {
+        FAIL() << "no simulator or no driver";
+    }
+    ChildProcess& driver = running->driver;
+    const std::uint64_t sum = restarts(DEVICES, 1);
+    ASSERT_EQ(sum, DEVICES) << driver.err();
+    EXPECT_TRUE(logs(driver, R"(log records dropped: the queue was full)"));
+    EXPECT_TRUE(driver.wait_for_error(
+        [&](std::string_view err) { return restart_counts(err) >= sum; },
+        WAIT_LIMIT))
+        << driver.err();
+    EXPECT_TRUE(stops_cleanly(driver));
+    EXPECT_EQ(restart_counts(driver.err()), sum);
+}
+
+TEST_F(UnitRestarts, TheStopWaitsForRoomForEveryHeldCount) {
+    // 100 devices restart twice, a few cycles apart, within one 10 s period:
+    // the first burst fills the queue of 64, and the second's counts are
+    // held. At the stop, 100 summaries wait for a queue of 64: the stop
+    // waits for room, and the counts add up to `restarts` (PR 182 M2).
+    constexpr std::size_t DEVICES = 100;
+    std::optional<Running> running =
+        run(DEVICES, QUEUE,
+            {"--set-after", "1", "0", "0", "3", "300", "--set-after", "1",
+             "0", "0", "1", "800"});
+    if (!running.has_value()) {
+        FAIL() << "no simulator or no driver";
+    }
+    ChildProcess& driver = running->driver;
+    const std::uint64_t sum = restarts(DEVICES, 2);
+    ASSERT_EQ(sum, 2 * DEVICES) << driver.err();
+    EXPECT_TRUE(stops_cleanly(driver));
+    EXPECT_EQ(restart_counts(driver.err()), sum) << driver.err();
 }
 
 }  // namespace

@@ -123,7 +123,7 @@ TEST(DrvTestArgs, ADisabledChannelAndASpinningOne) {
 }
 
 TEST(DrvTestArgs, TheWorkerLogQueueSize) {
-    // 64 records by default; 1 to the logger's limit (D-148).
+    // Sized from the devices by default; 1 to the logger's limit (D-148).
     std::string err;
     const auto plain =
         parse({"--base-dir", "/b", "--channel", "c", "tcp", "h", "1"}, err);

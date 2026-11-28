@@ -55,9 +55,19 @@ public:
     // ends. Takes constant time when nothing is due.
     SCADA_RT bool next_due(std::int64_t now_ns, LogSummary& out) noexcept;
 
+    // Gives back `count` events of a record or summary that `admit` or a
+    // take let through but that could not be logged (a full queue): they
+    // are held again, and the summary at the end of the current period
+    // carries them (PR 182 M2). Out of range: nothing.
+    SCADA_RT void give_back(std::size_t kind, std::size_t key,
+                            std::uint64_t count) noexcept;
+
     // Takes one held summary, due or not, into `out`; false when none is
     // held. For the stop, so that no count is lost.
     SCADA_RT bool next_held(LogSummary& out) noexcept;
+
+    // True if any count is held, due or not.
+    SCADA_RT [[nodiscard]] bool holds() const noexcept;
 
 private:
     static constexpr std::int64_t IDLE =

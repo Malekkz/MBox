@@ -43,6 +43,20 @@ bool LogLimit::admit(std::size_t kind, std::size_t key, std::int64_t now_ns,
     return false;
 }
 
+void LogLimit::give_back(std::size_t kind, std::size_t key,
+                         std::uint64_t count) noexcept {
+    if (kind >= kinds_ || key > keys_ || count == 0) {
+        return;
+    }
+    Entry& entry = entries_[index(kind, key)];
+    if (entry.held == 0) {
+        next_due_ns_ = std::min(next_due_ns_, entry.until_ns);
+    }
+    // Held at the largest count instead of wrapping to a small one.
+    constexpr std::uint64_t MOST = std::numeric_limits<std::uint64_t>::max();
+    entry.held = entry.held > MOST - count ? MOST : entry.held + count;
+}
+
 void LogLimit::take(std::size_t slot, LogSummary& out) noexcept {
     Entry& entry = entries_[slot];
     out = {.kind = slot / (keys_ + 1),
@@ -76,6 +90,11 @@ bool LogLimit::next_held(LogSummary& out) noexcept {
         }
     }
     return false;
+}
+
+bool LogLimit::holds() const noexcept {
+    return std::any_of(entries_.begin(), entries_.end(),
+                       [](const Entry& entry) { return entry.held != 0; });
 }
 
 void LogLimit::find_next_due() noexcept {

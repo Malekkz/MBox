@@ -82,10 +82,20 @@ using TransportFactory = std::function<std::unique_ptr<Transport>(
 
 inline constexpr std::int64_t DEFAULT_HEARTBEAT_PERIOD_NS = 100'000'000;
 
-// The records of a worker's log queue by default (D-148): about 96 KiB a
-// worker. A worker logs only its devices' identity and restart events, at
-// most one per kind and device per 10 s.
-inline constexpr std::size_t DEFAULT_WORKER_LOG_QUEUE = 64;
+// The least records of a worker's log queue (D-148): about 96 KiB a worker.
+// A worker logs only its devices' identity and restart events, at most one
+// per kind and device per 10 s.
+inline constexpr std::size_t MIN_WORKER_LOG_QUEUE = 64;
+// DriverSettings::worker_log_queue: sized from the channel's devices.
+inline constexpr std::size_t DEFAULT_WORKER_LOG_QUEUE = 0;
+
+// The records of the log queue of a worker with `devices` devices:
+// `setting` if not 0, else two per device and at least
+// MIN_WORKER_LOG_QUEUE, at most LOG_MAX_QUEUE_CAPACITY. Two per device, so
+// that a burst in which every device restarts and mismatches at once fits
+// (PR 182 M2).
+[[nodiscard]] std::size_t worker_log_queue_size(std::size_t setting,
+                                                std::size_t devices) noexcept;
 
 struct DriverSettings {
     // `drv-<protocol>` (CS 12.2): the process name in the tag set.
@@ -100,8 +110,9 @@ struct DriverSettings {
     // MAX_HEARTBEAT_PERIOD_NS.
     std::int64_t heartbeat_period_ns = DEFAULT_HEARTBEAT_PERIOD_NS;
     // Records each worker's log queue holds (11.3, D-148), 1 to
-    // LOG_MAX_QUEUE_CAPACITY. A test makes it small to see a full queue's
-    // drops in `log_dropped`.
+    // LOG_MAX_QUEUE_CAPACITY, or 0 to size each from its channel's devices
+    // (`worker_log_queue_size`). A test makes it small to see a full
+    // queue's drops in `log_dropped`.
     std::size_t worker_log_queue = DEFAULT_WORKER_LOG_QUEUE;
     // How the system tags of 11.1 are written, those of the process and of
     // every channel: null for the tag library's `scada_tag_write`. A test
