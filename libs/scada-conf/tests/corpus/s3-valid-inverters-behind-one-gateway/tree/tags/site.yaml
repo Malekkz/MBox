@@ -4,4 +4,3 @@ tags:
     expr: sum("ps1.inv*.power")
     unit: kW
     quality: ignore_bad
-    task: slow

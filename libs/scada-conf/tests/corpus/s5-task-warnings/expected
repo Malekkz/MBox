@@ -1,7 +1,9 @@
 # Stage 5 warnings on tasks and logging (D-125, slice 7e-2 of #100). The
-# virtual tag v.flow runs in the default task normal, every 100ms, and reads
-# a point polled every 1s (CW-903). Thirty-three internal tags log with
+# interlock ps1.flow_ok runs in the default task normal, every 100ms, and
+# reads a point polled every 1s (CW-903); the virtual tag v.flow reads it
+# too, and gives none, since CW-903 is for interlock conditions and program
+# inputs (the lead's ruling on #189). Thirty-three internal tags log with
 # 33 different raw retentions, one retention class more than 32 (CW-804).
 # Invented.
-tags/site.yaml:2:42: CW-903
+outputs/ps1.yaml:2:37: CW-903
 tags/site.yaml:35:64: CW-804

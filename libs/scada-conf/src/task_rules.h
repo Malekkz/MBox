@@ -23,9 +23,9 @@ namespace scada::conf {
 // - CF-906 for a task whose priority, given or the default 50, is at or
 //   above `realtime.io_priority` (default 95), at its `priority`, else at
 //   the task's name, else, for the default tasks, at `io_priority`;
-// - warning CW-903 for a reader of a task (one of its programs' sources,
-//   one of its virtual tags or interlocks) whose input polled most slowly
-//   has a poll period longer than the task's, at the reader;
+// - warning CW-903 for a program's source or an interlock's condition
+//   whose input polled most slowly has a poll period longer than its task's,
+//   at the reader; not for a virtual tag (ruling R1 of D-125);
 // - CF-904 for a reader of an `rt_required` task that reads a tag a
 //   protocol driver owns, directly or through virtual tags, naming the
 //   first such tag (ruling T2);

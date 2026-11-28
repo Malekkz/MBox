@@ -1,3 +1,7 @@
 # A protection relay with a breaker as a double point of two bits, its
 # command on two registers, and a double output with select before operate
 # and interlocks per direction (sections 5.3, 7.2, A.2, A.5). Invented.
+# Its interlock runs in the default task normal, every 100ms, and reads a
+# point polled every 1s: warning CW-903 (D-125; interlock conditions and
+# program inputs, not virtual tags, as the lead ruled on #189).
+outputs/ps1.yaml:3:16: CW-903

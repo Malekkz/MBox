@@ -89,3 +89,6 @@ scada_add_test(scada-conf-modbus-rules-perf-test KIND perf
 scada_add_test(scada-conf-task-rules-perf-test KIND perf
   SOURCES task_rules_perf_test.cpp
   DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-task-rules-memory-perf-test KIND perf
+  SOURCES task_rules_memory_perf_test.cpp
+  DEPENDS scada::conf scada::test-support)

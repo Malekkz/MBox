@@ -35,6 +35,7 @@ namespace {
 using detail::Reader;
 using detail::Reporter;
 
+constexpr std::uint16_t CF_NAME_TWICE = 303;
 constexpr std::uint16_t CF_PROGRAM_TASKS = 901;
 constexpr std::uint16_t CF_PROGRAM_TASK = 902;
 constexpr std::uint16_t CW_SLOWER_INPUT = 903;
@@ -202,11 +203,31 @@ private:
             }
             for (const NodeId program : reader.items(task.value, "programs")) {
                 if (document.kind(program) == NodeKind::SCALAR) {
-                    listings_[std::string(document.text(program))].push_back(
-                        Listing{.task = name, .item = program});
+                    list_program(reader, name, program);
                 }
             }
         }
+    }
+
+    // A program listed by `task`. Named twice in one task's list it is
+    // CF-303, a program name used twice (the review of #189), and counts
+    // once for CF-901.
+    void list_program(const Reader& reader, std::string_view task,
+                      NodeId program) {
+        const std::string_view name = reader.document().text(program);
+        std::vector<Listing>& listings = listings_[std::string(name)];
+        for (const Listing& listing : listings) {
+            if (listing.task == task) {
+                const Location first =
+                    reporter_.place_of(reader.document(), listing.item);
+                error(reader, program, CF_NAME_TWICE,
+                      "program " + quote_text(name) +
+                          " is defined twice; first at " + first.file + ":" +
+                          std::to_string(first.line));
+                return;
+            }
+        }
+        listings.push_back(Listing{.task = task, .item = program});
     }
 
     // The default tasks have the default priority and list no program: a
@@ -366,13 +387,16 @@ private:
     }
 
     // CW-903 and CF-904 for one reader of `task`.
+    // CW-903 is for programs' inputs and interlocks' conditions, not for
+    // virtual tags (the lead's ruling R1 on #189); CF-904 is for every
+    // reader. `slow_warning` says which.
     void check_reads(const Reader& reader, const Reads& reads,
-                     std::string_view task_name) {
+                     std::string_view task_name, bool slow_warning = true) {
         const auto task = task_info_.find(task_name);
         if (task == task_info_.end()) {
             return;  // CF-310 of the references
         }
-        if (task->second.period_ms != 0 &&
+        if (slow_warning && task->second.period_ms != 0 &&
             reads.slowest_class.poll_ms > task->second.period_ms) {
             reporter_.warning(
                 reader.document(), reads.slowest_at, CW_SLOWER_INPUT,
@@ -421,7 +445,7 @@ private:
                           .driver_at = expression.at,
                           .virtuals = {}};
         const Reader reader(*expression.document);
-        check_reads(reader, reads, expression.task);
+        check_reads(reader, reads, expression.task, !expression.is_virtual);
     }
 
     const TagNames* tags_;

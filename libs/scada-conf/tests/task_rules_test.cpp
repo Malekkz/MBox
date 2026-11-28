@@ -5,10 +5,12 @@
 
 #include "scada/common/result.h"
 #include "scada/conf/diagnostic.h"
+#include "scada/conf/expand.h"
 #include "scada/conf/validate.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -51,6 +53,17 @@ TEST(TaskRules, ProgramsAndTheirTasks) {
                      "\"fast\" disagrees with tasks.yaml (\"normal\")",
                      "control/d.yaml:1:10: error CF-901: program \"d\" must be "
                      "in exactly one task"}));
+}
+
+// A program named twice in one task's list is CF-303, a program name used
+// twice, and is in one task for CF-901 (the review of #189).
+TEST(TaskRules, AProgramListedTwiceInOneTask) {
+    EXPECT_EQ(errors_of({{"control/tasks.yaml",
+                          "tasks:\n"
+                          "  fast: { period: 10ms, programs: [a, a] }\n"},
+                         {"control/a.yaml", program("a")}}),
+              Lines{"control/tasks.yaml:2:39: error CF-303: program \"a\" is "
+                    "defined twice; first at control/tasks.yaml:2"});
 }
 
 // Without control/tasks.yaml no task lists a program.
@@ -161,24 +174,28 @@ std::string block_program(std::string_view name, std::string_view inputs,
            ", out: " + std::string(out) + " }\n";
 }
 
-// CW-903: the slowest input of each reader, against its task's period. A
-// tag of a tag file, and a write-only point, have no poll period.
+// CW-903: the slowest input of each program and interlock, against its
+// task's period; a virtual tag gives none (the lead's ruling R1 on #189). A
+// tag of a tag file, a write-only point and an `io` line have no poll
+// period.
 TEST(TaskRules, InputsPolledMoreSlowlyThanTheTask) {
     EXPECT_EQ(
         warnings_of(
             {{"tags/site.yaml",
               tags("  - { name: v.a, type: virtual, expr: \"ps1.m1.flow + "
-                   "ps1.m1.fast_flow\" }\n"
-                   "  - { name: v.b, type: virtual, task: slow, expr: "
-                   "\"ps1.m1.flow + 1\" }\n"
-                   "  - { name: v.c, type: virtual, expr: \"ps1.m1.fast_flow "
-                   "* 2\" }\n"
-                   "  - { name: v.d, type: virtual, task: slow, expr: "
-                   "\"v.a + 1\" }\n"
-                   "  - { name: v.e, type: virtual, expr: "
-                   "\"sum(\\\"ps1.m1.*flow\\\")\" }\n"
-                   "  - { name: v.wo, type: virtual, expr: \"ps1.m1.cmd + 1\" "
-                   "}\n")},
+                   "ps1.m1.fast_flow\" }\n")},
+             {"outputs/ps1.yaml",
+              "interlocks:\n"
+              "  - { name: il.a, condition: \"ps1.m1.flow + ps1.m1.fast_flow > "
+              "1\", message: m }\n"
+              "  - { name: il.b, task: slow, condition: \"ps1.m1.flow > 1\", "
+              "message: m }\n"
+              "  - { name: il.c, condition: \"ps1.m1.fast_flow > 1\", message: "
+              "m }\n"
+              "  - { name: il.d, condition: \"sum(\\\"ps1.m1.*flow\\\") > "
+              "1\", message: m }\n"
+              "  - { name: il.e, condition: \"ps1.m1.cmd > 1\", message: m }\n"
+              "  - { name: il.f, condition: \"v.a > 1\", message: m }\n"},
              {"control/p_slow.yaml",
               block_program("p_slow", "{ x: ps1.m1.fast_flow }")},
              // An io line is read every scan cycle: no poll period.
@@ -190,12 +207,12 @@ TEST(TaskRules, InputsPolledMoreSlowlyThanTheTask) {
                             "b1.q, z: 3 }")}}),
         (Lines{"control/p_normal.yaml:3:43: warning CW-903: task \"normal\" "
                "runs every 100ms but reads \"ps1.m1.flow\", polled every 1s",
-               "tags/site.yaml:2:39: warning CW-903: task \"normal\" runs "
+               "outputs/ps1.yaml:2:30: warning CW-903: task \"normal\" runs "
                "every 100ms but reads \"ps1.m1.flow\", polled every 1s",
-               "tags/site.yaml:4:39: warning CW-903: task \"normal\" runs "
+               "outputs/ps1.yaml:4:30: warning CW-903: task \"normal\" runs "
                "every 100ms but reads \"ps1.m1.fast_flow\", polled every "
                "200ms",
-               "tags/site.yaml:6:39: warning CW-903: task \"normal\" runs "
+               "outputs/ps1.yaml:5:30: warning CW-903: task \"normal\" runs "
                "every 100ms but reads \"ps1.m1.flow\", polled every 1s"}));
 }
 
@@ -264,6 +281,94 @@ TEST(TaskRules, AnRtRequiredTaskReadsNoDriverTag) {
                "drv-modbus",
                "tags/site.yaml:10:53: error CF-904: task \"fast\" is "
                "rt_required and reads \"ps1.m1.flow\" from drv-modbus"}));
+}
+
+// What CF-904 names and follows (the review of #189): a channel's system
+// tag; a tag read as `.quality` or `.age`; the first driver-owned input, not
+// the last; through virtual tags, the first in the order they are defined,
+// whatever order they are read in; and nothing through a cycle, which is
+// CF-525's.
+TEST(TaskRules, WhatCf904NamesAndFollows) {
+    EXPECT_EQ(
+        errors_of(inputs_tree(
+            {{"tags/site.yaml",
+              tags("  - { name: v.drv, type: virtual, task: fast, expr: "
+                   "\"sys.drv.line1.state > 0\" }\n"
+                   "  - { name: v.q, type: virtual, task: fast, expr: "
+                   "\"ps1.m1.run.quality\" }\n"
+                   "  - { name: v.age, type: virtual, task: fast, expr: "
+                   "\"ps1.m1.flow.age\" }\n"
+                   "  - { name: v.first, type: virtual, task: fast, expr: "
+                   "\"ps1.m1.fast_flow + ps1.m1.flow\" }\n"
+                   "  - { name: v.l1, type: virtual, task: slow, expr: "
+                   "\"ps1.m1.flow + 1\" }\n"
+                   "  - { name: v.l2, type: virtual, task: slow, expr: "
+                   "\"ps1.m1.fast_flow + 1\" }\n"
+                   "  - { name: v.order, type: virtual, task: fast, expr: "
+                   "\"v.l2 + v.l1\" }\n"
+                   "  - { name: v.x, type: virtual, task: slow, expr: \"v.y + "
+                   "ps1.m1.flow\" }\n"
+                   "  - { name: v.y, type: virtual, task: slow, expr: \"v.x + "
+                   "1\" }\n"
+                   "  - { name: v.cyc, type: virtual, task: fast, expr: \"v.x "
+                   "+ 1\" }\n")}})),
+        (Lines{"tags/site.yaml:2:53: error CF-904: task \"fast\" is "
+               "rt_required and reads \"sys.drv.line1.state\" from drv-modbus",
+               "tags/site.yaml:3:51: error CF-904: task \"fast\" is "
+               "rt_required and reads \"ps1.m1.run\" from drv-modbus",
+               "tags/site.yaml:4:53: error CF-904: task \"fast\" is "
+               "rt_required and reads \"ps1.m1.flow\" from drv-modbus",
+               "tags/site.yaml:5:55: error CF-904: task \"fast\" is "
+               "rt_required and reads \"ps1.m1.fast_flow\" from drv-modbus",
+               "tags/site.yaml:8:55: error CF-904: task \"fast\" is "
+               "rt_required and reads \"ps1.m1.flow\" from drv-modbus",
+               "tags/site.yaml:9:13: error CF-525: virtual tags form a cycle: "
+               "v.x, v.y"}));
+}
+
+// Past the pattern budget (CF-113) the inputs are not whole: no CW-903 and
+// no CF-904 is told from them (the review of #189). The tree of the
+// budget's tests: a pattern and a tag of an rt_required task, both reading
+// Modbus points.
+Files budget_tree() {
+    return inputs_tree(
+        {{"tags/site.yaml",
+          tags("  - { name: v.pat, type: virtual, task: fast, expr: "
+               "\"sum(\\\"ps1.m1.*flow\\\")\" }\n"
+               "  - { name: v.m, type: virtual, task: fast, expr: "
+               "\"ps1.m1.run\" }\n")}});
+}
+
+// True if `lines` start with CF-113 and hold no CF-904 or CW-903.
+bool only_the_budget(const Lines& lines) {
+    return !lines.empty() &&
+           lines.front().find("CF-113") != std::string::npos &&
+           std::ranges::none_of(lines, [](const std::string& line) {
+               return line.find("CF-904") != std::string::npos ||
+                      line.find("CW-903") != std::string::npos;
+           });
+}
+
+// The budget runs out at once, while the expressions are typed.
+TEST(TaskRules, NothingPastThePatternBudget) {
+    ExpandLimits limits;
+    limits.run_time_pattern_work = 1;
+    const Expanded expanded = expand_limited(budget_tree(), limits);
+    EXPECT_EQ(expanded.error_count, 1U);
+    EXPECT_TRUE(only_the_budget(expanded.lines));
+}
+
+// The budget runs out in the export of the inputs, after the types: with no
+// summary kept, the export walks the pattern again, and one unit short of
+// the whole run it stops there.
+TEST(TaskRules, NothingPastTheBudgetOfTheExport) {
+    ExpandLimits none;
+    none.kept_run_time = 0;
+    const std::uint64_t whole =
+        expand_limited(budget_tree(), none).run_time.pattern_work;
+    ExpandLimits short_of = none;
+    short_of.run_time_pattern_work = whole - 1;
+    EXPECT_TRUE(only_the_budget(expand_limited(budget_tree(), short_of).lines));
 }
 
 // CF-905 (ruling T3): an internal tag is written by one task, its own when

@@ -1,2 +1,2 @@
 tags:
-  - { name: total, type: virtual, expr: "gw1.m1.flow + gw2.m1.flow", logging: fast, task: slow }
+  - { name: total, type: virtual, expr: "gw1.m1.flow + gw2.m1.flow", logging: fast }

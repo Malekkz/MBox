@@ -234,9 +234,9 @@ interim rules (a) to (k), fail-safe, pending the product owner.
 
 Then stage 5 checks the control tasks (`src/task_rules.cpp`, D-125):
 CF-901 and CF-902 for a program's task; CF-906 for a priority not below
-the I/O scan's; warning CW-903 for a reader of a task (a program's source,
-a virtual tag, an interlock) whose slowest input is polled more slowly than
-the task runs; CF-904 for an `rt_required` task that reads a tag a protocol
+the I/O scan's; warning CW-903 for a program's source or an interlock's
+condition whose slowest input is polled more slowly than its task runs (not
+for a virtual tag); CF-904 for an `rt_required` task that reads a tag a protocol
 driver owns, directly or through virtual tags; CF-905 for an internal tag
 written by two tasks or by a task other than its own.
 
