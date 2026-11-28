@@ -1,0 +1,7 @@
+outputs:
+  - { name: ps1.p46, area: ps1, kind: single, target: ps1.v1.lone_on, feedback: ps1.v1.pos, interlocks: [], safe_state: off }
+  - { name: ps1.p47, area: ps1, kind: double, target: ps1.v1.lone_on2, no_feedback: true, interlocks: [], safe_state: off }
+  - { name: ps1.p55, area: ps1, kind: double, target: ps1.v1.dvals, no_feedback: true, interlocks: [], safe_state: off }
+  - { name: ps1.p53, area: ps1, kind: single, target: ps1.v1.fixed, no_feedback: true, interlocks: [], safe_state: off }
+  - { name: ps1.p61, area: ps1, kind: setpoint, target: ps1.v1.fixed2, no_feedback: true, safe_state: hold }
+  - { name: ps1.p60, area: ps1, kind: setpoint, target: ps1.v1.coded, no_feedback: true, safe_state: { value: 5 } }

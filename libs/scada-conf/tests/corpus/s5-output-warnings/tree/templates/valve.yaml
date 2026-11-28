@@ -1,0 +1,5 @@
+template: valve
+protocol: modbus
+points:
+  - { name: pos, address: { table: coil, register: 1 } }
+  - { name: c1, access: rw, storage: volatile, address: { table: coil, register: 11 } }

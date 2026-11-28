@@ -14,3 +14,7 @@ points:
   - name: flow
     address: { table: input, register: 12, type: uint16 }
     poll_group: hourly
+  - name: speed_sp
+    address: { table: holding, register: 20, type: uint16 }
+    access: rw
+    storage: volatile

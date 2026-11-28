@@ -1,0 +1,18 @@
+outputs:
+  - { name: ps1.a, area: ps1, kind: single, target: ps1.v1.ro, feedback: ps1.v1.pos, interlocks: [], safe_state: off }
+  - { name: ps1.b, area: ps1, kind: single, target: ps1.v1.c1, feedback: ps1.v1.pos, interlocks: [], safe_state: off }
+  - { name: ps1.c, area: ps1, kind: single, target: ps1.v1.c1, feedback: ps1.v1.pos, interlocks: [], safe_state: off }
+  - { name: ps1.d, area: ps1, kind: single, target: ps1.v1.danger, feedback: ps1.v1.pos, interlocks: [], safe_state: off }
+  - { name: ps1.e, area: ps1, kind: single, target: ps1.v1.c2, feedback: ps1.v1.pos, interlocks: [], on_only: true, safe_state: off }
+  - { name: ps1.f, area: ps1, kind: setpoint, target: ps1.v1.m10k, no_feedback: true, safe_state: hold }
+  - { name: ps1.g, area: ps1, kind: single, target: ps1.v1.c3, interlocks: [], safe_state: off }
+  - { name: ps1.h, area: ps1, kind: single, target: ps1.v1.c4, feedback: ps1.v1.pos, interlocks: [] }
+  - { name: ps1.i, area: ps1, kind: single, target: ps1.v1.c5, feedback: ps1.v1.pos, safe_state: off }
+  - { name: ps1.j, area: ps1, kind: setpoint, target: ps1.v1.s1, no_feedback: true, safe_state: { value: 70000 } }
+  - { name: ps1.k, area: ps1, kind: single, target: ps1.v1.c6, feedback: ps1.v1.pos, interlocks: [], safe_state: off, refresh: 10s }
+  - { name: ps1.l, area: ps1, kind: setpoint, target: ps1.v1.s2, feedback: ps1.v1.ro, safe_state: hold }
+  - { name: ps1.m, area: ps1, kind: step, target: ps1.v1.s3, no_feedback: true, interlocks: [], safe_state: off }
+  - { name: ps1.n, area: ps1, kind: pulse, target: ps1.v1.c7, feedback: ps1.v1.pos, interlocks: [], safe_state: hold, duration: 1s }
+  - { name: ps1.o, area: ps1, kind: single, target: ps1.v1.c8, feedback: ps1.v1.pos, interlocks: [], safe_state: hold, on_shutdown: safe }
+  - { name: ps1.p, area: ps1, kind: single, target: ps1.v1.c9, feedback: ps1.v1.pos, interlocks: [], safe_state: off, on_shutdown: release }
+  - { name: ps1.q, area: ps1, kind: single, target: ps1.v1.c10, feedback: ps1.v1.pos, interlocks: [], safe_state: { value: true } }

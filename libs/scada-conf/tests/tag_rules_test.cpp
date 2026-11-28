@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <string>
@@ -50,13 +51,18 @@ Lines errors_of(Files files, std::string_view meter = METER) {
     return found;
 }
 
-// The warnings of the tree of `files`, which has no error.
+// The warnings of the tree of `files`, which has no error. The area is
+// given only to a tree that names it: an area nothing uses is CW-701.
 Lines warnings_of(Files files, std::string_view meter = METER,
                   std::string_view devices = {}) {
-    files.try_emplace("areas.yaml", std::string(AREAS));
     files.try_emplace("templates/meter_a.yaml", std::string(meter));
     files.try_emplace("drivers/modbus/line1.yaml",
                       devices.empty() ? one_device() : channel(devices));
+    if (std::ranges::any_of(files, [](const auto& file) {
+            return file.second.find("area: ps1") != std::string::npos;
+        })) {
+        files.try_emplace("areas.yaml", std::string(AREAS));
+    }
     const Result<Validation> validation = validated(files);
     EXPECT_TRUE(validation.ok());
     if (!validation.ok()) {

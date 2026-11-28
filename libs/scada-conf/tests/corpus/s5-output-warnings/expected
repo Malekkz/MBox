@@ -1,0 +1,7 @@
+# Stage 5 warnings on areas and outputs (D-124, slice 7e-1 of #100): area
+# ps2 is used by nothing (CW-701); the output lists no interlock (CW-712),
+# and as a remote switching output with safe_state off it is set to hold
+# on control loss (CW-721). Invented.
+areas.yaml:3:3: CW-701
+outputs/ps1.yaml:2:98: CW-712
+outputs/ps1.yaml:2:136: CW-721
