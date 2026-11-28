@@ -332,7 +332,7 @@ TEST(PointRules, BitsNeedBitOrder) {
                         "    points:\n"
                         "      - { name: b, address: { table: holding, "
                         "register: 2, bit: 3 } }\n"),
-              (Lines{"drivers/modbus/line1.yaml:10:65: error CF-618: device "
+              (Lines{"drivers/modbus/line1.yaml:10:65: error CF-618: template "
                      "\"ps1.m1\" uses bits and needs bit_order"}));
     // `bits` and a quality rule's field count too.
     EXPECT_EQ(errors_of("template: meter_a\nprotocol: modbus\npoints:\n"
@@ -546,6 +546,70 @@ TEST(PointRules, DevicesTwiceAndTheChannelsGroups) {
                  {"drivers/modbus/line1.yaml", groups}})) {
         EXPECT_EQ(line.find("CF-611"), std::string::npos) << line;
     }
+}
+
+// --- The delta check of #174 ------------------------------------------
+
+// P29: the first unserved point by name across a rule's listed names and
+// patterns.
+TEST(PointRules, TheFirstUnservedAcrossNamesAndPatterns) {
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: h, poll_group: fast, address: { table: holding, "
+            "register: 1, type: uint16 } }\n"
+            "  - { name: zz, address: { table: holding, register: 2, type: "
+            "uint16 } }\n"
+            "  - { name: bb, address: { table: holding, register: 3, type: "
+            "uint16 } }\n"
+            "  - { name: cc, address: { table: holding, register: 4, type: "
+            "uint16 } }\n",
+            "health:\n  - { point: h, good_when: 0, applies_to: [ zz, \"c*\", "
+            "\"b*\" ] }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point \"bb\": "
+               "\"h\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:10:14 (point bb)"}));
+}
+
+// The first by name across the unserved groups: `ab` of `normal` before
+// `zb` of `slow`.
+TEST(PointRules, TheFirstUnservedAcrossGroups) {
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: h, poll_group: fast, address: { table: holding, "
+            "register: 1, type: uint16 } }\n"
+            "  - { name: zb, poll_group: slow, address: { table: holding, "
+            "register: 2, type: uint16 } }\n"
+            "  - { name: ab, address: { table: holding, register: 3, type: "
+            "uint16 } }\n",
+            "health:\n  - { point: h, good_when: 0, applies_to: [ \"*b\" ] "
+            "}\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point \"ab\": "
+               "\"h\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:9:14 (point ab)"}));
+}
+
+// N14: a plain health rule after one whose `good_when` has a field does not
+// hide the field.
+TEST(PointRules, AFieldOfAnEarlierHealthRule) {
+    EXPECT_EQ(
+        errors_of("template: meter_a\nprotocol: modbus\npoints:\n"
+                  "  - { name: a, address: { table: holding, register: 1, "
+                  "type: uint16 } }\n"
+                  "health:\n"
+                  "  - { point: a, good_when: { field: [0, 1], equals: 0 }, "
+                  "applies_to: all }\n"
+                  "  - { point: a, good_when: 0, applies_to: all }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
+               "\"meter_a\" uses bits and needs bit_order\n"
+               "  from template templates/meter_a.yaml:6:37 (health)"}));
+}
+
+// N17: `keep_last` on a `wo` point, with no `max_age`, gives no error.
+TEST(PointRules, KeepLastOnAWriteOnlyPoint) {
+    EXPECT_EQ(errors_of(meter("  - { name: w, access: wo, storage: volatile, "
+                              "on_invalid: keep_last, address: { table: "
+                              "holding, register: 1, type: uint16 } }\n")),
+              Lines{});
 }
 
 }  // namespace

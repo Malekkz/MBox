@@ -49,6 +49,27 @@ inline std::string health_patterns_meter(std::size_t points,
     return meter;
 }
 
+// meter_a with `points` points `p0` to `p<n-1>` and the health point `h`,
+// all in `normal`, and one health rule that lists `points` patterns `p*`:
+// every point is served, so no pattern needs a match (B-D1 of the delta
+// check of #174). The tree is valid.
+inline std::string served_patterns_meter(std::size_t points) {
+    std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
+    for (std::size_t i = 0; i < points; ++i) {
+        meter += "  - { name: p" + std::to_string(i) +
+                 ", address: { table: holding, register: " +
+                 std::to_string(i + 1) + ", type: uint16 } }\n";
+    }
+    meter +=
+        "  - { name: h, address: { table: holding, register: 60001, type: "
+        "uint16 } }\n"
+        "health:\n  - point: h\n    good_when: 0\n    applies_to:\n";
+    for (std::size_t i = 0; i < points; ++i) {
+        meter += "      - \"p*\"\n";
+    }
+    return meter;
+}
+
 // The CF-612 of the `zz` rule of `health_patterns_meter(points, rules)`.
 inline std::string health_patterns_zz_error(std::size_t points,
                                             std::size_t rules) {

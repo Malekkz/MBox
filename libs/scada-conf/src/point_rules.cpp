@@ -25,6 +25,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace scada::conf {
 
@@ -166,6 +167,12 @@ private:
         }
         first_read_ = {};
         first_other_group_ = {};
+        reads_by_group_.clear();
+        for (const auto& [point_name, point] : points_) {
+            if (point.read) {
+                reads_by_group_[point.group].push_back(point_name);
+            }
+        }
         for (const auto& [point_name, point] : points_) {
             if (!point.read) {
                 continue;
@@ -441,10 +448,11 @@ private:
             return;
         }
         const std::string_view template_name = template_of(device);
+        // Section 10's text, `{name}` the template, else the device.
         error(
             *site, CF_NO_BIT_ORDER,
-            (template_name.empty() ? "device " + quote_text(device_)
-                                   : "template " + quote_text(template_name)) +
+            "template " +
+                quote_text(template_name.empty() ? device_ : template_name) +
                 " uses bits and needs bit_order",
             detail);
     }
@@ -560,13 +568,44 @@ private:
             }
             return first_other_group_;
         }
-        return first_listed(*applies_to, serves);
+        return first_listed(*applies_to, health, serves);
+    }
+
+    // The first point by name that `pattern` matches and that `health` does
+    // not serve, or none; nothing when the budget runs out first. Walked
+    // only among the read points of the groups `health` does not serve,
+    // each in name order, and every visit counted, so that served points
+    // cost nothing and the time is the budget's (B-D1 of the delta check of
+    // #174).
+    [[nodiscard]] std::optional<std::optional<std::string_view>>
+    first_unserved_match(std::string_view pattern, const Point& health) {
+        std::optional<std::string_view> matched;
+        for (const auto& [group, names] : reads_by_group_) {
+            if (health.read && group == health.group) {
+                continue;
+            }
+            for (const std::string_view name : names) {
+                if (pattern_work_ >= max_pattern_work_) {
+                    return std::nullopt;
+                }
+                std::uint64_t steps = 0;
+                const bool hit = matches_name_pattern(pattern, name, steps);
+                pattern_work_ += RUN_TIME_NAME_WORK + steps;
+                if (hit) {
+                    if (!matched || name < *matched) {
+                        matched = name;
+                    }
+                    break;
+                }
+            }
+        }
+        return matched;
     }
 
     // As `first_unserved`, for an `applies_to` list of names and patterns.
     template <typename Serves>
     [[nodiscard]] std::optional<std::string_view> first_listed(
-        NodeId applies_to, const Serves& serves) {
+        NodeId applies_to, const Point& health, const Serves& serves) {
         std::optional<std::string_view> first;
         const auto consider = [&first](std::string_view name) {
             if (!first || name < *first) {
@@ -585,26 +624,11 @@ private:
                 }
                 continue;
             }
-            // In name order, the first point matched and not served.
-            std::optional<std::string_view> matched;
-            for (const auto& [name, point] : points_) {
-                if (pattern_work_ >= max_pattern_work_) {
-                    matched.reset();  // bounded (D-120): not checked
-                    break;
-                }
-                if (serves(point)) {
-                    continue;
-                }
-                std::uint64_t steps = 0;
-                const bool hit = matches_name_pattern(listed, name, steps);
-                pattern_work_ += RUN_TIME_NAME_WORK + steps;
-                if (hit) {
-                    matched = name;
-                    break;
-                }
-            }
-            if (matched) {
-                consider(*matched);
+            // A pattern the budget runs out in is not checked (D-120).
+            const std::optional<std::optional<std::string_view>> matched =
+                first_unserved_match(listed, health);
+            if (matched && *matched) {
+                consider(**matched);
             }
         }
         return first;
@@ -654,6 +678,9 @@ private:
     std::string_view device_;
     std::string_view point_name_;
     std::map<std::string_view, Point, std::less<>> points_;
+    // The read points of each poll group, in name order.
+    std::map<std::string_view, std::vector<std::string_view>, std::less<>>
+        reads_by_group_;
     // The first read point by name, and the first read point after it in
     // another poll group than its own; empty if none.
     std::string_view first_read_;
