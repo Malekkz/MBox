@@ -1,5 +1,7 @@
 #include "system_tags.h"
 
+#include "element.h"
+
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/diagnostics.h"
@@ -81,15 +83,15 @@ std::size_t index_of(ChannelSignal signal) noexcept {
 }  // namespace
 
 const SignalSpec& channel_signal(ChannelSignal signal) noexcept {
-    return CHANNEL_SPECS.at(index_of(signal));
+    return element(CHANNEL_SPECS, index_of(signal));
 }
 
 const SignalSpec& device_signal(DeviceSignal signal) noexcept {
-    return DEVICE_SPECS.at(static_cast<std::size_t>(signal));
+    return element(DEVICE_SPECS, static_cast<std::size_t>(signal));
 }
 
 const SignalSpec& process_signal(ProcessSignal signal) noexcept {
-    return PROCESS_SPECS.at(static_cast<std::size_t>(signal));
+    return element(PROCESS_SPECS, static_cast<std::size_t>(signal));
 }
 
 std::string channel_tag_name(std::string_view channel,
@@ -158,7 +160,7 @@ bool ProcessTags::publish_start() noexcept {
 
 bool ProcessTags::applied() noexcept {
     SystemSlot& state =
-        slots_.at(static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
+        element(slots_, static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
     return write_slot(write_, ctx_, state,
                       bits_of(static_cast<std::int64_t>(ConfigState::APPLIED)),
                       false, refused_);
@@ -166,7 +168,7 @@ bool ProcessTags::applied() noexcept {
 
 bool ProcessTags::stopped() noexcept {
     SystemSlot& state =
-        slots_.at(static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
+        element(slots_, static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));
     return write_slot(write_, ctx_, state,
                       bits_of(static_cast<std::int64_t>(ConfigState::LOADING)),
                       false, refused_);

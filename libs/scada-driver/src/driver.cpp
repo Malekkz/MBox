@@ -1,5 +1,6 @@
 #include "scada/driver/driver.h"
 
+#include "element.h"
 #include "event_throttle.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
@@ -650,7 +651,7 @@ Status Driver::Impl::take_process_owner() noexcept {
     for (std::size_t signal = 0; signal < detail::PROCESS_SIGNALS; ++signal) {
         const detail::SignalSpec& spec =
             detail::process_signal(static_cast<detail::ProcessSignal>(signal));
-        SystemSlot& slot = slots.at(signal);
+        SystemSlot& slot = detail::element(slots, signal);
         slot.type = spec.type;
         const Status resolved =
             resolve_one("the main thread", process_owner_,

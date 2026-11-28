@@ -57,7 +57,9 @@ BAD without COMM_FAIL, re-checked every `backoff`, but no sooner than one
 period of its identity points' group after the last check. With `warn` it
 runs and `identity_ok` is false. A value it cannot read is a mismatch only
 after max(`startup_grace`, 3 periods of that group); a busy answer is read
-again up to `retries` times. A cycle that nothing answered is read again a
+again up to `retries` times. A keep-alive of a device in its check proves
+the link only: verdicts come from its identity cycles alone. A cycle that
+nothing answered is read again a
 period of the device's fastest group later, so a dead device is demoted as a
 polled one is. Until the owner rules, only a RUNNING device takes writes,
 fail-safe writes included (`accepts_writes`, D-147). The log has `driver-identity-mismatch` (REASON
