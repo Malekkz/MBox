@@ -32,16 +32,18 @@ TEST_F(DriverProcess, ADeviceThatDiesAndComesBackIsDemotedAndRecovered) {
     if (!driver.has_value()) {
         FAIL() << "no driver";
     }
-    EXPECT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-device-demoted")"));
-    EXPECT_TRUE(logs(*driver, R"(MESSAGE_ID="driver-device-recovered")"));
-    EXPECT_TRUE(has(driver->err(), R"(DEVICE="d1")"));
-    EXPECT_FALSE(has(driver->err(),
-                     R"(driver-device-demoted" CHANNEL="line1" DEVICE="d2")"));
+    const bool recovered =
+        logs(*driver, R"(MESSAGE_ID="driver-device-recovered" CHANNEL=)"
+                      R"("line1" DEVICE="d1")");
+    EXPECT_TRUE(recovered);
     EXPECT_TRUE(stops_cleanly(*driver));
-    // One of each.
-    EXPECT_EQ(count_of(driver->err(), "driver-device-demoted"), 1U)
-        << driver->err();
-    EXPECT_EQ(count_of(driver->err(), "driver-device-recovered"), 1U);
+    // One of each, and both of d1.
+    const std::string err = driver->err();
+    EXPECT_TRUE(count_of(err, "driver-device-demoted") == 1 &&
+                count_of(err, R"(driver-device-demoted" CHANNEL="line1" )"
+                              R"(DEVICE="d1")") == 1 &&
+                count_of(err, "driver-device-recovered") == 1)
+        << err;
 }
 
 TEST_F(DriverProcess, APeerThatClosesTheConnectionIsALoss) {

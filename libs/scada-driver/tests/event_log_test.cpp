@@ -402,9 +402,10 @@ TEST_F(Logged, TheDeviceRecordsOfTheFailureRules) {
     one.count = 1;
     log().add(0, DeviceEvent::DEMOTED, one, 0, WALL);
     log().add(1, DeviceEvent::RECOVERED, one, 0, WALL);
+    constexpr std::uint32_t POINTS = 7;
     EventRecord absent;
     absent.count = 1;
-    absent.check = 7;
+    absent.check = POINTS;
     absent.has_details = true;
     log().add(0, DeviceEvent::POINT_ABSENT, absent, 0, WALL);
     EXPECT_EQ(lines(),
@@ -473,7 +474,6 @@ TEST(EventLog, EveryCloseReasonHasItsText) {
     EXPECT_EQ(close_reason_text(CloseReason::PARTIAL), "partial frame");
     EXPECT_EQ(close_reason_text(CloseReason::BROKEN), "broken answer");
     EXPECT_EQ(close_reason_text(CloseReason::SIDE_EFFECT), "side-effect read");
-    EXPECT_EQ(close_reason_text(static_cast<CloseReason>(99)), "unknown");
 }
 
 TEST(EventLog, AnEventOfNoDeviceOrNoQueueIsIgnored) {

@@ -436,6 +436,7 @@ private:
     TagSink* tags_;
     Status status_;
     Scheduler scheduler_;
+    std::array<EventRecord, CHANNEL_EVENTS> channel_events_{};  // D-149
     FailureTracker failures_;
     ChannelState channel_state_;
     std::vector<DeviceRun> devices_;
@@ -453,7 +454,6 @@ private:
     // `response_ms`); set by `wait_answer`.
     std::int64_t first_byte_ns_ = 0;
     bool connected_ = false;
-    std::array<EventRecord, CHANNEL_EVENTS> channel_events_{};
     // A close the driver made itself, and when (7.3, R-17): the rules of a
     // lost connection apply when `connect_timeout` passes without the
     // reconnect, whatever the connect does after.

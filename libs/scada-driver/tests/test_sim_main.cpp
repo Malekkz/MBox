@@ -249,7 +249,11 @@ std::size_t serve(std::vector<std::byte>& pending, SimBus& bus, int descriptor,
         // The last silent request of a `--silent-for` unit: it answers from
         // the next one on.
         for (SilentFor& silent : silent_for) {
-            if (silent.unit == unit && silent.left > 0 && --silent.left == 0) {
+            if (silent.unit != unit || silent.left == 0) {
+                continue;
+            }
+            --silent.left;
+            if (silent.left == 0) {
                 bus.fault(silent.unit, SimBus::Fault::NONE);
             }
         }
