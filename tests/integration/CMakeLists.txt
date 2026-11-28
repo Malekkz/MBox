@@ -256,6 +256,7 @@ scada_test_command(driver_sim_command scada-driver-test-sim)
 scada_add_test(scada-driver-process-integration-test KIND integration
   SOURCES driver_integration_test.cpp driver_stop_integration_test.cpp
     driver_identity_integration_test.cpp
+    driver_records_integration_test.cpp
     tag_writer_integration_test.cpp
   DEPENDS scada::tagd scada::tag scada::service scada::test-support
     scada::driver

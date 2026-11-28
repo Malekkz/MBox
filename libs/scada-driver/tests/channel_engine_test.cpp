@@ -2515,6 +2515,123 @@ TEST(ChannelEngine, TheLinkIsToldBeforeAConnectAndAfterALoss) {
                   ChannelLink::DISCONNECTED}));
 }
 
+// --- 11.3: the events of the log (D-149) ----------------------------------
+
+// The count of `device`'s events of `kind` since the last take, and the
+// record in `out`.
+std::uint64_t taken(ChannelEngine& engine, std::uint32_t device,
+                    DeviceEvent kind, EventRecord* out = nullptr) {
+    EventRecord record;
+    if (!engine.take_event(device, kind, record)) {
+        return 0;
+    }
+    if (out != nullptr) {
+        *out = record;
+    }
+    return record.count;
+}
+
+std::uint64_t taken(ChannelEngine& engine, ChannelEvent kind,
+                    EventRecord* out = nullptr) {
+    EventRecord record;
+    if (!engine.take_channel_event(kind, record)) {
+        return 0;
+    }
+    if (out != nullptr) {
+        *out = record;
+    }
+    return record.count;
+}
+
+TEST(EngineEvents, ADemotionAndItsRecoveryAreNotedOnceEach) {
+    Rig rig(channel_of(1, quick_failure(0, 1), TransportKind::SERIAL), 1);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::DEMOTED), 1U);
+    // Failed probes are no new demotion.
+    rig.run_until(5 * SECOND);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::DEMOTED), 0U);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::RECOVERED), 0U);
+    rig.bus.fault(1, Fault::NONE);
+    rig.run_until(15 * SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::RECOVERED), 1U);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::DEMOTED), 0U);
+}
+
+TEST(EngineEvents, AReconnectIsNoNewDemotionAndALossIsNoted) {
+    Rig rig(channel_of(2, quick_failure(0, 1), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::DEMOTED), 1U);
+    rig.transport.close_by_peer();
+    rig.run_until(4 * SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::DEMOTED);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::DEMOTED), 0U);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::RECOVERED), 0U);
+    EventRecord lost;
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::LOST, &lost), 1U);
+    EXPECT_TRUE(lost.has_details);
+    EXPECT_EQ(lost.reason, static_cast<std::uint8_t>(CloseReason::PEER));
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::CLOSED), 0U);
+}
+
+TEST(EngineEvents, EachRefusedConnectIsNoted) {
+    Rig rig(channel_of(1, quick_failure(2, 3), TransportKind::TCP), 1);
+    rig.transport.refuse_connects(3, 10 * MILLISECOND);
+    rig.run_until(8 * SECOND);
+    ASSERT_EQ(rig.state(0), DeviceStatus::RUNNING);
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::REFUSED), 3U);
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::LOST), 0U);
+}
+
+TEST(EngineEvents, AnOwnCloseIsNotedWithItsReason) {
+    // A broken frame on tcp: closed by the driver, resumed, never lost.
+    Rig rig(channel_of(2, quick_failure(2, 3), TransportKind::TCP), 2);
+    rig.run_until(300 * MILLISECOND);
+    rig.bus.fault(2, Fault::GARBAGE);
+    rig.run_until(450 * MILLISECOND);
+    rig.bus.fault(2, Fault::NONE);
+    rig.run_until(700 * MILLISECOND);
+    ASSERT_GE(rig.transport.abortive_closes(), 1);
+    EventRecord closed;
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::CLOSED, &closed),
+              static_cast<std::uint64_t>(rig.transport.abortive_closes()));
+    EXPECT_EQ(closed.reason, static_cast<std::uint8_t>(CloseReason::BROKEN));
+    EXPECT_EQ(taken(rig.engine, ChannelEvent::LOST), 0U);
+}
+
+TEST(EngineEvents, ARunOfTimeOutsIsAnOwnCloseAndALoss) {
+    Rig rig(channel_of(2, quick_failure(0, 3), TransportKind::TCP), 2);
+    rig.bus.fault(1, Fault::SILENT);
+    rig.bus.fault(2, Fault::SILENT);
+    rig.run_until(250 * MILLISECOND);
+    ASSERT_GE(rig.engine.counts().own_closes, 1U);
+    EventRecord closed;
+    EventRecord lost;
+    EXPECT_GE(taken(rig.engine, ChannelEvent::CLOSED, &closed), 1U);
+    EXPECT_GE(taken(rig.engine, ChannelEvent::LOST, &lost), 1U);
+    EXPECT_EQ(closed.reason, static_cast<std::uint8_t>(CloseReason::TIMEOUTS));
+    EXPECT_EQ(lost.reason, static_cast<std::uint8_t>(CloseReason::TIMEOUTS));
+}
+
+TEST(EngineEvents, AbsentPointsAreNotedOncePerConnection) {
+    Rig rig(channel_of(1, quick_failure(0, 1), TransportKind::TCP), 1);
+    rig.bus.fault(1, Fault::ABSENT);
+    rig.run_until(5 * FAST_PERIOD);
+    EventRecord absent;
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::POINT_ABSENT, &absent), 1U);
+    EXPECT_EQ(absent.check, 1U);  // the points of the answer
+    rig.run_until(10 * FAST_PERIOD);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::POINT_ABSENT), 0U);
+    // A new connection gives a new summary.
+    rig.transport.close_by_peer();
+    rig.run_until(10 * FAST_PERIOD + 3 * SECOND);
+    EXPECT_EQ(taken(rig.engine, 0, DeviceEvent::POINT_ABSENT), 1U);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

@@ -84,14 +84,39 @@ struct EngineCounts {
     std::uint64_t early_verdicts = 0;  // COMM_FAIL before the retries (J2)
 };
 
-// An identity or restart event of a device, for the log (D-147): noted by
-// the engine, handed to the main thread through the worker's event slot.
+// An event of a device, for the log (11.3; D-147, D-149): noted by the
+// engine, taken by the worker after each step.
 enum class DeviceEvent : std::uint8_t {
     MISMATCH = 0,  // a check failed (with `refuse` or `warn`)
     MATCH,         // a device in MISMATCH matched again
     RESTART,       // a restart of the device's unit was detected
+    DEMOTED,       // the device was demoted (7.4)
+    RECOVERED,     // a demoted device answered and is no longer demoted
+    // Points of the device are absent (5.2): the first answer that said so
+    // since the connect, once per connection; `check` holds its points.
+    POINT_ABSENT,
 };
-inline constexpr std::size_t DEVICE_EVENTS = 3;
+inline constexpr std::size_t DEVICE_EVENTS = 6;
+
+// An event of the channel's connection, for the log (11.3; D-149).
+enum class ChannelEvent : std::uint8_t {
+    LOST = 0,  // the connection is lost: every device CONNECTING (7.3)
+    REFUSED,   // a connect was refused
+    CLOSED,    // the driver closed the connection itself (7.3)
+};
+inline constexpr std::size_t CHANNEL_EVENTS = 3;
+
+// Why a connection was lost or closed: `EventRecord::reason` of a LOST or
+// CLOSED event (D-149).
+enum class CloseReason : std::uint8_t {
+    PEER = 0,     // the peer closed it, or it failed
+    TIMEOUTS,     // a run of time-outs spanning every live unit
+    NOT_RESUMED,  // the driver's own close was not followed by a reconnect
+                  // in time
+    PARTIAL,      // a frame not taken whole
+    BROKEN,       // a broken answer on a stream
+    SIDE_EFFECT,  // a side-effect read that failed
+};
 
 // The events of one kind since they were last taken: how many, and the last
 // one's details.
@@ -200,6 +225,9 @@ public:
     // range. The worker hands them to the main thread's log (D-147).
     SCADA_RT bool take_event(std::uint32_t device, DeviceEvent kind,
                              EventRecord& out) noexcept;
+    // The same for the channel's events of `kind` (D-149).
+    SCADA_RT bool take_channel_event(ChannelEvent kind,
+                                     EventRecord& out) noexcept;
     // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.
     [[nodiscard]] double requests_per_s(std::int64_t now_ns) noexcept {
         return request_rate_.per_second(now_ns);
@@ -279,14 +307,16 @@ private:
         std::uint64_t restarts = 0;
         // Per DeviceEvent: since the worker last took them.
         std::array<EventRecord, DEVICE_EVENTS> events{};
+        bool logged_demoted = false;  // a DEMOTED event not yet RECOVERED
+        bool absent_noted = false;    // POINT_ABSENT since the connect
     };
 
     // The exchange and the connection: not real-time, since they reach the
     // transport (DI 2.5); the processing they call is.
     std::int64_t try_connect(std::int64_t now_ns) noexcept;
     void lose(std::int64_t now_ns) noexcept;
-    void apply_loss() noexcept;
-    void close_own(std::int64_t now_ns, bool lost) noexcept;
+    void apply_loss(CloseReason reason) noexcept;
+    void close_own(std::int64_t now_ns, bool lost, CloseReason reason) noexcept;
     void next_connect_after_backoff(std::int64_t now_ns) noexcept;
     End attempt(const Choice& choice, DecodeResult& decoded) noexcept;
     End wait_answer(const Request& request, const Attempt& sent,
@@ -395,6 +425,9 @@ private:
     SCADA_RT void note_event(std::uint32_t device, DeviceEvent kind,
                              std::uint8_t reason, std::uint32_t check,
                              std::string_view text) noexcept;
+    // Counts an event of the channel's connection, with its reason.
+    SCADA_RT void note_channel_event(ChannelEvent kind,
+                                     CloseReason reason) noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;
@@ -420,6 +453,7 @@ private:
     // `response_ms`); set by `wait_answer`.
     std::int64_t first_byte_ns_ = 0;
     bool connected_ = false;
+    std::array<EventRecord, CHANNEL_EVENTS> channel_events_{};
     // A close the driver made itself, and when (7.3, R-17): the rules of a
     // lost connection apply when `connect_timeout` passes without the
     // reconnect, whatever the connect does after.

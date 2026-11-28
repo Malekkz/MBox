@@ -287,7 +287,7 @@ std::int64_t ChannelEngine::step() noexcept {
         // A close of our own not followed by a reconnect within
         // `connect_timeout`: the rules of a lost connection apply now,
         // whatever the connect does after (7.3, R-17; review P1).
-        apply_loss();
+        apply_loss(CloseReason::NOT_RESUMED);
     }
     if (!connected_) {
         std::int64_t next = std::min(try_connect(now), stale_due);
@@ -381,12 +381,16 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
             ++counts_.resumed;
         } else {
             if (own_close_) {
-                apply_loss();  // back, but too late (review P1)
+                // back, but too late (review P1)
+                apply_loss(CloseReason::NOT_RESUMED);
             }
             failures_.connected(now);  // keeps counts and demotion
         }
         own_close_ = false;
         connected_ = true;
+        for (DeviceRun& run : devices_) {
+            run.absent_noted = false;  // a summary per connection (11.3)
+        }
         set_link(ChannelLink::CONNECTED);
         ++counts_.connects;
         channel_state_.reset();
@@ -410,6 +414,7 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     set_link(ChannelLink::DISCONNECTED);
     if (status == IoStatus::REFUSED) {
         ++counts_.refused;
+        note_channel_event(ChannelEvent::REFUSED, CloseReason::PEER);
     }
     if (!own_close_) {
         // CONNECTING with COMM_FAIL (conformance test 16).
@@ -424,9 +429,10 @@ std::int64_t ChannelEngine::try_connect(std::int64_t now_ns) noexcept {
     return next_connect_ns_;
 }
 
-void ChannelEngine::apply_loss() noexcept {
+void ChannelEngine::apply_loss(CloseReason reason) noexcept {
     own_close_ = false;
     ++counts_.losses;
+    note_channel_event(ChannelEvent::LOST, reason);
     failures_.lost();
     scheduler_.reconnect();
     for (DeviceRun& run : devices_) {
@@ -444,16 +450,18 @@ void ChannelEngine::lose(std::int64_t now_ns) noexcept {
     connected_ = false;
     set_link(ChannelLink::DISCONNECTED);
     carry_ = 0;
-    apply_loss();
+    apply_loss(CloseReason::PEER);
     next_connect_after_backoff(now_ns);
 }
 
-void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
+void ChannelEngine::close_own(std::int64_t now_ns, bool lost,
+                              CloseReason reason) noexcept {
     transport_->close(true);
     connected_ = false;
     set_link(ChannelLink::DISCONNECTED);
     carry_ = 0;
     ++counts_.own_closes;
+    note_channel_event(ChannelEvent::CLOSED, reason);
     for (DeviceRun& run : devices_) {
         drop_chain(run);  // a chain cut by the close publishes nothing
         run.attempts = 0;
@@ -462,7 +470,7 @@ void ChannelEngine::close_own(std::int64_t now_ns, bool lost) noexcept {
     if (lost) {
         // The run of time-outs found the connection lost (7.3, R-15): its
         // rules apply at once, and the values go bad (review P1, D-139).
-        apply_loss();
+        apply_loss(reason);
     } else {
         own_close_ = true;
         own_close_ns_ = now_ns;
@@ -550,6 +558,18 @@ void ChannelEngine::publish_states() noexcept {
         }
         run.published = state;
         tags_->device_state(device, state);
+        // A demotion and the recovery that ends it, once each: a demoted
+        // device is DEMOTED again after every reconnect, which is not a new
+        // demotion (11.3; D-149).
+        if (state == DeviceStatus::DEMOTED && !run.logged_demoted) {
+            run.logged_demoted = true;
+            note_event(device, DeviceEvent::DEMOTED, 0, 0, {});
+        } else if (run.logged_demoted && state != DeviceStatus::DEMOTED &&
+                   state != DeviceStatus::CONNECTING &&
+                   state != DeviceStatus::DISABLED) {
+            run.logged_demoted = false;
+            note_event(device, DeviceEvent::RECOVERED, 0, 0, {});
+        }
         if (state == DeviceStatus::DEMOTED ||
             state == DeviceStatus::CONNECTING) {
             // What a chain held from before is never published (P9).
@@ -845,7 +865,8 @@ void ChannelEngine::exchange(const Choice& choice) noexcept {
             if (channel_->transport == TransportKind::SERIAL) {
                 failed(choice, End::TIMEOUT);  // as a time-out (7.2, Q7)
             } else {
-                close_own(now, false);  // a frame not taken whole (7.3)
+                // a frame not taken whole (7.3)
+                close_own(now, false, CloseReason::PARTIAL);
             }
             return;
         case End::ANSWER:
@@ -925,7 +946,13 @@ void ChannelEngine::answered(const Choice& choice,
     const bool refused = decoded.kind == DecodeResult::Kind::SPLIT;
     if ((refused && !scheduler_.refused(device, choice.request)) ||
         decoded.kind == DecodeResult::Kind::ABSENT) {
-        // Not on this device: its points are ABSENT (5.2, 6.3).
+        // Not on this device: its points are ABSENT (5.2, 6.3), logged
+        // once per connection (11.3).
+        if (!run.absent_noted) {
+            run.absent_noted = true;
+            note_event(device, DeviceEvent::POINT_ABSENT, 0,
+                       static_cast<std::uint32_t>(request.points.size()), {});
+        }
         sink_count_ = 0;
         for (const std::uint32_t point : request.points) {
             if (sink_count_ < sink_storage_.size()) {
@@ -949,7 +976,9 @@ void ChannelEngine::after_bad_frame(const Request& request, End end) noexcept {
         // A broken frame on a stream, or a lost side-effect read, closes
         // the connection (7.3).
         if (end == End::BROKEN || request.side_effect) {
-            close_own(now, false);
+            close_own(now, false,
+                      end == End::BROKEN ? CloseReason::BROKEN
+                                         : CloseReason::SIDE_EFFECT);
         }
         return;
     }
@@ -1056,7 +1085,8 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
     const FailureTracker::TimeoutEnd timed_out =
         failures_.read_timed_out(device, now);
     if (timed_out.lost && connected_) {
-        close_own(now, true);  // the run spans every live unit (7.3)
+        // the run spans every live unit (7.3)
+        close_own(now, true, CloseReason::TIMEOUTS);
         return;
     }
     rest_if_dead_block(choice);

@@ -11,7 +11,7 @@
 //
 //   scada-driver-test-sim (--tcp | --pty)
 //       [--map UNIT SPACE FIRST LAST] [--set UNIT SPACE ADDRESS VALUE]
-//       [--silent UNIT] [--close-after ANSWERS]
+//       [--silent UNIT] [--silent-for UNIT REQUESTS] [--close-after ANSWERS]
 //
 // Output lines: `tcp PORT` or `pty PATH` once ready; `request TIME UNIT
 // FIRST` when a request's last byte was read; `answer TIME` just before its
@@ -100,11 +100,19 @@ struct LaterSet {
     bool done = false;
 };
 
+// A unit silent for its first `left` requests, then answering again: a
+// device that dies and comes back (`--silent-for`).
+struct SilentFor {
+    std::uint8_t unit = 0;
+    std::uint32_t left = 0;
+};
+
 struct Options {
     bool tcp = false;
     bool pty = false;
     std::optional<std::size_t> close_after;
     std::vector<LaterSet> later;
+    std::vector<SilentFor> silent_for;
 };
 
 // The `count` numbers after `args[index]`; empty when they are not there.
@@ -138,6 +146,8 @@ bool apply(std::span<char*> args, std::size_t& index, SimBus& bus,
         count = REGISTER_NUMBERS;
     } else if (arg == "--set-after") {
         count = LATER_NUMBERS;
+    } else if (arg == "--silent-for") {
+        count = 2;
     }
     const std::vector<std::uint32_t> values = numbers_after(args, index, count);
     if (values.empty()) {
@@ -160,6 +170,10 @@ bool apply(std::span<char*> args, std::size_t& index, SimBus& bus,
                      .after = values[4]});
     } else if (arg == "--silent") {
         bus.fault(unit, SimBus::Fault::SILENT);
+    } else if (arg == "--silent-for") {
+        bus.fault(unit, SimBus::Fault::SILENT);
+        options.silent_for.push_back(
+            SilentFor{.unit = unit, .left = values[1]});
     } else if (arg == "--close-after") {
         options.close_after = values[0];
     } else {
@@ -203,7 +217,8 @@ bool write_all(int descriptor, std::span<const std::byte> bytes) {
 // Takes the whole requests out of `pending` and answers each on `fd`.
 // Returns the answers written.
 std::size_t serve(std::vector<std::byte>& pending, SimBus& bus, int descriptor,
-                  std::vector<LaterSet>& later) {
+                  std::vector<LaterSet>& later,
+                  std::vector<SilentFor>& silent_for) {
     std::size_t answered = 0;
     while (pending.size() >= REQUEST_BYTES) {
         const std::span<const std::byte> request =
@@ -231,6 +246,13 @@ std::size_t serve(std::vector<std::byte>& pending, SimBus& bus, int descriptor,
             }
         }
         const std::vector<std::byte> answer = bus.answer(request, now);
+        // The last silent request of a `--silent-for` unit: it answers from
+        // the next one on.
+        for (SilentFor& silent : silent_for) {
+            if (silent.unit == unit && silent.left > 0 && --silent.left == 0) {
+                bus.fault(silent.unit, SimBus::Fault::NONE);
+            }
+        }
         pending.erase(
             pending.begin(),
             pending.begin() + static_cast<std::ptrdiff_t>(REQUEST_BYTES));
@@ -301,7 +323,8 @@ int run_tcp(SimBus& bus, Options& options) {
         std::size_t answered = 0;
         Input input = Input::MORE;
         while ((input = take_input(client.get(), pending)) == Input::MORE) {
-            answered += serve(pending, bus, client.get(), options.later);
+            answered += serve(pending, bus, client.get(), options.later,
+                              options.silent_for);
             if (options.close_after && answered >= *options.close_after) {
                 break;
             }
@@ -336,7 +359,8 @@ int run_pty(SimBus& bus, Options& options) {
     say(std::string("pty ") + path.data());
     std::vector<std::byte> pending;
     while (take_input(master.get(), pending) == Input::MORE) {
-        (void)serve(pending, bus, master.get(), options.later);
+        (void)serve(pending, bus, master.get(), options.later,
+                    options.silent_for);
     }
     return 1;
 }
@@ -359,6 +383,7 @@ int main(int argc, char** argv) {
     if (args.size() < 2 || !parse(args.subspan(1), bus, options)) {
         say("usage: scada-driver-test-sim (--tcp | --pty) [--map U S F L] "
             "[--set U S A V] [--set-after U S A V N] [--silent U] "
+            "[--silent-for U N] "
             "[--close-after N]");
         return EXIT_USAGE;
     }
