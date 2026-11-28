@@ -1,0 +1,4 @@
+areas:
+  ps1:
+    description: Station 1
+    authority: { local_blocks_auto: true }

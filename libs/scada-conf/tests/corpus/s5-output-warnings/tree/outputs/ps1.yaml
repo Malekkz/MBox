@@ -1,0 +1,2 @@
+outputs:
+  - { name: ps1.a, area: ps1, kind: single, target: ps1.v1.c1, feedback: ps1.v1.pos, interlocks: [], safe_state: off, on_control_loss: { action: hold } }

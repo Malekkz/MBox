@@ -5,12 +5,13 @@
 # order: the setpoint of a deviation alarm is the BOOL bit ps1.p1.running
 # (CF-312); ps1.p2.speed is no tag; the local panel's input is no tag; the
 # template's exponent_from names no point of the device; poll group hourly
-# is not on line1; the output's feedback is no tag; tags/site.yaml defines
-# ps1.p1.flow, the point tag of ps1.p1. Invented.
+# is not on line1; the output's feedback names no tag (its target is
+# speed_sp: speed has exponent_from, which no write carries, CF-708);
+# tags/site.yaml defines ps1.p1.flow, the point tag of ps1.p1. Invented.
 alarms/ps1.yaml:3:64: CF-312
 alarms/ps1.yaml:5:12: CF-310
 areas.yaml:5:29: CF-310
 drivers/modbus/line1.yaml:7:13: CF-310
 drivers/modbus/line1.yaml:7:13: CF-604
-outputs/ps1.yaml:6:15: CF-310
+outputs/ps1.yaml:6:22: CF-310
 tags/site.yaml:2:13: CF-302

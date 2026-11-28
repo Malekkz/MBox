@@ -1,0 +1,13 @@
+# Write encodings that cannot write an output's safe side (A.5; D-124,
+# B1 of the delta check of #185), the reviewer's probes in order: a lone
+# write.on under a single and under a double with safe_state off (CF-707,
+# P46 and P47); a double whose write.values has no code 1 (CF-713, P55); a
+# single and a setpoint on a fixed write.value, which only a trigger or a
+# pulse takes (CF-702, P53 and P61); a safe value that is not a key of
+# write.values (CF-713, P60). Invented.
+outputs/ps1.yaml:2:121: CF-707
+outputs/ps1.yaml:3:119: CF-707
+outputs/ps1.yaml:4:116: CF-713
+outputs/ps1.yaml:5:55: CF-702
+outputs/ps1.yaml:6:57: CF-702
+outputs/ps1.yaml:7:111: CF-713
