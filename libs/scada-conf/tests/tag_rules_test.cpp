@@ -315,6 +315,153 @@ TEST(TagRules, APercentageNeedsRange) {
                "range"}));
 }
 
+// An `interval` finer than the tag's refresh is CW-805, at the tag's own
+// interval, else at its `logging`: a read point's poll group (`normal` by
+// default), a virtual tag's task (`normal` by default), the task an
+// internal tag names. A tag with no refresh these rules know gives none.
+TEST(TagRules, AnIntervalFinerThanTheRefresh) {
+    const std::string meter =
+        std::string(METER) +
+        "  - { name: p1, logging: { policy: sampled, interval: 500ms }, "
+        "address: { table: holding, register: 5, type: uint16 } }\n"
+        "  - { name: p2, poll_group: fast, logging: { policy: sampled, "
+        "interval: 500ms }, address: { table: holding, register: 6, type: "
+        "uint16 } }\n"
+        "  - { name: p3, poll_group: slow, logging: fast, address: { table: "
+        "holding, register: 7, type: uint16 } }\n";
+    Files files = tags(
+        "  - { name: v1, type: virtual, expr: \"1\", logging: fast }\n"
+        "  - { name: v2, type: virtual, expr: \"1\", task: slow, logging: "
+        "fast }\n"
+        "  - { name: i1, type: internal, value_type: int64, task: slow, "
+        "logging: { policy: sampled, interval: 200ms } }\n"
+        "  - { name: i2, type: internal, value_type: int64, logging: fast }\n"
+        "  - { name: m1, type: manual, value_type: int64, area: ps1, "
+        "logging: fast }\n");
+    files.emplace("logging.yaml",
+                  std::string(LOGGING) +
+                      "  fast: { mode: periodic, interval: 50ms, "
+                      "raw_retention: 1d }\n");
+    files.emplace("control/tasks.yaml",
+                  "tasks:\n  normal: { period: 20ms, programs: [] }\n"
+                  "  slow: { period: 1s, programs: [] }\n");
+    EXPECT_EQ(
+        warnings_of(files, meter),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"drivers/modbus/line1.yaml:7:11: warning CW-805: "
+               "\"ps1.m1.p1\": interval 500ms is finer than the tag's "
+               "refresh 1s\n  from template templates/meter_a.yaml:7:55 "
+               "(point p1)",
+               "drivers/modbus/line1.yaml:7:11: warning CW-805: "
+               "\"ps1.m1.p3\": interval 50ms is finer than the tag's "
+               "refresh 10s\n  from template templates/meter_a.yaml:9:44 "
+               "(point p3)",
+               "tags/site.yaml:3:64: warning CW-805: \"v2\": interval 50ms "
+               "is finer than the tag's refresh 1s",
+               "tags/site.yaml:4:102: warning CW-805: \"i1\": interval 200ms "
+               "is finer than the tag's refresh 1s"}));
+}
+
+// A channel's own poll groups replace the defaults; without
+// control/tasks.yaml a virtual tag's `normal` task runs every 100 ms (9.1).
+// An internal tag that names no task, and a manual tag, give none.
+TEST(TagRules, TheRefreshOfAChannelAndOfTheDefaultTasks) {
+    const std::string meter =
+        std::string(METER) +
+        "  - { name: p1, logging: { policy: sampled, interval: 500ms }, "
+        "address: { table: holding, register: 5, type: uint16 } }\n";
+    Files files = tags(
+        "  - { name: v1, type: virtual, expr: \"1\", logging: { policy: "
+        "sampled, interval: 100ms } }\n"
+        "  - { name: v2, type: virtual, expr: \"1\", logging: { policy: "
+        "sampled, interval: 99ms } }\n"
+        // No refresh these rules know: written by a program, or by people.
+        "  - { name: i1, type: internal, value_type: int64, logging: { "
+        "policy: sampled, interval: 99ms } }\n"
+        "  - { name: m1, type: manual, value_type: int64, area: ps1, "
+        "logging: { policy: sampled, interval: 99ms } }\n");
+    files.emplace("logging.yaml", std::string(LOGGING));
+    files.emplace("drivers/modbus/line1.yaml",
+                  "channel:\n  name: line1\n  type: rtu\n"
+                  "  device: /dev/serial/by-path/platform-serial1\n"
+                  "  poll_groups:\n    normal: { period: 500ms, priority: 1 "
+                  "}\n"
+                  "devices:\n"
+                  "  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n");
+    EXPECT_EQ(warnings_of(files, meter),
+              Lines{"tags/site.yaml:3:81: warning CW-805: \"v2\": interval "
+                    "99ms is finer than the tag's refresh 100ms"});
+}
+
+// The bits of a point are refreshed with it: a bit's own `logging`, and
+// the default policy of a bit given by its name only, are checked (items 1
+// and 2 of the review of #184).
+TEST(TagRules, TheBitsOfAPoint) {
+    Files files;
+    files.emplace("logging.yaml",
+                  std::string(LOGGING) +
+                      "  fast: { mode: periodic, interval: 50ms, "
+                      "raw_retention: 1d }\ndefault_policy: fast\n");
+    EXPECT_EQ(
+        warnings_of(files,
+                    "template: meter_a\nprotocol: modbus\nbit_order: lsb0\n"
+                    "points:\n"
+                    "  - name: status\n"
+                    "    address: { table: holding, register: 1, type: uint16 "
+                    "}\n"
+                    "    tag: false\n"
+                    "    bits: { 0: run, 1: { name: trip, logging: { policy: "
+                    "sampled, interval: 200ms } } }\n"),
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): long messages
+        (Lines{"drivers/modbus/line1.yaml:7:11: warning CW-805: "
+               "\"ps1.m1.run\": interval 50ms is finer than the tag's "
+               "refresh 1s\n  from template templates/meter_a.yaml:8:16 "
+               "(point status)",
+               "drivers/modbus/line1.yaml:7:11: warning CW-805: "
+               "\"ps1.m1.trip\": interval 200ms is finer than the tag's "
+               "refresh 1s\n  from template templates/meter_a.yaml:8:76 "
+               "(point status)"}));
+}
+
+// A control/tasks.yaml replaces the default tasks (9.1): its `normal` of
+// 1 s, not the default 100 ms, is the refresh of a virtual tag of the
+// default task (item 1 of the review of #184). A file without `normal`
+// leaves such a tag naming no task, which is CF-310 of the references.
+TEST(TagRules, ATasksFileReplacesTheDefaults) {
+    Files files = tags(
+        "  - { name: v1, type: virtual, expr: \"1\", logging: { policy: "
+        "sampled, interval: 500ms } }\n");
+    files.emplace("logging.yaml", std::string(LOGGING));
+    files.emplace("control/tasks.yaml",
+                  "tasks:\n  normal: { period: 1s, programs: [] }\n");
+    EXPECT_EQ(warnings_of(files),
+              Lines{"tags/site.yaml:2:81: warning CW-805: \"v1\": interval "
+                    "500ms is finer than the tag's refresh 1s"});
+}
+
+// A `wo` point is not refreshed: the `logging` a `defaults` map gives it
+// (no CF-614, D-120) gives no CW-805. The read point after it does, once
+// for the template's line (D-119).
+TEST(TagRules, AWriteOnlyPointHasNoRefresh) {
+    Files files;
+    files.emplace("logging.yaml",
+                  std::string(LOGGING) +
+                      "  fast: { mode: periodic, interval: 50ms, "
+                      "raw_retention: 1d }\n");
+    EXPECT_EQ(
+        warnings_of(files,
+                    "template: meter_a\nprotocol: modbus\n"
+                    "defaults: { logging: fast }\npoints:\n"
+                    "  - { name: cmd, access: wo, storage: volatile, address: "
+                    "{ table: holding, register: 1, type: uint16 } }\n"
+                    "  - { name: flow, address: { table: holding, register: "
+                    "2, type: uint16 } }\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: warning CW-805: "
+              "\"ps1.m1.flow\": interval 50ms is finer than the tag's "
+              "refresh 1s\n  from template templates/meter_a.yaml:3:22 "
+              "(point flow)"});
+}
+
 // --- Alarms (8) --------------------------------------------------------
 
 // `priorities`, `max_shelve` and `classes` are given in one alarms file

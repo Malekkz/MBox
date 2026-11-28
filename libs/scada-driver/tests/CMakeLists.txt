@@ -16,6 +16,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     driver_test.cpp
     drv_test_support.cpp
     drv_test_support_test.cpp
+    element_test.cpp
     identity_run_test.cpp
     identity_setup_test.cpp
     identity_test.cpp

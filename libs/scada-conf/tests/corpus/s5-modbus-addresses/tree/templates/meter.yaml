@@ -1,0 +1,14 @@
+template: meter
+protocol: modbus
+bit_order: lsb0
+functions: [3, 6, 16]
+read:
+  ranges:
+    - { kind: side_effect, table: holding, first: 20, last: 21 }
+points:
+  - { name: far, address: { table: holding, register: 65536, type: uint16 } }
+  - { name: flow, address: { table: holding, register: 10, type: uint32 } }
+  - { name: level, address: { table: holding, register: 11, type: uint16 } }
+  - { name: status, poll_group: fast, address: { table: holding, register: 20, type: uint16 } }
+  - { name: alarms, address: { table: holding, register: 21, type: uint16 } }
+  - { name: run, address: { table: coil, register: 1 } }

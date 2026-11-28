@@ -1,6 +1,7 @@
 #include "scada/driver/sample_processing.h"
 
 #include "checked.h"
+#include "element.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/tag_value.h"
@@ -88,6 +89,10 @@ std::uint16_t companion_flags(const CompanionInput& companion) noexcept {
 constexpr std::array<double, 21> POWERS_OF_TEN{
     1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9, 1e10,
     1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20};
+
+static_assert(POWERS_OF_TEN.size() == EXPONENT_MAX + 1 &&
+                  -EXPONENT_MIN <= EXPONENT_MAX,
+              "the table holds 10^|e| for every exponent CS 4.7 allows");
 
 // 2^63 as a binary64: every integral binary64 of smaller magnitude converts
 // to int64 exactly.
@@ -376,8 +381,11 @@ std::optional<double> apply_exponent(Work& work,
         return std::nullopt;
     }
     const std::int64_t power = rule.divide ? -*exponent : *exponent;
-    const double factor =
-        POWERS_OF_TEN.at(static_cast<std::size_t>(power >= 0 ? power : -power));
+    // In range: |power| is at most EXPONENT_MAX, checked above, and the
+    // table holds 10^0 to 10^EXPONENT_MAX (issue #181: no throwing `.at` in
+    // noexcept code).
+    const double factor = detail::element(
+        POWERS_OF_TEN, static_cast<std::size_t>(power >= 0 ? power : -power));
     // A negative power divides by the exact 10^|e|, never multiplies by an
     // inexact 10^-|e|.
     const double raw = double_of(work.sample->raw);

@@ -1,0 +1,9 @@
+unit:
+  id: site-0042
+  name: Test unit
+time:
+  timezone: Etc/UTC
+  sync:
+    mode: none
+limits:
+  max_devices_per_channel: 2

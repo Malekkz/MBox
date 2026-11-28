@@ -1,0 +1,14 @@
+# Stage 5 on the Modbus addresses (Annex A.1 to A.4; D-122): a template
+# meter at three devices of one channel. At each instance, grouped into one
+# error at the first (D-114): CF-602 (flow, uint32 at 10, meets level at
+# 11), CF-610 (status and alarms read the side-effect range 20 to 21 in fast
+# and normal), CF-615 (the coil run needs function 1, which functions
+# leaves out). CF-603 (far at register 65536 with base 0) at ps1.m1 and
+# ps1.m2 only: ps1.m3's address_base 1 makes it 65,535. CF-601 at ps1.m3,
+# whose base 1 puts its registers onto ps1.m1's on unit 1; ps1.m2 is on unit
+# 2. Invented.
+drivers/modbus/line1.yaml:7:13: CF-602
+drivers/modbus/line1.yaml:7:13: CF-603
+drivers/modbus/line1.yaml:7:13: CF-610
+drivers/modbus/line1.yaml:7:13: CF-615
+drivers/modbus/line1.yaml:9:13: CF-601
