@@ -1,0 +1,261 @@
+// Tests of LogQueue: a thread's own lock-free queue, drained by the
+// Logger's worker (driver interface contract 11.3).
+
+#include "log_capture.h"
+#include "scada/common/log.h"
+#include "scada/common/result.h"
+#include "scada/common/status.h"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace {
+
+using scada::Logger;
+using scada::LogLevel;
+using scada::LogQueue;
+using scada::Result;
+using scada::StatusCode;
+using scada::log_test::Capture;
+using scada::log_test::make_logger;
+using scada::log_test::WAIT;
+
+constexpr std::int64_t TIME_NS = 1'000;
+constexpr std::size_t SIZE = 8;
+
+// A logger with a capture sink and one queue.
+class Queued : public ::testing::Test {
+protected:
+    // Makes the logger and a queue of `size`; false if either failed.
+    bool start(std::size_t size = SIZE,
+               std::size_t logger_capacity = scada::log_test::CAPACITY) {
+        Result<Logger> made = make_logger(capture_, logger_capacity);
+        if (!made.ok()) {
+            return false;
+        }
+        logger_ = std::make_unique<Logger>(std::move(made).value());
+        queue_ = make_queue(size);
+        return queue_ != nullptr;
+    }
+    LogQueue* make_queue(std::size_t size) {
+        Result<LogQueue*> queue = logger_->make_queue(size);
+        return queue.ok() ? queue.value() : nullptr;
+    }
+    Capture& capture() { return capture_; }
+    Logger& logger() { return *logger_; }
+    LogQueue& queue() { return *queue_; }
+    // Destroys the logger, which delivers what it holds.
+    void end_logger() { logger_.reset(); }
+
+private:
+    Capture capture_;
+    std::unique_ptr<Logger> logger_;
+    LogQueue* queue_ = nullptr;
+};
+
+TEST_F(Queued, MakeQueueChecksTheCapacity) {
+    if (!start(1)) {
+        FAIL() << "logger or queue not made";
+    }
+    EXPECT_EQ(queue().capacity(), 1U);
+    EXPECT_EQ(logger().make_queue(0).status().code(), StatusCode::OUT_OF_RANGE);
+    EXPECT_EQ(
+        logger().make_queue(scada::LOG_MAX_QUEUE_CAPACITY + 1).status().code(),
+        StatusCode::OUT_OF_RANGE);
+}
+
+TEST_F(Queued, AMovedFromLoggerMakesNoQueue) {
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    const Logger target = std::move(logger());
+    // NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what is tested
+    EXPECT_EQ(logger().make_queue(SIZE).status().code(),
+              StatusCode::FAILED_PRECONDITION);
+}
+
+TEST_F(Queued, PushedRecordsAreDeliveredInOrderWithoutAWake) {
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    queue().push(LogLevel::INFO, TIME_NS, "started");
+    queue().push(LogLevel::WARNING, TIME_NS, "link down",
+                 {{"PEER", "ps2"}, {"ATTEMPT", "3"}});
+    // Below min_level: queued, then discarded by the worker.
+    queue().push(LogLevel::DEBUG, TIME_NS, "detail");
+    queue().push(LogLevel::ERROR, TIME_NS, "write failed",
+                 {{"bad key", "x"}, {"CODE", "17"}});
+    // Nothing wakes the worker: it finds them at its poll.
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    const std::vector<std::string> expected{
+        "6|unit-test|started",
+        "4|unit-test|link down|PEER=ps2|ATTEMPT=3",
+        "3|unit-test|write failed|CODE=17",
+    };
+    EXPECT_EQ(capture().snapshot(), expected);
+    EXPECT_EQ(logger().dropped(), 0U);
+}
+
+// Pushes `count` records "queued" numbered from 0; returns how many the
+// queue took.
+std::size_t push_numbered(LogQueue& queue, std::size_t count) {
+    std::size_t accepted = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (queue.push(LogLevel::INFO, TIME_NS, "queued",
+                       {{"N", std::to_string(i)}})) {
+            ++accepted;
+        }
+    }
+    return accepted;
+}
+
+// The records of the loss test: the first, the `kept` queued ones, then
+// the notice of `lost`.
+std::vector<std::string> after_loss(std::size_t kept, std::size_t lost) {
+    std::vector<std::string> expected{"6|unit-test|first"};
+    for (std::size_t i = 0; i < kept; ++i) {
+        expected.push_back("6|unit-test|queued|N=" + std::to_string(i));
+    }
+    expected.push_back(
+        "4|unit-test|log records dropped: the queue was full|DROPPED=" +
+        std::to_string(lost));
+    return expected;
+}
+
+constexpr std::size_t EXTRA = 3;
+
+// The worker blocks inside the sink with a record of its own queue, so it
+// takes nothing from the LogQueue while SIZE + EXTRA records are pushed;
+// returns how many the queue took, or 0 if the set-up failed.
+std::size_t overfill_while_stalled(Capture& capture, Logger& logger,
+                                   LogQueue& queue) {
+    logger.log(LogLevel::INFO, "first");
+    if (!capture.wait_for_entered(1)) {
+        return 0;
+    }
+    return push_numbered(queue, SIZE + EXTRA);
+}
+
+TEST_F(Queued, AFullQueueDropsAndCounts) {
+    capture().set_stalled(true);
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    EXPECT_EQ(overfill_while_stalled(capture(), logger(), queue()), SIZE);
+    EXPECT_EQ(queue().dropped(), EXTRA);
+    EXPECT_EQ(logger().dropped(), EXTRA);
+    capture().set_stalled(false);
+}
+
+TEST_F(Queued, TheLossIsReportedAfterTheKeptRecords) {
+    capture().set_stalled(true);
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    EXPECT_EQ(overfill_while_stalled(capture(), logger(), queue()), SIZE);
+    capture().set_stalled(false);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    EXPECT_EQ(capture().snapshot(), after_loss(SIZE, EXTRA));
+    // Room again once drained.
+    EXPECT_TRUE(queue().push(LogLevel::INFO, TIME_NS, "again"));
+}
+
+TEST_F(Queued, TheDestructorDeliversQueuedRecords) {
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    EXPECT_EQ(push_numbered(queue(), SIZE), SIZE);
+    end_logger();
+    EXPECT_EQ(capture().snapshot().size(), SIZE);
+}
+
+TEST_F(Queued, AQueueOutlivesAMoveOfItsLogger) {
+    if (!start()) {
+        FAIL() << "logger or queue not made";
+    }
+    Logger moved = std::move(logger());
+    EXPECT_TRUE(queue().push(LogLevel::INFO, TIME_NS, "after move"));
+    EXPECT_TRUE(moved.flush(WAIT).ok());
+    EXPECT_EQ(capture().snapshot(),
+              std::vector<std::string>{"6|unit-test|after move"});
+}
+
+// Success if `records` holds thread `thread`'s `count` records in order.
+::testing::AssertionResult in_order(const std::vector<std::string>& records,
+                                    std::size_t thread, std::size_t count) {
+    const std::string prefix =
+        "6|unit-test|queued|THREAD=" + std::to_string(thread) + "|N=";
+    std::size_t next = 0;
+    for (const std::string& record : records) {
+        if (record.starts_with(prefix)) {
+            if (record != prefix + std::to_string(next)) {
+                return ::testing::AssertionFailure()
+                       << record << " where N=" << next << " was due";
+            }
+            ++next;
+        }
+    }
+    if (next != count) {
+        return ::testing::AssertionFailure()
+               << "thread " << thread << ": " << next << " of " << count;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Pushes `count` records into each queue from a thread of its own, and logs
+// `count` through `logger` from one more thread; returns when all are done.
+void run_producers(Logger& logger, const std::vector<LogQueue*>& queues,
+                   std::size_t count) {
+    std::vector<std::jthread> threads;
+    threads.reserve(queues.size() + 1);
+    for (std::size_t thread = 0; thread < queues.size(); ++thread) {
+        threads.emplace_back([queue = queues[thread], thread, count] {
+            for (std::size_t i = 0; i < count; ++i) {
+                queue->push(LogLevel::INFO, TIME_NS, "queued",
+                            {{"THREAD", std::to_string(thread)},
+                             {"N", std::to_string(i)}});
+            }
+        });
+    }
+    // `logger` outlives the threads: they are joined before the return.
+    threads.emplace_back([&logger, count] {
+        for (std::size_t i = 0; i < count; ++i) {
+            logger.log(LogLevel::INFO, "direct");
+        }
+    });
+}
+
+// Several threads, each with its own queue, while the Logger's own queue is
+// used too: every record arrives once, each queue's in its order.
+TEST_F(Queued, ConcurrentProducersEachKeepTheirOrder) {
+    constexpr std::size_t THREADS = 4;
+    constexpr std::size_t PER_THREAD = 500;
+    if (!start(PER_THREAD, PER_THREAD)) {
+        FAIL() << "logger or queue not made";
+    }
+    std::vector<LogQueue*> queues{&queue()};
+    while (queues.size() < THREADS) {
+        queues.push_back(make_queue(PER_THREAD));
+    }
+    if (std::find(queues.begin(), queues.end(), nullptr) != queues.end()) {
+        FAIL() << "queue not made";
+    }
+    run_producers(logger(), queues, PER_THREAD);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    const std::vector<std::string> records = capture().snapshot();
+    EXPECT_EQ(records.size(), (THREADS + 1) * PER_THREAD);
+    EXPECT_EQ(logger().dropped(), 0U);
+    for (std::size_t thread = 0; thread < THREADS; ++thread) {
+        EXPECT_TRUE(in_order(records, thread, PER_THREAD));
+    }
+}
+
+}  // namespace

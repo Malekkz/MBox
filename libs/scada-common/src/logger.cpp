@@ -99,6 +99,102 @@ bool is_valid_component(std::string_view component) noexcept {
 
 }  // namespace
 
+// A single-producer, single-consumer ring. `tail_` is written by the
+// producer only and `head_` by the Logger's worker only; each publishes the
+// slots before it with release, and the other side reads it with acquire, so
+// a slot is never read and written at once. The indexes count records since
+// creation: at 2^64 records they would wrap, which no process lives to see.
+class LogQueue::Impl {
+public:
+    explicit Impl(std::size_t capacity) : ring_(capacity) {}
+
+    SCADA_RT bool push(LogLevel level, std::int64_t time_ns,
+                       std::string_view message,
+                       std::span<const LogField> fields) noexcept {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t head = head_.load(std::memory_order_acquire);
+        if (tail - head == ring_.size()) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        fill_slot(ring_[tail % ring_.size()], level, time_ns, message, fields);
+        tail_.store(tail + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Worker thread: moves the oldest record into `out`; false when empty.
+    bool pop(Slot& out) noexcept {
+        const std::size_t head = head_.load(std::memory_order_relaxed);
+        const std::size_t tail = tail_.load(std::memory_order_acquire);
+        if (head == tail) {
+            return false;
+        }
+        out = ring_[head % ring_.size()];
+        head_.store(head + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Any thread: true if no record waits. Exact for the worker; another
+    // thread may see a record that is being taken.
+    [[nodiscard]] bool empty() const noexcept {
+        return head_.load(std::memory_order_acquire) ==
+               tail_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::uint64_t dropped() const noexcept {
+        return dropped_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::size_t capacity() const noexcept { return ring_.size(); }
+
+    // Drops already in a notice. Any thread may read it with the Logger's
+    // mutex held; the worker writes it outside the mutex, so it is atomic.
+    [[nodiscard]] std::uint64_t reported() const noexcept {
+        return reported_.load(std::memory_order_relaxed);
+    }
+
+    // Worker thread only: drops counted since the last notice.
+    std::uint64_t take_unreported() noexcept {
+        const std::uint64_t now = dropped();
+        return now - reported_.exchange(now, std::memory_order_relaxed);
+    }
+
+private:
+    std::vector<Slot> ring_;  // fixed size; never grows
+    std::atomic<std::size_t> head_{0};
+    std::atomic<std::size_t> tail_{0};
+    // Statistics only, as the Logger's own counts.
+    std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> reported_{0};  // written by the worker only
+};
+
+LogQueue::LogQueue(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+LogQueue::~LogQueue() = default;
+
+bool LogQueue::push(LogLevel level, std::int64_t time_ns,
+                    std::string_view message,
+                    std::span<const LogField> fields) noexcept {
+    return impl_->push(level, time_ns, message, fields);
+}
+
+bool LogQueue::push(LogLevel level, std::int64_t time_ns,
+                    std::string_view message,
+                    std::initializer_list<LogField> fields) noexcept {
+    return impl_->push(
+        level, time_ns, message,
+        std::span<const LogField>(fields.begin(), fields.size()));
+}
+
+std::uint64_t LogQueue::dropped() const noexcept {
+    return impl_->dropped();
+}
+
+std::size_t LogQueue::capacity() const noexcept {
+    return impl_->capacity();
+}
+
 // The state behind a Logger. It has a stable address, which the worker thread
 // relies on.
 class Logger::Impl {
@@ -138,17 +234,39 @@ public:
 
     [[nodiscard]] Status flush(std::chrono::milliseconds timeout) noexcept {
         std::unique_lock lock(mutex_);
-        const bool idle = idle_cv_.wait_for(lock, timeout, [this] {
-            return count_ == 0 && dropped_unreported_ == 0 && !busy_;
-        });
+        const bool idle =
+            idle_cv_.wait_for(lock, timeout, [this] { return idle_locked(); });
         if (!idle) {
             return {StatusCode::TIMEOUT, "log queue not delivered in time"};
         }
         return {};
     }
 
+    [[nodiscard]] Result<LogQueue*> make_queue(std::size_t capacity) noexcept {
+        if (capacity == 0 || capacity > LOG_MAX_QUEUE_CAPACITY) {
+            return Status(StatusCode::OUT_OF_RANGE,
+                          "log queue capacity is out of range");
+        }
+        try {
+            auto queue = std::make_unique<LogQueue>(
+                std::make_unique<LogQueue::Impl>(capacity));
+            LogQueue* const made = queue.get();
+            const std::scoped_lock lock(mutex_);
+            queues_.push_back(std::move(queue));
+            return made;
+        } catch (const std::bad_alloc&) {
+            return Status(StatusCode::RESOURCE_EXHAUSTED,
+                          "out of memory creating a log queue");
+        }
+    }
+
     [[nodiscard]] std::uint64_t dropped() const noexcept {
-        return dropped_total_.load(std::memory_order_relaxed);
+        std::uint64_t total = dropped_total_.load(std::memory_order_relaxed);
+        const std::scoped_lock lock(mutex_);
+        for (const std::unique_ptr<LogQueue>& queue : queues_) {
+            total += queue->impl_->dropped();
+        }
+        return total;
     }
 
     [[nodiscard]] std::uint64_t sink_failures() const noexcept {
@@ -156,8 +274,11 @@ public:
     }
 
 private:
-    // Worker thread: takes records from the queue and hands them to the
-    // sink. After a stop request it delivers what is queued, then returns.
+    // Worker thread: takes records from its own queue and from every
+    // LogQueue and hands them to the sink. It waits for a record of its own
+    // queue or at most LOG_QUEUE_POLL_MS, since a push into a LogQueue does
+    // not wake it. After a stop request it delivers what is queued anywhere,
+    // then returns.
     void run(const std::stop_token& stop) noexcept {
         Slot slot;
         for (;;) {
@@ -166,16 +287,15 @@ private:
             {
                 std::unique_lock lock(mutex_);
                 busy_ = false;
-                if (count_ == 0 && dropped_unreported_ == 0) {
+                if (idle_locked()) {
                     idle_cv_.notify_all();
+                    if (stop.stop_requested()) {
+                        return;
+                    }
                 }
-                // Returns false only if a stop was requested and nothing is
-                // left to deliver.
-                if (!work_cv_.wait(lock, stop, [this] {
-                        return count_ > 0 || dropped_unreported_ > 0;
-                    })) {
-                    return;
-                }
+                work_cv_.wait_for(
+                    lock, stop, std::chrono::milliseconds(LOG_QUEUE_POLL_MS),
+                    [this] { return count_ > 0 || dropped_unreported_ > 0; });
                 if (count_ > 0) {
                     slot = ring_[head_];
                     head_ = (head_ + 1) % ring_.size();
@@ -188,10 +308,55 @@ private:
             }
             if (have_record) {
                 deliver(slot);
-            } else {
+            } else if (dropped_count > 0) {
                 deliver_drop_notice(dropped_count);
             }
+            drain_queues(slot);
         }
+    }
+
+    // Worker thread: delivers every record the LogQueues hold now, then one
+    // notice for the records they dropped since the last one.
+    void drain_queues(Slot& slot) noexcept {
+        std::uint64_t dropped_count = 0;
+        for (std::size_t index = 0;; ++index) {
+            LogQueue::Impl* queue = nullptr;
+            {
+                // The list only grows, and each queue lives as long as this
+                // Impl, so the pointer stays valid after the lock.
+                const std::scoped_lock lock(mutex_);
+                if (index == queues_.size()) {
+                    break;
+                }
+                queue = queues_[index]->impl_.get();
+            }
+            // At most one ring's worth per round, so that a producer that
+            // keeps pushing cannot hold the worker on one queue.
+            for (std::size_t taken = 0;
+                 taken < queue->capacity() && queue->pop(slot); ++taken) {
+                if (slot.level <= min_level_) {
+                    deliver(slot);
+                }
+            }
+            dropped_count += queue->take_unreported();
+        }
+        if (dropped_count > 0) {
+            deliver_drop_notice(dropped_count);
+        }
+    }
+
+    // True when everything accepted so far was handed to the sink. Called
+    // with `mutex_` held.
+    [[nodiscard]] bool idle_locked() const noexcept {
+        if (count_ > 0 || dropped_unreported_ > 0 || busy_) {
+            return false;
+        }
+        return std::all_of(queues_.begin(), queues_.end(),
+                           [](const std::unique_ptr<LogQueue>& queue) {
+                               return queue->impl_->empty() &&
+                                      queue->impl_->dropped() ==
+                                          queue->impl_->reported();
+                           });
     }
 
     void deliver(const Slot& slot) noexcept {
@@ -233,7 +398,7 @@ private:
 
     // Protects the members below up to `busy_`. Held only to copy one record
     // in or out, never during a sink call; that is what bounds `log`.
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable_any work_cv_;  // there is something to deliver
     std::condition_variable idle_cv_;      // everything accepted was delivered
     std::vector<Slot> ring_;               // fixed size; never grows
@@ -241,6 +406,8 @@ private:
     std::size_t count_ = 0;                // records queued
     std::uint64_t dropped_unreported_ = 0;
     bool busy_ = false;  // the worker is inside a sink call
+    // The LogQueues, in the order made. Only grows; drained by the worker.
+    std::vector<std::unique_ptr<LogQueue>> queues_;
 
     // Statistics only, so relaxed ordering is enough: no other data depends
     // on the order in which these are observed.
@@ -300,6 +467,14 @@ void Logger::log(LogLevel level, std::string_view message,
 
 Status Logger::flush(std::chrono::milliseconds timeout) noexcept {
     return impl_ ? impl_->flush(timeout) : Status();
+}
+
+Result<LogQueue*> Logger::make_queue(std::size_t capacity) noexcept {
+    if (!impl_) {
+        return Status(StatusCode::FAILED_PRECONDITION,
+                      "the logger was moved from");
+    }
+    return impl_->make_queue(capacity);
 }
 
 std::uint64_t Logger::dropped() const noexcept {
