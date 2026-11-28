@@ -2,9 +2,9 @@
 # (4.1; D-116): 2,800 one-point devices pass stage 4, which counts their
 # 2,800 point tags, and stage 5 refuses the tree. Each device has 17
 # signals of the driver interface contract (11.1) and its point's tag, the
-# tree 21 process tags and each of its 12 channels 8. The channels hold at
+# tree 20 process tags and each of its 12 channels 8. The channels hold at
 # most 247 devices each (CF-605; D-123) and are read in path order, line1,
 # line10 to line12, line2 to line9: the 2,772nd device, the 219th of line9,
-# passes the default of 50,000 with 50,013 tags (CF-1001, at that device).
+# passes the default of 50,000 with 50,012 tags (CF-1001, at that device).
 # Invented.
 drivers/modbus/line9.yaml:225:13: CF-1001

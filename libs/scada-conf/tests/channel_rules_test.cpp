@@ -84,6 +84,26 @@ TEST(ChannelRules, TooManyDevicesOnAChannel) {
                     "line1 has 3 devices, the limit is 2"});
 }
 
+// The limit holds on every protocol: an `io` channel (item 1 of the
+// review of #184).
+TEST(ChannelRules, TheLimitOnAnIoChannel) {
+    Files files = {
+        {"templates/io_a.yaml",
+         "template: io_a\nprotocol: io\npoints:\n"
+         "  - { name: lamp, address: { line: 1, direction: input } }\n"},
+        {"drivers/io/local.yaml",
+         "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
+         "devices:\n  - { name: ps1.a, template: io_a }\n"
+         "  - { name: ps1.b, template: io_a }\n"
+         "  - { name: ps1.c, template: io_a }\n"}};
+    files.emplace(
+        "system.yaml",
+        std::string(SYSTEM) + "limits: { max_devices_per_channel: 2 }\n");
+    EXPECT_EQ(diagnostics_of(files),
+              Lines{"drivers/io/local.yaml:1:18: error CF-605: channel local "
+                    "has 3 devices, the limit is 2"});
+}
+
 // The default limit is 247 (4.1).
 TEST(ChannelRules, TheDefaultLimitIs247) {
     EXPECT_EQ(diagnostics_of({{"drivers/modbus/line1.yaml",
