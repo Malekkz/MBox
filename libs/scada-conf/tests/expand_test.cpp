@@ -865,6 +865,29 @@ TEST(Expand, TheIdentityChecksAreEvaluated) {
               "\"1 > 2\": the value must be an INT, not BOOL"});
 }
 
+// A template's `address_base` (A.1: a template and device key) is a key of
+// the expanded device, as `functions` and `read` are; the instance's wins.
+TEST(Expand, AddressBaseComesFromTheTemplate) {
+    const std::string meter =
+        "template: meter_a\nprotocol: modbus\naddress_base: 1\n"
+        "points:\n"
+        "  - { name: p, address: { table: holding, register: 1, type: "
+        "uint16 } }\n";
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml", one_device()}},
+                     true),
+              (Lines{"ps1.m1: {address_base: 1, unit_id: 1}",
+                     "ps1.m1.p: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+    EXPECT_EQ(expand({{"templates/meter_a.yaml", meter},
+                      {"drivers/modbus/line1.yaml",
+                       one_device("    address_base: 0\n")}},
+                     true),
+              (Lines{"ps1.m1: {address_base: 0, unit_id: 1}",
+                     "ps1.m1.p: {address: {table: holding, register: 1, "
+                     "type: uint16}}"}));
+}
+
 // --- The review of #146 ------------------------------------------------
 
 // B1: a range over the whole INT span is refused from its bounds; its
