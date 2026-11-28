@@ -1,6 +1,7 @@
 #include "worker.h"
 
 #include "event_log.h"
+#include "scada/common/log.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/status.h"

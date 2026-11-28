@@ -1,5 +1,6 @@
 #include "drv_test_support.h"
 
+#include "scada/common/log.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/connections.h"

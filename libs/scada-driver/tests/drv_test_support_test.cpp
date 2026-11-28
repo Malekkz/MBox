@@ -5,6 +5,8 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/identity.h"
 
+#include "scada/driver/driver.h"
+
 #include <gtest/gtest.h>
 
 #include <optional>

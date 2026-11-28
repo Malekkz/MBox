@@ -6,9 +6,7 @@
 #include "scada/common/log.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
-#include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
-#include "scada/driver/identity_run.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
@@ -242,6 +240,14 @@ private:
                                     fields);
         } else if (logger_ != nullptr) {
             logger_->log(level, message, fields);
+        }
+    }
+    // Every queue to the journal, the workers' included, once they have
+    // returned and before the Logger stops (11.3, D-148). A flush that
+    // times out loses only records.
+    void drain_logs() noexcept {
+        if (logger_ != nullptr) {
+            (void)logger_->flush(LOG_FLUSH_LIMIT);
         }
     }
     // The queues: the main thread's, and one per worker given before its
@@ -911,12 +917,7 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
     for (;;) {
         if (all_joined()) {
             process_stopped();
-            if (logger_ != nullptr) {
-                // Every queue to the journal, the workers' included, now
-                // that they have returned and before the Logger stops
-                // (11.3, D-148). A flush that times out loses only records.
-                (void)logger_->flush(LOG_FLUSH_LIMIT);
-            }
+            drain_logs();
             return end;
         }
         const std::int64_t now = scada::monotonic_ns();

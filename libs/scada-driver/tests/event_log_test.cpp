@@ -11,11 +11,13 @@
 #include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/identity_run.h"
+#include "scada/driver/plan.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -92,7 +94,8 @@ EventRecord mismatch(std::uint64_t count, std::string_view value) {
 // A logger with a capture sink and one worker queue of `capacity`.
 class Logged : public ::testing::Test {
 protected:
-    bool start(std::size_t capacity = 16) {
+    static constexpr std::size_t CAPACITY = 16;
+    bool start(std::size_t capacity = CAPACITY) {
         Result<Logger> made = Logger::create(
             std::make_unique<LinesSink>(lines_), {.component = "unit-test"});
         if (!made.ok()) {
@@ -160,7 +163,7 @@ TEST_F(Logged, EachDeviceAndKindIsLimitedApart) {
     log().add(0, DeviceEvent::MISMATCH, mismatch(1, "8"), 0, WALL);
     log().add(1, DeviceEvent::MISMATCH, mismatch(1, "8"), 0, WALL);
     log().add(0, DeviceEvent::RESTART, restart, 0, WALL);
-    EventRecord matched = mismatch(1, "7");
+    const EventRecord matched = mismatch(1, "7");
     log().add(0, DeviceEvent::MATCH, matched, 0, WALL);
     const std::vector<std::string> got = lines();
     ASSERT_EQ(got.size(), 4U);
@@ -212,7 +215,8 @@ TEST_F(Logged, AFullQueueDropsAndCounts) {
     }
     EventRecord restart;
     restart.count = 1;
-    for (int round = 0; round < 50; ++round) {
+    constexpr int ROUNDS = 50;
+    for (int round = 0; round < ROUNDS; ++round) {
         log().add(0, DeviceEvent::RESTART, restart, round * PERIOD, WALL);
         log().add(1, DeviceEvent::RESTART, restart, round * PERIOD, WALL);
     }
