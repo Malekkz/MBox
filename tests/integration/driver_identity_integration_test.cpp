@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdlib>
@@ -265,6 +266,72 @@ TEST_F(DriverProcess, AFullWorkerQueuesDropsShowInLogDropped) {
 // `devices` devices d1, d2, ... of unit 1 on channel line1, d1 with a
 // restart rule on `v`: a restart d1 sees is the unit's, so every device
 // restarts in the same step. The worker's log queue holds `queue` records.
+// d1 and d2 of unit 1, d1 with a restart after 20 requests, logging into a
+// slow journal that refuses every record (`--refuse-log MS` writes each to
+// standard error and reports it refused MS ms later). After the stop, the
+// last `log_dropped` must equal the records written (PR 182 S1, S5).
+class RefusedJournal : public DriverProcess {
+protected:
+    void check(const std::string& delay_ms) {
+        start_tagd({{.name = "line1", .tags = {"d1.v", "d2.v"}}});
+        std::optional<ChildProcess> sim =
+            start_sim({"--set", "1", "0", "0", "5", "--set-after", "1", "0",
+                       "0", "3", "20"});
+        if (!sim.has_value()) {
+            FAIL() << "no simulator";
+        }
+        std::optional<ChildProcess> driver = start_driver(
+            joined(std::vector<std::string>{"--refuse-log", delay_ms},
+                   tcp_channel("line1", port_of(*sim)), device("d1", 1, "0"),
+                   std::vector<std::string>{"--restart-decreases", "0"},
+                   device("d2", 1, "0")));
+        if (!driver.has_value()) {
+            FAIL() << "no driver";
+        }
+        observe();
+        EXPECT_TRUE(eventually(
+            handle("sys.dev.d2.restarts"), [](const scada_value& value) {
+                return value.quality == SCADA_QUALITY_GOOD && value.value == 1;
+            }));
+        EXPECT_TRUE(stops_cleanly(*driver));
+        const std::string err = driver->err();
+        // A record is a line "<time> <LEVEL> scada-drv-test: ...".
+        std::size_t records = 0;
+        for (std::size_t at = 0; at < err.size();) {
+            const std::size_t end = std::min(err.find('\n', at), err.size());
+            const std::string_view line(err.data() + at, end - at);
+            if (line.starts_with("20") &&
+                line.find(" scada-drv-test: ") != std::string_view::npos) {
+                ++records;
+            }
+            at = end + 1;
+        }
+        EXPECT_GE(records, 4U) << err;  // running, two restarts, stopping
+        const scada_value dropped =
+            read(handle("sys.proc.drv-test.log_dropped"));
+        EXPECT_EQ(std::bit_cast<std::int64_t>(dropped.value),
+                  static_cast<std::int64_t>(records))
+            << err;
+    }
+};
+
+TEST_F(RefusedJournal, TheLastLogDroppedCountsTheDrainsRefusals) {
+    // 200 ms a record: the stop's records are still on their way when the
+    // workers have returned. `log_dropped` is written after the drain of
+    // every queue, which waits for them: one written before the drain, or
+    // no drain at all (the Logger's destructor delivers them later),
+    // counts fewer than the lines.
+    check("200");
+}
+
+TEST_F(RefusedJournal, RecordsTheDrainLeftUndeliveredCountAsDropped) {
+    // 1 s a record: the restart records and the stop's are still queued
+    // when the drain's 1 s runs out. Those it left count as dropped (S5);
+    // the Logger's destructor then delivers them to the refusing journal,
+    // so the lines match the count again.
+    check("1000");
+}
+
 // The least size of a worker's queue (MIN_WORKER_LOG_QUEUE).
 constexpr std::size_t QUEUE = 64;
 

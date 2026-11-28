@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -99,7 +100,7 @@ constexpr std::size_t MAX_LOG_QUEUE = LOG_MAX_QUEUE_CAPACITY;
 constexpr std::string_view USAGE =
     "usage: scada-drv-test --base-dir DIR [--retain-dir DIR] [--tagd-uid N]\n"
     "           [--heartbeat-ms N] [--refuse-write TAG VALUE SKIP]\n"
-    "           [--worker-log-queue N]\n"
+    "           [--worker-log-queue N] [--refuse-log MS]\n"
     "         ( --channel NAME (tcp HOST PORT | serial PATH BAUD)\n"
     "               [--connect-timeout-ms N] [--reconnect-ms MIN MAX]\n"
     "               [--disabled] [--hang | --spin]\n"
@@ -117,7 +118,10 @@ constexpr std::string_view USAGE =
     "spin for good, deaf to the stop. --refuse-write refuses the writes of\n"
     "VALUE to the system tag TAG once SKIP of them were written.\n"
     "--worker-log-queue sets the records of each worker's log queue (by\n"
-    "default two per device of its channel, at least 64).\n"
+    "default two per device of its channel, at least 64). --refuse-log\n"
+    "writes every log record, waits MS ms (0 to 1000) and then reports it\n"
+    "refused, as a slow journal that refuses it would, so that\n"
+    "log_dropped counts it.\n"
     "--substitute writes VALUE, UNCERTAIN with SUBSTITUTED, when the point\n"
     "reads RAW (`on_invalid: { substitute: VALUE }` of that pattern).\n"
     "--identify-equals checks that the device's POINT (its index among\n"
@@ -262,6 +266,14 @@ private:
         }
         if (arg == "--refuse-write") {
             return refuse_write();
+        }
+        if (arg == "--refuse-log") {
+            constexpr std::int64_t MOST_MS = 1'000;
+            if (!take(options_.refuse_log_ms, MOST_MS)) {
+                return false;
+            }
+            options_.refuse_log = true;
+            return true;
         }
         if (arg == "--worker-log-queue") {
             std::size_t records = 0;
@@ -587,6 +599,31 @@ std::unique_ptr<Transport> make_transport(const CompiledChannel& channel,
             std::make_unique<FaultyTransport>(std::move(made), endpoint.fault);
     }
     return made;
+}
+
+namespace {
+
+class RefusingSink final : public LogSink {
+public:
+    RefusingSink(std::unique_ptr<LogSink> inner, std::int64_t delay_ms)
+        : inner_(std::move(inner)), delay_(delay_ms) {}
+    [[nodiscard]] Status write(const LogRecord& record) noexcept override {
+        (void)inner_->write(record);
+        // The journal's slowness, not a wait for something.
+        std::this_thread::sleep_for(delay_);
+        return {StatusCode::UNAVAILABLE, "refused by --refuse-log"};
+    }
+
+private:
+    std::unique_ptr<LogSink> inner_;
+    std::chrono::milliseconds delay_;
+};
+
+}  // namespace
+
+std::unique_ptr<LogSink> refusing_sink(std::unique_ptr<LogSink> inner,
+                                       std::int64_t delay_ms) {
+    return std::make_unique<RefusingSink>(std::move(inner), delay_ms);
 }
 
 }  // namespace scada::driver::test

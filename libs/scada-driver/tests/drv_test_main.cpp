@@ -49,8 +49,13 @@ int main(int argc, char** argv) {
     if (!sink.ok()) {
         return driver::EXIT_ERROR;
     }
+    std::unique_ptr<scada::LogSink> output = std::move(sink).value();
+    if (options->refuse_log) {
+        output = driver::test::refusing_sink(std::move(output),
+                                              options->refuse_log_ms);
+    }
     scada::Result<scada::Logger> logger = scada::Logger::create(
-        std::move(sink).value(), {.component = "scada-drv-test"});
+        std::move(output), {.component = "scada-drv-test"});
     if (!logger.ok()) {
         return driver::EXIT_ERROR;
     }
