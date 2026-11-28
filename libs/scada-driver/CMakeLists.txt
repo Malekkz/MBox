@@ -13,6 +13,7 @@ scada_add_library(scada-driver
     src/diagnostics.cpp
     src/driver.cpp
     src/event_slot.cpp
+    src/event_throttle.cpp
     src/failure.cpp
     src/fd_io.cpp
     src/identity.cpp

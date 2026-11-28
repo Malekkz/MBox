@@ -120,10 +120,21 @@ bool write_slot(TagWriteFn write, scada_ctx* ctx, SystemSlot& slot,
 // The slots of a channel: CHANNEL_SIGNALS, then one `period.<group>` per
 // poll group, then DEVICE_SIGNALS per device of the channel (disabled ones
 // too). Filled by the main thread when it resolves the tags.
+// The text a STRING system tag was last written with, kept whole so that a
+// new text is compared byte by byte: the device chooses the identity text,
+// so it could build a collision of any hash of it (PR 177 S3).
+struct KeptText {
+    std::array<char, TAG_STRING_MAX_BYTES> bytes{};
+    std::size_t length = 0;
+};
+
 struct SystemTagHandles {
     std::vector<SystemSlot> slots;
     std::size_t groups = 0;
     std::size_t devices = 0;
+    // One per device, for its `identity` (D-147); sized with `devices`.
+    // A device without one has its text written at every call.
+    std::vector<KeptText> identity_texts;
     // How they are written: the library's, or a test's (review M4).
     TagWriteFn write = &scada_tag_write;
     TagWriteTextFn write_text = &scada_tag_write_string;
@@ -189,9 +200,11 @@ private:
     // Writes `bits` of the slot's type if it differs from the last value,
     // or with `all`; true if it wrote.
     bool put(std::size_t slot, std::uint64_t bits, bool all) noexcept;
-    // Writes `text` to a STRING slot if it differs from the text last
-    // written (by its hash), or with `all`; true if it wrote.
-    bool put_text(std::size_t slot, std::string_view text, bool all) noexcept;
+    // Writes `text` to a STRING slot if it differs from `kept`, the text
+    // last written, byte by byte, or with `all`, and keeps it there; true
+    // if it wrote. Without `kept`, written at every call.
+    bool put_text(std::size_t slot, std::string_view text, KeptText* kept,
+                  bool all) noexcept;
     // `identity_ok` and `identity` of each device with a verdict (D-147).
     bool put_identity(ChannelEngine& engine, const CompiledChannel& channel,
                       bool all) noexcept;

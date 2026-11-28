@@ -11,6 +11,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     channel_engine_test.cpp
     channel_engine_identity_test.cpp
     event_slot_test.cpp
+    event_throttle_test.cpp
     connections_test.cpp
     diagnostics_test.cpp
     driver_test.cpp

@@ -67,9 +67,11 @@ COUNT since its last record: the first at once, then at most one per 10 s
 per device.
 
 A restart rule that holds is a restart of the device's unit: every RUNNING
-device of it is checked again, and its points written NOT_INIT (9.1). The
-grace starts again once, until the unit has run the longest group's period
-without a restart. When each rule is wrong:
+device of it is checked again, and its points written NOT_INIT (9.1). Every
+rule sees the whole answer before any point of it is written, and an answer
+that shows a restart writes no value. A device already being checked starts
+its check again. The grace starts again once, until the unit has run the
+longest group's period without a restart. When each rule is wrong:
 
 | Rule | False restart | Missed restart |
 | --- | --- | --- |
@@ -309,11 +311,13 @@ until reload; every other signal has its default.
   channel, a kill and a restart, the owners of the tags, one notify per
   change, every protocol call on its thread (test 1), a lost and a refused
   connection (test 16), STALE (test 17). `driver_identity_integration_test.cpp`:
-  a match, a mismatch with `refuse` and `warn`, a restart (the simulator's
-  `--set-after`), with their tags and log records (D-147).
+  a match, a mismatch with `refuse` and `warn`, a hot swap, a restart (the
+  simulator's `--set-after`) and two whose COUNTs add up, with their tags
+  and log records (D-147).
   `driver_stop_integration_test.cpp`:
   READY, WATCHDOG and STOPPING, a wrong notify socket, the signals, a stop
   with a read in flight, an idle worker, a peer's close, a stop and a
-  retiring generation with a hung worker, a stall, a spinning worker, a
+  retiring generation with a hung worker, a stall, a stall that logs the
+  restart records it held, a spinning worker, a
   pause of the whole process, and the start's exit statuses (test 2). It
   takes about 2 minutes; the idle case alone runs 20 s.

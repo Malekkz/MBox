@@ -31,6 +31,7 @@ EventRecord record_of(std::uint64_t count, std::string_view text,
     record.check = check;
     record.length = std::min(text.size(), record.text.size());
     std::copy_n(text.data(), record.length, record.text.data());
+    record.has_details = true;
     return record;
 }
 
@@ -50,6 +51,7 @@ TEST(EventSlot, CountsAddUpAndTheDetailsAreTheLastOnes) {
     EXPECT_EQ(out.check, 4U);
     EXPECT_EQ(out.reason, 2U);
     EXPECT_EQ(out.time_ns, 1234);
+    EXPECT_TRUE(out.has_details);
     // Taken: none until the next.
     EXPECT_FALSE(slot.take(DeviceEvent::MISMATCH, out));
     // The kinds are apart.
@@ -84,6 +86,10 @@ TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
     std::uint64_t seen = 0;
     EventRecord out;
     bool torn = false;
+    // Once a take had details, every later one has some (PR 177 S4): a
+    // take that could not read them keeps the earlier ones.
+    bool had_details = false;
+    bool lost_details = false;
     while (!done.load(std::memory_order_acquire) || seen < ADDS) {
         if (!slot.take(DeviceEvent::MISMATCH, out)) {
             if (done.load(std::memory_order_acquire) && seen >= ADDS) {
@@ -92,6 +98,8 @@ TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
             continue;
         }
         seen += out.count;
+        lost_details = lost_details || (had_details && !out.has_details);
+        had_details = had_details || out.has_details;
         const std::string text = text_of(out);
         torn = torn || std::any_of(text.begin(), text.end(), [&](char byte) {
                    return byte != text.front();
@@ -100,6 +108,18 @@ TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
     worker.join();
     EXPECT_EQ(seen, ADDS);
     EXPECT_FALSE(torn);
+    EXPECT_FALSE(lost_details);
+}
+
+TEST(EventSlot, ARecordWithoutDetailsSaysSo) {
+    EventSlot slot;
+    EventRecord bare;
+    bare.count = 2;
+    slot.add(DeviceEvent::RESTART, bare);
+    EventRecord out;
+    ASSERT_TRUE(slot.take(DeviceEvent::RESTART, out));
+    EXPECT_EQ(out.count, 2U);
+    EXPECT_FALSE(out.has_details);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

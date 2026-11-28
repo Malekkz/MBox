@@ -10,9 +10,11 @@
 #include <gtest/gtest.h>
 
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -171,6 +173,24 @@ TEST_F(Identity, ARestartIsCountedLoggedAndCheckedAgain) {
     EXPECT_TRUE(reaches("d1.v", std::int64_t{3}));
     EXPECT_TRUE(reaches("sys.dev.d1.state", RUNNING));
     EXPECT_TRUE(stops_cleanly(running->driver));
+}
+
+TEST_F(Identity, TheRestartRecordsCountEveryRestart) {
+    // Two restarts, `v` falling at the 20th and the 40th request, likely in
+    // one 10 s period: the first record at once, the second's count held
+    // and logged by the stop at the latest. The counts add up to
+    // `restarts` (PR 177 S1).
+    std::optional<Running> running =
+        run("7",
+            {"--set-after", "1", "0", "0", "3", "20", "--set-after", "1", "0",
+             "0", "1", "40"},
+            {"--restart-decreases", "0"});
+    if (!running.has_value()) {
+        FAIL() << "no simulator or no driver";
+    }
+    EXPECT_TRUE(reaches("sys.dev.d1.restarts", std::int64_t{2}));
+    EXPECT_TRUE(stops_cleanly(running->driver));
+    EXPECT_EQ(restart_counts(running->driver.err()), 2U);
 }
 
 }  // namespace

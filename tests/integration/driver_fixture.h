@@ -316,6 +316,23 @@ inline ::testing::AssertionResult logs(ChildProcess& process,
            << "no '" << line << "' in: " << process.err();
 }
 
+// The sum of the COUNT fields of the `driver-device-restart` records in
+// `err` (D-147).
+inline std::uint64_t restart_counts(std::string_view err) {
+    constexpr std::string_view RECORD = R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::string_view COUNT = R"(COUNT=")";
+    std::uint64_t sum = 0;
+    for (std::size_t at = err.find(RECORD); at != std::string_view::npos;
+         at = err.find(RECORD, at + RECORD.size())) {
+        const std::string_view line = err.substr(at, err.find('\n', at) - at);
+        const std::size_t count = line.find(COUNT);
+        if (count != std::string_view::npos) {
+            sum += std::stoull(std::string(line.substr(count + COUNT.size())));
+        }
+    }
+    return sum;
+}
+
 // The times `line` is in `out`.
 inline std::size_t count_of(std::string_view out, std::string_view line) {
     std::size_t count = 0;

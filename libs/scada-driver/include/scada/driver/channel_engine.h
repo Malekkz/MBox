@@ -93,6 +93,10 @@ enum class DeviceEvent : std::uint8_t {
 };
 inline constexpr std::size_t DEVICE_EVENTS = 3;
 
+// The index of `kind` in an array of DEVICE_EVENTS; a value out of range is
+// a programmer's error and ends the process (coding standard, section 7).
+[[nodiscard]] SCADA_RT std::size_t event_index(DeviceEvent kind) noexcept;
+
 // The events of one kind since they were last taken: how many, and the last
 // one's details.
 struct EventRecord {
@@ -104,6 +108,10 @@ struct EventRecord {
     // MISMATCH: the check's value; MATCH: the identity text.
     std::array<char, TAG_STRING_MAX_BYTES> text{};
     std::size_t length = 0;
+    // The fields above (from `time_ns` on) hold an event's details. False
+    // when none could be read: the record then gives only the count, and
+    // the log leaves REASON, CHECK and VALUE out (PR 177 S4).
+    bool has_details = false;
 };
 
 class ChannelEngine {

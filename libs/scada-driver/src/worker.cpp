@@ -233,8 +233,9 @@ void Worker::hand_events(ChannelEngine& engine) noexcept {
          ++device) {
         for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
             const auto which = static_cast<DeviceEvent>(kind);
-            if (engine.take_event(device, which, record)) {
-                events_.at(device).add(which, record);
+            if (device < events_.size() &&
+                engine.take_event(device, which, record)) {
+                events_[device].add(which, record);
             }
         }
     }

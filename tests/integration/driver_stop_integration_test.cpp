@@ -468,6 +468,37 @@ TEST_F(DriverProcess, AStallStopsTheOtherWorkers) {
     EXPECT_TRUE(prints(*sim, "peer closed"));
 }
 
+TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
+    // Channel a's device restarts twice within a second or two: the first
+    // record at once, the second held for its 10 s period. Channel b hangs
+    // and stalls long before that period ends (its 3 s time-out makes its
+    // stall limit about 9 s); the stall's exit logs the held record (PR 177
+    // S6), so the counts add up to both restarts.
+    start_tagd(
+        {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
+    auto sim =
+        start_sim({"--set", "1", "0", "0", "5", "--set-after", "1", "0", "0",
+                   "3", "5", "--set-after", "1", "0", "0", "1", "10"});
+    auto other = start_sim({});
+    if (!sim.has_value() || !other.has_value()) {
+        FAIL() << "no simulator";
+    }
+    observe();
+    auto driver = start_driver(joined(
+        tcp_channel("a", port_of(*sim)), device("d1", 1, "0"),
+        std::vector<std::string>{"--restart-decreases", "0"},
+        faulty("b", port_of(*other), "--hang"), device("d2", 2, "0", "3000")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    ASSERT_TRUE(
+        eventually(handle("sys.dev.d1.restarts"), [](const scada_value& value) {
+            return value.quality == SCADA_QUALITY_GOOD && value.value == 2;
+        }));
+    EXPECT_TRUE(ends_with(*driver, EXIT_STALL));
+    EXPECT_EQ(restart_counts(driver->err()), 2U) << driver->err();
+}
+
 TEST_F(DriverProcess, ASpinningWorkerIsAStallToo) {
     start_tagd({{.name = "line1", .tags = {"d1.v"}}});
     auto sim = start_sim({});

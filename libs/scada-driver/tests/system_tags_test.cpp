@@ -149,6 +149,7 @@ struct Rig {
         out.write_text = &record_text;
         out.groups = compiled.poll_groups.size();
         out.devices = compiled.devices.size();
+        out.identity_texts.resize(out.devices);
         const std::size_t slots =
             CHANNEL_SIGNALS + out.groups + (out.devices * DEVICE_SIGNALS);
         for (std::size_t slot = 0; slot < slots; ++slot) {
@@ -246,6 +247,37 @@ TEST(SystemTags, RestartsAreACounter) {
         writes_of(rig.slot(DeviceSignal::RESTARTS));
     ASSERT_EQ(restarts.size(), 1U);
     EXPECT_EQ(restarts.front().bits, 0U);
+}
+
+TEST(SystemTags, TheIdentityTextIsWrittenAgainWhenItChanges) {
+    // A mismatch shows "0"; the device fixed, the re-check's match shows
+    // "5" (PR 177 S2). Each text once: compared byte by byte (S3).
+    Rig rig(identified(5), 1);
+    rig.run_until(SECOND);
+    ASSERT_EQ(recorder().texts.size(), 1U);
+    EXPECT_EQ(recorder().texts.back().second, "0");
+    rig.bus.set(1, 0, 0, 5);
+    rig.run_until(30 * SECOND);
+    ASSERT_EQ(recorder().texts.size(), 2U);
+    EXPECT_EQ(
+        recorder().texts.back(),
+        std::make_pair(rig.slot(DeviceSignal::IDENTITY), std::string("5")));
+}
+
+TEST(SystemTags, RestartsCarryTheirCount) {
+    // `decreases` on point 0: 5, then 3, is one restart (PR 177 S2).
+    CompiledChannel channel = Rig::make(1, false);
+    channel.devices[0].restart_indication = {
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
+    Rig rig(std::move(channel), 1);
+    rig.bus.set(1, 0, 0, 5);
+    rig.run_until(SECOND);
+    rig.bus.set(1, 0, 0, 3);
+    rig.run_until(5 * SECOND);
+    const std::vector<Recorded> restarts =
+        writes_of(rig.slot(DeviceSignal::RESTARTS));
+    ASSERT_FALSE(restarts.empty());
+    EXPECT_EQ(restarts.back().bits, 1U);
 }
 
 TEST(SystemTags, ACounterIsWrittenAtMostOncePerPeriod) {

@@ -5,7 +5,9 @@
 // thread for the log (decision D-147; the lead's option (b) for 5b-2b): per
 // kind, the count since the main thread last took it and the last event's
 // details. An interim slot until 5b-3's logging path, which replaces it;
-// between two takes only the last event's text survives.
+// between two takes only the last event's text survives. The details are
+// written before the count, so a take can give the details of an event
+// whose count the next take gives (D-147).
 //
 // One writer (the worker) and one reader (the main thread). The counts are
 // relaxed atomics, as the refused-write counts are; the details are atomic
@@ -28,9 +30,10 @@ public:
     void add(DeviceEvent kind, const EventRecord& record) noexcept;
 
     // The events of `kind` since the last take into `out`: false when there
-    // were none. The details are the last event's, or empty when the worker
-    // was writing them through every one of a few reads (`out.length` 0,
-    // `out.time_ns` 0). Main thread only. Never blocks.
+    // were none. The details are the last event's, or, when the worker was
+    // writing them through every one of a few reads, those this slot gave
+    // before (none, `has_details` false, if it gave none). Main thread
+    // only. Never blocks.
     bool take(DeviceEvent kind, EventRecord& out) noexcept;
 
 private:
@@ -48,7 +51,13 @@ private:
         std::array<std::atomic<std::uint64_t>, WORDS> words{};
     };
 
+    // The details of `source` into `into`; false when the worker wrote
+    // them through every read.
+    static bool read_details(const Kind& source, EventRecord& into) noexcept;
+
     std::array<Kind, DEVICE_EVENTS> kinds_{};
+    // The main thread's: the details each kind's last take gave.
+    std::array<EventRecord, DEVICE_EVENTS> last_{};
 };
 
 }  // namespace scada::driver::detail

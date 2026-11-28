@@ -73,18 +73,6 @@ std::uint64_t bits_of(bool value) noexcept {
     return value ? 1U : 0U;
 }
 
-// FNV-1a of `text`: a change of the identity text is seen without keeping
-// a copy of it in the slot.
-std::uint64_t hash_of(std::string_view text) noexcept {
-    constexpr std::uint64_t OFFSET = 14695981039346656037ULL;
-    constexpr std::uint64_t PRIME = 1099511628211ULL;
-    std::uint64_t hash = OFFSET;
-    for (const char byte : text) {
-        hash = (hash ^ static_cast<unsigned char>(byte)) * PRIME;
-    }
-    return hash;
-}
-
 std::size_t index_of(ChannelSignal signal) noexcept {
     return static_cast<std::size_t>(signal);
 }
@@ -203,14 +191,18 @@ bool SystemTags::put(std::size_t slot, std::uint64_t bits, bool all) noexcept {
 }
 
 bool SystemTags::put_text(std::size_t slot, std::string_view text,
-                          bool all) noexcept {
+                          KeptText* kept, bool all) noexcept {
     if (slot >= handles_.slots.size()) {
         return false;
     }
     SystemSlot& target = handles_.slots[slot];
-    const std::uint64_t hash = hash_of(text);
-    if (target.handle == SCADA_INVALID_HANDLE ||
-        (!all && target.written && target.last == hash)) {
+    // A text longer than the buffer is never kept: written at every call
+    // (none is longer: the tag holds TAG_STRING_MAX_BYTES).
+    const bool keepable = kept != nullptr && text.size() <= kept->bytes.size();
+    const bool same = keepable && target.written &&
+                      kept->length == text.size() &&
+                      std::equal(text.begin(), text.end(), kept->bytes.begin());
+    if (target.handle == SCADA_INVALID_HANDLE || (!all && same)) {
         return false;
     }
     // GOOD, no flags, source time 0, as every system tag.
@@ -220,7 +212,10 @@ bool SystemTags::put_text(std::size_t slot, std::string_view text,
         return false;
     }
     target.written = true;
-    target.last = hash;
+    if (keepable) {
+        std::copy_n(text.begin(), text.size(), kept->bytes.begin());
+        kept->length = text.size();
+    }
     return true;
 }
 
@@ -239,8 +234,11 @@ bool SystemTags::put_identity(ChannelEngine& engine,
         wrote = put(device_slot(device, DeviceSignal::IDENTITY_OK),
                     bits_of(*matched), all) ||
                 wrote;
+        KeptText* const kept = device < handles_.identity_texts.size()
+                                   ? &handles_.identity_texts[device]
+                                   : nullptr;
         wrote = put_text(device_slot(device, DeviceSignal::IDENTITY),
-                         engine.identity_text(index), all) ||
+                         engine.identity_text(index), kept, all) ||
                 wrote;
     }
     return wrote;

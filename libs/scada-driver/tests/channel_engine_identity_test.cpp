@@ -656,6 +656,38 @@ TEST(EngineIdentity, NoStalenessIsWrittenWhileTheCheckIsPending) {
     EXPECT_FALSE(written_with(rig.tags, 0, Flag::STALE));
 }
 
+TEST(EngineIdentity, EventsNotTakenAddUp) {
+    // Two restarts before a take: one record with a count of 2 (PR 177 S2).
+    Rig rig(restart_channel(RESTART_FIRST), restart_bus(RESTART_FIRST, MODEL));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    rig.bus.set(1, 0, RESTART_FIRST, 3);
+    rig.run_until(12 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    rig.bus.set(1, 0, RESTART_FIRST, 1);
+    rig.run_until(24 * SECOND);
+    ASSERT_EQ(rig.engine.restarts(0), 2U);
+    EventRecord record;
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::RESTART, record));
+    EXPECT_EQ(record.count, 2U);
+    EXPECT_TRUE(record.has_details);
+}
+
+TEST(EngineIdentity, ABusyIdentityReadEmptiesNoFailureCount) {
+    // Busy is no answer (ruling item 3, PR 177 S2): a failed cycle's count
+    // stays through busy cycles after it.
+    Rig rig(identity_channel(), identity_bus());
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(350 * MILLISECOND);  // one cycle of 3 attempts failed
+    ASSERT_EQ(rig.engine.failures().failures(0), 1U);
+    rig.bus.fault(1, SimBus::Fault::NONE);
+    rig.bus.busy_at(1, IDENTITY);
+    rig.run_until(25 * SECOND);
+    EXPECT_GT(rig.reads_of(IDENTITY), 3U);
+    EXPECT_EQ(rig.engine.failures().failures(0), 1U);
+    EXPECT_EQ(rig.state(), DeviceStatus::INITIALISING);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

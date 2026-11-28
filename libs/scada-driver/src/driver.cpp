@@ -1,5 +1,6 @@
 #include "scada/driver/driver.h"
 
+#include "event_throttle.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/log.h"
@@ -28,6 +29,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -67,7 +69,6 @@ constexpr std::int64_t STOP_GRACE_NS = NS_PER_S;
 constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
 // The rate limit of a record per MESSAGE_ID and device (DI 11, the pattern
 // of TD 10.1): the first at once, then at most one summary per 10 s.
-constexpr std::int64_t EVENT_LOG_PERIOD_NS = 10 * NS_PER_S;
 
 // The REASON of an identity mismatch's record (ruling item 3).
 std::string_view reason_text(std::uint8_t reason) noexcept {
@@ -296,8 +297,8 @@ private:
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
     // Logs the workers' identity and restart events (D-147), each kind of
-    // each device at most once per EVENT_LOG_PERIOD_NS, with the count
-    // since its last record; `all`: whatever is pending, at the stop.
+    // each device at most once per detail::EVENT_LOG_PERIOD_NS (10 s), with the
+    // count since its last record; `all`: whatever is pending, at the stop.
     void log_events(std::int64_t now, bool all) noexcept;
     void log_event(const Worker& worker, std::size_t device, DeviceEvent kind,
                    const EventRecord& record) noexcept;
@@ -344,14 +345,9 @@ private:
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
-    // Per worker, device and DeviceEvent: the events not yet logged, and
-    // when the next record may go.
-    struct PendingEvent {
-        EventRecord record;
-        std::int64_t next_ns = 0;
-    };
-    std::vector<std::vector<std::array<PendingEvent, DEVICE_EVENTS>>>
-        pending_events_;
+    // Per worker, a slot per device and DeviceEvent: the events not yet
+    // logged, and when the next record may go (PR 177 S1).
+    std::vector<detail::EventThrottle> pending_events_;
     std::uint64_t logged_process_refused_ = 0;  // the main thread's tags
     std::int64_t next_refused_log_ns_ = 0;
     std::string detail_;  // what failed, with names, for the log
@@ -536,10 +532,10 @@ Status Driver::Impl::make_workers() noexcept {
     watch_.start(workers_.size(), scada::monotonic_ns());
     watched_.reserve(workers_.size());
     logged_refused_.assign(workers_.size(), 0);
-    pending_events_.resize(workers_.size());
-    for (std::size_t index = 0; index < workers_.size(); ++index) {
-        pending_events_[index].resize(
-            workers_[index]->channel().devices.size());
+    pending_events_.clear();
+    for (const std::unique_ptr<Worker>& worker : workers_) {
+        pending_events_.emplace_back(worker->channel().devices.size() *
+                                     DEVICE_EVENTS);
     }
     for (const std::unique_ptr<Worker>& worker : workers_) {
         const Status started = worker->start();
@@ -686,6 +682,12 @@ Status Driver::Impl::resolve_system(const CompiledChannel& channel,
                                     SystemTagHandles& out) noexcept {
     out.groups = channel.poll_groups.size();
     out.devices = channel.devices.size();
+    try {
+        out.identity_texts.resize(out.devices);
+    } catch (const std::bad_alloc&) {
+        return {StatusCode::RESOURCE_EXHAUSTED,
+                "out of memory for the identity texts"};
+    }
     out.write = system_write();
     const auto add = [&](const std::string& name, std::uint8_t type) {
         SystemSlot slot{.type = type};
@@ -886,6 +888,11 @@ RunEnd Driver::Impl::after_stall(Worker& stalled) noexcept {
         }
         const std::int64_t now = scada::monotonic_ns();
         if (!waiting || now >= until) {
+            // The events handed over so far, the stalled worker's too: its
+            // slot never blocks the main thread, which takes them as at any
+            // step (PR 177 S6). What the stalled worker has not handed over
+            // is lost with it.
+            log_events(now, true);
             log(LogLevel::INFO, "workers stopped after a stall",
                 {{"MESSAGE_ID", "driver-stall-stopped"},
                  {"STOPPED", std::to_string(stopped)}});
@@ -920,6 +927,7 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
             }
         }
         if (stuck != nullptr) {
+            log_events(scada::monotonic_ns(), true);  // as after a stall
             log(LogLevel::ERROR, "channel did not stop",
                 {{"MESSAGE_ID", "driver-stop-overrun"},
                  {"CHANNEL", stuck->channel().name}});
@@ -1003,23 +1011,18 @@ void Driver::Impl::log_events(std::int64_t now, bool all) noexcept {
     EventRecord taken;
     for (std::size_t index = 0; index < workers; ++index) {
         Worker& worker = *workers_[index];
-        for (std::size_t device = 0; device < pending_events_[index].size();
+        detail::EventThrottle& pending = pending_events_[index];
+        for (std::size_t device = 0; device < worker.channel().devices.size();
              ++device) {
             for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
                 const auto which = static_cast<DeviceEvent>(kind);
-                PendingEvent& pending = pending_events_[index][device].at(kind);
+                const std::size_t slot = (device * DEVICE_EVENTS) + kind;
                 if (worker.take_event(device, which, taken)) {
-                    // The details are the last event's; the count adds up.
-                    taken.count += pending.record.count;
-                    pending.record = taken;
+                    pending.add(slot, taken);
                 }
-                if (pending.record.count == 0 ||
-                    (!all && now < pending.next_ns)) {
-                    continue;
+                if (pending.take(slot, now, all, taken)) {
+                    log_event(worker, device, which, taken);
                 }
-                log_event(worker, device, which, pending.record);
-                pending.record = EventRecord{};
-                pending.next_ns = add(now, EVENT_LOG_PERIOD_NS);
             }
         }
     }
@@ -1034,6 +1037,16 @@ void Driver::Impl::log_event(const Worker& worker, std::size_t device,
     const std::string_view text(record.text.data(), record.length);
     switch (kind) {
         case DeviceEvent::MISMATCH:
+            if (!record.has_details) {
+                // No details known: REASON and CHECK left out, since CHECK
+                // 0 is a valid index (PR 177 S4).
+                log(LogLevel::WARNING, "identity mismatch",
+                    {{"MESSAGE_ID", "driver-identity-mismatch"},
+                     {"CHANNEL", channel},
+                     {"DEVICE", name},
+                     {"COUNT", count}});
+                return;
+            }
             log(LogLevel::WARNING, "identity mismatch",
                 {{"MESSAGE_ID", "driver-identity-mismatch"},
                  {"CHANNEL", channel},
@@ -1044,6 +1057,14 @@ void Driver::Impl::log_event(const Worker& worker, std::size_t device,
                  {"COUNT", count}});
             return;
         case DeviceEvent::MATCH:
+            if (!record.has_details) {
+                log(LogLevel::NOTICE, "identity matched",
+                    {{"MESSAGE_ID", "driver-identity-matched"},
+                     {"CHANNEL", channel},
+                     {"DEVICE", name},
+                     {"COUNT", count}});
+                return;
+            }
             log(LogLevel::NOTICE, "identity matched",
                 {{"MESSAGE_ID", "driver-identity-matched"},
                  {"CHANNEL", channel},

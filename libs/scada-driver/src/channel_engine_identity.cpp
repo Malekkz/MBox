@@ -4,6 +4,8 @@
 
 #include "scada/driver/channel_engine.h"
 
+#include "scada/common/panic.h"
+
 #include "scada/driver/compiled.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/failure.h"
@@ -320,12 +322,20 @@ std::uint64_t ChannelEngine::restarts(std::uint32_t device) const noexcept {
     return device < devices_.size() ? devices_[device].restarts : 0;
 }
 
+std::size_t event_index(DeviceEvent kind) noexcept {
+    const auto index = static_cast<std::size_t>(kind);
+    if (index >= DEVICE_EVENTS) {
+        panic("a device event out of range");
+    }
+    return index;
+}
+
 void ChannelEngine::note_event(std::uint32_t device, DeviceEvent kind,
                                std::uint8_t reason, std::uint32_t check,
                                std::string_view text) noexcept {
-    EventRecord& record =
-        devices_[device].events.at(static_cast<std::size_t>(kind));
+    EventRecord& record = devices_[device].events[event_index(kind)];
     ++record.count;
+    record.has_details = true;
     record.time_ns = clock_->realtime_ns();
     record.reason = reason;
     record.check = check;
@@ -338,8 +348,7 @@ bool ChannelEngine::take_event(std::uint32_t device, DeviceEvent kind,
     if (device >= devices_.size()) {
         return false;
     }
-    EventRecord& record =
-        devices_[device].events.at(static_cast<std::size_t>(kind));
+    EventRecord& record = devices_[device].events[event_index(kind)];
     if (record.count == 0) {
         return false;
     }
