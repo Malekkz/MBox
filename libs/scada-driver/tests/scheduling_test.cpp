@@ -1596,44 +1596,66 @@ TEST(Scheduling, AChainOfTheIdentityCycleHoldsItsUnit) {
     EXPECT_EQ(restart.request, head);  // read again from its start
 }
 
-TEST(Scheduling, ADroppedRetryIsNoLongerPending) {
-    // The engine waits for the verdict while `retry_pending` (PR 177
-    // delta, item 2): each drop of a retry must clear it, or the cycle
-    // would never end.
-    const CompiledChannel channel = identity_channel();
-    const ReadPlan& plan = channel.devices[0].plan;
-    const std::uint32_t identity = plan.identity.front();
-    Scheduler scheduler(channel, 4, 0);
-    scheduler.set_mode(0, DeviceMode::IDENTITY);
-    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
-    EXPECT_FALSE(scheduler.retry_pending(0));
-    scheduler.retry(0, identity, MILLISECOND);
-    EXPECT_TRUE(scheduler.retry_pending(0));
-    // Sent: no longer pending.
-    const Choice again = scheduler.take(2 * MILLISECOND);
+// A scheduler of `identity_channel` in IDENTITY, its first cycle request
+// taken, and a retry of the identity request pending (PR 177 delta, item
+// 2: the engine waits for the verdict while `retry_pending`, so each drop
+// of a retry must clear it, or the cycle would never end).
+class PendingRetry {
+public:
+    PendingRetry()
+        : channel_(identity_channel()),
+          identity_(channel_.devices[0].plan.identity.front()),
+          scheduler_(channel_, 4, 0) {
+        scheduler_.set_mode(0, DeviceMode::IDENTITY);
+        (void)scheduler_.take(0);
+        scheduler_.retry(0, identity_, MILLISECOND);
+    }
+    Scheduler& scheduler() { return scheduler_; }
+    [[nodiscard]] std::uint32_t identity() const { return identity_; }
+    [[nodiscard]] const ReadPlan& plan() const {
+        return channel_.devices[0].plan;
+    }
+
+private:
+    CompiledChannel channel_;
+    std::uint32_t identity_;
+    Scheduler scheduler_;
+};
+
+TEST(Scheduling, ARetryIsPendingUntilSent) {
+    PendingRetry rig;
+    EXPECT_TRUE(rig.scheduler().retry_pending(0));
+    const Choice again = rig.scheduler().take(2 * MILLISECOND);
     EXPECT_EQ(again.kind, Choice::Kind::IDENTITY);
-    EXPECT_FALSE(scheduler.retry_pending(0));
-    // Dropped by a change of mode.
-    scheduler.retry(0, identity, 3 * MILLISECOND);
-    ASSERT_TRUE(scheduler.retry_pending(0));
-    scheduler.set_mode(0, DeviceMode::OFF);
-    EXPECT_FALSE(scheduler.retry_pending(0));
-    // Dropped by a reconnect.
-    scheduler.set_mode(0, DeviceMode::IDENTITY);
-    scheduler.retry(0, identity, 4 * MILLISECOND);
-    ASSERT_TRUE(scheduler.retry_pending(0));
-    (void)scheduler.reconnect();
-    EXPECT_FALSE(scheduler.retry_pending(0));
-    // Never taken in IDENTITY: a request outside the cycle (PR 171 S2).
+    EXPECT_EQ(again.request, rig.identity());
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+    EXPECT_FALSE(rig.scheduler().retry_pending(7));  // no such device
+}
+
+TEST(Scheduling, AChangeOfModeDropsTheRetry) {
+    PendingRetry rig;
+    rig.scheduler().set_mode(0, DeviceMode::OFF);
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+}
+
+TEST(Scheduling, AReconnectDropsTheRetry) {
+    PendingRetry rig;
+    (void)rig.scheduler().reconnect();
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+}
+
+TEST(Scheduling, ARetryOutsideTheCycleIsNeverPendingInIdentity) {
+    // PR 171 S2: in IDENTITY only the cycle is sent.
+    PendingRetry rig;
+    (void)rig.scheduler().take(2 * MILLISECOND);
+    const std::vector<std::uint32_t>& cycle = rig.plan().identity;
     std::uint32_t outside = 0;
-    while (std::find(plan.identity.begin(), plan.identity.end(), outside) !=
-           plan.identity.end()) {
+    while (std::find(cycle.begin(), cycle.end(), outside) != cycle.end()) {
         ++outside;
     }
-    ASSERT_LT(outside, plan.requests.size());
-    scheduler.retry(0, outside, 5 * MILLISECOND);
-    EXPECT_FALSE(scheduler.retry_pending(0));
-    EXPECT_FALSE(scheduler.retry_pending(7));  // no such device
+    ASSERT_LT(outside, rig.plan().requests.size());
+    rig.scheduler().retry(0, outside, 3 * MILLISECOND);
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
 }
 
 TEST(Scheduling, AKeepAlivesRetryIsAKeepAliveToo) {

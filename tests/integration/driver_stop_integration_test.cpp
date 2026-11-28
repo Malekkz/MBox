@@ -468,6 +468,30 @@ TEST_F(DriverProcess, AStallStopsTheOtherWorkers) {
     EXPECT_TRUE(prints(*sim, "peer closed"));
 }
 
+// Success if `err` shows the path of AStallLogsTheEventsItHeld: two
+// restart records and one stall, the stall within the first record's 10 s
+// period, and the second record logged after the stall, by its exit.
+::testing::AssertionResult held_until_the_stall(std::string_view err) {
+    constexpr std::string_view RESTART =
+        R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::string_view STALL = R"(MESSAGE_ID="driver-stall")";
+    constexpr std::int64_t PERIOD_MS = 10'000;
+    const std::vector<std::int64_t> restarts = record_times_ms(err, RESTART);
+    const std::vector<std::int64_t> stalls = record_times_ms(err, STALL);
+    if (restarts.size() != 2 || stalls.size() != 1) {
+        return ::testing::AssertionFailure()
+               << restarts.size() << " restart records, " << stalls.size()
+               << " stalls";
+    }
+    if (stalls[0] - restarts[0] >= PERIOD_MS || restarts[1] < stalls[0] ||
+        err.find(STALL) > err.rfind(RESTART)) {
+        return ::testing::AssertionFailure()
+               << "restarts at " << restarts[0] << " and " << restarts[1]
+               << " ms, the stall at " << stalls[0] << " ms";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
     // Channel a's device restarts at its 3rd and 6th request, about a
     // second apart: the first record at once, the second held for its 10 s
@@ -476,10 +500,6 @@ TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
     // ends; the stall's exit logs the held record (PR 177 S6). The record
     // times show that path was taken: the second after the stall, the stall
     // within the period of the first.
-    constexpr std::string_view RESTART =
-        R"(MESSAGE_ID="driver-device-restart")";
-    constexpr std::string_view STALL = R"(MESSAGE_ID="driver-stall")";
-    constexpr std::int64_t PERIOD_MS = 10'000;
     start_tagd(
         {{.name = "a", .tags = {"d1.v"}}, {.name = "b", .tags = {"d2.v"}}});
     auto sim =
@@ -504,13 +524,7 @@ TEST_F(DriverProcess, AStallLogsTheEventsItHeld) {
     EXPECT_TRUE(ends_with(*driver, EXIT_STALL));
     const std::string err = driver->err();
     EXPECT_EQ(restart_counts(err), 2U) << err;
-    const std::vector<std::int64_t> restarts = record_times_ms(err, RESTART);
-    const std::vector<std::int64_t> stalls = record_times_ms(err, STALL);
-    ASSERT_EQ(restarts.size(), 2U) << err;
-    ASSERT_EQ(stalls.size(), 1U) << err;
-    EXPECT_LT(stalls[0] - restarts[0], PERIOD_MS) << err;
-    EXPECT_GE(restarts[1], stalls[0]) << err;
-    EXPECT_LT(err.find(STALL), err.rfind(RESTART)) << err;
+    EXPECT_TRUE(held_until_the_stall(err)) << err;
 }
 
 TEST_F(DriverProcess, ASpinningWorkerIsAStallToo) {
