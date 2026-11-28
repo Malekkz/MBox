@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -64,6 +65,14 @@ private:
     std::shared_ptr<LogQueue> queue_;
     LogLimit limit_;
 };
+
+// A worker's stop (PR 182 M2): flushes `log` while its queue has room,
+// calling `wait` between tries while it is full, at most `waits` times; then
+// a last flush, which drops and counts what is still held, so that every
+// held count reaches `log_dropped` as a drop if not as a record. `wall_ns`
+// is the records' time. Not real-time: `wait` waits.
+void flush_at_stop(EventLog& log, std::int64_t wall_ns, int waits,
+                   const std::function<void()>& wait) noexcept;
 
 }  // namespace scada::driver::detail
 

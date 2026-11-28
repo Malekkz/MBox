@@ -111,8 +111,8 @@ struct DriverSettings {
     std::int64_t heartbeat_period_ns = DEFAULT_HEARTBEAT_PERIOD_NS;
     // Records each worker's log queue holds (11.3, D-148), 1 to
     // LOG_MAX_QUEUE_CAPACITY, or 0 to size each from its channel's devices
-    // (`worker_log_queue_size`). A test makes it small to see a full
-    // queue's drops in `log_dropped`.
+    // (`worker_log_queue_size`). Below MIN_WORKER_LOG_QUEUE for tests
+    // only, which make it small to see a full queue's drops (D-148).
     std::size_t worker_log_queue = DEFAULT_WORKER_LOG_QUEUE;
     // How the system tags of 11.1 are written, those of the process and of
     // every channel: null for the tag library's `scada_tag_write`. A test

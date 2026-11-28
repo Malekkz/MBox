@@ -126,5 +126,33 @@ TEST(RecordRing, AFullRingRefusesAndAnEmptyOneGivesNothing) {
     EXPECT_TRUE(ring.empty());
 }
 
+// The id of a thread other than this one.
+std::thread::id other_thread() {
+    std::thread::id id;
+    std::thread thread([&id] { id = std::this_thread::get_id(); });
+    thread.join();
+    return id;
+}
+
+// PR 182 delta, item 1: the first thread to push owns the queue; a second
+// is refused (and `LogQueue::push` then ends the process).
+TEST(ProducerCheck, TheFirstThreadOwnsTheQueueAndASecondIsRefused) {
+    const std::thread::id self = std::this_thread::get_id();
+    const std::thread::id other = other_thread();
+    ASSERT_NE(self, other);
+    ProducerCheck check;
+    EXPECT_TRUE(check.accepts(self));
+    EXPECT_TRUE(check.accepts(self));
+    EXPECT_FALSE(check.accepts(other));
+    EXPECT_TRUE(check.accepts(self));
+}
+
+TEST(ProducerCheck, WhicheverThreadComesFirstOwnsIt) {
+    const std::thread::id other = other_thread();
+    ProducerCheck check;
+    EXPECT_TRUE(check.accepts(other));
+    EXPECT_FALSE(check.accepts(std::this_thread::get_id()));
+}
+
 }  // namespace
 }  // namespace scada::log_internal

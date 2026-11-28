@@ -250,17 +250,12 @@ void Worker::flush_events() noexcept {
     if (!events_.has_value()) {
         return;
     }
-    for (int step = 0; step < LOG_ROOM_STEPS; ++step) {
-        if (events_->flush(clock_->realtime_ns(), false)) {
-            return;
-        }
+    flush_at_stop(*events_, clock_->realtime_ns(), LOG_ROOM_STEPS, [this] {
         // The Logger's thread drains the queue at least every 20 ms.
         moved();
         const timespec pause{.tv_sec = 0, .tv_nsec = LOG_ROOM_STEP_NS};
         (void)::ppoll(nullptr, 0, &pause, nullptr);
-    }
-    // Out of time: what is left is dropped, and counted (D-148).
-    (void)events_->flush(clock_->realtime_ns(), true);
+    });
 }
 
 void Worker::hand_events(ChannelEngine& engine) noexcept {

@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace scada::log_internal {
@@ -165,6 +166,28 @@ private:
     std::vector<Slot> slots_;  // fixed size; never grows
     std::atomic<std::size_t> head_{0};
     std::atomic<std::size_t> tail_{0};
+};
+
+// The one producer of a queue (PR 182 S4): the first thread to ask owns
+// it for the queue's life. A second producer would corrupt the ring; the
+// queue ends the process when `accepts` says no.
+class ProducerCheck {
+public:
+    // True if `self` owns the queue or becomes its owner now; false for
+    // any other thread. Lock-free, no system call.
+    SCADA_RT [[nodiscard]] bool accepts(std::thread::id self) noexcept {
+        if (owner_.load(std::memory_order_relaxed) == self) {
+            return true;
+        }
+        std::thread::id none{};
+        return owner_.compare_exchange_strong(none, self,
+                                              std::memory_order_relaxed) ||
+               none == self;
+    }
+
+private:
+    static_assert(std::atomic<std::thread::id>::is_always_lock_free);
+    std::atomic<std::thread::id> owner_;  // none until the first push
 };
 
 }  // namespace scada::log_internal

@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -102,6 +103,18 @@ bool EventLog::flush(std::int64_t wall_ns, bool last) noexcept {
             return false;
         }
     }
+}
+
+void flush_at_stop(EventLog& log, std::int64_t wall_ns, int waits,
+                   const std::function<void()>& wait) noexcept {
+    for (int step = 0; step < waits; ++step) {
+        if (log.flush(wall_ns, false)) {
+            return;
+        }
+        wait();
+    }
+    // Out of time: what is left is dropped, and counted (D-148).
+    (void)log.flush(wall_ns, true);
 }
 
 // A summary carries the count of the events it stands for and no details:

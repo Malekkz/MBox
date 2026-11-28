@@ -63,7 +63,16 @@ drains every queue (1 s at most) and then writes `log_dropped` a last
 time, before the run returns. The journal's order across threads is the
 drain's, not the records' times. The main thread's queue holds 1024
 records; a worker's, two per device of its channel and at least 64, unless
-`DriverSettings::worker_log_queue` sets it.
+`DriverSettings::worker_log_queue` sets it (below 64 for tests only).
+
+`log_dropped` counts dropped records, not lost events: after a burst it can
+be above zero while every COUNT still arrived. Compare the records' COUNTs
+with `restarts` before concluding that events were lost. A mismatch record
+refused in a burst comes back only as a count, without REASON, CHECK and
+VALUE; the identity read stays in the device's `identity` tag. A queue
+belongs to its first producer thread for life. With a slow sink the
+Logger's destructor delivers the backlog after the run has ended, without a
+bound; the journal sink does not block.
 
 ## Identity checks and restarts
 

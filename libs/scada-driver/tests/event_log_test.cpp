@@ -366,6 +366,34 @@ TEST_F(Logged, TheLastFlushDropsWhatDoesNotFit) {
     EXPECT_EQ(logger().dropped(), 1U);
 }
 
+// PR 182 delta, item 2: a stop that runs out of time drops what is still
+// held, so that the held counts reach `log_dropped` as drops.
+TEST_F(Logged, AStopOutOfTimeDropsAndCountsWhatIsLeft) {
+    ASSERT_TRUE(held_with_one_each());
+    int waits = 0;
+    flush_at_stop(log(), WALL, 3, [&waits] { ++waits; });
+    const std::uint64_t dropped = queue().dropped();
+    release();
+    EXPECT_EQ(waits, 3);
+    EXPECT_EQ(dropped, 1U);
+    EXPECT_EQ(restarts_of(lines()), (std::array<std::uint64_t, 2>{2, 1}));
+    EXPECT_EQ(logger().dropped(), 1U);
+}
+
+// A wait that makes room lets every held count go, and nothing is dropped.
+TEST_F(Logged, AStopWhoseWaitMakesRoomLosesNothing) {
+    ASSERT_TRUE(held_with_one_each());
+    int waits = 0;
+    flush_at_stop(log(), WALL, 3, [&] {
+        ++waits;
+        release();
+        (void)lines();
+    });
+    EXPECT_EQ(waits, 1);
+    EXPECT_EQ(restarts_of(lines()), (std::array<std::uint64_t, 2>{2, 2}));
+    EXPECT_EQ(logger().dropped(), 0U);
+}
+
 TEST(EventLog, AnEventOfNoDeviceOrNoQueueIsIgnored) {
     const CompiledChannel channel = two_devices();
     EventLog without(channel, nullptr, PERIOD);

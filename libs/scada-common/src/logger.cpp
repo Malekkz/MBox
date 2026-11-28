@@ -125,12 +125,16 @@ public:
                        std::string_view message,
                        std::span<const LogField> fields) noexcept {
         check_producer();
+        // Counted before the ring publishes the record, so that the
+        // Logger's thread, which takes it off after delivery, never makes
+        // `pending` wrap below zero (PR 182 delta, item 3).
+        counts_->pending.fetch_add(1, std::memory_order_relaxed);
         if (!ring_.push(level, time_ns, message, fields)) {
+            counts_->pending.fetch_sub(1, std::memory_order_relaxed);
             dropped_.fetch_add(1, std::memory_order_relaxed);
             counts_->queue_dropped.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        counts_->pending.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -164,18 +168,11 @@ public:
     }
 
 private:
-    // One producer only (PR 182 S4): the first thread to push owns the
-    // queue, and a push from another one is a programmer's error that would
-    // corrupt the ring, so it ends the process.
+    // One producer only (PR 182 S4): a push from a second thread is a
+    // programmer's error that would corrupt the ring, so it ends the
+    // process.
     SCADA_RT void check_producer() noexcept {
-        const std::thread::id self = std::this_thread::get_id();
-        if (producer_.load(std::memory_order_relaxed) == self) {
-            return;
-        }
-        std::thread::id none{};
-        if (!producer_.compare_exchange_strong(none, self,
-                                               std::memory_order_relaxed) &&
-            none != self) {
+        if (!producer_.accepts(std::this_thread::get_id())) {
             panic("a second thread pushed into a log queue");
         }
     }
@@ -183,8 +180,7 @@ private:
     RecordRing ring_;
     std::string name_;
     std::shared_ptr<LogCounts> counts_;
-    static_assert(std::atomic<std::thread::id>::is_always_lock_free);
-    std::atomic<std::thread::id> producer_;  // none until the first push
+    log_internal::ProducerCheck producer_;
     // Statistics only, as the Logger's own counts.
     std::atomic<std::uint64_t> dropped_{0};
     std::atomic<std::uint64_t> reported_{0};  // written by the worker only
