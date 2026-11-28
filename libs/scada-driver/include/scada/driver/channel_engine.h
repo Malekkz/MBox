@@ -21,14 +21,20 @@
 #include "scada/driver/diagnostics.h"
 #include "scada/driver/exchange.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
+#include "scada/driver/identity_run.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/scheduler.h"
+#include "scada/driver/tag_value.h"
 #include "scada/driver/transport.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 namespace scada::driver {
@@ -151,6 +157,18 @@ public:
     // index out of range.
     [[nodiscard]] std::uint64_t points_absent(
         std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.identity_ok` (3.6, 11.1; D-147): the last verdict
+    // of the identity check, kept while a re-check is pending; none before
+    // the first, nor for a device without checks or out of range.
+    [[nodiscard]] std::optional<bool> identity_ok(
+        std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.identity`: the values the last verdict's round read,
+    // cleaned and joined (D-147); empty before the first verdict.
+    [[nodiscard]] std::string_view identity_text(
+        std::uint32_t device) const noexcept;
+    // `sys.dev.<device>.restarts` (7.6, 11.1): the restarts detected since
+    // the attach; 0 for an index out of range.
+    [[nodiscard]] std::uint64_t restarts(std::uint32_t device) const noexcept;
     // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.
     [[nodiscard]] double requests_per_s(std::int64_t now_ns) noexcept {
         return request_rate_.per_second(now_ns);
@@ -213,6 +231,20 @@ private:
         // A part of the chain was busy: the rest of the chain is read, and
         // nothing of it published (P9).
         bool chain_cut = false;
+        // The identity check (3.6) and the restart rules (7.6; D-147).
+        std::optional<IdentityRun> identity;  // with `identify`
+        std::optional<RestartWatch> restart;  // with `restart_indication`
+        // Per point: the processing of identity and restart samples read in
+        // an identity round, apart from the point's own state and tag (no
+        // point tag is written while the check is pending, ruling item 2).
+        std::vector<PointState> scratch;
+        bool identity_round = false;      // a round is in progress
+        bool identity_retrying = false;   // a retry of an identity read waits
+        std::optional<bool> identity_ok;  // the last verdict
+        std::array<char, TAG_STRING_MAX_BYTES> identity_text{};
+        std::size_t identity_length = 0;
+        std::uint64_t restarts = 0;
+        // When its unit last restarted; NEVER before the first.
     };
 
     // The exchange and the connection: not real-time, since they reach the
@@ -272,6 +304,38 @@ private:
                           std::span<const DeliveredSample> samples) noexcept;
     SCADA_RT void process(std::uint32_t device,
                           std::span<const DeliveredSample> samples) noexcept;
+
+    // The identity check and the restart rules (channel_engine_identity.cpp;
+    // D-147). The mode the scheduler is to give `device` now.
+    [[nodiscard]] SCADA_RT DeviceMode
+    mode_of(std::uint32_t device) const noexcept;
+    // A new round of `device`'s check, to end by the tracker's deadline of
+    // its pending check (ruling item 2; identity_setup.h).
+    SCADA_RT void start_identity_round(std::uint32_t device) noexcept;
+    // An IDENTITY choice answered, or failed after its retries.
+    void identity_answered(const Choice& choice,
+                           const DecodeResult& decoded) noexcept;
+    void identity_failed(const Choice& choice, End end) noexcept;
+    // The samples of an identity read: those of identity and restart points
+    // go to the check and the watch through `scratch`; the rest are
+    // dropped. False when a restart fired: the rest of the answer is not
+    // used.
+    SCADA_RT bool identity_samples(
+        std::uint32_t device,
+        std::span<const DeliveredSample> samples) noexcept;
+    // The verdict, once `device`'s identity cycle has no read left.
+    void identity_cycle_done(std::uint32_t device) noexcept;
+    // A valid sample of a restart rule's point; true when the device
+    // restarted.
+    SCADA_RT bool watch_restart(std::uint32_t device, std::uint32_t point,
+                                const ProcessedSample& sample) noexcept;
+    // A restart of `device`'s unit was detected (ruling item 6).
+    void restarted(std::uint32_t device) noexcept;
+    // Every point tag of `device` withheld with `flags` (withhold_point).
+    SCADA_RT void withhold_points(std::uint32_t device, std::uint16_t flags,
+                                  bool keep_not_init) noexcept;
+    // Keeps the round's identity text as the device's (on a verdict).
+    SCADA_RT void keep_identity_text(std::uint32_t device) noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;
