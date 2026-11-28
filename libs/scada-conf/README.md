@@ -102,7 +102,10 @@ the whole of `validate_and_expand`):
 - time: about 12.8 s for the worst tree of expressions within their
   budget (additions and uncached parses take about 96 ns a node), 10.7 s
   for 61 instances of a template of 65,536 written points that each keep
-  one (`only`), just under the work budget.
+  one (`only`), just under the work budget. These are the expansion's;
+  the matching budgets of stage 5 add their own: 14.4 s for run-time
+  patterns (D-117), about 1 s for health rules' `applies_to` patterns
+  (CF-311, D-116).
 
 A tree past a limit is refused within that: a `when` of 400 terms over
 65,536 values in 30 instances in 5.2 s (it took 729 s when every

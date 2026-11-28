@@ -98,6 +98,11 @@ inline constexpr std::size_t MAX_EXPRESSION_WORK =
 inline constexpr std::uint64_t RUN_TIME_NAME_WORK = 32;
 inline constexpr std::uint64_t MAX_RUN_TIME_PATTERN_WORK = 10'000'000'000;
 
+// The work of matching the `applies_to` patterns of health rules against a
+// device's points for CF-311 at stage 5, counted as for run-time patterns
+// (D-116; #176); past it the patterns left are not checked.
+inline constexpr std::uint64_t MAX_APPLIES_TO_PATTERN_WORK = 1'000'000'000;
+
 struct ExpandLimits {
     std::size_t nodes = MAX_EXPANDED_NODES;
     std::size_t text_bytes = MAX_EXPANDED_TEXT;
@@ -115,6 +120,8 @@ struct ExpandLimits {
     std::size_t kept_run_time = MAX_KEPT_RUN_TIME;
     // At stage 5, the work of matching run-time patterns (CF-113).
     std::uint64_t run_time_pattern_work = MAX_RUN_TIME_PATTERN_WORK;
+    // At stage 5, the work of matching `applies_to` patterns for CF-311.
+    std::uint64_t applies_to_pattern_work = MAX_APPLIES_TO_PATTERN_WORK;
 };
 
 // What the expansion held to report its errors, at its end: the texts that

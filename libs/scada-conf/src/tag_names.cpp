@@ -49,11 +49,6 @@ constexpr std::uint16_t CF_TOO_MANY_TAGS = 1001;
 // 2.1: the most bytes of a tag name.
 constexpr std::size_t MAX_TAG_NAME_BYTES = 127;
 
-// The pattern and point comparisons of `applies_to` in one run; past it the
-// patterns left are not checked (D-116), so that n patterns over n points
-// stay bounded.
-constexpr std::size_t MAX_PATTERN_WORK = 20'000'000;
-
 constexpr std::string_view DEVICE_PREFIX = "sys.dev.";
 constexpr std::string_view CHANNEL_PREFIX = "sys.drv.";
 constexpr std::string_view PERIOD_SEGMENT = ".period";
@@ -985,8 +980,9 @@ namespace {
 class Referee {
 public:
     Referee(const TagNames& tags, const ExpandedTree& tree,
-            Diagnostics& diagnostics)
-        : tags_(&tags),
+            Diagnostics& diagnostics, std::uint64_t pattern_work)
+        : max_pattern_work_(pattern_work),
+          tags_(&tags),
           tree_(&tree),
           expanded_(tree.document),
           reporter_(tree, diagnostics) {}
@@ -1279,18 +1275,26 @@ private:
             need_point(entry);
             return;
         }
-        if (pattern_work_ + points_->size() > MAX_PATTERN_WORK) {
-            return;  // bounded (D-116)
+        // Each name compared costs RUN_TIME_NAME_WORK and the matcher's
+        // steps, as D-117 counts them (#176): the steps of one comparison
+        // grow with the pattern's length times the name's.
+        for (const std::string_view point : *points_) {
+            if (pattern_work_ >= max_pattern_work_) {
+                return;  // bounded (D-116): not checked
+            }
+            std::uint64_t steps = 0;
+            const bool matched = matches_name_pattern(text, point, steps);
+            pattern_work_ += RUN_TIME_NAME_WORK + steps;
+            if (matched) {
+                return;
+            }
         }
-        pattern_work_ += points_->size();
-        if (std::ranges::none_of(*points_, [text](std::string_view point) {
-                return matches_name_pattern(text, point);
-            })) {
-            report(expanded_, CF_NO_MATCH, entry,
-                   "pattern " + quote_text(text) + " matches no tag");
-        }
+        report(expanded_, CF_NO_MATCH, entry,
+               "pattern " + quote_text(text) + " matches no tag");
     }
 
+    // The work of matching `applies_to` patterns in one run (#176).
+    std::uint64_t max_pattern_work_;
     const TagNames* tags_;
     const ExpandedTree* tree_;
     Reader expanded_;
@@ -1302,7 +1306,7 @@ private:
     const std::vector<std::string_view>* points_ = nullptr;
     std::string_view point_;
     std::string detail_;
-    std::size_t pattern_work_ = 0;
+    std::uint64_t pattern_work_ = 0;
 };
 
 }  // namespace
@@ -1495,11 +1499,12 @@ TagNames collect_tags(const ExpandedTree& tree,
 
 void check_tag_references(const TagNames& tags, const ExpandedTree& tree,
                           std::span<const CheckedFile> files,
-                          Diagnostics& diagnostics) {
+                          Diagnostics& diagnostics,
+                          std::uint64_t pattern_work) {
     if (!tags.complete()) {
         return;
     }
-    Referee referee(tags, tree, diagnostics);
+    Referee referee(tags, tree, diagnostics, pattern_work);
     referee.check_tree();
     for (const CheckedFile& file : files) {
         referee.check_file(file);
