@@ -123,43 +123,43 @@ bool EventLog::push(std::size_t device, DeviceEvent kind,
         case DeviceEvent::MISMATCH: {
             if (!details) {
                 return queue_->push(LogLevel::WARNING, wall_ns,
-                                   "identity mismatch",
-                                   {{"MESSAGE_ID", "driver-identity-mismatch"},
-                                    {"CHANNEL", channel},
-                                    {"DEVICE", name},
-                                    {"COUNT", count.view()}});
+                                    "identity mismatch",
+                                    {{"MESSAGE_ID", "driver-identity-mismatch"},
+                                     {"CHANNEL", channel},
+                                     {"DEVICE", name},
+                                     {"COUNT", count.view()}});
             }
             const Number check(events.check);
             return queue_->push(LogLevel::WARNING, wall_ns, "identity mismatch",
-                               {{"MESSAGE_ID", "driver-identity-mismatch"},
-                                {"CHANNEL", channel},
-                                {"DEVICE", name},
-                                {"REASON", reason_text(events.reason)},
-                                {"CHECK", check.view()},
-                                {"VALUE", text},
-                                {"COUNT", count.view()}});
+                                {{"MESSAGE_ID", "driver-identity-mismatch"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"REASON", reason_text(events.reason)},
+                                 {"CHECK", check.view()},
+                                 {"VALUE", text},
+                                 {"COUNT", count.view()}});
         }
         case DeviceEvent::MATCH:
             if (!details) {
                 return queue_->push(LogLevel::NOTICE, wall_ns,
-                                   "identity matched",
-                                   {{"MESSAGE_ID", "driver-identity-matched"},
-                                    {"CHANNEL", channel},
-                                    {"DEVICE", name},
-                                    {"COUNT", count.view()}});
+                                    "identity matched",
+                                    {{"MESSAGE_ID", "driver-identity-matched"},
+                                     {"CHANNEL", channel},
+                                     {"DEVICE", name},
+                                     {"COUNT", count.view()}});
             }
             return queue_->push(LogLevel::NOTICE, wall_ns, "identity matched",
-                               {{"MESSAGE_ID", "driver-identity-matched"},
-                                {"CHANNEL", channel},
-                                {"DEVICE", name},
-                                {"IDENTITY", text},
-                                {"COUNT", count.view()}});
+                                {{"MESSAGE_ID", "driver-identity-matched"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"IDENTITY", text},
+                                 {"COUNT", count.view()}});
         case DeviceEvent::RESTART:
             return queue_->push(LogLevel::WARNING, wall_ns, "device restart",
-                               {{"MESSAGE_ID", "driver-device-restart"},
-                                {"CHANNEL", channel},
-                                {"DEVICE", name},
-                                {"COUNT", count.view()}});
+                                {{"MESSAGE_ID", "driver-device-restart"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"COUNT", count.view()}});
     }
     return true;  // no such kind: nothing to log
 }

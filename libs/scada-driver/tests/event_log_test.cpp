@@ -16,11 +16,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,8 +61,7 @@ public:
     // True once `count` writes have begun, within WAIT.
     bool wait_for_entered(std::size_t count) {
         std::unique_lock lock(mutex_);
-        return changed_.wait_for(lock, WAIT,
-                                 [&] { return entered_ >= count; });
+        return changed_.wait_for(lock, WAIT, [&] { return entered_ >= count; });
     }
 
 private:
@@ -92,14 +91,16 @@ private:
 // The sum of the COUNTs of the records of `message_id` of device `device`.
 std::uint64_t count_of(const std::vector<std::string>& lines,
                        std::string_view message_id, std::string_view device) {
-    const std::string id = "|MESSAGE_ID=" + std::string(message_id) + "|";
+    const std::string record = "|MESSAGE_ID=" + std::string(message_id) + "|";
     const std::string name = "|DEVICE=" + std::string(device) + "|";
     std::uint64_t sum = 0;
     for (const std::string& line : lines) {
-        const std::size_t at = line.find("|COUNT=");
-        if (line.find(id) != std::string::npos &&
-            line.find(name) != std::string::npos && at != std::string::npos) {
-            sum += std::stoull(line.substr(at + std::string_view("|COUNT=").size()));
+        const std::size_t count = line.find("|COUNT=");
+        if (line.find(record) != std::string::npos &&
+            line.find(name) != std::string::npos &&
+            count != std::string::npos) {
+            sum += std::stoull(
+                line.substr(count + std::string_view("|COUNT=").size()));
         }
     }
     return sum;
@@ -161,6 +162,9 @@ protected:
         return lines_.wait_for_entered(1);
     }
     void release() { lines_.set_stalled(false); }
+    // A queue of 1; one restart logged and one held for each device; the
+    // Logger's thread held in the sink. False if any step failed.
+    bool held_with_one_each();
 
 private:
     CompiledChannel channel_ = two_devices();
@@ -314,53 +318,51 @@ TEST_F(Logged, ADueSummaryWaitsForRoom) {
     EXPECT_EQ(count_of(lines(), "driver-device-restart", "d1"), 2U);
 }
 
-// One restart logged and one held for each device, through a queue of 1.
-void hold_one_each(EventLog& log, const std::function<void()>& drain) {
+bool Logged::held_with_one_each() {
+    if (!start(1)) {
+        return false;
+    }
     EventRecord restart;
     restart.count = 1;
     for (std::size_t device = 0; device < 2; ++device) {
-        log.add(device, DeviceEvent::RESTART, restart, 0, WALL);
-        drain();
-        log.add(device, DeviceEvent::RESTART, restart, 1, WALL);
+        log().add(device, DeviceEvent::RESTART, restart, 0, WALL);
+        (void)lines();
+        log().add(device, DeviceEvent::RESTART, restart, 1, WALL);
     }
+    return hold();
+}
+
+// The restart counts of d1 and d2 in `lines`.
+std::array<std::uint64_t, 2> restarts_of(
+    const std::vector<std::string>& lines) {
+    return {count_of(lines, "driver-device-restart", "d1"),
+            count_of(lines, "driver-device-restart", "d2")};
 }
 
 // The stop's flush logs while there is room and says when it must wait.
 TEST_F(Logged, TheStopsFlushWaitsForRoom) {
-    if (!start(1)) {
-        FAIL() << "no logger";
-    }
-    hold_one_each(log(), [this] { (void)lines(); });
-    if (!hold()) {
-        FAIL() << "the sink was not entered";
-    }
-    EXPECT_FALSE(log().flush(WALL, false));  // one in, one waits
-    EXPECT_FALSE(log().flush(WALL, false));
-    EXPECT_EQ(queue().dropped(), 0U);
+    ASSERT_TRUE(held_with_one_each());
+    // One goes in, one waits, and nothing is dropped.
+    const bool waits = !log().flush(WALL, false) && !log().flush(WALL, false) &&
+                       queue().dropped() == 0;
     release();
     (void)lines();
-    EXPECT_TRUE(log().flush(WALL, false));
-    const std::vector<std::string> got = lines();
-    EXPECT_EQ(count_of(got, "driver-device-restart", "d1"), 2U);
-    EXPECT_EQ(count_of(got, "driver-device-restart", "d2"), 2U);
+    const bool done = log().flush(WALL, false);
+    EXPECT_TRUE(waits);
+    EXPECT_TRUE(done);
+    EXPECT_EQ(restarts_of(lines()), (std::array<std::uint64_t, 2>{2, 2}));
 }
 
 // Out of time, the last flush drops what does not fit, and counts it.
 TEST_F(Logged, TheLastFlushDropsWhatDoesNotFit) {
-    if (!start(1)) {
-        FAIL() << "no logger";
-    }
-    hold_one_each(log(), [this] { (void)lines(); });
-    if (!hold()) {
-        FAIL() << "the sink was not entered";
-    }
-    EXPECT_TRUE(log().flush(WALL, true));
-    EXPECT_EQ(queue().dropped(), 1U);
+    ASSERT_TRUE(held_with_one_each());
+    const bool done = log().flush(WALL, true);
     release();
-    EXPECT_TRUE(log().flush(WALL, false));  // nothing held any more
-    const std::vector<std::string> got = lines();
-    EXPECT_EQ(count_of(got, "driver-device-restart", "d1"), 2U);
-    EXPECT_EQ(count_of(got, "driver-device-restart", "d2"), 1U);
+    // Nothing held any more.
+    const bool empty = log().flush(WALL, false);
+    EXPECT_TRUE(done && empty);
+    EXPECT_EQ(restarts_of(lines()), (std::array<std::uint64_t, 2>{2, 1}));
+    EXPECT_EQ(queue().dropped(), 1U);
     EXPECT_EQ(logger().dropped(), 1U);
 }
 

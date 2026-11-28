@@ -85,10 +85,8 @@ std::string_view read_slot(const Slot& slot,
 namespace {
 
 using log_internal::BoundedText;
-using log_internal::FieldSize;
 using log_internal::RecordRing;
 using log_internal::Slot;
-using log_internal::truncate_utf8;
 
 bool is_valid_component(std::string_view component) noexcept {
     if (component.empty() || component.size() > LOG_MAX_COMPONENT_BYTES) {
@@ -186,7 +184,7 @@ private:
     std::string name_;
     std::shared_ptr<LogCounts> counts_;
     static_assert(std::atomic<std::thread::id>::is_always_lock_free);
-    std::atomic<std::thread::id> producer_{};
+    std::atomic<std::thread::id> producer_;  // none until the first push
     // Statistics only, as the Logger's own counts.
     std::atomic<std::uint64_t> dropped_{0};
     std::atomic<std::uint64_t> reported_{0};  // written by the worker only
@@ -211,7 +209,9 @@ bool LogQueue::push(LogLevel level, std::int64_t time_ns,
         std::span<const LogField>(fields.begin(), fields.size()));
 }
 
-bool LogQueue::full() const noexcept { return impl_->full(); }
+bool LogQueue::full() const noexcept {
+    return impl_->full();
+}
 
 std::uint64_t LogQueue::dropped() const noexcept {
     return impl_->dropped();

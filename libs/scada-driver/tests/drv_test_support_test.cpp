@@ -138,8 +138,8 @@ TEST(DrvTestArgs, RefuseLog) {
     EXPECT_FALSE(plain->refuse_log);
     EXPECT_TRUE(refusing->refuse_log);
     EXPECT_EQ(refusing->refuse_log_ms, 200);
-    EXPECT_FALSE(parse({"--base-dir", "/b", "--refuse-log", "1001",
-                        "--channel", "c", "tcp", "h", "1"},
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--refuse-log", "1001", "--channel",
+                        "c", "tcp", "h", "1"},
                        err)
                      .has_value());
     EXPECT_FALSE(parse({"--base-dir", "/b", "--refuse-log", "--channel", "c",
@@ -153,8 +153,8 @@ TEST(DrvTestArgs, TheRefusingSinkWritesAndRefuses) {
     class Counting final : public LogSink {
     public:
         explicit Counting(int& count) : count_(count) {}
-        [[nodiscard]] Status write(const LogRecord& /*record*/) noexcept
-            override {
+        [[nodiscard]] Status write(
+            const LogRecord& /*record*/) noexcept override {
             ++count_;
             return {};
         }

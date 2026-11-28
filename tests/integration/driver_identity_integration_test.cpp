@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <bit>
 #include <cstddef>
-#include <cstdlib>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -299,7 +298,8 @@ protected:
         std::size_t records = 0;
         for (std::size_t at = 0; at < err.size();) {
             const std::size_t end = std::min(err.find('\n', at), err.size());
-            const std::string_view line(err.data() + at, end - at);
+            const std::string_view line =
+                std::string_view(err).substr(at, end - at);
             if (line.starts_with("20") &&
                 line.find(" scada-drv-test: ") != std::string_view::npos) {
                 ++records;
@@ -354,16 +354,17 @@ protected:
         start_tagd({{.name = "line1", .tags = tags}});
         std::vector<std::string> sim_args{"--set", "1", "0", "0", "5"};
         sim_args.insert(sim_args.end(), sim_extra.begin(), sim_extra.end());
-        std::optional<ChildProcess> sim = start_sim(sim_args);
-        if (!sim.has_value()) {
+        std::optional<ChildProcess> started = start_sim(sim_args);
+        if (!started.has_value()) {
             return std::nullopt;
         }
-        args = joined(args, tcp_channel("line1", port_of(*sim)));
+        ChildProcess& sim = *started;
+        args = joined(args, tcp_channel("line1", port_of(sim)));
         for (std::size_t index = 1; index <= devices; ++index) {
             args = joined(args, device("d" + std::to_string(index), 1, "0"));
             if (index == 1) {
-                args = joined(args, std::vector<std::string>{
-                                        "--restart-decreases", "0"});
+                args = joined(
+                    args, std::vector<std::string>{"--restart-decreases", "0"});
             }
         }
         std::optional<ChildProcess> driver = start_driver(args);
@@ -371,7 +372,7 @@ protected:
             return std::nullopt;
         }
         observe();
-        return Running{.sim = std::move(*sim), .driver = std::move(*driver)};
+        return Running{.sim = std::move(sim), .driver = std::move(*driver)};
     }
     // Waits until every device's `restarts` is GOOD with `expected`; their
     // sum.
@@ -383,8 +384,7 @@ protected:
             const bool reached =
                 eventually(handle(name), [&](const scada_value& value) {
                     return value.quality == SCADA_QUALITY_GOOD &&
-                           std::bit_cast<std::int64_t>(value.value) ==
-                               expected;
+                           std::bit_cast<std::int64_t>(value.value) == expected;
                 });
             if (!reached) {
                 ADD_FAILURE() << name << " is not " << expected;
@@ -402,7 +402,7 @@ TEST_F(UnitRestarts, ABurstLargerThanTheQueueLosesNoCount) {
     // count back to the limit, so the summaries after the 10 s period
     // carry them, and the counts add up to `restarts` before the stop (PR
     // 182 M2).
-    const std::size_t DEVICES = std::getenv("NDEV") ? std::stoul(std::getenv("NDEV")) : 200;
+    constexpr std::size_t DEVICES = 200;
     std::optional<Running> running =
         run(DEVICES, QUEUE, {"--set-after", "1", "0", "0", "3", "20"});
     if (!running.has_value()) {
@@ -428,8 +428,8 @@ TEST_F(UnitRestarts, TheStopWaitsForRoomForEveryHeldCount) {
     constexpr std::size_t DEVICES = 100;
     std::optional<Running> running =
         run(DEVICES, QUEUE,
-            {"--set-after", "1", "0", "0", "3", "300", "--set-after", "1",
-             "0", "0", "1", "800"});
+            {"--set-after", "1", "0", "0", "3", "300", "--set-after", "1", "0",
+             "0", "1", "800"});
     if (!running.has_value()) {
         FAIL() << "no simulator or no driver";
     }

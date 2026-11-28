@@ -28,11 +28,11 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cstddef>
 #include <array>
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -867,10 +867,10 @@ private:
                                           : channel.owner;
             // The owner's change ring at least twice its tags (CF-1003).
             const std::size_t owned =
-                channel.tags.size() + (channel.system_tags &&
-                                               channel.system_owner.empty()
-                                           ? system_tags_of(channel).size()
-                                           : 0);
+                channel.tags.size() +
+                (channel.system_tags && channel.system_owner.empty()
+                     ? system_tags_of(channel).size()
+                     : 0);
             add_owner(owners, owner, true, ring_for(owned));
             for (const std::string& tag : channel.tags) {
                 add_tag(tags, tag, owner, "int64", channel.retain);

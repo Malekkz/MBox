@@ -166,20 +166,18 @@ TEST_F(Queued, AFullQueueDropsAndCounts) {
 
 TEST_F(Queued, FullSaysWhetherAPushWouldDrop) {
     capture().set_stalled(true);
-    if (!start()) {
-        FAIL() << "logger or queue not made";
-    }
+    ASSERT_TRUE(start());
     logger().log(LogLevel::INFO, "first");
     ASSERT_TRUE(capture().wait_for_entered(1));
-    EXPECT_EQ(push_numbered(queue(), SIZE - 1), SIZE - 1);
-    EXPECT_FALSE(queue().full());
-    EXPECT_EQ(push_numbered(queue(), 1), 1U);
-    EXPECT_TRUE(queue().full());
+    const bool room_before_the_last =
+        push_numbered(queue(), SIZE - 1) == SIZE - 1 && !queue().full();
+    const bool full_after_it = push_numbered(queue(), 1) == 1 && queue().full();
     // Asking drops nothing.
-    EXPECT_EQ(queue().dropped(), 0U);
+    const bool none_dropped = queue().dropped() == 0;
     capture().set_stalled(false);
-    EXPECT_TRUE(logger().flush(WAIT).ok());
-    EXPECT_FALSE(queue().full());
+    const bool drained = logger().flush(WAIT).ok();
+    EXPECT_TRUE(room_before_the_last && full_after_it && none_dropped);
+    EXPECT_TRUE(drained && !queue().full());
 }
 
 TEST_F(Queued, TheLossIsReportedAfterTheKeptRecords) {
@@ -273,7 +271,7 @@ TEST(LoggerPolling, ALoggerWithoutQueuesDoesNotPoll) {
     const std::uint64_t idle = logger.worker_rounds();
     wait_out();
     EXPECT_LE(logger.worker_rounds() - idle, 1U);
-    Result<std::shared_ptr<LogQueue>> queue = logger.make_queue(4);
+    const Result<std::shared_ptr<LogQueue>> queue = logger.make_queue(4);
     ASSERT_TRUE(queue.ok());
     const std::uint64_t polling = logger.worker_rounds();
     wait_out();

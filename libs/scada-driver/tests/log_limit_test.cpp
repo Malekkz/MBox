@@ -137,15 +137,16 @@ TEST(LogLimit, AGivenBackSummaryWaitsForItsNewPeriod) {
 }
 
 TEST(LogLimit, AGivenBackCountIsHeldAtTheStop) {
+    constexpr std::uint64_t COUNT = 5;
     LogLimit limit(KINDS, KEYS, PERIOD);
-    EXPECT_TRUE(limit.admit(2, 0, 100, 5));
-    limit.give_back(2, 0, 5);
+    EXPECT_TRUE(limit.admit(2, 0, 100, COUNT));
+    limit.give_back(2, 0, COUNT);
     limit.give_back(2, 0, 0);
     limit.give_back(KINDS, 0, 1);
     limit.give_back(0, KEYS + 1, 1);
     EXPECT_TRUE(limit.holds());
     EXPECT_EQ(held(limit),
-              (std::vector<LogSummary>{{.kind = 2, .key = 0, .count = 5}}));
+              (std::vector<LogSummary>{{.kind = 2, .key = 0, .count = COUNT}}));
 }
 
 TEST(LogLimit, HoldsSaysWhetherACountWaits) {

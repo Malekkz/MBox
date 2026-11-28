@@ -167,9 +167,9 @@ std::size_t worker_log_queue_size(std::size_t setting,
         return setting;
     }
     // Two per device, without overflow for any count of devices.
-    const std::size_t two =
-        devices > LOG_MAX_QUEUE_CAPACITY / 2 ? LOG_MAX_QUEUE_CAPACITY
-                                             : devices * 2;
+    const std::size_t two = devices > LOG_MAX_QUEUE_CAPACITY / 2
+                                ? LOG_MAX_QUEUE_CAPACITY
+                                : devices * 2;
     return std::clamp(two, MIN_WORKER_LOG_QUEUE, LOG_MAX_QUEUE_CAPACITY);
 }
 

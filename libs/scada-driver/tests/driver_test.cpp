@@ -182,7 +182,8 @@ TEST(Driver, AWorkersLogQueueIsSizedFromItsDevices) {
               LOG_MAX_QUEUE_CAPACITY);
     EXPECT_EQ(worker_log_queue_size(0, LOG_MAX_QUEUE_CAPACITY),
               LOG_MAX_QUEUE_CAPACITY);
-    EXPECT_EQ(worker_log_queue_size(0, std::numeric_limits<std::size_t>::max()), LOG_MAX_QUEUE_CAPACITY);
+    EXPECT_EQ(worker_log_queue_size(0, std::numeric_limits<std::size_t>::max()),
+              LOG_MAX_QUEUE_CAPACITY);
     // A setting wins.
     EXPECT_EQ(worker_log_queue_size(1, 200), 1U);
 }
