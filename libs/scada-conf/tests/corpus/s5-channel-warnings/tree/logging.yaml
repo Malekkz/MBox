@@ -1,0 +1,2 @@
+policies:
+  fast: { mode: periodic, interval: 50ms, raw_retention: 1d }

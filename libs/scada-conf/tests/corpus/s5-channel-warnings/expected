@@ -1,0 +1,7 @@
+# Stage 5 warnings of slice 7d-3 of #100 (D-123): gw2 connects to gw1's host
+# at the default port 502 (CW-621, at its host), and a virtual tag of the
+# default task, every 100 ms, is logged every 50 ms (CW-805, at its
+# logging). The address is from the documentation range of RFC 5737.
+# Invented.
+drivers/modbus/gw2.yaml:4:9: CW-621
+tags/site.yaml:2:79: CW-805

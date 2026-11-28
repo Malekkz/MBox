@@ -2,7 +2,8 @@
 #define SCADA_CONF_SRC_TAG_RULES_H
 
 // Stage 5 on retained values (configuration schemas contract 5.2), logging
-// (6) and alarms (8): decision D-119, slice 7c of #100.
+// (6) and alarms (8): decision D-119, slice 7c of #100; CW-805, decision
+// D-123.
 
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
@@ -25,6 +26,10 @@ namespace scada::conf {
 //   before, or not a whole multiple of it;
 // - CF-802 for logging settings without `policy` that lack `mode` or
 //   `raw_retention`; CF-803 for a STRING tag logged other than on change;
+// - warning CW-805 for a logging `interval`, the tag's own or its policy's,
+//   shorter than the tag's refresh: a read point's poll group period, a
+//   virtual tag's task period, or the period of the task an internal tag
+//   names (D-123);
 // - CF-811 for `priorities`, `max_shelve` or `classes` in a second alarms
 //   file; CF-812 for two alarms of one id on one tag; CF-813 for a
 //   `high_high` limit not above every `high` limit of its tag, or a `low`
