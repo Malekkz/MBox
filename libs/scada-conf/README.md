@@ -180,15 +180,17 @@ limits out of order; CF-814 and CF-815 for alarms on STRING and BOOL tags.
 The warnings CW-804 and CW-805 are not given yet.
 
 Then stage 5 checks the keys of each device's points that need no
-protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a
-`max_age`, given or 3 periods of its poll group, below `update_period`;
-CF-612 for a companion or a health point in another poll group or not
-read; CF-613 for a read Modbus double point of a field or an integer
-without `states`; CF-614 for a `wo` point with `poll_group`, `alarms` or
-`logging`; CF-616 for an identity check on a `wo` point; CF-618 for a
-template whose points use bits without `bit_order`, once per device;
-CF-619 for an `rw` or `wo` point without `storage`; CF-640 for `keep_last`
-on a point that gives no `max_age`.
+protocol's address rules (`src/point_rules.cpp`, D-120): CF-611 for a read
+point's `max_age`, given or 3 periods of its poll group, below
+`update_period`; CF-612 for a companion or a health point in another poll
+group or not read; CF-613 for a read Modbus double point of a field or an
+integer without `states`; CF-614 for `poll_group`, `alarms` or `logging`
+that a `wo` point or its override gives (not `defaults`, `none` or `[]`);
+CF-616 for an identity check on a `wo` point; CF-618 for a device that uses
+a bit or a field anywhere without `bit_order`, once per device; CF-619 for
+an `rw` or `wo` point without `storage`; CF-640 for `keep_last` on a read
+point that gives no `max_age`. The patterns of health rules share a budget
+of matching work (D-120).
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does

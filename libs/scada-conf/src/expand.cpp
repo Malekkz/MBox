@@ -88,6 +88,9 @@ struct Member {
     const CheckedFile* key_file = nullptr;
     NodeId key_node = 0;
     std::vector<Value> value;  // exactly one; a vector keeps Value incomplete
+    // A key of a point that only `defaults` gave (step 5): one the point
+    // and its overrides did not write (D-120).
+    bool from_defaults = false;
 };
 
 // A plain aggregate that the merge reads and writes field by field; its
@@ -293,6 +296,7 @@ void merge_by_index(Value& into, const Value& over) {
         existing.key = member.key;
         existing.key_file = member.key_file;
         existing.key_node = member.key_node;
+        existing.from_defaults = member.from_defaults;
         merge(existing.value.front(), member.value.front(), member.key);
     }
 }
@@ -332,6 +336,7 @@ void merge(Value& into, const Value& over, std::string_view parent) {
             existing->key = member.key;
             existing->key_file = member.key_file;
             existing->key_node = member.key_node;
+            existing->from_defaults = member.from_defaults;
             merge(existing->value.front(), member.value.front(), member.key);
         } else {
             into.members.push_back(member);
@@ -1763,6 +1768,9 @@ private:
         if (!count_made(*instance.find("name"), total)) {
             return;
         }
+        for (Member& member : defaults.members) {
+            member.from_defaults = true;
+        }
         for (Point& point : points) {
             Value merged = defaults;
             merged.file = point.value.file;
@@ -2435,7 +2443,8 @@ private:
                               .types = {},
                               .instance_of = std::move(instance_of_),
                               .instances = std::move(instances_),
-                              .computed = std::move(computed_)};
+                              .computed = std::move(computed_),
+                              .from_defaults = std::move(from_defaults_)};
             tree.types = ScalarTypes(tree.document);
             for (const auto& [node, type] : types_) {
                 tree.types.set(node, type);
@@ -2466,6 +2475,7 @@ private:
                 builder_.key(text, ScalarStyle::PLAIN, where);
             if (node.ok()) {
                 note(node.value());
+                last_key_ = node.value();
             }
             return node.ok();
         }
@@ -2513,6 +2523,9 @@ private:
                         ? position(*member.key_file, member.key_node)
                         : position(*value.file, value.node);
                 ok_ = ok_ && key(member.key, where);
+                if (ok_ && member.from_defaults) {
+                    from_defaults_.push_back(last_key_);
+                }
                 write_value(value);
             }
         }
@@ -2573,6 +2586,8 @@ private:
         std::uint32_t instance_ = ExpandedTree::NO_INSTANCE;
         std::vector<std::uint32_t> instance_of_;
         std::vector<NodeId> computed_;
+        std::vector<NodeId> from_defaults_;  // in the order written
+        NodeId last_key_ = 0;
         std::vector<Location> instances_;
         std::vector<std::pair<NodeId, ScalarType>> types_;
         std::size_t text_bytes_ = 0;
@@ -2647,6 +2662,10 @@ Diagnostic expanded_diagnostic(const ExpandedTree& tree, std::uint16_t code,
                          .detail = std::move(detail)});
     diagnostic.location = tree.instances[instance];
     return diagnostic;
+}
+
+bool from_defaults(const ExpandedTree& tree, NodeId key) {
+    return std::ranges::binary_search(tree.from_defaults, key);
 }
 
 bool written_in_instance(const ExpandedTree& tree, NodeId node) {

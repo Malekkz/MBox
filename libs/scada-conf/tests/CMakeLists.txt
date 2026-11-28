@@ -60,3 +60,8 @@ scada_add_test(scada-conf-expression-limits-test KIND unit
 scada_add_test(scada-conf-runtime-limits-test KIND unit
   SOURCES runtime_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+# The work of the health rules' patterns of stage 5 at tens of thousands of
+# points (D-120), with its own time limit.
+scada_add_test(scada-conf-point-limits-test KIND unit
+  SOURCES point_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)

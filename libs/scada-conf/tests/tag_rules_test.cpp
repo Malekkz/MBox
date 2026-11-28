@@ -646,6 +646,7 @@ TEST(TagRules, ARefusedTierIsNotCompared) {
                             .instance_of = {},
                             .instances = {},
                             .computed = {},
+                            .from_defaults = {},
                             .max_tags = ExpandedTree::DEFAULT_MAX_TAGS};
     Diagnostics diagnostics;
     check_tag_rules(TagNames{}, tree, files, diagnostics);

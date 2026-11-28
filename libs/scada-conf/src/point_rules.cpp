@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace scada::conf {
@@ -51,10 +52,11 @@ constexpr std::string_view DEFAULT_GROUP = "normal";
 // 4.7: the default `max_age` is this many poll group periods.
 constexpr std::uint64_t MAX_AGE_PERIODS = 3;
 
-// The pattern and point comparisons of health rules' `applies_to` in one
-// run; past it the patterns left are not checked (D-120), as for CF-311
-// (D-116).
-constexpr std::size_t MAX_PATTERN_WORK = 20'000'000;
+// The work of matching health rules' `applies_to` patterns in one run, as
+// for run-time patterns (D-117): RUN_TIME_NAME_WORK per point name compared
+// and one per step of the matcher. Past it the patterns left are not
+// checked (D-120).
+constexpr std::uint64_t MAX_HEALTH_PATTERN_WORK = 1'000'000'000;
 
 // The keys a `wo` point must not have (CF-614).
 constexpr std::array<std::string_view, 3> READ_KEYS = {"poll_group", "alarms",
@@ -63,17 +65,22 @@ constexpr std::array<std::string_view, 3> READ_KEYS = {"poll_group", "alarms",
 // A point of the device being checked.
 struct Point {
     NodeId node = 0;
-    bool read = true;        // not `wo`
-    std::string_view group;  // a view into the expanded tree; empty if `wo`
+    bool read = true;  // not `wo`
+    // Its `poll_group`, or `normal`; a `wo` point is in none, whatever this
+    // says (4.7). A view into the expanded tree, or a constant.
+    std::string_view group;
 };
 
 class Checker {
 public:
     Checker(const ExpandedTree& tree, std::span<const CheckedFile> files,
             Diagnostics& diagnostics)
-        : files_(files),
+        : tree_(&tree),
+          files_(files),
           expanded_(tree.document),
-          reporter_(tree, diagnostics) {}
+          reporter_(tree, diagnostics) {
+        index_templates();
+    }
 
     // `expanded_` is pointed into while it runs: not copied, not moved.
     Checker(const Checker&) = delete;
@@ -156,16 +163,11 @@ private:
             if (!point_name) {
                 continue;
             }
-            const bool read = expanded_.text_of(point, "access") != "wo";
-            std::string_view group = expanded_.text_of(point, "poll_group");
-            if (read && group.empty()) {
-                group = DEFAULT_GROUP;
-            }
             points_.try_emplace(
                 text(*point_name),
                 Point{.node = point,
-                      .read = read,
-                      .group = read ? group : std::string_view()});
+                      .read = expanded_.text_of(point, "access") != "wo",
+                      .group = group_of(point)});
         }
         first_read_ = {};
         first_other_group_ = {};
@@ -180,9 +182,6 @@ private:
                 break;
             }
         }
-        const bool has_bit_order =
-            expanded_.scalar(device, "bit_order").has_value();
-        bool bit_order_told = false;
         for (const NodeId point : points) {
             const std::optional<NodeId> point_name =
                 expanded_.scalar(point, "name");
@@ -191,20 +190,9 @@ private:
             }
             point_name_ = text(*point_name);
             check_point(point);
-            if (!has_bit_order && !bit_order_told) {
-                // Only a template gives `bit_order` (4.3): a point of a
-                // device without one has no place to (on #136).
-                if (const std::optional<NodeId> bits = uses_bits(point);
-                    bits && !template_of(*bits).empty()) {
-                    // Once per device: the cause is the template's.
-                    error(*bits, CF_NO_BIT_ORDER,
-                          "template " + quote_text(template_of(*bits)) +
-                              " uses bits and needs bit_order");
-                    bit_order_told = true;
-                }
-            }
         }
         point_name_ = {};
+        check_bit_order(device, points);
         check_health(device);
         check_identity(device);
     }
@@ -224,16 +212,18 @@ private:
         }
         if (!read) {
             for (const std::string_view key : READ_KEYS) {
-                if (const std::optional<NodeId> given =
-                        expanded_.child(point, key)) {
+                if (const std::optional<NodeId> given = own_key(point, key);
+                    given && !says_nothing(*given)) {
                     error(*given, CF_WRITE_ONLY_READ,
                           "point " + quote_text(point_name_) +
                               " is write-only and cannot be read");
                 }
             }
         }
-        check_keep_last(point);
+        // A `wo` point is never read: no value of it is invalid, stale or
+        // refreshed, and it has no companions (4.7).
         if (read) {
+            check_keep_last(point);
             check_max_age(point);
             check_companions(point);
         }
@@ -242,6 +232,34 @@ private:
         if (read && protocol_ == "modbus") {
             check_states(point);
         }
+    }
+
+    // The value of `key` of `point` when the point or an override wrote it;
+    // a key only a `defaults` map gave is not the point's (D-120: M2 of the
+    // review of #174).
+    [[nodiscard]] std::optional<NodeId> own_key(NodeId point,
+                                                std::string_view key) const {
+        if (expanded_.document().kind(point) != NodeKind::MAP) {
+            return std::nullopt;
+        }
+        for (const Entry& entry : expanded_.document().entries(point)) {
+            if (text(entry.key) == key) {
+                if (from_defaults(*tree_, entry.key)) {
+                    return std::nullopt;
+                }
+                return entry.value;
+            }
+        }
+        return std::nullopt;
+    }
+
+    // `none` and an empty list say "nothing": `logging: none`, `alarms: []`.
+    [[nodiscard]] bool says_nothing(NodeId value) const {
+        const Document& document = expanded_.document();
+        return (document.kind(value) == NodeKind::SCALAR &&
+                document.text(value) == "none") ||
+               (document.kind(value) == NodeKind::SEQUENCE &&
+                document.items(value).empty());
     }
 
     // CF-640: `keep_last` needs a `max_age` the point gives (D-120).
@@ -360,15 +378,6 @@ private:
         if (const std::optional<NodeId> bits = expanded_.child(point, "bits")) {
             return bits;
         }
-        const auto bit_of = [this](NodeId map) -> std::optional<NodeId> {
-            for (const std::string_view key : {"bit", "field"}) {
-                if (const std::optional<NodeId> found =
-                        expanded_.child(map, key)) {
-                    return found;
-                }
-            }
-            return std::nullopt;
-        };
         if (const std::optional<NodeId> address =
                 expanded_.child(point, "address")) {
             if (const std::optional<NodeId> found = bit_of(*address)) {
@@ -391,18 +400,108 @@ private:
         return std::nullopt;
     }
 
-    // The name of the template `node` was written in: the stem of its file
-    // (CF-102 makes the two the same); empty for a node of another file.
-    [[nodiscard]] std::string_view template_of(NodeId node) const {
-        const std::string& file = expanded_.document().location(node).file;
-        for (const CheckedFile& checked : files_) {
-            if (checked.source->path == file) {
-                return checked.source->path_class.type == FileType::TEMPLATE
-                           ? std::string_view(checked.source->path_class.stem)
-                           : std::string_view();
+    // A `bit` or `field` of the map `map`.
+    [[nodiscard]] std::optional<NodeId> bit_of(NodeId map) const {
+        for (const std::string_view key : {"bit", "field"}) {
+            if (const std::optional<NodeId> found = expanded_.child(map, key)) {
+                return found;
             }
         }
-        return {};
+        return std::nullopt;
+    }
+
+    // CF-618: `bit_order` wherever a bit or a field is used (4.2, 4.3, the
+    // lead's ruling M3 of the review of #174): the points of the expanded
+    // device, the instance's own included, a health rule's `good_when` and
+    // an identity check's address. Once per device, at the first use, named
+    // by the device's template, else by the device.
+    void check_bit_order(NodeId device, std::span<const NodeId> points) {
+        if (expanded_.scalar(device, "bit_order")) {
+            return;
+        }
+        std::optional<NodeId> site;
+        std::string detail;
+        for (const NodeId point : points) {
+            if (const std::optional<NodeId> bits = uses_bits(point)) {
+                site = bits;
+                detail =
+                    "point " + std::string(expanded_.text_of(point, "name"));
+                break;
+            }
+        }
+        for (const auto& [key, part] : {std::pair{"health", "good_when"},
+                                        std::pair{"identify", "address"}}) {
+            for (const NodeId rule : expanded_.items(device, key)) {
+                if (site) {
+                    break;
+                }
+                if (const std::optional<NodeId> map =
+                        expanded_.child(rule, part)) {
+                    site = bit_of(*map);
+                    detail = key;
+                }
+            }
+        }
+        if (!site) {
+            return;
+        }
+        const std::string_view template_name = template_of(device);
+        error(
+            *site, CF_NO_BIT_ORDER,
+            (template_name.empty() ? "device " + quote_text(device_)
+                                   : "template " + quote_text(template_name)) +
+                " uses bits and needs bit_order",
+            detail);
+    }
+
+    // The `template` of the instance `device` was made from, as its channel
+    // file gives it; empty for a device without one.
+    [[nodiscard]] std::string_view template_of(NodeId device) const {
+        const std::optional<NodeId> name = expanded_.scalar(device, "name");
+        if (!name || *name >= tree_->instance_of.size() ||
+            tree_->instance_of[*name] >= tree_->instances.size()) {
+            return {};
+        }
+        const Location& place = tree_->instances[tree_->instance_of[*name]];
+        const auto found = templates_.find(
+            std::tuple{std::string_view(place.file), place.line, place.column});
+        return found == templates_.end() ? std::string_view() : found->second;
+    }
+
+    // The `template` of each device of the channel files, by the place of
+    // its `name` key, as the expanded tree records instances.
+    void index_templates() {
+        for (const CheckedFile& checked : files_) {
+            if (checked.source->path_class.type != FileType::CHANNEL ||
+                checked.document == nullptr) {
+                continue;
+            }
+            const Document& document = *checked.document;
+            const std::optional<NodeId> devices =
+                document.find(document.root(), "devices");
+            if (!devices || document.kind(*devices) != NodeKind::SEQUENCE) {
+                continue;
+            }
+            for (const NodeId item : document.items(*devices)) {
+                if (document.kind(item) != NodeKind::MAP) {
+                    continue;
+                }
+                const std::optional<NodeId> name = document.find(item, "name");
+                const std::optional<NodeId> used =
+                    document.find(item, "template");
+                if (!name || !used ||
+                    document.kind(*used) != NodeKind::SCALAR) {
+                    continue;
+                }
+                // A copy: `location()` returns a temporary (S3 of the
+                // review of #174).
+                const Location place = document.location(*name);
+                templates_.emplace(
+                    std::tuple{std::string_view(checked.source->path),
+                               place.line, place.column},
+                    document.text(*used));
+            }
+        }
     }
 
     // --- Device rules ------------------------------------------------------
@@ -439,9 +538,10 @@ private:
     // The first read point by name that health rule `rule` applies to (4.9:
     // `all`, or listed names and patterns) and that `health` does not serve:
     // `health` is not read, or is in another group. `all` is O(1); a name
-    // is one look-up; the patterns of a run are compared with at most
-    // MAX_PATTERN_WORK point names in all, and those past it are not checked
-    // (D-120), so that n patterns over n points stay bounded.
+    // is one look-up; the patterns of a run do at most
+    // MAX_HEALTH_PATTERN_WORK of matching work in all, counted as D-117
+    // counts it, and a pattern the budget runs out in, and those after it,
+    // are not checked (D-120), so that their time stays bounded.
     [[nodiscard]] std::optional<std::string_view> first_unserved(
         NodeId rule, const Point& health) {
         const auto serves = [&health](const Point& point) {
@@ -490,16 +590,26 @@ private:
                 }
                 continue;
             }
-            if (pattern_work_ + points_.size() > MAX_PATTERN_WORK) {
-                continue;  // bounded (D-120)
-            }
-            pattern_work_ += points_.size();
             // In name order, the first point matched and not served.
+            std::optional<std::string_view> matched;
             for (const auto& [name, point] : points_) {
-                if (!serves(point) && matches_name_pattern(listed, name)) {
-                    consider(name);
+                if (pattern_work_ >= MAX_HEALTH_PATTERN_WORK) {
+                    matched.reset();  // bounded (D-120): not checked
                     break;
                 }
+                if (serves(point)) {
+                    continue;
+                }
+                std::uint64_t steps = 0;
+                const bool hit = matches_name_pattern(listed, name, steps);
+                pattern_work_ += RUN_TIME_NAME_WORK + steps;
+                if (hit) {
+                    matched = name;
+                    break;
+                }
+            }
+            if (matched) {
+                consider(*matched);
             }
         }
         return first;
@@ -526,11 +636,19 @@ private:
         }
     }
 
+    const ExpandedTree* tree_;
     // The files of the tree, which outlive the check.
     std::span<const CheckedFile> files_;
+    // The `template` of each instance, by its channel file and the line and
+    // column of its `name` key: views into the files.
+    std::map<std::tuple<std::string_view, std::uint32_t, std::uint32_t>,
+             std::string_view>
+        templates_;
     Reader expanded_;
     Reporter reporter_;
-    // Of the channel being checked: views into the expanded tree.
+    // Of the channel being checked: views into the expanded tree; the keys
+    // of `periods_` are the channel's group names, or the constants of
+    // DEFAULT_PERIODS_MS.
     std::string_view protocol_;
     std::map<std::string_view, std::uint64_t, std::less<>> periods_;
     // Of the device being checked: views into the expanded tree.
@@ -542,7 +660,7 @@ private:
     std::string_view first_read_;
     std::string_view first_other_group_;
     // Of the whole run.
-    std::size_t pattern_work_ = 0;
+    std::uint64_t pattern_work_ = 0;
 };
 
 }  // namespace

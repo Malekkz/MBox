@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 
@@ -16,6 +17,17 @@ namespace {
 std::string meter(std::string_view points, std::string_view more = {}) {
     return "template: meter_a\nprotocol: modbus\npoints:\n" +
            std::string(points) + "bit_order: lsb0\n" + std::string(more);
+}
+
+// The errors of `lines`, the output of `expand`.
+Lines only_errors(const Lines& lines) {
+    Lines found;
+    for (const std::string& line : lines) {
+        if (line.find(": error ") != std::string::npos) {
+            found.push_back(line);
+        }
+    }
+    return found;
 }
 
 // The errors of the tree of meter_a and the devices given (one device
@@ -313,14 +325,15 @@ TEST(PointRules, BitsNeedBitOrder) {
                      "\"meter_a\" uses bits and needs bit_order\n"
                      "  from template templates/meter_a.yaml:5:61 (point b)"}));
     EXPECT_EQ(errors_of(points + "bit_order: msb0\n"), Lines{});
-    // A device without a template has no key that gives one (4.3; on #136).
-    EXPECT_EQ(expand({{"drivers/modbus/line1.yaml",
-                       channel("  - name: ps1.m1\n    unit_id: 1\n"
-                               "    points:\n"
-                               "      - { name: b, address: { table: holding, "
-                               "register: 2, bit: 3 } }\n")}}),
-              Lines{"ps1.m1.b: {address: {table: holding, register: 2, bit: "
-                    "3}}"});
+    // A device without a template: no level gives `bit_order`, and the
+    // device is named (M3 of the review of #174).
+    EXPECT_EQ(errors_of(points + "bit_order: msb0\n",
+                        "  - name: ps1.m1\n    unit_id: 1\n"
+                        "    points:\n"
+                        "      - { name: b, address: { table: holding, "
+                        "register: 2, bit: 3 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:65: error CF-618: device "
+                     "\"ps1.m1\" uses bits and needs bit_order"}));
     // `bits` and a quality rule's field count too.
     EXPECT_EQ(errors_of("template: meter_a\nprotocol: modbus\npoints:\n"
                         "  - { name: s, address: { table: holding, register: "
@@ -335,6 +348,204 @@ TEST(PointRules, BitsNeedBitOrder) {
               (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
                      "\"meter_a\" uses bits and needs bit_order\n"
                      "  from template templates/meter_a.yaml:4:52 (point s)"}));
+}
+
+// --- The review of #174 ------------------------------------------------
+
+// M3: every use of a bit in the expanded device needs `bit_order`: an
+// instance's own bit point, a double point's `on` or `fault` part, a health
+// rule's `good_when` and an identity check's address.
+TEST(PointRules, EveryUseOfABitNeedsBitOrder) {
+    const std::string plain =
+        "template: meter_a\nprotocol: modbus\npoints:\n"
+        "  - { name: a, address: { table: holding, register: 1, type: uint16 "
+        "} }\n";
+    EXPECT_EQ(errors_of(plain,
+                        "  - name: ps1.m1\n    template: meter_a\n"
+                        "    unit_id: 1\n    points:\n"
+                        "      - { name: b, address: { table: holding, "
+                        "register: 2, bit: 3 } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:11:65: error CF-618: template "
+                     "\"meter_a\" uses bits and needs bit_order"}));
+    EXPECT_EQ(errors_of(plain +
+                        "  - { name: d, kind: double_point, address: { on: { "
+                        "table: holding, register: 5, bit: 1 }, off: { table: "
+                        "coil, register: 6 } } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
+                     "\"meter_a\" uses bits and needs bit_order\n"
+                     "  from template templates/meter_a.yaml:5:87 (point d)"}));
+    EXPECT_EQ(
+        errors_of(plain +
+                  "  - { name: d, kind: double_point, address: { on: { "
+                  "table: coil, register: 5 }, off: { table: coil, "
+                  "register: 6 }, fault: { table: holding, register: 7, "
+                  "bit: 2 } } }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
+               "\"meter_a\" uses bits and needs bit_order\n"
+               "  from template templates/meter_a.yaml:5:159 (point d)"}));
+    EXPECT_EQ(errors_of(plain + "health:\n  - { point: a, good_when: { field: "
+                                "[0, 1], equals: 0 }, applies_to: all }\n"),
+              (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
+                     "\"meter_a\" uses bits and needs bit_order\n"
+                     "  from template templates/meter_a.yaml:6:37 (health)"}));
+    EXPECT_EQ(
+        errors_of(plain + "identify:\n  - { address: { table: holding, "
+                          "register: 9, bit: 4 }, equals: 1 }\n"),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-618: template "
+               "\"meter_a\" uses bits and needs bit_order\n"
+               "  from template templates/meter_a.yaml:6:52 (identify)"}));
+}
+
+// M1, M2: a `wo` point's `logging: none` and `alarms: []` say nothing, and
+// keys only a `defaults` map gives are not the point's; an override is.
+TEST(PointRules, WriteOnlyKeysThatAreNotThePoints) {
+    const std::string write_only =
+        "  - { name: w, access: wo, storage: volatile, logging: none, alarms: "
+        "[], address: { table: holding, register: 1, type: uint16 } }\n";
+    EXPECT_EQ(errors_of(meter(write_only)), Lines{});
+    EXPECT_EQ(errors_of(meter(write_only,
+                              "defaults: { poll_group: slow, logging: { "
+                              "mode: on_change, raw_retention: 1d } }\n")),
+              Lines{});
+    EXPECT_EQ(errors_of(meter(write_only),
+                        "  - name: ps1.m1\n    template: meter_a\n"
+                        "    unit_id: 1\n"
+                        "    defaults: { poll_group: slow }\n"),
+              Lines{});
+    EXPECT_EQ(errors_of(meter(write_only),
+                        "  - name: ps1.m1\n    template: meter_a\n"
+                        "    unit_id: 1\n"
+                        "    overrides: { w: { poll_group: slow } }\n"),
+              (Lines{"drivers/modbus/line1.yaml:10:35: error CF-614: point "
+                     "\"w\" is write-only and cannot be read"}));
+}
+
+// S1 and S2: the rules of read values do not apply to a `wo` point: its
+// `keep_last` from `defaults`, its `max_age` and its companions.
+TEST(PointRules, ReadRulesSkipWriteOnlyPoints) {
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: x, poll_group: slow, address: { table: holding, "
+            "register: 1, type: int16 } }\n"
+            "  - { name: w, access: wo, storage: volatile, update_period: 5s, "
+            "max_age: 1s, exponent_from: { point: x, direction: multiply }, "
+            "address: { table: holding, register: 2, type: int16 } }\n",
+            "defaults: { on_invalid: keep_last, max_age: 10s }\n")),
+        Lines{});
+    // A `wo` companion in the reading point's group is still not read.
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: w, access: wo, storage: volatile, address: { table: "
+            "holding, register: 1, type: int16 } }\n"
+            "  - { name: a, exponent_from: { point: w, direction: multiply }, "
+            "address: { table: holding, register: 2, type: int16 } }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point \"a\": "
+               "\"w\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:5:40 (point a)"}));
+}
+
+// S2: health rules. A `wo` point a rule names is not read and not checked;
+// a `wo` health point in the group serves none; the first by name of the
+// listed names and of the points of `all` is named.
+TEST(PointRules, HealthRulesAndWriteOnlyPoints) {
+    const std::string points =
+        "  - { name: z, address: { table: holding, register: 1, type: uint16 "
+        "} }\n"
+        "  - { name: b, address: { table: holding, register: 2, type: uint16 "
+        "} }\n"
+        "  - { name: w, access: wo, storage: volatile, address: { table: "
+        "holding, register: 3, type: uint16 } }\n"
+        "  - { name: h, poll_group: fast, address: { table: holding, "
+        "register: 4, type: uint16 } }\n";
+    EXPECT_EQ(errors_of(meter(points,
+                              "health:\n  - { point: h, good_when: 0, "
+                              "applies_to: [ w ] }\n")),
+              Lines{});
+    EXPECT_EQ(
+        errors_of(meter(points,
+                        "health:\n  - { point: h, good_when: 0, "
+                        "applies_to: [ z, b ] }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point "
+               "\"b\": \"h\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:10:14 (point b)"}));
+    EXPECT_EQ(
+        errors_of(meter(points,
+                        "health:\n  - { point: h, good_when: 0, "
+                        "applies_to: all }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point "
+               "\"b\": \"h\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:10:14 (point b)"}));
+    // A `wo` health point in the points' group does not serve them.
+    EXPECT_EQ(
+        errors_of(meter(points,
+                        "health:\n  - { point: w, good_when: 0, "
+                        "applies_to: [ b ] }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-612: point "
+               "\"b\": \"w\" must be in poll group \"normal\"\n"
+               "  from template templates/meter_a.yaml:10:14 (point b)"}));
+}
+
+// S2: a `parts` double point needs `states`; the shapes of two bits do not,
+// and outside Modbus there is no such rule.
+TEST(PointRules, StatesOfMoreShapes) {
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: p, kind: double_point, address: { table: holding, "
+            "parts: [ { register: 2 }, { register: 1 } ], type: uint32 } }\n")),
+        (Lines{"drivers/modbus/line1.yaml:7:11: error CF-613: point \"p\": "
+               "states must be given\n"
+               "  from template templates/meter_a.yaml:4:22 (point p)"}));
+    // `on` and `off` make it the two-bit shape, whose `states` has a
+    // default (A.2), whatever else the address gives.
+    EXPECT_EQ(
+        errors_of(meter(
+            "  - { name: d, kind: double_point, address: { table: holding, "
+            "register: 7, type: uint16, on: { table: holding, register: 8, "
+            "bit: 1 }, off: { table: holding, register: 8, bit: 2 } } }\n")),
+        Lines{});
+    EXPECT_EQ(only_errors(expand(
+                  {{"templates/sensor_a.yaml",
+                    "template: sensor_a\nprotocol: io\npoints:\n"
+                    "  - { name: pos, kind: double_point, address: { line: 1, "
+                    "direction: input } }\n"},
+                   {"drivers/io/local.yaml",
+                    "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
+                    "devices:\n  - { name: ps1.s1, template: sensor_a }\n"}})),
+              Lines{});
+}
+
+// S2: a device given twice (CF-303) is checked once; a channel's groups
+// replace the defaults, so `slow` is not one of them.
+TEST(PointRules, DevicesTwiceAndTheChannelsGroups) {
+    const std::string writable = meter(
+        "  - { name: c, access: rw, address: { table: holding, "
+        "register: 1, type: uint16 } }\n");
+    const Lines twice =
+        errors_of(writable,
+                  "  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                  "  - { name: ps1.m1, template: meter_a, unit_id: 2 }\n");
+    EXPECT_EQ(std::ranges::count_if(twice,
+                                    [](const std::string& line) {
+                                        return line.find("CF-619") !=
+                                               std::string::npos;
+                                    }),
+              1);
+    for (const std::string& line : twice) {
+        EXPECT_EQ(line.find("more instance"), std::string::npos) << line;
+    }
+    const std::string groups =
+        "channel:\n  name: line1\n  type: rtu\n"
+        "  device: /dev/serial/by-path/platform-serial1\n  baud: 9600\n"
+        "  poll_groups: { normal: { period: 2s } }\n"
+        "devices:\n  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n";
+    for (const std::string& line :
+         expand({{"templates/meter_a.yaml",
+                  meter("  - { name: s, poll_group: slow, update_period: 40s, "
+                        "address: { table: holding, register: 1, type: "
+                        "uint16 } }\n")},
+                 {"drivers/modbus/line1.yaml", groups}})) {
+        EXPECT_EQ(line.find("CF-611"), std::string::npos) << line;
+    }
 }
 
 }  // namespace

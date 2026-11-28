@@ -1638,7 +1638,8 @@ TEST(MergedPoints, AComputedValueWithoutARuleIsInternal) {
                       .types = {},
                       .instance_of = {},
                       .instances = {},
-                      .computed = {value}};
+                      .computed = {value},
+                      .from_defaults = {}};
     tree.types = ScalarTypes(tree.document);
     Diagnostics diagnostics;
     const Status status = check_merged_points(tree, {}, diagnostics);

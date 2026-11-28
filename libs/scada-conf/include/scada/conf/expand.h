@@ -51,6 +51,10 @@ struct ExpandedTree {
     // The scalars computed from a configuration expression (13.3), in the
     // order written, for the checks of their values at stage 5 (D-115).
     std::vector<NodeId> computed;
+    // The keys of points that only a `defaults` map gave (4.5 step 5), not
+    // the point or an override: their key nodes, in increasing order
+    // (D-120).
+    std::vector<NodeId> from_defaults;
     // `limits.max_tags` of system.yaml, or its default: the tags of the tag
     // set, generated tags included (4.1, CF-1001), which stage 5 counts
     // (D-116).
@@ -59,6 +63,10 @@ struct ExpandedTree {
     static constexpr std::uint32_t NO_INSTANCE = 0xFFFFFFFF;
     static constexpr std::int64_t DEFAULT_MAX_TAGS = 50'000;
 };
+
+// True if the key node `key` of `tree` is a point's key that only a
+// `defaults` map gave (D-120).
+[[nodiscard]] bool from_defaults(const ExpandedTree& tree, NodeId key);
 
 // True if `node` of `tree`, or a key or value below it, was written in its
 // instance's own file (an override, an instance point). An error placed

@@ -773,7 +773,8 @@ TEST(MergedPoints, TheCacheOfCheckedValuesIsPerProtocol) {
                       .types = {},
                       .instance_of = {},
                       .instances = {},
-                      .computed = {}};
+                      .computed = {},
+                      .from_defaults = {}};
     tree.types = ScalarTypes(tree.document);
     for (NodeId node = 0; node < tree.document.size(); ++node) {
         if (tree.document.kind(node) == NodeKind::SCALAR &&

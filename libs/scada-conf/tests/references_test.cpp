@@ -752,8 +752,12 @@ TEST(References, AlarmsOfADeviceWithoutTemplateAreRunTime) {
                            "            alarms: [ { type: state, alarm_on: "
                            "true, priority: high, suppress_when: "
                            "ps1.station.maint } ]\n")}}),
-        Lines{"drivers/modbus/line1.yaml:16:85 CF-310: tag "
-              "\"ps1.station.maint\" does not exist"});
+        // A device without a template that uses a bit is CF-618 too (M3 of
+        // the review of #174).
+        (Lines{"drivers/modbus/line1.yaml:14:11 CF-618: device \"ps1.m1\" "
+               "uses bits and needs bit_order",
+               "drivers/modbus/line1.yaml:16:85 CF-310: tag "
+               "\"ps1.station.maint\" does not exist"}));
 }
 
 // The one CF-523 of a configuration expression: the type of a `for` value
