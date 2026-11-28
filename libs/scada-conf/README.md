@@ -196,6 +196,22 @@ an `rw` or `wo` point without `storage`; CF-640 for `keep_last` on a read
 point that gives no `max_age`. The patterns of health rules share a budget
 of matching work (D-120).
 
+Then stage 5 checks the Modbus addresses of each channel
+(`src/modbus_rules.cpp`, D-122), with registers taken after the device's
+`address_base`: CF-603 for an address that is not valid for Modbus (a
+register outside 0 to 65,535, a value that runs past it, a bit key or a
+type other than `bool` on a coil or discrete input, a field wider than its
+raw type, a read range outside the table); CF-602 for two points of one
+device that read one register as whole values or write a bit in common;
+CF-601 for two devices of one channel whose registers meet; CF-610 for a
+`side_effect` or `exclusive` range read in two poll groups, read by an
+identity check, written, or overlapping a range of another kind; CF-615
+for a function a point needs that `functions` excludes, with no
+substitution; warning CW-607 for an `idle_timeout` shorter than the
+device's slowest poll or `backoff_max`, with no `keepalive`. The warnings
+that need the block plan (CW-606, CW-608) are the Modbus check mode's
+(#104).
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
@@ -270,26 +286,26 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-529 | `src/expression.cpp` |
 | CF-516 | `src/merged_points.cpp` |
 | CF-517 | `src/merged_points.cpp`, `src/rules.cpp` |
-| CF-601 | slice 7d-2 of #100 (Modbus addresses) |
-| CF-602 | slice 7d-2 of #100 (Modbus addresses) |
-| CF-603 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-601 | `src/modbus_rules.cpp` |
+| CF-602 | `src/modbus_rules.cpp` |
+| CF-603 | `src/modbus_rules.cpp` |
 | CF-604 | `src/tag_names.cpp` |
 | CF-605 | slice 7d-3 of #100 (channels and `io`) |
-| CF-610 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-610 | `src/modbus_rules.cpp` |
 | CF-611 | `src/point_rules.cpp` |
 | CF-612 | `src/point_rules.cpp` |
 | CF-613 | `src/point_rules.cpp` |
 | CF-614 | `src/point_rules.cpp` |
-| CF-615 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-615 | `src/modbus_rules.cpp` |
 | CF-616 | `src/point_rules.cpp` |
 | CF-618 | `src/point_rules.cpp` |
 | CF-619 | `src/point_rules.cpp` |
 | CF-620 | slice 7d-3 of #100 (channels and `io`) |
 | CF-622 | `src/references.cpp` |
 | CF-640 | `src/point_rules.cpp` |
-| CW-606 | slice 7d-2 of #100 (Modbus addresses) |
-| CW-607 | slice 7d-2 of #100 (Modbus addresses) |
-| CW-608 | slice 7d-2 of #100 (Modbus addresses) |
+| CW-606 | #104 (the Modbus check mode at stage 7, from the block plan; D-122) |
+| CW-607 | `src/modbus_rules.cpp` |
+| CW-608 | #104 (the Modbus check mode at stage 7, from the block plan; D-122) |
 | CW-621 | slice 7d-3 of #100 (channels and `io`) |
 | CW-660 | slice 7d-3 of #100 (channels and `io`) |
 | CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
@@ -352,8 +368,8 @@ codes that #100 gives, and CW-805 are listed too.
 | CF-1016 | #101 and #102 (stages 6 and 7) |
 | CF-1014 | #101 and #102 (stages 6 and 7) |
 | CF-651 | #104 (the Modbus `configure`; stage 5 gives CF-615, D-120) |
-| CF-652 | slice 7d-2 of #100 (Modbus addresses) |
-| CF-653 | slice 7d-2 of #100 (Modbus addresses) |
+| CF-652 | #104 (the Modbus `configure`, stage 7; D-122) |
+| CF-653 | #104 (the Modbus `configure`, stage 7; D-122) |
 | CF-662 | slice 7d-3 of #100 (channels and `io`) |
 
 ## The YAML subset parser

@@ -1,0 +1,5 @@
+template: meter
+protocol: modbus
+idle_timeout: 60s
+points:
+  - { name: flow, poll_group: slow, address: { table: holding, register: 1, type: uint16 } }

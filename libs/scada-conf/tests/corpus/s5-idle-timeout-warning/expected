@@ -1,0 +1,5 @@
+# CW-607 (4.6; D-122): a template's idle_timeout of 60 s is shorter than the
+# default backoff_max of 300 s, at ps1.m1, which has no keepalive. ps1.m2
+# gives a keepalive and ps1.m3 a backoff_max of 30 s, longer than none of
+# its poll periods (slow, 10 s): no warning. The tree is valid. Invented.
+drivers/modbus/line1.yaml:7:13: CW-607

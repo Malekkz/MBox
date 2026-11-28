@@ -676,8 +676,9 @@ TEST(TagNames, TheFirstErrorsAreListedInOrder) {
     std::string meter = "template: meter_a\nprotocol: modbus\npoints:\n";
     for (int point = 0; point < POINTS; ++point) {
         meter += "  - { name: p" + std::to_string(point) +
-                 ", address: { table: holding, register: 1, type: uint16 }, "
-                 "poll_group: hourly }\n";
+                 ", address: { table: holding, register: " +
+                 std::to_string(point + 1) +
+                 ", type: uint16 }, poll_group: hourly }\n";
     }
     const Expanded expanded =
         expand_limited({{"areas.yaml", std::string(AREAS)},
