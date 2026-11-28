@@ -681,10 +681,38 @@ protected:
         return {buffer.data(), length};
     }
 
-    scada_value read(std::uint32_t tag) {
+    // How the fixture reads a tag: `scada_tag_read`, or what a test gives
+    // in its place (issue #186).
+    using TagRead = std::function<int(scada_ctx*, std::uint32_t, scada_value*)>;
+    void set_tag_read(TagRead read) { tag_read_ = std::move(read); }
+
+    // One read of `tag`; nothing when the owner was mid-write for the
+    // whole read (SCADA_E_BUSY), which the tag database documents as
+    // transient: the reader keeps its previous copy and reads again (TD,
+    // the read section; issue #186). Any other failure fails the test.
+    std::optional<scada_value> try_read(std::uint32_t tag) {
         scada_value value{};
-        EXPECT_EQ(scada_tag_read(ctx_, tag, &value), SCADA_OK);
+        const int code = tag_read_(ctx_, tag, &value);
+        if (code == SCADA_E_BUSY) {
+            return std::nullopt;
+        }
+        EXPECT_EQ(code, SCADA_OK);
         return value;
+    }
+
+    // A read of `tag`, read again while the owner is mid-write, up to
+    // WAIT_LIMIT.
+    scada_value read(std::uint32_t tag) {
+        const auto end = SteadyClock::now() + WAIT_LIMIT;
+        for (bool first = true; first || SteadyClock::now() < end;
+             first = false) {
+            if (std::optional<scada_value> value = try_read(tag)) {
+                return *value;
+            }
+        }
+        ADD_FAILURE() << "the owner of tag " << tag
+                      << " was mid-write at every read";
+        return {};
     }
 
     // The next change of the observed owner within `limit`, gaps skipped.
@@ -818,7 +846,9 @@ protected:
                     milliseconds limit = WAIT_LIMIT) {
         const auto end = SteadyClock::now() + limit;
         while (SteadyClock::now() < end) {
-            if (holds(read(tag))) {
+            // A busy read is no answer: wait for the next change.
+            if (const std::optional<scada_value> value = try_read(tag);
+                value.has_value() && holds(*value)) {
                 return true;
             }
             scada_change change{};
@@ -966,6 +996,7 @@ private:
     std::unique_ptr<NotifyListener> listener_;
     scada_ctx* ctx_ = nullptr;
     scada_sub* sub_ = nullptr;
+    TagRead tag_read_ = scada_tag_read;
 };
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
