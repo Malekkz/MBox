@@ -36,6 +36,7 @@ scada_add_library(scada-driver
     src/utf8.cpp
     src/worker.cpp
     src/write_conversion.cpp
+    src/command_check.cpp
     src/zone_file.cpp
     src/zone_table.cpp
   DEPENDS scada::common scada::conf scada::service scada::tag)

@@ -74,6 +74,20 @@ belongs to its first producer thread for life. With a slow sink the
 Logger's destructor delivers the backlog after the run has ended, without a
 bound; the journal sink does not block.
 
+## Write requests
+
+A device has outputs (`CompiledOutput`, filled by the compile step, and
+until then by `scada-drv-test --output`), each naming its target point.
+`check_request` runs checks 2 to 9 of contract 8.2 in order on a request
+and its target: the target, the operation against the control model, the
+value against the kind, the limits and the raw type, the source against the
+output's mode tag `<output>.mode`, the local panel for AUTO, selections,
+the device's state and the write limits (D-150). It sends and posts
+nothing. Selections come with slice 7: until then a SELECT is refused
+NOT_SUPPORTED and an OPERATE NOT_SELECTED. The command thread that takes
+requests from the tag database and posts their results comes with 6a-2,
+the execution of an order with 6b.
+
 ## Identity checks and restarts
 
 A device with `identify` reads only its identity cycle after every connect,

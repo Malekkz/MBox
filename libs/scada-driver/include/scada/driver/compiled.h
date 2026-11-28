@@ -57,6 +57,14 @@ struct CompiledPollGroup {
 // Point access (CS 4.7): a `wo` point is never read.
 enum class Access : std::uint8_t { RO = 1, RW, WO };
 
+// `write_limits` of a writable point (CS 7.2; DI 8.9): writes beyond them
+// are refused whatever their source; a write counts when its first byte is
+// sent. 0: no limit.
+struct WriteLimits {
+    std::int64_t min_interval_ns = 0;
+    std::uint32_t max_per_day = 0;
+};
+
 struct CompiledPoint {
     std::string name;
     Access access = Access::RO;
@@ -64,7 +72,57 @@ struct CompiledPoint {
     // polled (`access: wo`, a report-only point).
     std::optional<std::uint32_t> poll_group;
     PointRules rules;
+    WriteLimits write_limits{};
     std::unique_ptr<ProtocolData> protocol;
+};
+
+// What a command on an output means (CS 7.2 `kind`; DI 8.3). `latch` is
+// reserved and compiled as SINGLE.
+enum class OutputKind : std::uint8_t {
+    SINGLE = 1,
+    DOUBLE,
+    SETPOINT,
+    STEP,
+    PULSE,
+    TRIGGER,
+};
+
+// The control model of an output (CS 7.2 `sbo`; DI 8.2 check 3).
+enum class ControlModel : std::uint8_t { DIRECT = 1, SBO };
+
+// One interval of an output's `limits.ranges`, in engineering units.
+struct ValueRange {
+    double lo = 0.0;
+    double hi = 0.0;
+};
+
+// `limits` of an output (CS 7.2), in engineering units: a value must be
+// within `min` and `max`, and in one of `ranges` when there are any.
+// `rate` and `release` are `scada-cmd`'s and the fail-safe slice's.
+struct OutputLimits {
+    std::optional<double> min;
+    std::optional<double> max;
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::vector<ValueRange> ranges{};
+};
+
+// An output of a device (CS 7.2; DI 8): the configured controllable point
+// that write requests name by its target's tag. Filled by the compile step
+// (slice 8), and until then by `scada-drv-test --output` (D-150).
+struct CompiledOutput {
+    std::string name;  // the output's name: its mode tag is `<name>.mode`
+    std::uint32_t point = 0;  // the target, an index into the device's points
+    OutputKind kind = OutputKind::SETPOINT;
+    bool on_only = false;  // "off" is refused (CS 7.2)
+    ControlModel model = ControlModel::DIRECT;
+    OutputLimits limits{};
+    // The raw width of the target's raw type, for the conversion of 8.4.
+    std::uint8_t raw_width = 0;
+    // `authority.local_blocks_auto` of the output's area, and its
+    // `local_panel.input` tag (CS 7.1; DI 8.2 check 6).
+    bool local_blocks_auto = false;
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::string panel_input{};
 };
 
 // Pacing of a channel or a device (6.4); 0 means none.
@@ -98,6 +156,8 @@ struct CompiledDevice {
     std::vector<RestartRule> restart_indication{};
     // NOLINTEND(readability-redundant-member-init)
     std::vector<CompiledPoint> points;
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::vector<CompiledOutput> outputs{};
     ReadPlan plan;
     std::unique_ptr<ProtocolData> protocol;
 };
