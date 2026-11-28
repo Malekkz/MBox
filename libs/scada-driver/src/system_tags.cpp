@@ -166,6 +166,12 @@ bool ProcessTags::applied() noexcept {
                       false, refused_);
 }
 
+bool ProcessTags::log_dropped(std::uint64_t count) noexcept {
+    SystemSlot& dropped =
+        element(slots_, static_cast<std::size_t>(ProcessSignal::LOG_DROPPED));
+    return write_slot(write_, ctx_, dropped, count, false, refused_);
+}
+
 bool ProcessTags::stopped() noexcept {
     SystemSlot& state =
         element(slots_, static_cast<std::size_t>(ProcessSignal::CONFIG_STATE));

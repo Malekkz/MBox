@@ -32,6 +32,7 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -864,7 +865,13 @@ private:
             const std::string owner = channel.owner.empty()
                                           ? "drv-test." + channel.name
                                           : channel.owner;
-            add_owner(owners, owner);
+            // The owner's change ring at least twice its tags (CF-1003).
+            const std::size_t owned =
+                channel.tags.size() +
+                (channel.system_tags && channel.system_owner.empty()
+                     ? system_tags_of(channel).size()
+                     : 0);
+            add_owner(owners, owner, true, ring_for(owned));
             for (const std::string& tag : channel.tags) {
                 add_tag(tags, tag, owner, "int64", channel.retain);
             }
@@ -921,8 +928,19 @@ private:
 
     // Adds `owner` of process drv-test to the JSON list `owners` once;
     // `observed`: it is one `observe` may subscribe to (a channel's).
+    // The least change ring of the tag set's rules for `tags` tags: a power
+    // of two, at least 1,024 and twice the tags (CF-1003).
+    static std::size_t ring_for(std::size_t tags) {
+        constexpr std::size_t LEAST = 1024;
+        std::size_t ring = LEAST;
+        while (ring < 2 * tags) {
+            ring *= 2;
+        }
+        return ring;
+    }
+
     void add_owner(std::string& owners, const std::string& owner,
-                   bool observed = true) {
+                   bool observed = true, std::size_t ring = 1024) {
         if (std::find(owners_.begin(), owners_.end(), owner) != owners_.end() ||
             owners.find(R"("name": ")" + owner + "\"") != std::string::npos) {
             return;
@@ -932,7 +950,9 @@ private:
         }
         owners += owners.empty() ? R"({"name": ")" : R"(, {"name": ")";
         owners += owner;
-        owners += R"(", "process": "drv-test", "change_ring_capacity": 1024})";
+        owners += R"(", "process": "drv-test", "change_ring_capacity": )";
+        owners += std::to_string(ring);
+        owners += "}";
     }
 
     std::optional<scada::test::TempDirectory> temp_;

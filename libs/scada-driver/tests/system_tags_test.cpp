@@ -529,6 +529,21 @@ TEST(ProcessTags, TheStopWritesLoadingAgain) {
     EXPECT_FALSE(tags.stopped());  // LOADING already
 }
 
+TEST(ProcessTags, LogDroppedIsWrittenWhenItChanges) {
+    // 5b-3 (D-148): the records lost on the way to the journal.
+    constexpr auto LOG_DROPPED =
+        static_cast<std::uint32_t>(ProcessSignal::LOG_DROPPED);
+    ProcessTags tags = recorded_process_tags();
+    (void)tags.publish_start();
+    EXPECT_FALSE(tags.log_dropped(0));  // 0 since the start
+    EXPECT_TRUE(tags.log_dropped(3));
+    EXPECT_FALSE(tags.log_dropped(3));
+    EXPECT_TRUE(tags.log_dropped(4));
+    const std::vector<Recorded> written = writes_of(LOG_DROPPED);
+    ASSERT_EQ(written.size(), 3U);  // 0 at the start, 3, 4
+    EXPECT_EQ(written.back().bits, 4U);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

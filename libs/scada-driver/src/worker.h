@@ -3,8 +3,9 @@
 
 // The worker thread of one channel (driver.h; DI 2.4, 2.6, 9.1, 10; D-142).
 
-#include "event_slot.h"
+#include "event_log.h"
 #include "scada/common/fd.h"
+#include "scada/common/log.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/protocol.h"
@@ -53,6 +54,10 @@ public:
     Worker(Worker&&) = delete;
     Worker& operator=(Worker&&) = delete;
 
+    // The queue the worker logs into (11.3, D-148); none: it logs nothing.
+    // Before `start`, main thread only.
+    void set_log(std::shared_ptr<LogQueue> queue) noexcept;
+
     // Creates the stop and start eventfds and starts the thread, which
     // writes every tag of its owner at once (9.1). The calling thread must
     // have blocked the stop signals: the new thread inherits its mask
@@ -97,14 +102,6 @@ public:
         return refused_.load(std::memory_order_relaxed);
     }
 
-    // The identity and restart events of device `device` since the last
-    // take, for the log (D-147): false when none, or before `start`. Main
-    // thread only.
-    bool take_event(std::size_t device, DeviceEvent kind,
-                    EventRecord& out) noexcept {
-        return device < events_.size() && events_.at(device).take(kind, out);
-    }
-
     // Joins the thread if it has returned; true when it is joined (or was
     // never started).
     bool join_if_returned() noexcept;
@@ -124,8 +121,11 @@ private:
         return stop_.load(std::memory_order_acquire);
     }
     void moved() noexcept { progress_.fetch_add(1, std::memory_order_relaxed); }
-    // Hands the engine's events to the event slots.
+    // Logs the engine's events through `events_`, and the summaries due.
     void hand_events(ChannelEngine& engine) noexcept;
+    // At the stop: logs every count `events_` holds, waiting for room in
+    // the queue a bounded time (PR 182 M2).
+    void flush_events() noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;
@@ -149,8 +149,10 @@ private:
     // Relaxed: counters, read only to see whether they moved or for a log.
     std::atomic<std::uint64_t> progress_{0};
     std::atomic<std::uint64_t> refused_{0};
-    // One per device, made by `start` before the thread runs (D-147).
-    std::vector<detail::EventSlot> events_;
+    // The worker's log queue, shared with the Logger, and the log of its
+    // devices' events, made by `start` before the thread runs (D-148).
+    std::shared_ptr<LogQueue> log_queue_;
+    std::optional<EventLog> events_;
     std::atomic<Phase> phase_{Phase::STARTING};
     Status failure_;  // written before the phase becomes FAILED
     // A POSIX thread, for its stack size (DI 2.4).

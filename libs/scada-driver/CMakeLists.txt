@@ -12,11 +12,11 @@ scada_add_library(scada-driver
     src/channel_engine_identity.cpp
     src/diagnostics.cpp
     src/driver.cpp
-    src/event_slot.cpp
-    src/event_throttle.cpp
+    src/event_log.cpp
     src/failure.cpp
     src/fd_io.cpp
     src/identity.cpp
+    src/log_limit.cpp
     src/identity_run.cpp
     src/identity_setup.cpp
     src/identity_text.cpp

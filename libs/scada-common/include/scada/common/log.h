@@ -1,6 +1,7 @@
 #ifndef SCADA_COMMON_LOG_H
 #define SCADA_COMMON_LOG_H
 
+#include "scada/common/realtime.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 
@@ -21,8 +22,12 @@
 // is dropped and counted, and the count is reported as a record of its own
 // once the sink accepts records again.
 //
-// Logging is not allowed in real-time code (CLAUDE.md, "Real-time code"):
-// `log` takes a mutex and reads the clock.
+// `log` takes a mutex and reads the clock, so it is not allowed in
+// real-time code (CLAUDE.md, "Real-time code"). A thread that must never wait
+// for another (a real-time thread, or one that writes a heartbeat or a tag:
+// driver interface contract 11.3) logs through a `LogQueue` of its own
+// instead: a lock-free single-producer queue that the same worker thread
+// drains.
 
 namespace scada {
 
@@ -147,6 +152,63 @@ struct LoggerOptions {
     std::size_t queue_capacity = LOG_DEFAULT_QUEUE_CAPACITY;
 };
 
+// The polling period of a Logger's worker thread, in milliseconds: a push
+// into a `LogQueue` cannot wake the worker (a wake is a system call), so the
+// worker looks at its queues at least this often. A record pushed into a
+// queue reaches the sink within about this time plus the sink's own time.
+inline constexpr std::int64_t LOG_QUEUE_POLL_MS = 20;
+
+// One thread's queue of records, made by `Logger::make_queue` and drained by
+// that Logger's worker thread. Exactly one thread may push into a queue at a
+// time. The Logger and the producer share it: a producer that outlives the
+// Logger (a stalled thread that is never joined) pushes into a queue that
+// nobody drains, and its records are dropped and counted, never written to
+// freed memory. A moved Logger keeps its queues.
+class LogQueue {
+public:
+    LogQueue(const LogQueue&) = delete;
+    LogQueue& operator=(const LogQueue&) = delete;
+    LogQueue(LogQueue&&) = delete;
+    LogQueue& operator=(LogQueue&&) = delete;
+    ~LogQueue();
+
+    // Copies one record into the queue and returns true, or, if the queue is
+    // full, drops it, counts it (see `dropped`) and returns false.
+    // `time_ns` is the record's time on CLOCK_REALTIME, read by the caller,
+    // which may read it once for many records. The record is otherwise
+    // treated as by `Logger::log`, but records below the Logger's
+    // `min_level` are queued and discarded by the worker. Allocates nothing,
+    // takes no lock and makes no system call; one producer thread only.
+    SCADA_RT bool push(LogLevel level, std::int64_t time_ns,
+                       std::string_view message,
+                       std::span<const LogField> fields = {}) noexcept;
+
+    // Same, for fields written in place.
+    SCADA_RT bool push(LogLevel level, std::int64_t time_ns,
+                       std::string_view message,
+                       std::initializer_list<LogField> fields) noexcept;
+
+    // True if a push now would drop its record. For the producer, which can
+    // wait for room instead of dropping (the driver's stop, D-148): only the
+    // Logger's thread takes records out, so a false answer holds until the
+    // producer's next push. Takes no lock and makes no system call.
+    SCADA_RT [[nodiscard]] bool full() const noexcept;
+
+    // Records this queue dropped because it was full, since creation. Any
+    // thread.
+    [[nodiscard]] std::uint64_t dropped() const noexcept;
+
+    // Records it holds, 1 to LOG_MAX_QUEUE_CAPACITY.
+    [[nodiscard]] std::size_t capacity() const noexcept;
+
+    class Impl;  // opaque: only a Logger can make one
+    explicit LogQueue(std::unique_ptr<Impl> impl) noexcept;
+
+private:
+    friend class Logger;
+    std::unique_ptr<Impl> impl_;
+};
+
 // Accepts records from any thread and delivers them to one sink from its own
 // worker thread. Move-only; a moved-from Logger discards every record.
 class Logger {
@@ -188,10 +250,36 @@ public:
     // or `timeout` has passed. Returns OK or TIMEOUT. Thread-safe.
     [[nodiscard]] Status flush(std::chrono::milliseconds timeout) noexcept;
 
-    // Number of records dropped because the queue was full, since creation.
+    // Makes a queue of `capacity` records for one thread (see `LogQueue`)
+    // and returns it, shared with the Logger, whose worker drains it from
+    // then on. `name` (a thread's or a channel's) is the QUEUE field of the
+    // notice of its dropped records; empty: none. Allocates about 1.5 KiB per
+    // record, so call it at set-up, not in real-time code. Fails with
+    // OUT_OF_RANGE for a capacity of 0 or above LOG_MAX_QUEUE_CAPACITY,
+    // RESOURCE_EXHAUSTED without memory, and FAILED_PRECONDITION on a
+    // moved-from Logger. Thread-safe.
+    [[nodiscard]] Result<std::shared_ptr<LogQueue>> make_queue(
+        std::size_t capacity, std::string_view name = {}) noexcept;
+
+    // Number of records dropped because a queue was full, since creation:
+    // the Logger's own queue and every `LogQueue` of it. Lock-free, so that
+    // a thread that writes a heartbeat may read it (DI 11.3).
     [[nodiscard]] std::uint64_t dropped() const noexcept;
 
-    // Number of records the sink refused, since creation.
+    // Records accepted, by `log` or a push, and not yet handed to the sink:
+    // after a `flush` that timed out, those still on their way. Lock-free.
+    [[nodiscard]] std::uint64_t pending() const noexcept;
+
+    // Times a caller took the Logger's mutex (`log`, `flush`,
+    // `make_queue`), since creation: a probe for the tests that show a path
+    // takes none. `dropped`, `pending`, `sink_failures` and a push take none.
+    [[nodiscard]] std::uint64_t caller_locks() const noexcept;
+
+    // Rounds of the worker thread's loop, since creation: a probe for the
+    // test that a Logger without a LogQueue does not poll.
+    [[nodiscard]] std::uint64_t worker_rounds() const noexcept;
+
+    // Number of records the sink refused, since creation. Lock-free.
     [[nodiscard]] std::uint64_t sink_failures() const noexcept;
 
 private:

@@ -7,6 +7,7 @@
 #include "../src/tag_writer.h"
 #include "channel_builder.h"
 #include "scada/common/fd.h"
+#include "scada/common/log.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/plan.h"
@@ -171,6 +172,22 @@ TEST(Driver, EachEndHasItsExitStatus) {
     EXPECT_EQ(exit_status(RunEnd::STALLED), EXIT_STALL);
 }
 
+// PR 182 M2: one summary per kind and device fits a burst of every device.
+TEST(Driver, AWorkersLogQueueIsSizedFromItsDevices) {
+    EXPECT_EQ(worker_log_queue_size(0, 0), MIN_WORKER_LOG_QUEUE);
+    EXPECT_EQ(worker_log_queue_size(0, 32), MIN_WORKER_LOG_QUEUE);
+    EXPECT_EQ(worker_log_queue_size(0, 33), 66U);
+    EXPECT_EQ(worker_log_queue_size(0, 200), 400U);
+    EXPECT_EQ(worker_log_queue_size(0, LOG_MAX_QUEUE_CAPACITY / 2),
+              LOG_MAX_QUEUE_CAPACITY);
+    EXPECT_EQ(worker_log_queue_size(0, LOG_MAX_QUEUE_CAPACITY),
+              LOG_MAX_QUEUE_CAPACITY);
+    EXPECT_EQ(worker_log_queue_size(0, std::numeric_limits<std::size_t>::max()),
+              LOG_MAX_QUEUE_CAPACITY);
+    // A setting wins.
+    EXPECT_EQ(worker_log_queue_size(1, 200), 1U);
+}
+
 TEST(Driver, OnlyTheStopSignalsAreBlocked) {
     // Review M8: SIGABRT and the fault signals keep their default.
     sigset_t before{};
@@ -248,6 +265,10 @@ TEST(Driver, SettingsOutOfRangeFailTheRunAtOnce) {
     EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(run_with(settings("", DEFAULT_HEARTBEAT_PERIOD_NS), failure),
               RunEnd::FAILED);
+    EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
+    DriverSettings big = settings("drv-test", DEFAULT_HEARTBEAT_PERIOD_NS);
+    big.worker_log_queue = LOG_MAX_QUEUE_CAPACITY + 1;
+    EXPECT_EQ(run_with(std::move(big), failure), RunEnd::FAILED);
     EXPECT_EQ(failure.code(), StatusCode::INVALID_ARGUMENT);
 }
 
