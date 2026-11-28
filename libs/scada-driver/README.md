@@ -55,11 +55,15 @@ own (`LogQueue` of libscada-common), which never blocks, allocates or makes
 a system call; the logger's thread drains them at least every 20 ms. A
 worker logs its devices' identity and restart events through `LogLimit`:
 the first of a kind and device at once, then one summary per 10 s with the
-COUNT of the events since. A full queue drops records; the drops, and the
+COUNT of the events since. A record a full queue refuses gives its count
+to the next summary, so no count is lost; the refused records, and the
 records the journal refused, are `sys.proc.<process>.log_dropped`. The
-stop logs every held count and drains every queue before the run returns.
-The journal's order across threads is the drain's, not the records' times.
-A worker's queue holds 64 records (`DriverSettings::worker_log_queue`).
+stop logs every held count, waiting for room in the queue 0.5 s at most,
+drains every queue (1 s at most) and then writes `log_dropped` a last
+time, before the run returns. The journal's order across threads is the
+drain's, not the records' times. The main thread's queue holds 1024
+records; a worker's, two per device of its channel and at least 64, unless
+`DriverSettings::worker_log_queue` sets it.
 
 ## Identity checks and restarts
 

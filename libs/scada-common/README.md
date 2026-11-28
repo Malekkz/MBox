@@ -56,9 +56,13 @@ No exception leaves the library. Functions that can fail return `Status` or
   takes the record's time from the caller. The logger's thread drains every
   queue at least every 20 ms (`LOG_QUEUE_POLL_MS`), so a queued record
   reaches the sink within about that time; records of different queues
-  arrive in drain order, each with its own time. A full queue drops and
-  counts the record, in `Logger::dropped` and the same `DROPPED` notice.
-  `flush` and the destructor wait for the queues too. The queue is shared
+  arrive in drain order, each with its own time. One thread only may push
+  into a queue; a second one ends the process. A full queue drops and
+  counts the record, in `Logger::dropped` and a `DROPPED` notice of its
+  own, which names the queue when it has a name; `full` tells the producer
+  beforehand. `dropped`, `sink_failures` and `pending` take no lock.
+  `flush` and the destructor wait for the queues too. A Logger without
+  queues does not poll. The queue is shared
   with its producer, so a producer that outlives the Logger pushes into a
   queue nobody drains, never into freed memory.
 
