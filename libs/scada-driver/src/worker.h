@@ -3,6 +3,7 @@
 
 // The worker thread of one channel (driver.h; DI 2.4, 2.6, 9.1, 10; D-142).
 
+#include "event_slot.h"
 #include "scada/common/fd.h"
 #include "scada/common/status.h"
 #include "scada/driver/compiled.h"
@@ -96,6 +97,14 @@ public:
         return refused_.load(std::memory_order_relaxed);
     }
 
+    // The identity and restart events of device `device` since the last
+    // take, for the log (D-147): false when none, or before `start`. Main
+    // thread only.
+    bool take_event(std::size_t device, DeviceEvent kind,
+                    EventRecord& out) noexcept {
+        return device < events_.size() && events_.at(device).take(kind, out);
+    }
+
     // Joins the thread if it has returned; true when it is joined (or was
     // never started).
     bool join_if_returned() noexcept;
@@ -115,6 +124,8 @@ private:
         return stop_.load(std::memory_order_acquire);
     }
     void moved() noexcept { progress_.fetch_add(1, std::memory_order_relaxed); }
+    // Hands the engine's events to the event slots.
+    void hand_events(ChannelEngine& engine) noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;
@@ -138,6 +149,8 @@ private:
     // Relaxed: counters, read only to see whether they moved or for a log.
     std::atomic<std::uint64_t> progress_{0};
     std::atomic<std::uint64_t> refused_{0};
+    // One per device, made by `start` before the thread runs (D-147).
+    std::vector<detail::EventSlot> events_;
     std::atomic<Phase> phase_{Phase::STARTING};
     Status failure_;  // written before the phase becomes FAILED
     // A POSIX thread, for its stack size (DI 2.4).

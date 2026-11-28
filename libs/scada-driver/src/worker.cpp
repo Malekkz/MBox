@@ -1,5 +1,7 @@
 #include "worker.h"
 
+#include "event_slot.h"
+
 #include "scada/common/fd.h"
 #include "scada/common/status.h"
 #include "scada/driver/channel_engine.h"
@@ -81,6 +83,7 @@ Worker::~Worker() {
 }
 
 Status Worker::start() noexcept {
+    events_ = std::vector<detail::EventSlot>(channel_->devices.size());
     stop_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     begin_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     if (!stop_fd_.valid() || !begin_fd_.valid()) {
@@ -202,6 +205,7 @@ void Worker::serve(TagWriter& writer) noexcept {
                               false);
         writer.notify();
         refused_.store(writer.refused(), std::memory_order_relaxed);
+        hand_events(*engine);
         // After a stop the stop eventfd is readable: this wait returns at
         // once, and the loop ends at its check.
         wait_until(std::min(next, writer.system_due_ns()), -1);
@@ -220,6 +224,20 @@ void Worker::serve(TagWriter& writer) noexcept {
     writer.stopped_system(*channel_);
     writer.notify();
     refused_.store(writer.refused(), std::memory_order_relaxed);
+    hand_events(*engine);
+}
+
+void Worker::hand_events(ChannelEngine& engine) noexcept {
+    EventRecord record;
+    for (std::uint32_t device = 0; device < channel_->devices.size();
+         ++device) {
+        for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
+            const auto which = static_cast<DeviceEvent>(kind);
+            if (engine.take_event(device, which, record)) {
+                events_.at(device).add(which, record);
+            }
+        }
+    }
 }
 
 void Worker::run() noexcept {

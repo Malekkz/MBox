@@ -5,7 +5,9 @@
 #include "scada/common/log.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
+#include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
+#include "scada/driver/identity_run.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
@@ -17,6 +19,7 @@
 #include "worker.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +65,22 @@ constexpr std::int64_t STOP_GRACE_NS = NS_PER_S;
 // A change of a channel's refused tag writes is logged at the heartbeat
 // step, at most this often per channel (review M9; 5b-3 replaces it).
 constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
+// The rate limit of a record per MESSAGE_ID and device (DI 11, the pattern
+// of TD 10.1): the first at once, then at most one summary per 10 s.
+constexpr std::int64_t EVENT_LOG_PERIOD_NS = 10 * NS_PER_S;
+
+// The REASON of an identity mismatch's record (ruling item 3).
+std::string_view reason_text(std::uint8_t reason) noexcept {
+    switch (static_cast<MismatchReason>(reason)) {
+        case MismatchReason::VALUE:
+            return "value";
+        case MismatchReason::ABSENT:
+            return "absent";
+        case MismatchReason::UNREADABLE:
+            return "unreadable";
+    }
+    return "unknown";
+}
 // "process paused" is logged at most this often, with the pauses since.
 constexpr std::int64_t PAUSE_LOG_PERIOD_NS = 10 * NS_PER_S;
 constexpr std::chrono::milliseconds LOG_FLUSH_LIMIT{1000};
@@ -276,6 +295,12 @@ private:
     void stop_all() noexcept;
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
+    // Logs the workers' identity and restart events (D-147), each kind of
+    // each device at most once per EVENT_LOG_PERIOD_NS, with the count
+    // since its last record; `all`: whatever is pending, at the stop.
+    void log_events(std::int64_t now, bool all) noexcept;
+    void log_event(const Worker& worker, std::size_t device, DeviceEvent kind,
+                   const EventRecord& record) noexcept;
     // The settings' write of the system tags, or the library's.
     [[nodiscard]] detail::TagWriteFn system_write() const noexcept {
         return settings_.system_write != nullptr ? settings_.system_write
@@ -319,6 +344,14 @@ private:
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
+    // Per worker, device and DeviceEvent: the events not yet logged, and
+    // when the next record may go.
+    struct PendingEvent {
+        EventRecord record;
+        std::int64_t next_ns = 0;
+    };
+    std::vector<std::vector<std::array<PendingEvent, DEVICE_EVENTS>>>
+        pending_events_;
     std::uint64_t logged_process_refused_ = 0;  // the main thread's tags
     std::int64_t next_refused_log_ns_ = 0;
     std::string detail_;  // what failed, with names, for the log
@@ -503,6 +536,11 @@ Status Driver::Impl::make_workers() noexcept {
     watch_.start(workers_.size(), scada::monotonic_ns());
     watched_.reserve(workers_.size());
     logged_refused_.assign(workers_.size(), 0);
+    pending_events_.resize(workers_.size());
+    for (std::size_t index = 0; index < workers_.size(); ++index) {
+        pending_events_[index].resize(
+            workers_[index]->channel().devices.size());
+    }
     for (const std::unique_ptr<Worker>& worker : workers_) {
         const Status started = worker->start();
         if (!started.ok()) {
@@ -959,6 +997,70 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
     log_process_refused();
 }
 
+void Driver::Impl::log_events(std::int64_t now, bool all) noexcept {
+    const std::size_t workers =
+        std::min(workers_.size(), pending_events_.size());
+    EventRecord taken;
+    for (std::size_t index = 0; index < workers; ++index) {
+        Worker& worker = *workers_[index];
+        for (std::size_t device = 0; device < pending_events_[index].size();
+             ++device) {
+            for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
+                const auto which = static_cast<DeviceEvent>(kind);
+                PendingEvent& pending = pending_events_[index][device].at(kind);
+                if (worker.take_event(device, which, taken)) {
+                    // The details are the last event's; the count adds up.
+                    taken.count += pending.record.count;
+                    pending.record = taken;
+                }
+                if (pending.record.count == 0 ||
+                    (!all && now < pending.next_ns)) {
+                    continue;
+                }
+                log_event(worker, device, which, pending.record);
+                pending.record = EventRecord{};
+                pending.next_ns = add(now, EVENT_LOG_PERIOD_NS);
+            }
+        }
+    }
+}
+
+void Driver::Impl::log_event(const Worker& worker, std::size_t device,
+                             DeviceEvent kind,
+                             const EventRecord& record) noexcept {
+    const std::string& channel = worker.channel().name;
+    const std::string& name = worker.channel().devices[device].name;
+    const std::string count = std::to_string(record.count);
+    const std::string_view text(record.text.data(), record.length);
+    switch (kind) {
+        case DeviceEvent::MISMATCH:
+            log(LogLevel::WARNING, "identity mismatch",
+                {{"MESSAGE_ID", "driver-identity-mismatch"},
+                 {"CHANNEL", channel},
+                 {"DEVICE", name},
+                 {"REASON", reason_text(record.reason)},
+                 {"CHECK", std::to_string(record.check)},
+                 {"VALUE", text},
+                 {"COUNT", count}});
+            return;
+        case DeviceEvent::MATCH:
+            log(LogLevel::NOTICE, "identity matched",
+                {{"MESSAGE_ID", "driver-identity-matched"},
+                 {"CHANNEL", channel},
+                 {"DEVICE", name},
+                 {"IDENTITY", text},
+                 {"COUNT", count}});
+            return;
+        case DeviceEvent::RESTART:
+            log(LogLevel::WARNING, "device restart",
+                {{"MESSAGE_ID", "driver-device-restart"},
+                 {"CHANNEL", channel},
+                 {"DEVICE", name},
+                 {"COUNT", count}});
+            return;
+    }
+}
+
 void Driver::Impl::log_process_refused() noexcept {
     if (!process_tags_.has_value() ||
         process_tags_->refused() == logged_process_refused_) {
@@ -983,6 +1085,7 @@ void Driver::Impl::process_stopped() noexcept {
     // no heartbeat follows (review M4).
     next_refused_log_ns_ = 0;
     log_refused(scada::monotonic_ns());
+    log_events(scada::monotonic_ns(), true);
 }
 
 Status Driver::Impl::start() noexcept {
@@ -1061,6 +1164,7 @@ RunEnd Driver::Impl::run(Status& failure) noexcept {
             return after_stall(*worker);
         }
         log_refused(now);
+        log_events(now, false);
         const Beat said = beat();
         if (said == Beat::RETIRING) {
             failure = {StatusCode::UNAVAILABLE, "the generation is retiring"};

@@ -9,6 +9,7 @@
 #include "scada/driver/compiled.h"
 #include "scada/driver/failure.h"
 #include "scada/driver/identity.h"
+#include "scada/driver/identity_run.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
 #include "scada/tag/types.h"
@@ -21,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -279,6 +281,34 @@ TEST(EngineIdentity, AMalformedCheckOrRuleRefusesTheChannel) {
         RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
     const Rig rule(std::move(on_string), identity_bus());
     EXPECT_FALSE(rule.engine.status().ok());
+}
+
+TEST(EngineIdentity, EachEventIsNotedForTheLog) {
+    // A mismatch with its reason, check and value; the match that ends it;
+    // a restart. Each is taken once.
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].restart_indication = {
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES}};
+    Rig rig(std::move(channel), identity_bus(8));
+    rig.run_until(SECOND);
+    EventRecord record;
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::MISMATCH, record));
+    EXPECT_EQ(record.count, 1U);
+    EXPECT_EQ(record.reason, static_cast<std::uint8_t>(MismatchReason::VALUE));
+    EXPECT_EQ(record.check, 0U);
+    EXPECT_EQ(std::string_view(record.text.data(), record.length), "8");
+    EXPECT_FALSE(rig.engine.take_event(0, DeviceEvent::MISMATCH, record));
+    EXPECT_FALSE(rig.engine.take_event(0, DeviceEvent::MATCH, record));
+    rig.bus.set(1, 0, IDENTITY, MODEL);
+    rig.run_until(12 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::MATCH, record));
+    EXPECT_EQ(std::string_view(record.text.data(), record.length), "7");
+    rig.bus.set(1, 0, DATA, 3);
+    rig.run_until(13 * SECOND);
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::RESTART, record));
+    EXPECT_EQ(record.count, 1U);
+    EXPECT_FALSE(rig.engine.take_event(5, DeviceEvent::RESTART, record));
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

@@ -14,8 +14,12 @@
 #include "scada/driver/raw_value.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/scheduler.h"
+#include "scada/driver/tag_value.h"
 #include "scada/tag/types.h"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -179,13 +183,21 @@ void ChannelEngine::identity_cycle_done(std::uint32_t device) noexcept {
             // Out of MISMATCH through INITIALISING only: a match makes no
             // tag GOOD, reads do (ruling item 3).
             failures_.identity_passed(device);
-            (void)was_mismatch;  // the log record comes with the event slot
+            if (was_mismatch) {
+                note_event(device, DeviceEvent::MATCH, 0, 0,
+                           identity_text(device));
+            }
             return;
         case IdentityVerdict::Kind::MISMATCH:
             break;
     }
     keep_identity_text(device);
     run.identity_ok = false;
+    std::array<char, TAG_STRING_MAX_BYTES> value{};
+    const std::size_t length = run.identity->check_text(verdict.check, value);
+    note_event(device, DeviceEvent::MISMATCH,
+               static_cast<std::uint8_t>(verdict.reason), verdict.check,
+               std::string_view(value.data(), length));
     if (!compiled.refuse_on_mismatch) {
         // `warn`: the device runs, `identity_ok` false (ruling item 3).
         failures_.identity_passed(device);
@@ -222,6 +234,7 @@ void ChannelEngine::restarted(std::uint32_t device) noexcept {
         }
         DeviceRun& peer_run = devices_[other];
         ++peer_run.restarts;
+        note_event(other, DeviceEvent::RESTART, 0, 0, {});
         if (failures_.state(other) != DeviceStatus::RUNNING) {
             continue;  // INITIALISING already: counted, nothing else
         }
@@ -279,6 +292,34 @@ std::string_view ChannelEngine::identity_text(
 
 std::uint64_t ChannelEngine::restarts(std::uint32_t device) const noexcept {
     return device < devices_.size() ? devices_[device].restarts : 0;
+}
+
+void ChannelEngine::note_event(std::uint32_t device, DeviceEvent kind,
+                               std::uint8_t reason, std::uint32_t check,
+                               std::string_view text) noexcept {
+    EventRecord& record =
+        devices_[device].events.at(static_cast<std::size_t>(kind));
+    ++record.count;
+    record.time_ns = clock_->realtime_ns();
+    record.reason = reason;
+    record.check = check;
+    record.length = std::min(text.size(), record.text.size());
+    std::copy_n(text.data(), record.length, record.text.data());
+}
+
+bool ChannelEngine::take_event(std::uint32_t device, DeviceEvent kind,
+                               EventRecord& out) noexcept {
+    if (device >= devices_.size()) {
+        return false;
+    }
+    EventRecord& record =
+        devices_[device].events.at(static_cast<std::size_t>(kind));
+    if (record.count == 0) {
+        return false;
+    }
+    out = record;
+    record.count = 0;
+    return true;
 }
 
 }  // namespace scada::driver

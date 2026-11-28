@@ -84,6 +84,28 @@ struct EngineCounts {
     std::uint64_t early_verdicts = 0;  // COMM_FAIL before the retries (J2)
 };
 
+// An identity or restart event of a device, for the log (D-147): noted by
+// the engine, handed to the main thread through the worker's event slot.
+enum class DeviceEvent : std::uint8_t {
+    MISMATCH = 0,  // a check failed (with `refuse` or `warn`)
+    MATCH,         // a device in MISMATCH matched again
+    RESTART,       // a restart of the device's unit was detected
+};
+inline constexpr std::size_t DEVICE_EVENTS = 3;
+
+// The events of one kind since they were last taken: how many, and the last
+// one's details.
+struct EventRecord {
+    std::uint64_t count = 0;
+    std::int64_t time_ns = 0;  // the wall clock at the last one
+    // MISMATCH: the MismatchReason and the first failing check.
+    std::uint8_t reason = 0;
+    std::uint32_t check = 0;
+    // MISMATCH: the check's value; MATCH: the identity text.
+    std::array<char, TAG_STRING_MAX_BYTES> text{};
+    std::size_t length = 0;
+};
+
 class ChannelEngine {
 public:
     // The answer to wait for when nothing is to be done until an order
@@ -169,6 +191,11 @@ public:
     // `sys.dev.<device>.restarts` (7.6, 11.1): the restarts detected since
     // the attach; 0 for an index out of range.
     [[nodiscard]] std::uint64_t restarts(std::uint32_t device) const noexcept;
+    // The events of `kind` of `device` since the last take, into `out`, and
+    // forgets them; false when there were none or the device is out of
+    // range. The worker hands them to the main thread's log (D-147).
+    SCADA_RT bool take_event(std::uint32_t device, DeviceEvent kind,
+                             EventRecord& out) noexcept;
     // `sys.drv.<channel>.requests_per_s`: frames sent over the last 10 s.
     [[nodiscard]] double requests_per_s(std::int64_t now_ns) noexcept {
         return request_rate_.per_second(now_ns);
@@ -244,7 +271,8 @@ private:
         std::array<char, TAG_STRING_MAX_BYTES> identity_text{};
         std::size_t identity_length = 0;
         std::uint64_t restarts = 0;
-        // When its unit last restarted; NEVER before the first.
+        // Per DeviceEvent: since the worker last took them.
+        std::array<EventRecord, DEVICE_EVENTS> events{};
     };
 
     // The exchange and the connection: not real-time, since they reach the
@@ -349,6 +377,10 @@ private:
                                   bool keep_not_init) noexcept;
     // Keeps the round's identity text as the device's (on a verdict).
     SCADA_RT void keep_identity_text(std::uint32_t device) noexcept;
+    // Counts an event of `kind` of `device`, with `text` as its details.
+    SCADA_RT void note_event(std::uint32_t device, DeviceEvent kind,
+                             std::uint8_t reason, std::uint32_t check,
+                             std::string_view text) noexcept;
 
     const CompiledChannel* channel_;
     const FrameProtocol* protocol_;
