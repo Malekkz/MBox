@@ -1,6 +1,6 @@
 #include "worker.h"
 
-#include "event_slot.h"
+#include "event_log.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/status.h"
@@ -21,6 +21,7 @@
 #include <ctime>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <utility>
@@ -82,8 +83,17 @@ Worker::~Worker() {
     (void)join_if_returned();
 }
 
+void Worker::set_log(std::shared_ptr<LogQueue> queue) noexcept {
+    log_queue_ = std::move(queue);
+}
+
 Status Worker::start() noexcept {
-    events_ = std::vector<detail::EventSlot>(channel_->devices.size());
+    try {
+        // Its limit's table is allocated here, before the thread runs.
+        events_.emplace(*channel_, log_queue_);
+    } catch (const std::bad_alloc&) {
+        return {StatusCode::RESOURCE_EXHAUSTED, "no memory for a worker's log"};
+    }
     stop_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     begin_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     if (!stop_fd_.valid() || !begin_fd_.valid()) {
@@ -225,20 +235,29 @@ void Worker::serve(TagWriter& writer) noexcept {
     writer.notify();
     refused_.store(writer.refused(), std::memory_order_relaxed);
     hand_events(*engine);
+    // Every count the limit held, so that none is lost at the stop (11.3).
+    if (events_.has_value()) {
+        events_->flush(clock_->realtime_ns());
+    }
 }
 
 void Worker::hand_events(ChannelEngine& engine) noexcept {
+    if (!events_.has_value()) {
+        return;
+    }
+    const std::int64_t now = clock_->monotonic_ns();
+    const std::int64_t wall = clock_->realtime_ns();
     EventRecord record;
     for (std::uint32_t device = 0; device < channel_->devices.size();
          ++device) {
         for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
             const auto which = static_cast<DeviceEvent>(kind);
-            if (device < events_.size() &&
-                engine.take_event(device, which, record)) {
-                events_[device].add(which, record);
+            if (engine.take_event(device, which, record)) {
+                events_->add(device, which, record, now, wall);
             }
         }
     }
+    events_->due(now, wall);
 }
 
 void Worker::run() noexcept {

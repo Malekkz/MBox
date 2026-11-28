@@ -160,8 +160,10 @@ inline constexpr std::int64_t LOG_QUEUE_POLL_MS = 20;
 
 // One thread's queue of records, made by `Logger::make_queue` and drained by
 // that Logger's worker thread. Exactly one thread may push into a queue at a
-// time; the queue stays valid for the life of its Logger (a moved Logger
-// keeps its queues).
+// time. The Logger and the producer share it: a producer that outlives the
+// Logger (a stalled thread that is never joined) pushes into a queue that
+// nobody drains, and its records are dropped and counted, never written to
+// freed memory. A moved Logger keeps its queues.
 class LogQueue {
 public:
     LogQueue(const LogQueue&) = delete;
@@ -243,12 +245,13 @@ public:
     [[nodiscard]] Status flush(std::chrono::milliseconds timeout) noexcept;
 
     // Makes a queue of `capacity` records for one thread (see `LogQueue`)
-    // and returns it; the Logger owns it, and its worker drains it from then
-    // on. Allocates about 1.5 KiB per record, so call it at set-up, not in
+    // and returns it, shared with the Logger, whose worker drains it from
+    // then on. Allocates about 1.5 KiB per record, so call it at set-up, not in
     // real-time code. Fails with OUT_OF_RANGE for a capacity of 0 or above
     // LOG_MAX_QUEUE_CAPACITY, RESOURCE_EXHAUSTED without memory, and
     // FAILED_PRECONDITION on a moved-from Logger. Thread-safe.
-    [[nodiscard]] Result<LogQueue*> make_queue(std::size_t capacity) noexcept;
+    [[nodiscard]] Result<std::shared_ptr<LogQueue>> make_queue(
+        std::size_t capacity) noexcept;
 
     // Number of records dropped because a queue was full, since creation:
     // the Logger's own queue and every `LogQueue` of it.

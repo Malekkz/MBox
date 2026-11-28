@@ -47,8 +47,12 @@ protected:
         return queue_ != nullptr;
     }
     LogQueue* make_queue(std::size_t size) {
-        Result<LogQueue*> queue = logger_->make_queue(size);
-        return queue.ok() ? queue.value() : nullptr;
+        Result<std::shared_ptr<LogQueue>> queue = logger_->make_queue(size);
+        if (!queue.ok()) {
+            return nullptr;
+        }
+        held_.push_back(queue.value());
+        return held_.back().get();
     }
     Capture& capture() { return capture_; }
     Logger& logger() { return *logger_; }
@@ -59,6 +63,7 @@ protected:
 private:
     Capture capture_;
     std::unique_ptr<Logger> logger_;
+    std::vector<std::shared_ptr<LogQueue>> held_;  // the producers' share
     LogQueue* queue_ = nullptr;
 };
 
@@ -176,6 +181,20 @@ TEST_F(Queued, TheDestructorDeliversQueuedRecords) {
     EXPECT_EQ(push_numbered(queue(), SIZE), SIZE);
     end_logger();
     EXPECT_EQ(capture().snapshot().size(), SIZE);
+}
+
+TEST_F(Queued, AQueueOutlivesItsLogger) {
+    // A producer that outlives the Logger (a stalled thread never joined)
+    // still pushes into its share: dropped and counted once full, never
+    // into freed memory.
+    if (!start(2)) {
+        FAIL() << "logger or queue not made";
+    }
+    end_logger();
+    EXPECT_TRUE(queue().push(LogLevel::INFO, TIME_NS, "one"));
+    EXPECT_TRUE(queue().push(LogLevel::INFO, TIME_NS, "two"));
+    EXPECT_FALSE(queue().push(LogLevel::INFO, TIME_NS, "three"));
+    EXPECT_EQ(queue().dropped(), 1U);
 }
 
 TEST_F(Queued, AQueueOutlivesAMoveOfItsLogger) {

@@ -31,6 +31,7 @@
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -81,6 +82,11 @@ using TransportFactory = std::function<std::unique_ptr<Transport>(
 
 inline constexpr std::int64_t DEFAULT_HEARTBEAT_PERIOD_NS = 100'000'000;
 
+// The records of a worker's log queue by default (D-148): about 96 KiB a
+// worker. A worker logs only its devices' identity and restart events, at
+// most one per kind and device per 10 s.
+inline constexpr std::size_t DEFAULT_WORKER_LOG_QUEUE = 64;
+
 struct DriverSettings {
     // `drv-<protocol>` (CS 12.2): the process name in the tag set.
     std::string process;
@@ -93,6 +99,10 @@ struct DriverSettings {
     // process's heartbeat timeout in the tag set. Above 0 and at most
     // MAX_HEARTBEAT_PERIOD_NS.
     std::int64_t heartbeat_period_ns = DEFAULT_HEARTBEAT_PERIOD_NS;
+    // Records each worker's log queue holds (11.3, D-148), 1 to
+    // LOG_MAX_QUEUE_CAPACITY. A test makes it small to see a full queue's
+    // drops in `log_dropped`.
+    std::size_t worker_log_queue = DEFAULT_WORKER_LOG_QUEUE;
     // How the system tags of 11.1 are written, those of the process and of
     // every channel: null for the tag library's `scada_tag_write`. A test
     // gives one that refuses chosen writes, so that the refused-write paths

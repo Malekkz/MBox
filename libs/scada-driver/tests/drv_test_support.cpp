@@ -93,10 +93,12 @@ constexpr std::uint32_t MAX_BAUD = 4'000'000;
 constexpr std::int64_t FAST_MS = 200;
 constexpr std::int64_t NORMAL_MS = 1'000;
 constexpr std::int64_t SLOW_MS = 10'000;
+constexpr std::size_t MAX_LOG_QUEUE = LOG_MAX_QUEUE_CAPACITY;
 
 constexpr std::string_view USAGE =
     "usage: scada-drv-test --base-dir DIR [--retain-dir DIR] [--tagd-uid N]\n"
     "           [--heartbeat-ms N] [--refuse-write TAG VALUE SKIP]\n"
+    "           [--worker-log-queue N]\n"
     "         ( --channel NAME (tcp HOST PORT | serial PATH BAUD)\n"
     "               [--connect-timeout-ms N] [--reconnect-ms MIN MAX]\n"
     "               [--disabled] [--hang | --spin]\n"
@@ -113,6 +115,7 @@ constexpr std::string_view USAGE =
     "(10 s). --hang and --spin make the channel's first receive block or\n"
     "spin for good, deaf to the stop. --refuse-write refuses the writes of\n"
     "VALUE to the system tag TAG once SKIP of them were written.\n"
+    "--worker-log-queue sets the records of each worker's log queue (64).\n"
     "--substitute writes VALUE, UNCERTAIN with SUBSTITUTED, when the point\n"
     "reads RAW (`on_invalid: { substitute: VALUE }` of that pattern).\n"
     "--identify-equals checks that the device's POINT (its index among\n"
@@ -257,6 +260,14 @@ private:
         }
         if (arg == "--refuse-write") {
             return refuse_write();
+        }
+        if (arg == "--worker-log-queue") {
+            std::size_t records = 0;
+            if (!take(records, MAX_LOG_QUEUE) || records == 0) {
+                return false;
+            }
+            options_.settings.worker_log_queue = records;
+            return true;
         }
         if (arg == "--channel") {
             return channel();

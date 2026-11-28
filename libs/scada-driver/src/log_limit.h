@@ -43,11 +43,11 @@ public:
              std::int64_t period_ns = LOG_LIMIT_PERIOD_NS);
 
     // True if the record of `kind` and `key` at `now_ns` (monotonic) is
-    // to be logged now; otherwise it is held and counted, and a later
-    // `next_due` gives its summary. A kind or key out of range is always
-    // logged: a wrong index must not lose records.
-    SCADA_RT bool admit(std::size_t kind, std::size_t key,
-                        std::int64_t now_ns) noexcept;
+    // to be logged now; otherwise its `count` events are held and added,
+    // and a later `next_due` gives their summary. A kind or key out of
+    // range is always logged: a wrong index must not lose records.
+    SCADA_RT bool admit(std::size_t kind, std::size_t key, std::int64_t now_ns,
+                        std::uint64_t count = 1) noexcept;
 
     // Takes one summary whose period ended by `now_ns` into `out` and starts
     // its next period; false when none is due. Call it until false at every

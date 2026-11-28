@@ -45,6 +45,17 @@ TEST(LogLimit, TheFirstGoesAtOnceAndTheRestAreSummedAfterThePeriod) {
     EXPECT_TRUE(due(limit, 111).empty());
 }
 
+TEST(LogLimit, AHeldRecordAddsItsCount) {
+    // A record that stands for several events (a worker's take of the
+    // engine's counts) adds them all; a count of 0 is one.
+    LogLimit limit(KINDS, KEYS, PERIOD);
+    EXPECT_TRUE(limit.admit(0, 0, 0, 3));
+    EXPECT_FALSE(limit.admit(0, 0, 1, 4));
+    EXPECT_FALSE(limit.admit(0, 0, 2, 0));
+    EXPECT_EQ(due(limit, PERIOD),
+              (std::vector<LogSummary>{{.kind = 0, .key = 0, .count = 5}}));
+}
+
 TEST(LogLimit, ASummaryStartsTheNextPeriod) {
     LogLimit limit(KINDS, KEYS, PERIOD);
     EXPECT_TRUE(limit.admit(0, 0, 0));

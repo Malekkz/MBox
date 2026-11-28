@@ -242,18 +242,18 @@ public:
         return {};
     }
 
-    [[nodiscard]] Result<LogQueue*> make_queue(std::size_t capacity) noexcept {
+    [[nodiscard]] Result<std::shared_ptr<LogQueue>> make_queue(
+        std::size_t capacity) noexcept {
         if (capacity == 0 || capacity > LOG_MAX_QUEUE_CAPACITY) {
             return Status(StatusCode::OUT_OF_RANGE,
                           "log queue capacity is out of range");
         }
         try {
-            auto queue = std::make_unique<LogQueue>(
+            auto queue = std::make_shared<LogQueue>(
                 std::make_unique<LogQueue::Impl>(capacity));
-            LogQueue* const made = queue.get();
             const std::scoped_lock lock(mutex_);
-            queues_.push_back(std::move(queue));
-            return made;
+            queues_.push_back(queue);
+            return queue;
         } catch (const std::bad_alloc&) {
             return Status(StatusCode::RESOURCE_EXHAUSTED,
                           "out of memory creating a log queue");
@@ -263,7 +263,7 @@ public:
     [[nodiscard]] std::uint64_t dropped() const noexcept {
         std::uint64_t total = dropped_total_.load(std::memory_order_relaxed);
         const std::scoped_lock lock(mutex_);
-        for (const std::unique_ptr<LogQueue>& queue : queues_) {
+        for (const std::shared_ptr<LogQueue>& queue : queues_) {
             total += queue->impl_->dropped();
         }
         return total;
@@ -322,8 +322,8 @@ private:
         for (std::size_t index = 0;; ++index) {
             LogQueue::Impl* queue = nullptr;
             {
-                // The list only grows, and each queue lives as long as this
-                // Impl, so the pointer stays valid after the lock.
+                // The list only grows, and it holds each queue as long as
+                // this Impl lives, so the pointer stays valid after the lock.
                 const std::scoped_lock lock(mutex_);
                 if (index == queues_.size()) {
                     break;
@@ -352,7 +352,7 @@ private:
             return false;
         }
         return std::all_of(queues_.begin(), queues_.end(),
-                           [](const std::unique_ptr<LogQueue>& queue) {
+                           [](const std::shared_ptr<LogQueue>& queue) {
                                return queue->impl_->empty() &&
                                       queue->impl_->dropped() ==
                                           queue->impl_->reported();
@@ -407,7 +407,7 @@ private:
     std::uint64_t dropped_unreported_ = 0;
     bool busy_ = false;  // the worker is inside a sink call
     // The LogQueues, in the order made. Only grows; drained by the worker.
-    std::vector<std::unique_ptr<LogQueue>> queues_;
+    std::vector<std::shared_ptr<LogQueue>> queues_;
 
     // Statistics only, so relaxed ordering is enough: no other data depends
     // on the order in which these are observed.
@@ -469,7 +469,8 @@ Status Logger::flush(std::chrono::milliseconds timeout) noexcept {
     return impl_ ? impl_->flush(timeout) : Status();
 }
 
-Result<LogQueue*> Logger::make_queue(std::size_t capacity) noexcept {
+Result<std::shared_ptr<LogQueue>> Logger::make_queue(
+    std::size_t capacity) noexcept {
     if (!impl_) {
         return Status(StatusCode::FAILED_PRECONDITION,
                       "the logger was moved from");

@@ -24,8 +24,8 @@ LogLimit::LogLimit(std::size_t kinds, std::size_t keys, std::int64_t period_ns)
       period_ns_(std::max<std::int64_t>(period_ns, 1)),
       entries_(kinds * (keys + 1)) {}
 
-bool LogLimit::admit(std::size_t kind, std::size_t key,
-                     std::int64_t now_ns) noexcept {
+bool LogLimit::admit(std::size_t kind, std::size_t key, std::int64_t now_ns,
+                     std::uint64_t count) noexcept {
     if (kind >= kinds_ || key > keys_) {
         return true;
     }
@@ -39,7 +39,7 @@ bool LogLimit::admit(std::size_t kind, std::size_t key,
     if (entry.held == 0) {
         next_due_ns_ = std::min(next_due_ns_, entry.until_ns);
     }
-    ++entry.held;
+    entry.held += std::max<std::uint64_t>(count, 1);
     return false;
 }
 
