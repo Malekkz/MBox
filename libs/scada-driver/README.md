@@ -53,7 +53,10 @@ No thread that writes a heartbeat or a tag writes to the journal (11.3,
 D-148). The main thread and each worker push records into a queue of their
 own (`LogQueue` of libscada-common), which never blocks, allocates or makes
 a system call; the logger's thread drains them at least every 20 ms. A
-worker logs its devices' identity and restart events through `LogLimit`:
+worker logs its devices' identity mismatches, matches and restarts, their
+demotions and recoveries and absent points (once per connection), and its
+connection's losses, failed connects and own closes (with REASON; D-149),
+through `LogLimit`:
 the first of a kind and device at once, then one summary per 10 s with the
 COUNT of the events since. A record a full queue refuses gives its count
 to the next summary, so no count is lost; the refused records, and the

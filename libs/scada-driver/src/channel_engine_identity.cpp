@@ -369,4 +369,29 @@ bool ChannelEngine::take_event(std::uint32_t device, DeviceEvent kind,
     return true;
 }
 
+void ChannelEngine::note_channel_event(ChannelEvent kind,
+                                       CloseReason reason) noexcept {
+    EventRecord& record =
+        detail::element(channel_events_, static_cast<std::size_t>(kind));
+    ++record.count;
+    record.has_details = true;
+    record.time_ns = clock_->realtime_ns();
+    record.reason = static_cast<std::uint8_t>(reason);
+}
+
+bool ChannelEngine::take_channel_event(ChannelEvent kind,
+                                       EventRecord& out) noexcept {
+    const auto index = static_cast<std::size_t>(kind);
+    if (index >= channel_events_.size()) {
+        return false;
+    }
+    EventRecord& record = detail::element(channel_events_, index);
+    if (record.count == 0) {
+        return false;
+    }
+    out = record;
+    record.count = 0;
+    return true;
+}
+
 }  // namespace scada::driver

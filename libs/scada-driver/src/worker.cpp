@@ -274,6 +274,12 @@ void Worker::hand_events(ChannelEngine& engine) noexcept {
             }
         }
     }
+    for (std::size_t kind = 0; kind < CHANNEL_EVENTS; ++kind) {
+        const auto which = static_cast<ChannelEvent>(kind);
+        if (engine.take_channel_event(which, record)) {
+            events_->add_channel(which, record, now, wall);
+        }
+    }
     events_->due(now, wall);
 }
 

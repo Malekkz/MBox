@@ -42,6 +42,32 @@ private:
 
 }  // namespace
 
+std::string_view close_reason_text(CloseReason reason) noexcept {
+    switch (reason) {
+        case CloseReason::PEER:
+            return "peer";
+        case CloseReason::TIMEOUTS:
+            return "time-outs";
+        case CloseReason::NOT_RESUMED:
+            return "not resumed";
+        case CloseReason::PARTIAL:
+            return "partial frame";
+        case CloseReason::BROKEN:
+            return "broken answer";
+        case CloseReason::SIDE_EFFECT:
+            return "side-effect read";
+        case CloseReason::REFUSED:
+            return "refused";
+        case CloseReason::TIMED_OUT:
+            return "timed out";
+        case CloseReason::UNREACHABLE:
+            return "unreachable";
+        case CloseReason::OPEN_FAILED:
+            return "open failed";
+    }
+    return "unknown";
+}
+
 std::string_view reason_text(std::uint8_t reason) noexcept {
     switch (static_cast<MismatchReason>(reason)) {
         case MismatchReason::VALUE:
@@ -58,7 +84,10 @@ EventLog::EventLog(const CompiledChannel& channel,
                    std::shared_ptr<LogQueue> queue, std::int64_t period_ns)
     : channel_(&channel),
       queue_(std::move(queue)),
-      limit_(DEVICE_EVENTS, channel.devices.size(), period_ns) {}
+      // The channel's kinds after the devices', keyed on the limit's slot
+      // of no key.
+      limit_(DEVICE_EVENTS + CHANNEL_EVENTS, channel.devices.size(),
+             period_ns) {}
 
 void EventLog::add(std::size_t device, DeviceEvent kind,
                    const EventRecord& events, std::int64_t now_ns,
@@ -68,8 +97,21 @@ void EventLog::add(std::size_t device, DeviceEvent kind,
     }
     const auto which = static_cast<std::size_t>(kind);
     if (limit_.admit(which, device, now_ns, events.count) &&
-        !push(device, kind, events, events.has_details, wall_ns)) {
+        !push(which, device, events, events.has_details, wall_ns)) {
         limit_.give_back(which, device, events.count);
+    }
+}
+
+void EventLog::add_channel(ChannelEvent kind, const EventRecord& events,
+                           std::int64_t now_ns, std::int64_t wall_ns) noexcept {
+    if (events.count == 0) {
+        return;
+    }
+    const std::size_t which = DEVICE_EVENTS + static_cast<std::size_t>(kind);
+    const std::size_t key = channel_->devices.size();
+    if (limit_.admit(which, key, now_ns, events.count) &&
+        !push(which, key, events, events.has_details, wall_ns)) {
+        limit_.give_back(which, key, events.count);
     }
 }
 
@@ -80,7 +122,7 @@ void EventLog::due(std::int64_t now_ns, std::int64_t wall_ns) noexcept {
     // refused all the same is given back, with a new period, so the loop
     // does not take it again.
     while ((!queue_ || !queue_->full()) && limit_.next_due(now_ns, summary)) {
-        if (!push(summary.key, static_cast<DeviceEvent>(summary.kind),
+        if (!push(summary.kind, summary.key,
                   EventRecord{.count = summary.count}, false, wall_ns)) {
             limit_.give_back(summary.kind, summary.key, summary.count);
         }
@@ -96,7 +138,7 @@ bool EventLog::flush(std::int64_t wall_ns, bool last) noexcept {
         if (!limit_.next_held(summary)) {
             return true;
         }
-        if (!push(summary.key, static_cast<DeviceEvent>(summary.kind),
+        if (!push(summary.kind, summary.key,
                   EventRecord{.count = summary.count}, false, wall_ns) &&
             !last) {
             limit_.give_back(summary.kind, summary.key, summary.count);
@@ -120,13 +162,77 @@ void flush_at_stop(EventLog& log, std::int64_t wall_ns, int waits,
 // A summary carries the count of the events it stands for and no details:
 // they were in the first record of the period, or in no record at all
 // (D-148).
-bool EventLog::push(std::size_t device, DeviceEvent kind,
+bool EventLog::push(std::size_t kind, std::size_t key,
                     const EventRecord& events, bool details,
                     std::int64_t wall_ns) noexcept {
-    // Nothing to log into, or no device to name: nothing to give back.
-    if (!queue_ || device >= channel_->devices.size()) {
-        return true;
+    if (!queue_) {
+        return true;  // nothing to log into: nothing to give back
     }
+    if (kind >= DEVICE_EVENTS) {
+        return push_channel(static_cast<ChannelEvent>(kind - DEVICE_EVENTS),
+                            events, details, wall_ns);
+    }
+    if (key >= channel_->devices.size()) {
+        return true;  // no device to name
+    }
+    return push_device(key, static_cast<DeviceEvent>(kind), events, details,
+                       wall_ns);
+}
+
+bool EventLog::push_channel(ChannelEvent kind, const EventRecord& events,
+                            bool details, std::int64_t wall_ns) noexcept {
+    const std::string_view channel = channel_->name;
+    const Number count(events.count);
+    const std::string_view reason =
+        close_reason_text(static_cast<CloseReason>(events.reason));
+    switch (kind) {
+        case ChannelEvent::LOST:
+            if (!details) {
+                return queue_->push(LogLevel::WARNING, wall_ns,
+                                    "connection lost",
+                                    {{"MESSAGE_ID", "driver-connection-lost"},
+                                     {"CHANNEL", channel},
+                                     {"COUNT", count.view()}});
+            }
+            return queue_->push(LogLevel::WARNING, wall_ns, "connection lost",
+                                {{"MESSAGE_ID", "driver-connection-lost"},
+                                 {"CHANNEL", channel},
+                                 {"REASON", reason},
+                                 {"COUNT", count.view()}});
+        case ChannelEvent::REFUSED:
+            if (!details) {
+                return queue_->push(
+                    LogLevel::WARNING, wall_ns, "connect failed",
+                    {{"MESSAGE_ID", "driver-connection-refused"},
+                     {"CHANNEL", channel},
+                     {"COUNT", count.view()}});
+            }
+            return queue_->push(LogLevel::WARNING, wall_ns, "connect failed",
+                                {{"MESSAGE_ID", "driver-connection-refused"},
+                                 {"CHANNEL", channel},
+                                 {"REASON", reason},
+                                 {"COUNT", count.view()}});
+        case ChannelEvent::CLOSED:
+            if (!details) {
+                return queue_->push(LogLevel::WARNING, wall_ns,
+                                    "connection closed by the driver",
+                                    {{"MESSAGE_ID", "driver-connection-closed"},
+                                     {"CHANNEL", channel},
+                                     {"COUNT", count.view()}});
+            }
+            return queue_->push(LogLevel::WARNING, wall_ns,
+                                "connection closed by the driver",
+                                {{"MESSAGE_ID", "driver-connection-closed"},
+                                 {"CHANNEL", channel},
+                                 {"REASON", reason},
+                                 {"COUNT", count.view()}});
+    }
+    return true;  // no such kind: nothing to log
+}
+
+bool EventLog::push_device(std::size_t device, DeviceEvent kind,
+                           const EventRecord& events, bool details,
+                           std::int64_t wall_ns) noexcept {
     const std::string_view channel = channel_->name;
     const std::string_view name = channel_->devices[device].name;
     const Number count(events.count);
@@ -167,6 +273,34 @@ bool EventLog::push(std::size_t device, DeviceEvent kind,
                                  {"DEVICE", name},
                                  {"IDENTITY", text},
                                  {"COUNT", count.view()}});
+        case DeviceEvent::DEMOTED:
+            return queue_->push(LogLevel::WARNING, wall_ns, "device demoted",
+                                {{"MESSAGE_ID", "driver-device-demoted"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"COUNT", count.view()}});
+        case DeviceEvent::RECOVERED:
+            return queue_->push(LogLevel::NOTICE, wall_ns, "device recovered",
+                                {{"MESSAGE_ID", "driver-device-recovered"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"COUNT", count.view()}});
+        case DeviceEvent::POINT_ABSENT: {
+            if (!details) {
+                return queue_->push(LogLevel::WARNING, wall_ns, "points absent",
+                                    {{"MESSAGE_ID", "driver-point-absent"},
+                                     {"CHANNEL", channel},
+                                     {"DEVICE", name},
+                                     {"COUNT", count.view()}});
+            }
+            const Number points(events.check);
+            return queue_->push(LogLevel::WARNING, wall_ns, "points absent",
+                                {{"MESSAGE_ID", "driver-point-absent"},
+                                 {"CHANNEL", channel},
+                                 {"DEVICE", name},
+                                 {"POINTS", points.view()},
+                                 {"COUNT", count.view()}});
+        }
         case DeviceEvent::RESTART:
             return queue_->push(LogLevel::WARNING, wall_ns, "device restart",
                                 {{"MESSAGE_ID", "driver-device-restart"},

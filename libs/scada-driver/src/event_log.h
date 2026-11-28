@@ -28,6 +28,9 @@ namespace scada::driver::detail {
 // The REASON of an identity mismatch's record (D-147, ruling item 3).
 [[nodiscard]] std::string_view reason_text(std::uint8_t reason) noexcept;
 
+// The REASON of a connection's lost or closed record (D-149).
+[[nodiscard]] std::string_view close_reason_text(CloseReason reason) noexcept;
+
 class EventLog {
 public:
     // The log of `channel`'s devices into `queue`; a null queue logs
@@ -43,6 +46,12 @@ public:
                       const EventRecord& events, std::int64_t now_ns,
                       std::int64_t wall_ns) noexcept;
 
+    // The same for the channel's connection events of `kind` (D-149),
+    // limited per kind for the channel.
+    SCADA_RT void add_channel(ChannelEvent kind, const EventRecord& events,
+                              std::int64_t now_ns,
+                              std::int64_t wall_ns) noexcept;
+
     // Logs the summaries whose period ended by `now_ns`, as many as the
     // queue has room for; the rest stay due for the next call.
     SCADA_RT void due(std::int64_t now_ns, std::int64_t wall_ns) noexcept;
@@ -56,10 +65,17 @@ public:
     SCADA_RT bool flush(std::int64_t wall_ns, bool last) noexcept;
 
 private:
+    // The record of limit kind `kind` (a DeviceEvent, or DEVICE_EVENTS
+    // plus a ChannelEvent) and key `key` (a device, or the channel's slot).
     // False if the queue refused the record.
-    SCADA_RT bool push(std::size_t device, DeviceEvent kind,
+    SCADA_RT bool push(std::size_t kind, std::size_t key,
                        const EventRecord& events, bool details,
                        std::int64_t wall_ns) noexcept;
+    SCADA_RT bool push_device(std::size_t device, DeviceEvent kind,
+                              const EventRecord& events, bool details,
+                              std::int64_t wall_ns) noexcept;
+    SCADA_RT bool push_channel(ChannelEvent kind, const EventRecord& events,
+                               bool details, std::int64_t wall_ns) noexcept;
 
     const CompiledChannel* channel_;
     std::shared_ptr<LogQueue> queue_;

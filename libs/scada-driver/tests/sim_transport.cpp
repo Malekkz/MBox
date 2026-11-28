@@ -21,6 +21,10 @@ IoStatus SimTransport::connect(std::int64_t deadline_ns) noexcept {
     }
     ++connects_;
     connect_times_.push_back(clock_->monotonic_ns());
+    if (failures_ > 0) {
+        --failures_;
+        return IoStatus::FAILED;
+    }
     if (refusals_ > 0) {
         --refusals_;
         clock_->advance_to(
