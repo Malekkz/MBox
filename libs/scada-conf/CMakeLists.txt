@@ -49,6 +49,7 @@ scada_add_library(scada-conf
     src/modbus_rules.cpp
     src/names.cpp
     src/output_rules.cpp
+    src/output_values.cpp
     src/node.cpp
     src/point_rules.cpp
     src/point_types.cpp

@@ -3,6 +3,8 @@
 
 #include "output_rules.h"
 
+#include "output_values.h"
+#include "point_types.h"
 #include "scada/conf/diagnostic.h"
 #include "scada/conf/expand.h"
 #include "scada/conf/node.h"
@@ -21,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -35,6 +38,10 @@ constexpr std::uint16_t CW_AREA_NOT_USED = 701;
 constexpr std::uint16_t CF_NOT_WRITABLE = 702;
 constexpr std::uint16_t CF_TARGET_TWICE = 703;
 constexpr std::uint16_t CF_DANGEROUS = 705;
+constexpr std::uint16_t CF_ON_ONLY = 707;
+constexpr std::uint16_t CF_CANNOT_WRITE = 708;
+constexpr std::uint16_t CF_VALUE_TYPE = 713;
+constexpr std::uint16_t CF_FEEDBACK_KIND = 715;
 constexpr std::uint16_t CF_NVM_CYCLIC = 706;
 constexpr std::uint16_t CF_NO_FEEDBACK = 709;
 constexpr std::uint16_t CF_NO_SAFE_STATE = 710;
@@ -70,6 +77,34 @@ struct Target {
     std::string_view protocol;
     bool dangerous = false;
     bool nvm = false;
+    // Of a point: its address, the raw type a write writes (empty for one
+    // these rules do not count), its scaling and write encoding (A.5).
+    NodeId address = 0;
+    std::string raw;
+    Scaling scaling;
+    bool mask = false;    // `write.mask`
+    bool on_off = false;  // `write.on` or `write.off`
+    bool double_point = false;
+    bool at_start_safe = false;  // `io`: `at_start: safe`
+    // Why the protocol cannot write it (CF-708), empty if it can.
+    std::string unwritable;
+};
+
+[[nodiscard]] bool is_number_type(std::string_view value_type) {
+    return value_type == "int64" || value_type == "uint64" ||
+           value_type == "float64";
+}
+
+// The fail-safe actions of an output, each as written or its default (7.2,
+// 7.4; ruling Q7 of D-124): what the writer of the target does on an
+// orderly stop, on control lost and on a generation change.
+struct FailSafe {
+    std::string_view on_shutdown;
+    bool shutdown_given = false;
+    std::string_view on_control_loss;
+    bool loss_given = false;
+    std::string_view on_generation_change;
+    bool generation_given = false;
 };
 
 class Checker {
@@ -138,20 +173,77 @@ private:
         if (!info) {
             return std::nullopt;
         }
-        Target target{
-            .point = info->origin == TagOrigin::POINT && info->point != 0,
-            .value_type = info->value_type,
-            .access = {},
-            .protocol = info->protocol,
-            .dangerous = false,
-            .nvm = false};
+        Target target;
+        target.point = info->origin == TagOrigin::POINT && info->point != 0;
+        target.value_type = info->value_type;
+        target.protocol = info->protocol;
         if (target.point) {
             target.access = expanded_.text_of(info->point, "access");
             target.dangerous =
                 expanded_.text_of(info->point, "dangerous") == "true";
             target.nvm = expanded_.text_of(info->point, "storage") == "nvm";
+            read_point(info->point, target);
         }
         return target;
+    }
+
+    // The address, raw type, scaling and encoding of the target's point, and
+    // why its protocol cannot write it (CF-708, ruling Q3 of D-124).
+    void read_point(NodeId point, Target& target) const {
+        const Document& document = expanded_.document();
+        target.double_point =
+            expanded_.text_of(point, "kind") == "double_point";
+        if (const std::optional<NodeId> scale =
+                expanded_.child(point, "scale")) {
+            target.scaling =
+                Scaling{.gain = expanded_.text_of(*scale, "gain"),
+                        .offset = expanded_.text_of(*scale, "offset"),
+                        .divide_by = expanded_.text_of(*scale, "divide_by")};
+        }
+        if (expanded_.child(point, "exponent_from")) {
+            target.unwritable = "a point with exponent_from";
+        }
+        const std::optional<NodeId> address = expanded_.child(point, "address");
+        if (!address || document.kind(*address) != NodeKind::MAP) {
+            return;
+        }
+        target.address = *address;
+        const std::optional<NodeId> write = expanded_.child(*address, "write");
+        target.mask = write && expanded_.child(*write, "mask");
+        target.on_off = write && (expanded_.child(*write, "on") ||
+                                  expanded_.child(*write, "off"));
+        if (target.protocol == "io") {
+            target.at_start_safe =
+                expanded_.text_of(*address, "at_start") == "safe";
+            if (target.value_type == "bool") {
+                target.raw = "bool";
+            }
+            if (target.unwritable.empty() &&
+                expanded_.text_of(*address, "direction") == "input") {
+                target.unwritable = "an input line";
+            }
+            return;
+        }
+        if (target.protocol != "modbus") {
+            return;
+        }
+        target.raw = modbus_raw_type(document, *address);
+        if (!target.unwritable.empty()) {
+            return;
+        }
+        const std::string_view table = expanded_.text_of(*address, "table");
+        if (target.raw == "mod10k" || target.raw == "epoch" ||
+            target.raw == "datetime") {
+            target.unwritable = "raw type " + target.raw;
+        } else if ((expanded_.child(*address, "bit") ||
+                    expanded_.child(*address, "field")) &&
+                   !target.mask) {
+            target.unwritable = "a bit or field without write.mask";
+        } else if ((table == "discrete" || table == "input") &&
+                   !target.on_off) {
+            target.unwritable = "table " + std::string(table) +
+                                " without write.on or write.off";
+        }
     }
 
     // --- One output ------------------------------------------------------
@@ -168,7 +260,7 @@ private:
         if (const std::optional<NodeId> target_node =
                 reader.scalar(output, "target")) {
             target = target_of(reader, *target_node);
-            check_target(reader, *target_node, head, target);
+            check_target(reader, *target_node, head, kind, target);
         }
         const bool dangerous = target && target->dangerous;
         if (!reader.child(output, "feedback") &&
@@ -192,19 +284,48 @@ private:
                   head + ": the device must time the pulse");
         }
         check_control_loss_hold(reader, output, head, kind, target);
+        if (target && target->point) {
+            check_dangerous_flags(reader, output, head, *target);
+            check_on_only(reader, output, head, kind, *target);
+            check_values(reader, output, head, *target);
+            check_native_select(reader, output, head, *target);
+            check_defaults(reader, output, head, kind, *target);
+        }
+        check_feedback(reader, output, head, kind);
     }
 
-    // CF-702 and CF-703.
+    // The output's kind fits its target's type (interim rule (g) of D-124):
+    // a switching kind needs a BOOL target, a double point for `double`, or
+    // a write encoding; a `step` or `setpoint` needs a number.
+    [[nodiscard]] static bool kind_fits(std::string_view kind,
+                                        const Target& target) {
+        if (kind == "single" || kind == "pulse" || kind == "trigger") {
+            return target.value_type == "bool" || target.mask || target.on_off;
+        }
+        if (kind == "double") {
+            return target.double_point || target.on_off;
+        }
+        if (kind == "step" || kind == "setpoint") {
+            return is_number_type(target.value_type);
+        }
+        return true;  // `latch`: reserved (CF-210)
+    }
+
+    // CF-702, CF-708 and CF-703.
     void check_target(const Reader& reader, NodeId node,
-                      const std::string& head,
+                      const std::string& head, std::string_view kind,
                       const std::optional<Target>& target) {
         const std::string_view tag = reader.document().text(node);
-        if (target && (!target->point ||
-                       (target->access != "rw" && target->access != "wo") ||
-                       target->value_type == "string")) {
+        if (target &&
+            (!target->point ||
+             (target->access != "rw" && target->access != "wo") ||
+             target->value_type == "string" || !kind_fits(kind, *target))) {
             error(reader, node, CF_NOT_WRITABLE,
                   head + ": target " + quote_text(tag) +
                       " is not a writable point");
+        } else if (target && !target->unwritable.empty()) {
+            error(reader, node, CF_CANNOT_WRITE,
+                  head + ": the protocol cannot write " + target->unwritable);
         }
         const auto [first, added] = targets_.try_emplace(
             std::string(tag), std::string(head.substr(head.find(' ') + 1)));
@@ -370,6 +491,348 @@ private:
             warning(reader, *loss, CW_HOLDS_ON_LOSS,
                     head +
                         " holds on control loss although its safe_state is " +
+                        std::string(state));
+        }
+    }
+
+    // --- The rulings of D-124
+    // -------------------------------------------------
+
+    // CF-705 (ruling Q2): a dangerous output always asks for a reason and
+    // a re-authentication; writing `false` for either is refused.
+    void check_dangerous_flags(const Reader& reader, NodeId output,
+                               const std::string& head, const Target& target) {
+        if (!target.dangerous) {
+            return;
+        }
+        for (const std::string_view key : {"reason_required", "reauth"}) {
+            if (const std::optional<NodeId> flag = reader.scalar(output, key);
+                flag && reader.document().text(*flag) == "false") {
+                error(reader, *flag, CF_DANGEROUS,
+                      head + " is dangerous: its " + std::string(key) +
+                          " must be true");
+            }
+        }
+    }
+
+    // CF-707 (ruling Q4): an on-only output, by `on_only: true` or a mask
+    // target (A.5), has no off value; `on_only: false` cannot be given to a
+    // `trigger`, a `pulse` or a mask target. A trigger's or pulse's
+    // `safe_state` is CF-719's.
+    void check_on_only(const Reader& reader, NodeId output,
+                       const std::string& head, std::string_view kind,
+                       const Target& target) {
+        const std::optional<NodeId> on_only = reader.scalar(output, "on_only");
+        const bool written_off =
+            on_only && reader.document().text(*on_only) == "false";
+        const bool always_on = kind == "trigger" || kind == "pulse";
+        if (written_off && (always_on || target.mask)) {
+            error(reader, *on_only, CF_ON_ONLY, head + " is on-only");
+            return;
+        }
+        const bool on_only_output =
+            !always_on &&
+            ((on_only && reader.document().text(*on_only) == "true") ||
+             target.mask);
+        if (const std::optional<NodeId> safe_state =
+                reader.scalar(output, "safe_state");
+            on_only_output && safe_state &&
+            reader.document().text(*safe_state) == "off") {
+            error(reader, *safe_state, CF_ON_ONLY, head + " is on-only");
+        }
+    }
+
+    // CF-715 (ruling Q5, interim rules (b) and (i)): the feedback a kind
+    // takes.
+    void check_feedback(const Reader& reader, NodeId output,
+                        const std::string& head, std::string_view kind) {
+        const std::optional<NodeId> feedback = reader.child(output, "feedback");
+        if (!feedback || !tags_->complete()) {
+            return;
+        }
+        const Document& document = reader.document();
+        const NodeKind shape = document.kind(*feedback);
+        const auto refuse = [&](std::string_view needed) {
+            error(reader, *feedback, CF_FEEDBACK_KIND,
+                  head + ": feedback must be " + std::string(needed));
+        };
+        const auto tag_info = [&](std::optional<NodeId> node) {
+            return node ? tags_->find(document.text(*node))
+                        : std::optional<TagInfo>();
+        };
+        const bool on_off =
+            shape == NodeKind::MAP && reader.child(*feedback, "on");
+        if (on_off) {
+            for (const std::string_view side : {"on", "off"}) {
+                const std::optional<TagInfo> info =
+                    tag_info(reader.scalar(*feedback, side));
+                if (info && info->value_type != "bool") {
+                    refuse("{ on, off } of two BOOL tags");
+                    return;
+                }
+            }
+        }
+        if (kind == "step") {
+            refuse("none: a step output has no feedback yet");
+            return;
+        }
+        if (kind == "single" || kind == "pulse" || kind == "trigger") {
+            const std::optional<TagInfo> info =
+                shape == NodeKind::SCALAR ? tag_info(feedback) : std::nullopt;
+            if ((shape == NodeKind::SCALAR && info &&
+                 info->value_type != "bool") ||
+                (shape == NodeKind::MAP && !on_off)) {
+                refuse("a BOOL tag or { on, off }");
+            }
+            return;
+        }
+        if (kind == "double") {
+            const std::optional<TagInfo> info =
+                shape == NodeKind::SCALAR ? tag_info(feedback) : std::nullopt;
+            const bool double_point =
+                info && info->origin == TagOrigin::POINT && info->point != 0 &&
+                expanded_.text_of(info->point, "kind") == "double_point";
+            if ((shape == NodeKind::SCALAR && info && !double_point) ||
+                (shape == NodeKind::MAP && !on_off)) {
+                refuse("a double point or { on, off }");
+            }
+            return;
+        }
+        if (kind == "setpoint") {
+            const std::optional<NodeId> tag =
+                shape == NodeKind::MAP ? reader.scalar(*feedback, "tag")
+                                       : std::nullopt;
+            if (!tag) {
+                refuse("{ tag, within, settle } on a number tag");
+                return;
+            }
+            const std::optional<TagInfo> info = tag_info(tag);
+            if (info && !is_number_type(info->value_type)) {
+                refuse("{ tag, within, settle } on a number tag");
+            } else if (const std::optional<NodeId> within =
+                           reader.scalar(*feedback, "within");
+                       info && info->value_type == "float64" && within &&
+                       compare_numbers(document.text(*within), "0") == 0) {
+                refuse(
+                    "{ tag, within, settle } with a within above 0 on a "
+                    "FLOAT64 tag");
+            }
+        }
+    }
+
+    // CF-713 (ruling Q8, interim rules (d), (e) and (f)): the values an
+    // output writes fit its target, by mathematical value.
+    void check_values(const Reader& reader, NodeId output,
+                      const std::string& head, const Target& target) {
+        const Document& document = reader.document();
+        const auto refuse = [&](NodeId node, const std::string& key) {
+            error(reader, node, CF_VALUE_TYPE,
+                  head + ": " + key + " does not fit the target's type");
+        };
+        const std::optional<NodeId> limits = reader.child(output, "limits");
+        // The bounds of `limits`, for interim rule (d): min, max, ranges.
+        std::vector<std::pair<std::string_view, std::string_view>> intervals;
+        std::string_view min;
+        std::string_view max;
+        if (limits) {
+            for (const std::string_view key : {"min", "max"}) {
+                if (const std::optional<NodeId> bound =
+                        reader.scalar(*limits, key)) {
+                    if (!fits_value_type(document.text(*bound),
+                                         target.value_type)) {
+                        refuse(*bound, "limits." + std::string(key));
+                    }
+                    (key == "min" ? min : max) = document.text(*bound);
+                }
+            }
+            std::size_t index = 0;
+            for (const NodeId range : reader.items(*limits, "ranges")) {
+                const std::span<const NodeId> bounds =
+                    document.kind(range) == NodeKind::SEQUENCE
+                        ? document.items(range)
+                        : std::span<const NodeId>();
+                for (const NodeId bound : bounds) {
+                    if (!fits_value_type(document.text(bound),
+                                         target.value_type)) {
+                        refuse(bound,
+                               "limits.ranges[" + std::to_string(index) + "]");
+                    }
+                }
+                if (bounds.size() == 2) {
+                    intervals.emplace_back(document.text(bounds[0]),
+                                           document.text(bounds[1]));
+                }
+                ++index;
+            }
+        }
+        const auto within_limits = [&](std::string_view value) {
+            if ((!min.empty() && compare_numbers(value, min).value_or(0) < 0) ||
+                (!max.empty() && compare_numbers(value, max).value_or(0) > 0)) {
+                return false;
+            }
+            if (intervals.empty()) {
+                return true;
+            }
+            for (const auto& [low, high] : intervals) {
+                if (compare_numbers(value, low).value_or(-1) >= 0 &&
+                    compare_numbers(value, high).value_or(1) <= 0) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto check_written = [&](NodeId map, const std::string& key) {
+            if (document.kind(map) != NodeKind::MAP) {
+                return;
+            }
+            if (const std::optional<NodeId> value =
+                    reader.scalar(map, "value")) {
+                const std::string_view text = document.text(*value);
+                if (!fits_value_type(text, target.value_type)) {
+                    refuse(*value, key + ".value");
+                } else if (!target.raw.empty() &&
+                           !survives_scaling(text, target.value_type,
+                                             target.raw, target.scaling)) {
+                    refuse(*value, key + ".value " + std::string(text) +
+                                       " (scaled into raw type " + target.raw +
+                                       ")");
+                } else if (key == "safe_state" && !within_limits(text)) {
+                    refuse(*value, key + ".value " + std::string(text) +
+                                       " (outside the output's limits)");
+                }
+            }
+            if (const std::optional<NodeId> raw = reader.scalar(map, "raw")) {
+                if (target.mask || target.on_off) {
+                    refuse(*raw,
+                           key + ".raw (the target has a write encoding)");
+                } else if (!fits_raw_width(document.text(*raw), target.raw)) {
+                    refuse(*raw, key + ".raw");
+                }
+            }
+        };
+        if (const std::optional<NodeId> safe_state =
+                reader.child(output, "safe_state")) {
+            check_written(*safe_state, "safe_state");
+        }
+        if (const std::optional<NodeId> release =
+                limits ? reader.child(*limits, "release") : std::nullopt) {
+            check_written(*release, "limits.release");
+        }
+    }
+
+    // Interim rule (a) of D-124: `native_select` needs a select on the
+    // device, which no protocol of phase 2 has (CF-714).
+    void check_native_select(const Reader& reader, NodeId output,
+                             const std::string& head, const Target& target) {
+        if (const std::optional<NodeId> select =
+                reader.child(output, "native_select");
+            select &&
+            (target.protocol == "modbus" || target.protocol == "io")) {
+            error(reader, *select, CF_REFRESH_OR_RELEASE,
+                  head +
+                      ": native_select needs a select on the device, "
+                      "which protocol " +
+                      std::string(target.protocol) + " does not have");
+        }
+    }
+
+    // The fail-safe actions of an output, written or by default (7.2, 7.4;
+    // ruling Q7 of D-124): a dangerous output and the kinds with no safe
+    // action hold on every protocol; an `io` output goes safe on a stop and
+    // at once on control lost; a remote switching output goes safe 30 s
+    // after control lost and holds on a stop; the others hold.
+    [[nodiscard]] static FailSafe fail_safe_of(const Reader& reader,
+                                               NodeId output,
+                                               std::string_view kind,
+                                               const Target& target) {
+        const std::string_view state = reader.text_of(output, "safe_state");
+        const bool holds_always = target.dangerous || has_no_safe_action(kind);
+        const bool local = target.protocol == "io";
+        const bool remote_switching =
+            !local && is_switching(kind) && (state == "off" || state == "on");
+        FailSafe fail_safe{
+            .on_shutdown = (!holds_always && local) ? "safe" : "hold",
+            .shutdown_given = false,
+            .on_control_loss = (!holds_always && (local || remote_switching))
+                                   ? "safe"
+                                   : "hold",
+            .loss_given = false,
+            .on_generation_change = "hold",
+            .generation_given = false};
+        if (const std::optional<NodeId> shutdown =
+                reader.scalar(output, "on_shutdown")) {
+            fail_safe.on_shutdown = reader.document().text(*shutdown);
+            fail_safe.shutdown_given = true;
+        }
+        if (const std::optional<NodeId> loss =
+                reader.child(output, "on_control_loss")) {
+            if (const std::optional<NodeId> action =
+                    reader.scalar(*loss, "action")) {
+                fail_safe.on_control_loss = reader.document().text(*action);
+                fail_safe.loss_given = true;
+            }
+        }
+        if (const std::optional<NodeId> generation =
+                reader.scalar(output, "on_generation_change")) {
+            fail_safe.on_generation_change =
+                reader.document().text(*generation);
+            fail_safe.generation_given = true;
+        }
+        return fail_safe;
+    }
+
+    // CF-722 on the defaults (ruling Q7), and on an `io` line's `at_start:
+    // safe` (interim rule (c)), where `safe_state` is `hold`; and the io
+    // form of CW-721 (interim rule (h)).
+    void check_defaults(const Reader& reader, NodeId output,
+                        const std::string& head, std::string_view kind,
+                        const Target& target) {
+        const std::optional<NodeId> safe_state =
+            reader.scalar(output, "safe_state");
+        if (!safe_state) {
+            return;
+        }
+        const std::string_view state = reader.document().text(*safe_state);
+        const FailSafe fail_safe = fail_safe_of(reader, output, kind, target);
+        if (state == "hold" && !target.dangerous && !has_no_safe_action(kind)) {
+            for (const auto& [key, action, given] :
+                 {std::tuple{"on_shutdown", fail_safe.on_shutdown,
+                             fail_safe.shutdown_given},
+                  std::tuple{"on_control_loss", fail_safe.on_control_loss,
+                             fail_safe.loss_given}}) {
+                if (!given && action == "safe") {
+                    error(reader, *safe_state, CF_SAFE_WITH_HOLD,
+                          head +
+                              ": action safe needs a safe_state other than "
+                              "hold (safe is the default of " +
+                              std::string(key) + " for an io target)");
+                }
+            }
+            if (target.at_start_safe) {
+                error(reader, *safe_state, CF_SAFE_WITH_HOLD,
+                      head +
+                          ": action safe needs a safe_state other than hold "
+                          "(the target's at_start is safe)");
+            }
+        }
+        if (target.protocol != "io" || target.dangerous ||
+            !is_switching(kind) || (state != "off" && state != "on")) {
+            return;
+        }
+        if (const std::optional<NodeId> loss =
+                reader.child(output, "on_control_loss");
+            loss && fail_safe.loss_given &&
+            fail_safe.on_control_loss == "hold") {
+            warning(reader, *loss, CW_HOLDS_ON_LOSS,
+                    head +
+                        " holds on control loss although its safe_state is " +
+                        std::string(state));
+        }
+        if (const std::optional<NodeId> shutdown =
+                reader.scalar(output, "on_shutdown");
+            shutdown && fail_safe.on_shutdown == "hold") {
+            warning(reader, *shutdown, CW_HOLDS_ON_LOSS,
+                    head + " holds on shutdown although its safe_state is " +
                         std::string(state));
         }
     }

@@ -37,9 +37,28 @@ constexpr std::string_view METER =
     "register: 12 } }\n"
     "  - { name: danger, access: rw, storage: volatile, dangerous: true, "
     "address: { table: coil, register: 20 } }\n"
+    "  - { name: dsp, access: rw, storage: volatile, dangerous: true, "
+    "address: { table: holding, register: 21, type: uint16 } }\n"
+    "  - { name: tenth2, access: rw, storage: volatile, scale: { divide_by: "
+    "10 }, address: { table: holding, register: 22, type: uint16 } }\n"
     "  - { name: text, access: rw, storage: volatile, address: { table: "
     "holding, register: 30, type: string, length: 4 } }\n"
     "  - { name: state, address: { table: coil, register: 40 } }\n"
+    "  - { name: brk, kind: double_point, access: wo, storage: volatile, "
+    "address: { write: { on: { table: holding, register: 60, value: 1 }, "
+    "off: { table: holding, register: 61, value: 1 } } } }\n"
+    "  - { name: tenth, access: rw, storage: volatile, scale: { divide_by: "
+    "10 }, address: { table: holding, register: 62, type: uint16 } }\n"
+    "  - { name: reset, access: wo, storage: volatile, address: { table: "
+    "holding, register: 63, write: { mask: 0x0001 } } }\n"
+    "  - { name: big, access: rw, storage: volatile, value_type: float64, "
+    "address: { table: holding, register: 64, type: float64 } }\n"
+    "  - { name: m10k, access: rw, storage: volatile, address: { table: "
+    "holding, register: 70, type: mod10k, count: 2 } }\n"
+    "  - { name: flag, access: rw, storage: volatile, address: { table: "
+    "holding, register: 72, bit: 3 } }\n"
+    "  - { name: din, access: rw, storage: volatile, address: { table: "
+    "discrete, register: 73 } }\n"
     "  - name: status\n"
     "    address: { table: holding, register: 50, type: uint16 }\n"
     "    tag: false\n"
@@ -49,7 +68,13 @@ constexpr std::string_view METER =
 constexpr std::string_view IO_TEMPLATE =
     "template: io_a\nprotocol: io\npoints:\n"
     "  - { name: lamp, access: rw, storage: volatile, address: { line: 1, "
-    "direction: output, at_start: safe } }\n";
+    "direction: output, at_start: safe } }\n"
+    "  - { name: held, access: rw, storage: volatile, address: { line: 2, "
+    "direction: output, at_start: hold } }\n"
+    "  - { name: button, access: rw, storage: volatile, address: { line: 3, "
+    "direction: input, at_start: hold } }\n"
+    "  - { name: led, access: rw, storage: volatile, address: { line: 4, "
+    "direction: output, at_start: hold } }\n";
 
 // The tree of meter_a at ps1.m1, an `io` device ps1.io, the area ps1 and
 // `files`.
@@ -129,17 +154,20 @@ Lines errors_with_interlock(std::string_view outputs, Files more = {}) {
 // one output, and an output given twice is CF-302 alone.
 TEST(OutputRules, TargetsAreWritablePoints) {
     EXPECT_EQ(
-        errors_with_interlock(output("ps1.a", "setpoint", "ps1.m1.ro") +
-                                  output("ps1.b", "single", "ps1.m1.run") +
-                                  output("ps1.c", "setpoint", "ps1.m1.text") +
-                                  output("ps1.d", "setpoint", "site.t") +
-                                  output("ps1.e", "setpoint", "ps1.m1.sp") +
-                                  output("ps1.f", "setpoint", "ps1.m1.sp") +
-                                  output("ps1.g", "single", "ps1.m1.c3") +
-                                  output("ps1.h", "single", "ps1.io.lamp"),
-                              {{"tags/site.yaml",
-                                "tags:\n  - { name: site.t, type: "
-                                "internal, value_type: int64 }\n"}}),
+        errors_with_interlock(
+            output("ps1.a", "setpoint", "ps1.m1.ro") +
+                output("ps1.b", "single", "ps1.m1.run") +
+                output("ps1.c", "setpoint", "ps1.m1.text") +
+                output("ps1.d", "setpoint", "site.t") +
+                output("ps1.e", "setpoint", "ps1.m1.sp") +
+                output("ps1.f", "setpoint", "ps1.m1.sp") +
+                output("ps1.g", "single", "ps1.m1.c3") +
+                "  - { name: ps1.h, area: ps1, kind: single, target: "
+                "ps1.io.held, "
+                "no_feedback: true, interlocks: [ps1.ok], safe_state: off }\n",
+            {{"tags/site.yaml",
+              "tags:\n  - { name: site.t, type: "
+              "internal, value_type: int64 }\n"}}),
         (Lines{"outputs/ps1.yaml:4:55: error CF-702: output \"ps1.a\": target "
                "\"ps1.m1.ro\" is not a writable point",
                "outputs/ps1.yaml:5:53: error CF-702: output \"ps1.b\": target "
@@ -171,7 +199,7 @@ TEST(OutputRules, FeedbackSafeStateAndInterlocks) {
             // A dangerous target holds without being told (7.2).
             "  - { name: ps1.d, area: ps1, kind: single, target: "
             "ps1.m1.danger, feedback: ps1.m1.state, interlocks: [] }\n"
-            "  - { name: ps1.e, area: ps1, kind: double, target: ps1.m1.c2, "
+            "  - { name: ps1.e, area: ps1, kind: double, target: ps1.m1.brk, "
             "feedback: { on: ps1.m1.state, off: ps1.m1.run }, interlocks: { "
             "on: [ps1.ok], off: [] }, safe_state: off }\n"),
         (Lines{"outputs/ps1.yaml:4:13: error CF-709: output \"ps1.a\" needs "
@@ -191,7 +219,7 @@ TEST(OutputRules, Refresh) {
             output("ps1.b", "setpoint", "ps1.m1.sp",
                    ", refresh: 10s, sbo: true") +
             output("ps1.c", "setpoint", "ps1.m1.nvm", ", refresh: 10s") +
-            output("ps1.d", "setpoint", "ps1.m1.danger", ", refresh: 10s") +
+            output("ps1.d", "setpoint", "ps1.m1.dsp", ", refresh: 10s") +
             output("ps1.e", "setpoint", "ps1.m1.sp2", ", refresh: 10s")),
         (Lines{
             "outputs/ps1.yaml:4:132: error CF-714: output \"ps1.a\": refresh "
@@ -200,7 +228,7 @@ TEST(OutputRules, Refresh) {
             "cannot be used with sbo",
             "outputs/ps1.yaml:6:135: error CF-706: output \"ps1.c\" writes "
             "non-volatile memory and cannot be written cyclically",
-            "outputs/ps1.yaml:7:138: error CF-705: output \"ps1.d\" is "
+            "outputs/ps1.yaml:7:135: error CF-705: output \"ps1.d\" is "
             "dangerous: it cannot be refreshed"}));
 }
 
@@ -248,6 +276,12 @@ TEST(OutputRules, SafeStatesAndFailSafeKeys) {
             "is only for setpoints",
             "outputs/ps1.yaml:9:153: error CF-714: output \"ps1.f\": release "
             "in on_control_loss needs limits.release",
+            "outputs/ps1.yaml:11:119: error CF-722: output \"ps1.h\": action "
+            "safe needs a safe_state other than hold (safe is the default of "
+            "on_control_loss for an io target)",
+            "outputs/ps1.yaml:11:119: error CF-722: output \"ps1.h\": action "
+            "safe needs a safe_state other than hold (the target's at_start "
+            "is safe)",
             "outputs/ps1.yaml:11:138: error CF-722: output \"ps1.h\": action "
             "safe needs a safe_state other than hold",
             "outputs/ps1.yaml:11:166: error CF-722: output \"ps1.h\": action "
@@ -271,25 +305,29 @@ TEST(OutputRules, EmptyInterlocksAndHoldingOnControlLoss) {
         warnings_of(
             "  - { name: ps1.a, area: ps1, kind: single, target: ps1.m1.c1, "
             "no_feedback: true, interlocks: [], safe_state: off }\n"
-            "  - { name: ps1.b, area: ps1, kind: double, target: ps1.m1.c2, "
+            "  - { name: ps1.b, area: ps1, kind: double, target: ps1.m1.brk, "
             "no_feedback: true, interlocks: { on: [], off: [] }, safe_state: "
             "on, on_control_loss: { action: hold } }\n"
             // Not a remote output: `io`.
             "  - { name: ps1.c, area: ps1, kind: single, target: ps1.io.lamp, "
             "no_feedback: true, interlocks: [], safe_state: off, "
-            "on_control_loss: { action: hold } }\n"
+            "on_control_loss: { action: hold }, on_shutdown: hold }\n"
             // A setpoint is no switching output.
             "  - { name: ps1.d, area: ps1, kind: setpoint, target: ps1.m1.sp, "
             "no_feedback: true, safe_state: { value: 0 }, on_control_loss: { "
             "action: hold } }\n"),
         (Lines{"outputs/ps1.yaml:2:95: warning CW-712: output \"ps1.a\" has no "
                "interlock",
-               "outputs/ps1.yaml:3:95: warning CW-712: output \"ps1.b\" has no "
+               "outputs/ps1.yaml:3:96: warning CW-712: output \"ps1.b\" has no "
                "interlock",
-               "outputs/ps1.yaml:3:149: warning CW-721: output \"ps1.b\" holds "
+               "outputs/ps1.yaml:3:150: warning CW-721: output \"ps1.b\" holds "
                "on control loss although its safe_state is on",
                "outputs/ps1.yaml:4:97: warning CW-712: output \"ps1.c\" has no "
-               "interlock"}));
+               "interlock",
+               "outputs/ps1.yaml:4:135: warning CW-721: output \"ps1.c\" holds "
+               "on control loss although its safe_state is off",
+               "outputs/ps1.yaml:4:166: warning CW-721: output \"ps1.c\" holds "
+               "on shutdown although its safe_state is off"}));
 }
 
 // --- CW-701 and CF-718: areas ------------------------------------------
@@ -330,6 +368,212 @@ TEST(OutputRules, AreasAndTheirPanels) {
                                "areas:\n  ps1: { description: Station }\n"
                                "  ps2: { description: Spare }\n"}}),
         Lines{"areas.yaml:3:3: warning CW-701: area \"ps2\" is not used"});
+}
+
+// --- The rulings of D-124 -----------------------------------------------
+
+// CF-708 (ruling Q3): the shapes no write carries; a bit with
+// `write.mask` is written.
+TEST(OutputRules, ShapesTheProtocolCannotWrite) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            output("ps1.a", "setpoint", "ps1.m1.m10k") +
+            output("ps1.b", "single", "ps1.m1.flag") +
+            output("ps1.c", "single", "ps1.m1.din") +
+            "  - { name: ps1.d, area: ps1, kind: single, target: "
+            "ps1.io.button, "
+            "no_feedback: true, interlocks: [ps1.ok], safe_state: off }\n" +
+            output("ps1.e", "single", "ps1.m1.reset")),
+        (Lines{"outputs/ps1.yaml:4:55: error CF-708: output \"ps1.a\": the "
+               "protocol cannot write raw type mod10k",
+               "outputs/ps1.yaml:5:53: error CF-708: output \"ps1.b\": the "
+               "protocol cannot write a bit or field without write.mask",
+               "outputs/ps1.yaml:6:53: error CF-708: output \"ps1.c\": the "
+               "protocol cannot write table discrete without write.on or "
+               "write.off",
+               "outputs/ps1.yaml:7:53: error CF-708: output \"ps1.d\": the "
+               "protocol cannot write an input line"}));
+}
+
+// CF-702 (interim rule (g)): the kind fits the target's type.
+TEST(OutputRules, KindAgainstTargetType) {
+    EXPECT_EQ(
+        errors_with_interlock(output("ps1.a", "single", "ps1.m1.sp") +
+                              output("ps1.b", "setpoint", "ps1.m1.c1") +
+                              output("ps1.c", "double", "ps1.m1.c2") +
+                              output("ps1.d", "step", "ps1.m1.sp2") +
+                              output("ps1.e", "double", "ps1.m1.brk")),
+        (Lines{"outputs/ps1.yaml:4:53: error CF-702: output \"ps1.a\": target "
+               "\"ps1.m1.sp\" is not a writable point",
+               "outputs/ps1.yaml:5:55: error CF-702: output \"ps1.b\": target "
+               "\"ps1.m1.c1\" is not a writable point",
+               "outputs/ps1.yaml:6:53: error CF-702: output \"ps1.c\": target "
+               "\"ps1.m1.c2\" is not a writable point"}));
+}
+
+// CF-705 (ruling Q2): a dangerous output always asks for a reason and a
+// re-authentication.
+TEST(OutputRules, ADangerousOutputAsksForAReason) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            output("ps1.a", "single", "ps1.m1.danger",
+                   ", reason_required: false, reauth: false") +
+            output("ps1.b", "single", "ps1.m1.c1", ", reason_required: false")),
+        (Lines{"outputs/ps1.yaml:4:144: error CF-705: output \"ps1.a\" is "
+               "dangerous: its reason_required must be true",
+               "outputs/ps1.yaml:4:159: error CF-705: output \"ps1.a\" is "
+               "dangerous: its reauth must be true"}));
+}
+
+// CF-707 (ruling Q4): an on-only output has no off value.
+TEST(OutputRules, OnOnlyOutputs) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: single, target: ps1.m1.c1, "
+            "no_feedback: true, interlocks: [], on_only: true, safe_state: "
+            "off }\n"
+            "  - { name: ps1.b, area: ps1, kind: trigger, target: ps1.m1.c2, "
+            "no_feedback: true, interlocks: [], on_only: false, safe_state: "
+            "hold }\n"
+            "  - { name: ps1.c, area: ps1, kind: single, target: "
+            "ps1.m1.reset, no_feedback: true, interlocks: [], on_only: false, "
+            "safe_state: hold }\n"
+            "  - { name: ps1.d, area: ps1, kind: single, target: ps1.m1.c3, "
+            "no_feedback: true, interlocks: [], on_only: true, safe_state: "
+            "on }\n"),
+        (Lines{"outputs/ps1.yaml:4:126: error CF-707: output \"ps1.a\" is "
+               "on-only",
+               "outputs/ps1.yaml:5:109: error CF-707: output \"ps1.b\" is "
+               "on-only",
+               "outputs/ps1.yaml:6:111: error CF-707: output \"ps1.c\" is "
+               "on-only"}));
+}
+
+// CF-715 (ruling Q5, interim rules (b) and (i)): the feedback of each
+// kind.
+TEST(OutputRules, FeedbackOfEachKind) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: single, target: ps1.m1.c1, "
+            "feedback: ps1.m1.ro, interlocks: [], safe_state: off }\n"
+            "  - { name: ps1.b, area: ps1, kind: double, target: ps1.m1.brk, "
+            "feedback: ps1.m1.state, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.c, area: ps1, kind: setpoint, target: ps1.m1.sp, "
+            "feedback: ps1.m1.ro, safe_state: hold }\n"
+            "  - { name: ps1.d, area: ps1, kind: step, target: ps1.m1.sp2, "
+            "feedback: ps1.m1.ro, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.e, area: ps1, kind: setpoint, target: ps1.m1.big, "
+            "feedback: { tag: ps1.m1.big, within: 0, settle: 1s }, "
+            "safe_state: hold }\n"
+            "  - { name: ps1.f, area: ps1, kind: setpoint, target: "
+            "ps1.m1.tenth, feedback: { tag: ps1.m1.tenth, within: 0.5, "
+            "settle: 1s }, safe_state: hold }\n"
+            "  - { name: ps1.g, area: ps1, kind: single, target: ps1.m1.c2, "
+            "feedback: { on: ps1.m1.state, off: ps1.m1.ro }, interlocks: [], "
+            "safe_state: off }\n"),
+        (Lines{
+            "outputs/ps1.yaml:4:74: error CF-715: output \"ps1.a\": feedback "
+            "must be a BOOL tag or { on, off }",
+            "outputs/ps1.yaml:5:75: error CF-715: output \"ps1.b\": feedback "
+            "must be a double point or { on, off }",
+            "outputs/ps1.yaml:6:76: error CF-715: output \"ps1.c\": feedback "
+            "must be { tag, within, settle } on a number tag",
+            "outputs/ps1.yaml:7:73: error CF-715: output \"ps1.d\": feedback "
+            "must be none: a step output has no feedback yet",
+            "outputs/ps1.yaml:8:77: error CF-715: output \"ps1.e\": feedback "
+            "must be { tag, within, settle } with a within above 0 on a "
+            "FLOAT64 tag",
+            "outputs/ps1.yaml:10:74: error CF-715: output \"ps1.g\": "
+            "feedback must be { on, off } of two BOOL tags"}));
+}
+
+// CF-713 (ruling Q8, interim rules (d), (e) and (f)): the values an
+// output writes fit its target, by mathematical value.
+TEST(OutputRules, ValuesFitTheTarget) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: ps1.m1.sp, "
+            "no_feedback: true, safe_state: { value: 1.5 }, limits: { min: "
+            "-1, max: 9223372036854775808 } }\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.sp2, no_feedback: true, safe_state: { value: 70000 } }\n"
+            "  - { name: ps1.c, area: ps1, kind: setpoint, target: "
+            "ps1.m1.tenth, no_feedback: true, safe_state: { value: 7000 }, "
+            "limits: { release: { raw: 0x1FFFF } }, on_shutdown: release }\n"
+            "  - { name: ps1.d, area: ps1, kind: setpoint, target: "
+            "ps1.m1.nvm, no_feedback: true, safe_state: { value: 50 }, "
+            "limits: { min: 0, max: 40 } }\n"
+            "  - { name: ps1.e, area: ps1, kind: single, target: "
+            "ps1.m1.reset, no_feedback: true, interlocks: [], safe_state: { "
+            "raw: 1 } }\n"
+            "  - { name: ps1.f, area: ps1, kind: setpoint, target: ps1.m1.big, "
+            "no_feedback: true, safe_state: { value: 9007199254740993 }, "
+            "limits: { ranges: [[0, 9007199254740992]] } }\n"
+            "  - { name: ps1.g, area: ps1, kind: setpoint, target: "
+            "ps1.m1.tenth2, no_feedback: true, safe_state: { value: 6553.5 }, "
+            "limits: { min: 0, max: 6553.5 } }\n"),
+        (Lines{"outputs/ps1.yaml:4:106: error CF-713: output \"ps1.a\": "
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:4:137: error CF-713: output \"ps1.a\": "
+               "limits.max does not fit the target's type",
+               "outputs/ps1.yaml:5:107: error CF-713: output \"ps1.b\": "
+               "safe_state.value 70000 (scaled into raw type uint16) does not "
+               "fit the target's type",
+               "outputs/ps1.yaml:6:109: error CF-713: output \"ps1.c\": "
+               "safe_state.value 7000 (scaled into raw type uint16) does not "
+               "fit the target's type",
+               "outputs/ps1.yaml:6:143: error CF-713: output \"ps1.c\": "
+               "limits.release.raw does not fit the target's type",
+               "outputs/ps1.yaml:7:107: error CF-713: output \"ps1.d\": "
+               "safe_state.value 50 (outside the output's limits) does not fit "
+               "the target's type",
+               "outputs/ps1.yaml:8:121: error CF-713: output \"ps1.e\": "
+               "safe_state.raw (the target has a write encoding) does not fit "
+               "the target's type",
+               "outputs/ps1.yaml:9:107: error CF-713: output \"ps1.f\": "
+               "safe_state.value does not fit the target's type"}));
+}
+
+// CF-714 (interim rule (a)): no protocol of phase 2 has a select on the
+// device.
+TEST(OutputRules, NativeSelectWithoutADeviceSelect) {
+    EXPECT_EQ(
+        errors_with_interlock(output("ps1.a", "single", "ps1.m1.c1",
+                                     ", native_select: at_operate") +
+                              "  - { name: ps1.b, area: ps1, kind: "
+                              "single, target: ps1.io.led, no_feedback: "
+                              "true, interlocks: [], safe_state: off, "
+                              "native_select: at_select }\n"),
+        (Lines{"outputs/ps1.yaml:4:138: error CF-714: output \"ps1.a\": "
+               "native_select needs a select on the device, which protocol "
+               "modbus does not have",
+               "outputs/ps1.yaml:5:132: error CF-714: output \"ps1.b\": "
+               "native_select needs a select on the device, which protocol io "
+               "does not have"}));
+}
+
+// CF-722 on the defaults (ruling Q7) and on `at_start: safe` (interim
+// rule (c)); the kinds with no safe action and a dangerous output hold on
+// every protocol by default.
+TEST(OutputRules, TheDefaultsOfTheFailSafeKeys) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            output("ps1.a", "single", "ps1.io.held") +
+            output("ps1.b", "single", "ps1.io.lamp",
+                   ", on_shutdown: hold, on_control_loss: { action: hold }") +
+            "  - { name: ps1.c, area: ps1, kind: pulse, target: ps1.io.led, "
+            "no_feedback: true, interlocks: [], safe_state: hold }\n" +
+            output("ps1.d", "single", "ps1.m1.c1")),
+        (Lines{
+            "outputs/ps1.yaml:4:119: error CF-722: output \"ps1.a\": action "
+            "safe needs a safe_state other than hold (safe is the default of "
+            "on_shutdown for an io target)",
+            "outputs/ps1.yaml:4:119: error CF-722: output \"ps1.a\": action "
+            "safe needs a safe_state other than hold (safe is the default of "
+            "on_control_loss for an io target)",
+            "outputs/ps1.yaml:5:119: error CF-722: output \"ps1.b\": action "
+            "safe needs a safe_state other than hold (the target's at_start "
+            "is safe)"}));
 }
 
 // NOLINTEND(bugprone-suspicious-missing-comma)

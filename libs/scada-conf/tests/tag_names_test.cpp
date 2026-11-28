@@ -373,7 +373,7 @@ TEST(TagNames, GeneratedNamesOfTwoCauses) {
               "  - { name: ps1.m1.flow.alarm, area: ps1, kind: setpoint, "
               "target: ps1.m1.flow, no_feedback: true, interlocks: [], "
               "safe_state: hold }\n"
-              "  - { name: sys.out, area: ps1, kind: setpoint, target: "
+              "  - { name: sys.out, area: ps1, kind: single, target: "
               "ps1.m1.alarm_on, no_feedback: true, interlocks: [], safe_state: "
               "hold }\n"}})),
         (Lines{"alarms/site.yaml:3:31: error CF-301: tag names starting "
@@ -595,20 +595,22 @@ TEST(TagNames, TheGeneratedTagsAndTheirTypes) {
 // S7: an `io` channel's process is `io`; an `io` point is `bool` on
 // `gpio`, `float64` on another backend; a local output has a fail-safe tag
 // by default, a `step` none; a fail-safe key with `safe` or `release` makes
-// one; `refresh_failures` needs a refreshed output.
+// one; `refresh_failures` needs a refreshed output. The step and setpoint
+// outputs write number registers of ps1.m2 (D-124: a step or setpoint
+// needs a number target).
 TEST(TagNames, LocalOutputsAndTheIoProcess) {
     const std::string outputs =
         "outputs:\n"
         "  - { name: ps1.lamp, area: ps1, kind: single, target: ps1.io.lamp, "
         "no_feedback: true, interlocks: [], safe_state: off }\n"
-        "  - { name: ps1.step, area: ps1, kind: step, target: ps1.io.lamp2, "
+        "  - { name: ps1.step, area: ps1, kind: step, target: ps1.m2.s1, "
         "no_feedback: true, interlocks: [], safe_state: hold, on_shutdown: "
         "hold, on_control_loss: { action: hold } }\n"
-        "  - { name: ps1.gen, area: ps1, kind: setpoint, target: ps1.m1.flow, "
+        "  - { name: ps1.gen, area: ps1, kind: setpoint, target: ps1.m2.s2, "
         "no_feedback: true, interlocks: [], safe_state: { value: 0 }, "
         "on_generation_change: safe }\n"
         "  - { name: ps1.loss, area: ps1, kind: setpoint, target: "
-        "ps1.m1.alarm_on, no_feedback: true, interlocks: [], safe_state: { "
+        "ps1.m2.s3, no_feedback: true, interlocks: [], safe_state: { "
         "value: 0 }, on_control_loss: { action: release, after: 1s }, limits: "
         "{ release: { raw: 0 } } }\n";
     std::string alarms = "alarms:\n";
@@ -627,7 +629,17 @@ TEST(TagNames, LocalOutputsAndTheIoProcess) {
         errors(expand(
             {{"areas.yaml", std::string(AREAS)},
              {"templates/meter_a.yaml", std::string(METER)},
-             {"drivers/modbus/line1.yaml", one_device()},
+             {"templates/meter_b.yaml",
+              "template: meter_b\nprotocol: modbus\npoints:\n"
+              "  - { name: s1, access: rw, storage: volatile, address: { "
+              "table: holding, register: 1, type: uint16 } }\n"
+              "  - { name: s2, access: rw, storage: volatile, address: { "
+              "table: holding, register: 2, type: uint16 } }\n"
+              "  - { name: s3, access: rw, storage: volatile, address: { "
+              "table: holding, register: 3, type: uint16 } }\n"},
+             {"drivers/modbus/line1.yaml",
+              channel("  - { name: ps1.m1, template: meter_a, unit_id: 1 }\n"
+                      "  - { name: ps1.m2, template: meter_b, unit_id: 2 }\n")},
              {"templates/io_a.yaml",
               "template: io_a\nprotocol: io\npoints:\n"
               "  - { name: lamp, address: { line: 1, direction: output, "
