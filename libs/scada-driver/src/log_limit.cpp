@@ -18,19 +18,18 @@ std::int64_t add(std::int64_t left, std::int64_t right) noexcept {
 
 }  // namespace
 
-LogLimit::LogLimit(std::size_t kinds, std::size_t devices,
-                   std::int64_t period_ns)
+LogLimit::LogLimit(std::size_t kinds, std::size_t keys, std::int64_t period_ns)
     : kinds_(kinds),
-      devices_(devices),
+      keys_(keys),
       period_ns_(std::max<std::int64_t>(period_ns, 1)),
-      entries_(kinds * (devices + 1)) {}
+      entries_(kinds * (keys + 1)) {}
 
-bool LogLimit::admit(std::size_t kind, std::size_t device,
+bool LogLimit::admit(std::size_t kind, std::size_t key,
                      std::int64_t now_ns) noexcept {
-    if (kind >= kinds_ || device > devices_) {
+    if (kind >= kinds_ || key > keys_) {
         return true;
     }
-    Entry& entry = entries_[index(kind, device)];
+    Entry& entry = entries_[index(kind, key)];
     if (entry.held == 0 && now_ns >= entry.until_ns) {
         entry.until_ns = add(now_ns, period_ns_);
         return true;
@@ -46,8 +45,8 @@ bool LogLimit::admit(std::size_t kind, std::size_t device,
 
 void LogLimit::take(std::size_t slot, LogSummary& out) noexcept {
     Entry& entry = entries_[slot];
-    out = {.kind = slot / (devices_ + 1),
-           .device = slot % (devices_ + 1),
+    out = {.kind = slot / (keys_ + 1),
+           .key = slot % (keys_ + 1),
            .count = entry.held};
     entry.held = 0;
 }

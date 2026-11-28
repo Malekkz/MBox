@@ -3,11 +3,13 @@
 
 // The rate limit of a thread's log records (driver interface contract 11.3,
 // the pattern of the tag database's `heartbeat late` record): per kind of
-// record and device, the first record goes at once and starts a period;
-// records within the period are held and counted; at the first look after
-// the period, one summary with the count goes and starts the next period. A
+// record (its MESSAGE_ID) and key (a small integer: in the driver, the
+// device), the first record goes at once and starts a period; records
+// within the period are held and counted; at the first look after the
+// period, one summary with the count goes and starts the next period. A
 // device that flaps every period therefore writes two records per period at
-// most. Decision D-148.
+// most. Nothing in it is particular to the driver, so that it can move to
+// libscada-common when a second service needs it (decision D-148).
 //
 // One per thread, made at set-up; nothing after the constructor allocates.
 
@@ -23,10 +25,10 @@ namespace scada::driver::detail {
 // The period: 10 s (11.3).
 inline constexpr std::int64_t LOG_LIMIT_PERIOD_NS = 10'000'000'000;
 
-// Records held in one period of one kind and device.
+// Records held in one period of one kind and key.
 struct LogSummary {
     std::size_t kind = 0;
-    std::size_t device = 0;
+    std::size_t key = 0;
     std::uint64_t count = 0;
 
     friend bool operator==(const LogSummary&, const LogSummary&) = default;
@@ -34,17 +36,17 @@ struct LogSummary {
 
 class LogLimit {
 public:
-    // Entries for `kinds` kinds of record and `devices` devices, plus one
-    // per kind for records of no device (device index `devices`).
+    // Entries for `kinds` kinds of record and `keys` keys, plus one per
+    // kind for records of no key (key `keys`).
     // `period_ns` is at least 1. May throw std::bad_alloc.
-    LogLimit(std::size_t kinds, std::size_t devices,
+    LogLimit(std::size_t kinds, std::size_t keys,
              std::int64_t period_ns = LOG_LIMIT_PERIOD_NS);
 
-    // True if the record of `kind` and `device` at `now_ns` (monotonic) is
+    // True if the record of `kind` and `key` at `now_ns` (monotonic) is
     // to be logged now; otherwise it is held and counted, and a later
-    // `next_due` gives its summary. A kind or device out of range is always
+    // `next_due` gives its summary. A kind or key out of range is always
     // logged: a wrong index must not lose records.
-    SCADA_RT bool admit(std::size_t kind, std::size_t device,
+    SCADA_RT bool admit(std::size_t kind, std::size_t key,
                         std::int64_t now_ns) noexcept;
 
     // Takes one summary whose period ended by `now_ns` into `out` and starts
@@ -67,8 +69,8 @@ private:
     };
 
     [[nodiscard]] std::size_t index(std::size_t kind,
-                                    std::size_t device) const noexcept {
-        return kind * (devices_ + 1) + device;
+                                    std::size_t key) const noexcept {
+        return kind * (keys_ + 1) + key;
     }
     void take(std::size_t slot, LogSummary& out) noexcept;
     // Sets `next_due_ns_` to the earliest end of a period with held
@@ -76,7 +78,7 @@ private:
     void find_next_due() noexcept;
 
     std::size_t kinds_;
-    std::size_t devices_;
+    std::size_t keys_;
     std::int64_t period_ns_;
     std::vector<Entry> entries_;  // fixed size
     // No summary is due before this time: the earliest end of a period

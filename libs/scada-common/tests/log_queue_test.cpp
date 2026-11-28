@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -256,6 +257,36 @@ TEST_F(Queued, ConcurrentProducersEachKeepTheirOrder) {
     for (std::size_t thread = 0; thread < THREADS; ++thread) {
         EXPECT_TRUE(in_order(records, thread, PER_THREAD));
     }
+}
+
+// One producer against the draining worker through a small queue, for the
+// thread sanitizer: the release stores and acquire loads of head and tail
+// must order every slot's copy. Each record is delivered whole and in order,
+// or dropped and counted; none is lost or torn.
+TEST_F(Queued, OneProducerAndTheDrainUnderLoad) {
+    constexpr std::size_t SMALL = 4;
+    constexpr std::size_t PUSHES = 20'000;
+    if (!start(SMALL)) {
+        FAIL() << "logger or queue not made";
+    }
+    const std::size_t accepted = push_numbered(queue(), PUSHES);
+    EXPECT_TRUE(logger().flush(WAIT).ok());
+    EXPECT_EQ(accepted + queue().dropped(), PUSHES);
+    std::size_t delivered = 0;
+    std::size_t last = 0;
+    bool ordered = true;
+    for (const std::string& record : capture().snapshot()) {
+        constexpr std::string_view PREFIX = "6|unit-test|queued|N=";
+        if (!record.starts_with(PREFIX)) {
+            continue;  // a drop notice
+        }
+        const std::size_t number = std::stoul(record.substr(PREFIX.size()));
+        ordered = ordered && (delivered == 0 || number > last);
+        last = number;
+        ++delivered;
+    }
+    EXPECT_EQ(delivered, accepted);
+    EXPECT_TRUE(ordered);
 }
 
 }  // namespace
