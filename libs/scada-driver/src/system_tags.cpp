@@ -8,6 +8,7 @@
 #include "scada/driver/scheduler.h"
 #include "scada/tag/scada_tag.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>

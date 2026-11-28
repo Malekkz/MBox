@@ -6,6 +6,7 @@
 
 #include "scada/driver/compiled.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/scheduler.h"
 

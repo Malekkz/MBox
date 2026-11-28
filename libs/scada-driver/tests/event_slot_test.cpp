@@ -69,6 +69,27 @@ TEST(EventSlot, AFullTextGoesThroughWhole) {
     EXPECT_EQ(text_of(out), full);
 }
 
+// Whether `text` is one letter repeated, or empty.
+bool one_letter(const std::string& text) {
+    return std::all_of(text.begin(), text.end(),
+                       [&](char byte) { return byte == text.front(); });
+}
+
+// Once a take had details, every later one has some (PR 177 S4): a take
+// that could not read them keeps the earlier ones.
+class DetailsWatch {
+public:
+    void see(bool has) {
+        lost_ = lost_ || (had_ && !has);
+        had_ = had_ || has;
+    }
+    [[nodiscard]] bool lost() const { return lost_; }
+
+private:
+    bool had_ = false;
+    bool lost_ = false;
+};
+
 TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
     // The worker writes texts of one repeated letter; a take sees one
     // letter only, or no details, and every count arrives.
@@ -86,10 +107,7 @@ TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
     std::uint64_t seen = 0;
     EventRecord out;
     bool torn = false;
-    // Once a take had details, every later one has some (PR 177 S4): a
-    // take that could not read them keeps the earlier ones.
-    bool had_details = false;
-    bool lost_details = false;
+    DetailsWatch details;
     while (!done.load(std::memory_order_acquire) || seen < ADDS) {
         if (!slot.take(DeviceEvent::MISMATCH, out)) {
             if (done.load(std::memory_order_acquire) && seen >= ADDS) {
@@ -98,17 +116,13 @@ TEST(EventSlot, ATakeWhileTheWorkerWritesReadsNoTornText) {
             continue;
         }
         seen += out.count;
-        lost_details = lost_details || (had_details && !out.has_details);
-        had_details = had_details || out.has_details;
-        const std::string text = text_of(out);
-        torn = torn || std::any_of(text.begin(), text.end(), [&](char byte) {
-                   return byte != text.front();
-               });
+        details.see(out.has_details);
+        torn = torn || !one_letter(text_of(out));
     }
     worker.join();
     EXPECT_EQ(seen, ADDS);
     EXPECT_FALSE(torn);
-    EXPECT_FALSE(lost_details);
+    EXPECT_FALSE(details.lost());
 }
 
 TEST(EventSlot, ARecordWithoutDetailsSaysSo) {

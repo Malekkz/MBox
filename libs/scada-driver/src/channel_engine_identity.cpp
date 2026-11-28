@@ -4,7 +4,7 @@
 
 #include "scada/driver/channel_engine.h"
 
-#include "scada/common/panic.h"
+#include "element.h"
 
 #include "scada/driver/compiled.h"
 #include "scada/driver/exchange.h"
@@ -265,7 +265,7 @@ void ChannelEngine::restarted(std::uint32_t device) noexcept {
     // which starts its round.
     for (std::uint32_t other = 0; other < devices_.size(); ++other) {
         const CompiledDevice& peer = channel_->devices[other];
-        DeviceRun& peer_run = devices_[other];
+        const DeviceRun& peer_run = devices_[other];
         if (!peer.enabled || !peer_run.identity_round ||
             (other != device && !same_unit(compiled, peer))) {
             continue;
@@ -322,18 +322,11 @@ std::uint64_t ChannelEngine::restarts(std::uint32_t device) const noexcept {
     return device < devices_.size() ? devices_[device].restarts : 0;
 }
 
-std::size_t event_index(DeviceEvent kind) noexcept {
-    const auto index = static_cast<std::size_t>(kind);
-    if (index >= DEVICE_EVENTS) {
-        panic("a device event out of range");
-    }
-    return index;
-}
-
 void ChannelEngine::note_event(std::uint32_t device, DeviceEvent kind,
                                std::uint8_t reason, std::uint32_t check,
                                std::string_view text) noexcept {
-    EventRecord& record = devices_[device].events[event_index(kind)];
+    EventRecord& record = detail::element(devices_[device].events,
+                                          static_cast<std::size_t>(kind));
     ++record.count;
     record.has_details = true;
     record.time_ns = clock_->realtime_ns();
@@ -348,7 +341,8 @@ bool ChannelEngine::take_event(std::uint32_t device, DeviceEvent kind,
     if (device >= devices_.size()) {
         return false;
     }
-    EventRecord& record = devices_[device].events[event_index(kind)];
+    EventRecord& record = detail::element(devices_[device].events,
+                                          static_cast<std::size_t>(kind));
     if (record.count == 0) {
         return false;
     }

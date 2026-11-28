@@ -94,8 +94,9 @@ TEST(EventThrottle, ASlotOutOfRangeAndAPeriodAtTheEndOfTimeAreSafe) {
     constexpr std::int64_t LATE = std::numeric_limits<std::int64_t>::max();
     EventThrottle throttle(1, PERIOD);
     EventRecord out;
-    throttle.add(5, events(1, "a"));
-    EXPECT_FALSE(throttle.take(5, 0, true, out));
+    constexpr std::size_t OUTSIDE = 5;
+    throttle.add(OUTSIDE, events(1, "a"));
+    EXPECT_FALSE(throttle.take(OUTSIDE, 0, true, out));
     throttle.add(0, events(1, "a"));
     ASSERT_TRUE(throttle.take(0, LATE - 1, false, out));
     throttle.add(0, events(1, "a"));

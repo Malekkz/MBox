@@ -93,10 +93,6 @@ enum class DeviceEvent : std::uint8_t {
 };
 inline constexpr std::size_t DEVICE_EVENTS = 3;
 
-// The index of `kind` in an array of DEVICE_EVENTS; a value out of range is
-// a programmer's error and ends the process (coding standard, section 7).
-[[nodiscard]] SCADA_RT std::size_t event_index(DeviceEvent kind) noexcept;
-
 // The events of one kind since they were last taken: how many, and the last
 // one's details.
 struct EventRecord {

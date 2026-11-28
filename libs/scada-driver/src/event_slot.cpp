@@ -1,5 +1,7 @@
 #include "event_slot.h"
 
+#include "element.h"
+
 #include "scada/driver/channel_engine.h"
 
 #include <algorithm>
@@ -26,7 +28,7 @@ constexpr std::uint64_t LENGTH_MASK = 0xFF;
 }  // namespace
 
 void EventSlot::add(DeviceEvent kind, const EventRecord& record) noexcept {
-    Kind& target = kinds_[event_index(kind)];
+    Kind& target = element(kinds_, static_cast<std::size_t>(kind));
     // The details first, under an odd sequence number; then the count, with
     // release, so that a take that sees the count sees these details. Each
     // word is stored with release, so that a take that reads it sees the
@@ -51,17 +53,18 @@ void EventSlot::add(DeviceEvent kind, const EventRecord& record) noexcept {
             std::copy_n(record.text.begin() + static_cast<std::ptrdiff_t>(from),
                         std::min(bytes.size(), length - from), bytes.begin());
         }
-        target.words[2 + word].store(std::bit_cast<std::uint64_t>(bytes),
-                                     std::memory_order_release);
+        element(target.words, 2 + word)
+            .store(std::bit_cast<std::uint64_t>(bytes),
+                   std::memory_order_release);
     }
     target.sequence.store(sequence + 2, std::memory_order_release);
     target.count.fetch_add(record.count, std::memory_order_release);
 }
 
 bool EventSlot::take(DeviceEvent kind, EventRecord& out) noexcept {
-    const std::size_t index = event_index(kind);
-    Kind& source = kinds_[index];
-    EventRecord& last = last_[index];
+    const auto index = static_cast<std::size_t>(kind);
+    Kind& source = element(kinds_, index);
+    EventRecord& last = element(last_, index);
     const std::uint64_t count =
         source.count.exchange(0, std::memory_order_acquire);
     if (count == 0) {
@@ -87,7 +90,8 @@ bool EventSlot::read_details(const Kind& source, EventRecord& into) noexcept {
         // Acquire: a word of a later add brings its odd number with it, so
         // the number read after them differs.
         for (std::size_t word = 0; word < WORDS; ++word) {
-            words[word] = source.words[word].load(std::memory_order_acquire);
+            element(words, word) =
+                element(source.words, word).load(std::memory_order_acquire);
         }
         if (source.sequence.load(std::memory_order_relaxed) != before) {
             continue;  // written meanwhile
@@ -104,7 +108,7 @@ bool EventSlot::read_details(const Kind& source, EventRecord& into) noexcept {
         for (std::size_t word = 0; word < TEXT_WORDS; ++word) {
             const auto bytes =
                 std::bit_cast<std::array<char, sizeof(std::uint64_t)>>(
-                    words[2 + word]);
+                    element(words, 2 + word));
             const std::size_t from = word * bytes.size();
             if (from < into.length) {
                 std::copy_n(

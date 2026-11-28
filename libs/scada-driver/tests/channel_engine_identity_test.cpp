@@ -412,24 +412,53 @@ TEST(EngineIdentity, ARestartInAMismatchReCheckIsReadAgain) {
 
 // The probes' case: a device lost, back with its restart point lower; the
 // check after the recovery sees the restart and must still end.
-TEST(EngineIdentity, ARestartSeenAfterALostDeviceIsReadAgain) {
-    for (const std::uint32_t restart : {RESTART_FIRST, RESTART_LAST}) {
-        SCOPED_TRACE(restart);
-        Rig rig(restart_channel(restart), restart_bus(restart, MODEL));
-        rig.run_until(SECOND);
-        ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
-        rig.bus.fault(1, SimBus::Fault::SILENT);
-        rig.run_until(4 * SECOND);
-        ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
-        rig.bus.set(1, 0, restart, 3);
-        rig.bus.fault(1, SimBus::Fault::NONE);
-        rig.run_until(40 * SECOND);
-        EXPECT_EQ(rig.engine.restarts(0), 1U);
-        EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
-        // Read up to the end, not stuck after the restart.
-        ASSERT_FALSE(rig.bus.log().empty());
-        EXPECT_GT(rig.bus.log().back().time_ns, 39 * SECOND);
+::testing::AssertionResult read_again_after_a_loss(std::uint32_t restart) {
+    Rig rig(restart_channel(restart), restart_bus(restart, MODEL));
+    rig.run_until(SECOND);
+    if (rig.state() != DeviceStatus::RUNNING) {
+        return ::testing::AssertionFailure() << "not RUNNING at first";
     }
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(4 * SECOND);
+    if (rig.state() != DeviceStatus::DEMOTED) {
+        return ::testing::AssertionFailure() << "not DEMOTED when lost";
+    }
+    rig.bus.set(1, 0, restart, 3);
+    rig.bus.fault(1, SimBus::Fault::NONE);
+    rig.run_until(40 * SECOND);
+    // Read up to the end, not stuck after the restart.
+    const bool read_on =
+        !rig.bus.log().empty() && rig.bus.log().back().time_ns > 39 * SECOND;
+    if (rig.engine.restarts(0) != 1 || rig.state() != DeviceStatus::RUNNING ||
+        !read_on) {
+        return ::testing::AssertionFailure()
+               << "restarts " << rig.engine.restarts(0) << ", state "
+               << static_cast<int>(rig.state()) << ", read on " << read_on;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+TEST(EngineIdentity, ARestartSeenAfterALostDeviceIsReadAgain) {
+    EXPECT_TRUE(read_again_after_a_loss(RESTART_FIRST));
+    EXPECT_TRUE(read_again_after_a_loss(RESTART_LAST));
+}
+
+// Success if every write in `history` from `from` on is BAD with NOT_INIT
+// and no source time.
+::testing::AssertionResult all_not_init(
+    const std::vector<RecordingTags::Logged>& history, std::size_t from) {
+    for (std::size_t index = from; index < history.size(); ++index) {
+        const RecordingTags::Written& written = history[index].written;
+        if (written.quality != tag::Quality::BAD ||
+            (written.flags & static_cast<std::uint16_t>(Flag::NOT_INIT)) == 0 ||
+            written.time_ns != 0) {
+            return ::testing::AssertionFailure()
+                   << "write " << index << ": quality "
+                   << static_cast<int>(written.quality) << ", flags "
+                   << written.flags << ", value " << written.value;
+        }
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // PR 177 M2: a restart point in one block with another point. The answer
@@ -447,16 +476,8 @@ TEST(EngineIdentity, NoValueOfARestartAnswerIsPublished) {
     rig.run_until(1'300 * MILLISECOND);
     ASSERT_EQ(rig.engine.restarts(0), 1U);
     ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
-    const std::vector<RecordingTags::Logged>& history = rig.tags.history();
-    ASSERT_GT(history.size(), before);
-    for (std::size_t index = before; index < history.size(); ++index) {
-        const RecordingTags::Logged& write = history[index];
-        EXPECT_EQ(write.written.quality, tag::Quality::BAD) << index;
-        EXPECT_NE(
-            write.written.flags & static_cast<std::uint16_t>(Flag::NOT_INIT), 0)
-            << index;
-        EXPECT_EQ(write.written.time_ns, 0) << index;
-    }
+    ASSERT_GT(rig.tags.history().size(), before);
+    EXPECT_TRUE(all_not_init(rig.tags.history(), before));
     // Checked again at 10 s: the values return.
     rig.run_until(11 * SECOND);
     EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
