@@ -59,6 +59,9 @@ constexpr std::string_view METER =
     "holding, register: 72, bit: 3 } }\n"
     "  - { name: din, access: rw, storage: volatile, address: { table: "
     "discrete, register: 73 } }\n"
+    "  - { name: label, access: wo, storage: volatile, address: { table: "
+    "holding, register: 80, type: string, length: 2, write: { mask: 0x0001 "
+    "} } }\n"
     "  - name: status\n"
     "    address: { table: holding, register: 50, type: uint16 }\n"
     "    tag: false\n"
@@ -396,6 +399,14 @@ TEST(OutputRules, ShapesTheProtocolCannotWrite) {
 }
 
 // CF-702 (interim rule (g)): the kind fits the target's type.
+// A STRING target is no target, even with a write encoding that would
+// fit a switching kind.
+TEST(OutputRules, AStringTargetWithAMask) {
+    EXPECT_EQ(errors_with_interlock(output("ps1.a", "single", "ps1.m1.label")),
+              Lines{"outputs/ps1.yaml:4:53: error CF-702: output \"ps1.a\": "
+                    "target \"ps1.m1.label\" is not a writable point"});
+}
+
 TEST(OutputRules, KindAgainstTargetType) {
     EXPECT_EQ(
         errors_with_interlock(output("ps1.a", "single", "ps1.m1.sp") +

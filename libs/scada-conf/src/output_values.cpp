@@ -5,6 +5,7 @@
 
 #include "scada/conf/scalar.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace scada::conf {
 
@@ -38,47 +40,50 @@ struct Decimal {
 // A decimal of the integer or decimal form of 1.2 (hex as an integer);
 // nothing for another text.
 [[nodiscard]] std::optional<Decimal> decimal_of(std::string_view text) {
+    std::string hex_digits;
     if (text.starts_with("0x") || text.starts_with("0X")) {
+        // A hex integer is read as the decimal digits of its value.
         const std::optional<Integer> value = parse_integer(text);
         if (!value) {
             return std::nullopt;
         }
-        return decimal_of(std::to_string(value->magnitude));
+        hex_digits = std::to_string(value->magnitude);
+        text = hex_digits;
     }
     if (!has_decimal_form(text)) {
         return std::nullopt;
     }
     Decimal result;
-    std::size_t at = 0;
-    if (text[at] == '-') {
+    std::size_t pos = 0;
+    if (text[pos] == '-') {
         result.negative = true;
-        ++at;
+        ++pos;
     }
     std::string digits;
     std::int64_t exponent = 0;
     bool fraction = false;
-    for (; at < text.size() && text[at] != 'e' && text[at] != 'E'; ++at) {
-        if (text[at] == '.') {
+    for (; pos < text.size() && text[pos] != 'e' && text[pos] != 'E'; ++pos) {
+        if (text[pos] == '.') {
             fraction = true;
             continue;
         }
-        digits += text[at];
+        digits += text[pos];
         if (fraction) {
             --exponent;
         }
     }
-    if (at < text.size()) {
-        ++at;  // the `e`
+    if (pos < text.size()) {
+        ++pos;  // the `e`
         bool minus = false;
-        if (text[at] == '-' || text[at] == '+') {
-            minus = text[at] == '-';
-            ++at;
+        if (text[pos] == '-' || text[pos] == '+') {
+            minus = text[pos] == '-';
+            ++pos;
         }
         std::int64_t written = 0;
-        for (; at < text.size() && is_digit(text[at]); ++at) {
+        for (; pos < text.size() && is_digit(text[pos]); ++pos) {
             if (written < EXPONENT_CAP) {
                 written = written * static_cast<std::int64_t>(DECIMAL) +
-                          (text[at] - '0');
+                          (text[pos] - '0');
             }
         }
         exponent += minus ? -written : written;
@@ -131,7 +136,7 @@ struct Decimal {
     return lhs_negative ? -magnitudes : magnitudes;
 }
 
-// The decimal as an Integer, if it is a whole number of magnitude at most
+// The decimal as an Integer, if it is a whole number of magnitude pos most
 // 2^64 - 1.
 [[nodiscard]] std::optional<Integer> integer_of(const Decimal& value) {
     if (value.digits.empty()) {
@@ -325,11 +330,12 @@ struct RawRange {
     // the compares below are exact for an integer-valued `rounded`.
     constexpr double TWO_TO_63 = 9223372036854775808.0;
     constexpr double TWO_TO_64 = 18446744073709551616.0;
-    const double above =
-        range->above == std::numeric_limits<std::uint64_t>::max() ? TWO_TO_64
-        : range->above == INT64_MAGNITUDE_MAX
-            ? TWO_TO_63
-            : static_cast<double>(range->above) + 1.0;
+    double above = static_cast<double>(range->above) + 1.0;
+    if (range->above == std::numeric_limits<std::uint64_t>::max()) {
+        above = TWO_TO_64;
+    } else if (range->above == INT64_MAGNITUDE_MAX) {
+        above = TWO_TO_63;
+    }
     const double below = -static_cast<double>(range->below);
     return rounded < above && rounded >= below;
 }
@@ -379,17 +385,21 @@ std::optional<int> compare_numbers(std::string_view lhs, std::string_view rhs) {
 }
 
 bool fits_raw_width(std::string_view pattern, std::string_view raw) {
+    constexpr std::uint64_t WIDTH_8 = 8;
+    constexpr std::uint64_t WIDTH_16 = 16;
+    constexpr std::uint64_t WIDTH_32 = 32;
+    constexpr std::uint64_t WIDTH_64 = 64;
     std::uint64_t bits = 0;
     if (raw == "bool") {
         bits = 1;
     } else if (raw == "int8" || raw == "uint8") {
-        bits = 8;  // NOLINT(readability-magic-numbers): the type's width
+        bits = WIDTH_8;
     } else if (raw == "int16" || raw == "uint16") {
-        bits = 16;  // NOLINT(readability-magic-numbers): the type's width
+        bits = WIDTH_16;
     } else if (raw == "int32" || raw == "uint32" || raw == "float32") {
-        bits = 32;  // NOLINT(readability-magic-numbers): the type's width
+        bits = WIDTH_32;
     } else if (raw == "int64" || raw == "uint64" || raw == "float64") {
-        bits = 64;  // NOLINT(readability-magic-numbers): the type's width
+        bits = WIDTH_64;
     } else {
         return false;
     }

@@ -8,6 +8,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     point_rules_test.cpp
     channel_rules_test.cpp
     output_rules_test.cpp
+    output_values_test.cpp
     modbus_rules_test.cpp
     expression_test.cpp
     expression_types_test.cpp

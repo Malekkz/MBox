@@ -220,6 +220,17 @@ CF-620 for two Modbus `rtu` channels on one `device` path, compared as
 written; warning CW-621 for two Modbus `tcp` or `rtu_over_tcp` channels to
 one host and port, the host compared as an address.
 
+Then stage 5 checks the outputs and areas (`src/output_rules.cpp`,
+D-124; review by a person): CF-702 and CF-703 for targets; CF-708 for a
+shape no write carries; CF-709 to CF-711 and warning CW-712 for the keys an
+output needs; CF-705 for a dangerous target, CF-706 and CF-714 for
+`refresh`, CF-707 for an on-only output, CF-713 for a value that does not
+fit the target or survive its scaling (`src/output_values.cpp`), CF-715 for
+feedback, CF-719, CF-720, CF-722 and CF-723 for safe states and fail-safe
+keys, written or by default; CF-718 and warning CW-701 for areas; warning
+CW-721 for a switching output that holds on control loss. D-124 lists the
+interim rules (a) to (i), fail-safe, pending the product owner.
+
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does
 not validate before phase 6.
@@ -317,26 +328,29 @@ codes that #100 gives, and CW-805 are listed too.
 | CW-621 | `src/channel_rules.cpp` |
 | CW-660 | #107 (the `io` `configure`, D-123) |
 | CF-650 to CF-699 | drivers, through #104 and #102 (protocol refusals of section 13.1) |
-| CF-702 | slice 7e of #100 |
-| CF-703 | slice 7e of #100 |
-| CF-704 | slice 7e of #100 |
-| CF-705 | slice 7e of #100 |
-| CF-706 | slice 7e of #100 |
-| CF-707 | slice 7e of #100 |
-| CF-708 | slice 7e of #100 |
-| CF-709 | slice 7e of #100 |
-| CF-710 | slice 7e of #100 |
-| CF-711 | slice 7e of #100 |
-| CF-713 | slice 7e of #100 |
-| CF-714 | slice 7e of #100 |
-| CF-715 | slice 7e of #100 |
-| CF-716 | slice 7e of #100 |
-| CF-717 | slice 7e of #100 |
-| CF-718 | slice 7e of #100 |
-| CF-719 | slice 7e of #100 |
-| CF-720 | slice 7e of #100 |
-| CF-723 | slice 7e of #100 |
-| CF-722 | slice 7e of #100 |
+| CF-702 | `src/output_rules.cpp` |
+| CF-703 | `src/output_rules.cpp` |
+| CF-704 | #104 (the Modbus `configure`, stage 7: the device's select window; D-124) |
+| CF-705 | `src/output_rules.cpp` |
+| CF-706 | `src/output_rules.cpp` |
+| CF-707 | `src/output_rules.cpp` |
+| CF-708 | `src/output_rules.cpp` |
+| CF-709 | `src/output_rules.cpp` |
+| CF-710 | `src/output_rules.cpp` |
+| CF-711 | `src/output_rules.cpp` |
+| CF-713 | `src/output_rules.cpp` |
+| CF-714 | `src/output_rules.cpp` |
+| CF-715 | `src/output_rules.cpp` |
+| CF-716 | #104 (the Modbus `configure`, stage 7: the device's select window; D-124) |
+| CF-717 | not in phase 2 (needs the programs, phase 6; D-124) |
+| CF-718 | `src/output_rules.cpp` |
+| CF-719 | `src/output_rules.cpp` |
+| CF-720 | `src/output_rules.cpp` |
+| CF-723 | `src/output_rules.cpp` |
+| CF-722 | `src/output_rules.cpp` |
+| CW-701 | `src/output_rules.cpp` |
+| CW-712 | `src/output_rules.cpp` |
+| CW-721 | `src/output_rules.cpp` |
 | CF-801 | `src/tag_rules.cpp` |
 | CF-802 | `src/tag_rules.cpp` |
 | CF-803 | `src/tag_rules.cpp` |

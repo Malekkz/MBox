@@ -1,0 +1,19 @@
+template: valve
+protocol: modbus
+points:
+  - { name: pos, address: { table: coil, register: 1 } }
+  - { name: ro, address: { table: holding, register: 2, type: uint16 } }
+  - { name: c1, access: rw, storage: volatile, address: { table: coil, register: 11 } }
+  - { name: c2, access: rw, storage: volatile, address: { table: coil, register: 12 } }
+  - { name: c3, access: rw, storage: volatile, address: { table: coil, register: 13 } }
+  - { name: c4, access: rw, storage: volatile, address: { table: coil, register: 14 } }
+  - { name: c5, access: rw, storage: volatile, address: { table: coil, register: 15 } }
+  - { name: c6, access: rw, storage: volatile, address: { table: coil, register: 16 } }
+  - { name: c7, access: rw, storage: volatile, address: { table: coil, register: 17 } }
+  - { name: c8, access: rw, storage: volatile, address: { table: coil, register: 18 } }
+  - { name: c9, access: rw, storage: volatile, address: { table: coil, register: 19 } }
+  - { name: danger, access: rw, storage: volatile, dangerous: true, address: { table: coil, register: 20 } }
+  - { name: s1, access: rw, storage: volatile, address: { table: holding, register: 31, type: uint16 } }
+  - { name: s2, access: rw, storage: volatile, address: { table: holding, register: 32, type: uint16 } }
+  - { name: s3, access: rw, storage: volatile, address: { table: holding, register: 33, type: uint16 } }
+  - { name: m10k, access: rw, storage: volatile, address: { table: holding, register: 40, type: mod10k, count: 2 } }

@@ -13,6 +13,7 @@
 #include "tag_names.h"
 #include "tree_reader.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -550,173 +551,219 @@ private:
         if (!feedback || !tags_->complete()) {
             return;
         }
-        const Document& document = reader.document();
-        const NodeKind shape = document.kind(*feedback);
-        const auto refuse = [&](std::string_view needed) {
+        if (const std::optional<std::string_view> needed =
+                feedback_fault(reader, *feedback, kind)) {
             error(reader, *feedback, CF_FEEDBACK_KIND,
-                  head + ": feedback must be " + std::string(needed));
-        };
-        const auto tag_info = [&](std::optional<NodeId> node) {
-            return node ? tags_->find(document.text(*node))
-                        : std::optional<TagInfo>();
-        };
+                  head + ": feedback must be " + std::string(*needed));
+        }
+    }
+
+    // The tag a scalar at `node` names, if any.
+    [[nodiscard]] std::optional<TagInfo> tag_at(
+        const Reader& reader, std::optional<NodeId> node) const {
+        return node ? tags_->find(reader.document().text(*node))
+                    : std::optional<TagInfo>();
+    }
+
+    // What `feedback` of an output of `kind` must be, when it is not.
+    [[nodiscard]] std::optional<std::string_view> feedback_fault(
+        const Reader& reader, NodeId feedback, std::string_view kind) const {
+        const NodeKind shape = reader.document().kind(feedback);
         const bool on_off =
-            shape == NodeKind::MAP && reader.child(*feedback, "on");
+            shape == NodeKind::MAP && reader.child(feedback, "on").has_value();
         if (on_off) {
             for (const std::string_view side : {"on", "off"}) {
                 const std::optional<TagInfo> info =
-                    tag_info(reader.scalar(*feedback, side));
+                    tag_at(reader, reader.scalar(feedback, side));
                 if (info && info->value_type != "bool") {
-                    refuse("{ on, off } of two BOOL tags");
-                    return;
+                    return "{ on, off } of two BOOL tags";
                 }
             }
         }
         if (kind == "step") {
-            refuse("none: a step output has no feedback yet");
-            return;
+            return "none: a step output has no feedback yet";
         }
+        const std::optional<TagInfo> plain =
+            shape == NodeKind::SCALAR ? tag_at(reader, feedback) : std::nullopt;
         if (kind == "single" || kind == "pulse" || kind == "trigger") {
-            const std::optional<TagInfo> info =
-                shape == NodeKind::SCALAR ? tag_info(feedback) : std::nullopt;
-            if ((shape == NodeKind::SCALAR && info &&
-                 info->value_type != "bool") ||
-                (shape == NodeKind::MAP && !on_off)) {
-                refuse("a BOOL tag or { on, off }");
-            }
-            return;
+            const bool fits = shape == NodeKind::SCALAR
+                                  ? !plain || plain->value_type == "bool"
+                                  : on_off;
+            return fits ? std::nullopt
+                        : std::optional<std::string_view>(
+                              "a BOOL tag or { on, off }");
         }
         if (kind == "double") {
-            const std::optional<TagInfo> info =
-                shape == NodeKind::SCALAR ? tag_info(feedback) : std::nullopt;
-            const bool double_point =
-                info && info->origin == TagOrigin::POINT && info->point != 0 &&
-                expanded_.text_of(info->point, "kind") == "double_point";
-            if ((shape == NodeKind::SCALAR && info && !double_point) ||
-                (shape == NodeKind::MAP && !on_off)) {
-                refuse("a double point or { on, off }");
-            }
-            return;
+            const bool fits = shape == NodeKind::SCALAR
+                                  ? !plain || is_double_point(*plain)
+                                  : on_off;
+            return fits ? std::nullopt
+                        : std::optional<std::string_view>(
+                              "a double point or { on, off }");
         }
         if (kind == "setpoint") {
-            const std::optional<NodeId> tag =
-                shape == NodeKind::MAP ? reader.scalar(*feedback, "tag")
-                                       : std::nullopt;
-            if (!tag) {
-                refuse("{ tag, within, settle } on a number tag");
-                return;
-            }
-            const std::optional<TagInfo> info = tag_info(tag);
-            if (info && !is_number_type(info->value_type)) {
-                refuse("{ tag, within, settle } on a number tag");
-            } else if (const std::optional<NodeId> within =
-                           reader.scalar(*feedback, "within");
-                       info && info->value_type == "float64" && within &&
-                       compare_numbers(document.text(*within), "0") == 0) {
-                refuse(
-                    "{ tag, within, settle } with a within above 0 on a "
-                    "FLOAT64 tag");
-            }
+            return setpoint_feedback_fault(reader, feedback);
         }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] bool is_double_point(const TagInfo& info) const {
+        return info.origin == TagOrigin::POINT && info.point != 0 &&
+               expanded_.text_of(info.point, "kind") == "double_point";
+    }
+
+    // A setpoint's feedback: `{ tag, within, settle }` on a number tag, and
+    // a `within` above 0 on a FLOAT64 one (interim rule (i)).
+    [[nodiscard]] std::optional<std::string_view> setpoint_feedback_fault(
+        const Reader& reader, NodeId feedback) const {
+        constexpr std::string_view NUMBER_TAG =
+            "{ tag, within, settle } on a number tag";
+        const std::optional<NodeId> tag =
+            reader.document().kind(feedback) == NodeKind::MAP
+                ? reader.scalar(feedback, "tag")
+                : std::nullopt;
+        if (!tag) {
+            return NUMBER_TAG;
+        }
+        const std::optional<TagInfo> info = tag_at(reader, tag);
+        if (!info) {
+            return std::nullopt;  // CF-310 of the references
+        }
+        if (!is_number_type(info->value_type)) {
+            return NUMBER_TAG;
+        }
+        const std::optional<NodeId> within = reader.scalar(feedback, "within");
+        if (info->value_type == "float64" && within &&
+            compare_numbers(reader.document().text(*within), "0") == 0) {
+            return "{ tag, within, settle } with a within above 0 on a FLOAT64 "
+                   "tag";
+        }
+        return std::nullopt;
+    }
+
+    // An output's `limits`, as interim rule (d) reads them: texts of the
+    // Document.
+    struct Limits {
+        std::string_view min;
+        std::string_view max;
+        std::vector<std::pair<std::string_view, std::string_view>> ranges;
+    };
+
+    void refuse_value(const Reader& reader, NodeId node,
+                      const std::string& head, const std::string& key) {
+        error(reader, node, CF_VALUE_TYPE,
+              head + ": " + key + " does not fit the target's type");
     }
 
     // CF-713 (ruling Q8, interim rules (d), (e) and (f)): the values an
     // output writes fit its target, by mathematical value.
     void check_values(const Reader& reader, NodeId output,
                       const std::string& head, const Target& target) {
-        const Document& document = reader.document();
-        const auto refuse = [&](NodeId node, const std::string& key) {
-            error(reader, node, CF_VALUE_TYPE,
-                  head + ": " + key + " does not fit the target's type");
-        };
         const std::optional<NodeId> limits = reader.child(output, "limits");
-        // The bounds of `limits`, for interim rule (d): min, max, ranges.
-        std::vector<std::pair<std::string_view, std::string_view>> intervals;
-        std::string_view min;
-        std::string_view max;
-        if (limits) {
-            for (const std::string_view key : {"min", "max"}) {
-                if (const std::optional<NodeId> bound =
-                        reader.scalar(*limits, key)) {
-                    if (!fits_value_type(document.text(*bound),
-                                         target.value_type)) {
-                        refuse(*bound, "limits." + std::string(key));
-                    }
-                    (key == "min" ? min : max) = document.text(*bound);
-                }
-            }
-            std::size_t index = 0;
-            for (const NodeId range : reader.items(*limits, "ranges")) {
-                const std::span<const NodeId> bounds =
-                    document.kind(range) == NodeKind::SEQUENCE
-                        ? document.items(range)
-                        : std::span<const NodeId>();
-                for (const NodeId bound : bounds) {
-                    if (!fits_value_type(document.text(bound),
-                                         target.value_type)) {
-                        refuse(bound,
-                               "limits.ranges[" + std::to_string(index) + "]");
-                    }
-                }
-                if (bounds.size() == 2) {
-                    intervals.emplace_back(document.text(bounds[0]),
-                                           document.text(bounds[1]));
-                }
-                ++index;
-            }
-        }
-        const auto within_limits = [&](std::string_view value) {
-            if ((!min.empty() && compare_numbers(value, min).value_or(0) < 0) ||
-                (!max.empty() && compare_numbers(value, max).value_or(0) > 0)) {
-                return false;
-            }
-            if (intervals.empty()) {
-                return true;
-            }
-            for (const auto& [low, high] : intervals) {
-                if (compare_numbers(value, low).value_or(-1) >= 0 &&
-                    compare_numbers(value, high).value_or(1) <= 0) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        const auto check_written = [&](NodeId map, const std::string& key) {
-            if (document.kind(map) != NodeKind::MAP) {
-                return;
-            }
-            if (const std::optional<NodeId> value =
-                    reader.scalar(map, "value")) {
-                const std::string_view text = document.text(*value);
-                if (!fits_value_type(text, target.value_type)) {
-                    refuse(*value, key + ".value");
-                } else if (!target.raw.empty() &&
-                           !survives_scaling(text, target.value_type,
-                                             target.raw, target.scaling)) {
-                    refuse(*value, key + ".value " + std::string(text) +
-                                       " (scaled into raw type " + target.raw +
-                                       ")");
-                } else if (key == "safe_state" && !within_limits(text)) {
-                    refuse(*value, key + ".value " + std::string(text) +
-                                       " (outside the output's limits)");
-                }
-            }
-            if (const std::optional<NodeId> raw = reader.scalar(map, "raw")) {
-                if (target.mask || target.on_off) {
-                    refuse(*raw,
-                           key + ".raw (the target has a write encoding)");
-                } else if (!fits_raw_width(document.text(*raw), target.raw)) {
-                    refuse(*raw, key + ".raw");
-                }
-            }
-        };
+        const Limits bounds =
+            limits ? read_limits(reader, *limits, head, target) : Limits{};
         if (const std::optional<NodeId> safe_state =
                 reader.child(output, "safe_state")) {
-            check_written(*safe_state, "safe_state");
+            check_written(reader, *safe_state, "safe_state", head, target,
+                          &bounds);
         }
         if (const std::optional<NodeId> release =
                 limits ? reader.child(*limits, "release") : std::nullopt) {
-            check_written(*release, "limits.release");
+            check_written(reader, *release, "limits.release", head, target,
+                          nullptr);
+        }
+    }
+
+    // The bounds of `limits`, each checked against the target's type.
+    [[nodiscard]] Limits read_limits(const Reader& reader, NodeId limits,
+                                     const std::string& head,
+                                     const Target& target) {
+        const Document& document = reader.document();
+        Limits bounds;
+        for (const std::string_view key : {"min", "max"}) {
+            if (const std::optional<NodeId> bound =
+                    reader.scalar(limits, key)) {
+                if (!fits_value_type(document.text(*bound),
+                                     target.value_type)) {
+                    refuse_value(reader, *bound, head,
+                                 "limits." + std::string(key));
+                }
+                (key == "min" ? bounds.min : bounds.max) =
+                    document.text(*bound);
+            }
+        }
+        std::size_t index = 0;
+        for (const NodeId range : reader.items(limits, "ranges")) {
+            const std::span<const NodeId> pair =
+                document.kind(range) == NodeKind::SEQUENCE
+                    ? document.items(range)
+                    : std::span<const NodeId>();
+            for (const NodeId bound : pair) {
+                if (!fits_value_type(document.text(bound), target.value_type)) {
+                    refuse_value(
+                        reader, bound, head,
+                        "limits.ranges[" + std::to_string(index) + "]");
+                }
+            }
+            if (pair.size() == 2) {
+                bounds.ranges.emplace_back(document.text(pair[0]),
+                                           document.text(pair[1]));
+            }
+            ++index;
+        }
+        return bounds;
+    }
+
+    // True if `value` is within `limits`: `min`, `max` and the union of
+    // `ranges`.
+    [[nodiscard]] static bool within(const Limits& limits,
+                                     std::string_view value) {
+        if ((!limits.min.empty() &&
+             compare_numbers(value, limits.min).value_or(0) < 0) ||
+            (!limits.max.empty() &&
+             compare_numbers(value, limits.max).value_or(0) > 0)) {
+            return false;
+        }
+        return limits.ranges.empty() ||
+               std::ranges::any_of(limits.ranges, [value](const auto& range) {
+                   return compare_numbers(value, range.first).value_or(-1) >=
+                              0 &&
+                          compare_numbers(value, range.second).value_or(1) <= 0;
+               });
+    }
+
+    // A `{ value }` or `{ raw }` that the output writes, at `map`; `limits`
+    // bound a safe value (interim rule (d)), none for a release value.
+    void check_written(const Reader& reader, NodeId map, const std::string& key,
+                       const std::string& head, const Target& target,
+                       const Limits* limits) {
+        const Document& document = reader.document();
+        if (document.kind(map) != NodeKind::MAP) {
+            return;
+        }
+        if (const std::optional<NodeId> value = reader.scalar(map, "value")) {
+            const std::string_view text = document.text(*value);
+            if (!fits_value_type(text, target.value_type)) {
+                refuse_value(reader, *value, head, key + ".value");
+            } else if (!target.raw.empty() &&
+                       !survives_scaling(text, target.value_type, target.raw,
+                                         target.scaling)) {
+                refuse_value(reader, *value, head,
+                             key + ".value " + std::string(text) +
+                                 " (scaled into raw type " + target.raw + ")");
+            } else if (limits != nullptr && !within(*limits, text)) {
+                refuse_value(reader, *value, head,
+                             key + ".value " + std::string(text) +
+                                 " (outside the output's limits)");
+            }
+        }
+        if (const std::optional<NodeId> raw = reader.scalar(map, "raw")) {
+            if (target.mask || target.on_off) {
+                refuse_value(reader, *raw, head,
+                             key + ".raw (the target has a write encoding)");
+            } else if (!fits_raw_width(document.text(*raw), target.raw)) {
+                refuse_value(reader, *raw, head, key + ".raw");
+            }
         }
     }
 
@@ -745,19 +792,15 @@ private:
                                                NodeId output,
                                                std::string_view kind,
                                                const Target& target) {
-        const std::string_view state = reader.text_of(output, "safe_state");
-        const bool holds_always = target.dangerous || has_no_safe_action(kind);
-        const bool local = target.protocol == "io";
-        const bool remote_switching =
-            !local && is_switching(kind) && (state == "off" || state == "on");
+        const FailSafeDefaults defaults =
+            fail_safe_defaults(kind, target.protocol, target.dangerous,
+                               reader.text_of(output, "safe_state"));
         FailSafe fail_safe{
-            .on_shutdown = (!holds_always && local) ? "safe" : "hold",
+            .on_shutdown = defaults.on_shutdown,
             .shutdown_given = false,
-            .on_control_loss = (!holds_always && (local || remote_switching))
-                                   ? "safe"
-                                   : "hold",
+            .on_control_loss = defaults.on_control_loss,
             .loss_given = false,
-            .on_generation_change = "hold",
+            .on_generation_change = defaults.on_generation_change,
             .generation_given = false};
         if (const std::optional<NodeId> shutdown =
                 reader.scalar(output, "on_shutdown")) {
@@ -945,6 +988,33 @@ private:
 };
 
 }  // namespace
+
+FailSafeDefaults fail_safe_defaults(std::string_view kind,
+                                    std::string_view protocol, bool dangerous,
+                                    std::string_view safe_state) {
+    if (dangerous || has_no_safe_action(kind)) {
+        return {.on_shutdown = "hold",
+                .on_control_loss = "hold",
+                .control_loss_after = {},
+                .on_generation_change = "hold"};
+    }
+    if (protocol == "io") {
+        return {.on_shutdown = "safe",
+                .on_control_loss = "safe",
+                .control_loss_after = "0s",
+                .on_generation_change = "hold"};
+    }
+    if (is_switching(kind) && (safe_state == "off" || safe_state == "on")) {
+        return {.on_shutdown = "hold",
+                .on_control_loss = "safe",
+                .control_loss_after = "30s",
+                .on_generation_change = "hold"};
+    }
+    return {.on_shutdown = "hold",
+            .on_control_loss = "hold",
+            .control_loss_after = {},
+            .on_generation_change = "hold"};
+}
 
 void check_output_rules(const TagNames& tags, const ExpandedTree& tree,
                         std::span<const CheckedFile> files,

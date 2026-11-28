@@ -10,6 +10,7 @@
 #include "tag_names.h"
 
 #include <span>
+#include <string_view>
 
 namespace scada::conf {
 
@@ -45,6 +46,29 @@ namespace scada::conf {
 void check_output_rules(const TagNames& tags, const ExpandedTree& tree,
                         std::span<const CheckedFile> files,
                         Diagnostics& diagnostics);
+
+// The fail-safe actions of an output by default (7.2, 7.4; ruling Q7 of
+// D-124), for each key it does not write: constant texts.
+struct FailSafeDefaults {
+    std::string_view on_shutdown;
+    std::string_view on_control_loss;     // the action
+    std::string_view control_loss_after;  // empty for `hold`
+    std::string_view on_generation_change;
+};
+
+// The defaults of an output of `kind` whose target is on a channel of
+// `protocol`, `dangerous` or not, with `safe_state` (a scalar's text, empty
+// for a map or none): a dangerous output and a `step`, `pulse` or `trigger`
+// hold in every key, on every protocol; an `io` output goes safe on an
+// orderly stop and at once on control lost; a remote switching output (a
+// `single` or `double` on a protocol driver with `safe_state` `off` or `on`)
+// holds on a stop and goes safe 30 s after control lost; any other holds.
+// Every check reads the defaults from here; the expanded outputs of #101
+// write them, and `scada-io` derives none itself.
+[[nodiscard]] FailSafeDefaults fail_safe_defaults(std::string_view kind,
+                                                  std::string_view protocol,
+                                                  bool dangerous,
+                                                  std::string_view safe_state);
 
 }  // namespace scada::conf
 
