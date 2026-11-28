@@ -1,5 +1,7 @@
 #include "tzif.h"
 
+#include "element.h"
+
 #include "scada/common/result.h"
 #include "scada/common/status.h"
 
@@ -477,7 +479,8 @@ Result<std::optional<TzString>> read_footer(std::span<const std::byte> footer) {
         if (character == '\n') {
             return refused();
         }
-        buffer.at(index - 1) = character;
+        // In range: the footer's size was checked against the buffer's.
+        detail::element(buffer, index - 1) = character;
     }
     const std::string_view text(buffer.data(), footer.size() - 2);
     if (text.empty()) {
@@ -528,7 +531,16 @@ Result<TzifZone> parse_tzif_throwing(std::span<const std::byte> file) {
     zone.transitions_s = std::move(times);
     zone.offsets_s.reserve(type_of.size());
     for (const std::uint8_t type : type_of) {
-        zone.offsets_s.push_back(type_offsets.at(type));
+        // `read_transitions` refused a type at or above the count, and
+        // `read_types` read the count: a file that still breaks it is
+        // refused, never an abort on outside input (issue #181).
+        if (type >= type_offsets.size()) {
+            return refused();
+        }
+        zone.offsets_s.push_back(type_offsets[type]);
+    }
+    if (type_offsets.empty()) {
+        return refused();  // the header refused a count of 0 already
     }
     zone.initial_offset_s = type_offsets.front();
     return zone;
