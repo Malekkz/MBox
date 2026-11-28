@@ -1596,6 +1596,92 @@ TEST(Scheduling, AChainOfTheIdentityCycleHoldsItsUnit) {
     EXPECT_EQ(restart.request, head);  // read again from its start
 }
 
+// A scheduler of `identity_channel` in IDENTITY, its first cycle request
+// taken, and a retry of the identity request pending (PR 177 delta, item
+// 2: the engine waits for the verdict while `retry_pending`, so each drop
+// of a retry must clear it, or the cycle would never end).
+class PendingRetry {
+public:
+    PendingRetry()
+        : channel_(identity_channel()),
+          identity_(channel_.devices[0].plan.identity.front()),
+          scheduler_(channel_, 4, 0) {
+        scheduler_.set_mode(0, DeviceMode::IDENTITY);
+        (void)scheduler_.take(0);
+        scheduler_.retry(0, identity_, MILLISECOND);
+    }
+    Scheduler& scheduler() { return scheduler_; }
+    [[nodiscard]] std::uint32_t identity() const { return identity_; }
+    [[nodiscard]] const ReadPlan& plan() const {
+        return channel_.devices[0].plan;
+    }
+
+private:
+    CompiledChannel channel_;
+    std::uint32_t identity_;
+    Scheduler scheduler_;
+};
+
+TEST(Scheduling, ARetryIsPendingUntilSent) {
+    PendingRetry rig;
+    EXPECT_TRUE(rig.scheduler().retry_pending(0));
+    const Choice again = rig.scheduler().take(2 * MILLISECOND);
+    EXPECT_EQ(again.kind, Choice::Kind::IDENTITY);
+    EXPECT_EQ(again.request, rig.identity());
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+    EXPECT_FALSE(rig.scheduler().retry_pending(7));  // no such device
+}
+
+TEST(Scheduling, AChangeOfModeDropsTheRetry) {
+    PendingRetry rig;
+    rig.scheduler().set_mode(0, DeviceMode::OFF);
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+}
+
+TEST(Scheduling, AReconnectDropsTheRetry) {
+    PendingRetry rig;
+    (void)rig.scheduler().reconnect();
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+}
+
+TEST(Scheduling, ARetryOutsideTheCycleIsNeverPendingInIdentity) {
+    // PR 171 S2: in IDENTITY only the cycle is sent.
+    PendingRetry rig;
+    (void)rig.scheduler().take(2 * MILLISECOND);
+    const std::vector<std::uint32_t>& cycle = rig.plan().identity;
+    std::uint32_t outside = 0;
+    while (std::find(cycle.begin(), cycle.end(), outside) != cycle.end()) {
+        ++outside;
+    }
+    ASSERT_LT(outside, rig.plan().requests.size());
+    rig.scheduler().retry(0, outside, 3 * MILLISECOND);
+    EXPECT_FALSE(rig.scheduler().retry_pending(0));
+}
+
+TEST(Scheduling, AKeepAlivesRetryIsAKeepAliveToo) {
+    // In IDENTITY a keep-alive's retry is taken marked as a keep-alive, so
+    // that its answer gives no verdict (PR 177 delta, item 1); a cycle's
+    // retry is not.
+    const CompiledChannel channel = identity_channel(SECOND);
+    const std::uint32_t identity = channel.devices[0].plan.identity.front();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    scheduler.retry(0, identity, MILLISECOND, true);
+    const Choice keepalive = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(keepalive.kind, Choice::Kind::IDENTITY);
+    EXPECT_TRUE(keepalive.identity_keepalive);
+    scheduler.retry(0, identity, 3 * MILLISECOND);
+    const Choice cycle = scheduler.take(4 * MILLISECOND);
+    EXPECT_EQ(cycle.kind, Choice::Kind::IDENTITY);
+    EXPECT_FALSE(cycle.identity_keepalive);
+    // Not sent: the mark comes back with the retry.
+    scheduler.retry(0, identity, 5 * MILLISECOND, true);
+    ASSERT_TRUE(scheduler.take(6 * MILLISECOND).identity_keepalive);
+    EXPECT_FALSE(scheduler.not_sent().has_value());
+    EXPECT_TRUE(scheduler.take(7 * MILLISECOND).identity_keepalive);
+}
+
 TEST(Scheduling, ADeviceWithoutAProbeRequestIsProbedByItsIdentityCycle) {
     CompiledChannel channel = identity_channel();
     ReadPlan& plan = channel.devices[0].plan;
@@ -1894,6 +1980,24 @@ TEST(Scheduling, BetweenIdentityAndAllEachGroupKeepsItsDueTime) {
     scheduler.set_mode(0, DeviceMode::OFF);
     scheduler.set_mode(0, DeviceMode::ALL);
     EXPECT_EQ(scheduler.take(4 * MILLISECOND).kind, Choice::Kind::POLL);
+}
+
+TEST(Scheduling, ACycleNothingAnsweredWaitsTheFastestPeriodOnly) {
+    // The lead's ruling on 5b-2b: the identity period is the slow group's
+    // (10 s), the fastest group's 200 ms.
+    const CompiledChannel channel = identity_channel();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    scheduler.identity_again(0, 0, Scheduler::IdentityFloor::FASTEST_PERIOD);
+    const Choice wait = scheduler.take(MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, FAST_PERIOD);
+    ASSERT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::IDENTITY);
+    // Answered: the identity period again.
+    scheduler.identity_again(0, 0, Scheduler::IdentityFloor::IDENTITY_PERIOD);
+    EXPECT_EQ(scheduler.take(FAST_PERIOD + MILLISECOND).wake_ns,
+              FAST_PERIOD + SLOW_PERIOD);
 }
 
 TEST(Scheduling, EnteringIdentityAgainWithinAPeriodWaitsForIt) {

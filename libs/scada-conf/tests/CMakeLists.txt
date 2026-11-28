@@ -61,6 +61,14 @@ scada_add_test(scada-conf-expression-limits-test KIND unit
 scada_add_test(scada-conf-runtime-limits-test KIND unit
   SOURCES runtime_limits_test.cpp
   DEPENDS scada::conf scada::test-support)
+# The work of `applies_to` patterns for CF-311 at stage 5 (D-116, #176),
+# with its own time limit, and the same at the default budget, timed.
+scada_add_test(scada-conf-applies-to-limits-test KIND unit
+  SOURCES applies_to_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+scada_add_test(scada-conf-applies-to-limits-perf-test KIND perf
+  SOURCES applies_to_limits_perf_test.cpp
+  DEPENDS scada::conf scada::test-support)
 # The work of the health rules' patterns of stage 5 at tens of thousands of
 # points (D-120), with its own time limit.
 scada_add_test(scada-conf-point-limits-test KIND unit

@@ -34,6 +34,7 @@ namespace {
 using detail::Reader;
 using detail::Reporter;
 
+constexpr std::uint16_t CF_SIZE_LIMIT = 113;
 constexpr std::uint16_t CF_MAX_AGE_BELOW_UPDATE = 611;
 constexpr std::uint16_t CF_COMPANION_GROUP = 612;
 constexpr std::uint16_t CF_NO_STATES = 613;
@@ -623,10 +624,22 @@ private:
                 }
                 continue;
             }
-            // A pattern the budget runs out in is not checked (D-120).
+            if (over_budget_) {
+                continue;  // CF-113 is given: the tree is refused (D-120)
+            }
             const std::optional<std::optional<std::string_view>> matched =
                 first_unserved_match(listed, health);
-            if (matched && *matched) {
+            if (!matched) {
+                // A budget that runs out is CF-113, once, at the first
+                // pattern not checked (the lead's ruling on the review of
+                // #179; contract 1.3).
+                over_budget_ = true;
+                error(entry, CF_SIZE_LIMIT,
+                      "the pattern matching of health rules' poll groups "
+                      "exceeds its limit of " +
+                          std::to_string(max_pattern_work_) + " units",
+                      "health");
+            } else if (*matched) {
                 consider(**matched);
             }
         }
@@ -686,6 +699,7 @@ private:
     std::string_view first_other_group_;
     // Of the whole run.
     std::uint64_t pattern_work_ = 0;
+    bool over_budget_ = false;
 };
 
 }  // namespace

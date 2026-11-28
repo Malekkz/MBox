@@ -171,6 +171,8 @@ SCADA_RT void RecordingTags::write_point(
     written.value = sample.tag.value.i;
     written.time_ns = sample.tag.source_time_ns;
     ++written.writes;
+    history_.push_back(
+        Logged{.device = device, .point = point, .written = written});
 }
 
 std::size_t run_engine(ChannelEngine& engine, SimClock& clock,

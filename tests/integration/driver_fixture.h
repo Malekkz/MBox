@@ -86,6 +86,9 @@ struct ChannelTags {
     // driver must refuse (review S3).
     // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
     std::string system_owner{};
+    // The devices with `identify`: they have the identity tags too (11.1).
+    // NOLINTNEXTLINE(readability-redundant-member-init): GCC's -Wmissing-field-initializers needs it where a designated initializer leaves the member out
+    std::vector<std::string> identified{};
 };
 
 // One system tag of driver interface contract 11.1: its signal and type.
@@ -116,7 +119,7 @@ inline constexpr std::array<SystemTag, 7> PROCESS_SYSTEM_TAGS{{
 // scada-drv-test's poll groups.
 inline constexpr std::array<std::string_view, 3> POLL_GROUPS{"fast", "normal",
                                                              "slow"};
-inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
+inline constexpr std::array<SystemTag, 15> DEVICE_SYSTEM_TAGS{{
     {.signal = "state", .type = "int64"},
     {.signal = "last_ok_time", .type = "int64"},
     {.signal = "requests", .type = "uint64"},
@@ -131,15 +134,15 @@ inline constexpr std::array<SystemTag, 14> DEVICE_SYSTEM_TAGS{{
     {.signal = "sentinels", .type = "uint64"},
     {.signal = "invalid", .type = "uint64"},
     {.signal = "points_absent", .type = "uint64"},
+    {.signal = "restarts", .type = "uint64"},
 }};
 
 // The device tags the validator generates for every device (11.1) that no
 // slice built yet writes: the driver resolves none of them, and they read
 // BAD with NOT_INIT, from the walk of 9.1, for the driver's whole life
-// (5b-2 brings `restarts`, the command slices the other two; review S2).
-// `refresh_failures` and the identity tags are only for some devices.
-inline constexpr std::array<SystemTag, 3> UNWRITTEN_DEVICE_TAGS{{
-    {.signal = "restarts", .type = "uint64"},
+// (the command slices bring them; review S2). `refresh_failures` and the
+// identity tags are only for some devices.
+inline constexpr std::array<SystemTag, 2> UNWRITTEN_DEVICE_TAGS{{
     {.signal = "selections_lost", .type = "uint64"},
     {.signal = "last_command_stage", .type = "int64"},
 }};
@@ -181,6 +184,11 @@ inline std::vector<std::pair<std::string, std::string_view>> system_tags_of(
         for (const SystemTag& tag : UNWRITTEN_DEVICE_TAGS) {
             out.emplace_back(
                 "sys.dev." + device + "." + std::string(tag.signal), tag.type);
+        }
+        if (std::find(channel.identified.begin(), channel.identified.end(),
+                      device) != channel.identified.end()) {
+            out.emplace_back("sys.dev." + device + ".identity", "string");
+            out.emplace_back("sys.dev." + device + ".identity_ok", "bool");
         }
     }
     return out;
@@ -306,6 +314,50 @@ inline ::testing::AssertionResult logs(ChildProcess& process,
     }
     return ::testing::AssertionFailure()
            << "no '" << line << "' in: " << process.err();
+}
+
+// The sum of the COUNT fields of the `driver-device-restart` records in
+// `err` (D-147).
+inline std::uint64_t restart_counts(std::string_view err) {
+    constexpr std::string_view RECORD = R"(MESSAGE_ID="driver-device-restart")";
+    constexpr std::string_view COUNT = R"(COUNT=")";
+    std::uint64_t sum = 0;
+    for (std::size_t at = err.find(RECORD); at != std::string_view::npos;
+         at = err.find(RECORD, at + RECORD.size())) {
+        const std::string_view line = err.substr(at, err.find('\n', at) - at);
+        const std::size_t count = line.find(COUNT);
+        if (count != std::string_view::npos) {
+            sum += std::stoull(std::string(line.substr(count + COUNT.size())));
+        }
+    }
+    return sum;
+}
+
+// The times of day, in ms since midnight UTC, of the lines of `err` that
+// hold `record`, in order: from the stream sink's leading
+// "YYYY-MM-DDTHH:MM:SS.mmmZ" (log.h, `make_stream_sink`).
+inline std::vector<std::int64_t> record_times_ms(std::string_view err,
+                                                 std::string_view record) {
+    constexpr std::size_t TIME_AT = 11;      // after "YYYY-MM-DDT"
+    constexpr std::size_t TIME_LENGTH = 12;  // "HH:MM:SS.mmm"
+    std::vector<std::int64_t> times;
+    for (std::size_t at = err.find(record); at != std::string_view::npos;
+         at = err.find(record, at + record.size())) {
+        const std::size_t start = err.rfind('\n', at);
+        const std::size_t line =
+            start == std::string_view::npos ? 0 : start + 1;
+        if (line + TIME_AT + TIME_LENGTH > err.size()) {
+            continue;
+        }
+        const std::string time(err.substr(line + TIME_AT, TIME_LENGTH));
+        const std::int64_t hours = std::stoll(time.substr(0, 2));
+        const std::int64_t minutes = std::stoll(time.substr(3, 2));
+        const std::int64_t seconds = std::stoll(time.substr(6, 2));
+        const std::int64_t millis = std::stoll(time.substr(9, 3));
+        times.push_back((((hours * 60) + minutes) * 60 + seconds) * 1000 +
+                        millis);
+    }
+    return times;
 }
 
 // The times `line` is in `out`.
@@ -612,6 +664,20 @@ protected:
         EXPECT_EQ(scada_tag_resolve(ctx_, name.c_str(), &found), SCADA_OK)
             << name;
         return found;
+    }
+
+    // The text of the STRING tag `tag`, and its quality in `quality`.
+    std::string read_text(std::uint32_t tag, std::uint8_t& quality) {
+        std::array<char, SCADA_STRING_MAX> buffer{};
+        std::size_t length = 0;
+        scada_value value{};
+        if (scada_tag_read_string(ctx_, tag, buffer.data(), buffer.size(),
+                                  &length, &value) != SCADA_OK) {
+            quality = SCADA_QUALITY_BAD;
+            return {};
+        }
+        quality = value.quality;
+        return {buffer.data(), length};
     }
 
     scada_value read(std::uint32_t tag) {

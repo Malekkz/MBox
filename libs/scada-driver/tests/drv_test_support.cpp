@@ -5,6 +5,7 @@
 #include "scada/driver/connections.h"
 #include "scada/driver/driver.h"
 #include "scada/driver/exchange.h"
+#include "scada/driver/identity.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/point_rules.h"
 #include "scada/driver/protocol.h"
@@ -12,6 +13,7 @@
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
 #include "scada/tag/scada_tag.h"
+#include "scada/tag/types.h"
 #include "test_protocol.h"
 
 #include <algorithm>
@@ -101,7 +103,9 @@ constexpr std::string_view USAGE =
     "           ( --device NAME UNIT [--timeout-ms N] [--retries N] "
     "[--disabled]\n"
     "             ( --point NAME FIRST GROUP [--max-age-ms N]\n"
-    "                 [--substitute RAW VALUE] )... )... )...\n"
+    "                 [--substitute RAW VALUE] )...\n"
+    "             [--identify-equals POINT VALUE]... [--on-mismatch-warn]\n"
+    "             [--restart-decreases POINT]... )... )...\n"
     "       scada-drv-test --help\n"
     "\n"
     "A driver of the test protocol. A point reads one unit of space 0 into\n"
@@ -111,6 +115,11 @@ constexpr std::string_view USAGE =
     "VALUE to the system tag TAG once SKIP of them were written.\n"
     "--substitute writes VALUE, UNCERTAIN with SUBSTITUTED, when the point\n"
     "reads RAW (`on_invalid: { substitute: VALUE }` of that pattern).\n"
+    "--identify-equals checks that the device's POINT (its index among\n"
+    "the device's points so far) reads VALUE before any point is\n"
+    "published; a mismatch is MISMATCH, or with --on-mismatch-warn the\n"
+    "device runs. --restart-decreases makes a decrease of POINT a\n"
+    "restart of the device (`restart_indication: { decreases: ... }`).\n"
     "Every number is unsigned.\n"
     "Exit status: 0 stopped, 1 failed, 2 usage, 3 thread check, 4 stall.\n";
 
@@ -376,6 +385,13 @@ private:
         if (arg == "--max-age-ms" && !device.points.empty()) {
             return millis(device.points.back().rules.max_age_ns);
         }
+        if (arg == "--identify-equals" || arg == "--restart-decreases") {
+            return identity_option(arg, device);
+        }
+        if (arg == "--on-mismatch-warn") {
+            device.refuse_on_mismatch = false;
+            return true;
+        }
         if (arg == "--substitute" && !device.points.empty()) {
             std::uint64_t raw = 0;
             std::int64_t value = 0;
@@ -389,6 +405,30 @@ private:
             return true;
         }
         return false;
+    }
+
+    // `--identify-equals POINT VALUE` and `--restart-decreases POINT`, on a
+    // point the device already has.
+    bool identity_option(std::string_view arg, CompiledDevice& device) {
+        std::uint32_t point = 0;
+        if (!take(point, MAX_REGISTER) || point >= device.points.size()) {
+            return false;
+        }
+        if (arg == "--restart-decreases") {
+            device.restart_indication.push_back(RestartRule{
+                .point = point, .kind = RestartRule::Kind::DECREASES});
+            return true;
+        }
+        std::int64_t value = 0;
+        if (!take(value, MAX_SUBSTITUTE)) {
+            return false;
+        }
+        IdentityCheck check;
+        check.point = point;
+        check.kind = IdentityCheck::Kind::EQUALS;
+        check.values = {ExpectedValue{.type = tag::TagType::INT64, .i = value}};
+        device.identify.push_back(std::move(check));
+        return true;
     }
 
     std::span<const char* const> args_;

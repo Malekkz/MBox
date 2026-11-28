@@ -9,8 +9,11 @@ set(SCADA_ZONEINFO_DIR "/usr/share/zoneinfo" CACHE PATH
 scada_add_library(scada-driver
   SOURCES
     src/channel_engine.cpp
+    src/channel_engine_identity.cpp
     src/diagnostics.cpp
     src/driver.cpp
+    src/event_slot.cpp
+    src/event_throttle.cpp
     src/failure.cpp
     src/fd_io.cpp
     src/identity.cpp
