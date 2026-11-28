@@ -13,6 +13,7 @@
 #include "scada/common/realtime.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace scada::driver {
@@ -29,6 +30,9 @@ enum class DeviceStatus : std::uint8_t {
     REFUSING = 6,
 };
 
+// A time that never comes, for a bound left unset.
+inline constexpr std::int64_t NEVER_NS =
+    std::numeric_limits<std::int64_t>::max();
 inline constexpr std::int64_t DEFAULT_TIMEOUT_NS = 1'000'000'000;   // 1 s
 inline constexpr std::int64_t DEFAULT_BACKOFF_NS = 10'000'000'000;  // 10 s
 inline constexpr std::int64_t DEFAULT_BACKOFF_MAX_NS =
@@ -67,6 +71,17 @@ public:
         FailureRules rules;
         bool enabled = true;
         bool has_poll_group = true;  // at least one point in a poll group
+        bool identify = false;       // has identity checks (3.6; D-147)
+        // With `identify`: how long a pending check may take before a value
+        // it cannot read is a mismatch (ruling item 2), from
+        // `identity_wait_ns()` (identity_setup.h). Unset, never: the check
+        // stays pending and nothing of the device is published, rather than
+        // a mismatch at once (review of PR 171).
+        std::int64_t identity_wait_ns = NEVER_NS;
+        // A restart re-arms the grace once until this long passes without
+        // another (item 6), from `full_period_ns()`. Unset, never: the grace
+        // is re-armed by the first restart only, never by every one.
+        std::int64_t full_period_ns = NEVER_NS;
     };
     // `lost_after_timeouts` is the channel's key (CS) on `tcp`, and 0 where
     // read timeouts never close the connection (serial, `rtu_over_tcp`).
@@ -75,7 +90,8 @@ public:
 
     // A connection was made at `now_ns`: every enabled device starts its
     // grace and is INITIALISING, but a demoted one is DEMOTED again with its
-    // probe schedule; failure counts are kept (7.3, 7.4).
+    // probe schedule; failure counts are kept (7.3, 7.4). An INITIALISING
+    // device with identity checks has its check pending (D-147).
     void connected(std::int64_t now_ns) noexcept;
 
     // The connection is lost: every enabled device is CONNECTING (7.3); a
@@ -84,7 +100,8 @@ public:
 
     // A close the driver made itself was followed by a reconnect within
     // `connect_timeout` (7.3): states, counts and grace are kept; only the
-    // run of consecutive timeouts is emptied.
+    // run of consecutive timeouts is emptied. A pending identity check stays
+    // pending, and none is started (D-147).
     void resumed() noexcept;
 
     // What a read time-out after its retries did.
@@ -122,19 +139,64 @@ public:
     // answered since has its back-off doubled first, up to `backoff_max`, so
     // that a unit that answers probes and no poll does not flap at the same
     // rate for ever (review G6). An answer makes an INITIALISING device
-    // RUNNING. Returns true when some device was demoted by this call.
+    // RUNNING, but not while its identity check is pending (review M4).
+    // Returns true when some device was demoted by this call.
     SCADA_RT bool request_ended(std::uint32_t device, RequestEnd end,
                                 std::int64_t now_ns) noexcept;
 
     // The end of a probe of a demoted `device` (7.4), for every demoted
-    // device of its unit: an answer recovers them to INITIALISING and
-    // empties the count; a failure doubles their back-off, up to
-    // `backoff_max`. The back-off is reset only by a poll that answered.
+    // device of its unit: an answer recovers them to INITIALISING, with
+    // their identity check pending, and empties the count; a failure
+    // doubles their back-off, up to `backoff_max`. The back-off is reset
+    // only by a poll that answered.
     SCADA_RT void probe_ended(std::uint32_t device, bool answered,
                               std::int64_t now_ns) noexcept;
 
+    // The end of an identity read of `device` at `now_ns`, after its
+    // retries (D-147; DI 7.3). It neither adds to the run of consecutive
+    // time-outs nor empties it. A failure outside the grace counts toward
+    // the unit's demotion as a polled read's does (`request_ended`), so a
+    // dead device is DEMOTED, never MISMATCH. An answer empties the unit's
+    // count, but makes no device RUNNING and resets no back-off: a unit
+    // that answers its identity and nothing else is not seen to recover.
+    // For a device INITIALISING, RUNNING or MISMATCH; returns true when some
+    // device was demoted.
+    SCADA_RT bool identity_ended(std::uint32_t device, RequestEnd end,
+                                 std::int64_t now_ns) noexcept;
+
+    // The identity check of `device` matched (or failed with `warn`): it is
+    // no longer pending; a device in MISMATCH is INITIALISING again, and
+    // RUNNING only once a poll answers (D-147).
+    SCADA_RT void identity_passed(std::uint32_t device) noexcept;
+
+    // The identity check of an INITIALISING or MISMATCH `device` failed with
+    // `refuse` at `now_ns`: MISMATCH, its check due again after `backoff`,
+    // which does not grow (DI 3.6), whether it entered MISMATCH now or a
+    // re-check failed (review M5).
+    SCADA_RT void identity_mismatched(std::uint32_t device,
+                                      std::int64_t now_ns) noexcept;
+
+    // A restart of `device` was detected at `now_ns` (D-147): every RUNNING
+    // device of its unit is INITIALISING again, with its identity check
+    // pending; the grace starts again, unless the unit restarted less than
+    // `full_period_ns` ago (once until a full period of every group passes
+    // without a restart, ruling item 6). A device INITIALISING, DEMOTED or
+    // MISMATCH is left as it is.
+    SCADA_RT void restarted(std::uint32_t device, std::int64_t now_ns) noexcept;
+
+    // The identity check of `device` is pending: no verdict since the
+    // connect, recovery or restart that started it.
+    [[nodiscard]] bool identity_pending(std::uint32_t device) const noexcept;
+    // When the pending check began (a connect, a recovery, a restart, or a
+    // MISMATCH re-check falling due) and when it is to end (ruling item 2).
+    [[nodiscard]] std::int64_t identity_since_ns(
+        std::uint32_t device) const noexcept;
+    [[nodiscard]] std::int64_t identity_deadline_ns(
+        std::uint32_t device) const noexcept;
+
     [[nodiscard]] DeviceStatus state(std::uint32_t device) const noexcept;
-    // When a demoted device's next probe is due.
+    // When a demoted device's next probe is due, or a MISMATCH device's
+    // next identity check.
     [[nodiscard]] std::int64_t probe_due_ns(
         std::uint32_t device) const noexcept;
     // The consecutive failures counted for the device's unit id.
@@ -154,7 +216,25 @@ private:
         bool demoted = false;  // kept across a lost connection
         // Recovered by a probe, and no poll answered since (review G6).
         bool probe_recovered = false;
+        bool identity_pending = false;  // D-147
+        std::int64_t identity_since_ns = 0;
+        // When its unit last restarted; NO_RESTART before the first.
+        std::int64_t last_restart_ns = NO_RESTART;
     };
+
+    static constexpr std::int64_t NO_RESTART =
+        std::numeric_limits<std::int64_t>::min();
+
+    // The check of `device` is pending from `now_ns` (with `identify`).
+    void begin_check(std::uint32_t device, std::int64_t now_ns) noexcept;
+
+    // Adds a failure of `device` outside its grace to its unit's count and
+    // demotes every device of the unit whose limit it reaches; true when
+    // one was.
+    bool count_failure(std::uint32_t device, std::int64_t now_ns) noexcept;
+
+    // INITIALISING, RUNNING or MISMATCH: a device whose failures count.
+    [[nodiscard]] bool counted(std::uint32_t device) const noexcept;
 
     // Adds the time-out of `device` to the run; true when the connection is
     // lost.

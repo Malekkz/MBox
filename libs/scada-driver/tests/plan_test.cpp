@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -478,6 +479,121 @@ TEST(Plan, AClusterOfExactlyMaxUnitsIsOneRequest) {
         planned({at(0, 0), further}, ReadRules{.max_units = 4, .max_gap = 3});
     EXPECT_EQ(spans(chain), (std::vector<Span>{{0, 1}, {4, 1}}));
     EXPECT_TRUE(chain.requests[chain.by_group[0][0]].chained);
+}
+
+// --- The identity cycle (3.6, 7.6; D-147) --------------------------------
+
+PlanPoint identity_at(std::uint32_t point, std::uint64_t first,
+                      std::uint32_t group = 0) {
+    PlanPoint out = at(point, first);
+    out.poll_group = group;
+    out.identity = true;
+    return out;
+}
+
+TEST(Plan, TheIdentityCycleHoldsTheRequestsOfIdentityPoints) {
+    // Two groups: the identity point 1 shares a request with 0 in group 0;
+    // group 1's request reads none.
+    PlanPoint other = at(2, 50);
+    other.poll_group = 1;
+    const ReadPlan plan = planned({at(0, 0), identity_at(1, 1), other},
+                                  ReadRules{.max_units = 4}, 2);
+    ASSERT_EQ(plan.identity.size(), 1U);
+    EXPECT_EQ(plan.identity[0], plan.by_group[0][0]);
+    // Without one, it is empty.
+    EXPECT_TRUE(
+        planned({at(0, 0)}, ReadRules{.max_units = 4}).identity.empty());
+}
+
+TEST(Plan, TheIdentityCycleTakesAChainWhole) {
+    // The identity point 1 is the companion of 0, read back to back: both
+    // requests of the chain are in the cycle, in order.
+    PlanPoint companion = identity_at(1, 100);
+    companion.cluster = 0;
+    const ReadPlan plan =
+        planned({at(0, 0), companion, at(2, 50)}, ReadRules{.max_units = 4});
+    ASSERT_EQ(plan.identity.size(), 2U);  // not the request at 50
+    EXPECT_TRUE(plan.requests[plan.identity[0]].chained);
+    EXPECT_EQ(plan.requests[plan.identity[0]].first, 0U);
+    EXPECT_EQ(plan.requests[plan.identity[1]].first, 100U);
+}
+
+TEST(Plan, APointInNoPollGroupIsReadOnlyByTheIdentityCycle) {
+    // An identity check on a protocol address: no group, no keep-alive.
+    const ReadPlan plan =
+        planned({at(0, 0), identity_at(1, 300, NO_POLL_GROUP)},
+                ReadRules{.max_units = 4});
+    EXPECT_EQ(spans(plan), (std::vector<Span>{{0, 1}}));
+    ASSERT_EQ(plan.identity.size(), 1U);
+    const Request& read = plan.requests[plan.identity[0]];
+    EXPECT_EQ(read.first, 300U);
+    EXPECT_EQ(read.poll_group, NO_POLL_GROUP);
+    if (!plan.keepalive.has_value()) {
+        FAIL() << "no keep-alive request";
+    }
+    EXPECT_EQ(plan.requests[*plan.keepalive].first, 0U);
+    EXPECT_EQ(requests_per_scan(plan), 1U);
+    // A point in no group that is no identity point is refused.
+    PlanPoint lost = at(1, 300);
+    lost.poll_group = NO_POLL_GROUP;
+    expect_refused({at(0, 0), lost}, ReadRules{.max_units = 4});
+}
+
+TEST(Plan, AnIdentityPointIsNeverReadWithASideEffect) {
+    ReadRules rules{.max_units = 8, .max_gap = 4};
+    rules.ranges = {range(Kind::SIDE_EFFECT, 0, 0)};
+    // In the range: refused.
+    expect_refused({identity_at(0, 0)}, rules);
+    // Next to it, within the gap: two requests, the identity one without.
+    const ReadPlan plan = planned({at(0, 0), identity_at(1, 2)}, rules);
+    ASSERT_EQ(plan.identity.size(), 1U);
+    EXPECT_FALSE(plan.requests[plan.identity[0]].side_effect);
+    EXPECT_EQ(spans(plan).size(), 2U);
+    // A companion of a side-effect point in another request: the chain
+    // reads a side effect, refused.
+    PlanPoint companion = identity_at(1, 100);
+    companion.cluster = 0;
+    ReadRules chained{.max_units = 4};
+    chained.ranges = {range(Kind::SIDE_EFFECT, 0, 0)};
+    expect_refused({at(0, 0), companion}, chained);
+}
+
+TEST(Plan, AnIdentityPointInASideEffectRangeIsRefusedAsSuch) {
+    // Review P2: refused by the identity rule itself, before the later
+    // check of the identity cycle, which would refuse the plan too.
+    ReadRules rules{.max_units = 8};
+    rules.ranges = {range(Kind::SIDE_EFFECT, 5, 6)};
+    ReadPlan plan;
+    const Status status = plan_blocks({identity_at(0, 5)}, rules, 1, plan);
+    EXPECT_EQ(status.code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(std::string_view(status.message()),
+              "an identity point in a side-effect range");
+}
+
+TEST(Plan, AnIdentityPointInAnyRangeButAnAtomicOneIsRefused) {
+    // PR 171 S7: each kind of range on its own, the identity point inside.
+    for (const Kind kind :
+         {Kind::NO_READ, Kind::EXCLUSIVE, Kind::SIDE_EFFECT}) {
+        ReadRules rules{.max_units = 8};
+        rules.ranges = {range(kind, 5, 6)};
+        expect_refused({identity_at(0, 5)}, rules);
+    }
+    // An atomic range only keeps its points in one request.
+    ReadRules atomic{.max_units = 8};
+    atomic.ranges = {range(Kind::ATOMIC, 5, 6)};
+    const ReadPlan plan = planned({identity_at(0, 5)}, atomic);
+    EXPECT_EQ(plan.identity.size(), 1U);
+}
+
+TEST(Plan, ARequestInNoPollGroupIsNeverTheKeepAlive) {
+    // PR 171 S7: the identity read in no group is the shortest request;
+    // the keep-alive is still the group's longer one.
+    const ReadPlan plan =
+        planned({at(0, 0, 2), identity_at(1, 300, NO_POLL_GROUP)},
+                ReadRules{.max_units = 4});
+    ASSERT_TRUE(plan.keepalive.has_value());
+    EXPECT_EQ(plan.requests[plan.keepalive.value_or(0)].first, 0U);
+    EXPECT_EQ(plan.requests[plan.keepalive.value_or(0)].count, 2U);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

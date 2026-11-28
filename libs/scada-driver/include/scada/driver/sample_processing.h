@@ -139,6 +139,12 @@ struct ProcessedSample {
     std::size_t bit_count = 0;
     std::uint64_t bit_values = 0;
     SampleCounts counts{};
+    // For the restart rules (contract 7.6; D-147): the sample gave a value
+    // read from the device that is not BAD, and `rule_value` is that value
+    // as processing computed it before a counter's `on_decrease: hold`. A
+    // STRING's text points into the state, as `tag`'s does.
+    bool rule_valid = false;
+    TagValue rule_value{};
 };
 
 // The value of bit rule `index` in `sample`.
@@ -165,6 +171,18 @@ SCADA_RT void process_sample(const PointRules& rules, PointState& state,
                              const RawSample& sample,
                              std::span<const CompanionInput> companions,
                              const SampleTimes& times,
+                             ProcessedSample& out) noexcept;
+
+// Writes the point withheld (D-147): BAD with exactly `flags`, the value
+// kept, `source_time_ns` as given (0: the library's own time). The state
+// forgets every value read before, so that neither `keep_last` nor a held
+// DEVICE_INVALID can bring one back (`has_value`, `has_valid` and holding
+// cleared); a counter's previous value and the bits' values are kept. For a
+// device found not to be the one configured (MISMATCH) and the writes of
+// 9.1 after a device restart (contract 3.6, 7.6). Fills `out` for the
+// write.
+SCADA_RT void withhold_point(const PointRules& rules, PointState& state,
+                             std::uint16_t flags, std::int64_t source_time_ns,
                              ProcessedSample& out) noexcept;
 
 // The staleness check of contract 7.5 at a transaction boundary. Returns

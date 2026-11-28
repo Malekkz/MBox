@@ -14,10 +14,15 @@ scada_add_test(scada-driver-unit-test KIND unit
     driver_test.cpp
     drv_test_support.cpp
     drv_test_support_test.cpp
+    identity_run_test.cpp
+    identity_setup_test.cpp
+    identity_test.cpp
+    identity_text_test.cpp
     scheduling_test.cpp
     sim_transport.cpp
     stall_watch_test.cpp
     system_tags_test.cpp
+    text_pattern_test.cpp
     test_protocol.cpp
     timing_test.cpp
     tzif_test.cpp
