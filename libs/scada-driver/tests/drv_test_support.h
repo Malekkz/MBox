@@ -5,6 +5,7 @@
 // unit tests reach them: the command line, the thread-checked test
 // protocol, the faulty transports and the factory of the transports.
 
+#include "scada/common/log.h"
 #include "scada/driver/compiled.h"
 #include "scada/driver/driver.h"
 #include "scada/driver/protocol.h"
@@ -49,7 +50,17 @@ struct DrvTestOptions {
     CompiledConfig config;
     std::vector<Endpoint> endpoints;  // one per channel
     bool help = false;                // `--help`: print the usage, exit 0
+    bool refuse_log = false;          // `--refuse-log MS`: see refusing_sink
+    std::int64_t refuse_log_ms = 0;
 };
+
+// A sink that writes every record to `inner`, takes `delay_ms` more, as a
+// slow journal would, and then reports it refused: a test sees each
+// refusal in `log_dropped` and the record itself in the output, and the
+// records of the stop are still on their way when the run ends (PR 182
+// S1).
+[[nodiscard]] std::unique_ptr<LogSink> refusing_sink(
+    std::unique_ptr<LogSink> inner, std::int64_t delay_ms);
 
 // The usage text of scada-drv-test.
 [[nodiscard]] std::string_view drv_test_usage() noexcept;

@@ -1,6 +1,7 @@
 #include "worker.h"
 
-#include "event_slot.h"
+#include "event_log.h"
+#include "scada/common/log.h"
 
 #include "scada/common/fd.h"
 #include "scada/common/status.h"
@@ -21,6 +22,7 @@
 #include <ctime>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <utility>
@@ -36,6 +38,12 @@ namespace {
 
 constexpr std::int64_t NS_PER_S = 1'000'000'000;
 constexpr std::int64_t NEVER = std::numeric_limits<std::int64_t>::max();
+// At the stop, a full log queue is waited for in steps of 5 ms, 100 at
+// most: 0.5 s, well within the stop budget of 2 s, which the main thread's
+// own flush of at most 1 s follows (D-148). Counted in steps, not read from
+// the clock, so that a clock that does not move cannot hold the stop.
+constexpr std::int64_t LOG_ROOM_STEP_NS = 5'000'000;
+constexpr int LOG_ROOM_STEPS = 100;
 
 // A worker's stack (DI 2.4): 256 KiB, a build setting; the sanitizer
 // builds give it more (CMake SCADA_DRIVER_WORKER_STACK_BYTES).
@@ -82,8 +90,17 @@ Worker::~Worker() {
     (void)join_if_returned();
 }
 
+void Worker::set_log(std::shared_ptr<LogQueue> queue) noexcept {
+    log_queue_ = std::move(queue);
+}
+
 Status Worker::start() noexcept {
-    events_ = std::vector<detail::EventSlot>(channel_->devices.size());
+    try {
+        // Its limit's table is allocated here, before the thread runs.
+        events_.emplace(*channel_, log_queue_);
+    } catch (const std::bad_alloc&) {
+        return {StatusCode::RESOURCE_EXHAUSTED, "no memory for a worker's log"};
+    }
     stop_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     begin_fd_ = Fd(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     if (!stop_fd_.valid() || !begin_fd_.valid()) {
@@ -225,20 +242,39 @@ void Worker::serve(TagWriter& writer) noexcept {
     writer.notify();
     refused_.store(writer.refused(), std::memory_order_relaxed);
     hand_events(*engine);
+    // Every count the limit held, so that none is lost at the stop (11.3).
+    flush_events();
+}
+
+void Worker::flush_events() noexcept {
+    if (!events_.has_value()) {
+        return;
+    }
+    flush_at_stop(*events_, clock_->realtime_ns(), LOG_ROOM_STEPS, [this] {
+        // The Logger's thread drains the queue at least every 20 ms.
+        moved();
+        const timespec pause{.tv_sec = 0, .tv_nsec = LOG_ROOM_STEP_NS};
+        (void)::ppoll(nullptr, 0, &pause, nullptr);
+    });
 }
 
 void Worker::hand_events(ChannelEngine& engine) noexcept {
+    if (!events_.has_value()) {
+        return;
+    }
+    const std::int64_t now = clock_->monotonic_ns();
+    const std::int64_t wall = clock_->realtime_ns();
     EventRecord record;
     for (std::uint32_t device = 0; device < channel_->devices.size();
          ++device) {
         for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
             const auto which = static_cast<DeviceEvent>(kind);
-            if (device < events_.size() &&
-                engine.take_event(device, which, record)) {
-                events_[device].add(which, record);
+            if (engine.take_event(device, which, record)) {
+                events_->add(device, which, record, now, wall);
             }
         }
     }
+    events_->due(now, wall);
 }
 
 void Worker::run() noexcept {

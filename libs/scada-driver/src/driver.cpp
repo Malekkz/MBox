@@ -1,15 +1,12 @@
 #include "scada/driver/driver.h"
 
 #include "element.h"
-#include "event_throttle.h"
 #include "scada/common/clock.h"
 #include "scada/common/fd.h"
 #include "scada/common/log.h"
 #include "scada/common/result.h"
 #include "scada/common/status.h"
-#include "scada/driver/channel_engine.h"
 #include "scada/driver/compiled.h"
-#include "scada/driver/identity_run.h"
 #include "scada/driver/protocol.h"
 #include "scada/driver/timing.h"
 #include "scada/driver/transport.h"
@@ -68,21 +65,11 @@ constexpr std::int64_t STOP_GRACE_NS = NS_PER_S;
 // A change of a channel's refused tag writes is logged at the heartbeat
 // step, at most this often per channel (review M9; 5b-3 replaces it).
 constexpr std::int64_t REFUSED_LOG_PERIOD_NS = NS_PER_S;
-// The rate limit of a record per MESSAGE_ID and device (DI 11, the pattern
-// of TD 10.1): the first at once, then at most one summary per 10 s.
-
-// The REASON of an identity mismatch's record (ruling item 3).
-std::string_view reason_text(std::uint8_t reason) noexcept {
-    switch (static_cast<MismatchReason>(reason)) {
-        case MismatchReason::VALUE:
-            return "value";
-        case MismatchReason::ABSENT:
-            return "absent";
-        case MismatchReason::UNREADABLE:
-            return "unreadable";
-    }
-    return "unknown";
-}
+// The main thread's log queue, in records of about 1.5 KiB each: 1.5 MiB,
+// so that the start's records, a few per channel and device, fit before
+// the Logger's thread first drains it (PR 182 S5, D-148). Each worker's is
+// `worker_log_queue_size`.
+constexpr std::size_t MAIN_LOG_QUEUE = 1024;
 // "process paused" is logged at most this often, with the pauses since.
 constexpr std::int64_t PAUSE_LOG_PERIOD_NS = 10 * NS_PER_S;
 constexpr std::chrono::milliseconds LOG_FLUSH_LIMIT{1000};
@@ -117,6 +104,10 @@ Status validate(const DriverSettings& settings) noexcept {
         settings.heartbeat_period_ns > MAX_HEARTBEAT_PERIOD_NS) {
         return {StatusCode::INVALID_ARGUMENT,
                 "the heartbeat period is out of range"};
+    }
+    if (settings.worker_log_queue > LOG_MAX_QUEUE_CAPACITY) {
+        return {StatusCode::INVALID_ARGUMENT,
+                "the worker log queue size is out of range"};
     }
     return {};
 }
@@ -168,6 +159,18 @@ Status block_stop_signals() noexcept {
         return {StatusCode::INTERNAL, "cannot block the stop signals"};
     }
     return {};
+}
+
+std::size_t worker_log_queue_size(std::size_t setting,
+                                  std::size_t devices) noexcept {
+    if (setting != 0) {
+        return setting;
+    }
+    // Two per device, without overflow for any count of devices.
+    const std::size_t two = devices > LOG_MAX_QUEUE_CAPACITY / 2
+                                ? LOG_MAX_QUEUE_CAPACITY
+                                : devices * 2;
+    return std::clamp(two, MIN_WORKER_LOG_QUEUE, LOG_MAX_QUEUE_CAPACITY);
 }
 
 int exit_status(RunEnd end) noexcept {
@@ -240,11 +243,33 @@ private:
     // What the heartbeat said.
     enum class Beat : std::uint8_t { OK = 1, RETIRING, REFUSED };
 
+    // The main thread's records go into its own queue (11.3, D-148): a
+    // push never waits for the logger. Before the queue exists, at the
+    // very start, and if it could not be made, the Logger's own path.
     void log(LogLevel level, std::string_view message,
              std::initializer_list<LogField> fields = {}) noexcept {
-        if (logger_ != nullptr) {
+        if (main_queue_) {
+            (void)main_queue_->push(level, scada::realtime_ns(), message,
+                                    fields);
+        } else if (logger_ != nullptr) {
             logger_->log(level, message, fields);
         }
+    }
+    // Every queue to the journal, the workers' included, once they have
+    // returned and before the Logger stops (11.3, D-148), and then the last
+    // `log_dropped`, so that it counts the drain's refusals too (PR 182
+    // S1). A flush that times out loses only records, and those it left
+    // undelivered count as dropped (S5).
+    void drain_logs() noexcept;
+    // The queues: the main thread's, and one per worker given before its
+    // start. Without a logger, none.
+    [[nodiscard]] Status make_log_queues() noexcept;
+    // Records dropped on the way to the journal (11.1, 11.3): by a full
+    // queue, the logger's own or a thread's, or refused by the sink.
+    [[nodiscard]] std::uint64_t log_dropped() const noexcept {
+        return logger_ == nullptr
+                   ? 0
+                   : logger_->dropped() + logger_->sink_failures();
     }
     [[nodiscard]] Status fail_start(Status status, std::string detail) {
         detail_ = std::move(detail);
@@ -297,12 +322,6 @@ private:
     void stop_all() noexcept;
     bool all_joined() noexcept;
     void log_refused(std::int64_t now) noexcept;
-    // Logs the workers' identity and restart events (D-147), each kind of
-    // each device at most once per detail::EVENT_LOG_PERIOD_NS (10 s), with the
-    // count since its last record; `all`: whatever is pending, at the stop.
-    void log_events(std::int64_t now, bool all) noexcept;
-    void log_event(const Worker& worker, std::size_t device, DeviceEvent kind,
-                   const EventRecord& record) noexcept;
     // The settings' write of the system tags, or the library's.
     [[nodiscard]] detail::TagWriteFn system_write() const noexcept {
         return settings_.system_write != nullptr ? settings_.system_write
@@ -346,9 +365,8 @@ private:
     std::int64_t next_pause_log_ns_ = 0;
     // Per worker: the refused writes last logged.
     std::vector<std::uint64_t> logged_refused_;
-    // Per worker, a slot per device and DeviceEvent: the events not yet
-    // logged, and when the next record may go (PR 177 S1).
-    std::vector<detail::EventThrottle> pending_events_;
+    // The main thread's log queue, shared with the Logger (D-148).
+    std::shared_ptr<LogQueue> main_queue_;
     std::uint64_t logged_process_refused_ = 0;  // the main thread's tags
     std::int64_t next_refused_log_ns_ = 0;
     std::string detail_;  // what failed, with names, for the log
@@ -533,10 +551,9 @@ Status Driver::Impl::make_workers() noexcept {
     watch_.start(workers_.size(), scada::monotonic_ns());
     watched_.reserve(workers_.size());
     logged_refused_.assign(workers_.size(), 0);
-    pending_events_.clear();
-    for (const std::unique_ptr<Worker>& worker : workers_) {
-        pending_events_.emplace_back(worker->channel().devices.size() *
-                                     DEVICE_EVENTS);
+    const Status queues = make_log_queues();
+    if (!queues.ok()) {
+        return fail_start(queues, "cannot make the log queues");
     }
     for (const std::unique_ptr<Worker>& worker : workers_) {
         const Status started = worker->start();
@@ -889,11 +906,9 @@ RunEnd Driver::Impl::after_stall(Worker& stalled) noexcept {
         }
         const std::int64_t now = scada::monotonic_ns();
         if (!waiting || now >= until) {
-            // The events handed over so far, the stalled worker's too: its
-            // slot never blocks the main thread, which takes them as at any
-            // step (PR 177 S6). What the stalled worker has not handed over
-            // is lost with it.
-            log_events(now, true);
+            // The workers that stopped logged what their limits held into
+            // their queues; the flush below hands those to the journal. A
+            // stalled worker's held counts are lost with it (D-148).
             log(LogLevel::INFO, "workers stopped after a stall",
                 {{"MESSAGE_ID", "driver-stall-stopped"},
                  {"STOPPED", std::to_string(stopped)}});
@@ -913,6 +928,7 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
     for (;;) {
         if (all_joined()) {
             process_stopped();
+            drain_logs();
             return end;
         }
         const std::int64_t now = scada::monotonic_ns();
@@ -928,7 +944,6 @@ RunEnd Driver::Impl::finish(RunEnd end) noexcept {
             }
         }
         if (stuck != nullptr) {
-            log_events(scada::monotonic_ns(), true);  // as after a stall
             log(LogLevel::ERROR, "channel did not stop",
                 {{"MESSAGE_ID", "driver-stop-overrun"},
                  {"CHANNEL", stuck->channel().name}});
@@ -1006,81 +1021,31 @@ void Driver::Impl::log_refused(std::int64_t now) noexcept {
     log_process_refused();
 }
 
-void Driver::Impl::log_events(std::int64_t now, bool all) noexcept {
-    const std::size_t workers =
-        std::min(workers_.size(), pending_events_.size());
-    EventRecord taken;
-    for (std::size_t index = 0; index < workers; ++index) {
-        Worker& worker = *workers_[index];
-        detail::EventThrottle& pending = pending_events_[index];
-        for (std::size_t device = 0; device < worker.channel().devices.size();
-             ++device) {
-            for (std::size_t kind = 0; kind < DEVICE_EVENTS; ++kind) {
-                const auto which = static_cast<DeviceEvent>(kind);
-                const std::size_t slot = (device * DEVICE_EVENTS) + kind;
-                if (worker.take_event(device, which, taken)) {
-                    pending.add(slot, taken);
-                }
-                if (pending.take(slot, now, all, taken)) {
-                    log_event(worker, device, which, taken);
-                }
-            }
+Status Driver::Impl::make_log_queues() noexcept {
+    if (logger_ == nullptr) {
+        return {};
+    }
+    Result<std::shared_ptr<LogQueue>> main =
+        logger_->make_queue(MAIN_LOG_QUEUE, "main");
+    if (!main.ok()) {
+        return main.status();
+    }
+    for (const std::unique_ptr<Worker>& worker : workers_) {
+        Result<std::shared_ptr<LogQueue>> own =
+            // Named for its channel, which a drop notice names (S2).
+            logger_->make_queue(
+                worker_log_queue_size(settings_.worker_log_queue,
+                                      worker->channel().devices.size()),
+                worker->channel().name);
+        if (!own.ok()) {
+            return own.status();
         }
+        worker->set_log(std::move(own).value());
     }
-}
-
-void Driver::Impl::log_event(const Worker& worker, std::size_t device,
-                             DeviceEvent kind,
-                             const EventRecord& record) noexcept {
-    const std::string& channel = worker.channel().name;
-    const std::string& name = worker.channel().devices[device].name;
-    const std::string count = std::to_string(record.count);
-    const std::string_view text(record.text.data(), record.length);
-    switch (kind) {
-        case DeviceEvent::MISMATCH:
-            if (!record.has_details) {
-                // No details known: REASON and CHECK left out, since CHECK
-                // 0 is a valid index (PR 177 S4).
-                log(LogLevel::WARNING, "identity mismatch",
-                    {{"MESSAGE_ID", "driver-identity-mismatch"},
-                     {"CHANNEL", channel},
-                     {"DEVICE", name},
-                     {"COUNT", count}});
-                return;
-            }
-            log(LogLevel::WARNING, "identity mismatch",
-                {{"MESSAGE_ID", "driver-identity-mismatch"},
-                 {"CHANNEL", channel},
-                 {"DEVICE", name},
-                 {"REASON", reason_text(record.reason)},
-                 {"CHECK", std::to_string(record.check)},
-                 {"VALUE", text},
-                 {"COUNT", count}});
-            return;
-        case DeviceEvent::MATCH:
-            if (!record.has_details) {
-                log(LogLevel::NOTICE, "identity matched",
-                    {{"MESSAGE_ID", "driver-identity-matched"},
-                     {"CHANNEL", channel},
-                     {"DEVICE", name},
-                     {"COUNT", count}});
-                return;
-            }
-            log(LogLevel::NOTICE, "identity matched",
-                {{"MESSAGE_ID", "driver-identity-matched"},
-                 {"CHANNEL", channel},
-                 {"DEVICE", name},
-                 {"IDENTITY", text},
-                 {"COUNT", count}});
-            return;
-        case DeviceEvent::RESTART:
-            log(LogLevel::WARNING, "device restart",
-                {{"MESSAGE_ID", "driver-device-restart"},
-                 {"CHANNEL", channel},
-                 {"DEVICE", name},
-                 {"COUNT", count}});
-            return;
-    }
+    // The main thread's last, so that a failure above still logs through
+    // the Logger's own path.
+    main_queue_ = std::move(main).value();
+    return {};
 }
 
 void Driver::Impl::log_process_refused() noexcept {
@@ -1107,7 +1072,23 @@ void Driver::Impl::process_stopped() noexcept {
     // no heartbeat follows (review M4).
     next_refused_log_ns_ = 0;
     log_refused(scada::monotonic_ns());
-    log_events(scada::monotonic_ns(), true);
+}
+
+void Driver::Impl::drain_logs() noexcept {
+    if (logger_ == nullptr) {
+        return;
+    }
+    const bool drained = logger_->flush(LOG_FLUSH_LIMIT).ok();
+    if (!process_tags_.has_value()) {
+        return;
+    }
+    // After a time-out the Logger's destructor may still deliver some of
+    // them: the count can be high, never low.
+    const std::uint64_t left = drained ? 0 : logger_->pending();
+    if (process_tags_->log_dropped(log_dropped() + left)) {
+        // A refused notify only delays the readers to their next wake.
+        (void)scada_tag_notify(ctx_);
+    }
 }
 
 Status Driver::Impl::start() noexcept {
@@ -1186,7 +1167,11 @@ RunEnd Driver::Impl::run(Status& failure) noexcept {
             return after_stall(*worker);
         }
         log_refused(now);
-        log_events(now, false);
+        if (process_tags_.has_value() &&
+            process_tags_->log_dropped(log_dropped())) {
+            // A refused notify only delays the readers to their next wake.
+            (void)scada_tag_notify(ctx_);
+        }
         const Beat said = beat();
         if (said == Beat::RETIRING) {
             failure = {StatusCode::UNAVAILABLE, "the generation is retiring"};

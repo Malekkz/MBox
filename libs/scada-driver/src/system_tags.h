@@ -225,8 +225,8 @@ private:
 
 // The `sys.proc.<process>.*` tags, written by the main thread (D-146). The
 // counters stay 0 until the slices that count them: the command slices
-// (`stale_outcomes`, `answers_dropped`), the fail-safe slice
-// (`safe_unjournalled`) and 5b-3 (`log_dropped`).
+// (`stale_outcomes`, `answers_dropped`) and the fail-safe slice
+// (`safe_unjournalled`); `log_dropped` counts from 5b-3 on (D-148).
 class ProcessTags {
 public:
     // One slot per ProcessSignal, in order, resolved by the main thread.
@@ -249,6 +249,11 @@ public:
     // stop do not say "applied" (PR 159 review M3; D-146). True if it
     // wrote.
     bool stopped() noexcept;
+
+    // `log_dropped` with `count`, the records lost on the way to the
+    // journal since the start (11.1, 11.3), if it changed. True if it
+    // wrote.
+    bool log_dropped(std::uint64_t count) noexcept;
 
     // Writes the library refused.
     [[nodiscard]] std::uint64_t refused() const noexcept { return refused_; }
