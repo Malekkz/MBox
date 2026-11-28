@@ -57,19 +57,22 @@ TEST(ModbusRulesPerf, ManyLongValues) {
 // all the device's writes.
 TEST(ModbusRulesPerf, ManyWritablePoints) {
     constexpr std::size_t EACH = 32768;
+    // `access` and `storage` come from `defaults`, and the lines are short,
+    // so that the template, about 4.3 MB, stays well under the file limit
+    // of 8 MiB (contract 1.3; an item of the delta check of #180).
     std::string meter =
         "template: meter_a\nprotocol: modbus\n"
-        "functions: [1, 3, 5, 6, 15, 16]\npoints:\n";
+        "functions: [1, 3, 5, 6, 15, 16]\n"
+        "defaults: {access: rw, storage: volatile}\npoints:\n";
     for (std::size_t i = 0; i < EACH; ++i) {
-        meter += "  - { name: h" + std::to_string(i) +
-                 ", access: rw, storage: volatile, address: { table: "
-                 "holding, register: " +
-                 std::to_string(i) + ", type: uint16 } }\n";
-        meter += "  - { name: c" + std::to_string(i) +
-                 ", access: rw, storage: volatile, address: { table: coil, "
-                 "register: " +
-                 std::to_string(i) + " } }\n";
+        meter += "- {name: h" + std::to_string(i) +
+                 ", address: {table: holding, register: " + std::to_string(i) +
+                 ", type: uint16}}\n";
+        meter += "- {name: c" + std::to_string(i) +
+                 ", address: {table: coil, register: " + std::to_string(i) +
+                 "}}\n";
     }
+    EXPECT_LT(meter.size(), std::size_t{5} << 20U);  // 3 MiB below the limit
     Files files = {
         {"templates/meter_a.yaml", meter},
         {"drivers/modbus/line1.yaml",

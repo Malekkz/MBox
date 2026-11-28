@@ -543,6 +543,56 @@ TEST(ModbusRules, TheBytesOfOneRegister) {
                "drivers/modbus/line1.yaml:7:11: error CF-602: points \"f\" a"
                "nd \"h\" overlap at holding 2 of unit 1\n  from template tem"
                "plates/meter_a.yaml:11:84 (point h)"}));
+    // Under `msb0` a byte keeps its half: bit 2 is in the high byte, bit
+    // 10 in the low one (an item of the delta check of #180).
+    EXPECT_EQ(
+        errors_of(std::string(POINTS) +
+                  "  - { name: a, access: rw, storage: volatile, address: { "
+                  "table: holding, register: 5, type: uint8, byte: high } }\n"
+                  "  - { name: b, access: rw, storage: volatile, address: { "
+                  "table: holding, register: 5, bit: 2 } }\n"
+                  "  - { name: c, access: rw, storage: volatile, address: { "
+                  "table: holding, register: 6, type: uint8, byte: high } }\n"
+                  "  - { name: d, access: rw, storage: volatile, address: { "
+                  "table: holding, register: 6, bit: 10 } }\n"
+                  "bit_order: msb0\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: error CF-602: points \"a\" "
+              "and \"b\" overlap at holding 5 of unit 1\n"
+              "  from template templates/meter_a.yaml:5:84 (point b)"});
+}
+
+// A range's own `unit_id` is the unit of its registers: points of unit 2
+// in two poll groups meet a unit-2 side-effect range, and the same
+// registers of the device's unit 1 do not (an item of the delta check of
+// #180).
+TEST(ModbusRules, ARangeOfItsOwnUnit) {
+    EXPECT_EQ(
+        errors_of("read:\n  ranges:\n"
+                  "    - { kind: side_effect, table: holding, first: 60, "
+                  "last: 61, unit_id: 2 }\n"
+                  "points:\n"
+                  "  - { name: a, poll_group: fast, address: { table: holding, "
+                  "register: 60, type: uint16, unit_id: 2 } }\n"
+                  "  - { name: b, address: { table: holding, register: 61, "
+                  "type: uint16, unit_id: 2 } }\n"
+                  "  - { name: c, poll_group: fast, address: { table: holding, "
+                  "register: 60, type: uint16 } }\n"
+                  "  - { name: d, address: { table: holding, register: 61, "
+                  "type: uint16 } }\n"),
+        Lines{"drivers/modbus/line1.yaml:7:11: error CF-610: range "
+              "side_effect holding 60 to 61 of device \"ps1.m1\": points "
+              "\"b\" and \"a\" are in different poll groups\n"
+              "  from template templates/meter_a.yaml:5:15 (read)"});
+    EXPECT_EQ(
+        errors_of("read:\n  ranges:\n"
+                  "    - { kind: side_effect, table: holding, first: 60, "
+                  "last: 61, unit_id: 2 }\n"
+                  "points:\n"
+                  "  - { name: c, poll_group: fast, address: { table: holding, "
+                  "register: 60, type: uint16 } }\n"
+                  "  - { name: d, address: { table: holding, register: 61, "
+                  "type: uint16 } }\n"),
+        Lines{});
 }
 
 // A `write.quantity` that runs past 65,535 is CF-603, at the quantity
