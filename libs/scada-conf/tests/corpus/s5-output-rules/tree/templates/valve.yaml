@@ -17,3 +17,4 @@ points:
   - { name: s2, access: rw, storage: volatile, address: { table: holding, register: 32, type: uint16 } }
   - { name: s3, access: rw, storage: volatile, address: { table: holding, register: 33, type: uint16 } }
   - { name: m10k, access: rw, storage: volatile, address: { table: holding, register: 40, type: mod10k, count: 2 } }
+  - { name: c10, access: rw, storage: volatile, address: { table: coil, register: 21 } }

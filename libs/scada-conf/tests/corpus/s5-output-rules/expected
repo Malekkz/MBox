@@ -7,8 +7,9 @@
 # into uint16 (CF-713), refresh on a single (CF-714), a setpoint fed back
 # by a plain tag (CF-715), a step with safe_state off (CF-719), a pulse
 # timed by the unit (CF-720), safe with safe_state hold (CF-722), release
-# on a single (CF-723); and an area that blocks automatic commands with no
-# local panel (CF-718). Invented.
+# on a single (CF-723), a single with a value form of safe_state (CF-713,
+# M1 of the review of #185); and an area that blocks automatic commands
+# with no local panel (CF-718). Invented.
 areas.yaml:4:37: CF-718
 outputs/ps1.yaml:2:53: CF-702
 outputs/ps1.yaml:4:53: CF-703
@@ -25,3 +26,4 @@ outputs/ps1.yaml:14:109: CF-719
 outputs/ps1.yaml:15:129: CF-720
 outputs/ps1.yaml:16:133: CF-722
 outputs/ps1.yaml:17:132: CF-723
+outputs/ps1.yaml:18:115: CF-713

@@ -15,3 +15,4 @@ outputs:
   - { name: ps1.n, area: ps1, kind: pulse, target: ps1.v1.c7, feedback: ps1.v1.pos, interlocks: [], safe_state: hold, duration: 1s }
   - { name: ps1.o, area: ps1, kind: single, target: ps1.v1.c8, feedback: ps1.v1.pos, interlocks: [], safe_state: hold, on_shutdown: safe }
   - { name: ps1.p, area: ps1, kind: single, target: ps1.v1.c9, feedback: ps1.v1.pos, interlocks: [], safe_state: off, on_shutdown: release }
+  - { name: ps1.q, area: ps1, kind: single, target: ps1.v1.c10, feedback: ps1.v1.pos, interlocks: [], safe_state: { value: true } }

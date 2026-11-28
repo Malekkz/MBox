@@ -880,6 +880,9 @@ TEST(TagNames, MoreTypesAndPlaces) {
             std::string(tag) + ", priority: high, area: ps1, id: d" +
             std::to_string(alarms.size()) + " }\n";
     }
+    // A pulse and a trigger hold, so their lines start as they are: an
+    // `at_start: safe` line with safe_state hold is CF-722 (M2 of the
+    // review of #185).
     const std::string outputs =
         "interlocks:\n  - { name: ps1.ok, condition: \"ps1.m1.flow > 1\", "
         "message: low }\n"
@@ -898,11 +901,11 @@ TEST(TagNames, MoreTypesAndPlaces) {
              {"templates/io_a.yaml",
               "template: io_a\nprotocol: io\npoints:\n"
               "  - { name: lamp, address: { line: 1, direction: output, "
-              "at_start: safe }, access: rw, storage: volatile }\n"
+              "at_start: hold }, access: rw, storage: volatile }\n"
               "  - { name: count, value_type: int64, address: { line: 2, "
               "direction: input } }\n"
               "  - { name: lamp2, address: { line: 3, direction: output, "
-              "at_start: safe }, access: rw, storage: volatile }\n"},
+              "at_start: hold }, access: rw, storage: volatile }\n"},
              {"drivers/io/local.yaml",
               "channel: { name: local, backend: gpio, chip: gpiochip0 }\n"
               "devices:\n  - { name: ps1.io, template: io_a }\n"},

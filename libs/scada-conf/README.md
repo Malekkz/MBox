@@ -229,7 +229,7 @@ fit the target or survive its scaling (`src/output_values.cpp`), CF-715 for
 feedback, CF-719, CF-720, CF-722 and CF-723 for safe states and fail-safe
 keys, written or by default; CF-718 and warning CW-701 for areas; warning
 CW-721 for a switching output that holds on control loss. D-124 lists the
-interim rules (a) to (i), fail-safe, pending the product owner.
+interim rules (a) to (j), fail-safe, pending the product owner.
 
 Not in phase 2: structured text is not parsed, and the block library
 declares no block type until phase 6, so a tree with control programs does

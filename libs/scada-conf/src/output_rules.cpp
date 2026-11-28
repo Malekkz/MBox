@@ -82,9 +82,17 @@ struct Target {
     // these rules do not count), its scaling and write encoding (A.5).
     NodeId address = 0;
     std::string raw;
+    // The raw type a write writes: `write.type` where given, else `raw`
+    // (A.5; M4 of the review of #185).
+    std::string write_raw;
     Scaling scaling;
     bool mask = false;    // `write.mask`
     bool on_off = false;  // `write.on` or `write.off`
+    // Any write encoding: `mask`, `on`/`off`, `values` or `value` (A.5).
+    bool encoded = false;
+    // The codes of the point's enumeration (5.5), when it has one.
+    bool has_enum = false;
+    std::vector<std::string_view> enum_codes;
     bool double_point = false;
     bool at_start_safe = false;  // `io`: `at_start: safe`
     // Why the protocol cannot write it (CF-708), empty if it can.
@@ -129,6 +137,7 @@ public:
         for (const CheckedFile& file : files_) {
             readers_.emplace_back(*file.document);
         }
+        read_enumerations();
         for (std::size_t i = 0; i < files_.size(); ++i) {
             if (files_[i].source->path_class.type == FileType::OUTPUTS) {
                 const Reader& reader = readers_[i];
@@ -183,6 +192,7 @@ private:
             target.dangerous =
                 expanded_.text_of(info->point, "dangerous") == "true";
             target.nvm = expanded_.text_of(info->point, "storage") == "nvm";
+            device_ = info->device;
             read_point(info->point, target);
         }
         return target;
@@ -204,20 +214,22 @@ private:
         if (expanded_.child(point, "exponent_from")) {
             target.unwritable = "a point with exponent_from";
         }
+        read_enumeration(point, target);
         const std::optional<NodeId> address = expanded_.child(point, "address");
         if (!address || document.kind(*address) != NodeKind::MAP) {
             return;
         }
         target.address = *address;
         const std::optional<NodeId> write = expanded_.child(*address, "write");
-        target.mask = write && expanded_.child(*write, "mask");
-        target.on_off = write && (expanded_.child(*write, "on") ||
-                                  expanded_.child(*write, "off"));
+        if (write) {
+            read_write(*write, target);
+        }
         if (target.protocol == "io") {
             target.at_start_safe =
                 expanded_.text_of(*address, "at_start") == "safe";
             if (target.value_type == "bool") {
                 target.raw = "bool";
+                target.write_raw = "bool";
             }
             if (target.unwritable.empty() &&
                 expanded_.text_of(*address, "direction") == "input") {
@@ -229,6 +241,10 @@ private:
             return;
         }
         target.raw = modbus_raw_type(document, *address);
+        const std::string_view written_type =
+            write ? expanded_.text_of(*write, "type") : std::string_view();
+        target.write_raw =
+            written_type.empty() ? target.raw : std::string(written_type);
         if (!target.unwritable.empty()) {
             return;
         }
@@ -245,6 +261,16 @@ private:
             target.unwritable = "table " + std::string(table) +
                                 " without write.on or write.off";
         }
+    }
+
+    // The write encoding of a point (A.5).
+    void read_write(NodeId write, Target& target) const {
+        target.mask = expanded_.child(write, "mask").has_value();
+        target.on_off = expanded_.child(write, "on").has_value() ||
+                        expanded_.child(write, "off").has_value();
+        target.encoded = target.mask || target.on_off ||
+                         expanded_.child(write, "values").has_value() ||
+                         expanded_.child(write, "value").has_value();
     }
 
     // --- One output ------------------------------------------------------
@@ -269,12 +295,14 @@ private:
             error(reader, *name_node, CF_NO_FEEDBACK,
                   head + " needs feedback or no_feedback: true");
         }
-        // A dangerous output holds whatever it is given (7.2): no
-        // `safe_state` is needed, and one other than `hold` is CF-705.
-        if (!reader.child(output, "safe_state") && !dangerous) {
+        // Every output names its safe_state, a dangerous one too (7.2; M3
+        // of the review of #185), where one other than `hold` is CF-705.
+        if (!reader.child(output, "safe_state")) {
             error(reader, *name_node, CF_NO_SAFE_STATE,
                   head + " needs a safe_state");
         }
+        const bool form_fits =
+            dangerous || check_safe_state_form(reader, output, head, kind);
         check_interlocks(reader, output, *name_node, head, kind);
         check_refresh(reader, output, head, kind, target);
         check_actions(reader, output, head, kind, dangerous);
@@ -285,10 +313,12 @@ private:
                   head + ": the device must time the pulse");
         }
         check_control_loss_hold(reader, output, head, kind, target);
-        if (target && target->point) {
+        // A target that is not a writable point of the output's kind is
+        // CF-702 alone (S3 of the review of #185).
+        if (target && writable(kind, *target)) {
             check_dangerous_flags(reader, output, head, *target);
             check_on_only(reader, output, head, kind, *target);
-            check_values(reader, output, head, *target);
+            check_values(reader, output, head, kind, *target, form_fits);
             check_native_select(reader, output, head, *target);
             check_defaults(reader, output, head, kind, *target);
         }
@@ -312,15 +342,51 @@ private:
         return true;  // `latch`: reserved (CF-210)
     }
 
+    // True if `target` is a writable point that an output of `kind` can
+    // drive (CF-702).
+    [[nodiscard]] static bool writable(std::string_view kind,
+                                       const Target& target) {
+        return target.point &&
+               (target.access == "rw" || target.access == "wo") &&
+               target.value_type != "string" && kind_fits(kind, target);
+    }
+
+    // CF-713 for a `safe_state` whose form its kind does not take (7.2; M1
+    // of the review of #185): `off`, `on` or `hold` for `single` and
+    // `double`, `{ value }`, `{ raw }` or `hold` for `setpoint`. A `step`,
+    // `pulse` or `trigger` holds only: CF-719 of `check_actions`. True if
+    // the form fits, or there is none.
+    bool check_safe_state_form(const Reader& reader, NodeId output,
+                               const std::string& head, std::string_view kind) {
+        const std::optional<NodeId> safe_state =
+            reader.child(output, "safe_state");
+        if (!safe_state) {
+            return true;
+        }
+        if (has_no_safe_action(kind)) {
+            return true;  // CF-719 of check_actions; no value is checked
+        }
+        const Document& document = reader.document();
+        const bool scalar = document.kind(*safe_state) == NodeKind::SCALAR;
+        const std::string_view text = scalar ? document.text(*safe_state) : "";
+        bool fits = true;
+        if (is_switching(kind)) {
+            fits = scalar && (text == "off" || text == "on" || text == "hold");
+        } else if (kind == "setpoint") {
+            fits = !scalar || text == "hold";
+        }
+        if (!fits) {
+            refuse_value(reader, *safe_state, head, "safe_state");
+        }
+        return fits;
+    }
+
     // CF-702, CF-708 and CF-703.
     void check_target(const Reader& reader, NodeId node,
                       const std::string& head, std::string_view kind,
                       const std::optional<Target>& target) {
         const std::string_view tag = reader.document().text(node);
-        if (target &&
-            (!target->point ||
-             (target->access != "rw" && target->access != "wo") ||
-             target->value_type == "string" || !kind_fits(kind, *target))) {
+        if (target && !writable(kind, *target)) {
             error(reader, node, CF_NOT_WRITABLE,
                   head + ": target " + quote_text(tag) +
                       " is not a writable point");
@@ -430,6 +496,9 @@ private:
         }
         const std::optional<NodeId> limits = reader.child(output, "limits");
         const bool has_release = limits && reader.child(*limits, "release");
+        const std::optional<NodeId> loss =
+            reader.child(output, "on_control_loss");
+        const bool loss_timed = loss && reader.child(*loss, "after");
         for (const auto& [key, node] : actions_of(reader, output)) {
             const std::string_view action = document.text(node);
             if (action == "hold") {
@@ -458,6 +527,12 @@ private:
                 error(
                     reader, node, CF_SAFE_WITH_HOLD,
                     head + ": action safe needs a safe_state other than hold");
+            } else if (action == "safe" && key == "on_control_loss" &&
+                       !loss_timed) {
+                // Interim rule (j) of D-124 (S1 of the review of #185): a
+                // written safe action on control loss says when.
+                error(reader, node, CF_REFRESH_OR_RELEASE,
+                      head + ": on_control_loss with action safe needs after");
             }
         }
     }
@@ -658,12 +733,14 @@ private:
     // CF-713 (ruling Q8, interim rules (d), (e) and (f)): the values an
     // output writes fit its target, by mathematical value.
     void check_values(const Reader& reader, NodeId output,
-                      const std::string& head, const Target& target) {
+                      const std::string& head, std::string_view kind,
+                      const Target& target, bool form_fits) {
         const std::optional<NodeId> limits = reader.child(output, "limits");
         const Limits bounds =
             limits ? read_limits(reader, *limits, head, target) : Limits{};
         if (const std::optional<NodeId> safe_state =
-                reader.child(output, "safe_state")) {
+                reader.child(output, "safe_state");
+            safe_state && form_fits && !has_no_safe_action(kind)) {
             check_written(reader, *safe_state, "safe_state", head, target,
                           &bounds);
         }
@@ -741,27 +818,22 @@ private:
         if (document.kind(map) != NodeKind::MAP) {
             return;
         }
+        // One text for every cause (S4 of the review of #185): D-124 lists
+        // them.
         if (const std::optional<NodeId> value = reader.scalar(map, "value")) {
             const std::string_view text = document.text(*value);
-            if (!fits_value_type(text, target.value_type)) {
+            if (!fits_value_type(text, target.value_type) ||
+                (target.has_enum && !is_enum_code(target, text)) ||
+                (!target.write_raw.empty() &&
+                 !survives_scaling(text, target.value_type, target.write_raw,
+                                   target.scaling)) ||
+                (limits != nullptr && !within(*limits, text))) {
                 refuse_value(reader, *value, head, key + ".value");
-            } else if (!target.raw.empty() &&
-                       !survives_scaling(text, target.value_type, target.raw,
-                                         target.scaling)) {
-                refuse_value(reader, *value, head,
-                             key + ".value " + std::string(text) +
-                                 " (scaled into raw type " + target.raw + ")");
-            } else if (limits != nullptr && !within(*limits, text)) {
-                refuse_value(reader, *value, head,
-                             key + ".value " + std::string(text) +
-                                 " (outside the output's limits)");
             }
         }
         if (const std::optional<NodeId> raw = reader.scalar(map, "raw")) {
-            if (target.mask || target.on_off) {
-                refuse_value(reader, *raw, head,
-                             key + ".raw (the target has a write encoding)");
-            } else if (!fits_raw_width(document.text(*raw), target.raw)) {
+            if (target.encoded ||
+                !fits_raw_width(document.text(*raw), target.write_raw)) {
                 refuse_value(reader, *raw, head, key + ".raw");
             }
         }
@@ -851,12 +923,15 @@ private:
                               std::string(key) + " for an io target)");
                 }
             }
-            if (target.at_start_safe) {
-                error(reader, *safe_state, CF_SAFE_WITH_HOLD,
-                      head +
-                          ": action safe needs a safe_state other than hold "
-                          "(the target's at_start is safe)");
-            }
+        }
+        // Interim rule (c), on every output (M2 of the review of #185): an
+        // `at_start: safe` line is requested at the safe state, which `hold`
+        // does not name.
+        if (state == "hold" && target.at_start_safe) {
+            error(reader, *safe_state, CF_SAFE_WITH_HOLD,
+                  head +
+                      ": action safe needs a safe_state other than hold "
+                      "(the target's at_start is safe)");
         }
         if (target.protocol != "io" || target.dangerous ||
             !is_switching(kind) || (state != "off" && state != "on")) {
@@ -878,6 +953,75 @@ private:
                     head + " holds on shutdown although its safe_state is " +
                         std::string(state));
         }
+    }
+
+    // --- Enumerations (5.5; M6 of the review of #185) -----------------------
+
+    // The devices of the expanded tree by name, and the tables of
+    // enums.yaml, for the enumerations that points name.
+    void read_enumerations() {
+        const Document& document = expanded_.document();
+        for (const NodeId channel :
+             expanded_.items(document.root(), "channels")) {
+            for (const NodeId device : expanded_.items(channel, "devices")) {
+                devices_.try_emplace(expanded_.text_of(device, "name"), device);
+            }
+        }
+        for (std::size_t i = 0; i < files_.size(); ++i) {
+            if (files_[i].source->path_class.type != FileType::ENUMS) {
+                continue;
+            }
+            const Reader& reader = readers_[i];
+            for (const Entry& table :
+                 reader.entries(reader.document().root(), "enums")) {
+                global_enums_.try_emplace(reader.document().text(table.key),
+                                          Table{&reader, table.value});
+            }
+        }
+    }
+
+    // The codes of the enumeration of `point`: inline, else named in the
+    // device's `enums` (its templates' merged), else in enums.yaml.
+    void read_enumeration(NodeId point, Target& target) const {
+        const std::optional<NodeId> named = expanded_.child(point, "enum");
+        if (!named) {
+            return;
+        }
+        Table table{&expanded_, *named};
+        if (expanded_.document().kind(*named) == NodeKind::SCALAR) {
+            const std::string_view name = expanded_.document().text(*named);
+            const auto device = devices_.find(device_);
+            const std::optional<NodeId> own =
+                device == devices_.end()
+                    ? std::nullopt
+                    : expanded_.child(device->second, "enums");
+            const std::optional<NodeId> local =
+                own ? expanded_.child(*own, name) : std::nullopt;
+            if (local) {
+                table.node = *local;
+            } else if (const auto global = global_enums_.find(name);
+                       global != global_enums_.end()) {
+                table = global->second;
+            } else {
+                return;  // CF-310 of the references
+            }
+        }
+        if (table.reader->document().kind(table.node) != NodeKind::MAP) {
+            return;
+        }
+        target.has_enum = true;
+        for (const Entry& code : table.reader->document().entries(table.node)) {
+            target.enum_codes.push_back(
+                table.reader->document().text(code.key));
+        }
+    }
+
+    [[nodiscard]] static bool is_enum_code(const Target& target,
+                                           std::string_view value) {
+        return std::ranges::any_of(
+            target.enum_codes, [value](std::string_view code) {
+                return compare_numbers(value, code).value_or(1) == 0;
+            });
     }
 
     // --- Areas (7.1) -------------------------------------------------------
@@ -981,6 +1125,15 @@ private:
     Reader expanded_;
     Reporter reporter_;
     std::vector<Reader> readers_;
+    // An enumeration table: a map of codes in a Document.
+    struct Table {
+        const Reader* reader = nullptr;
+        NodeId node = 0;
+    };
+    std::map<std::string_view, NodeId, std::less<>> devices_;
+    std::map<std::string_view, Table, std::less<>> global_enums_;
+    // The device of the target being read.
+    mutable std::string_view device_;
     // The outputs checked, by name: views into the tree's Documents.
     std::set<std::string_view> outputs_;
     // Each target and the first output that names it, quoted.

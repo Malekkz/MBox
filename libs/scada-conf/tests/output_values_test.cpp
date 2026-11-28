@@ -97,6 +97,23 @@ TEST(OutputValues, TheInverseScaling) {
         survives_scaling("12.5", "float64", "uint16", with_gain("0.5")));
 }
 
+// S2 of the review of #185: a negative integer gain, the sign of the
+// offset on the binary64 path, and v - offset past 2^64 - 1.
+TEST(OutputValues, SignsAndOverflow) {
+    EXPECT_TRUE(survives_scaling("-10", "int64", "uint16", with_gain("-2")));
+    EXPECT_FALSE(survives_scaling("10", "int64", "uint16", with_gain("-2")));
+    EXPECT_TRUE(survives_scaling("10", "int64", "int16", with_gain("-2")));
+    // 0.5 - 1 is -0.5, which rounds to -1; 0.5 + 1 is 1.5, which rounds to 2.
+    EXPECT_FALSE(
+        survives_scaling("0.5", "float64", "uint16", with_offset("1")));
+    EXPECT_TRUE(
+        survives_scaling("0.5", "float64", "uint16", with_offset("-1")));
+    EXPECT_FALSE(survives_scaling("18446744073709551615", "uint64", "uint64",
+                                  with_offset("-1")));
+    EXPECT_TRUE(survives_scaling("18446744073709551615", "uint64", "uint64",
+                                 with_offset("1")));
+}
+
 // Q7: the defaults, for each kind, protocol and safe state.
 TEST(OutputValues, TheFailSafeDefaults) {
     using Row =

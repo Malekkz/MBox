@@ -62,6 +62,25 @@ constexpr std::string_view METER =
     "  - { name: label, access: wo, storage: volatile, address: { table: "
     "holding, register: 80, type: string, length: 2, write: { mask: 0x0001 "
     "} } }\n"
+    // M4 to M6 of the review of #185: a point written as another raw type,
+    // two with a write encoding a setpoint can carry, and an enumeration.
+    "  - { name: signed, access: rw, storage: volatile, address: { table: "
+    "holding, register: 90, type: uint16, write: { type: int16 } } }\n"
+    "  - { name: coded, access: rw, storage: volatile, address: { table: "
+    "holding, register: 91, type: uint16, write: { values: { 0: 1, 1: 2 } "
+    "} } }\n"
+    "  - { name: fixed, access: wo, storage: volatile, address: { table: "
+    "holding, register: 92, type: uint16, write: { value: 1 } } }\n"
+    "  - { name: narrow, access: rw, storage: volatile, address: { table: "
+    "holding, register: 100, type: uint32, write: { type: uint16 } } }\n"
+    "  - { name: mode, access: rw, storage: volatile, enum: { 0: stop, 1: "
+    "run }, address: { table: holding, register: 93, type: uint16 } }\n"
+    "  - { name: brk2, kind: double_point, access: wo, storage: volatile, "
+    "address: { write: { on: { table: holding, register: 94, value: 1 }, "
+    "off: { table: holding, register: 95, value: 1 } } } }\n"
+    "  - { name: brk3, kind: double_point, access: wo, storage: volatile, "
+    "address: { write: { on: { table: holding, register: 96, value: 1 }, "
+    "off: { table: holding, register: 97, value: 1 } } } }\n"
     "  - name: status\n"
     "    address: { table: holding, register: 50, type: uint16 }\n"
     "    tag: false\n"
@@ -77,6 +96,15 @@ constexpr std::string_view IO_TEMPLATE =
     "  - { name: button, access: rw, storage: volatile, address: { line: 3, "
     "direction: input, at_start: hold } }\n"
     "  - { name: led, access: rw, storage: volatile, address: { line: 4, "
+    "direction: output, at_start: hold } }\n"
+    // M2 of the review of #185: more lines that start safe.
+    "  - { name: lamp2, access: rw, storage: volatile, address: { line: 5, "
+    "direction: output, at_start: safe } }\n"
+    "  - { name: horn, access: rw, storage: volatile, dangerous: true, "
+    "address: { line: 6, direction: output, at_start: safe } }\n"
+    "  - { name: horn2, access: rw, storage: volatile, dangerous: true, "
+    "address: { line: 7, direction: output, at_start: safe } }\n"
+    "  - { name: level, access: rw, storage: volatile, address: { line: 8, "
     "direction: output, at_start: hold } }\n";
 
 // The tree of meter_a at ps1.m1, an `io` device ps1.io, the area ps1 and
@@ -199,7 +227,8 @@ TEST(OutputRules, FeedbackSafeStateAndInterlocks) {
             "ps1.m1.sp2, no_feedback: true }\n"
             "  - { name: ps1.c, area: ps1, kind: single, target: ps1.m1.c1, "
             "no_feedback: true, safe_state: off }\n"
-            // A dangerous target holds without being told (7.2).
+            // A dangerous output names its safe_state too (7.2; M3 of the
+            // review of #185).
             "  - { name: ps1.d, area: ps1, kind: single, target: "
             "ps1.m1.danger, feedback: ps1.m1.state, interlocks: [] }\n"
             "  - { name: ps1.e, area: ps1, kind: double, target: ps1.m1.brk, "
@@ -210,7 +239,9 @@ TEST(OutputRules, FeedbackSafeStateAndInterlocks) {
                "outputs/ps1.yaml:5:13: error CF-710: output \"ps1.b\" needs a "
                "safe_state",
                "outputs/ps1.yaml:6:13: error CF-711: output \"ps1.c\" needs "
-               "interlocks (an empty list if none applies)"}));
+               "interlocks (an empty list if none applies)",
+               "outputs/ps1.yaml:7:13: error CF-710: output \"ps1.d\" needs a "
+               "safe_state"}));
 }
 
 // --- CF-705, CF-706, CF-714: refresh -----------------------------------
@@ -528,21 +559,196 @@ TEST(OutputRules, ValuesFitTheTarget) {
                "outputs/ps1.yaml:4:137: error CF-713: output \"ps1.a\": "
                "limits.max does not fit the target's type",
                "outputs/ps1.yaml:5:107: error CF-713: output \"ps1.b\": "
-               "safe_state.value 70000 (scaled into raw type uint16) does not "
-               "fit the target's type",
+               "safe_state.value does not fit the target's type",
                "outputs/ps1.yaml:6:109: error CF-713: output \"ps1.c\": "
-               "safe_state.value 7000 (scaled into raw type uint16) does not "
-               "fit the target's type",
+               "safe_state.value does not fit the target's type",
                "outputs/ps1.yaml:6:143: error CF-713: output \"ps1.c\": "
                "limits.release.raw does not fit the target's type",
                "outputs/ps1.yaml:7:107: error CF-713: output \"ps1.d\": "
-               "safe_state.value 50 (outside the output's limits) does not fit "
-               "the target's type",
-               "outputs/ps1.yaml:8:121: error CF-713: output \"ps1.e\": "
-               "safe_state.raw (the target has a write encoding) does not fit "
-               "the target's type",
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:8:114: error CF-713: output \"ps1.e\": "
+               "safe_state does not fit the target's type",
                "outputs/ps1.yaml:9:107: error CF-713: output \"ps1.f\": "
                "safe_state.value does not fit the target's type"}));
+}
+
+// M1 of the review of #185: each kind takes its own safe_state forms,
+// CF-713 once at the safe_state, and a pulse's CF-719 alone (S3).
+TEST(OutputRules, SafeStateFormsPerKind) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: ps1.m1.sp, "
+            "no_feedback: true, safe_state: off, on_shutdown: safe }\n"
+            "  - { name: ps1.b, area: ps1, kind: double, target: ps1.m1.brk, "
+            "no_feedback: true, interlocks: [], safe_state: { value: 7 } }\n"
+            "  - { name: ps1.c, area: ps1, kind: double, target: ps1.m1.brk2, "
+            "no_feedback: true, interlocks: [], safe_state: { value: 2 } }\n"
+            "  - { name: ps1.d, area: ps1, kind: single, target: ps1.m1.c1, "
+            "no_feedback: true, interlocks: [], safe_state: { value: true } "
+            "}\n"
+            "  - { name: ps1.e, area: ps1, kind: single, target: ps1.m1.c2, "
+            "no_feedback: true, interlocks: [], safe_state: { raw: 1 } }\n"
+            "  - { name: ps1.f, area: ps1, kind: pulse, target: ps1.m1.c3, "
+            "no_feedback: true, interlocks: [], safe_state: { value: true } "
+            "}\n"
+            "  - { name: ps1.g, area: ps1, kind: setpoint, target: "
+            "ps1.m1.sp2, no_feedback: true, safe_state: { value: 3 } }\n"
+            "  - { name: ps1.h, area: ps1, kind: double, target: ps1.m1.brk3, "
+            "no_feedback: true, interlocks: [], safe_state: on }\n"),
+        (Lines{"outputs/ps1.yaml:4:97: error CF-713: output \"ps1.a\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:5:112: error CF-713: output \"ps1.b\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:6:113: error CF-713: output \"ps1.c\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:7:111: error CF-713: output \"ps1.d\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:8:111: error CF-713: output \"ps1.e\": "
+               "safe_state does not fit the target's type",
+               "outputs/ps1.yaml:9:110: error CF-719: output \"ps1.f\": a "
+               "pulse output has no safe action; use hold"}));
+}
+
+// Interim rule (c) on every output (M2 of the review of #185): a pulse, a
+// trigger and a dangerous output that hold cannot target a line that starts
+// safe; a dangerous one without safe_state is CF-710 alone (M3).
+TEST(OutputRules, HoldOnALineThatStartsSafe) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: pulse, target: ps1.io.lamp, "
+            "no_feedback: true, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.b, area: ps1, kind: trigger, target: "
+            "ps1.io.lamp2, no_feedback: true, interlocks: [], safe_state: hold "
+            "}\n"
+            "  - { name: ps1.c, area: ps1, kind: single, target: ps1.io.horn, "
+            "no_feedback: true, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.d, area: ps1, kind: single, target: "
+            "ps1.io.horn2, no_feedback: true, interlocks: [] }\n"),
+        (Lines{"outputs/ps1.yaml:4:112: error CF-722: output \"ps1.a\": "
+               "action safe needs a safe_state other than hold (the target's "
+               "at_start is safe)",
+               "outputs/ps1.yaml:5:115: error CF-722: output \"ps1.b\": "
+               "action safe needs a safe_state other than hold (the target's "
+               "at_start is safe)",
+               "outputs/ps1.yaml:6:113: error CF-722: output \"ps1.c\": "
+               "action safe needs a safe_state other than hold (the target's "
+               "at_start is safe)",
+               "outputs/ps1.yaml:7:13: error CF-710: output \"ps1.d\" needs a "
+               "safe_state"}));
+}
+
+// Interim rule (j) (S1 of the review of #185): a written safe action on
+// control loss says when; S3: a setpoint on a BOOL line is CF-702 alone.
+TEST(OutputRules, ControlLossSafeNeedsAfter) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: single, target: ps1.m1.c1, "
+            "no_feedback: true, interlocks: [], safe_state: off, "
+            "on_control_loss: { action: safe } }\n"
+            "  - { name: ps1.b, area: ps1, kind: single, target: ps1.m1.c2, "
+            "no_feedback: true, interlocks: [], safe_state: off, "
+            "on_control_loss: { action: safe, after: 5s } }\n"
+            "  - { name: ps1.c, area: ps1, kind: setpoint, target: "
+            "ps1.io.level, no_feedback: true, safe_state: { value: 1 }, "
+            "limits: { min: 0, max: 1 } }\n"),
+        (Lines{"outputs/ps1.yaml:4:143: error CF-714: output \"ps1.a\": "
+               "on_control_loss with action safe needs after",
+               "outputs/ps1.yaml:6:55: error CF-702: output \"ps1.c\": target "
+               "\"ps1.io.level\" is not a writable point"}));
+}
+
+// S2 of the review of #185: each bound of `limits.ranges` is a value of
+// the target's type, and a safe value outside every range is refused
+// although it is within min and max.
+TEST(OutputRules, TheRangesOfTheLimits) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: ps1.m1.sp, "
+            "no_feedback: true, safe_state: hold, limits: { ranges: [[0, "
+            "1.5]] } }\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.sp2, no_feedback: true, safe_state: { value: 5 }, limits: "
+            "{ min: 0, max: 10, ranges: [[0, 2], [7, 10]] } }\n"
+            "  - { name: ps1.c, area: ps1, kind: setpoint, target: "
+            "ps1.m1.tenth2, no_feedback: true, safe_state: { value: 8 }, "
+            "limits: { min: 0, max: 10, ranges: [[0, 2], [7, 10]] } }\n"),
+        (Lines{"outputs/ps1.yaml:4:126: error CF-713: output \"ps1.a\": "
+               "limits.ranges[0] does not fit the target's type",
+               "outputs/ps1.yaml:5:107: error CF-713: output \"ps1.b\": "
+               "safe_state.value does not fit the target's type"}));
+}
+
+// M4 to M6 of the review of #185: a value is compared with the raw type
+// written, `{ raw }` is refused with any write encoding, and an
+// enumeration's codes are the values its target takes.
+TEST(OutputRules, ValuesAgainstTheWrite) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: "
+            "ps1.m1.signed, no_feedback: true, safe_state: { value: 40000 } "
+            "}\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.coded, no_feedback: true, safe_state: { raw: 1 } }\n"
+            "  - { name: ps1.c, area: ps1, kind: setpoint, target: "
+            "ps1.m1.fixed, no_feedback: true, safe_state: { raw: 1 } }\n"
+            "  - { name: ps1.d, area: ps1, kind: setpoint, target: "
+            "ps1.m1.mode, no_feedback: true, safe_state: { value: 5 }, "
+            "limits: { release: { value: 1 } } }\n"
+            "  - { name: ps1.e, area: ps1, kind: setpoint, target: "
+            "ps1.m1.sp, no_feedback: true, safe_state: { raw: 40000 } }\n"
+            "  - { name: ps1.f, area: ps1, kind: setpoint, target: "
+            "ps1.m1.narrow, no_feedback: true, safe_state: { raw: 70000 } }\n"),
+        (Lines{"outputs/ps1.yaml:4:110: error CF-713: output \"ps1.a\": "
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:5:107: error CF-713: output \"ps1.b\": "
+               "safe_state.raw does not fit the target's type",
+               "outputs/ps1.yaml:6:107: error CF-713: output \"ps1.c\": "
+               "safe_state.raw does not fit the target's type",
+               "outputs/ps1.yaml:7:108: error CF-713: output \"ps1.d\": "
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:9:108: error CF-713: output \"ps1.f\": "
+               "safe_state.raw does not fit the target's type"}));
+    // A uint16 point written as int16 takes -5, and its raw form too.
+    EXPECT_EQ(errors_with_interlock(
+                  "  - { name: ps1.a, area: ps1, kind: setpoint, target: "
+                  "ps1.m1.signed, no_feedback: true, safe_state: { value: -5 "
+                  "}, limits: { release: { raw: -5 } } }\n"),
+              Lines{});
+}
+
+// M6 of the review of #185: a named enumeration resolves over the
+// template's `enums`, then enums.yaml.
+TEST(OutputRules, ValuesOfANamedEnumeration) {
+    std::string meter(METER);
+    meter.insert(meter.find("  - name: status"),
+                 "  - { name: local, access: rw, storage: volatile, enum: "
+                 "states, address: { table: holding, register: 98, type: "
+                 "uint16 } }\n"
+                 "  - { name: shared, access: rw, storage: volatile, enum: "
+                 "modes, address: { table: holding, register: 99, type: "
+                 "uint16 } }\n");
+    meter += "enums:\n  states: { 0: off, 4: on }\n";
+    const Files more{{"templates/meter_a.yaml", meter},
+                     {"enums.yaml", "enums:\n  modes: { 1: auto, 2: hand }\n"}};
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: "
+            "ps1.m1.local, no_feedback: true, safe_state: { value: 1 } }\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.shared, no_feedback: true, safe_state: { value: 0 } }\n",
+            more),
+        (Lines{"outputs/ps1.yaml:4:109: error CF-713: output \"ps1.a\": "
+               "safe_state.value does not fit the target's type",
+               "outputs/ps1.yaml:5:110: error CF-713: output \"ps1.b\": "
+               "safe_state.value does not fit the target's type"}));
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: setpoint, target: "
+            "ps1.m1.local, no_feedback: true, safe_state: { value: 4 } }\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.shared, no_feedback: true, safe_state: { value: 0x2 } }\n",
+            more),
+        Lines{});
 }
 
 // CF-714 (interim rule (a)): no protocol of phase 2 has a select on the
