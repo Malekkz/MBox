@@ -45,12 +45,13 @@ struct ExpressionInputs {
     // The input polled most slowly, and its class.
     std::string slowest;
     InputClass slowest_class;
-    // The first input a protocol driver owns, in the expression's order and
-    // a pattern's name order, and that driver.
+    // The first tag a protocol driver owns that it reads, and that driver:
+    // its own inputs first, in the expression's order and a pattern's name
+    // order, else through the virtual tags it reads, in the order they are
+    // defined (ruling T2 of D-125). Found once per tag over the graph of
+    // CF-525, so a pattern that many tags read costs one walk.
     std::string driver_tag;
     std::string driver;
-    // The virtual tags it reads, for what they read in turn.
-    std::vector<std::string> virtuals;
 };
 
 // What the virtual tags and interlocks of a tree read, for the task rules.

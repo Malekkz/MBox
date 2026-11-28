@@ -387,14 +387,17 @@ private:
         std::string tag = reads.driver_tag;
         std::string driver = reads.driver;
         NodeId place = reads.driver_at;
+        // A virtual tag read gives what it reaches (ruling T2), found once
+        // for every tag by the run-time expressions.
         for (const auto& [name, node] : reads.virtuals) {
             if (!tag.empty()) {
                 break;
             }
-            if (const std::optional<std::pair<std::string, std::string>> found =
-                    driver_through(name)) {
-                tag = found->first;
-                driver = found->second;
+            const auto found = virtuals_.find(name);
+            if (found != virtuals_.end() &&
+                !found->second->driver_tag.empty()) {
+                tag = found->second->driver_tag;
+                driver = found->second->driver;
                 place = node;
             }
         }
@@ -404,36 +407,6 @@ private:
                       " is rt_required and reads " + quote_text(tag) +
                       " from " + driver);
         }
-    }
-
-    // The first tag a protocol driver owns that virtual tag `name` reads,
-    // itself or through the virtual tags it reads (ruling T2), and its
-    // driver: depth first, in the order read, without recursion (a tree
-    // may chain many virtual tags); a cycle (CF-525) ends a path.
-    [[nodiscard]] std::optional<std::pair<std::string, std::string>>
-    driver_through(std::string_view name) const {
-        std::set<std::string_view> seen{name};
-        std::vector<std::string_view> stack{name};
-        while (!stack.empty()) {
-            const std::string_view next = stack.back();
-            stack.pop_back();
-            const auto found = virtuals_.find(next);
-            if (found == virtuals_.end()) {
-                continue;
-            }
-            const ExpressionInputs& expression = *found->second;
-            if (!expression.driver_tag.empty()) {
-                return std::pair{expression.driver_tag, expression.driver};
-            }
-            // Reversed, so that the first input is walked first.
-            for (const std::string& input :
-                 std::ranges::reverse_view(expression.virtuals)) {
-                if (seen.insert(input).second) {
-                    stack.emplace_back(input);
-                }
-            }
-        }
-        return std::nullopt;
     }
 
     void check_expression(const ExpressionInputs& expression) {
@@ -446,19 +419,9 @@ private:
                           .driver_tag = expression.driver_tag,
                           .driver = expression.driver,
                           .driver_at = expression.at,
-                          .virtuals = virtuals_of(expression)};
+                          .virtuals = {}};
         const Reader reader(*expression.document);
         check_reads(reader, reads, expression.task);
-    }
-
-    [[nodiscard]] static std::vector<std::pair<std::string, NodeId>>
-    virtuals_of(const ExpressionInputs& expression) {
-        std::vector<std::pair<std::string, NodeId>> virtuals;
-        virtuals.reserve(expression.virtuals.size());
-        for (const std::string& name : expression.virtuals) {
-            virtuals.emplace_back(name, expression.at);
-        }
-        return virtuals;
     }
 
     const TagNames* tags_;

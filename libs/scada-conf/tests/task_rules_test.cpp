@@ -224,13 +224,19 @@ TEST(TaskRules, AnRtRequiredTaskReadsNoDriverTag) {
                    "  - { name: v.pat, type: virtual, task: fast, expr: "
                    "\"sum(\\\"v.sl*\\\") > 1\" }\n"
                    "  - { name: b1.v, type: virtual, task: slow, expr: "
-                   "\"ps1.m1.flow * 3\" }\n")},
+                   "\"ps1.m1.flow * 3\" }\n"
+                   "  - { name: v.il, type: virtual, task: fast, expr: "
+                   "\"il.c\" }\n")},
              {"outputs/ps1.yaml",
               "interlocks:\n"
               "  - { name: il.a, task: fast, condition: \"v.io AND "
               "ps1.m1.run\", message: m }\n"
               "  - { name: il.b, task: fast, condition: \"v.io\", message: m "
-              "}\n"},
+              "}\n"
+              // An interlock is allowed: what its condition reads is not
+              // followed (ruling T2).
+              "  - { name: il.c, task: slow, condition: \"ps1.m1.flow > 1\", "
+              "message: m }\n"},
              {"control/p_fast.yaml",
               block_program("p_fast", "{ x: ps1.m1.fast_flow, y: il.b }")},
              // A program reads a virtual tag; `b1.v` is the pin of block b1,

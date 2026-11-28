@@ -174,7 +174,6 @@ struct PatternInputs {
     InputClass slowest_class;
     std::string driver_tag;
     std::string driver;
-    std::vector<std::string> virtuals;
 };
 
 // A distinct name pattern that a virtual tag or an interlock reads: a
@@ -328,20 +327,11 @@ private:
             inputs.driver_tag = std::string(name);
             inputs.driver = std::move(read.driver);
         }
-        if (const auto found = by_name_.find(name);
-            found != by_name_.end() && named_[found->second].is_virtual) {
-            inputs.virtuals.emplace_back(name);
-        }
     }
 
     [[nodiscard]] static std::size_t bytes_of(const PatternInputs& inputs) {
-        std::size_t bytes = inputs.slowest.size() + inputs.driver_tag.size() +
-                            inputs.driver.size() +
-                            inputs.slowest_class.poll_text.size();
-        for (const std::string& name : inputs.virtuals) {
-            bytes += name.size();
-        }
-        return bytes;
+        return inputs.slowest.size() + inputs.driver_tag.size() +
+               inputs.driver.size() + inputs.slowest_class.poll_text.size();
     }
 
     // Adds what `pattern` matches to `inputs`: from the summary kept, else
@@ -365,8 +355,6 @@ private:
             inputs.driver_tag = matched->driver_tag;
             inputs.driver = matched->driver;
         }
-        inputs.virtuals.insert(inputs.virtuals.end(), matched->virtuals.begin(),
-                               matched->virtuals.end());
     }
 
     // Adds tag `name` to `inputs`, if it is one.
@@ -424,10 +412,76 @@ private:
                 .slowest = std::move(inputs.slowest),
                 .slowest_class = std::move(inputs.slowest_class),
                 .driver_tag = std::move(inputs.driver_tag),
-                .driver = std::move(inputs.driver),
-                .virtuals = std::move(inputs.virtuals)});
+                .driver = std::move(inputs.driver)});
+            exported_[static_cast<std::size_t>(&vertex - named_.data())] =
+                task_inputs_->expressions.size() - 1;
         }
         task_inputs_->whole = !over_budget_;
+        if (task_inputs_->whole) {
+            reach_drivers();
+        }
+    }
+
+    // The driver-owned tag each virtual tag and interlock reaches through
+    // the virtual tags it reads (ruling T2 of D-125), in the order of the
+    // components of the graph: every input before what reads it. A pattern
+    // reaches what the first virtual tag it matched reaches; a cycle
+    // (CF-525) reaches nothing more.
+    void reach_drivers() {
+        std::vector<const ExpressionInputs*> reach(named_.size() +
+                                                   patterns_.size());
+        for (const std::vector<std::size_t>& component : order_) {
+            if (component.size() != 1) {
+                continue;  // a cycle
+            }
+            const std::size_t vertex = component.front();
+            reach[vertex] = vertex >= named_.size()
+                                ? pattern_reach(vertex, reach)
+                                : named_reach(vertex, reach);
+        }
+    }
+
+    // What a pattern vertex reaches: that of the first virtual tag it
+    // matched that reaches one.
+    [[nodiscard]] const ExpressionInputs* pattern_reach(
+        std::size_t vertex,
+        const std::vector<const ExpressionInputs*>& reach) const {
+        for (const std::size_t input :
+             pattern_virtuals_[vertex - named_.size()]) {
+            if (reach[input] != nullptr) {
+                return reach[input];
+            }
+        }
+        return nullptr;
+    }
+
+    // What a virtual tag or interlock reaches: its own first driver-owned
+    // input, else that of the first virtual tag or pattern it reads that
+    // reaches one; nothing for one that reads itself (CF-525). An
+    // interlock's is its own, and no reader follows it.
+    const ExpressionInputs* named_reach(
+        std::size_t vertex, const std::vector<const ExpressionInputs*>& reach) {
+        const auto found = exported_.find(vertex);
+        if (found == exported_.end() ||
+            std::ranges::binary_search(named_[vertex].inputs, vertex)) {
+            return nullptr;
+        }
+        ExpressionInputs& inputs = task_inputs_->expressions[found->second];
+        for (const std::size_t input : named_[vertex].inputs) {
+            if (!inputs.driver_tag.empty()) {
+                break;
+            }
+            // An interlock reaches nothing (below): only virtual tags and
+            // patterns lead on.
+            if (reach[input] != nullptr) {
+                inputs.driver_tag = reach[input]->driver_tag;
+                inputs.driver = reach[input]->driver;
+            }
+        }
+        if (inputs.driver_tag.empty() || !named_[vertex].is_virtual) {
+            return nullptr;
+        }
+        return &inputs;
     }
 
     // --- Tasks --------------------------------------------------------------
@@ -771,6 +825,11 @@ private:
             const bool matched =
                 matches_name_pattern(pattern.text, name, steps);
             if (spend(RUN_TIME_NAME_WORK + steps) && matched) {
+                // What a pattern reaches is that of the virtual tags it
+                // matches (D-125): kept from this walk, the one it has.
+                if (task_inputs_ != nullptr && named_[index].is_virtual) {
+                    pattern_virtuals_[vertex - named_.size()].push_back(index);
+                }
                 return index;
             }
         }
@@ -789,8 +848,9 @@ private:
     }
 
     void type_virtuals() {
-        const std::vector<std::vector<std::size_t>> walked = components();
-        for (const std::vector<std::size_t>& component : walked) {
+        pattern_virtuals_.assign(patterns_.size(), {});
+        order_ = components();
+        for (const std::vector<std::size_t>& component : order_) {
             // Past the budget the graph is not whole: no cycle and no type
             // is told from it.
             if (over_budget_) {
@@ -1074,6 +1134,12 @@ private:
     // The inputs of each pattern kept, and of the last walked (D-125).
     std::map<std::string, PatternInputs, std::less<>> pattern_inputs_;
     PatternInputs last_inputs_;
+    // The components of the graph in the order walked (type_virtuals), the
+    // virtual tags each pattern vertex matched, and the exported inputs of
+    // each named vertex by its index (D-125).
+    std::vector<std::vector<std::size_t>> order_;
+    std::vector<std::vector<std::size_t>> pattern_virtuals_;
+    std::map<std::size_t, std::size_t> exported_;
     GroupedErrors grouped_;
     std::map<std::string, std::int64_t, std::less<>> periods_;
     std::set<std::string, std::less<>> task_names_;
