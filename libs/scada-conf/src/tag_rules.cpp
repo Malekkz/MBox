@@ -348,6 +348,10 @@ private:
         }
     }
 
+    [[nodiscard]] std::string_view text_of_node(NodeId node) const {
+        return expanded_.document().text(node);
+    }
+
     // The period of `name` in `periods`, none for a name that has none.
     [[nodiscard]] static Period period_of(
         const std::map<std::string_view, Period, std::less<>>& periods,
@@ -391,10 +395,20 @@ private:
             // No tag of its own (D-116): only alarms that name a tag.
             collect_alarms(source, point, {});
         }
-        // A bit given by its name only has no key these rules read: its
-        // logging is the default policy's, which gives no error here (M1 of
-        // the review of #172).
         for (const Entry& entry : expanded_.entries(point, "bits")) {
+            // A bit given by its name only has no key of its own: its
+            // logging is the default policy's, which gives no error here (M1
+            // of the review of #172) but may give CW-805 (item 2 of the
+            // review of #184). The name is its own map, with no keys.
+            if (expanded_.document().kind(entry.value) == NodeKind::SCALAR) {
+                check_site(Site{.source = source,
+                                .name = tag_of(text_of_node(entry.value)),
+                                .name_node = entry.value,
+                                .keys = entry.value,
+                                .tag_file = false,
+                                .refresh = refresh});
+                continue;
+            }
             if (expanded_.document().kind(entry.value) != NodeKind::MAP) {
                 continue;
             }
