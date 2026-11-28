@@ -1202,8 +1202,8 @@ private:
     static void merge_level_keys(const Value& level, Value& device_keys,
                                  Value& defaults) {
         for (const std::string_view key :
-             {"read", "bit_order", "functions", "device_time", "keepalive",
-              "idle_timeout", "on_mismatch"}) {
+             {"read", "bit_order", "functions", "address_base", "device_time",
+              "keepalive", "idle_timeout", "on_mismatch"}) {
             merge_member(level, key, device_keys);
         }
         // An enumeration table of a level replaces the inherited one of its
