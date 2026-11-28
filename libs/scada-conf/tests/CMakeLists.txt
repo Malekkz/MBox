@@ -5,6 +5,7 @@ scada_add_test(scada-conf-unit-test KIND unit
     diagnostic_test.cpp
     expand_test.cpp
     merged_points_test.cpp
+    point_rules_test.cpp
     expression_test.cpp
     expression_types_test.cpp
     names_test.cpp
@@ -58,4 +59,13 @@ scada_add_test(scada-conf-expression-limits-test KIND unit
 # tags and patterns (D-117), with its own time limit.
 scada_add_test(scada-conf-runtime-limits-test KIND unit
   SOURCES runtime_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+# The work of the health rules' patterns of stage 5 at tens of thousands of
+# points (D-120), with its own time limit.
+scada_add_test(scada-conf-point-limits-test KIND unit
+  SOURCES point_limits_test.cpp
+  DEPENDS scada::conf scada::test-support)
+# The same at the default budget, timed (D-120).
+scada_add_test(scada-conf-point-limits-perf-test KIND perf
+  SOURCES point_limits_perf_test.cpp
   DEPENDS scada::conf scada::test-support)

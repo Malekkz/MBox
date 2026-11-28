@@ -1,5 +1,6 @@
 template: meter
 protocol: modbus
+bit_order: lsb0
 params:
   first: { type: int, default: 0 }
   flag: { type: int, default: 0 }
