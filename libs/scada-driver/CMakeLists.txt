@@ -17,6 +17,7 @@ scada_add_library(scada-driver
     src/failure.cpp
     src/fd_io.cpp
     src/identity.cpp
+    src/log_limit.cpp
     src/identity_run.cpp
     src/identity_setup.cpp
     src/identity_text.cpp
