@@ -1,7 +1,7 @@
 // A device's identity check and restart rule through a running driver, its
 // tag database and the simulator (driver interface contract 3.6, 7.6, 11.1;
-// decision D-147): a match, a mismatch with `refuse` and with `warn`, and a
-// restart, each in its tags and its log record.
+// decision D-147): a match, a mismatch with `refuse` and with `warn`, a hot
+// swap, and a restart, each in its tags and its log record.
 
 #include "driver_fixture.h"
 
@@ -135,6 +135,25 @@ TEST_F(Identity, AMismatchWithWarnRunsTheDevice) {
     EXPECT_TRUE(reaches("sys.dev.d1.state", RUNNING));
     EXPECT_TRUE(reaches("sys.dev.d1.identity_ok", false));
     EXPECT_TRUE(reaches("d1.v", std::int64_t{5}));
+    EXPECT_TRUE(stops_cleanly(running->driver));
+}
+
+TEST_F(Identity, AHotSwappedDeviceIsRefusedAndWithheld) {
+    // A running device unplugged and another model plugged in: the
+    // simulator closes the connection after 20 answers, and from the 20th
+    // request on `model` reads 8. The check after the reconnect refuses
+    // it, and its points go BAD without COMM_FAIL (PR 177 M3).
+    std::optional<Running> running = run(
+        "7", {"--set-after", "1", "0", "1", "8", "20", "--close-after", "20"},
+        {});
+    if (!running.has_value()) {
+        FAIL() << "no simulator or no driver";
+    }
+    EXPECT_TRUE(reaches("sys.dev.d1.state", MISMATCH));
+    EXPECT_TRUE(reaches("sys.dev.d1.identity_ok", false));
+    EXPECT_EQ(text_of("sys.dev.d1.identity"), "8");
+    EXPECT_TRUE(bad_without_comm_fail("d1.v"));
+    EXPECT_TRUE(logged_mismatch(running->driver));
     EXPECT_TRUE(stops_cleanly(running->driver));
 }
 

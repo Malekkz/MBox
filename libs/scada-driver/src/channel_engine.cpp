@@ -882,7 +882,13 @@ void ChannelEngine::answered(const Choice& choice,
         scheduler_.probe_done();
         if (choice.identity_probe) {
             // A probe by the identity cycle (D-147, S4): the device is
-            // alive; the check that the recovery starts reads its cycle.
+            // alive, its samples are dropped, and the check that the
+            // recovery starts reads its cycle. The probe was the cycle's
+            // first request and the scheduler is in IDENTITY already, so
+            // the next cycle is asked for here; nothing else would.
+            if (!scheduler_.identity_running(device)) {
+                scheduler_.identity_again(device, now, false);
+            }
             return;
         }
         if (choice.cycle && decoded.kind == DecodeResult::Kind::BUSY) {

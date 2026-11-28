@@ -503,6 +503,159 @@ TEST(EngineIdentity, EveryRestartRuleSeesTheWholeIdentityAnswer) {
     EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
 }
 
+// PR 177 M3: the guards that keep a possibly wrong device's values off its
+// point tags.
+
+// Whether any write of point `point` of d1 from history index `from` on was
+// GOOD.
+bool written_good(const RecordingTags& tags, std::uint32_t point,
+                  std::size_t from = 0) {
+    const std::vector<RecordingTags::Logged>& history = tags.history();
+    return std::any_of(history.begin() + static_cast<std::ptrdiff_t>(from),
+                       history.end(), [&](const RecordingTags::Logged& write) {
+                           return write.device == 0 && write.point == point &&
+                                  write.written.quality == tag::Quality::GOOD;
+                       });
+}
+
+bool written_with(const RecordingTags& tags, std::uint32_t point, Flag flag,
+                  std::size_t from = 0) {
+    const std::vector<RecordingTags::Logged>& history = tags.history();
+    return std::any_of(history.begin() + static_cast<std::ptrdiff_t>(from),
+                       history.end(), [&](const RecordingTags::Logged& write) {
+                           return write.device == 0 && write.point == point &&
+                                  (write.written.flags &
+                                   static_cast<std::uint16_t>(flag)) != 0;
+                       });
+}
+
+TEST(EngineIdentity, AKeepAlivesSamplesNeverReachThePointTags) {
+    // In MISMATCH the keep-alive (1 s) is the identity request (S8); its
+    // answer, the wrong model, goes to the check, never to the identity
+    // point's own tag.
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].keepalive_ns = SECOND;
+    Rig rig(std::move(channel), identity_bus(8));
+    rig.run_until(9 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    EXPECT_GT(rig.reads_of(IDENTITY), 3U);  // the keep-alives
+    EXPECT_FALSE(written_good(rig.tags, 1));
+    EXPECT_FALSE(written_good(rig.tags, 0));
+}
+
+TEST(EngineIdentity, AKeepAliveFailureArmsNoVerdict) {
+    // A keep-alive that times out is an identity read: it counts toward
+    // demotion, and no early verdict writes COMM_FAIL (one failure, below
+    // demote_after).
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].keepalive_ns = SECOND;
+    Rig rig(std::move(channel), identity_bus(8));
+    rig.run_until(900 * MILLISECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(1'400 * MILLISECOND);
+    rig.bus.fault(1, SimBus::Fault::NONE);
+    // A verdict would wait one period of the request's group (slow, 10 s).
+    rig.run_until(15 * SECOND);
+    EXPECT_GT(rig.engine.counts().timeouts, 0U);
+    EXPECT_EQ(rig.engine.counts().early_verdicts, 0U);
+    EXPECT_FALSE(written_with(rig.tags, 0, Flag::COMM_FAIL));
+    EXPECT_EQ(rig.state(), DeviceStatus::MISMATCH);
+}
+
+TEST(EngineIdentity, AnIdentityProbesAnswerIsNeverPublished) {
+    // No probe request: the identity cycle probes (S4). The identity point
+    // is in no group, so no write of it may ever be GOOD. The recovered
+    // device is checked and runs: before the fix the probe left the cycle
+    // read and nothing asked for the next, so it stayed INITIALISING.
+    CompiledChannel channel = identity_channel(IDENTITY, true);
+    channel.devices[0].plan.probe.reset();
+    Rig rig(std::move(channel), identity_bus());
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(5 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
+    const std::uint64_t probes = rig.engine.counts().requests;
+    rig.bus.fault(1, SimBus::Fault::NONE);
+    rig.run_until(30 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    EXPECT_GT(rig.engine.counts().requests, probes);
+    EXPECT_FALSE(written_good(rig.tags, 1));
+}
+
+// The hot swap: a running device with GOOD values is unplugged and another
+// model answers on the new connection. No GOOD value after the swap, and
+// entering MISMATCH writes every point BAD, without COMM_FAIL, the value
+// kept.
+TEST(EngineIdentity, AHotSwappedDeviceIsWithheldInMismatch) {
+    CompiledChannel channel = identity_channel();
+    channel.transport = TransportKind::TCP;
+    Rig rig(std::move(channel), identity_bus());
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    ASSERT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+    const std::size_t before = rig.tags.history().size();
+    rig.bus.set(1, 0, IDENTITY, 8);
+    rig.bus.set(1, 0, DATA, 9);
+    rig.transport.close_by_peer();
+    // Reconnected after 1 s; the check is due one identity period (10 s)
+    // after the last cycle started (PR 171 M3).
+    rig.run_until(12 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    EXPECT_GT(rig.transport.connects(), 1);
+    EXPECT_FALSE(written_good(rig.tags, 0, before));
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::BAD);
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::NOT_INIT));
+    EXPECT_EQ(rig.tags.point(0, 0).value, 5);  // the old value, kept
+}
+
+// After a loss (COMM_FAIL written), a MISMATCH clears COMM_FAIL, and a
+// later loss writes it again.
+TEST(EngineIdentity, AMismatchClearsCommFailAndALaterLossWritesItAgain) {
+    Rig rig(identity_channel(), identity_bus());
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(3 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
+    ASSERT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    rig.bus.set(1, 0, IDENTITY, 8);
+    rig.bus.fault(1, SimBus::Fault::NONE);
+    rig.run_until(15 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::BAD);
+    EXPECT_FALSE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+    rig.bus.fault(1, SimBus::Fault::SILENT);
+    rig.run_until(60 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
+    EXPECT_TRUE(rig.tags.has_flag(0, 0, Flag::COMM_FAIL));
+}
+
+TEST(EngineIdentity, NoStalenessIsWrittenInMismatch) {
+    // `max_age` 1 s on the data point: in MISMATCH nothing confirms it, but
+    // no point tag is written while the device reads its cycle only.
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].points[0].rules.max_age_ns = SECOND;
+    Rig rig(std::move(channel), identity_bus(8));
+    rig.run_until(500 * MILLISECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    const std::size_t before = rig.tags.history().size();
+    rig.run_until(5 * SECOND);
+    EXPECT_FALSE(written_with(rig.tags, 0, Flag::STALE, before));
+    EXPECT_EQ(rig.tags.history().size(), before);
+}
+
+TEST(EngineIdentity, NoStalenessIsWrittenWhileTheCheckIsPending) {
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].points[0].rules.max_age_ns = SECOND;
+    channel.devices[0].points[1].rules.markers.push_back(
+        InvalidMarker{.pattern = 0xFFFF, .action = InvalidAction::BAD});
+    Rig rig(std::move(channel), identity_bus(0xFFFF));
+    rig.run_until(5 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    EXPECT_FALSE(written_with(rig.tags, 0, Flag::STALE));
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

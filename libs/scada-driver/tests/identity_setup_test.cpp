@@ -131,6 +131,18 @@ TEST(IdentitySetup, OnlyARunningDeviceTakesWrites) {
     }
 }
 
+TEST(IdentitySetup, IdentityAndRestartPointsAreReadByTheCycle) {
+    CompiledDevice device;
+    IdentityCheck check;
+    check.point = 1;
+    device.identify = {check};
+    device.restart_indication = {RestartRule{.point = 3}};
+    EXPECT_FALSE(reads_identity(device, 0));
+    EXPECT_TRUE(reads_identity(device, 1));
+    EXPECT_FALSE(reads_identity(device, 2));
+    EXPECT_TRUE(reads_identity(device, 3));
+}
+
 TEST(IdentitySetup, UnsetBoundsAreSafe) {
     // A tracker device left with the defaults: the check never becomes a
     // mismatch by the clock, and a restart re-arms the grace once only.
