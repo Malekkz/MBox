@@ -1896,6 +1896,24 @@ TEST(Scheduling, BetweenIdentityAndAllEachGroupKeepsItsDueTime) {
     EXPECT_EQ(scheduler.take(4 * MILLISECOND).kind, Choice::Kind::POLL);
 }
 
+TEST(Scheduling, ACycleNothingAnsweredWaitsTheFastestPeriodOnly) {
+    // The lead's ruling on 5b-2b: the identity period is the slow group's
+    // (10 s), the fastest group's 200 ms.
+    const CompiledChannel channel = identity_channel();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    scheduler.identity_again(0, 0, false);
+    const Choice wait = scheduler.take(MILLISECOND);
+    EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
+    EXPECT_EQ(wait.wake_ns, FAST_PERIOD);
+    ASSERT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::IDENTITY);
+    // Answered: the identity period again.
+    scheduler.identity_again(0, 0, true);
+    EXPECT_EQ(scheduler.take(FAST_PERIOD + MILLISECOND).wake_ns,
+              FAST_PERIOD + SLOW_PERIOD);
+}
+
 TEST(Scheduling, EnteringIdentityAgainWithinAPeriodWaitsForIt) {
     // M3: the floor holds for a cycle that a mode change makes due too.
     const CompiledChannel channel = identity_channel();

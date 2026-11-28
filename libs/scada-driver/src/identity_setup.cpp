@@ -90,4 +90,8 @@ DeviceMode scheduler_mode(DeviceStatus state, bool identity_pending) noexcept {
     return DeviceMode::OFF;
 }
 
+bool accepts_writes(DeviceStatus state) noexcept {
+    return state == DeviceStatus::RUNNING;
+}
+
 }  // namespace scada::driver

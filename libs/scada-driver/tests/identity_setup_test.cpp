@@ -112,6 +112,25 @@ TEST(IdentitySetup, EachStateHasItsSchedulerMode) {
     }
 }
 
+TEST(IdentitySetup, OnlyARunningDeviceTakesWrites) {
+    // The interim strict default (D-147): no write, fail-safe ones
+    // included, before the identity check passed or in MISMATCH.
+    struct Row {
+        DeviceStatus state;
+        bool expected;
+    };
+    const std::vector<Row> rows{
+        {DeviceStatus::DISABLED, false},     {DeviceStatus::CONNECTING, false},
+        {DeviceStatus::INITIALISING, false}, {DeviceStatus::RUNNING, true},
+        {DeviceStatus::DEMOTED, false},      {DeviceStatus::MISMATCH, false},
+        {DeviceStatus::REFUSING, false},
+    };
+    for (const Row& row : rows) {
+        EXPECT_EQ(accepts_writes(row.state), row.expected)
+            << static_cast<int>(row.state);
+    }
+}
+
 TEST(IdentitySetup, UnsetBoundsAreSafe) {
     // A tracker device left with the defaults: the check never becomes a
     // mismatch by the clock, and a restart re-arms the grace once only.

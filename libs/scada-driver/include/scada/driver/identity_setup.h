@@ -48,6 +48,14 @@ namespace scada::driver {
 [[nodiscard]] SCADA_RT DeviceMode
 scheduler_mode(DeviceStatus state, bool identity_pending) noexcept;
 
+// Whether a device in tracker state `state` takes a write, an order step
+// or a fail-safe write: RUNNING only. INITIALISING (its identity check
+// pending or a first poll not yet answered) and MISMATCH take none, their
+// fail-safe writes included: the interim strict default of D-147 until the
+// owner rules (the lead's instruction). The command and fail-safe slices
+// call it before they queue a write.
+[[nodiscard]] SCADA_RT bool accepts_writes(DeviceStatus state) noexcept;
+
 }  // namespace scada::driver
 
 #endif  // SCADA_DRIVER_IDENTITY_SETUP_H

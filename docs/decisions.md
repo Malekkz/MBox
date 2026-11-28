@@ -3006,7 +3006,7 @@ Consequences:
   - giving the tracker `identity_wait_ns` and `full_period_ns`, and the scheduler `scheduler_mode` of each state in place of `set_polled` (an unreadable check is a mismatch at its deadline and not before; a failed identity probe leaves the device OFF and a recovered one starts in IDENTITY, S4);
   - routing each identity sample to `IdentityRun` and its verdict to the tracker (each outcome of the list above gives its verdict);
   - reading a busy identity request again, which needs the decoded answer (a busy answer is read again and is no verdict; an identity retry, which skips the identity floor, is bounded by `retries`);
-  - giving the samples of an identity probe or keep-alive to the check, never to the tag database.
+  - giving the samples of an identity keep-alive to the check, never to the tag database. An identity probe's samples are dropped instead, and the recovery starts a new check that reads its cycle (the lead's ruling on 5b-2b; this replaces the probe part of the 5b-2a text).
 - Accepted side effect of emptying the unit's count on an answered identity read: a device that shares its unit with a device in IDENTITY, and has only a slow group, may never be demoted while its sibling's identity reads answer; its points still go COMM_FAIL on each failed read.
 - For #136:
   - the (n+1)(m+1) bound in place of CS 2.5's "linear", and the pattern's 250-byte limit;
@@ -3028,17 +3028,20 @@ Consequences:
 ### D-147, slice 5b-2b: the engine, the system tags, the log records
 
 Decision:
-- The plan step: a protocol gives the planner a point that a check or a restart rule reads as a `PlanPoint::identity`, in no poll group when the point has none, by `reads_identity` (`identity_setup.h`). The test protocol does; contract 3.6 puts the identity reads on the framework, and this is the framework's part of the plan step, not a contract change.
+- The plan step: a protocol gives the planner a point that a check or a restart rule reads as a `PlanPoint::identity`, in no poll group when the point has none, by `reads_identity` (`identity_setup.h`). Every protocol must call it in its plan step; the test protocol does. Contract 3.6 puts the identity reads on the framework, and this is the framework's part of the plan step, not a contract change (accepted by the lead).
 - The engine:
   - It gives the tracker `identity_wait_ns` and `full_period_ns`, and the scheduler `scheduler_mode` of each state, in place of `set_polled`.
   - It checks the keys again with `validate_identity_check` and `validate_restart_rule` (a point that reads a device time is a time point); a channel whose keys fail does not start.
   - An identity read's samples go to `IdentityRun`, processed apart from the points' own states, and no point tag is written. An identity keep-alive is an identity read. An identity probe's samples are dropped: the recovery starts a new check, which reads its cycle.
   - A busy identity read is read again at once, at most `retries` times, then the cycle ends without a verdict. The retry skips the identity floor, so the count bounds it.
   - A failed re-check calls `identity_mismatched` again (M5), and the next cycle is asked for at the tracker's `probe_due_ns`.
-- The scheduler's floor (M3) applies to the engine's cycles too:
+- The scheduler's floor (M3) applies to the engine's cycles too, as the lead accepted:
   - a MISMATCH device is re-checked at its `backoff`, but no sooner than one identity period after its last check, so at max(`backoff`, identity period);
-  - after a restart, the check comes up to one identity period after the last one;
-  - a dead device's identity reads fail once per identity period, so it is DEMOTED after `demote_after` identity periods.
+  - after a restart, the check comes up to one identity period after the last one.
+- A cycle that nothing answered (time-outs, broken frames, a gateway's failure: the failures that give no verdict) is exempt from the identity floor; the next cycle may go one period of the device's fastest group after the last started (`identity_again(device, due, answered)`, the lead's ruling on 5b-2b). A dead device is then DEMOTED on a polled device's time scale, and its points reach COMM_FAIL in time. Answered reads, busy and refused ones included, keep the floor. Tests: the scheduler's floor of an unanswered cycle, and a dead device with identity DEMOTED within `demote_after` fastest periods plus its time-outs.
+- Writes, interim until the owner answers the two open questions (whether `warn` is allowed on a device with outputs, and whether fail-safe writes are held until the identity check passes): the strict default for both, as the lead instructed.
+  - `accepts_writes(state)` (`identity_setup.h`) is true for RUNNING only: a device in INITIALISING or MISMATCH takes no write, its fail-safe writes included. No write path exists yet; the command and fail-safe slices call it before they queue a write.
+  - Refusing `on_mismatch: warn` on a device with outputs is left to the configuration validator.
 - The system tags (11.1):
   - `restarts` for every device, a counter written with the others.
   - `identity_ok` and `identity` only for a device with `identify`: their slots hold no handle otherwise. Both are written once the check has a verdict, and are NOT_INIT from the walk of 9.1 before. `identity` is written by `scada_tag_write_string`, again only when its text changes (by a 64-bit hash of it).
@@ -3056,4 +3059,6 @@ Consequences:
   - `system_tags_test.cpp`: the identity tags after the verdict, `identity_ok` false, `restarts`.
   - `event_slot_test.cpp`: counts and the last details, a full text, and a take racing the writer (under the thread sanitizer too).
   - `drv_test_support_test.cpp`: the new options.
+  - `identity_setup_test.cpp`: `accepts_writes` for each state.
+  - `scheduling_test.cpp`: an unanswered cycle's floor.
   - `driver_identity_integration_test.cpp`: a match, a mismatch with `refuse` and `warn`, a restart, in the tags and the log.

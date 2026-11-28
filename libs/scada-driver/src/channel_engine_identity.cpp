@@ -59,6 +59,7 @@ void ChannelEngine::start_identity_round(std::uint32_t device) noexcept {
     // The tracker's deadline: from the connect, recovery, restart or due
     // re-check that began the pending check (ruling item 2).
     run.identity->start(failures_.identity_deadline_ns(device));
+    run.identity_answered = false;
     run.identity_round = true;
     run.identity_retrying = false;
 }
@@ -70,6 +71,7 @@ void ChannelEngine::identity_answered(const Choice& choice,
     const Request& request =
         channel_->devices[device].plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
+    run.identity_answered = true;
     // An identity read neither adds to the run of time-outs nor empties it,
     // and resets no back-off (DI 7.3, ruling item 2).
     if (decoded.kind == DecodeResult::Kind::BUSY) {
@@ -171,9 +173,12 @@ void ChannelEngine::identity_cycle_done(std::uint32_t device) noexcept {
     switch (verdict.kind) {
         case IdentityVerdict::Kind::NONE: {
             // Not yet: the cycle again, the deadline kept; the scheduler
-            // floors it at one identity period after the last (PR 171 M3).
+            // floors it at one identity period after the last (PR 171 M3),
+            // or at the fastest group's period when nothing answered (the
+            // lead's ruling on 5b-2b).
             run.identity->start(run.identity->deadline_ns());
-            scheduler_.identity_again(device, now);
+            scheduler_.identity_again(device, now, run.identity_answered);
+            run.identity_answered = false;
             return;
         }
         case IdentityVerdict::Kind::MATCH:

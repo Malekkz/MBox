@@ -234,11 +234,14 @@ public:
     // period after the last cycle started, whichever is later: a re-check
     // of a device in MISMATCH at its back-off, or a check without a verdict
     // yet (D-147). The floor keeps a device that never gives a verdict (a
-    // busy answer for ever) to one cycle per period (PR 171 M3). Ignored
-    // unless the device is in IDENTITY with no cycle in progress. Never
-    // allocates.
-    SCADA_RT void identity_again(std::uint32_t device,
-                                 std::int64_t due_ns) noexcept;
+    // busy answer for ever) to one cycle per period (PR 171 M3). A cycle
+    // that nothing answered (`answered` false: time-outs, broken frames, a
+    // gateway's failure) waits the device's fastest group period instead,
+    // so that a dead device is demoted on a polled device's time scale (the
+    // lead's ruling on 5b-2b). Ignored unless the device is in IDENTITY
+    // with no cycle in progress. Never allocates.
+    SCADA_RT void identity_again(std::uint32_t device, std::int64_t due_ns,
+                                 bool answered = true) noexcept;
     // The identity period of `device`: the shortest period of the poll
     // groups of its identity requests, or of all its groups when none of
     // them is in a group; 0 when it has no group at all.
@@ -356,6 +359,7 @@ private:
         std::int64_t identity_cycle_due_ns = 0;
         std::int64_t identity_start_ns = 0;
         std::int64_t identity_period_ns = 0;
+        std::int64_t fastest_period_ns = 0;  // of all its groups
         std::vector<GroupState> groups;
         // An order whose steps have started.
         OrderTicket order{};

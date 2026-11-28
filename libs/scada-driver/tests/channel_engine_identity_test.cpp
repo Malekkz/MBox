@@ -241,11 +241,12 @@ TEST(EngineIdentity, ARecoveredDeviceIsCheckedBeforeItIsPolled) {
     // check is read before any poll of the data.
     Rig rig(identity_channel(), identity_bus());
     rig.bus.fault(1, SimBus::Fault::SILENT);
-    // One failed read (after its retries) per cycle, a cycle per slow
-    // period: the third at 20 s demotes it.
-    rig.run_until(19 * SECOND);
-    EXPECT_EQ(rig.state(), DeviceStatus::INITIALISING);
-    rig.run_until(21 * SECOND);
+    // One failed read (after its retries) per cycle. A cycle that nothing
+    // answered waits the fastest group's period only (200 ms), not the
+    // identity period (10 s; the lead's ruling on 5b-2b): DEMOTED within
+    // demote_after periods of 200 ms plus the time-outs of 3 attempts of
+    // 100 ms each, 1.5 s.
+    rig.run_until(1'500 * MILLISECOND);
     ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
     rig.bus.fault(1, SimBus::Fault::NONE);
     const std::size_t before = rig.bus.log().size();
