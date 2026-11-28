@@ -25,10 +25,12 @@ TEST(Expand, ThePointLimit) {
                   std::string(range) +
                   "\" }\n"
                   "    points:\n"
+                  // Registers 0 to 32,767 and 32,768 to 65,535 (CF-602,
+                  // D-122).
                   "      - { name: \"a{n}\", address: { table: holding, "
-                  "register: 1, type: uint16 } }\n"
+                  "register: \"n - 1\", type: uint16 } }\n"
                   "      - { name: \"b{n}\", address: { table: holding, "
-                  "register: 2, type: uint16 } }\n"},
+                  "register: \"n + 32767\", type: uint16 } }\n"},
              {"drivers/modbus/line1.yaml", one_device()},
              {"system.yaml", std::string(SYSTEM) + "limits: { max_tags: "
                                                    "1000000 }\n"}});

@@ -1,0 +1,9 @@
+channel:
+  name: line1
+  type: rtu
+  device: /dev/serial/by-path/platform-serial1
+  baud: 9600
+devices:
+  - { name: ps1.m1, template: meter, unit_id: 1 }
+  - { name: ps1.m2, template: meter, unit_id: 2 }
+  - { name: ps1.m3, template: meter, unit_id: 1, address_base: 1 }
