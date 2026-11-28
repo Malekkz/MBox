@@ -120,6 +120,32 @@ TEST(DrvTestArgs, ADisabledChannelAndASpinningOne) {
     EXPECT_EQ(options->endpoints[1].fault, Fault::SPIN);
 }
 
+TEST(DrvTestArgs, TheWorkerLogQueueSize) {
+    // 64 records by default; 1 to the logger's limit (D-148).
+    std::string err;
+    const auto plain =
+        parse({"--base-dir", "/b", "--channel", "c", "tcp", "h", "1"}, err);
+    if (!plain.has_value()) {
+        FAIL() << err;
+    }
+    EXPECT_EQ(plain->settings.worker_log_queue, DEFAULT_WORKER_LOG_QUEUE);
+    const auto small = parse({"--base-dir", "/b", "--worker-log-queue", "1",
+                              "--channel", "c", "tcp", "h", "1"},
+                             err);
+    if (!small.has_value()) {
+        FAIL() << err;
+    }
+    EXPECT_EQ(small->settings.worker_log_queue, 1U);
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--worker-log-queue", "0",
+                        "--channel", "c", "tcp", "h", "1"},
+                       err)
+                     .has_value());
+    EXPECT_FALSE(parse({"--base-dir", "/b", "--worker-log-queue", "65537",
+                        "--channel", "c", "tcp", "h", "1"},
+                       err)
+                     .has_value());
+}
+
 TEST(DrvTestArgs, SignsAndNumbersOutOfRangeAreRefused) {
     std::string err;
     const std::vector<std::vector<const char*>> bad{

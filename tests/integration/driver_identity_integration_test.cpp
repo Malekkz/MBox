@@ -178,7 +178,8 @@ TEST_F(Identity, TheRestartRecordsCountEveryRestart) {
     // Two restarts, `v` falling at the 20th and the 40th request, likely in
     // one 10 s period: the first record at once, the second's count held
     // and logged by the stop at the latest. The counts add up to
-    // `restarts` (PR 177 S1).
+    // `restarts` (PR 177 S1): no record is lost at the stop, which drains
+    // the worker's queue after the worker returned (11.3, D-148).
     std::optional<Running> running =
         run("7",
             {"--set-after", "1", "0", "0", "3", "20", "--set-after", "1", "0",
@@ -190,6 +191,8 @@ TEST_F(Identity, TheRestartRecordsCountEveryRestart) {
     EXPECT_TRUE(reaches("sys.dev.d1.restarts", std::int64_t{2}));
     EXPECT_TRUE(stops_cleanly(running->driver));
     EXPECT_EQ(restart_counts(running->driver.err()), 2U);
+    // The main thread's own last records went through its queue too.
+    EXPECT_TRUE(has(running->driver.err(), R"(MESSAGE_ID="driver-stopping")"));
 }
 
 TEST_F(Identity, ASecondRestartIsLoggedAfterItsPeriod) {
@@ -222,6 +225,39 @@ TEST_F(Identity, ASecondRestartIsLoggedAfterItsPeriod) {
     EXPECT_GE(apart, PERIOD_MS - 100) << running->driver.err();
     EXPECT_EQ(restart_counts(running->driver.err()), 2U);
     EXPECT_TRUE(stops_cleanly(running->driver));
+}
+
+TEST_F(DriverProcess, AFullWorkerQueuesDropsShowInLogDropped) {
+    // Four devices of one unit, d1 with a restart rule: one restart is the
+    // unit's, so the worker pushes four restart records in one step into a
+    // queue of one record (`--worker-log-queue 1`). The logger drains the
+    // queue at most every 20 ms, so records are dropped, and
+    // `sys.proc.drv-test.log_dropped` shows them (11.3, D-148).
+    start_tagd({{.name = "line1", .tags = {"d1.v", "d2.v", "d3.v", "d4.v"}}});
+    std::optional<ChildProcess> sim = start_sim(
+        {"--set", "1", "0", "0", "5", "--set-after", "1", "0", "0", "3", "20"});
+    if (!sim.has_value()) {
+        FAIL() << "no simulator";
+    }
+    std::optional<ChildProcess> driver = start_driver(joined(
+        std::vector<std::string>{"--worker-log-queue", "1"},
+        tcp_channel("line1", port_of(*sim)), device("d1", 1, "0"),
+        std::vector<std::string>{"--restart-decreases", "0"},
+        device("d2", 1, "0"), device("d3", 1, "0"), device("d4", 1, "0")));
+    if (!driver.has_value()) {
+        FAIL() << "no driver";
+    }
+    observe();
+    EXPECT_TRUE(
+        eventually(handle("sys.dev.d4.restarts"), [](const scada_value& value) {
+            return value.quality == SCADA_QUALITY_GOOD && value.value == 1;
+        }));
+    EXPECT_TRUE(eventually(
+        handle("sys.proc.drv-test.log_dropped"), [](const scada_value& value) {
+            return value.quality == SCADA_QUALITY_GOOD && value.value >= 1;
+        }));
+    EXPECT_TRUE(logs(*driver, R"(log records dropped: the queue was full)"));
+    EXPECT_TRUE(stops_cleanly(*driver));
 }
 
 }  // namespace

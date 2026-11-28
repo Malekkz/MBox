@@ -43,9 +43,23 @@ a driver whose tag set lacks one does not start. `identity` and
 the check has a verdict. The device tags of slices not built yet
 (`selections_lost`, `last_command_stage`) read NOT_INIT.
 
-Not yet here: the workers' log queues (slice 5b-3), commands, the
-generation change and reload. `docs/decisions.md` D-130 to D-147 record the
-choices the contracts left open.
+Not yet here: commands, the generation change and reload.
+`docs/decisions.md` D-130 to D-148 record the choices the contracts left
+open.
+
+## Logging
+
+No thread that writes a heartbeat or a tag writes to the journal (11.3,
+D-148). The main thread and each worker push records into a queue of their
+own (`LogQueue` of libscada-common), which never blocks, allocates or makes
+a system call; the logger's thread drains them at least every 20 ms. A
+worker logs its devices' identity and restart events through `LogLimit`:
+the first of a kind and device at once, then one summary per 10 s with the
+COUNT of the events since. A full queue drops records; the drops, and the
+records the journal refused, are `sys.proc.<process>.log_dropped`. The
+stop logs every held count and drains every queue before the run returns.
+The journal's order across threads is the drain's, not the records' times.
+A worker's queue holds 64 records (`DriverSettings::worker_log_queue`).
 
 ## Identity checks and restarts
 
@@ -65,8 +79,8 @@ polled one is. Until the owner rules, only a RUNNING device takes writes,
 fail-safe writes included (`accepts_writes`, D-147). The log has `driver-identity-mismatch` (REASON
 `value`, `absent` or `unreadable`, CHECK, VALUE), `driver-identity-matched`
 when a device leaves MISMATCH, and `driver-device-restart`, each with the
-COUNT since its last record: the first at once, then at most one per 10 s
-per device.
+COUNT since its last record: the first at once, then at most one summary
+per 10 s per device, without the details (see Logging).
 
 A restart rule that holds is a restart of the device's unit: every RUNNING
 device of it is checked again, and its points written NOT_INIT (9.1). Every
