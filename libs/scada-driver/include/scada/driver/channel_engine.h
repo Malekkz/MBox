@@ -304,6 +304,19 @@ private:
                           std::span<const DeliveredSample> samples) noexcept;
     SCADA_RT void process(std::uint32_t device,
                           std::span<const DeliveredSample> samples) noexcept;
+    // `samples` into `batch_` in the order `process` takes them: restart
+    // rules' points, then points without companions, then the rest.
+    SCADA_RT void order_batch(
+        std::uint32_t device,
+        std::span<const DeliveredSample> samples) noexcept;
+    // The companions of `batch_[index]` into `companions_`, as the points
+    // before it in the batch gave them.
+    SCADA_RT void gather_companions(std::uint32_t device,
+                                    std::size_t index) noexcept;
+    // The identity check and restart rules of a device at construction:
+    // their point check, the scratch states of an identity round, the run
+    // and the watch (D-147).
+    void set_up_identity(std::uint32_t device, std::int64_t now_ns);
 
     // The identity check and the restart rules (channel_engine_identity.cpp;
     // D-147). The mode the scheduler is to give `device` now.

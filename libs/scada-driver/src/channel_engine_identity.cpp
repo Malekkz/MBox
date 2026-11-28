@@ -10,13 +10,12 @@
 #include "scada/driver/identity_run.h"
 #include "scada/driver/identity_setup.h"
 #include "scada/driver/plan.h"
+#include "scada/driver/protocol.h"
 #include "scada/driver/raw_value.h"
 #include "scada/driver/sample_processing.h"
 #include "scada/driver/scheduler.h"
 #include "scada/tag/types.h"
 
-#include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -67,13 +66,24 @@ void ChannelEngine::identity_answered(const Choice& choice,
     const Request& request =
         channel_->devices[device].plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
-    run.attempts = 0;
-    run.identity_retrying = false;
     // An identity read neither adds to the run of time-outs nor empties it,
     // and resets no back-off (DI 7.3, ruling item 2).
     if (decoded.kind == DecodeResult::Kind::BUSY) {
         (void)failures_.identity_ended(device, RequestEnd::NOT_COUNTED, now);
-    } else {
+        // Busy is no verdict: read again at once, at most `retries` times
+        // (ruling item 3); the retry skips the identity floor, so the
+        // count bounds it (review of PR 171).
+        if (run.attempts < channel_->devices[device].failure.retries) {
+            ++run.attempts;
+            ++counts_.retries;
+            run.identity_retrying = true;
+            scheduler_.retry(device, choice.request, now);
+            return;
+        }
+    }
+    run.attempts = 0;
+    run.identity_retrying = false;
+    if (decoded.kind != DecodeResult::Kind::BUSY) {
         (void)failures_.identity_ended(device, RequestEnd::ANSWERED, now);
         const bool refused = decoded.kind == DecodeResult::Kind::SPLIT;
         if (refused && scheduler_.refused(device, choice.request)) {

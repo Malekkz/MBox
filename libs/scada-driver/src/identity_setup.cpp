@@ -2,6 +2,7 @@
 
 #include "scada/driver/compiled.h"
 #include "scada/driver/failure.h"
+#include "scada/driver/identity.h"
 #include "scada/driver/plan.h"
 #include "scada/driver/scheduler.h"
 
@@ -59,6 +60,18 @@ std::int64_t full_period_ns(
                                 return left.period_ns < right.period_ns;
                             })
         ->period_ns;
+}
+
+bool reads_identity(const CompiledDevice& device,
+                    std::uint32_t point) noexcept {
+    return std::any_of(device.identify.begin(), device.identify.end(),
+                       [&](const IdentityCheck& check) {
+                           return check.point == point;
+                       }) ||
+           std::any_of(
+               device.restart_indication.begin(),
+               device.restart_indication.end(),
+               [&](const RestartRule& rule) { return rule.point == point; });
 }
 
 DeviceMode scheduler_mode(DeviceStatus state, bool identity_pending) noexcept {

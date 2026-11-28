@@ -9,6 +9,7 @@ scada_add_test(scada-driver-unit-test KIND unit
     point_rules_test.cpp
     sample_processing_test.cpp
     channel_engine_test.cpp
+    channel_engine_identity_test.cpp
     connections_test.cpp
     diagnostics_test.cpp
     driver_test.cpp
