@@ -107,9 +107,12 @@ void ChannelEngine::identity_answered(const Choice& choice,
                 }
             }
         }
-        if (!identity_samples(device,
-                              std::span(sink_storage_).first(sink_count_))) {
-            return;  // a restart: the round starts again
+        if (identity_samples(device,
+                             std::span(sink_storage_).first(sink_count_))) {
+            // A new round, and the cycle read again unless it is still
+            // running (PR 177 M1); no verdict on a round with nothing in it.
+            restarted(device);
+            return;
         }
     }
     if (!scheduler_.identity_running(device)) {
@@ -139,6 +142,10 @@ bool ChannelEngine::identity_samples(
     const CompiledDevice& compiled = channel_->devices[device];
     const SampleTimes times{.receive_time_ns = clock_->realtime_ns(),
                             .receive_mono_ns = clock_->monotonic_ns()};
+    // Every restart rule sees the whole answer, so that each keeps its
+    // baseline when one fires (PR 177 M2); what the check saw of an answer
+    // that shows a restart is dropped with the round.
+    bool restart = false;
     for (const DeliveredSample& sample : samples) {
         if (sample.point >= run.scratch.size()) {
             continue;
@@ -148,16 +155,13 @@ bool ChannelEngine::identity_samples(
         process_sample(compiled.points[sample.point].rules,
                        run.scratch[sample.point], sample.sample, {}, times,
                        processed_);
-        if (run.identity.has_value()) {
+        if (run.identity.has_value() && !restart) {
             run.identity->sample(sample.point, sample.sample.outcome,
                                  processed_.rule_valid, processed_.rule_value);
         }
-        if (watch_restart(device, sample.point, processed_)) {
-            restarted(device);
-            return false;
-        }
+        restart = watch_restart(device, sample.point, processed_) || restart;
     }
-    return true;
+    return restart;
 }
 
 void ChannelEngine::identity_cycle_done(std::uint32_t device) noexcept {
@@ -252,6 +256,23 @@ void ChannelEngine::restarted(std::uint32_t device) noexcept {
     // The tracker re-arms the grace once until a full period passes without
     // a restart of the unit (ruling item 6).
     failures_.restarted(device, now);
+    // A device already in IDENTITY (its check pending, or MISMATCH) starts
+    // its round again and is read again (PR 177 M1): without this, a
+    // restart seen in the last read of a cycle left it unread for ever. A
+    // device that was RUNNING enters IDENTITY at the next sync_scheduler,
+    // which starts its round.
+    for (std::uint32_t other = 0; other < devices_.size(); ++other) {
+        const CompiledDevice& peer = channel_->devices[other];
+        DeviceRun& peer_run = devices_[other];
+        if (!peer.enabled || !peer_run.identity_round ||
+            (other != device && !same_unit(compiled, peer))) {
+            continue;
+        }
+        start_identity_round(other);
+        if (!scheduler_.identity_running(other)) {
+            scheduler_.identity_again(other, now, false);
+        }
+    }
 }
 
 void ChannelEngine::withhold_points(std::uint32_t device, std::uint16_t flags,

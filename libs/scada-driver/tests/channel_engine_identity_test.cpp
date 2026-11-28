@@ -312,6 +312,197 @@ TEST(EngineIdentity, EachEventIsNotedForTheLog) {
     EXPECT_FALSE(rig.engine.take_event(5, DeviceEvent::RESTART, record));
 }
 
+// PR 177 M1: d1 as identity_channel, with a third point at `restart` and a
+// `decreases` rule on it. At register 1, in the fast group, it shares the
+// data point's request, first in the identity cycle; at 50, in the slow
+// group after the identity point, it has a request of its own, last in the
+// cycle.
+constexpr std::uint32_t RESTART_FIRST = 1;
+constexpr std::uint32_t RESTART_LAST = 50;
+
+CompiledChannel restart_channel(std::uint32_t restart) {
+    const std::vector<PointSpec> points{
+        PointSpec{.first = DATA, .group = FAST},
+        PointSpec{.first = IDENTITY, .group = SLOW},
+        PointSpec{.first = restart,
+                  .group = restart == RESTART_LAST ? SLOW : FAST}};
+    const DeviceSpec spec{.name = "d1", .unit_id = 1, .points = points};
+    CompiledChannel channel;
+    channel.name = "line1";
+    channel.poll_groups = default_groups();
+    channel.transport = TransportKind::SERIAL;
+    channel.connection.reconnect_min_ns = SECOND;
+    channel.connection.reconnect_max_ns = 8 * SECOND;
+    CompiledDevice device = make_device(spec);
+    device.failure = rules();
+    IdentityCheck check;
+    check.point = 1;
+    check.kind = IdentityCheck::Kind::EQUALS;
+    check.values = {ExpectedValue{
+        .type = device.points[1].rules.tag_type, .i = MODEL, .u = MODEL}};
+    device.identify = {check};
+    device.restart_indication = {
+        RestartRule{.point = 2, .kind = RestartRule::Kind::DECREASES}};
+    device.plan.by_group.resize(channel.poll_groups.size());
+    const TestProtocol protocol;
+    EXPECT_TRUE(
+        protocol.plan(device, ReadRules{.max_units = 4}, device.plan).ok());
+    channel.devices.push_back(std::move(device));
+    return channel;
+}
+
+SimBus restart_bus(std::uint32_t restart, std::uint16_t model) {
+    SimBus bus = identity_bus(model);
+    bus.set(1, 0, restart, 5);
+    return bus;
+}
+
+// The cycle order the tests rely on: the restart point's request before
+// or after the identity point's.
+TEST(EngineIdentity, TheRestartPointIsFirstOrLastInTheCycle) {
+    for (const std::uint32_t restart : {RESTART_FIRST, RESTART_LAST}) {
+        Rig rig(restart_channel(restart), restart_bus(restart, MODEL));
+        rig.run_until(100 * MILLISECOND);
+        ASSERT_GE(rig.bus.log().size(), 2U);
+        const bool first =
+            rig.bus.log()[0].first <= restart && restart < IDENTITY;
+        EXPECT_EQ(first, restart == RESTART_FIRST);
+        EXPECT_EQ(rig.bus.log()[restart == RESTART_FIRST ? 1 : 0].first,
+                  IDENTITY);
+    }
+}
+
+// A restart seen in an identity cycle while the check is pending: the
+// device is read again and reaches its verdict (PR 177 M1).
+TEST(EngineIdentity, ARestartInAPendingCycleIsReadAgain) {
+    for (const std::uint32_t restart : {RESTART_FIRST, RESTART_LAST}) {
+        SCOPED_TRACE(restart);
+        // Unreadable at first: the check stays pending (deadline 30 s).
+        CompiledChannel channel = restart_channel(restart);
+        channel.devices[0].points[1].rules.markers.push_back(
+            InvalidMarker{.pattern = 0xFFFF, .action = InvalidAction::BAD});
+        Rig rig(std::move(channel), restart_bus(restart, 0xFFFF));
+        rig.run_until(SECOND);
+        ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
+        // Before the next cycle (10 s): the model readable, and the
+        // restart point lower, which that cycle sees.
+        rig.bus.set(1, 0, IDENTITY, MODEL);
+        rig.bus.set(1, 0, restart, 3);
+        rig.run_until(15 * SECOND);
+        EXPECT_EQ(rig.engine.restarts(0), 1U);
+        EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+        EXPECT_GT(rig.reads_of(DATA), 0U);
+    }
+}
+
+TEST(EngineIdentity, ARestartInAMismatchReCheckIsReadAgain) {
+    for (const std::uint32_t restart : {RESTART_FIRST, RESTART_LAST}) {
+        SCOPED_TRACE(restart);
+        Rig rig(restart_channel(restart), restart_bus(restart, 8));
+        rig.run_until(SECOND);
+        ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+        // The re-check at 10 s finds the right model and a restart.
+        rig.bus.set(1, 0, IDENTITY, MODEL);
+        rig.bus.set(1, 0, restart, 3);
+        rig.run_until(15 * SECOND);
+        EXPECT_EQ(rig.engine.restarts(0), 1U);
+        EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+    }
+}
+
+// The probes' case: a device lost, back with its restart point lower; the
+// check after the recovery sees the restart and must still end.
+TEST(EngineIdentity, ARestartSeenAfterALostDeviceIsReadAgain) {
+    for (const std::uint32_t restart : {RESTART_FIRST, RESTART_LAST}) {
+        SCOPED_TRACE(restart);
+        Rig rig(restart_channel(restart), restart_bus(restart, MODEL));
+        rig.run_until(SECOND);
+        ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+        rig.bus.fault(1, SimBus::Fault::SILENT);
+        rig.run_until(4 * SECOND);
+        ASSERT_EQ(rig.state(), DeviceStatus::DEMOTED);
+        rig.bus.set(1, 0, restart, 3);
+        rig.bus.fault(1, SimBus::Fault::NONE);
+        rig.run_until(40 * SECOND);
+        EXPECT_EQ(rig.engine.restarts(0), 1U);
+        EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+        // Read up to the end, not stuck after the restart.
+        ASSERT_FALSE(rig.bus.log().empty());
+        EXPECT_GT(rig.bus.log().back().time_ns, 39 * SECOND);
+    }
+}
+
+// PR 177 M2: a restart point in one block with another point. The answer
+// that shows the restart writes no value: every write after it, until the
+// device is checked again, is BAD with NOT_INIT.
+TEST(EngineIdentity, NoValueOfARestartAnswerIsPublished) {
+    Rig rig(restart_channel(RESTART_FIRST), restart_bus(RESTART_FIRST, MODEL));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    ASSERT_EQ(rig.tags.point(0, 0).value, 5);
+    const std::size_t before = rig.tags.history().size();
+    // One answer: the data point 6 and the restart point 3.
+    rig.bus.set(1, 0, DATA, 6);
+    rig.bus.set(1, 0, RESTART_FIRST, 3);
+    rig.run_until(1'300 * MILLISECOND);
+    ASSERT_EQ(rig.engine.restarts(0), 1U);
+    ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    const std::vector<RecordingTags::Logged>& history = rig.tags.history();
+    ASSERT_GT(history.size(), before);
+    for (std::size_t index = before; index < history.size(); ++index) {
+        const RecordingTags::Logged& write = history[index];
+        EXPECT_EQ(write.written.quality, tag::Quality::BAD) << index;
+        EXPECT_NE(
+            write.written.flags & static_cast<std::uint16_t>(Flag::NOT_INIT), 0)
+            << index;
+        EXPECT_EQ(write.written.time_ns, 0) << index;
+    }
+    // Checked again at 10 s: the values return.
+    rig.run_until(11 * SECOND);
+    EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+    EXPECT_EQ(rig.tags.point(0, 0).value, 6);
+    EXPECT_EQ(rig.tags.point(0, 0).quality, tag::Quality::GOOD);
+}
+
+// Every rule sees the whole answer (M2): two rules fire in one answer, and
+// the next answer, the same values, fires none.
+TEST(EngineIdentity, EveryRestartRuleSeesTheWholeAnswer) {
+    CompiledChannel channel = restart_channel(RESTART_FIRST);
+    channel.devices[0].restart_indication.push_back(
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES});
+    Rig rig(std::move(channel), restart_bus(RESTART_FIRST, MODEL));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::RUNNING);
+    rig.bus.set(1, 0, DATA, 2);
+    rig.bus.set(1, 0, RESTART_FIRST, 3);
+    rig.run_until(25 * SECOND);
+    EXPECT_EQ(rig.engine.restarts(0), 1U);
+    EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+}
+
+// The same in an identity cycle: both rules' points are in its first
+// request, and both keep their baselines when they fire together.
+TEST(EngineIdentity, EveryRestartRuleSeesTheWholeIdentityAnswer) {
+    CompiledChannel channel = restart_channel(RESTART_FIRST);
+    channel.devices[0].restart_indication.push_back(
+        RestartRule{.point = 0, .kind = RestartRule::Kind::DECREASES});
+    channel.devices[0].points[1].rules.markers.push_back(
+        InvalidMarker{.pattern = 0xFFFF, .action = InvalidAction::BAD});
+    Rig rig(std::move(channel), restart_bus(RESTART_FIRST, 0xFFFF));
+    rig.run_until(SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    // Both lower while the check is pending: the next cycle (every 200 ms,
+    // the fast group's period) sees both; the model readable after that.
+    rig.bus.set(1, 0, DATA, 2);
+    rig.bus.set(1, 0, RESTART_FIRST, 3);
+    rig.run_until(1'500 * MILLISECOND);
+    ASSERT_EQ(rig.engine.restarts(0), 1U);
+    rig.bus.set(1, 0, IDENTITY, MODEL);
+    rig.run_until(25 * SECOND);
+    EXPECT_EQ(rig.engine.restarts(0), 1U);
+    EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace

@@ -1169,6 +1169,13 @@ void ChannelEngine::set_up_identity(std::uint32_t device_index,
     }
 }
 
+bool ChannelEngine::is_restart_point(const CompiledDevice& device,
+                                     std::uint32_t point) noexcept {
+    return std::any_of(
+        device.restart_indication.begin(), device.restart_indication.end(),
+        [&](const RestartRule& rule) { return rule.point == point; });
+}
+
 void ChannelEngine::order_batch(
     std::uint32_t device, std::span<const DeliveredSample> samples) noexcept {
     const DeviceRun& run = devices_[device];
@@ -1179,11 +1186,7 @@ void ChannelEngine::order_batch(
     // them (5.5, D-131): three passes into the engine's own storage,
     // nothing allocated (P8).
     const auto pass_of = [&](std::uint32_t point) {
-        if (run.restart.has_value() &&
-            std::any_of(
-                compiled.restart_indication.begin(),
-                compiled.restart_indication.end(),
-                [&](const RestartRule& rule) { return rule.point == point; })) {
+        if (run.restart.has_value() && is_restart_point(compiled, point)) {
             return 0;
         }
         return compiled.points[point].rules.companions.empty() ? 1 : 2;
@@ -1231,6 +1234,12 @@ void ChannelEngine::process(std::uint32_t device,
     const SampleTimes times{.receive_time_ns = clock_->realtime_ns(),
                             .receive_mono_ns = clock_->monotonic_ns()};
     order_batch(device, samples);
+    if (answer_restarted(device, times)) {
+        // No value of the answer is written: every point gets the NOT_INIT
+        // withhold, and the check starts (the lead's ruling on PR 177 M2).
+        restarted(device);
+        return;
+    }
     for (std::size_t index = 0; index < batch_.size(); ++index) {
         const DeliveredSample& sample = batch_[index];
         gather_companions(device, index);
@@ -1244,14 +1253,35 @@ void ChannelEngine::process(std::uint32_t device,
             ++run.diag.invalid;
         }
         tags_->write_point(device, sample.point, processed_);
-        if (watch_restart(device, sample.point, processed_)) {
-            // The rest of the answer is not used, and an open chain is
-            // dropped (ruling item 6).
-            restarted(device);
-            return;
-        }
     }
     run.comm_failed = false;
+}
+
+bool ChannelEngine::answer_restarted(std::uint32_t device,
+                                     const SampleTimes& times) noexcept {
+    DeviceRun& run = devices_[device];
+    if (!run.restart.has_value()) {
+        return false;
+    }
+    const CompiledDevice& compiled = channel_->devices[device];
+    // Every rule sees the whole answer, so that each keeps its baseline
+    // when one fires; the points of the rules are first in the batch
+    // (order_batch). Each is processed on a copy of its state, so that
+    // nothing is written or kept before the verdict.
+    bool restarted = false;
+    for (std::size_t index = 0; index < batch_.size(); ++index) {
+        const std::uint32_t point = batch_[index].point;
+        if (!is_restart_point(compiled, point)) {
+            break;
+        }
+        PointState& copy = run.scratch[point];
+        copy = run.points[point].state;  // capacity reserved: no allocation
+        gather_companions(device, index);
+        process_sample(compiled.points[point].rules, copy, batch_[index].sample,
+                       companions_, times, processed_);
+        restarted = watch_restart(device, point, processed_) || restarted;
+    }
+    return restarted;
 }
 
 void ChannelEngine::set_link(ChannelLink link) noexcept {

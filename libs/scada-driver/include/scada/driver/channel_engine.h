@@ -340,6 +340,14 @@ private:
     SCADA_RT void order_batch(
         std::uint32_t device,
         std::span<const DeliveredSample> samples) noexcept;
+    // Every restart rule over the restart points at the front of `batch_`,
+    // each processed on a copy of its state; true when one fired. Nothing is
+    // written (the lead's ruling on PR 177 M2).
+    SCADA_RT bool answer_restarted(std::uint32_t device,
+                                   const SampleTimes& times) noexcept;
+    // Whether `point` of `device` is the point of a restart rule.
+    [[nodiscard]] SCADA_RT static bool is_restart_point(
+        const CompiledDevice& device, std::uint32_t point) noexcept;
     // The companions of `batch_[index]` into `companions_`, as the points
     // before it in the batch gave them.
     SCADA_RT void gather_companions(std::uint32_t device,
@@ -362,8 +370,8 @@ private:
     void identity_failed(const Choice& choice, End end) noexcept;
     // The samples of an identity read: those of identity and restart points
     // go to the check and the watch through `scratch`; the rest are
-    // dropped. False when a restart fired: the rest of the answer is not
-    // used.
+    // dropped. True when a restart rule fired: the check takes nothing of
+    // the answer after it, and the caller calls `restarted`.
     SCADA_RT bool identity_samples(
         std::uint32_t device,
         std::span<const DeliveredSample> samples) noexcept;
