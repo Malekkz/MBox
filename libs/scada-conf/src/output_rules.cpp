@@ -354,6 +354,19 @@ private:
         if (target.fixed_value) {
             return always_on;
         }
+        // A `values` map writes only the commands it has keys for (N1 of
+        // the delta check of #185): a map of true and false writes no code
+        // of a double and no number, and a pulse's or trigger's map needs
+        // `true`, the one command they send.
+        if (target.has_values) {
+            if (bool_values(target) &&
+                (kind == "double" || kind == "setpoint" || kind == "step")) {
+                return false;
+            }
+            if (always_on && !is_values_key(target, "true")) {
+                return false;
+            }
+        }
         if (kind == "single" || always_on) {
             return target.value_type == "bool" || target.mask ||
                    target.on_off || bool_values(target);

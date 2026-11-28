@@ -92,6 +92,20 @@ constexpr std::string_view METER =
     "  - { name: polar, access: rw, storage: volatile, address: { table: "
     "holding, register: 115, type: uint16, write: { values: { true: 0, "
     "false: 1 } } } }\n"
+    // N1 of the delta check: maps that cannot write the kind's commands.
+    "  - { name: dpolar, kind: double_point, access: rw, storage: volatile, "
+    "states: { 0: 0, 1: 1, 2: 2, 3: 3 }, address: { table: holding, "
+    "register: 117, type: uint16, write: { values: { true: 1, false: 2 } } "
+    "} }\n"
+    "  - { name: polar2, access: rw, storage: volatile, address: { table: "
+    "holding, register: 118, type: uint16, write: { values: { true: 0, "
+    "false: 1 } } } }\n"
+    "  - { name: offs, access: wo, storage: volatile, address: { table: "
+    "holding, register: 119, type: uint16, write: { values: { false: 1 } } "
+    "} }\n"
+    "  - { name: offs2, access: wo, storage: volatile, address: { table: "
+    "holding, register: 123, type: uint16, write: { values: { false: 1 } } "
+    "} }\n"
     "  - { name: fixed2, access: wo, storage: volatile, address: { table: "
     "holding, register: 116, type: uint16, write: { value: 1 } } }\n"
     "  - { name: narrow, access: rw, storage: volatile, address: { table: "
@@ -805,6 +819,31 @@ TEST(OutputRules, EncodingsThatWriteTheSafeSide) {
             "  - { name: ps1.e, area: ps1, kind: setpoint, target: "
             "ps1.m1.coded, no_feedback: true, safe_state: { value: 0x1 } }\n"),
         Lines{});
+}
+
+// N1 of the delta check of #185: a `values` map that cannot write the
+// kind's commands. The reviewer's probes P75, P76, P70 and P77.
+TEST(OutputRules, ValuesMapsThatCannotWriteTheKind) {
+    EXPECT_EQ(
+        errors_with_interlock(
+            "  - { name: ps1.a, area: ps1, kind: double, target: "
+            "ps1.m1.dpolar, no_feedback: true, interlocks: [], safe_state: "
+            "hold }\n"
+            "  - { name: ps1.b, area: ps1, kind: setpoint, target: "
+            "ps1.m1.polar2, no_feedback: true, safe_state: hold }\n"
+            "  - { name: ps1.c, area: ps1, kind: pulse, target: ps1.m1.offs, "
+            "no_feedback: true, interlocks: [], safe_state: hold }\n"
+            "  - { name: ps1.d, area: ps1, kind: trigger, target: "
+            "ps1.m1.offs2, no_feedback: true, interlocks: [], safe_state: "
+            "hold }\n"),
+        (Lines{"outputs/ps1.yaml:4:53: error CF-702: output \"ps1.a\": target "
+               "\"ps1.m1.dpolar\" is not a writable point",
+               "outputs/ps1.yaml:5:55: error CF-702: output \"ps1.b\": target "
+               "\"ps1.m1.polar2\" is not a writable point",
+               "outputs/ps1.yaml:6:52: error CF-702: output \"ps1.c\": target "
+               "\"ps1.m1.offs\" is not a writable point",
+               "outputs/ps1.yaml:7:54: error CF-702: output \"ps1.d\": target "
+               "\"ps1.m1.offs2\" is not a writable point"}));
 }
 
 // M6 of the review of #185: a named enumeration resolves over the
