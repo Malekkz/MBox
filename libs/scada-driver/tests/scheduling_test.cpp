@@ -1596,6 +1596,70 @@ TEST(Scheduling, AChainOfTheIdentityCycleHoldsItsUnit) {
     EXPECT_EQ(restart.request, head);  // read again from its start
 }
 
+TEST(Scheduling, ADroppedRetryIsNoLongerPending) {
+    // The engine waits for the verdict while `retry_pending` (PR 177
+    // delta, item 2): each drop of a retry must clear it, or the cycle
+    // would never end.
+    const CompiledChannel channel = identity_channel();
+    const ReadPlan& plan = channel.devices[0].plan;
+    const std::uint32_t identity = plan.identity.front();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    EXPECT_FALSE(scheduler.retry_pending(0));
+    scheduler.retry(0, identity, MILLISECOND);
+    EXPECT_TRUE(scheduler.retry_pending(0));
+    // Sent: no longer pending.
+    const Choice again = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(again.kind, Choice::Kind::IDENTITY);
+    EXPECT_FALSE(scheduler.retry_pending(0));
+    // Dropped by a change of mode.
+    scheduler.retry(0, identity, 3 * MILLISECOND);
+    ASSERT_TRUE(scheduler.retry_pending(0));
+    scheduler.set_mode(0, DeviceMode::OFF);
+    EXPECT_FALSE(scheduler.retry_pending(0));
+    // Dropped by a reconnect.
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    scheduler.retry(0, identity, 4 * MILLISECOND);
+    ASSERT_TRUE(scheduler.retry_pending(0));
+    (void)scheduler.reconnect();
+    EXPECT_FALSE(scheduler.retry_pending(0));
+    // Never taken in IDENTITY: a request outside the cycle (PR 171 S2).
+    std::uint32_t outside = 0;
+    while (std::find(plan.identity.begin(), plan.identity.end(), outside) !=
+           plan.identity.end()) {
+        ++outside;
+    }
+    ASSERT_LT(outside, plan.requests.size());
+    scheduler.retry(0, outside, 5 * MILLISECOND);
+    EXPECT_FALSE(scheduler.retry_pending(0));
+    EXPECT_FALSE(scheduler.retry_pending(7));  // no such device
+}
+
+TEST(Scheduling, AKeepAlivesRetryIsAKeepAliveToo) {
+    // In IDENTITY a keep-alive's retry is taken marked as a keep-alive, so
+    // that its answer gives no verdict (PR 177 delta, item 1); a cycle's
+    // retry is not.
+    const CompiledChannel channel = identity_channel(SECOND);
+    const std::uint32_t identity = channel.devices[0].plan.identity.front();
+    Scheduler scheduler(channel, 4, 0);
+    scheduler.set_mode(0, DeviceMode::IDENTITY);
+    ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
+    scheduler.retry(0, identity, MILLISECOND, true);
+    const Choice keepalive = scheduler.take(2 * MILLISECOND);
+    EXPECT_EQ(keepalive.kind, Choice::Kind::IDENTITY);
+    EXPECT_TRUE(keepalive.identity_keepalive);
+    scheduler.retry(0, identity, 3 * MILLISECOND);
+    const Choice cycle = scheduler.take(4 * MILLISECOND);
+    EXPECT_EQ(cycle.kind, Choice::Kind::IDENTITY);
+    EXPECT_FALSE(cycle.identity_keepalive);
+    // Not sent: the mark comes back with the retry.
+    scheduler.retry(0, identity, 5 * MILLISECOND, true);
+    ASSERT_TRUE(scheduler.take(6 * MILLISECOND).identity_keepalive);
+    EXPECT_FALSE(scheduler.not_sent().has_value());
+    EXPECT_TRUE(scheduler.take(7 * MILLISECOND).identity_keepalive);
+}
+
 TEST(Scheduling, ADeviceWithoutAProbeRequestIsProbedByItsIdentityCycle) {
     CompiledChannel channel = identity_channel();
     ReadPlan& plan = channel.devices[0].plan;
@@ -1903,13 +1967,13 @@ TEST(Scheduling, ACycleNothingAnsweredWaitsTheFastestPeriodOnly) {
     Scheduler scheduler(channel, 4, 0);
     scheduler.set_mode(0, DeviceMode::IDENTITY);
     ASSERT_EQ(scheduler.take(0).kind, Choice::Kind::IDENTITY);
-    scheduler.identity_again(0, 0, false);
+    scheduler.identity_again(0, 0, Scheduler::IdentityFloor::FASTEST_PERIOD);
     const Choice wait = scheduler.take(MILLISECOND);
     EXPECT_EQ(wait.kind, Choice::Kind::WAIT);
     EXPECT_EQ(wait.wake_ns, FAST_PERIOD);
     ASSERT_EQ(scheduler.take(FAST_PERIOD).kind, Choice::Kind::IDENTITY);
     // Answered: the identity period again.
-    scheduler.identity_again(0, 0, true);
+    scheduler.identity_again(0, 0, Scheduler::IdentityFloor::IDENTITY_PERIOD);
     EXPECT_EQ(scheduler.take(FAST_PERIOD + MILLISECOND).wake_ns,
               FAST_PERIOD + SLOW_PERIOD);
 }

@@ -914,7 +914,8 @@ Choice Scheduler::take_identity(std::uint32_t device,
     if (run.retry) {
         const Choice out{.kind = Choice::Kind::IDENTITY,
                          .device = device,
-                         .request = run.retry_request};
+                         .request = run.retry_request,
+                         .identity_keepalive = run.retry_keepalive};
         save_undo(out, 0);
         record(device, false, now_ns);
         run.retry = false;
@@ -1449,7 +1450,7 @@ void Scheduler::set_mode(std::uint32_t device, DeviceMode mode) noexcept {
 }
 
 void Scheduler::identity_again(std::uint32_t device, std::int64_t due_ns,
-                               bool answered) noexcept {
+                               IdentityFloor floor) noexcept {
     if (device >= devices_.size() ||
         devices_[device].mode != DeviceMode::IDENTITY ||
         devices_[device].identity_cycle) {
@@ -1460,9 +1461,11 @@ void Scheduler::identity_again(std::uint32_t device, std::int64_t due_ns,
     // A cycle that nothing answered waits the device's fastest period only
     // (the lead's ruling on 5b-2b): a dead device is demoted as soon as a
     // polled one would be.
-    const std::int64_t floor =
-        answered ? run.identity_period_ns : run.fastest_period_ns;
-    run.identity_due_ns = std::max(due_ns, later(run.identity_start_ns, floor));
+    const std::int64_t floor_ns = floor == IdentityFloor::IDENTITY_PERIOD
+                                      ? run.identity_period_ns
+                                      : run.fastest_period_ns;
+    run.identity_due_ns =
+        std::max(due_ns, later(run.identity_start_ns, floor_ns));
 }
 
 void Scheduler::set_probe(std::uint32_t device, std::int64_t due_ns,
@@ -1522,7 +1525,7 @@ void Scheduler::clear_probe(std::uint32_t device) noexcept {
 }
 
 void Scheduler::retry(std::uint32_t device, std::uint32_t request,
-                      std::int64_t now_ns) noexcept {
+                      std::int64_t now_ns, bool keepalive) noexcept {
     if (device >= devices_.size() || devices_[device].mode == DeviceMode::OFF ||
         request >= channel_->devices[device].plan.requests.size() ||
         channel_->devices[device].plan.requests[request].side_effect) {
@@ -1535,6 +1538,8 @@ void Scheduler::retry(std::uint32_t device, std::uint32_t request,
     devices_[device].retry = true;
     devices_[device].retry_request = request;
     devices_[device].retry_due_ns = now_ns;
+    devices_[device].retry_keepalive =
+        keepalive && devices_[device].mode == DeviceMode::IDENTITY;
 }
 
 std::int64_t Scheduler::achieved_period_ns(std::uint32_t group,

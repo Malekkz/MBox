@@ -269,8 +269,7 @@ private:
         // an identity round, apart from the point's own state and tag (no
         // point tag is written while the check is pending, ruling item 2).
         std::vector<PointState> scratch;
-        bool identity_round = false;     // a round is in progress
-        bool identity_retrying = false;  // a retry of an identity read waits
+        bool identity_round = false;  // a round is in progress
         // An identity read of the current cycle was answered (busy and
         // refused too): the next cycle keeps the identity floor.
         bool identity_answered = false;

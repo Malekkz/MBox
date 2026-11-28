@@ -63,7 +63,6 @@ void ChannelEngine::start_identity_round(std::uint32_t device) noexcept {
     run.identity->start(failures_.identity_deadline_ns(device));
     run.identity_answered = false;
     run.identity_round = true;
-    run.identity_retrying = false;
 }
 
 void ChannelEngine::identity_answered(const Choice& choice,
@@ -73,6 +72,18 @@ void ChannelEngine::identity_answered(const Choice& choice,
     const Request& request =
         channel_->devices[device].plan.requests[choice.request];
     const std::int64_t now = clock_->monotonic_ns();
+    if (choice.identity_keepalive) {
+        // A keep-alive's answer proves the link alive only: no sample goes
+        // to the check, no verdict, and a MISMATCH re-check keeps its due
+        // time (the lead's ruling on the PR 177 delta check). A busy one is
+        // no answer.
+        (void)failures_.identity_ended(device,
+                                       decoded.kind == DecodeResult::Kind::BUSY
+                                           ? RequestEnd::NOT_COUNTED
+                                           : RequestEnd::ANSWERED,
+                                       now);
+        return;
+    }
     run.identity_answered = true;
     // An identity read neither adds to the run of time-outs nor empties it,
     // and resets no back-off (DI 7.3, ruling item 2).
@@ -84,13 +95,11 @@ void ChannelEngine::identity_answered(const Choice& choice,
         if (run.attempts < channel_->devices[device].failure.retries) {
             ++run.attempts;
             ++counts_.retries;
-            run.identity_retrying = true;
             scheduler_.retry(device, choice.request, now);
             return;
         }
     }
     run.attempts = 0;
-    run.identity_retrying = false;
     if (decoded.kind != DecodeResult::Kind::BUSY) {
         (void)failures_.identity_ended(device, RequestEnd::ANSWERED, now);
         const bool refused = decoded.kind == DecodeResult::Kind::SPLIT;
@@ -127,12 +136,14 @@ void ChannelEngine::identity_failed(const Choice& choice, End end) noexcept {
     DeviceRun& run = devices_[device];
     const std::int64_t now = clock_->monotonic_ns();
     run.attempts = 0;
-    run.identity_retrying = false;
     // A time-out, a broken frame or a gateway's failure: a communication
     // failure, which counts toward demotion and gives no verdict (ruling
     // items 2, 3). A frame not sent counts as a failed request.
     (void)end;
     (void)failures_.identity_ended(device, RequestEnd::FAILED, now);
+    if (choice.identity_keepalive) {
+        return;  // no part of a cycle: the cycle's times stay
+    }
     if (!scheduler_.identity_running(device)) {
         identity_cycle_done(device);
     }
@@ -168,8 +179,10 @@ bool ChannelEngine::identity_samples(
 
 void ChannelEngine::identity_cycle_done(std::uint32_t device) noexcept {
     DeviceRun& run = devices_[device];
+    // A retry still to be sent ends the cycle later; a dropped one does
+    // not hold it (PR 177 delta, item 2).
     if (!run.identity.has_value() || !run.identity_round ||
-        run.identity_retrying) {
+        scheduler_.retry_pending(device)) {
         return;
     }
     const CompiledDevice& compiled = channel_->devices[device];
@@ -183,7 +196,11 @@ void ChannelEngine::identity_cycle_done(std::uint32_t device) noexcept {
             // or at the fastest group's period when nothing answered (the
             // lead's ruling on 5b-2b).
             run.identity->start(run.identity->deadline_ns());
-            scheduler_.identity_again(device, now, run.identity_answered);
+            scheduler_.identity_again(
+                device, now,
+                run.identity_answered
+                    ? Scheduler::IdentityFloor::IDENTITY_PERIOD
+                    : Scheduler::IdentityFloor::FASTEST_PERIOD);
             run.identity_answered = false;
             return;
         }
@@ -272,7 +289,8 @@ void ChannelEngine::restarted(std::uint32_t device) noexcept {
         }
         start_identity_round(other);
         if (!scheduler_.identity_running(other)) {
-            scheduler_.identity_again(other, now, false);
+            scheduler_.identity_again(other, now,
+                                      Scheduler::IdentityFloor::FASTEST_PERIOD);
         }
     }
 }

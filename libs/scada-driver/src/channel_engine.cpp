@@ -887,7 +887,8 @@ void ChannelEngine::answered(const Choice& choice,
             // first request and the scheduler is in IDENTITY already, so
             // the next cycle is asked for here; nothing else would.
             if (!scheduler_.identity_running(device)) {
-                scheduler_.identity_again(device, now, false);
+                scheduler_.identity_again(
+                    device, now, Scheduler::IdentityFloor::FASTEST_PERIOD);
             }
             return;
         }
@@ -1004,9 +1005,8 @@ void ChannelEngine::failed(const Choice& choice, End end) noexcept {
         }
         ++run.attempts;
         ++counts_.retries;
-        run.identity_retrying =
-            choice.kind == Choice::Kind::IDENTITY || choice.identity_keepalive;
-        scheduler_.retry(device, choice.request, now);
+        scheduler_.retry(device, choice.request, now,
+                         choice.identity_keepalive);
         return;
     }
     if (choice.kind == Choice::Kind::IDENTITY || choice.identity_keepalive) {

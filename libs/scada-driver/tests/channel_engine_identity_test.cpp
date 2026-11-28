@@ -582,6 +582,11 @@ TEST(EngineIdentity, AKeepAliveFailureArmsNoVerdict) {
     EXPECT_EQ(rig.engine.counts().early_verdicts, 0U);
     EXPECT_FALSE(written_with(rig.tags, 0, Flag::COMM_FAIL));
     EXPECT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    // Nor does it move the re-check: mismatches at 0 and 10 s only (the
+    // PR 177 delta ruling).
+    EventRecord record;
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::MISMATCH, record));
+    EXPECT_EQ(record.count, 2U);
 }
 
 TEST(EngineIdentity, AnIdentityProbesAnswerIsNeverPublished) {
@@ -707,6 +712,41 @@ TEST(EngineIdentity, ABusyIdentityReadEmptiesNoFailureCount) {
     EXPECT_GT(rig.reads_of(IDENTITY), 3U);
     EXPECT_EQ(rig.engine.failures().failures(0), 1U);
     EXPECT_EQ(rig.state(), DeviceStatus::INITIALISING);
+}
+
+TEST(EngineIdentity, AKeepAliveGivesNoVerdictInMismatch) {
+    // A keep-alive every 500 ms proves the link alive only (the lead's
+    // ruling on the PR 177 delta check): the re-checks stay at
+    // max(backoff 1 s, identity period 10 s), at 0, 10 and 20 s, so three
+    // mismatches in 25 s, not one per keep-alive.
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].keepalive_ns = 500 * MILLISECOND;
+    Rig rig(std::move(channel), identity_bus(8));
+    rig.run_until(25 * SECOND);
+    ASSERT_EQ(rig.state(), DeviceStatus::MISMATCH);
+    EXPECT_GT(rig.reads_of(IDENTITY), 20U);  // the keep-alives went
+    EventRecord record;
+    ASSERT_TRUE(rig.engine.take_event(0, DeviceEvent::MISMATCH, record));
+    EXPECT_EQ(record.count, 3U);
+}
+
+TEST(EngineIdentity, AKeepAliveDoesNotEndAPendingCheck) {
+    // The model readable only on the keep-alives' reads would end the
+    // check early if they gave verdicts: the cycle's own read at 10 s
+    // gives it. Unreadable first, readable from 2 s; the keep-alive (500
+    // ms) reads it from then on, but the check ends with the cycle at 10 s.
+    CompiledChannel channel = identity_channel();
+    channel.devices[0].keepalive_ns = 500 * MILLISECOND;
+    channel.devices[0].points[1].rules.markers.push_back(
+        InvalidMarker{.pattern = 0xFFFF, .action = InvalidAction::BAD});
+    Rig rig(std::move(channel), identity_bus(0xFFFF));
+    rig.run_until(2 * SECOND);
+    rig.bus.set(1, 0, IDENTITY, MODEL);
+    rig.run_until(9 * SECOND);
+    EXPECT_EQ(rig.state(), DeviceStatus::INITIALISING);
+    EXPECT_FALSE(rig.engine.identity_ok(0).has_value());
+    rig.run_until(11 * SECOND);
+    EXPECT_EQ(rig.state(), DeviceStatus::RUNNING);
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

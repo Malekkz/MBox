@@ -230,18 +230,29 @@ public:
     void set_polled(std::uint32_t device, bool polled) noexcept {
         set_mode(device, polled ? DeviceMode::ALL : DeviceMode::OFF);
     }
-    // Another identity cycle of `device`, due at `due_ns` or one identity
-    // period after the last cycle started, whichever is later: a re-check
-    // of a device in MISMATCH at its back-off, or a check without a verdict
-    // yet (D-147). The floor keeps a device that never gives a verdict (a
-    // busy answer for ever) to one cycle per period (PR 171 M3). A cycle
-    // that nothing answered (`answered` false: time-outs, broken frames, a
-    // gateway's failure) waits the device's fastest group period instead,
-    // so that a dead device is demoted on a polled device's time scale (the
-    // lead's ruling on 5b-2b). Ignored unless the device is in IDENTITY
-    // with no cycle in progress. Never allocates.
-    SCADA_RT void identity_again(std::uint32_t device, std::int64_t due_ns,
-                                 bool answered = true) noexcept;
+    // The floor of the next identity cycle after the last one started.
+    enum class IdentityFloor : std::uint8_t {
+        // One identity period: the floor of a cycle that was answered, a
+        // busy or refused answer included (PR 171 M3).
+        IDENTITY_PERIOD,
+        // One period of the device's fastest group: after a cycle that
+        // nothing answered (time-outs, broken frames, a gateway's failure),
+        // so that a dead device is demoted on a polled device's time scale
+        // (the lead's ruling on 5b-2b), and for a new check that a restart
+        // or an identity probe's recovery starts (PR 177 M1).
+        FASTEST_PERIOD,
+    };
+
+    // Another identity cycle of `device`, due at `due_ns` or `floor` after
+    // the last cycle started, whichever is later: a re-check of a device in
+    // MISMATCH at its back-off, or a check without a verdict yet (D-147).
+    // The identity period's floor keeps a device that never gives a
+    // verdict (a busy answer for ever) to one cycle per period. Ignored
+    // unless the device is in IDENTITY with no cycle in progress. Never
+    // allocates.
+    SCADA_RT void identity_again(
+        std::uint32_t device, std::int64_t due_ns,
+        IdentityFloor floor = IdentityFloor::IDENTITY_PERIOD) noexcept;
     // The identity period of `device`: the shortest period of the poll
     // groups of its identity requests, or of all its groups when none of
     // them is in a group; 0 when it has no group at all.
@@ -249,6 +260,13 @@ public:
         std::uint32_t device) const noexcept {
         return device < devices_.size() ? devices_[device].identity_period_ns
                                         : 0;
+    }
+    // Whether a retry of `device` waits to be sent. A retry is dropped by a
+    // change of mode, a dropped chain, an order of another device on the
+    // unit or a reconnect; the engine asks this instead of keeping its own
+    // flag, which a drop would leave set (PR 177 delta, item 2).
+    [[nodiscard]] bool retry_pending(std::uint32_t device) const noexcept {
+        return device < devices_.size() && devices_[device].retry;
     }
     // Whether `device` has an identity cycle in progress.
     [[nodiscard]] bool identity_running(std::uint32_t device) const noexcept {
@@ -311,9 +329,11 @@ public:
     // IDENTITY, a request that is neither in `plan.identity` nor a part of
     // the split form of one (PR 171 S2). An order step that drops
     // the device's chain drops the retry too: the chain is read again
-    // whole. Never allocates.
+    // whole. `keepalive`: the failed request was an identity keep-alive,
+    // and its retry is taken as one (`Choice::identity_keepalive`). Never
+    // allocates.
     SCADA_RT void retry(std::uint32_t device, std::uint32_t request,
-                        std::int64_t now_ns) noexcept;
+                        std::int64_t now_ns, bool keepalive = false) noexcept;
 
     // Orders queued and not yet started.
     [[nodiscard]] std::size_t pending_orders() const noexcept {
@@ -384,6 +404,11 @@ private:
         bool identity_due = false;
         bool probe = false;
         bool retry = false;
+        // The retry is of an identity keep-alive: taken as one (PR 177
+        // delta, item 1), so that its answer gives no verdict either. Set
+        // by every `retry` and read only while `retry` is, so `not_sent`
+        // needs no undo of it.
+        bool retry_keepalive = false;
         // A windowed probe was sent for this due time: the next one waits for
         // the floor, with its whole time-out (J1).
         bool windowed_tried = false;
